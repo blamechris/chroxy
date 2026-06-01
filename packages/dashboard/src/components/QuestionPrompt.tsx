@@ -22,6 +22,18 @@
 import { useId, useState, useRef, useEffect } from 'react'
 import { OTHER_OPTION_VALUE, type ChatMessageQuestion } from '@chroxy/store-core'
 
+/**
+ * #4651 — payload shape emitted when the user picks "Other" on a single-
+ * question AskUserQuestion and types freeform text. The store reads this
+ * shape to send a two-stage `user_question_response` (server writes the
+ * Other digit to claude TUI, waits for the text-input prompt swap, then
+ * writes the freeform text + Enter).
+ */
+export interface OtherFreeformAnswer {
+  otherLabel: string
+  freeformText: string
+}
+
 export interface QuestionPromptProps {
   question: string
   options: { label: string; value: string }[]
@@ -35,12 +47,16 @@ export interface QuestionPromptProps {
    */
   questions?: ChatMessageQuestion[]
   /**
-   * Fires with either a plain string (single-question / free-text path,
-   * back-compat) or a `Record<string,string>` map (multi-question form,
-   * keyed by `question.question` with multi-select values
-   * JSON-stringified arrays of chosen labels).
+   * Fires with one of three shapes:
+   * - `string` — legacy single-question / free-text-only path (back-compat).
+   * - `Record<string,string>` — multi-question form (#4604 Chunk B), keyed
+   *   by `question.question` with multi-select values JSON-stringified
+   *   arrays of chosen labels.
+   * - `OtherFreeformAnswer` — single-question "Other" with freeform text
+   *   (#4651), carrying both the Other option's label (for digit lookup
+   *   on the server) and the typed text.
    */
-  onSelect: (answer: string | Record<string, string>) => void
+  onSelect: (answer: string | Record<string, string> | OtherFreeformAnswer) => void
 }
 
 export function QuestionPrompt({ question, options, answered, questions, onSelect }: QuestionPromptProps) {
@@ -227,12 +243,20 @@ interface SingleQuestionPromptProps {
   question: string
   options: { label: string; value: string }[]
   answered?: string
-  onSelect: (value: string) => void
+  onSelect: (value: string | OtherFreeformAnswer) => void
 }
 
 function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQuestionPromptProps) {
   const [text, setText] = useState('')
   const [otherActive, setOtherActive] = useState(false)
+  // #4651 — when the user clicks the Other option button, stash the option's
+  // label so handleSubmit can emit it back to the server. The server uses
+  // the label to resolve Other → 1-indexed digit (claude TUI hotkey) and
+  // then writes the digit BEFORE the freeform text so the TUI's text-
+  // input prompt is open when the text lands. Default 'Other' covers the
+  // synthesized-sentinel case (#3746) where options[*].value ===
+  // OTHER_OPTION_VALUE but no real option carries that label.
+  const [otherLabel, setOtherLabel] = useState<string>('Other')
   // #4312: post-answer the option block collapses to a one-line summary;
   // user can re-expand to inspect the full disabled-button list. Default
   // collapsed once `answered` is set, including the remote-answered case
@@ -258,7 +282,18 @@ function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQ
     const trimmed = text.trim()
     if (!trimmed) return
     submittedRef.current = true
-    onSelect(trimmed)
+    // #4651 — when the user reached this form by clicking the "Other"
+    // option (otherActive), emit the structured payload so the server
+    // can drive the two-stage TUI write (Other digit → text-input prompt
+    // → freeform text + Enter). When otherActive is false the user is
+    // in the zero-options free-text-only path (#1245) — keep emitting
+    // a plain string so the server's existing free-text handler
+    // continues to work unchanged.
+    if (otherActive) {
+      onSelect({ otherLabel, freeformText: trimmed })
+    } else {
+      onSelect(trimmed)
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -270,6 +305,12 @@ function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQ
 
   const handleOptionClick = (value: string) => {
     if (value === OTHER_OPTION_VALUE) {
+      // #4651 — capture the label of the option the user actually clicked
+      // so the freeform payload carries the right label for the server's
+      // digit lookup. Synthetic sentinel options use the label 'Other';
+      // model-supplied custom labels (rare) preserve their text.
+      const clicked = options.find((o) => o.value === value)
+      setOtherLabel(clicked?.label || 'Other')
       setOtherActive(true)
       return
     }

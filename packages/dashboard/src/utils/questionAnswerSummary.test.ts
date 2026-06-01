@@ -100,6 +100,18 @@ describe('formatQuestionAnswerSummary', () => {
       )
     })
 
+    it('renders Other / freeform single-question answers as the typed text (#4651)', () => {
+      // #4651 — single-question "Other" with freeform text. The summary
+      // chip should show the user's typed text, not the literal "Other"
+      // label that was used to pick the Other option in the menu.
+      expect(
+        formatQuestionAnswerSummary({
+          otherLabel: 'Other',
+          freeformText: 'my freeform thought',
+        }),
+      ).toBe('my freeform thought')
+    })
+
     it('only flattens arrays — non-array JSON values are kept as the raw string', () => {
       // MultiQuestionForm.handleSubmit only ever JSON-stringifies arrays
       // of option values (see handleSubmit in QuestionPrompt.tsx). The

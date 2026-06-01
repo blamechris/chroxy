@@ -42,10 +42,18 @@ function formatMultiSelectValue(value: string): string {
 }
 
 export function formatQuestionAnswerSummary(
-  answer: string | Record<string, string>,
+  answer: string | Record<string, string> | { otherLabel: string; freeformText: string },
 ): string {
   if (typeof answer === 'string') return answer
-  return Object.entries(answer)
+  // #4651 — single-question Other / freeform path. The summary chip
+  // should surface the typed text (what the user actually wrote), not
+  // the literal label "Other" — matching the post-answer UX of the
+  // free-text-only path (#1245) where the typed text becomes the
+  // chip content directly.
+  if ('freeformText' in answer && 'otherLabel' in answer) {
+    return (answer as { freeformText: string }).freeformText
+  }
+  return Object.entries(answer as Record<string, string>)
     .map(([question, value]) => `${question}: ${formatMultiSelectValue(value)}`)
     .join(' | ')
 }

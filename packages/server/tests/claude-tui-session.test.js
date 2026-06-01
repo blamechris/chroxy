@@ -2704,6 +2704,91 @@ describe('ClaudeTuiSession', () => {
       assert.equal(writes.length, 0, 'no PTY writes when there is no pending answer')
     })
 
+    // #4651 — "Other" / freeform answer support. claude TUI's AskUserQuestion
+    // renders an "Other" option that, when picked via its digit, opens a
+    // text-input prompt. Pre-#4651 the dashboard's freeform Other path sent
+    // only the typed string; the server then tried to type that string at
+    // the digit-select menu (jump-nav landed wherever the first char
+    // happened to point — #4288). New protocol: dashboard sends the typed
+    // text in `freeformText`, with `answer` = the Other option label. The
+    // server resolves Other → digit, writes the digit to enter text-input
+    // mode, then writes the freeform text + Enter to submit.
+    describe('Other / freeform answer (#4651)', () => {
+      it('writes the Other digit, then the freeform text + Enter', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_other_freeform',
+          options: [
+            { label: 'Patch' },
+            { label: 'Minor' },
+            { label: 'Other' },
+          ],
+        }
+
+        // Dashboard sends: answer='Other' (the Other option label),
+        // freeformText='my custom answer' (the typed text).
+        session.respondToQuestion('Other', undefined, 'toolu_aq_other_freeform', {
+          freeformText: 'my custom answer',
+        })
+        // Allow throttled writes (digit + settle + per-char text) to drain.
+        await new Promise((resolve) => setTimeout(resolve, 250))
+
+        // Sequence shape: [paste-disable, '3' (Other digit), <settle pause>,
+        // paste-disable-again, per-char text, '\r', paste-enable]. We pin
+        // the digit and the text presence to keep the assertion stable
+        // regardless of intermediate enable/disable toggles.
+        const joined = writes.join('')
+        assert.ok(joined.includes('3'), `expected Other digit "3" in writes, got: ${JSON.stringify(writes)}`)
+        assert.ok(joined.includes('my custom answer'), `expected freeform text in writes, got: ${JSON.stringify(writes)}`)
+        const otherIdx = writes.indexOf('3')
+        const firstTextCharIdx = writes.indexOf('m')
+        assert.ok(otherIdx >= 0 && firstTextCharIdx > otherIdx, 'Other digit must be written BEFORE the freeform text')
+        // Trailing Enter so claude TUI submits the text-input prompt.
+        assert.ok(writes.includes('\r'), 'trailing Enter submits the freeform answer')
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after answer write')
+      })
+
+      it('falls through to legacy single-write path when no freeformText is supplied', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_other_legacy',
+          options: [
+            { label: 'Patch' },
+            { label: 'Other' },
+          ],
+        }
+
+        // Legacy path: answer matches an option label exactly → 1-indexed digit.
+        session.respondToQuestion('Patch')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // disable + '1' + \\r + enable = 4 writes (matches the #4290 test shape).
+        assert.equal(writes.length, 4, `expected 4 writes for legacy path, got ${writes.length}: ${JSON.stringify(writes)}`)
+        assert.equal(writes[1], '1', 'legacy index path unchanged when freeformText is absent')
+      })
+
+      it('is a no-op when freeformText is supplied but no Other option exists', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_no_other',
+          options: [{ label: 'A' }, { label: 'B' }],
+        }
+
+        // Defensive: dashboard sent freeformText for an AskUserQuestion that
+        // has no "Other" option. Don't blindly write the freeform text at
+        // the digit menu (that's the #4288 jump-nav footgun). Drop + clear.
+        session.respondToQuestion('Other', undefined, 'toolu_aq_no_other', {
+          freeformText: 'should be dropped',
+        })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.equal(writes.length, 0, `no PTY writes when freeform requested but no Other option exists, got: ${JSON.stringify(writes)}`)
+      })
+    })
+
     it('PostToolUse for AskUserQuestion clears _pendingUserAnswer if it was still set', () => {
       // Cleanup invariant: claude eventually resolved its own prompt
       // (maybe via the underlying terminal multiplexer, maybe via the
