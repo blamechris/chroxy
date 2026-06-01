@@ -555,7 +555,10 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // single-answer string).
     // #4651: log freeformText presence so the Other-path two-stage write
     // is greppable in chroxy.log without leaking the user's text.
-    const hasFreeform = msg.freeformText && typeof msg.freeformText === 'string' && msg.freeformText.length > 0
+    // Copilot review (#4753): explicit boolean — `&&` of a string yields
+    // the string, not a boolean, which downstream conditionals can read
+    // but is confusing in a `freeform=${...}` log template.
+    const hasFreeform = typeof msg.freeformText === 'string' && msg.freeformText.length > 0
     log.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0} freeform=${hasFreeform ? msg.freeformText.length : 0}`)
     // #4668: forward msg.toolUseId so claude-tui-session can route the
     // answer to the right pending entry in its Map. Sessions that don't

@@ -50,7 +50,18 @@ export function formatQuestionAnswerSummary(
   // the literal label "Other" — matching the post-answer UX of the
   // free-text-only path (#1245) where the typed text becomes the
   // chip content directly.
-  if ('freeformText' in answer && 'otherLabel' in answer) {
+  //
+  // Copilot review (#4753): tight detection — require EXACTLY two keys
+  // (`freeformText` + `otherLabel`) AND string values for both. A
+  // multi-question Record<string,string> whose question keys happen to
+  // be those exact strings would otherwise misclassify here.
+  if (
+    !Array.isArray(answer)
+    && Object.keys(answer).length === 2
+    && 'freeformText' in answer && 'otherLabel' in answer
+    && typeof (answer as Record<string, unknown>).freeformText === 'string'
+    && typeof (answer as Record<string, unknown>).otherLabel === 'string'
+  ) {
     return (answer as { freeformText: string }).freeformText
   }
   return Object.entries(answer as Record<string, string>)

@@ -1570,8 +1570,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //   (digit → text-input prompt → freeform text + Enter). Older
     //   servers that ignore `freeformText` fall through to the legacy
     //   path and type the label literally — a clean degradation.
+    // Copilot review (#4753): tighten the freeform-shape detection to
+    // avoid misclassifying a multi-question Record<string,string> whose
+    // question keys happen to be literally "freeformText" and "otherLabel"
+    // (rare, but possible if the model phrases a question that way).
+    // The freeform shape is `Record<string,string>` with EXACTLY those
+    // two keys AND both string values — anything else falls through to
+    // the multi-question path.
     const isFreeformAnswer = typeof answer === 'object' && answer !== null
-      && 'freeformText' in answer && 'otherLabel' in answer;
+      && !Array.isArray(answer)
+      && Object.keys(answer).length === 2
+      && 'freeformText' in answer && 'otherLabel' in answer
+      && typeof (answer as Record<string, unknown>).freeformText === 'string'
+      && typeof (answer as Record<string, unknown>).otherLabel === 'string';
     const isMultiAnswer = !isFreeformAnswer && typeof answer !== 'string';
     let answerSummary: string;
     if (isFreeformAnswer) {

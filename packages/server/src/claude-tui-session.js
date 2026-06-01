@@ -1917,8 +1917,22 @@ export class ClaudeTuiSession extends BaseSession {
    *
    * No-op when no pending answer.
    *
-   * @param {string} text — the chosen answer (single-question path); ignored on the multi-question path when answersMap is populated
-   * @param {object} [answersMap] — `{ [questionText]: string | string[] }`; required for multi-question forms (Chunk B)
+   * @param {string} text — the chosen answer (single-question path); on the
+   *   Other / freeform path (#4651) this is the Other option's label, used
+   *   to resolve the 1-indexed TUI digit. Ignored on the multi-question
+   *   path when answersMap is populated.
+   * @param {object} [answersMap] — `{ [questionText]: string | string[] }`;
+   *   required for multi-question forms (Chunk B).
+   * @param {string} [toolUseId] — #4668: target the specific pending entry
+   *   to answer when multiple AskUserQuestion tool_uses are in flight in
+   *   the same turn. When omitted, falls back to the most-recently-set
+   *   pending entry via the back-compat getter.
+   * @param {object} [opts] — extra options.
+   * @param {string} [opts.freeformText] — #4651 single-question Other path:
+   *   when set, the session writes the Other digit (resolved from `text`),
+   *   waits ~150 ms for claude TUI's option-menu → text-input prompt swap,
+   *   then writes `freeformText` + Enter. Dropped when the chosen option
+   *   doesn't exist or sits beyond the single-digit hotkey range.
    */
   respondToQuestion(text, answersMap, toolUseId, opts) {
     // #4668: route to the specific pending entry the dashboard answered
