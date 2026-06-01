@@ -6,10 +6,18 @@
  * avoiding real WebSocket connections.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, within, waitFor } from '@testing-library/react'
 
 vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
+}))
+
+// #4673 — control the clipboard helper per-test so we can assert that the
+// "Copied!" check mark only fires when the helper actually wrote. Default
+// to a successful write so the unrelated render-smoke tests stay green.
+const clipboardWriteTextMock = vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true))
+vi.mock('./utils/clipboard', () => ({
+  writeText: (text: string) => clipboardWriteTextMock(text),
 }))
 
 // #3608: capture the `onRestart` prop the App passes into StdinDisabledBanner
@@ -151,6 +159,10 @@ vi.mock('zustand/react/shallow', () => ({
 beforeEach(() => {
   stateOverrides = {}
   capturedOnRestart = null
+  // #4673 — reset the clipboard mock between tests so per-case rejection
+  // overrides don't bleed through.
+  clipboardWriteTextMock.mockReset()
+  clipboardWriteTextMock.mockResolvedValue(true)
   // #4432 — reset the shared shortcut registry so per-test rebinds
   // don't bleed between cases. The registry persists overrides to
   // localStorage; clearing the key keeps loadOverrides() returning {}.
@@ -1477,6 +1489,67 @@ describe('App', () => {
 
       expect(screen.queryByRole('menu')).not.toBeInTheDocument()
       expect(document.activeElement).toBe(treeitem)
+    })
+  })
+
+  // #4673 — Tauri WKWebView's `navigator.clipboard.writeText` silently
+  // resolves without writing to the OS clipboard, which made the "Copied!"
+  // check mark flash on a transcript that was never actually copied. The
+  // copy callback now routes through the `writeText` helper and only marks
+  // the button as copied when the helper reports success.
+  describe('handleCopyTranscript copy indicator (#4673)', () => {
+    const connectedWithMessages = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+      getActiveSessionState: () => ({
+        messages: [
+          { id: 'msg-1', type: 'user_input', content: 'hello', timestamp: 1 },
+          { id: 'msg-2', type: 'response', content: 'hi back', timestamp: 2 },
+        ],
+        streamingMessageId: null,
+        activeModel: null,
+        permissionMode: null,
+        contextUsage: null,
+        sessionCost: null,
+        isIdle: true,
+        activeAgents: [],
+        isPlanPending: false,
+      }),
+    }
+
+    it('does NOT flash the check mark when the clipboard helper returns false', async () => {
+      clipboardWriteTextMock.mockResolvedValue(false)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const btn = screen.getByTestId('btn-copy-transcript')
+      // Title before click reflects the not-copied state (no "Copied!").
+      expect(btn.getAttribute('title')).not.toContain('Copied!')
+
+      fireEvent.click(btn)
+      await waitFor(() => {
+        expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
+      })
+
+      // Indicator must NOT flip — the OS clipboard was never written.
+      expect(btn.textContent).not.toContain('✓')
+      expect(btn.getAttribute('title')).not.toContain('Copied!')
+    })
+
+    it('DOES flash the check mark when the clipboard helper returns true', async () => {
+      clipboardWriteTextMock.mockResolvedValue(true)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const btn = screen.getByTestId('btn-copy-transcript')
+      fireEvent.click(btn)
+
+      await waitFor(() => {
+        expect(btn.textContent).toContain('✓')
+      })
+      expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
+      expect(btn.getAttribute('title')).toContain('Copied!')
     })
   })
 })

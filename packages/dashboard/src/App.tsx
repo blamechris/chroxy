@@ -63,6 +63,7 @@ import { formatShortcutKeys, isMacPlatform } from './utils/platform'
 import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
 import { formatBindingForDisplay, parseBinding } from './shortcuts/registry'
 import { readClipboardImage } from './utils/clipboard-image'
+import { writeText as clipboardWriteText } from './utils/clipboard'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
@@ -503,19 +504,15 @@ export function App() {
   const handleCopyTranscript = useCallback(() => {
     const text = formatTranscript(storeMessages)
     if (!text) return
-    // navigator.clipboard is undefined in non-secure contexts (and some
-    // embedded webviews). Accessing .writeText on undefined would throw
-    // synchronously — bypass the .catch() and surface as a runtime error
-    // in the keyboard handler. Guard with the same pattern as the other
-    // dashboard copy paths.
-    if (!navigator.clipboard) return
-    void navigator.clipboard.writeText(text).then(() => {
+    // #4673: route through the clipboard helper so Tauri builds use the
+    // native plugin (navigator.clipboard.writeText silently no-ops in
+    // WKWebView). Only flash the "Copied!" check mark if the helper actually
+    // wrote — otherwise the indicator lies about an empty OS clipboard.
+    void clipboardWriteText(text).then((ok) => {
+      if (!ok) return
       setTranscriptCopied(true)
       if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
       transcriptResetTimerRef.current = setTimeout(() => setTranscriptCopied(false), 1500)
-    }).catch(() => {
-      // Clipboard rejected (e.g. user denied permissions). Surface the
-      // failure quietly — the user can copy manually from the chat view.
     })
   }, [storeMessages])
   useEffect(() => () => {
@@ -621,16 +618,12 @@ export function App() {
         useConnectionStore.getState().addServerError(message)
       },
       copyToClipboard: (text) => {
-        // navigator.clipboard is undefined in non-secure contexts and some
-        // embedded webviews; mirror the same guard handleCopyTranscript
-        // uses (see the comment block on that callback) so this menu item
-        // doesn't throw out of the synchronous click handler.
-        if (!navigator.clipboard) return
-        void navigator.clipboard.writeText(text).catch(() => {
-          // Clipboard rejected (user denied permission) — fail quietly.
-          // The user can still see the conversation id by hovering or
-          // re-running the search.
-        })
+        // #4673: route through the clipboard helper so Tauri builds use the
+        // native plugin instead of navigator.clipboard (which silently
+        // no-ops in WKWebView). Failures fall through quietly — the user
+        // can still see the conversation id by hovering or re-running the
+        // search.
+        void clipboardWriteText(text)
       },
       openCreateSessionAt: (cwd) => {
         setPendingCwd(cwd)
