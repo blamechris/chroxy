@@ -281,11 +281,12 @@ describe('useVoiceInput', () => {
 
     // #4733 — Chrome / Safari Web Speech routinely emit each utterance's
     // transcript field without a leading space. A naive `+= text` glued
-    // them into run-on words ("hello worldhow are you") and the user's
-    // 332-codepoint TUI prompt arrived with whitespace stripped mid-
-    // message. Verify the buffer inserts a single separator when neither
-    // side carries one — and stays idempotent when the legacy
-    // leading-space variant is mixed in.
+    // them into run-on words ("hello worldhow are you"), which is the
+    // strongest source candidate for the 332-codepoint TUI prompt in
+    // #4733 that arrived with whitespace stripped mid-message (root
+    // cause not yet confirmed end-to-end). Verify the buffer inserts a
+    // single separator when neither side carries one — and stays
+    // idempotent when the legacy leading-space variant is mixed in.
     it('inserts a separator between final segments that lack leading/trailing space (#4733)', async () => {
       const { result } = renderHook(() => useVoiceInput())
 
