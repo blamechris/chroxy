@@ -617,6 +617,204 @@ describe('SettingsPanel', () => {
       const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
       expect(input.maxLength).toBe(4000)
     })
+
+    // #4662: cross-session debounce safety + multi-client conflict UX.
+    // Mirrors the QuietHoursEditor pattern (#4570): a pending debounce
+    // closes over the typed text but reads activeSessionId at fire-time
+    // — switching sessions mid-debounce would leak draft A onto session
+    // B. A divergent server broadcast mid-edit was also silently
+    // overwriting the local draft.
+    describe('cross-session debounce safety + multi-client conflict UX (#4662)', () => {
+      it('cancels a pending debounce when activeSessionId changes mid-edit', () => {
+        vi.useFakeTimers()
+        try {
+          const setSessionPreamble = vi.fn()
+          setMockState({
+            activeSessionId: 'sess-A',
+            sessions: [
+              { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: '' },
+              { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: '' },
+            ],
+            setSessionPreamble,
+          })
+          const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+          fireEvent.change(input, { target: { value: 'session A draft' } })
+          // Switch active session within the debounce window.
+          vi.advanceTimersByTime(100)
+          setMockState({
+            activeSessionId: 'sess-B',
+            sessions: [
+              { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: '' },
+              { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: '' },
+            ],
+            setSessionPreamble,
+          })
+          rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          // Drain past the original debounce window — nothing should fire.
+          vi.advanceTimersByTime(500)
+          expect(setSessionPreamble).not.toHaveBeenCalled()
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('hydrates the text area to the new session value after a switch (no stale draft)', () => {
+        setMockState({
+          activeSessionId: 'sess-A',
+          sessions: [
+            { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: 'A value' },
+            { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: 'B value' },
+          ],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(input.value).toBe('A value')
+        fireEvent.change(input, { target: { value: 'A draft' } })
+        // Switch sessions before the debounce fires.
+        setMockState({
+          activeSessionId: 'sess-B',
+          sessions: [
+            { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: 'A value' },
+            { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: 'B value' },
+          ],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('B value')
+      })
+
+      it('surfaces a conflict banner when a divergent snapshot lands mid-edit', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'original' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        fireEvent.change(input, { target: { value: 'my local draft' } })
+        // Divergent snapshot arrives from another client.
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'other client value' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.getByTestId('session-preamble-conflict-banner')).toBeInTheDocument()
+        expect(screen.getByTestId('session-preamble-conflict-accept')).toBeInTheDocument()
+        expect(screen.getByTestId('session-preamble-conflict-discard')).toBeInTheDocument()
+        // Local draft is preserved while the banner is up.
+        const afterInput = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(afterInput.value).toBe('my local draft')
+      })
+
+      it('clicking discard replaces the draft with the snapshot and clears the banner', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'original' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'my draft' } })
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'other client' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('session-preamble-conflict-discard'))
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('other client')
+        expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+      })
+
+      it('clicking accept keeps the local draft and clears the banner', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'original' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'my draft' } })
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'other client' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('session-preamble-conflict-accept'))
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('my draft')
+        expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+      })
+
+      it('a snapshot matching the local draft does not surface the banner (own echo)', () => {
+        vi.useFakeTimers()
+        try {
+          const setSessionPreamble = vi.fn()
+          setMockState({
+            activeSessionId: 'sess-1',
+            sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: '' }],
+            setSessionPreamble,
+          })
+          const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'echo me' } })
+          vi.advanceTimersByTime(401)
+          expect(setSessionPreamble).toHaveBeenCalledWith('echo me')
+          // Server echoes the same value back.
+          setMockState({
+            activeSessionId: 'sess-1',
+            sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'echo me' }],
+            setSessionPreamble,
+          })
+          rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('accepts snapshot updates normally when the editor is clean', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'initial' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        // No edits — a fresh snapshot replaces the draft.
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'from server' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('from server')
+        expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+      })
+
+      it('cancels a pending debounce on unmount', () => {
+        vi.useFakeTimers()
+        try {
+          const setSessionPreamble = vi.fn()
+          setMockState({
+            activeSessionId: 'sess-1',
+            sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: '' }],
+            setSessionPreamble,
+          })
+          const { unmount } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'half-typed' } })
+          vi.advanceTimersByTime(100)
+          unmount()
+          vi.advanceTimersByTime(500)
+          expect(setSessionPreamble).not.toHaveBeenCalled()
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+    })
   })
 
   describe('BYOK credentials (#4052)', () => {
