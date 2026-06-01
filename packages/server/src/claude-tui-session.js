@@ -161,7 +161,7 @@ function ensureCwdTrusted(cwd) {
 // This is written ONCE per session at start() — the same settings.json is
 // reused across every turn, so changing it mid-session has no effect
 // (claude reads it at spawn time).
-function writeHookSettings(sinkDir, { permissionsEnabled }) {
+export function writeHookSettings(sinkDir, { permissionsEnabled }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
   // PreToolUse runs ALL registered hooks in order. We always capture the
@@ -1521,7 +1521,34 @@ export class ClaudeTuiSession extends BaseSession {
       ` writePath=${turn.writePath ?? 'n/a'} writeMs=${turn.writeMs ?? 'n/a'} writeBytes=${turn.writeBytes ?? 'n/a'} writeCompleted=${turn.writeCompleted ?? 'n/a'})`)
   }
 
+  /**
+   * #4642: observability-only invariant check. Every `sendMessage` sets
+   * `_isBusy=true` AND `_currentMessageId` together (lines 848/851), and
+   * every teardown path clears them together. If a teardown site ever
+   * observes `_isBusy=true` with `_currentMessageId=null`, the session
+   * is in a state the construction contract forbids — the `if(messageId)`
+   * guards in `_finishTurnError`, `_handleHardTimeout`,
+   * `_handleStreamStall`, and `_onAskUserQuestionStall` would silently
+   * skip `stream_end`, recreating the wedge mode #4638 fixed.
+   *
+   * Cheap (one warn line on violation, no-op otherwise) defensive
+   * instrumentation so a future regression that breaks the invariant
+   * surfaces in logs rather than as a wedge only triageable from
+   * screenshots. Callsite tag is grep-able so an operator can identify
+   * which teardown path observed the corruption.
+   */
+  _assertBusyHasMessageId(callsite) {
+    if (this._isBusy && !this._currentMessageId) {
+      log.warn(
+        `[invariant violation] ${callsite}: _isBusy=true but _currentMessageId=null — ` +
+        `construction contract requires both set together (sendMessage) or both cleared together (teardown). ` +
+        `Silently skipping stream_end here would recreate the #4638 wedge.`,
+      )
+    }
+  }
+
   _finishTurnError(message, callerMessageId) {
+    this._assertBusyHasMessageId('_finishTurnError')
     this._logSendMessageSummary('error')
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
@@ -1651,6 +1678,7 @@ export class ClaudeTuiSession extends BaseSession {
 
   _handleHardTimeout() {
     if (!this._isBusy) return
+    this._assertBusyHasMessageId('_handleHardTimeout')
     const friendly = formatIdleDuration(this._hardTimeoutMs)
     log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._hardTimeoutMs
@@ -1692,6 +1720,7 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _handleStreamStall() {
     if (!this._isBusy) return
+    this._assertBusyHasMessageId('_handleStreamStall')
     const friendly = formatIdleDuration(this._streamStallTimeoutMs)
     const messageId = this._currentMessageId
     log.warn(
@@ -2210,6 +2239,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._destroying) return
     if (!this._pendingUserAnswer && !this._isBusy) return
 
+    this._assertBusyHasMessageId('_onAskUserQuestionStall')
     log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
 
     const messageId = this._currentMessageId
