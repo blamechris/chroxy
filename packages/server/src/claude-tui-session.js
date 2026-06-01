@@ -2245,7 +2245,23 @@ export class ClaudeTuiSession extends BaseSession {
     const messageId = this._currentMessageId
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
 
-    this._pendingUserAnswer = null
+    // #4691: surgical clear — drop ONLY the entry for the tool that
+    // timed out. The other teardown sites (_finishTurnError, hard
+    // timeout via _teardownTurn, interrupt, destroy) end the whole
+    // turn, so wiping the whole Map there is correct. The watchdog is
+    // different: it knows the exact toolUseId that wedged (passed to
+    // setTimeout in respondToQuestion) and the rest of the turn is
+    // still live — sibling AskUserQuestion entries armed by parallel
+    // PreToolUse blocks can still see a PostToolUse arrive. Falling
+    // back to `_pendingUserAnswer = null` here would re-trigger the
+    // back-compat setter → `_pendingUserAnswers.clear()` and wipe
+    // those siblings under their own still-live turns, re-introducing
+    // the #4668-class state-shape mismatch (dashboard cleared the
+    // QuestionPrompt UI when it sent the answer, but the server-side
+    // Map is empty — a late retry-as-singles answer with toolUseId B
+    // would hit the "no matching pending entry — dropping" path and
+    // wedge the next form silently).
+    this._clearPendingAnswerByToolUseId(toolUseId)
     this._clearAskUserQuestionLock()
     // #4616: emit a synthetic tool_result FIRST so the dashboard's
     // activeTools entry for this AskUserQuestion is cleared. Without it
