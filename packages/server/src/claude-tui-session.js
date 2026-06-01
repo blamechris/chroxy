@@ -1533,7 +1533,7 @@ export class ClaudeTuiSession extends BaseSession {
    *
    * Cheap (one warn line on violation, no-op otherwise) defensive
    * instrumentation so a future regression that breaks the invariant
-   * surfaces in logs rather than as a wedge only triagable from
+   * surfaces in logs rather than as a wedge only triageable from
    * screenshots. Callsite tag is grep-able so an operator can identify
    * which teardown path observed the corruption.
    */

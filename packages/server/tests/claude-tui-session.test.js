@@ -3363,7 +3363,7 @@ describe('ClaudeTuiSession', () => {
     // _finishTurnError / _handleHardTimeout / _handleStreamStall /
     // _onAskUserQuestionStall would silently skip stream_end and recreate the
     // #4638 wedge. These tests pin the warn line so a regression is observable
-    // in chroxy.log rather than only triagable from screenshots.
+    // in chroxy.log rather than only triageable from screenshots.
 
     let warnLines
     let logSpy
