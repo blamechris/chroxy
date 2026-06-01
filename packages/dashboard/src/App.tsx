@@ -344,17 +344,19 @@ export function App() {
     [activeMismatched],
   )
 
-  // #4735: the multi-question AskUserQuestion form is gated per session
-  // type. TUI sessions (`claude-tui`) keep the #4666 deferred notice
-  // because the permission-hook denies multi-question tool_uses there
-  // and answers would misroute through `_pendingUserAnswer`. SDK / BYOK
-  // / Codex sessions support per-question delivery natively (#4731), so
-  // the dashboard renders the interactive `MultiQuestionForm` for them
-  // and submits per-question answers (including multi-select arrays) on
-  // the widened wire. Reuses the `activeSessionProvider` selector declared
+  // #4735 / #4731: the multi-question AskUserQuestion form is gated per
+  // session type. TUI / CLI sessions (`claude-tui` / `claude-cli`) keep
+  // the #4666 deferred notice because the permission-hook (#4648) denies
+  // multi-question tool_uses there and answers would misroute through
+  // `_pendingUserAnswer`. SDK / BYOK / Codex / Gemini sessions support
+  // per-question delivery natively (#4731) via the in-process
+  // `canUseTool` flow (`packages/server/src/sdk-session.js:30`), so the
+  // dashboard renders the interactive `MultiQuestionForm` for them and
+  // submits per-question answers (including multi-select arrays) on the
+  // widened wire. Reuses the `activeSessionProvider` selector declared
   // above (#4603) so we don't re-derive the same value.
   const allowMultiQuestionForm = useMemo(
-    () => activeSessionProvider != null && activeSessionProvider !== 'claude-tui',
+    () => activeSessionProvider != null && activeSessionProvider !== 'claude-tui' && activeSessionProvider !== 'claude-cli',
     [activeSessionProvider],
   )
 
@@ -1554,11 +1556,12 @@ export function App() {
           options={storeMsg.options}
           questions={storeMsg.questions}
           answered={storeMsg.answered}
-          // #4735 — SDK-mode sessions get the interactive
-          // MultiQuestionForm; TUI sessions keep the #4666 deferred
-          // notice. Derivation lives at activeSessionProvider above so
-          // the flag flips correctly on session-switch without a full
-          // re-render of every prompt.
+          // #4735 / #4731 — SDK / BYOK / Codex / Gemini sessions get the
+          // interactive MultiQuestionForm; TUI / CLI sessions keep the
+          // #4666 deferred notice (their permission-hook still denies
+          // multi-question forms per #4648). Derivation lives at
+          // `allowMultiQuestionForm` above so the flag flips correctly
+          // on session-switch without a full re-render of every prompt.
           allowMultiQuestion={allowMultiQuestionForm}
           onSelect={(answer) => {
             // #4604 Chunk B / #4735 — answer is `string` for

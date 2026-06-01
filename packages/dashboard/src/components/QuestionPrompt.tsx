@@ -66,14 +66,16 @@ export interface QuestionPromptProps {
    */
   questions?: ChatMessageQuestion[]
   /**
-   * #4735 — opt-in flag for SDK-mode sessions to render the interactive
-   * `MultiQuestionForm` instead of the #4666 deferred notice. TUI
-   * sessions (`provider === 'claude-tui'`) leave this false because the
-   * permission-hook denies multi-question tool_uses there; SDK / BYOK
-   * / Codex sessions pass `true` because the underlying delivery path
-   * supports per-question answers natively (#4731). Defaults to false
-   * so existing callers (and tests) keep their #4666 deferred-notice
-   * behaviour unless they explicitly opt in.
+   * #4735 / #4731 — opt-in flag for SDK-mode sessions to render the
+   * interactive `MultiQuestionForm` instead of the #4666 deferred notice.
+   * TUI / CLI sessions (`provider === 'claude-tui'` / `claude-cli`) leave
+   * this false because the permission-hook (#4648) denies multi-question
+   * tool_uses there — see `packages/server/hooks/permission-hook.sh`.
+   * SDK / BYOK / Codex sessions pass `true` because the in-process
+   * `canUseTool` permission flow (`packages/server/src/sdk-session.js:30`)
+   * accepts per-question `answers` maps natively (#4731). Defaults to
+   * false so existing callers (and tests) keep their #4666 deferred-
+   * notice behaviour unless they explicitly opt in.
    */
   allowMultiQuestion?: boolean
   /**
@@ -93,14 +95,16 @@ export interface QuestionPromptProps {
 export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, onSelect }: QuestionPromptProps) {
   const isMultiQuestion = Array.isArray(questions) && questions.length > 1
 
-  // #4666 / #4735 — TUI sessions: permission-hook denies any AskUserQuestion
-  // with `questions[]` length > 1 because the TUI keystroke driver can't
-  // reliably answer combined forms. The dashboard still receives the
-  // tool_use event (broadcast is independent of the deny), so we render a
-  // non-interactive notice to prevent misrouted answers via
-  // `_pendingUserAnswer`. SDK-mode sessions (#4731) flip
+  // #4666 / #4735 / #4731 — TUI / CLI sessions: permission-hook denies any
+  // AskUserQuestion with `questions[]` length > 1 because the TUI keystroke
+  // driver can't reliably answer combined forms. The dashboard still
+  // receives the tool_use event (broadcast is independent of the deny),
+  // so we render a non-interactive notice to prevent misrouted answers
+  // via `_pendingUserAnswer`. SDK-mode sessions (#4731) flip
   // `allowMultiQuestion` on and render the live `MultiQuestionForm` so
-  // per-question answers reach the SDK's canUseTool callback natively.
+  // per-question answers reach the SDK's canUseTool callback natively
+  // (`PermissionManager.respondToQuestion`,
+  // `packages/server/src/permission-manager.js`).
   if (isMultiQuestion && answered == null) {
     if (allowMultiQuestion) {
       return <MultiQuestionForm questions={questions} onSelect={onSelect} />

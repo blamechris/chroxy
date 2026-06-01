@@ -498,30 +498,40 @@ describe('PermissionManager', () => {
       assert.ok(!('Unknown?' in result.updatedInput.answers))
     })
 
-    // #4621 / #4735 — per-question answer wire format. Multi-select
-    // answers may arrive as `string[]` (native array) from #4621+
-    // clients. The PermissionManager passes the value through to
-    // `updatedInput.answers` unchanged so the SDK's canUseTool callback
-    // receives the array as the value for that question — the SDK
-    // accepts both shapes per the AskUserQuestion contract. Older
-    // clients that JSON-stringified the array continue to flow through
-    // as plain strings (unchanged).
-    it('passes string[] answers through to updatedInput.answers (#4621 multi-select native array)', async () => {
+    // #4621 wire shape + #4731 SDK normalization. answersMap values may
+    // arrive as string[] (native multi-select from updated dashboards).
+    // PermissionManager normalizes arrays to the SDK's canonical
+    // comma-separated string shape (see normalizeAnswerValue and
+    // sdk-multi-question-shapes.test.js for the full coverage) because
+    // the SDK's `AskUserQuestionOutput.answers` is typed
+    // `{ [questionText]: string }`. Single-select strings pass through.
+    it('normalizes string[] answersMap values to comma-separated strings for the SDK (#4621 + #4731)', async () => {
       const questions = [
-        { question: 'Which targets?', multiSelect: true, options: [
-          { label: 'App' }, { label: 'Docs' }, { label: 'Tests' },
-        ] },
+        { question: 'Areas?', multiSelect: true, options: [{ label: 'App' }, { label: 'Tests' }] },
+        { question: 'Strategy?', options: [{ label: 'Patch' }, { label: 'Minor' }] },
       ]
       const promise = pm._handleAskUserQuestion({ questions }, null)
 
-      pm.respondToQuestion('summary', { 'Which targets?': ['App', 'Tests'] })
+      pm.respondToQuestion('summary', {
+        'Areas?': ['App', 'Tests'],
+        'Strategy?': 'Minor',
+      })
       const result = await promise
-      assert.deepEqual(result.updatedInput.answers, { 'Which targets?': ['App', 'Tests'] })
-      assert.ok(Array.isArray(result.updatedInput.answers['Which targets?']),
-        'array value should be preserved (not coerced to string)')
+      assert.deepEqual(result.updatedInput.answers, {
+        'Areas?': 'App, Tests',
+        'Strategy?': 'Minor',
+      })
+      assert.equal(typeof result.updatedInput.answers['Areas?'], 'string',
+        'multi-select array must be coerced to comma-separated string per SDK contract')
     })
 
-    it('passes mixed string + string[] answers through unchanged (#4621 / #4735)', async () => {
+    // #4621 / #4735 / #4731 — mixed single-select + multi-select shape.
+    // Single-select strings pass through unchanged; multi-select arrays
+    // are normalized to comma-separated strings per the SDK contract
+    // (see normalizeAnswerValue + the test above). #4735 added the
+    // mixed-shape coverage; #4731 corrected the assertion to match the
+    // SDK's `{ [questionText]: string }` output type.
+    it('normalizes mixed string + string[] answers per the SDK contract (#4621 / #4731 / #4735)', async () => {
       const questions = [
         { question: 'Strategy?', options: [{ label: 'Patch' }, { label: 'Minor' }] },
         { question: 'Targets?', multiSelect: true, options: [
@@ -539,11 +549,11 @@ describe('PermissionManager', () => {
       const result = await promise
       assert.deepEqual(result.updatedInput.answers, {
         'Strategy?': 'Patch',
-        'Targets?': ['App', 'Docs'],
+        'Targets?': 'App, Docs',
         'Confirm?': 'Yes',
       })
-      assert.ok(Array.isArray(result.updatedInput.answers['Targets?']),
-        'array value should be preserved (not coerced to string)')
+      assert.equal(typeof result.updatedInput.answers['Targets?'], 'string',
+        'multi-select array must be coerced to comma-separated string per SDK contract')
     })
   })
 

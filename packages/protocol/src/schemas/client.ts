@@ -416,7 +416,7 @@ export const NotificationPrefsSetSchema = z.object({
 }).passthrough()
 
 /**
- * #4735 / #4621 — per-question answer wire format.
+ * #4735 / #4731 / #4621 — per-question answer wire format.
  *
  * `answers` is a map keyed by question text. Values are either:
  * - `string` — single-select label or a free-form ("Other"/text) answer
@@ -431,24 +431,33 @@ export const NotificationPrefsSetSchema = z.object({
  * see `resolveQuestionDigits` in `claude-tui-session.js` for the TUI
  * path that handles the array variant directly.
  *
- * Array bounds: at most 100 entries per array (mirroring the per-answer-
- * map cap), and at most 10_000 chars per entry. Multi-select values are
- * option labels (short by construction) — capping at 10_000 chars keeps
- * the total per-answer worst case bounded at ~1MB without the legacy
- * 100_000-char-per-item cap on the string path, which exists to cover
- * the JSON-stringified-array shape sent by pre-#4621 dashboards (and is
- * itself bounded by the top-level CHROXY_MAX_PAYLOAD).
+ * The server normalizes arrays to the SDK's canonical comma-separated
+ * format inside `PermissionManager.respondToQuestion` (the SDK's
+ * `AskUserQuestionOutput.answers` is typed `{ [questionText]: string }`
+ * and the spec is explicit: "multi-select answers are comma-separated").
+ * Older dashboards' JSON-stringified array payloads are unwrapped on the
+ * same path, so all variants converge before reaching the SDK.
+ *
+ * Bounds:
+ *   - Array max length: 100 entries per question (mirrors the per-answer-
+ *     map cap; chroxy never sees forms past 4 options in practice, so
+ *     this is a generous safety margin).
+ *   - Per-array-entry char cap: 10_000. Multi-select values are option
+ *     labels (short by construction) — capping at 10_000 chars keeps the
+ *     per-answer worst case bounded at ~1MB without the legacy
+ *     100_000-char cap on the string path, which exists to cover the
+ *     JSON-stringified-array shape sent by pre-#4621 dashboards (and is
+ *     itself bounded by the top-level CHROXY_MAX_PAYLOAD).
  */
+const UserQuestionAnswerValueSchema = z.union([
+  z.string().max(100_000),
+  z.array(z.string().max(10_000)).max(100),
+])
+
 export const UserQuestionResponseSchema = z.object({
   type: z.literal('user_question_response'),
   answer: z.string().max(100_000),
-  answers: z.record(
-    z.string(),
-    z.union([
-      z.string().max(100_000),
-      z.array(z.string().max(10_000)).max(100),
-    ]),
-  ).refine(
+  answers: z.record(z.string(), UserQuestionAnswerValueSchema).refine(
     (obj) => Object.keys(obj).length <= 100,
     { message: 'Too many answers (max 100)' }
   ).optional(),
