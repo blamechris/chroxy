@@ -871,10 +871,18 @@ export class CliSession extends BaseSession {
   _applyToolInputSemantics(ctx) {
     const toolName = ctx.currentToolName
     const toolUseId = ctx.currentToolUseId
+    // `parseSucceeded` tracks whether the buffered JSON parsed without
+    // throwing — distinct from `parsed != null`, because JSON.parse can
+    // legally return falsy values (0, false, '', null) and the
+    // pre-extraction code emitted on any successful parse regardless of
+    // the parsed value. Gating on truthiness would silently drop those
+    // payloads. (#4774 Copilot review)
     let parsed = null
+    let parseSucceeded = false
     if (ctx.toolInputChunks) {
       try {
         parsed = JSON.parse(ctx.toolInputChunks)
+        parseSucceeded = true
       } catch (err) {
         // Parse-failure logging matches the per-tool pre-extraction
         // messages so existing log scraping continues to work.
@@ -888,8 +896,8 @@ export class CliSession extends BaseSession {
         }
         if (toolName === 'ExitPlanMode') {
           log.warn(`Failed to parse ExitPlanMode input: ${err.message}`)
-          // ExitPlanMode falls through with parsed=null so the empty
-          // allowedPrompts default still applies.
+          // ExitPlanMode falls through with parseSucceeded=false so the
+          // empty allowedPrompts default still applies.
         }
       }
     }
@@ -899,9 +907,11 @@ export class CliSession extends BaseSession {
 
     switch (semantics.kind) {
       case 'ask_user_question': {
-        // The pre-extraction code required successfully-parsed input to
-        // proceed; preserve that by gating on a non-null parsed payload.
-        if (!parsed) return
+        // The pre-extraction code required a non-empty buffer AND a
+        // successful parse before emitting; preserve that gate via
+        // `parseSucceeded` (truthiness of `parsed` would drop legal
+        // falsy JSON values).
+        if (!parseSucceeded) return
         log.info(`AskUserQuestion detected (${toolUseId})`)
         this._waitingForAnswer = true
         this.emit('user_question', {
@@ -911,7 +921,7 @@ export class CliSession extends BaseSession {
         return
       }
       case 'task': {
-        if (!parsed) return
+        if (!parseSucceeded) return
         const agentInfo = {
           toolUseId,
           description: semantics.payload.description,
