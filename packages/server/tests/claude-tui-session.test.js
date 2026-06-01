@@ -2643,6 +2643,101 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4682 — per-turn summary log emitted from the shared _teardownTurn
+  // helper. PR #4681 added _logSendMessageSummary for the wedge
+  // investigation but originally only wired it into the success path
+  // and _finishTurnError. The stream-stall watchdog (#4638) and
+  // hard-timeout (#3920) finishers also null _activeTurn but skipped
+  // the helper, so the very wedge modes the instrumentation was
+  // designed to diagnose left no grep-able trail. After #4641
+  // refactored both finishers to delegate to _teardownTurn, the
+  // summary log lives at the top of the helper so every teardown path
+  // gets a uniform `sendMessage done` line.
+  describe('per-turn summary log on teardown paths (#4682)', () => {
+    it('_teardownTurn emits the `sendMessage done` summary line with the reason tag', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-summary-1'
+      session._sessionId = 'sess-summary-1'
+      session._activeTurn = { startedAt: Date.now() - 10, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+
+      const summaryLines = []
+      const logSpy = addLogListener((level, message) => {
+        if (level === 'info' && /sendMessage done/.test(message)) summaryLines.push(message)
+      })
+      try {
+        session._teardownTurn('stream_stall', {
+          duration: 11,
+          errorPayload: { code: 'stream_stall', message: 'stalled' },
+        })
+        assert.equal(summaryLines.length, 1, 'one summary line per teardown call')
+        const summary = summaryLines[0]
+        assert.match(summary, /msg=msg-summary-1/, 'summary tags the messageId')
+        assert.match(summary, /reason=stream_stall/, 'summary tags the reason passed to _teardownTurn')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
+
+    it('_handleHardTimeout end-to-end produces the summary with reason=hard_timeout', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 50,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-summary-ht'
+      session._sessionId = 'sess-summary-ht'
+      session._activeTurn = { startedAt: Date.now() - 60, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+
+      const summaryLines = []
+      const logSpy = addLogListener((level, message) => {
+        if (level === 'info' && /sendMessage done/.test(message)) summaryLines.push(message)
+      })
+      try {
+        session._handleHardTimeout()
+        assert.equal(summaryLines.length, 1, 'hard-timeout path emits exactly one summary line')
+        assert.match(summaryLines[0], /reason=hard_timeout/, 'summary tags reason=hard_timeout')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
+
+    it('_handleStreamStall end-to-end produces the summary with reason=stream_stall', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 50,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-summary-ss'
+      session._sessionId = 'sess-summary-ss'
+      session._activeTurn = { startedAt: Date.now() - 60, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+
+      const summaryLines = []
+      const logSpy = addLogListener((level, message) => {
+        if (level === 'info' && /sendMessage done/.test(message)) summaryLines.push(message)
+      })
+      try {
+        session._handleStreamStall()
+        assert.equal(summaryLines.length, 1, 'stream-stall path emits exactly one summary line')
+        assert.match(summaryLines[0], /reason=stream_stall/, 'summary tags reason=stream_stall')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
+  })
+
   describe('PTY output ring buffer (#3919)', () => {
     it('keeps a tail of recent output with ANSI stripped', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
