@@ -475,7 +475,11 @@ describe('handleSessionMessage', () => {
         answer: 'yes please',
       }, ctx)
       assert.equal(entry.session.respondToQuestion.callCount, 1)
-      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes please', undefined])
+      // #4668: handler forwards msg.toolUseId so claude-tui-session can
+      // route to the right pending entry in its Map. Old 2-arg shape
+      // (answer, answersMap) is preserved positionally; toolUseId is the
+      // new trailing optional arg passed to every session type.
+      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes please', undefined, 'tool-xyz'])
     })
 
     it('forwards answers map to respondToQuestion', async () => {
@@ -490,7 +494,7 @@ describe('handleSessionMessage', () => {
         answers: answersMap,
       }, ctx)
       assert.equal(entry.session.respondToQuestion.callCount, 1)
-      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes', answersMap])
+      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes', answersMap, 'tool-abc'])
     })
   })
 

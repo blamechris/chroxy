@@ -543,7 +543,14 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // count distinguishes the SDK's per-question form from the TUI's
     // single-answer string).
     log.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0}`)
-    entry.session.respondToQuestion(msg.answer, msg.answers)
+    // #4668: forward msg.toolUseId so claude-tui-session can route the
+    // answer to the right pending entry in its Map. Sessions that don't
+    // care about toolUseId (cli-session, sdk-session via permission-
+    // manager) ignore the extra argument — JS positional args make this
+    // a safe addition. ByokSession's respondToQuestion forwards to
+    // _permissions.respondToQuestion which similarly ignores trailing
+    // args it doesn't read.
+    entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId)
   }
 }
 
