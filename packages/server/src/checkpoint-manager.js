@@ -13,7 +13,13 @@ const log = createLogger('checkpoint')
 
 const execFileAsync = promisify(execFileCb)
 
-const CHECKPOINTS_DIR = join(homedir(), '.chroxy', 'checkpoints')
+// Resolve at call time, not module-load time, so tests that set
+// CHROXY_CONFIG_DIR in beforeEach are respected. Mirrors models.js and
+// connection-info.js (#4633).
+function defaultCheckpointsDir() {
+  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  return join(configDir, 'checkpoints')
+}
 const MAX_CHECKPOINTS_PER_SESSION = 50
 
 /**
@@ -60,16 +66,25 @@ async function acquireCwdLock(cwd) {
  * conversation ID, effectively branching the conversation.
  */
 export class CheckpointManager extends EventEmitter {
-  constructor() {
+  /**
+   * @param {object} [options]
+   * @param {string} [options.checkpointsDir] - Override the on-disk directory
+   *   for checkpoint state files. Defaults to `$CHROXY_CONFIG_DIR/checkpoints`
+   *   (or `~/.chroxy/checkpoints` when unset). Tests should pass a tmp
+   *   directory (or set `CHROXY_CONFIG_DIR`) to avoid contaminating the
+   *   developer's real state (#4633).
+   */
+  constructor(options = {}) {
     super()
     this._checkpoints = new Map() // sessionId -> Checkpoint[]
     this._counters = new Map() // sessionId -> monotonic counter for default names
+    this._checkpointsDir = options.checkpointsDir || defaultCheckpointsDir()
     this._ensureDir()
   }
 
   _ensureDir() {
-    if (!existsSync(CHECKPOINTS_DIR)) {
-      mkdirSync(CHECKPOINTS_DIR, { recursive: true })
+    if (!existsSync(this._checkpointsDir)) {
+      mkdirSync(this._checkpointsDir, { recursive: true })
     }
   }
 
@@ -222,7 +237,7 @@ export class CheckpointManager extends EventEmitter {
     }
     this._checkpoints.delete(sessionId)
 
-    const file = join(CHECKPOINTS_DIR, `${sessionId}.json`)
+    const file = join(this._checkpointsDir, `${sessionId}.json`)
     if (existsSync(file)) {
       try { unlinkSync(file) } catch { /* ignore */ }
     }
@@ -377,7 +392,7 @@ export class CheckpointManager extends EventEmitter {
   }
 
   _load(sessionId) {
-    const file = join(CHECKPOINTS_DIR, `${sessionId}.json`)
+    const file = join(this._checkpointsDir, `${sessionId}.json`)
     try {
       if (existsSync(file)) {
         const data = JSON.parse(readFileSync(file, 'utf8'))
@@ -391,7 +406,7 @@ export class CheckpointManager extends EventEmitter {
   }
 
   _persist(sessionId) {
-    const file = join(CHECKPOINTS_DIR, `${sessionId}.json`)
+    const file = join(this._checkpointsDir, `${sessionId}.json`)
     const data = { version: 1, checkpoints: this._getCheckpoints(sessionId) }
     try {
       writeFileRestricted(file, JSON.stringify(data, null, 2))

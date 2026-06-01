@@ -1,5 +1,8 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { EventEmitter } from 'node:events'
 import { SessionManager } from '../src/session-manager.js'
 
@@ -9,7 +12,20 @@ import { SessionManager } from '../src/session-manager.js'
  * When the JSONL read path throws (corrupt data, disk error, null cwd),
  * getFullHistoryAsync() must catch the error and fall back to the ring buffer
  * instead of propagating the rejection to callers.
+ *
+ * CRITICAL: Every SessionManager instance MUST use a temp stateFilePath.
+ * Without it, tests write to real ~/.chroxy/session-state.json (see #4633).
  */
+
+let _globalTmpDir
+function tmpStateFile() {
+  if (!_globalTmpDir) _globalTmpDir = mkdtempSync(join(tmpdir(), 'sm-history-error-'))
+  return join(_globalTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+}
+
+after(() => {
+  if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
+})
 
 function createFakeSession({ resumeSessionId = null } = {}) {
   const session = new EventEmitter()
@@ -25,7 +41,7 @@ describe('getFullHistoryAsync error handling', () => {
   let mgr
 
   beforeEach(() => {
-    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5 })
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
   })
 
   it('falls back to ring buffer when JSONL path resolution throws', async () => {

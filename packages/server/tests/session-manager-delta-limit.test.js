@@ -1,12 +1,28 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { SessionManager } from '../src/session-manager.js'
 import { EventEmitter } from 'events'
 
 /**
  * Tests for stream delta size limit (issue #2146).
  * Prevents OOM from malicious clients sending unbounded stream_delta data.
+ *
+ * CRITICAL: Every SessionManager instance MUST use a temp stateFilePath.
+ * Without it, tests write to real ~/.chroxy/session-state.json (see #4633).
  */
+
+let _globalTmpDir
+function tmpStateFile() {
+  if (!_globalTmpDir) _globalTmpDir = mkdtempSync(join(tmpdir(), 'sm-delta-limit-'))
+  return join(_globalTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+}
+
+after(() => {
+  if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
+})
 
 function createFakeSession() {
   const session = new EventEmitter()
@@ -16,7 +32,7 @@ function createFakeSession() {
 }
 
 function setupManager() {
-  const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5 })
+  const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
   const session = createFakeSession()
   const sessionId = 'test-session-1'
   mgr._sessions.set(sessionId, { session, name: 'Test', cwd: '/tmp', createdAt: Date.now() })
