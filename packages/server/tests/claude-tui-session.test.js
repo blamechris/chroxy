@@ -3354,4 +3354,146 @@ describe('ClaudeTuiSession', () => {
         'in-process bookkeeping still updates so capabilities checks stay coherent')
     })
   })
+
+  describe('_assertBusyHasMessageId invariant (#4642)', () => {
+    // #4642: observability-only defensive instrumentation. Every sendMessage
+    // sets `_isBusy=true` AND `_currentMessageId` together (claude-tui-session.js
+    // lines 848/851), and every teardown clears both together. If a future
+    // regression breaks that pairing, the `if(messageId)` guards in
+    // _finishTurnError / _handleHardTimeout / _handleStreamStall /
+    // _onAskUserQuestionStall would silently skip stream_end and recreate the
+    // #4638 wedge. These tests pin the warn line so a regression is observable
+    // in chroxy.log rather than only triagable from screenshots.
+
+    let warnLines
+    let logSpy
+
+    beforeEach(() => {
+      warnLines = []
+      logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'claude-tui-session') {
+          warnLines.push(entry.message)
+        }
+      }
+      addLogListener(logSpy)
+    })
+
+    afterEach(() => {
+      if (logSpy) removeLogListener(logSpy)
+      logSpy = null
+      warnLines = null
+    })
+
+    it('emits a warn when _isBusy=true and _currentMessageId is null', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(violation, `expected an invariant-violation warn, got warnLines=${JSON.stringify(warnLines)}`)
+      // Pin the structured fields the warn carries — an operator greps for
+      // these; a future refactor that drops the callsite tag or the
+      // `_isBusy=true but _currentMessageId=null` phrasing should fail.
+      assert.match(violation, /test-callsite/, 'warn includes callsite tag for greppability')
+      assert.match(violation, /_isBusy=true/, 'warn names the busy flag')
+      assert.match(violation, /_currentMessageId=null/, 'warn names the missing id')
+      assert.match(violation, /#4638/, 'warn cross-references the wedge this prevents')
+    })
+
+    it('is a no-op when both _isBusy=true AND _currentMessageId are set (healthy state)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn when invariant holds, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('is a no-op when _isBusy=false (idle session — invariant only applies mid-turn)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = false
+      session._currentMessageId = null
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn on idle session, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _finishTurnError when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+
+      // Corrupt state: busy but no messageId. This is the contract violation
+      // the assertion exists to surface — a future regression that sets one
+      // without the other should fail this test.
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._finishTurnError('synthetic error', null)
+
+      const violation = warnLines.find((m) => /_finishTurnError/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_finishTurnError must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _handleHardTimeout when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._handleHardTimeout()
+
+      const violation = warnLines.find((m) => /_handleHardTimeout/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_handleHardTimeout must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _handleStreamStall when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._handleStreamStall()
+
+      const violation = warnLines.find((m) => /_handleStreamStall/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_handleStreamStall must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('does NOT fire from teardown sites when invariant holds (healthy turn end)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      // Healthy state: both set together as the contract requires.
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+      session._activeTurn = { messageId: 'msg-healthy', startedAt: Date.now(), aborted: false }
+
+      session._finishTurnError('synthetic error', 'msg-healthy')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn on healthy teardown, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+  })
 })
