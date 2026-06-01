@@ -545,7 +545,10 @@ describe('QuestionPrompt', () => {
         expect(group.getAttribute('aria-required')).toBe('true')
         const labelledBy = group.getAttribute('aria-labelledby')
         expect(labelledBy).toBeTruthy()
-        const labelEl = row.querySelector(`#${labelledBy}`)
+        // useId() returns ids containing ':' which need CSS escaping for
+        // querySelector; getElementById takes a raw id string and matches
+        // the pattern used by the Modal tests.
+        const labelEl = document.getElementById(labelledBy!)
         expect(labelEl).not.toBeNull()
         expect(labelEl!.textContent).toBe('Pick exactly one')
       })
@@ -558,7 +561,7 @@ describe('QuestionPrompt', () => {
         expect(group.getAttribute('aria-required')).toBeNull()
         const labelledBy = group.getAttribute('aria-labelledby')
         expect(labelledBy).toBeTruthy()
-        const labelEl = row.querySelector(`#${labelledBy}`)
+        const labelEl = document.getElementById(labelledBy!)
         expect(labelEl).not.toBeNull()
         expect(labelEl!.textContent).toBe('Pick any')
       })
