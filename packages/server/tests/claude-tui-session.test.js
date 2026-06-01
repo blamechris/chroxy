@@ -2832,6 +2832,72 @@ describe('ClaudeTuiSession', () => {
       session._handleHardTimeout()
       assert.equal(session._pendingUserAnswer, null, 'hard timeout clears pending answer')
     })
+
+    // #4693 — the diagnostic added in #4687 (PTY tail hex dump before each
+    // answer write) is unbounded per-turn: a multi-question retry-as-singles
+    // wedge can fire 4+ respondToQuestion calls in succession, each pumping
+    // ~70 hex-dump lines into chroxy.log. Rate-limit to once per turn — the
+    // first answer write still captures the diagnostic; subsequent writes
+    // in the same turn emit a compact one-line skip notice instead of the
+    // full dump.
+    it('respondToQuestion PTY tail hex dump is rate-limited to once per turn (#4693)', async () => {
+      const hexDumpLines = []
+      const skipLines = []
+      const logSpy = (entry) => {
+        if (entry.component !== 'claude-tui-session') return
+        if (entry.level !== 'info') return
+        if (/respondToQuestion PTY tail before write/.test(entry.message)) hexDumpLines.push(entry.message)
+        if (/respondToQuestion PTY tail hex dump skipped/.test(entry.message)) skipLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        session._term = { write: () => {}, kill: () => {} }
+        // Mark a single active turn so the rate-limiter has a stable scope.
+        session._activeTurn = { messageId: 'msg-hex-rate', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+
+        // Three sibling AskUserQuestion tool_uses in the SAME turn (mirrors
+        // the multi-question retry-as-singles wedge that motivated #4693).
+        for (const id of ['toolu_one', 'toolu_two', 'toolu_three']) {
+          session._emitToolHookEvent('PreToolUse', {
+            tool_use_id: id,
+            tool_name: 'AskUserQuestion',
+            tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }, { label: 'B' }] }] },
+          }, 'msg-hex-rate')
+        }
+
+        // Dashboard answers all three in quick succession.
+        session.respondToQuestion('A', undefined, 'toolu_one')
+        session.respondToQuestion('B', undefined, 'toolu_two')
+        session.respondToQuestion('A', undefined, 'toolu_three')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.equal(
+          hexDumpLines.length, 1,
+          `expected exactly 1 hex dump for 3 same-turn answers, got ${hexDumpLines.length}: ${JSON.stringify(hexDumpLines.map((l) => l.split('\n')[0]))}`,
+        )
+        assert.equal(
+          skipLines.length, 2,
+          `expected 2 compact skip notices for the rate-limited calls, got ${skipLines.length}`,
+        )
+
+        // After a new turn starts, the next answer emits a fresh hex dump.
+        hexDumpLines.length = 0
+        skipLines.length = 0
+        session._activeTurn = { messageId: 'msg-hex-rate-2', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_turn2',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
+        }, 'msg-hex-rate-2')
+        session.respondToQuestion('A', undefined, 'toolu_turn2')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.equal(hexDumpLines.length, 1, 'new turn resets the rate-limit; first answer emits the dump again')
+        assert.equal(skipLines.length, 0, 'no skip notice on the first answer of a new turn')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
   })
 
   // #4604 — observability + watchdog around AskUserQuestion. The root
