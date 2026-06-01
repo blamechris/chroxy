@@ -1049,6 +1049,36 @@ export class ClaudeTuiSession extends BaseSession {
    * @returns {Promise<boolean>} true if completed, false if aborted.
    */
   async _writePtyTextThrottled(text, { onAbort } = {}) {
+    // #4678: multi-line prompts (from Shift+Enter in the dashboard
+    // composer) need to be delivered as a single bracketed paste —
+    // claude TUI v2.1.x treats raw \n in the input box as "insert
+    // newline in multi-line composition" with no way to break out via
+    // a subsequent \r (the bare \r is also interpreted as a newline
+    // when the cursor is in a multi-line composition). Wrapping the
+    // content in CSI bracketed-paste markers (\x1b[200~ ... \x1b[201~)
+    // tells claude TUI the content was pasted; on receipt of the close
+    // marker the input is ready to submit and the trailing \r fires.
+    //
+    // Single-line content keeps the per-char throttled write — the
+    // #4269 throttle exists to defeat claude TUI's heuristic paste
+    // detector when the input is typed input (not a real paste). For
+    // genuine paste we use the explicit markers and rely on claude TUI
+    // honouring DEC mode 2004 for those bytes.
+    const hasNewlines = /\r?\n/.test(text)
+    if (hasNewlines) {
+      // Normalise CRLF → LF so the pasted body contains a single line
+      // break per logical newline. Trailing newlines are dropped so
+      // the close marker lands at the end of the visible content
+      // rather than after an empty trailing line.
+      const body = text.replace(/\r\n/g, '\n').replace(/\n+$/, '')
+      if (this._activeTurn?.aborted || this._ptyExited) {
+        onAbort?.()
+        return false
+      }
+      this._term.write('\x1b[200~' + body + '\x1b[201~\r')
+      return true
+    }
+
     this._term.write('\x1b[?2004l')
     try {
       // #4276: huge prompts bypass the throttle. Counting code-points

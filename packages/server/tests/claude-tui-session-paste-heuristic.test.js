@@ -177,6 +177,102 @@ describe('ClaudeTuiSession paste-heuristic integration (#4271)', () => {
     )
   })
 
+  // #4678: multi-line prompts (from Shift+Enter in the dashboard composer)
+  // are delivered as a single bracketed paste so claude TUI v2.1.x receives
+  // them as one block and the trailing CR fires as a submit. Without this,
+  // embedded \n chars put the input box into multi-line composition mode
+  // where the trailing \r is interpreted as another newline rather than
+  // submit, and the turn wedges until the 5-minute stream-stall watchdog.
+  describe('multi-line prompt delivery (#4678)', () => {
+    it('multi-line prompt wraps the body in CSI bracketed-paste markers + trailing CR', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+
+      const prompt = 'first line\nsecond line\nthird line'
+      const completed = await session._writePtyTextThrottled(prompt)
+      assert.equal(completed, true, 'multi-line write completes')
+
+      const writes = pty.allWrites()
+      assert.equal(writes.length, 1, 'multi-line uses a single atomic write — not the per-char throttle')
+      const sent = writes[0]
+      assert.ok(sent.startsWith('\x1b[200~'), `must start with paste-start CSI (got ${JSON.stringify(sent.slice(0, 10))})`)
+      assert.ok(sent.endsWith('\x1b[201~\r'), `must end with paste-end CSI + CR (got ${JSON.stringify(sent.slice(-12))})`)
+      assert.ok(sent.includes('first line\nsecond line\nthird line'), 'body preserves embedded \\n chars verbatim')
+    })
+
+    it('CRLF in multi-line content is normalised to LF before paste', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+
+      const prompt = 'one\r\ntwo\r\nthree'
+      const completed = await session._writePtyTextThrottled(prompt)
+      assert.equal(completed, true)
+
+      const sent = pty.allWrites()[0]
+      assert.ok(!sent.includes('\r\n'), 'no CRLF survives in the pasted body')
+      assert.ok(sent.includes('one\ntwo\nthree'), 'CRLF collapsed to LF')
+    })
+
+    it('trailing newlines are stripped so the close marker lands flush with content', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+
+      // Trailing newline (user pressed Shift+Enter at the end of their
+      // prompt) — without stripping, the body would end with \n right
+      // before the paste-close marker, putting the cursor on a blank
+      // line on receipt of \r and either inserting another empty line
+      // or producing inconsistent submit behaviour across TUI versions.
+      const prompt = 'hello\n\n'
+      const completed = await session._writePtyTextThrottled(prompt)
+      assert.equal(completed, true)
+
+      const sent = pty.allWrites()[0]
+      assert.equal(sent, '\x1b[200~hello\x1b[201~\r', 'trailing newlines stripped; body is just "hello"')
+    })
+
+    it('single-line prompts still use the per-char throttle path (regression guard)', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+
+      const prompt = 'no newlines here just plain text'
+      const completed = await session._writePtyTextThrottled(prompt)
+      assert.equal(completed, true)
+
+      // Single-line should still go through the per-char throttle: one
+      // write per character + the mode-2004 wrap + final \r. If this
+      // ever switched to bracketed paste for single-line too, the #4269
+      // paste-detector defence would regress (the throttle is required
+      // because the detector ignores DEC mode 2004 toggles on real
+      // claude TUI).
+      assert.ok(pty.visibleCharCount() === prompt.length, 'every char written individually')
+      assert.equal(pty.visibleBody(), prompt, 'visible body matches prompt verbatim')
+      // No paste markers anywhere in the byte stream for single-line.
+      const allBytes = pty.allWrites().join('')
+      assert.ok(!allBytes.includes('\x1b[200~'), 'single-line must not emit paste-start CSI')
+      assert.ok(!allBytes.includes('\x1b[201~'), 'single-line must not emit paste-end CSI')
+    })
+
+    it('multi-line write honours abort flag set before the paste fires', async () => {
+      const session = makeSession()
+      const pty = new PasteHeuristicPtyStub()
+      session._term = pty
+      session._activeTurn.aborted = true
+
+      let onAbortCalled = false
+      const completed = await session._writePtyTextThrottled('aborted\nprompt', {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false, 'aborted returns false')
+      assert.equal(onAbortCalled, true, 'onAbort fired')
+      assert.equal(pty.allWrites().length, 0, 'no bytes leaked to the PTY after abort')
+    })
+  })
+
   it('abort-mid-loop: partial write does NOT trip the heuristic', async () => {
     const session = makeSession()
     const pty = new PasteHeuristicPtyStub()
