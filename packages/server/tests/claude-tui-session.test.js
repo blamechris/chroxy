@@ -3415,8 +3415,8 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
-    // #4690 (review of #4687) — pin the watchdog teardown semantics when
-    // sibling pending entries exist in `_pendingUserAnswers`. Setup:
+    // #4691 — surgical watchdog teardown when sibling pending entries
+    // exist in `_pendingUserAnswers`. Setup:
     //
     //   1. PreToolUse arms A and B in the Map (parallel AskUserQuestion).
     //   2. respondToQuestion(A) consumes A's entry (surgical
@@ -3425,19 +3425,18 @@ describe('ClaudeTuiSession', () => {
     //   3. PostToolUse for A never arrives → watchdog fires →
     //      `_onAskUserQuestionStall(A)`.
     //
-    // CURRENT behaviour (claude-tui-session.js:2149 `_pendingUserAnswer =
-    // null` → back-compat setter → `_pendingUserAnswers.clear()`): the
-    // watchdog wipes EVERY pending entry, including B which had nothing
-    // to do with A's stall. The all-or-nothing collapse is intentional
-    // for the teardown sites listed at #4691 (destroy, hard timeout,
-    // interrupt) but the watchdog-with-siblings case is the borderline
-    // one: B's PostToolUse may still arrive, and its entry just got
-    // collapsed under it. The semantic question is open in #4691; this
-    // test pins the current behaviour so the change is loud when it
-    // happens — and asserts the error event still carries A's
-    // toolUseId (B's stall did not happen, so the error must not
-    // misattribute).
-    it('watchdog fire with N>1 sibling pending entries wipes the whole Map; error carries the timed-out toolUseId (#4690, #4691)', () => {
+    // Pre-#4691 behaviour was `_pendingUserAnswer = null` → back-compat
+    // setter → `_pendingUserAnswers.clear()`: the watchdog wiped EVERY
+    // pending entry, including B which had nothing to do with A's stall.
+    // Post-#4691: the watchdog only knows about A (the toolUseId it was
+    // armed with), so it surgically clears A via
+    // `_clearPendingAnswerByToolUseId('toolu_A_stall')` and leaves B
+    // intact. B's PostToolUse can still arrive without finding a
+    // collapsed entry. The other teardown sites (destroy, hard timeout,
+    // interrupt, _finishTurnError) remain all-or-nothing because the
+    // whole turn is over there — no live sibling can survive a turn
+    // ending — so wiping the Map matches their semantics exactly.
+    it('watchdog fire with N>1 sibling pending entries surgically clears ONLY the timed-out tool; siblings survive (#4691)', () => {
       mock.timers.enable({ apis: ['setTimeout'] })
       try {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
@@ -3482,21 +3481,121 @@ describe('ClaudeTuiSession', () => {
         assert.equal(errors[0].toolUseId, 'toolu_A_stall',
           'error attributes the stall to A (the timed-out tool), not B')
 
-        // Pinned current semantics: the teardown's
-        // `_pendingUserAnswer = null` flows through the back-compat
-        // setter → `_pendingUserAnswers.clear()` → B is wiped too. If
-        // #4691 lands a surgical teardown, this assertion will flip and
-        // both the test + the issue should be updated in the same commit.
-        assert.equal(session._pendingUserAnswers.size, 0,
-          'CURRENT semantics: watchdog clears entire Map (see #4691 for the open semantic question)')
-        assert.ok(!session._pendingUserAnswers.has('toolu_B_pending'),
-          'specifically: B\'s pending entry collapsed along with A\'s teardown')
+        // #4691 surgical-teardown semantics: the watchdog ONLY clears
+        // the entry it was armed for (A). Sibling B survives because its
+        // PostToolUse path is still live. A regression that re-introduces
+        // the pre-#4691 back-compat `_pendingUserAnswer = null` here
+        // would silently wipe B and re-create the #4691 state-shape
+        // mismatch.
+        assert.equal(session._pendingUserAnswers.size, 1,
+          'watchdog clears ONLY the timed-out tool, not the whole Map')
+        assert.ok(session._pendingUserAnswers.has('toolu_B_pending'),
+          'B SURVIVES — its turn is still live, do not collapse it under A\'s teardown')
+        assert.ok(!session._pendingUserAnswers.has('toolu_A_stall'),
+          'A is gone (it was the watchdog\'s target)')
 
         // Busy state cleared so the session is recoverable.
         assert.equal(session._isBusy, false, 'busy cleared')
       } finally {
         mock.timers.reset()
       }
+    })
+
+    // #4691 — single-pending-entry watchdog still tears the slot down
+    // (no regression from the surgical refactor). When only one entry
+    // is armed AND the watchdog fires for it, surgical clear and
+    // all-or-nothing clear produce the same end state — empty Map.
+    // This pins that the common single-question case isn't accidentally
+    // left behind by the per-toolUseId change.
+    it('watchdog fire with exactly 1 pending entry still clears it (single-question, #4691)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { uuid: 'test-watchdog-single', synthSeq: 0 }
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_solo',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'Q?', options: [{ label: 's1' }, { label: 's2' }] }] },
+        }, 'msg-watchdog-solo')
+
+        // respondToQuestion consumes the entry then we need to simulate
+        // the "no PostToolUse arrived" wedge by reinstating it (the
+        // production scenario where chroxy wrote the digit but TUI sat
+        // on a multi-question form). The watchdog still tears it down.
+        session.respondToQuestion('s1', undefined, 'toolu_solo')
+        session._pendingUserAnswers.set('toolu_solo', {
+          toolUseId: 'toolu_solo',
+          options: [{ label: 's1' }, { label: 's2' }],
+        })
+        session._lastPendingAnswerToolUseId = 'toolu_solo'
+
+        mock.timers.tick(31_000)
+
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].toolUseId, 'toolu_solo')
+        assert.equal(session._pendingUserAnswers.size, 0,
+          'single-entry case still ends empty (surgical clear of the only entry)')
+        assert.equal(session._isBusy, false, 'busy cleared')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    // #4691 — pin all-or-nothing semantics for the OTHER teardown sites
+    // (_finishTurnError / _handleHardTimeout / interrupt / destroy). The
+    // surgical-by-toolUseId fix only applies to the watchdog because it
+    // knows which tool stalled. The other paths end the whole turn —
+    // no sibling can survive a turn ending — so wiping the Map is the
+    // correct semantic. If a future refactor accidentally introduces a
+    // per-toolUseId clear at one of these sites, a stale entry could
+    // outlive the turn and misroute a late user_question_response into
+    // a dead PTY.
+    it('_finishTurnError wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-finish'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._finishTurnError('test-error', 'msg-finish')
+      assert.equal(session._pendingUserAnswers.size, 0,
+        '_finishTurnError ends the turn — every pending answer is now stale')
+    })
+
+    it('_handleHardTimeout wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-hard'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session._hardTimeoutMs = 1000
+      session._handleHardTimeout()
+      assert.equal(session._pendingUserAnswers.size, 0,
+        'hard timeout ends the turn — every pending answer is now stale')
+    })
+
+    it('interrupt() wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.interrupt()
+      assert.equal(session._pendingUserAnswers.size, 0,
+        'interrupt ends the turn — every pending answer is now stale')
     })
 
     it('watchdog is cleared on destroy() (clean teardown)', async () => {
