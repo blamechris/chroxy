@@ -4433,6 +4433,58 @@ describe('handleUserQuestion', () => {
     expect(typeof out!.chatMessage.timestamp).toBe('number')
   })
 
+  // #4613 — mirrors the #4607 fix for handleToolStart. The server's history
+  // ring buffer stamps `timestamp: Date.now()` at append time and forwards it
+  // on every replay (session-message-history.js:208-216). When the dashboard
+  // rebuilds the `prompt` ChatMessage during history_replay (the question
+  // event is part of the replayed ring buffer), it must honour that wire
+  // timestamp instead of stamping a new Date.now(). Without this, a question
+  // prompt that originally fired at 10:00 shows as "just now" if you tab
+  // away and back. Lower-impact than #4607 (affects bubble display only, not
+  // the timer pill), but still a correctness bug.
+  it('honours wire `timestamp` field on the user_question payload (#4613)', () => {
+    const wireTimestamp = 1_700_000_000_000
+    const out = handleUserQuestion(
+      {
+        questions: [{ question: 'Pick a colour' }],
+        timestamp: wireTimestamp,
+      },
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.timestamp).toBe(wireTimestamp)
+  })
+
+  it('falls back to Date.now() when wire `timestamp` is missing (live user_question, #4613)', () => {
+    const before = Date.now()
+    const out = handleUserQuestion(
+      { questions: [{ question: 'Pick a colour' }] },
+      'sess-active',
+    )
+    const after = Date.now()
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.timestamp).toBeGreaterThanOrEqual(before)
+    expect(out!.chatMessage.timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('ignores non-finite wire `timestamp` and falls back to Date.now() (#4613)', () => {
+    // Defensive: a malformed wire payload (NaN, Infinity, string-coerced)
+    // must not poison the displayed bubble timestamp with NaN-driven
+    // arithmetic downstream.
+    const before = Date.now()
+    const out = handleUserQuestion(
+      {
+        questions: [{ question: 'Pick a colour' }],
+        timestamp: Number.NaN,
+      },
+      'sess-active',
+    )
+    const after = Date.now()
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.timestamp).toBeGreaterThanOrEqual(before)
+    expect(out!.chatMessage.timestamp).toBeLessThanOrEqual(after)
+  })
+
   it('uses msg.sessionId when present', () => {
     const out = handleUserQuestion(
       { questions: [{ question: 'Q?' }], sessionId: 'sess-9' },
