@@ -2540,6 +2540,75 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._pendingUserAnswer, null, 'pending cleared after PostToolUse')
     })
 
+    // #4689 — when the hook payload omits tool_use_id (older claude builds,
+    // certain MCP tools), `_emitToolHookEvent` synthesizes a stable id from
+    // `${messageId}-tool-${synthSeq}` and the PreToolUse branch stores the
+    // pending entry under THAT synthesized id. Pre-#4689 PostToolUse cleanup
+    // gated on the RAW `payload.tool_use_id`, which was null in this path,
+    // so the cleanup branch was skipped and both the _pendingUserAnswers
+    // Map entry AND the askuserquestion-active lock dir leaked forever —
+    // the next AskUserQuestion turn wedged on the sibling-deny check.
+    //
+    // This test pins the fix: PostToolUse for AskUserQuestion with NO
+    // payload.tool_use_id must still clear the entry by the resolved local
+    // toolUseId and drop the lock dir. Reverting line ~1439 of
+    // claude-tui-session.js to gate on `payload.tool_use_id` fails this
+    // test on the "pending entry not cleared" assertion.
+    it('PostToolUse cleanup uses resolved local toolUseId when payload tool_use_id is missing (#4689)', () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-4689-sink-'))
+      session._sinkDir = sinkDir
+      // _emitToolHookEvent requires _activeTurn to synthesize ids; the
+      // synthSeq counter increments on PreToolUse and is reused on the
+      // matching PostToolUse so the pair shares one id.
+      session._activeTurn = { uuid: 'test-4689', synthSeq: 0 }
+
+      // Drop the askuserquestion-active lock onto disk so we can assert
+      // PostToolUse removes it (mirrors the sibling-deny path the
+      // permission-hook.sh script would have created on PreToolUse).
+      const lockDir = join(sinkDir, 'askuserquestion-active')
+      mkdirSync(lockDir, { recursive: true })
+      assert.ok(existsSync(lockDir), 'precondition: lock dir exists before PostToolUse')
+
+      // PreToolUse with NO tool_use_id — forces synthesis. The id lands
+      // at `msg-aq-synth-tool-1` (synthSeq goes 0 → 1).
+      session._emitToolHookEvent('PreToolUse', {
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
+      }, 'msg-aq-synth')
+      const synthesizedId = 'msg-aq-synth-tool-1'
+      assert.ok(
+        session._pendingUserAnswers.has(synthesizedId),
+        `pending entry armed under synthesized id ${synthesizedId} (keys=${[...session._pendingUserAnswers.keys()].join(',')})`,
+      )
+
+      // PostToolUse with NO tool_use_id either — `_emitToolHookEvent`
+      // reuses the current synthSeq (does NOT increment), so the local
+      // toolUseId resolves to the SAME synthesized id. Pre-#4689 the
+      // cleanup branch was gated on `payload.tool_use_id` which is null
+      // here → skipped → entry leaked, lock dir leaked.
+      session._emitToolHookEvent('PostToolUse', {
+        tool_name: 'AskUserQuestion',
+        tool_response: { selectedLabel: 'A' },
+      }, 'msg-aq-synth')
+
+      assert.equal(
+        session._pendingUserAnswers.size, 0,
+        'pending entry cleared via resolved local toolUseId (not raw payload.tool_use_id)',
+      )
+      assert.ok(
+        !session._pendingUserAnswers.has(synthesizedId),
+        'specifically: the synthesized-id entry is gone from the Map',
+      )
+      assert.ok(
+        !existsSync(lockDir),
+        'askuserquestion-active lock dir removed via _clearAskUserQuestionLock',
+      )
+      // sinkDir cleanup happens in the outer afterEach via session.destroy()
+      // (claude-tui-session.js rmSyncs _sinkDir with force:true). An inline
+      // rmSync here would be redundant AND get skipped if any assertion
+      // above throws — the centralized path is unconditional.
+    })
+
     it('PostToolUse for a non-AskUserQuestion tool does NOT touch _pendingUserAnswer (defensive)', () => {
       session._pendingUserAnswer = { toolUseId: 'toolu_aq_5' }
       session._emitToolHookEvent('PostToolUse', {
