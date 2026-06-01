@@ -146,7 +146,6 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
-  const prevStreamingRef = useRef(isStreaming)
 
   // Deduplicate by id — keep first occurrence
   const dedupedMessages = useMemo(() => {
@@ -189,19 +188,14 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
     requestAnimationFrame(() => { programmaticScrollRef.current = false })
   }, [])
 
-  // #4652: when streaming ends, only re-anchor to the bottom if the user
-  // is still at the bottom. The original behavior unconditionally reset
-  // `userScrolledUp` to false — which snapped the user back down the
-  // moment an AskUserQuestion arrived (the question flips `isStreaming`
-  // from true to false), making it impossible to read history while a
-  // prompt was visible. Now we leave their scroll position alone and
-  // the existing scroll-to-bottom button gives them a one-click return.
-  useEffect(() => {
-    if (prevStreamingRef.current && !isStreaming && !userScrolledUp) {
-      setUserScrolledUp(false)
-    }
-    prevStreamingRef.current = isStreaming
-  }, [isStreaming, userScrolledUp])
+  // #4652: previously a separate streaming-end effect reset
+  // `userScrolledUp` to false — that snapped the user back to the
+  // bottom the moment an AskUserQuestion arrived (the question flips
+  // `isStreaming` from true to false), making it impossible to read
+  // history while a prompt was visible. The reset is no longer needed:
+  // the count-change effect below handles the "follow latest" path
+  // when the user is at the bottom, and the scroll-to-bottom button
+  // gives a one-click return when they're scrolled up.
 
   // #4652: auto-scroll on new messages (stable count-based trigger) only
   // when the user is at the bottom. Previously we unconditionally snapped
