@@ -1886,6 +1886,12 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _handleFirstOutputTimeout() {
     if (!this._isBusy) return
+    // #4642: mirror the invariant check the other teardown sites
+    // (`_finishTurnError`, `_handleHardTimeout`, `_handleStreamStall`,
+    // `_onAskUserQuestionStall`) emit so a future regression that
+    // breaks the `_isBusy ↔ _currentMessageId` construction contract
+    // surfaces from THIS path too.
+    this._assertBusyHasMessageId('_handleFirstOutputTimeout')
     const elapsedMs = this._firstOutputArmedAt > 0
       ? Date.now() - this._firstOutputArmedAt
       : this._firstOutputTimeoutMs
@@ -2065,6 +2071,12 @@ export class ClaudeTuiSession extends BaseSession {
       clearTimeout(this._askUserQuestionWatchdog)
       this._askUserQuestionWatchdog = null
     }
+    // #4732: same reasoning for the pre-first-output watchdog. interrupt()
+    // doesn't synchronously flip _isBusy=false, so without this clear the
+    // watchdog could fire in the 150ms poll-loop window before
+    // _finishTurnError runs and emit a spurious stream_stall for a
+    // session the user has already interrupted.
+    this._clearFirstOutputWatchdog()
   }
 
   /**
