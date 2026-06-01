@@ -2898,6 +2898,144 @@ describe('ClaudeTuiSession', () => {
         removeLogListener(logSpy)
       }
     })
+
+    // #4690 (review of #4687) — pin the Map-isolation invariant on the
+    // PostToolUse cleanup path. The PreToolUse branch arms one entry in
+    // `_pendingUserAnswers` per tool_use_id; PostToolUse for tool A must
+    // surgically clear ONLY A's entry via `_clearPendingAnswerByToolUseId`
+    // (claude-tui-session.js:1438-1440). A future refactor that goes back
+    // to the pre-#4668 all-or-nothing wipe (e.g. `_pendingUserAnswer = null`
+    // in the PostToolUse branch → setter calls Map.clear()) would silently
+    // wipe sibling B's pending entry and re-introduce the #4668 wedge.
+    // This test pins per-tool isolation so that regression is loud.
+    it('PostToolUse for tool A leaves tool B\'s pending entry intact (Map isolation, #4690)', () => {
+      // Two parallel AskUserQuestion tool_uses arrive in one turn (the
+      // #4668 setup). Both armed in the Map under their own toolUseIds.
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+      }, 'msg-aq-AB')
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_B',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }] }] },
+      }, 'msg-aq-AB')
+
+      assert.equal(session._pendingUserAnswers.size, 2, 'both A and B armed')
+      assert.ok(session._pendingUserAnswers.has('toolu_A'), 'A present pre-PostToolUse')
+      assert.ok(session._pendingUserAnswers.has('toolu_B'), 'B present pre-PostToolUse')
+
+      // PostToolUse for tool A only — must NOT touch B's pending entry.
+      const resultEvents = []
+      session.on('tool_result', (e) => resultEvents.push(e))
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_response: { selectedLabel: 'a1' },
+      }, 'msg-aq-AB')
+
+      // The cleanup branch fires for A only.
+      assert.equal(session._pendingUserAnswers.size, 1, 'exactly one entry left after PostToolUse(A)')
+      assert.ok(!session._pendingUserAnswers.has('toolu_A'), 'A cleared by its own PostToolUse')
+      assert.ok(session._pendingUserAnswers.has('toolu_B'),
+        'B SURVIVES — PostToolUse(A) must not wipe sibling entries')
+
+      // The tool_result for A still fired (Map cleanup is in addition to,
+      // not instead of, the normal PostToolUse fan-out).
+      assert.equal(resultEvents.length, 1, 'tool_result for A still emitted')
+      assert.equal(resultEvents[0].toolUseId, 'toolu_A')
+
+      // B's entry is unchanged — same options shape we armed it with.
+      const bEntry = session._pendingUserAnswers.get('toolu_B')
+      assert.equal(bEntry.toolUseId, 'toolu_B')
+      assert.deepEqual(bEntry.options, [{ label: 'b1' }, { label: 'b2' }],
+        'B\'s options array preserved verbatim')
+    })
+
+    // #4690 (review of #4687) — pin the fallback path in respondToQuestion
+    // when the dashboard omits `toolUseId` but multiple pending entries
+    // exist. Per claude-tui-session.js:1896-1899 the current contract is:
+    //   1. Emit a warn log naming the omitted-toolUseId condition + Map
+    //      size + the pending keys (greppable in chroxy.log so the wedge
+    //      symptom is visible).
+    //   2. Fall back to the back-compat `_pendingUserAnswer` getter, which
+    //      returns the MOST-RECENTLY-SET entry (insertion order via
+    //      `_lastPendingAnswerToolUseId`).
+    //   3. Consume that entry only (surgical _clearPendingAnswerByToolUseId
+    //      on `entry.toolUseId`); siblings remain pending.
+    //
+    // The fallback is intentional — legacy mobile clients that don't pass
+    // toolUseId would otherwise wedge. The behaviour decision (warn vs.
+    // drop) is tracked separately in #4688; #4690 pins the CURRENT
+    // semantics so any future change to "drop on ambiguity" is loud, not
+    // silent.
+    it('respondToQuestion: no toolUseId + N>1 pending fires WARN, routes to most-recent, preserves siblings (#4690)', async () => {
+      // Capture warn lines so we can assert on the #4688 diagnostic.
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.component !== 'claude-tui-session') return
+        if (entry.level === 'warn') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+        // Arm A first, then B — Map insertion order tracks "most recent".
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_first',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+        }, 'msg-fallback')
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_second',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }, { label: 'b3' }] }] },
+        }, 'msg-fallback')
+
+        assert.equal(session._pendingUserAnswers.size, 2, 'precondition: both pending')
+        assert.equal(session._lastPendingAnswerToolUseId, 'toolu_second',
+          'precondition: "most recent" pointer is at B (the second insert)')
+
+        // Dashboard sends an answer matching B's option, but OMITS toolUseId
+        // (legacy client path). Per fallback contract: warn + route to B,
+        // leave A alone.
+        session.respondToQuestion('b3', undefined, undefined)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // (1) WARN log fires naming the fallback condition. Pre-#4688
+        // this was silent and the wedge symptom required a code read to
+        // diagnose.
+        const fallbackWarn = warnLines.find(
+          (m) => /omitted toolUseId/.test(m) && /falling back to most-recent/.test(m),
+        )
+        assert.ok(fallbackWarn,
+          `expected fallback warn, got warnLines=${JSON.stringify(warnLines)}`)
+        assert.match(fallbackWarn, /2 pending entries/,
+          'warn includes the Map size for triage')
+        assert.match(fallbackWarn, /toolu_first/, 'warn lists pending keys (A)')
+        assert.match(fallbackWarn, /toolu_second/, 'warn lists pending keys (B)')
+
+        // (2) Most-recent entry (B) received the answer — PTY write of the
+        // 1-indexed digit for "b3" (option 3 of toolu_second's options).
+        assert.equal(writes[0], '\x1b[?2004l', 'bracketed-paste-disable')
+        assert.equal(writes[1], '3',
+          'wrote 1-indexed digit for B\'s option "b3" — routed to most-recent entry')
+
+        // (3) A's entry is UNTOUCHED — the surgical
+        // _clearPendingAnswerByToolUseId(entry.toolUseId) on the fallback
+        // path only removes the entry it consumed, not every sibling.
+        assert.equal(session._pendingUserAnswers.size, 1,
+          'one entry left after fallback consumed the most-recent')
+        assert.ok(session._pendingUserAnswers.has('toolu_first'),
+          'A (the older entry) SURVIVES — fallback must not collapse the Map')
+        assert.ok(!session._pendingUserAnswers.has('toolu_second'),
+          'B (the consumed most-recent) is gone')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
   })
 
   // #4604 — observability + watchdog around AskUserQuestion. The root
@@ -3119,6 +3257,90 @@ describe('ClaudeTuiSession', () => {
         // cleared by PostToolUse, so no late fire.
         mock.timers.tick(60_000)
         assert.equal(errors.length, 0, 'watchdog cancelled by PostToolUse, no late stall error')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    // #4690 (review of #4687) — pin the watchdog teardown semantics when
+    // sibling pending entries exist in `_pendingUserAnswers`. Setup:
+    //
+    //   1. PreToolUse arms A and B in the Map (parallel AskUserQuestion).
+    //   2. respondToQuestion(A) consumes A's entry (surgical
+    //      `_clearPendingAnswerByToolUseId`) AND arms the stall watchdog
+    //      with A's toolUseId. B remains pending in the Map.
+    //   3. PostToolUse for A never arrives → watchdog fires →
+    //      `_onAskUserQuestionStall(A)`.
+    //
+    // CURRENT behaviour (claude-tui-session.js:2149 `_pendingUserAnswer =
+    // null` → back-compat setter → `_pendingUserAnswers.clear()`): the
+    // watchdog wipes EVERY pending entry, including B which had nothing
+    // to do with A's stall. The all-or-nothing collapse is intentional
+    // for the teardown sites listed at #4691 (destroy, hard timeout,
+    // interrupt) but the watchdog-with-siblings case is the borderline
+    // one: B's PostToolUse may still arrive, and its entry just got
+    // collapsed under it. The semantic question is open in #4691; this
+    // test pins the current behaviour so the change is loud when it
+    // happens — and asserts the error event still carries A's
+    // toolUseId (B's stall did not happen, so the error must not
+    // misattribute).
+    it('watchdog fire with N>1 sibling pending entries wipes the whole Map; error carries the timed-out toolUseId (#4690, #4691)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { uuid: 'test-watchdog-siblings', synthSeq: 0 }
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+
+        // Arm both A and B in the Map.
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_A_stall',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+        }, 'msg-watchdog-AB')
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_B_pending',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }] }] },
+        }, 'msg-watchdog-AB')
+        assert.equal(session._pendingUserAnswers.size, 2, 'precondition: A and B armed')
+
+        // Dashboard answers A — consumes A's entry, arms the watchdog with
+        // A's toolUseId, leaves B pending.
+        session.respondToQuestion('a1', undefined, 'toolu_A_stall')
+
+        // State after respondToQuestion: A is gone, B is still pending.
+        assert.ok(!session._pendingUserAnswers.has('toolu_A_stall'),
+          'A consumed by respondToQuestion')
+        assert.ok(session._pendingUserAnswers.has('toolu_B_pending'),
+          'B still pending — its turn has not started yet')
+        assert.equal(session._pendingUserAnswers.size, 1, 'only B left')
+
+        // PostToolUse for A never arrives. Cross the watchdog threshold.
+        mock.timers.tick(31_000)
+
+        // Error fires for the toolUseId we ARMED the watchdog with (A) —
+        // NOT for B which had nothing to do with the stall.
+        assert.equal(errors.length, 1, 'exactly one stall error')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_STALL')
+        assert.equal(errors[0].toolUseId, 'toolu_A_stall',
+          'error attributes the stall to A (the timed-out tool), not B')
+
+        // Pinned current semantics: the teardown's
+        // `_pendingUserAnswer = null` flows through the back-compat
+        // setter → `_pendingUserAnswers.clear()` → B is wiped too. If
+        // #4691 lands a surgical teardown, this assertion will flip and
+        // both the test + the issue should be updated in the same commit.
+        assert.equal(session._pendingUserAnswers.size, 0,
+          'CURRENT semantics: watchdog clears entire Map (see #4691 for the open semantic question)')
+        assert.ok(!session._pendingUserAnswers.has('toolu_B_pending'),
+          'specifically: B\'s pending entry collapsed along with A\'s teardown')
+
+        // Busy state cleared so the session is recoverable.
+        assert.equal(session._isBusy, false, 'busy cleared')
       } finally {
         mock.timers.reset()
       }
