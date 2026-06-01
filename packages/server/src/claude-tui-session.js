@@ -8,6 +8,7 @@ import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContex
 import { resolveBinary } from './utils/resolve-binary.js'
 import { createLogger } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import {
   parseBackgroundShellId,
@@ -293,7 +294,7 @@ export class ClaudeTuiSession extends BaseSession {
     return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
   }
 
-  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, skipPermissions } = {}) {
+  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, firstOutputTimeoutMs, skipPermissions } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
 
     this._port = port || null
@@ -360,6 +361,25 @@ export class ClaudeTuiSession extends BaseSession {
     // _onAskUserQuestionStall clears busy state + emits an error so the
     // session is recoverable. Cleared on PostToolUse + destroy().
     this._askUserQuestionWatchdog = null
+    // #4732: effective pre-first-output timeout in ms. Distinct from
+    // _streamStallTimeoutMs (#4638) — that watchdog only re-arms BETWEEN
+    // hook events, so a turn where claude TUI accepts the prompt write
+    // but never emits ANY hook (stuck Anthropic API call, frozen dialog
+    // screen) had no recoverable watchdog short of the 2h hard cap. This
+    // timer arms at _armResultTimeout() time and disarms on the first
+    // consumed hook event. 0 disables; non-finite, negative, or above
+    // the 24h ceiling falls back to FIRST_OUTPUT_TIMEOUT_MS (90s).
+    this._firstOutputTimeoutMs =
+      isOperatorTimeoutInRange(firstOutputTimeoutMs, { allowZero: true, name: 'firstOutputTimeoutMs', log })
+        ? firstOutputTimeoutMs
+        : ClaudeTuiSession.FIRST_OUTPUT_TIMEOUT_MS
+    this._firstOutputTimeout = null
+    this._firstOutputArmedAt = 0
+    // #4732: per-turn latch — flipped true by `_clearFirstOutputWatchdog`
+    // so subsequent `_armResultTimeout` re-arms (one per consumed hook)
+    // don't re-arm the first-output timer. Reset to false on each new
+    // turn via `_resetFirstOutputWatchdogForTurn` (sendMessage entry path).
+    this._firstOutputDisarmed = false
   }
 
   /**
@@ -441,6 +461,16 @@ export class ClaudeTuiSession extends BaseSession {
   // surface for emoji-only prompts, decompose to UTF-8 bytes (or
   // graphemes) before the loop (#4274).
   static get PROMPT_CHAR_DELAY_MS() { return 1 }
+
+  // #4732: default pre-first-output silence timeout (ms). Fires once at
+  // turn start when claude TUI accepts the prompt write but emits no
+  // hook events for this long — see _firstOutputTimeoutMs JSDoc + the
+  // describe block in claude-tui-session.test.js for the why. Sized at
+  // 90s: wide enough to cover slow first-token latency (cold model,
+  // big context, slow Anthropic backend) but tight enough that the
+  // dashboard chip surfaces within a minute or two of a real stall so
+  // the user can retry without waiting for the 2h hard cap.
+  static get FIRST_OUTPUT_TIMEOUT_MS() { return 90 * 1000 }
 
   // #4276: per-char throttling is O(N) blocking latency. For huge
   // prompts (pasted file contents, JSON dumps) the cumulative cost
@@ -950,6 +980,13 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
 
+    // #4732: reset the per-turn pre-first-output watchdog latch so the
+    // upcoming `_armResultTimeout` call arms a fresh first-output timer
+    // for this turn (the latch was set true when the PREVIOUS turn
+    // consumed its first hook). Must happen BEFORE `_armResultTimeout`
+    // below — that helper checks the latch.
+    this._resetFirstOutputWatchdogForTurn()
+
     try {
       // #4269: claude TUI's paste detector triggers on byte-arrival rate,
       // not DEC mode 2004 — a single bulk write of the whole prompt is
@@ -1034,6 +1071,13 @@ export class ClaudeTuiSession extends BaseSession {
       // that's actively producing tool events doesn't trip the soft
       // inactivity warning (#3920).
       if (this._consumedFiles.size > sizeBefore && this._isBusy) {
+        // #4732: a consumed hook file = first output observed for this
+        // turn. Disarm the pre-first-output watchdog BEFORE the
+        // re-arm below — `_armResultTimeout` would otherwise re-arm
+        // it, defeating the disarm and giving the watchdog a fresh
+        // window after every hook. The inter-stream `_streamStallTimeout`
+        // continues to re-arm on each consumed event as before.
+        this._clearFirstOutputWatchdog()
         this._armResultTimeout()
       }
     }
@@ -1118,10 +1162,16 @@ export class ClaudeTuiSession extends BaseSession {
     // path, matching the one _finishTurnError emits on error paths so
     // every turn lands one grep-able line regardless of outcome.
     this._logSendMessageSummary('success')
-    // Clear inactivity timers — turn done, nothing to backstop (#3920, #4638).
+    // Clear inactivity timers — turn done, nothing to backstop (#3920, #4638, #4732).
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: clear the pre-first-output watchdog. By the success path we
+    // already saw at least one hook (the Stop hook), so it should be
+    // disarmed via _clearFirstOutputWatchdog already — but the same
+    // belt-and-braces clear the other timers get above also applies here
+    // so a freak ordering can't leak a live handle past turn-end.
+    this._clearFirstOutputWatchdog()
     // #4022: drop the per-turn attachment dir now that the Stop hook
     // has fired and the response has streamed back. The Read-tool
     // results are already in the model's context window, so the bytes
@@ -1556,6 +1606,10 @@ export class ClaudeTuiSession extends BaseSession {
     // aborts before the stall window doesn't fire a stale stream_stall
     // error into the dashboard mid-recovery.
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: clear the pre-first-output watchdog for the same reason —
+    // an aborted/failed turn must not surface a stale first-output stall
+    // into the dashboard mid-recovery.
+    this._clearFirstOutputWatchdog()
     // #4010: balance the early stream_start with stream_end + result so the
     // dashboard's busy state clears (event-normalizer.js:215 synthesizes
     // agent_idle from result). Without this, an aborted/failed TUI turn
@@ -1662,6 +1716,76 @@ export class ClaudeTuiSession extends BaseSession {
         this._handleStreamStall()
       }, this._streamStallTimeoutMs)
     }
+    // #4732: first-output watchdog. Independent from the inter-stream
+    // stall timer above — that one only re-arms BETWEEN hook events, so
+    // a turn where claude TUI accepts the prompt and emits zero hooks
+    // gets no protection from it. The first-output timer arms once per
+    // turn here, disarms on the first consumed hook event via
+    // `_clearFirstOutputWatchdog()`, and on fire calls
+    // `_handleFirstOutputTimeout` which routes through `_teardownTurn`
+    // with the stream_stall error code so the dashboard chip surfaces
+    // through the same wire path. 0 disables.
+    this._armFirstOutputWatchdog()
+  }
+
+  /**
+   * #4732: arm (or re-arm) the pre-first-output silence watchdog.
+   * No-op when `_firstOutputTimeoutMs` is 0 (operator opt-out) or
+   * when `_firstOutputDisarmed` is true (a hook event was already
+   * consumed this turn — re-arming would defeat the disarm). Always
+   * clears any existing handle before re-arming so back-to-back
+   * `_armResultTimeout` calls produce exactly one live timer.
+   *
+   * Called from `_armResultTimeout()`. The matching disarm helper
+   * (`_clearFirstOutputWatchdog`) is called from the hook-drain loop
+   * on first consumed event and from every teardown path (success,
+   * error, hard timeout, stream stall, AskUserQuestion stall,
+   * destroy) so a late fire cannot land on an idle session.
+   */
+  _armFirstOutputWatchdog() {
+    if (this._firstOutputTimeout) {
+      clearTimeout(this._firstOutputTimeout)
+      this._firstOutputTimeout = null
+    }
+    if (this._firstOutputTimeoutMs <= 0) return
+    if (this._firstOutputDisarmed) return
+    this._firstOutputArmedAt = Date.now()
+    this._firstOutputTimeout = setTimeout(() => {
+      this._firstOutputTimeout = null
+      this._handleFirstOutputTimeout()
+    }, this._firstOutputTimeoutMs)
+  }
+
+  /**
+   * #4732: disarm the pre-first-output silence watchdog without
+   * affecting the inter-stream stall timer. Called from the hook-drain
+   * loop the first time any hook file is consumed, and from every
+   * teardown path so a late fire cannot land on a torn-down session.
+   * Idempotent and safe to call when the timer was never armed.
+   *
+   * Sets the per-turn `_firstOutputDisarmed` latch so subsequent
+   * `_armResultTimeout` calls (one per consumed hook) don't re-arm
+   * the watchdog. The latch is reset to false in `sendMessage` at
+   * turn start via `_resetFirstOutputWatchdogForTurn` so the NEXT
+   * turn gets a fresh arm cycle.
+   */
+  _clearFirstOutputWatchdog() {
+    if (this._firstOutputTimeout) {
+      clearTimeout(this._firstOutputTimeout)
+      this._firstOutputTimeout = null
+    }
+    this._firstOutputDisarmed = true
+  }
+
+  /**
+   * #4732: reset the per-turn `_firstOutputDisarmed` latch so the
+   * next turn's `_armResultTimeout` call arms the watchdog fresh.
+   * Called from `sendMessage` immediately before the prompt write so
+   * a long-lived session with many turns gets first-output protection
+   * on every turn (not just the first).
+   */
+  _resetFirstOutputWatchdogForTurn() {
+    this._firstOutputDisarmed = false
   }
 
   _handleInactivityWarning() {
@@ -1742,6 +1866,55 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #4732: pre-first-output silence watchdog handler. Fires once per
+   * turn when claude TUI accepts the prompt write (writePtyText
+   * completed=true) but emits NO hook events for
+   * `_firstOutputTimeoutMs`. Distinct from `_handleStreamStall` —
+   * that one fires on silence BETWEEN hook events, this one fires on
+   * silence BEFORE the first one.
+   *
+   * Live failure that motivated this (v0.9.32 dogfooding, #4732):
+   * `writePtyText completed=true` at T+0; 200s of `hookPoll
+   * heartbeat … consumed=0 stopFound=no` with no recovery. claude TUI
+   * subprocess had 2.71s CPU after 4 min wall — consistent with a
+   * stuck Anthropic API call. User clicked Stop manually.
+   *
+   * Reuses the `stream_stall` error code so the dashboard's existing
+   * recovery chip surfaces without provider-specific wiring. The
+   * distinct teardown reason `'first_output_timeout'` keeps the two
+   * stall flavors distinguishable in post-mortem logs / metrics.
+   */
+  _handleFirstOutputTimeout() {
+    if (!this._isBusy) return
+    // #4642: mirror the invariant check the other teardown sites
+    // (`_finishTurnError`, `_handleHardTimeout`, `_handleStreamStall`,
+    // `_onAskUserQuestionStall`) emit so a future regression that
+    // breaks the `_isBusy ↔ _currentMessageId` construction contract
+    // surfaces from THIS path too.
+    this._assertBusyHasMessageId('_handleFirstOutputTimeout')
+    const elapsedMs = this._firstOutputArmedAt > 0
+      ? Date.now() - this._firstOutputArmedAt
+      : this._firstOutputTimeoutMs
+    const friendly = formatIdleDuration(this._firstOutputTimeoutMs)
+    log.warn(`first-output watchdog fired (elapsedMs=${elapsedMs}) — claude TUI did not respond`)
+    const duration = this._activeTurn
+      ? Date.now() - this._activeTurn.startedAt
+      : this._firstOutputTimeoutMs
+    // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
+    // before error, gate stream_end on messageId) so the dashboard sees
+    // the same fan-out it already handles for the inter-stream stall.
+    this._teardownTurn('first_output_timeout', {
+      duration,
+      errorPayload: {
+        code: 'stream_stall',
+        message: `No response from claude TUI within ${friendly}. Try sending again.`,
+      },
+      errorBeforeResult: false,
+      gateStreamEndOnMessageId: true,
+    })
+  }
+
+  /**
    * #4641: shared per-turn teardown for the timeout/stall recovery paths
    * (`_handleHardTimeout`, `_handleStreamStall`). Centralises the cleanup
    * sequence so the next #4286/#4604-class symmetry fix only needs to
@@ -1806,6 +1979,10 @@ export class ClaudeTuiSession extends BaseSession {
       clearTimeout(this._askUserQuestionWatchdog)
       this._askUserQuestionWatchdog = null
     }
+    // #4732: clear the pre-first-output watchdog so a teardown via
+    // `_handleHardTimeout` / `_handleStreamStall` / `_handleFirstOutputTimeout`
+    // can never leak a live handle that would re-fire on a torn-down turn.
+    this._clearFirstOutputWatchdog()
     // 5. Error + result emit, in the order the caller requests. The two
     // existing callers disagree (hard-timeout: error first; stream-stall:
     // result first), and that asymmetry is preserved exactly.
@@ -1894,6 +2071,12 @@ export class ClaudeTuiSession extends BaseSession {
       clearTimeout(this._askUserQuestionWatchdog)
       this._askUserQuestionWatchdog = null
     }
+    // #4732: same reasoning for the pre-first-output watchdog. interrupt()
+    // doesn't synchronously flip _isBusy=false, so without this clear the
+    // watchdog could fire in the 150ms poll-loop window before
+    // _finishTurnError runs and emit a spurious stream_stall for a
+    // session the user has already interrupted.
+    this._clearFirstOutputWatchdog()
   }
 
   /**
@@ -2376,12 +2559,17 @@ export class ClaudeTuiSession extends BaseSession {
       try { this._term.write('\x03') } catch { /* ignore */ }
     }
 
-    // Clear all three inactivity timers — turn is over, nothing to
+    // Clear all four inactivity timers — turn is over, nothing to
     // backstop, leaving them armed would fire stale callbacks on a
     // session that's already idle.
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: pre-first-output watchdog. AskUserQuestion only fires
+    // mid-turn (post-stream_start), so the first-output watchdog has
+    // typically been disarmed already, but clear it explicitly so a
+    // pathological race can't leak a live handle past the stall.
+    this._clearFirstOutputWatchdog()
 
     // #4022: drop per-turn attachment dir (same as the other teardown
     // paths) so a failed turn doesn't leak materialized files until destroy().
@@ -2424,6 +2612,10 @@ export class ClaudeTuiSession extends BaseSession {
     // a late fire could land in _handleStreamStall after _term is null,
     // skipping the Ctrl-C path but still emitting events into a dead session.
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: same reasoning for the pre-first-output watchdog — a late
+    // fire post-destroy must not emit a stream_stall error into a torn-
+    // down listener set or write Ctrl-C into a killed PTY.
+    this._clearFirstOutputWatchdog()
     // #4604: cancel the AskUserQuestion stall watchdog so it can't fire
     // a stale ASK_USER_QUESTION_STALL event into a torn-down listener.
     if (this._askUserQuestionWatchdog) {

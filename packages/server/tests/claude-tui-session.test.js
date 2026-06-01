@@ -2045,6 +2045,159 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4732 — pre-first-output silence watchdog. The existing #4638
+  // streamStallTimeout only re-arms BETWEEN hook events; a turn where
+  // claude TUI accepts the prompt write but never emits ANY hook (stuck
+  // Anthropic API call, frozen dialog screen) had no recoverable
+  // watchdog short of the 2h hard cap. _firstOutputTimeout arms at
+  // _armResultTimeout() time and disarms on the first consumed hook
+  // event, surfacing a stream_stall with the same dashboard chip the
+  // inter-stream watchdog uses so the user can retry within minutes.
+  describe('first-output watchdog (#4732)', () => {
+    it('fires after _firstOutputTimeoutMs of zero hook events, clears busy state, emits stream_stall', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        // Long soft+hard+stream-stall so the first-output timer wins;
+        // short first-output so the test doesn't sleep for seconds.
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-first-output'
+      const TURN_AGE_MS = 100
+      session._activeTurn = { startedAt: Date.now() - TURN_AGE_MS, aborted: false }
+      const ptyWrites = []
+      session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push({ type: 'stream_end', ...e }))
+      session.on('result', (e) => events.push({ type: 'result', ...e }))
+      session.on('error', (e) => events.push({ type: 'error', ...e }))
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed by _armResultTimeout')
+      await new Promise((r) => setTimeout(r, 80))
+
+      assert.equal(session._isBusy, false, 'busy cleared')
+      assert.equal(session._currentMessageId, null, 'messageId nulled')
+      assert.ok(ptyWrites.includes('\x03'), 'Ctrl-C written to PTY')
+
+      const types = events.map((e) => e.type)
+      assert.deepEqual(types, ['stream_end', 'result', 'error'],
+        'fan-out order matches stream-stall path: stream_end → result → error')
+
+      const err = events.find((e) => e.type === 'error')
+      assert.equal(err.code, 'stream_stall', 'distinct code reuses dashboard chip wire')
+      assert.match(err.message, /No response/i)
+    })
+
+    it('is disarmed by the first consumed hook event (does not fire on healthy turn)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 50,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      // Disarm helper the sendMessage poll loop calls when any hook
+      // file is consumed; documents that the watchdog can be cleared
+      // without re-arming the inter-stream timer.
+      session._clearFirstOutputWatchdog()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared')
+
+      // Wait past the original window — should NOT fire.
+      await new Promise((r) => setTimeout(r, 80))
+      assert.equal(session._isBusy, true, 'still busy — watchdog disarmed before fire')
+    })
+
+    it('is disabled when firstOutputTimeoutMs=0 (operator opt-out)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 0,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-opt-out'
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer not armed when disabled')
+
+      await new Promise((r) => setTimeout(r, 30))
+      assert.equal(session._isBusy, true, 'still busy — watchdog opted out')
+    })
+
+    it('is cleared by _finishTurnError so a stalled-after-error fire cannot land', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = 'msg-fte'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      session._finishTurnError('test', 'msg-fte')
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared on error path')
+    })
+
+    it('is cleared by destroy() so a late fire cannot land on a torn-down session', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-d-fo'
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      await session.destroy()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared on destroy')
+    })
+
+    it('logs explicit elapsedMs line when fired', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-log'
+      session._activeTurn = { startedAt: Date.now() - 30, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+      session.on('stream_end', () => {})
+
+      const logs = []
+      const listener = (entry) => logs.push(entry)
+      addLogListener(listener)
+      try {
+        session._armResultTimeout()
+        await new Promise((r) => setTimeout(r, 80))
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const matched = logs.find((l) => /first-output watchdog fired/i.test(l.message ?? ''))
+      assert.ok(matched, 'log line present: ' + JSON.stringify(logs.map((l) => l.message).slice(-5)))
+      assert.match(matched.message, /elapsedMs=\d+/, 'log line includes elapsedMs')
+      assert.match(matched.message, /claude TUI did not respond/, 'log line includes did-not-respond marker')
+    })
+  })
+
   // #4641 — `_teardownTurn` is the shared helper extracted from
   // `_handleHardTimeout` and `_handleStreamStall`. Both call sites
   // already have their own end-to-end coverage (see `inactivity timer`
