@@ -2603,8 +2603,10 @@ describe('ClaudeTuiSession', () => {
         !existsSync(lockDir),
         'askuserquestion-active lock dir removed via _clearAskUserQuestionLock',
       )
-
-      rmSync(sinkDir, { recursive: true, force: true })
+      // sinkDir cleanup happens in the outer afterEach via session.destroy()
+      // (claude-tui-session.js rmSyncs _sinkDir with force:true). An inline
+      // rmSync here would be redundant AND get skipped if any assertion
+      // above throws — the centralized path is unconditional.
     })
 
     it('PostToolUse for a non-AskUserQuestion tool does NOT touch _pendingUserAnswer (defensive)', () => {
