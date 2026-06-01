@@ -636,15 +636,31 @@ function _hasGeminiOAuthCreds() {
  * enough to justify the cache.
  */
 let _credFileCache = {
-  byok: { envValue: null, path: null, mtimeMs: null, size: null, result: null },
-  deepseek: { envValue: null, path: null, mtimeMs: null, size: null, result: null },
+  byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+  deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+}
+
+// Env-var names per slot, used for the canonical "not set and file does not
+// exist" reason when we short-circuit the ENOENT case (#4728 review). Kept
+// here rather than passed in so the wrapper signature stays minimal.
+const _SLOT_ENV_VAR = {
+  byok: 'ANTHROPIC_API_KEY',
+  deepseek: 'DEEPSEEK_API_KEY',
 }
 
 /**
  * Cache wrapper around a credential-file resolver. The resolver itself does
  * the file read; this helper short-circuits to the cached resolver result when
  * the env var is unchanged AND either (env-var path was taken last time) or
- * (the file's stat-mtime+size still matches what we cached).
+ * (the file's stat-mtime+size+mode still matches what we cached).
+ *
+ * `mode` participates in the key because the underlying resolvers refuse any
+ * file mode more permissive than 0o600 as a security boundary
+ * (byok-credentials.js / deepseek-credentials.js). `chmod 0644` does NOT
+ * update mtime or size on POSIX, so without mode in the key the cache would
+ * keep returning ready=true with the key after the user runs chmod — the
+ * dashboard would lag the resolver's actual rejection until the next file
+ * write. Including `mode` makes the dashboard match resolver behaviour.
  *
  * @param {'byok' | 'deepseek'} slot
  * @param {string | undefined} envValue - current value of the relevant env var
@@ -662,30 +678,43 @@ function _cachedResolveCredentialFile(slot, envValue, resolve) {
       return entry.result
     }
     const result = resolve()
-    _credFileCache[slot] = { envValue, path: null, mtimeMs: null, size: null, result }
+    _credFileCache[slot] = { envValue, path: null, mtimeMs: null, size: null, mode: null, result }
     return result
   }
 
   // No env var → resolver consults the file. Stat first; if the file is gone
-  // or the stat throws, drop any cached entry and let the resolver build the
-  // "missing" reason. We don't cache the missing case under a stat key (there
-  // is no stat to key on), but the env-var path above will still cache after
-  // a subsequent env-var set.
+  // or the stat throws, drop any cached entry. ENOENT is the hot "user never
+  // configured BYOK" case — short-circuit and synthesize the resolver's
+  // missing-reason string directly so we don't pay for a second statSync()
+  // inside the resolver (#4728 review). Any other stat error falls through
+  // to the resolver so its richer error message wins (e.g. EACCES surfaces
+  // "unable to stat ... permission denied").
   let stat
   try {
     stat = statSync(credPath)
-  } catch {
-    _credFileCache[slot] = { envValue: null, path: null, mtimeMs: null, size: null, result: null }
+  } catch (err) {
+    _credFileCache[slot] = { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null }
+    if (err.code === 'ENOENT') {
+      return {
+        key: null,
+        source: 'none',
+        reason: `${_SLOT_ENV_VAR[slot]} not set and ${credPath} does not exist`,
+      }
+    }
     return resolve()
   }
 
   // Cache key includes credPath so an HOME change invalidates even if the
-  // new file coincidentally has the same mtime+size as the cached old one.
+  // new file coincidentally has the same mtime+size+mode as the cached old
+  // one, and includes the low 9 mode bits so a chmod 0644 (which doesn't
+  // touch mtime) flips the cached result to match the resolver's refusal.
+  const mode = stat.mode & 0o777
   if (
     entry.envValue === null
     && entry.path === credPath
     && entry.mtimeMs === stat.mtimeMs
     && entry.size === stat.size
+    && entry.mode === mode
     && entry.result
   ) {
     return entry.result
@@ -697,6 +726,7 @@ function _cachedResolveCredentialFile(slot, envValue, resolve) {
     path: credPath,
     mtimeMs: stat.mtimeMs,
     size: stat.size,
+    mode,
     result,
   }
   return result
@@ -716,8 +746,8 @@ export function _resetCredsCacheForTest() {
     gemini: { value: null, expiresAt: 0, key: null },
   }
   _credFileCache = {
-    byok: { envValue: null, path: null, mtimeMs: null, size: null, result: null },
-    deepseek: { envValue: null, path: null, mtimeMs: null, size: null, result: null },
+    byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+    deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
   }
 }
 

@@ -854,11 +854,16 @@ describe('listProviders credential-file caching (#4658)', () => {
   }
 
   function teardown() {
-    for (const k of ENV_KEYS) {
-      if (saved[k] === undefined) delete process.env[k]
-      else process.env[k] = saved[k]
+    // Guard each step so a partial setup() (e.g. mkdtempSync threw before
+    // tmpHome was assigned) doesn't make teardown throw and mask the
+    // original failure. Each cleanup is independent and best-effort.
+    if (saved) {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
     }
-    rmSync(tmpHome, { recursive: true, force: true })
+    if (tmpHome) rmSync(tmpHome, { recursive: true, force: true })
     if (_tmpClaudeHome) rmSync(_tmpClaudeHome, { recursive: true, force: true })
     if (_tmpCodexHome) rmSync(_tmpCodexHome, { recursive: true, force: true })
     if (_tmpGeminiHome) rmSync(_tmpGeminiHome, { recursive: true, force: true })
@@ -998,6 +1003,32 @@ describe('listProviders credential-file caching (#4658)', () => {
         assert.equal(envResult.ready, true)
         assert.equal(envResult.envVar, 'ANTHROPIC_API_KEY')
         assert.match(envResult.detail, /ANTHROPIC_API_KEY set/)
+      } finally {
+        teardown()
+      }
+    })
+
+    // #4728 review: mtime+size+envValue is not sufficient — the resolver also
+    // refuses any file with mode more permissive than 0o600 as a security
+    // boundary. `chmod 0644` does NOT bump mtime or change size, so without
+    // mode in the cache key the dashboard would keep reporting ready=true
+    // until the next file write. Pinning the chmod path here.
+    it('refreshes when the file mode is loosened (chmod does not touch mtime/size)', () => {
+      try {
+        setup()
+        const path = writeCredFile(JSON.stringify({ anthropicApiKey: 'sk-ant-mode-test' }))
+        const before = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(before.ready, true, 'baseline: 0o600 file must be readable')
+
+        // Loosen the mode without rewriting contents. mtime and size are
+        // unchanged; only `stat.mode & 0o777` flips. The resolver should
+        // refuse on the next call and the cache must reflect that.
+        chmodSync(path, 0o644)
+
+        const after = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(after.ready, false,
+          'cache must refresh on mode change — otherwise dashboard lags resolver after chmod')
+        assert.match(after.detail, /mode 644|refusing to read|must be 0600/)
       } finally {
         teardown()
       }
