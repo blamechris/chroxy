@@ -462,11 +462,17 @@ wss.on('connection', (ws) => {
         // which normalizes `questions[0]` into the legacy single-
         // question `content` + `options` on the prompt ChatMessage.
         //
-        // Options use `value: 'approve' | 'deny'` so the MessageBubble
-        // testID `approval-button-<value>` resolves to
+        // Wire payload emits `{ label: 'approve' | 'deny' }` per option;
+        // `handleUserQuestion` normalizes each option to `{ label, value }`
+        // where `value === label` (see normalizeQuestion in
+        // packages/store-core/src/handlers/index.ts). MessageBubble's
+        // testID `approval-button-<value>` therefore resolves to
         // `approval-button-approve` / `approval-button-deny` — the
         // canonical Maestro selectors documented in the per-flow
-        // headers.
+        // headers. (Production AskUserQuestion option labels come from
+        // the model and are usually capitalized; the lowercase here is
+        // a deliberate fixture choice so the testID format matches the
+        // canonical selectors exactly.)
         if (text.trim() === 'show-ask-user-question') {
           showAskUserQuestionCounter += 1
           const toolUseId = `tu-askuserquestion-mock-${showAskUserQuestionCounter}`
@@ -501,15 +507,18 @@ wss.on('connection', (ws) => {
         // MessageBubble currently renders only `questions[0]` (the
         // legacy single-question shape), so this flow asserts that
         // (a) the prompt bubble lands without dropping the message,
-        // (b) Q[0]'s options ('Approve' / 'Deny') render correctly,
+        // (b) Q[0]'s options ('approve' / 'deny') render correctly,
         // and (c) the answered state round-trips. When the mobile
         // multi-question UI lands, this flow can extend to iterate
         // `approval-question-<index>` for N>1.
         //
-        // The mock uses `value: 'approve' | 'deny'` on every question
-        // so the same `approval-button-<value>` selector matches Q[0]
-        // — option labels per question vary so the test can prove
-        // distinct questions hydrated correctly (asserted by content).
+        // Wire payload: each option is `{ label: <string> }`; the
+        // store-core normalizer (handleUserQuestion) maps each option
+        // to `{ label, value }` with `value === label`. Q[0] uses
+        // lowercase 'approve' / 'deny' so the `approval-button-<value>`
+        // selector matches Q[0]; subsequent questions use distinct
+        // labels per question so the multi-question test can prove
+        // every entry hydrated correctly (asserted by content).
         if (text.trim() === 'show-ask-user-question-multi') {
           showAskUserQuestionCounter += 1
           const toolUseId = `tu-askuserquestion-multi-mock-${showAskUserQuestionCounter}`
@@ -587,7 +596,9 @@ wss.on('connection', (ws) => {
         break
 
       case 'permission_response':
-        console.log(`[mock] permission_response: requestId="${msg.requestId}" response="${msg.response}"`)
+        // Wire shape per packages/app/src/store/connection.ts:
+        // `{ type: 'permission_response', requestId, decision }`.
+        console.log(`[mock] permission_response: requestId="${msg.requestId || ''}" decision="${msg.decision || ''}"`)
         break
 
       case 'request_session_context':
