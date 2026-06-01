@@ -1,13 +1,18 @@
-mod config;
-mod node;
-mod platform;
-mod qrcode;
-mod server;
-mod settings;
-mod setup;
+// Modules are `pub` (not private) so the `tests/command_integration.rs`
+// integration suite can exercise their public functions directly without a
+// running Tauri app. The crate is an internal binary support library — no
+// external consumer depends on this surface, so exposing it for testing
+// carries no API stability cost.
+pub mod config;
+pub mod node;
+pub mod platform;
+pub mod qrcode;
+pub mod server;
+pub mod settings;
+pub mod setup;
 #[cfg(target_os = "macos")]
-mod speech;
-mod window;
+pub mod speech;
+pub mod window;
 
 use server::{ServerManager, ServerStatus};
 use settings::DesktopSettings;
@@ -15,7 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 /// Lock a Mutex, recovering from poisoning instead of panicking.
-pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+/// `pub` so integration tests can drive the same lock-recovery semantics
+/// as the production command bodies (see `tests/command_integration.rs`).
+pub fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -314,7 +321,9 @@ fn set_allow_auto_permission_mode(value: bool) -> Result<(), String> {
 
 /// Helper that does the actual file read/merge/write, parameterised on path
 /// so unit tests can target a temp file instead of `~/.chroxy/config.json`.
-fn set_allow_auto_permission_mode_at(
+/// `pub` so the integration test suite can drive it directly without a
+/// running Tauri app (see `tests/command_integration.rs`).
+pub fn set_allow_auto_permission_mode_at(
     path: &std::path::Path,
     value: bool,
 ) -> Result<(), String> {
