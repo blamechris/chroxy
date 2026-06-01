@@ -178,7 +178,11 @@ describe('SDK multi-question wedge shapes (#4731)', () => {
 
 describe('UserQuestionResponseSchema multi-select value (#4731)', () => {
   it('accepts arrays and strings as per-question answer values', async () => {
-    const { UserQuestionResponseSchema } = await import('../../protocol/dist/schemas/client.js')
+    // Import via the package entry rather than reaching into the dist
+    // layout so this test follows the same pattern as other server tests
+    // (e.g. tests/ws-schemas.test.js:1001) and stays decoupled from the
+    // package's internal build structure. Per Copilot review on PR #4763.
+    const { UserQuestionResponseSchema } = await import('@chroxy/protocol')
 
     // Pre-#4731 happy path — plain string values
     const stringOnly = UserQuestionResponseSchema.safeParse({
