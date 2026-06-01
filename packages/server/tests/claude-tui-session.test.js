@@ -2365,6 +2365,77 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._pendingUserAnswer, null, 'pending cleared')
     })
 
+    // #4668 — when claude TUI emits parallel AskUserQuestion tool_use
+    // blocks in one assistant turn (observed post-#4648 deny), chroxy's
+    // pre-#4668 single-field `_pendingUserAnswer` got overwritten by
+    // each new tool_use → user answers routed to the wrong toolUseId's
+    // slot. New behaviour: a Map keyed by toolUseId preserves every
+    // pending entry; respondToQuestion(text, answersMap, toolUseId)
+    // routes by toolUseId to the right entry. Per-entry cleanup leaves
+    // sibling pending answers alive.
+    it('Map-keyed _pendingUserAnswers preserves sibling tool_uses; respondToQuestion routes by toolUseId (#4668)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // Two parallel AskUserQuestion tool_uses arrive in one turn.
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_first',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Q1?', options: [{ label: 'A' }, { label: 'B' }] }] },
+      }, 'msg-1')
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_second',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Q2?', options: [{ label: 'X' }, { label: 'Y' }, { label: 'Z' }] }] },
+      }, 'msg-1')
+
+      // Both entries present in the Map — pre-#4668 the second overwrote the first.
+      assert.equal(session._pendingUserAnswers.size, 2, 'both tool_uses tracked independently')
+      assert.ok(session._pendingUserAnswers.has('toolu_first'), 'first preserved')
+      assert.ok(session._pendingUserAnswers.has('toolu_second'), 'second present')
+
+      // Dashboard answers the FIRST one (by toolUseId).
+      session.respondToQuestion('A', undefined, 'toolu_first')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // Wrote '1' (1-indexed option for 'A') — proving the route went to the first entry's options.
+      assert.equal(writes[1], '1', 'wrote 1-indexed digit for first entry\'s option A')
+      // First entry cleared; SECOND entry preserved (no all-or-nothing wipe).
+      assert.ok(!session._pendingUserAnswers.has('toolu_first'), 'first entry cleared after response')
+      assert.ok(session._pendingUserAnswers.has('toolu_second'), 'second sibling entry SURVIVES first\'s response')
+
+      // Now dashboard answers the SECOND one.
+      writes.length = 0
+      session.respondToQuestion('Z', undefined, 'toolu_second')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      assert.equal(writes[1], '3', 'wrote 1-indexed digit for second entry\'s option Z')
+      assert.equal(session._pendingUserAnswers.size, 0, 'Map empty after both answered')
+    })
+
+    // #4668 — defensive: dashboard sends an answer for a toolUseId that's
+    // already been cleared (late arrival after watchdog teardown). Pre-fix
+    // this would write keystrokes into whatever pending entry happened to
+    // exist (or into nothing). Now: log warn + drop, never write.
+    it('respondToQuestion drops + logs when toolUseId has no matching pending entry (#4668)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_live',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
+      }, 'msg-1')
+
+      // Dashboard sends an answer for a DIFFERENT (stale) toolUseId.
+      session.respondToQuestion('A', undefined, 'toolu_stale_or_missing')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // No PTY writes — the stale answer was dropped, not written into the live entry's slot.
+      assert.equal(writes.length, 0, 'no PTY writes for stale toolUseId')
+      // Live entry still pending, ready for its own answer.
+      assert.ok(session._pendingUserAnswers.has('toolu_live'), 'live entry untouched')
+    })
+
     it('respondToQuestion writes the label text when the answer does NOT match any option (custom / Other path)', async () => {
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }

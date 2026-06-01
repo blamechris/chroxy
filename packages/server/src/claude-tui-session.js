@@ -342,15 +342,81 @@ export class ClaudeTuiSession extends BaseSession {
     // dashboard's QuestionPrompt UI eventually sends a
     // `user_question_response` which routes to respondToQuestion() —
     // that method writes the chosen answer back to the PTY (claude's
-    // own TTY-style prompt is waiting on stdin). Cleared on response,
-    // on PostToolUse (claude resolved the prompt some other way), or
-    // on session destroy.
-    this._pendingUserAnswer = null
+    // own TTY-style prompt is waiting on stdin).
+    //
+    // #4668 (Map refactor): when claude TUI emits parallel AskUserQuestion
+    // tool_use blocks in one assistant turn (which it has been observed to
+    // do post-#4648 deny), the single-field `_pendingUserAnswer` was
+    // overwritten by each new tool_use — so the user's answer to question
+    // 1 got routed to question 4's slot. Map keyed by toolUseId preserves
+    // every pending answer independently; respondToQuestion(toolUseId, …)
+    // routes the dashboard's answer to the right entry. Back-compat getter
+    // `_pendingUserAnswer` returns the most-recently-set entry so legacy
+    // tests + callers that read the single field keep working.
+    this._pendingUserAnswers = new Map()
+    this._lastPendingAnswerToolUseId = null
     // #4604: watchdog timer armed in respondToQuestion(). If PostToolUse
     // never arrives after we write the answer (multi-question form wedge),
     // _onAskUserQuestionStall clears busy state + emits an error so the
     // session is recoverable. Cleared on PostToolUse + destroy().
     this._askUserQuestionWatchdog = null
+  }
+
+  /**
+   * Back-compat getter for the pre-#4668 single-field `_pendingUserAnswer`.
+   * Returns the most-recently-set pending answer entry, or null when none
+   * are pending. New code should iterate / look up `_pendingUserAnswers`
+   * directly by toolUseId.
+   */
+  get _pendingUserAnswer() {
+    if (!this._lastPendingAnswerToolUseId) return null
+    return this._pendingUserAnswers.get(this._lastPendingAnswerToolUseId) || null
+  }
+
+  /**
+   * Back-compat setter: writing `_pendingUserAnswer = null` (the pattern
+   * used at every turn-teardown site) clears the entire Map. Writing an
+   * entry sets it in the Map keyed by its toolUseId AND updates the
+   * "most recent" pointer. Pre-#4668 callers don't need to change.
+   */
+  set _pendingUserAnswer(entry) {
+    if (entry === null || entry === undefined) {
+      this._pendingUserAnswers.clear()
+      this._lastPendingAnswerToolUseId = null
+      return
+    }
+    const toolUseId = entry.toolUseId
+    if (toolUseId) {
+      this._pendingUserAnswers.set(toolUseId, entry)
+      this._lastPendingAnswerToolUseId = toolUseId
+    }
+  }
+
+  /** Internal: drop a specific pending answer entry (PostToolUse cleanup). */
+  _clearPendingAnswerByToolUseId(toolUseId) {
+    if (!toolUseId) return
+    this._pendingUserAnswers.delete(toolUseId)
+    if (this._lastPendingAnswerToolUseId === toolUseId) {
+      // Advance the "most recent" pointer to whichever entry was set most
+      // recently after the one we just removed (insertion-order via Map
+      // iteration). null when the Map is empty.
+      const keys = [...this._pendingUserAnswers.keys()]
+      this._lastPendingAnswerToolUseId = keys.length > 0 ? keys[keys.length - 1] : null
+    }
+  }
+
+  /**
+   * #4668 cleanup: drop the askuserquestion-active sibling lock the
+   * permission-hook.sh leaves under our sink dir. The hook script's
+   * PostToolUse cleanup (tee | grep | rm) handles the happy path, but
+   * when a turn tears down for ANY other reason (watchdog fire, stream
+   * stall, hard timeout, PTY exit mid-turn, destroy()) the lock leaks
+   * and blocks the next turn's AskUserQuestion at the sibling-deny
+   * check. Cheap idempotent rm — call from every teardown path.
+   */
+  _clearAskUserQuestionLock() {
+    if (!this._sinkDir) return
+    try { rmSync(join(this._sinkDir, 'askuserquestion-active'), { recursive: true, force: true }) } catch {}
   }
 
   // Tail length to keep + length to include in error diagnostics.
@@ -1355,8 +1421,23 @@ export class ClaudeTuiSession extends BaseSession {
     // or via the underlying terminal multiplexer if a human typed into
     // the same PTY. Either way, clear the pending state so the next
     // user_question_response doesn't write into a stale context.
-    if (toolName === 'AskUserQuestion' && this._pendingUserAnswer) {
-      this._pendingUserAnswer = null
+    //
+    // #4668: clear only THIS specific tool_use's entry from the pending
+    // Map, not every entry. Pre-#4668 chroxy used a single field so
+    // clearing was all-or-nothing; with the Map there may be sibling
+    // pending answers from other tool_uses in the same turn that
+    // shouldn't be wiped when this one completes.
+    if (toolName === 'AskUserQuestion' && payload.tool_use_id) {
+      this._clearPendingAnswerByToolUseId(payload.tool_use_id)
+    }
+    // #4669 cleanup: drop the askuserquestion-active sibling lock for THIS
+    // tool_use's PostToolUse (the original PostToolUse hook in
+    // writeHookSettings() does this via tee/grep/rm — duplicated here for
+    // the defensive path where the hook script's cleanup didn't run, e.g.
+    // when claude TUI emitted PostToolUse but the hook chain raced with
+    // turn teardown). Cheap idempotent rm.
+    if (toolName === 'AskUserQuestion' && this._sinkDir) {
+      try { rmSync(join(this._sinkDir, 'askuserquestion-active'), { recursive: true, force: true }) } catch {}
     }
     // #4604: PostToolUse means claude accepted the answer (single-question
     // happy path). Cancel the stall watchdog so it doesn't fire a spurious
@@ -1475,6 +1556,7 @@ export class ClaudeTuiSession extends BaseSession {
     // clicked the QuestionPrompt right as the hard timeout fired) would
     // attempt a PTY write that no longer matches a live turn.
     this._pendingUserAnswer = null
+    this._clearAskUserQuestionLock()
     // #4604: same symmetry for the stall watchdog. The guard in
     // _onAskUserQuestionStall (`!_pendingUserAnswer && !_isBusy`) would
     // currently no-op the late fire (both are falsy here), but leaving
@@ -1584,6 +1666,7 @@ export class ClaudeTuiSession extends BaseSession {
     // after we've already fired Ctrl-C and emitted error/result has
     // nowhere meaningful to go.
     this._pendingUserAnswer = null
+    this._clearAskUserQuestionLock()
     // #4604: same symmetry for the stall watchdog — see _finishTurnError.
     if (this._askUserQuestionWatchdog) {
       clearTimeout(this._askUserQuestionWatchdog)
@@ -1646,6 +1729,7 @@ export class ClaudeTuiSession extends BaseSession {
     // #4286/#4604 symmetry — clear pending AskUserQuestion slot + watchdog
     // so a late answer / late stall fire can't write to a torn-down turn.
     this._pendingUserAnswer = null
+    this._clearAskUserQuestionLock()
     if (this._askUserQuestionWatchdog) {
       clearTimeout(this._askUserQuestionWatchdog)
       this._askUserQuestionWatchdog = null
@@ -1721,6 +1805,7 @@ export class ClaudeTuiSession extends BaseSession {
     // #4278: also drop any pending AskUserQuestion so a subsequent
     // user_question_response can't write into a torn-down context.
     this._pendingUserAnswer = null
+    this._clearAskUserQuestionLock()
     // #4604: cancel the stall watchdog too. interrupt() does NOT clear
     // _isBusy directly (Ctrl-C surfaces async via _finishTurn*), so without
     // this the watchdog could fire ~30s later and emit a spurious
@@ -1768,27 +1853,59 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {string} text — the chosen answer (single-question path); ignored on the multi-question path when answersMap is populated
    * @param {object} [answersMap] — `{ [questionText]: string | string[] }`; required for multi-question forms (Chunk B)
    */
-  respondToQuestion(text, answersMap) {
-    // #4604: capture toolUseId BEFORE clearing _pendingUserAnswer so the
-    // observability log + watchdog arm have something to correlate on
-    // when the response fails or stalls.
-    const prevToolUseId = this._pendingUserAnswer?.toolUseId || null
-    const pendingQuestions = this._pendingUserAnswer?.questions || []
+  respondToQuestion(text, answersMap, toolUseId) {
+    // #4668: route to the specific pending entry the dashboard answered
+    // for. Pre-#4668 chroxy stored a single pending answer in a field
+    // and respondToQuestion always read THAT field — so when claude TUI
+    // emitted parallel AskUserQuestion tool_use blocks in one turn, the
+    // field got overwritten and the user's answer landed in the wrong
+    // toolUseId's slot. Now: if the dashboard supplied a toolUseId, look
+    // it up in the Map; if not (legacy clients), fall back to the most-
+    // recently-set entry via the back-compat getter so behaviour matches
+    // pre-#4668 for the single-pending case.
+    let entry = null
+    if (toolUseId && this._pendingUserAnswers.has(toolUseId)) {
+      entry = this._pendingUserAnswers.get(toolUseId)
+    } else if (toolUseId && this._pendingUserAnswers.size > 0) {
+      // Dashboard sent a toolUseId we don't have a pending entry for.
+      // Common cause: stale answer arriving after the turn's teardown
+      // cleared the Map (watchdog fire, user gave up + the late answer
+      // came in). Log + drop rather than write keystrokes into whatever
+      // form happens to be currently rendered.
+      log.warn(`respondToQuestion: dashboard sent toolUseId=${toolUseId} but no matching pending entry (Map.size=${this._pendingUserAnswers.size} keys=${[...this._pendingUserAnswers.keys()].join(',')}) — dropping`)
+      return
+    } else {
+      // Legacy / unidentified path: route to the most-recent entry via
+      // the back-compat getter. Maintains the pre-#4668 behaviour for
+      // single-pending cases and for callers that haven't been updated
+      // to pass toolUseId.
+      entry = this._pendingUserAnswer
+    }
+    const prevToolUseId = entry?.toolUseId || null
+    const pendingQuestions = entry?.questions || []
     const answersMapKeyCount = answersMap && typeof answersMap === 'object' ? Object.keys(answersMap).length : 0
-    log.info(`respondToQuestion: tool=${prevToolUseId || '?'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${this._pendingUserAnswer?.options?.length || 0}`)
-    if (!this._pendingUserAnswer) return
+    log.info(`respondToQuestion: tool=${prevToolUseId || '?'} dashboardToolUseId=${toolUseId || 'none'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${entry?.options?.length || 0} pendingMapSize=${this._pendingUserAnswers.size}`)
+    if (!entry) return
     // Single-question / free-text path requires a non-empty `text`. The
     // multi-question path is driven from answersMap (text is ignored when
     // a map is present) so an empty string is permitted there.
     if (typeof text !== 'string') return
     if (text.length === 0 && answersMapKeyCount === 0) return
-    const { options } = this._pendingUserAnswer
-    // pendingQuestions captured at the top so the .length read survives
-    // entries that only ever set { toolUseId, options } (pre-Chunk-B
-    // tests, the watchdog test fixtures, and any legacy caller).
+    const { options } = entry
     const questions = pendingQuestions
-    this._pendingUserAnswer = null
+    // #4668: clear only this specific entry; sibling pending answers
+    // (from parallel AskUserQuestion calls in the same turn) survive.
+    this._clearPendingAnswerByToolUseId(entry.toolUseId)
     if (!this._term) return
+    // #4668 diagnostic: capture the PTY output tail just before we write
+    // the answer keystroke. The wedge symptom observed 2026-06-01 was
+    // "chroxy wrote bytes=1 → TUI silent for 30s → watchdog fires" with
+    // no visibility into whether the TUI's input prompt was actually
+    // ready to receive a digit. Logging the tail hex dump at write-time
+    // tells us exactly what the TUI was showing when our keystroke
+    // landed — single-keystroke wedges almost always come from a form
+    // misalignment that's visible in the trailing render bytes.
+    log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
 
     const armWatchdog = () => {
       // #4604: arm a stall watchdog. If claude TUI never emits PostToolUse
@@ -2013,6 +2130,7 @@ export class ClaudeTuiSession extends BaseSession {
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
 
     this._pendingUserAnswer = null
+    this._clearAskUserQuestionLock()
     // #4616: emit a synthetic tool_result FIRST so the dashboard's
     // activeTools entry for this AskUserQuestion is cleared. Without it
     // the footer "Running AskUserQuestion · Ns" pill keeps ticking
@@ -2084,6 +2202,7 @@ export class ClaudeTuiSession extends BaseSession {
     // #4278: drop any pending AskUserQuestion so a late
     // user_question_response can't write into a dead PTY.
     this._pendingUserAnswer = null
+    this._clearAskUserQuestionLock()
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     // #4638: clear the stream-stall watchdog on destroy too — otherwise
