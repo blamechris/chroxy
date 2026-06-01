@@ -1553,6 +1553,12 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* #4652: keep wheel/touchpad scroll inside the chat panel even when
+     an AskUserQuestion form is open. Without `contain`, reaching the
+     top/bottom of the chat lets the scroll bubble up to the outer page
+     (or the form's own inputs absorb the wheel before the chat does),
+     which felt like scrolling was "stuck" while a prompt was visible. */
+  overscroll-behavior: contain;
 }
 
 /* ---- Message rows with sender icons ---- */
@@ -2236,11 +2242,20 @@
 /* #4634: multi-question AskUserQuestion form (#4604 Chunk B / #4620).
    The component renders these class names but they previously had no
    CSS rules — Submit fell back to the native browser button (gray-on-
-   dark, unreadable) and questions had no visual separation. */
+   dark, unreadable) and questions had no visual separation.
+
+   #4652: cap height to the viewport and let the form scroll internally
+   when it would otherwise grow taller than the chat pane. Without this
+   cap a large multi-question form pushed messages off-screen and
+   trapped wheel events because the chat-messages container had no room
+   to scroll past the form. */
 .question-prompt--multi {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .question-prompt-multi-row {
