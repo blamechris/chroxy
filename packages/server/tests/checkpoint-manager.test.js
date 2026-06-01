@@ -22,9 +22,14 @@ function createTempGitRepo() {
 describe('CheckpointManager', () => {
   let manager
   let gitDir
+  let tmpCheckpointsDir
 
   beforeEach(() => {
-    manager = new CheckpointManager()
+    // Pass a tmp checkpointsDir so the manager doesn't write to the
+    // developer's real ~/.chroxy/checkpoints/ (sandbox guard in
+    // tests/_setup.mjs blocks it; see #4633).
+    tmpCheckpointsDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-state-'))
+    manager = new CheckpointManager({ checkpointsDir: tmpCheckpointsDir })
     // Clear any persisted state from prior tests
     manager.clearCheckpoints('sess-1')
     gitDir = createTempGitRepo()
@@ -32,6 +37,7 @@ describe('CheckpointManager', () => {
 
   afterEach(() => {
     rmSync(gitDir, { recursive: true, force: true })
+    try { rmSync(tmpCheckpointsDir, { recursive: true, force: true }) } catch {}
   })
 
   it('creates a checkpoint with metadata', async () => {

@@ -1,12 +1,29 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
 
 /**
  * Tests for session auto-labeling — when a session's first user_input is recorded,
  * the session name should be updated to a truncation of that input.
+ *
+ * CRITICAL: Every SessionManager instance MUST use a temp stateFilePath.
+ * Without it, tests write to real ~/.chroxy/session-state.json, contaminating
+ * the user's server with test data (see #4633, #2314).
  */
+
+let _globalTmpDir
+function tmpStateFile() {
+  if (!_globalTmpDir) _globalTmpDir = mkdtempSync(join(tmpdir(), 'sm-auto-label-'))
+  return join(_globalTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+}
+
+after(() => {
+  if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
+})
 
 function makeMockSession(overrides = {}) {
   const session = new EventEmitter()
@@ -20,7 +37,7 @@ describe('SessionManager auto-labeling', () => {
   let mgr
 
   beforeEach(() => {
-    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5 })
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
   })
 
   it('auto-renames session on first user_input when name matches default pattern', () => {
