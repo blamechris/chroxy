@@ -116,4 +116,57 @@ describe('formatQuestionAnswerSummary', () => {
       )
     })
   })
+
+  // #4621 — widen the wire shape to Record<string, string | string[]>.
+  // MultiQuestionForm now sends native string[] for multi-select instead
+  // of JSON-stringifying. The summary helper must accept arrays directly
+  // and render them as comma-joined labels — without leaking
+  // `["App","Tests"]` JSON syntax (which the legacy back-compat path
+  // also covered).
+  describe('multi-question form path (Record<string, string | string[]>) — #4621', () => {
+    it('renders a native string[] multi-select as comma-joined labels', () => {
+      const answer: Record<string, string | string[]> = {
+        'Which areas?': ['App', 'Tests'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which areas?: App, Tests',
+      )
+    })
+
+    it('renders an empty string[] without brackets', () => {
+      const answer: Record<string, string | string[]> = {
+        'Which areas?': [],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe('Which areas?: ')
+    })
+
+    it('renders a single-item string[] without brackets or quotes', () => {
+      const answer: Record<string, string | string[]> = {
+        'Which areas?': ['App'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe('Which areas?: App')
+    })
+
+    it('renders mixed single-select string + native multi-select string[]', () => {
+      const answer: Record<string, string | string[]> = {
+        'Which release strategy?': 'Minor',
+        'Which areas?': ['App', 'Tests', 'Docs'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which release strategy?: Minor | Which areas?: App, Tests, Docs',
+      )
+    })
+
+    it('preserves labels that contain commas (no comma-split corruption)', () => {
+      // The legacy JSON-encoded path also handled this, but the native
+      // string[] path makes it trivially obvious: round-tripping a label
+      // with embedded commas must not split into separate entries.
+      const answer: Record<string, string | string[]> = {
+        'Which?': ['Hello, world', 'foo'],
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which?: Hello, world, foo',
+      )
+    })
+  })
 })

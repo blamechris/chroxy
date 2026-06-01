@@ -629,14 +629,16 @@ export interface ConnectionState {
    * requestId — last write wins. */
   markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
   /**
-   * #4604 Chunk B — answer may be either a plain string (single-question /
-   * free-text path, back-compat) or a `Record<string,string>` map
-   * (multi-question form, keyed by question text with multi-select values
-   * JSON-stringified arrays). The Record path populates the wire's
-   * `answers` field; both paths populate `answer` with a human-readable
-   * summary so older servers stay functional.
+   * #4604 Chunk B / #4621 — answer may be either a plain string
+   * (single-question / free-text path, back-compat) or a
+   * `Record<string, string | string[]>` map (multi-question form, keyed
+   * by question text). Multi-select values are emitted as native
+   * `string[]` (#4621) so consumers don't have to JSON.parse to recover
+   * the chosen labels. The Record path populates the wire's `answers`
+   * field; both paths populate `answer` with a human-readable summary
+   * so older servers stay functional.
    */
-  sendUserQuestionResponse: (answer: string | Record<string, string>, toolUseId?: string) => 'sent' | 'queued' | false;
+  sendUserQuestionResponse: (answer: string | Record<string, string | string[]>, toolUseId?: string) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
   setModel: (model: string) => void;

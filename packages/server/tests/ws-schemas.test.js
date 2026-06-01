@@ -997,6 +997,94 @@ describe('dead code removal', () => {
     assert.equal(UserQuestionResponseSchema.safeParse({ type: 'user_question_response', answer: 'a', answers: mkAnswers(101) }).success, false)
   })
 
+  // #4621 — `answers` values widen to `string | string[]` so multi-select
+  // questions can ship native arrays instead of JSON-stringified strings.
+  it('UserQuestionResponseSchema accepts string[] values for multi-select answers (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    // String values (legacy single-select / free-text) still accepted.
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'Yes',
+      answers: { 'Pick one?': 'A' },
+    }).success, true)
+    // String[] values (native multi-select).
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'App, Tests',
+      answers: { 'Which areas?': ['App', 'Tests'] },
+    }).success, true)
+    // Mixed string + string[] values in the same map.
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'summary',
+      answers: { 'Q1?': 'A', 'Q2?': ['x', 'y'] },
+    }).success, true)
+    // Empty array is allowed (multi-select with zero selections).
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: '',
+      answers: { 'Q?': [] },
+    }).success, true)
+  })
+
+  it('UserQuestionResponseSchema rejects array values longer than 100 entries (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    const mkArr = (n) => Array.from({ length: n }, (_, i) => `v${i}`)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': mkArr(100) },
+    }).success, true)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': mkArr(101) },
+    }).success, false)
+  })
+
+  it('UserQuestionResponseSchema rejects non-string array members (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    // Numbers / objects in the array must be rejected — only string[].
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': ['a', 42] },
+    }).success, false)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': ['a', { obj: 1 }] },
+    }).success, false)
+  })
+
+  // #4621 (Copilot review): per-array-item cap is 10_000 chars to bound
+  // total per-answer cost. Labels are short by construction; the
+  // legacy 100_000-char string cap is preserved only on the
+  // back-compat string branch (JSON-stringified arrays from older
+  // dashboards).
+  it('UserQuestionResponseSchema rejects array members longer than 10_000 chars (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    const ok = 'x'.repeat(10_000)
+    const tooBig = 'x'.repeat(10_001)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': [ok] },
+    }).success, true)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': [tooBig] },
+    }).success, false)
+    // The string branch keeps the 100_000-char cap for legacy
+    // JSON-stringified-array payloads from pre-#4621 dashboards.
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': 'x'.repeat(100_000) },
+    }).success, true)
+  })
+
   it('SandboxSchema rejects arrays larger than 256', async () => {
     const { SandboxSchema } = await import('@chroxy/protocol')
     const mk = (n) => Array.from({ length: n }, (_, i) => `item${i}`)
