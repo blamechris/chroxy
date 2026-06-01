@@ -102,17 +102,46 @@ describe('_handleChildClose after intentional stop', () => {
     assert.equal(session._respawnTimer, null, 'no respawn timer left behind')
   })
 
-  it('clears _intentionalStop even when destroy()-style guards short-circuit later paths', () => {
+  it('clears _intentionalStop even when _destroying short-circuit fires (single-use across all close paths)', () => {
     const session = createReadySession()
     session._intentionalStop = true
     session._destroying = true
 
+    const stoppedEvents = []
+    const errorEvents = []
+    session.on('stopped', (e) => stoppedEvents.push(e))
+    session.on('error', (e) => errorEvents.push(e))
+
     session._handleChildClose(0)
 
-    // _destroying short-circuits before our flag check, so the flag is left
-    // for the next session lifecycle. destroy() itself resets it explicitly
-    // (covered by the destroy regression test below).
-    assert.equal(session._destroying, true)
+    // _destroying suppresses both stopped + error emits (destroy owns the
+    // teardown UX), but the flag must still be cleared so a later session
+    // lifecycle doesn't inherit it.
+    assert.equal(session._intentionalStop, false, 'flag MUST be cleared even when _destroying short-circuits')
+    assert.equal(stoppedEvents.length, 0, '_destroying suppresses stopped emit')
+    assert.equal(errorEvents.length, 0, '_destroying suppresses error emit')
+  })
+
+  it('clears _intentionalStop even when _respawning short-circuit fires (model-switch race)', () => {
+    const session = createReadySession()
+    session._intentionalStop = true
+    session._respawning = true
+
+    const stoppedEvents = []
+    const errorEvents = []
+    session.on('stopped', (e) => stoppedEvents.push(e))
+    session.on('error', (e) => errorEvents.push(e))
+
+    session._handleChildClose(0)
+
+    // If the user clicks Stop and a model switch races in, _killAndRespawn
+    // sets _respawning=true and SIGTERM brings the child down. The close
+    // handler hits _respawning first, so the user's stop intent is
+    // effectively absorbed into the respawn — but the flag must NOT leak
+    // to swallow a real crash on the next child instance.
+    assert.equal(session._intentionalStop, false, 'flag MUST be cleared even when _respawning short-circuits')
+    assert.equal(stoppedEvents.length, 0, '_respawning suppresses stopped emit')
+    assert.equal(errorEvents.length, 0, '_respawning suppresses error emit')
   })
 })
 

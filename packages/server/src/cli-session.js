@@ -1122,6 +1122,14 @@ export class CliSession extends BaseSession {
     this._processReady = false
     this._child = null
 
+    // #4602: capture-and-clear up front so the flag never leaks past a
+    // close, even when the _destroying / _respawning guards short-circuit
+    // (e.g. user clicks Stop → flag set → model switch fires
+    // _killAndRespawn → _respawning short-circuit hits, but the flag must
+    // not persist to silently swallow a real crash on a future close).
+    const wasIntentionalStop = this._intentionalStop
+    this._intentionalStop = false
+
     if (this._destroying) return
     if (this._respawning) return
 
@@ -1129,11 +1137,8 @@ export class CliSession extends BaseSession {
 
     // #4602: user-initiated Stop sent SIGINT via interrupt(). The child
     // exited cleanly as a result — do NOT show "exited unexpectedly" and
-    // do NOT auto-respawn the child the user explicitly stopped. Clear
-    // the flag so a subsequent natural crash still triggers the
-    // crash-recovery path below.
-    if (this._intentionalStop) {
-      this._intentionalStop = false
+    // do NOT auto-respawn the child the user explicitly stopped.
+    if (wasIntentionalStop) {
       log.info(`Process exited (code ${code}) after user stop`)
       this.emit('stopped', { code })
       return
