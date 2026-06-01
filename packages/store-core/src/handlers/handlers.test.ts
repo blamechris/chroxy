@@ -1396,6 +1396,20 @@ describe('handleAuthOk', () => {
       expect(handleAuthOk({ capabilities: [] }).serverCapabilities).toEqual({})
       expect(handleAuthOk({ capabilities: 'cap' }).serverCapabilities).toEqual({})
     })
+
+    // Defence-in-depth (#4781 Copilot review): server-supplied keys are
+    // untrusted; refuse `__proto__`/`constructor`/`prototype` so a malformed
+    // payload can't mutate Object.prototype. JSON.parse'd payloads with
+    // these keys become own properties enumerable by Object.entries.
+    it('refuses prototype-pollution keys (__proto__, constructor, prototype)', () => {
+      const polluted = JSON.parse(
+        '{"__proto__": true, "constructor": true, "prototype": true, "ok": true}',
+      )
+      const caps = handleAuthOk({ capabilities: polluted }).serverCapabilities
+      expect(caps).toEqual({ ok: true })
+      // Object.prototype must be unchanged after parsing the payload.
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    })
   })
 
   it('returns the hardened defaults payload for an empty message', () => {

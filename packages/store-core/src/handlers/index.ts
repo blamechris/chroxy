@@ -711,9 +711,9 @@ export interface AuthOkWebFeatures {
  * which let `streamStallTimeoutMs` silently drop on mobile (StreamStallChip
  * couldn't humanise the headline phrase). The parser now owns the full
  * wire-shape decode; consumers assemble their platform-specific state
- * patches around the shared payload. `connectedClients` parsing lives in
- * its sibling helper `parseConnectedClients` so the `ConnectedClient` type
- * stays at the consumer boundary.
+ * patches around the shared payload. The connected-clients roster is
+ * parsed separately in `parseConnectedClients` (sibling helper) so the
+ * roster shape doesn't bloat `AuthOkPayload`.
  */
 export interface AuthOkPayload {
   /** Validated server mode (`'cli'`, `'terminal'`, or null). */
@@ -798,10 +798,17 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
       : { ...DEFAULT_WEB_FEATURES }
 
   // capabilities: object → strict-true boolean map; absent/non-object → {}.
+  // Skip prototype-pollution-prone keys (`__proto__`, `constructor`,
+  // `prototype`) so a malformed server payload can't mutate Object.prototype
+  // even though both consumers spread the map into Zustand state (which
+  // doesn't re-walk the prototype chain at runtime, but defence-in-depth is
+  // cheap here). Capability gates are fail-closed elsewhere — dropping a
+  // dangerous key just leaves the gate unset, which is the safe default.
   const capabilitiesRaw = msg.capabilities
   const serverCapabilities: Record<string, boolean> = {}
   if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
     for (const [k, v] of Object.entries(capabilitiesRaw)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
       serverCapabilities[k] = v === true
     }
   }
