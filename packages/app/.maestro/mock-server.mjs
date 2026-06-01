@@ -19,6 +19,11 @@ let showTodosCounter = 0
 // the same pattern used by `show-todos` — repeated invocations need
 // unique ids so React keys + tool_result patching stay independent.
 let showBashPartialCounter = 0
+// #4697: per-trigger counter for the AskUserQuestion fixtures. Same
+// rationale as `show-todos` / `show-bash-partial` — repeated
+// invocations on the same session need unique toolUseIds so the
+// app's user_question handler doesn't collide on a fixed id.
+let showAskUserQuestionCounter = 0
 
 function send(ws, msg) {
   seqCounter++
@@ -437,6 +442,121 @@ wss.on('connection', (ws) => {
           break
         }
 
+        // #4697: trigger phrase 'show-ask-user-question' emits a
+        // single-question AskUserQuestion `user_question` wire event so
+        // the Maestro ask-user-question{,-deny} flows can exercise the
+        // approve/deny round-trip on a real RN runtime. This is the
+        // *exact surface* of the v0.9.x prompt-delivery wedges
+        // (#4668 / #4679 / #4687 / #4648 / #4669) — server-side
+        // regression coverage is locked in, but the mobile app had
+        // zero E2E coverage for the approve/deny round-trip until
+        // #4697. Mirrors `show-todos` / `show-bash-partial` counter
+        // pattern so repeated triggers don't collide on a fixed
+        // toolUseId (which would let the user_question handler skip
+        // the second emission entirely).
+        //
+        // Wire shape matches the server's `user_question` envelope —
+        // see `packages/server/src/ws-server.js`
+        // `{ type:'user_question', toolUseId, questions }` and
+        // `packages/store-core/src/handlers/index.ts handleUserQuestion`
+        // which normalizes `questions[0]` into the legacy single-
+        // question `content` + `options` on the prompt ChatMessage.
+        //
+        // Options use `value: 'approve' | 'deny'` so the MessageBubble
+        // testID `approval-button-<value>` resolves to
+        // `approval-button-approve` / `approval-button-deny` — the
+        // canonical Maestro selectors documented in the per-flow
+        // headers.
+        if (text.trim() === 'show-ask-user-question') {
+          showAskUserQuestionCounter += 1
+          const toolUseId = `tu-askuserquestion-mock-${showAskUserQuestionCounter}`
+          // NOTE: option labels are deliberately lowercase ('approve' /
+          // 'deny') so the MessageBubble testID `approval-button-<value>`
+          // (value === label, see handleUserQuestion normalizeQuestion)
+          // resolves to the canonical `approval-button-approve` /
+          // `approval-button-deny` selectors documented in the flow
+          // headers. Production AskUserQuestion options come from the
+          // model and are usually capitalized — the testID format works
+          // regardless because the assertion targets the test fixture
+          // by exact match.
+          send(ws, {
+            type: 'user_question',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            questions: [
+              {
+                question: 'Should I run the deploy script?',
+                options: [
+                  { label: 'approve' },
+                  { label: 'deny' },
+                ],
+              },
+            ],
+          })
+          break
+        }
+
+        // #4697 Chunk B: 4-question multi-question form mirrors the
+        // shape #4604 Chunk B pinned at the server level. The mobile
+        // MessageBubble currently renders only `questions[0]` (the
+        // legacy single-question shape), so this flow asserts that
+        // (a) the prompt bubble lands without dropping the message,
+        // (b) Q[0]'s options ('Approve' / 'Deny') render correctly,
+        // and (c) the answered state round-trips. When the mobile
+        // multi-question UI lands, this flow can extend to iterate
+        // `approval-question-<index>` for N>1.
+        //
+        // The mock uses `value: 'approve' | 'deny'` on every question
+        // so the same `approval-button-<value>` selector matches Q[0]
+        // — option labels per question vary so the test can prove
+        // distinct questions hydrated correctly (asserted by content).
+        if (text.trim() === 'show-ask-user-question-multi') {
+          showAskUserQuestionCounter += 1
+          const toolUseId = `tu-askuserquestion-multi-mock-${showAskUserQuestionCounter}`
+          // Q[0] uses lowercase 'approve' / 'deny' to keep the canonical
+          // selector match with the single-question flow. Subsequent
+          // questions use distinct labels so the multi-question test
+          // can assert that the wire payload preserved every question
+          // (a regression in handleUserQuestion's normalizedAll filter
+          // would drop entries and we'd see fewer labels round-trip).
+          send(ws, {
+            type: 'user_question',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            questions: [
+              {
+                question: 'Q1 — deploy to production?',
+                options: [
+                  { label: 'approve' },
+                  { label: 'deny' },
+                ],
+              },
+              {
+                question: 'Q2 — notify the on-call channel?',
+                options: [
+                  { label: 'yes-notify' },
+                  { label: 'no-notify' },
+                ],
+              },
+              {
+                question: 'Q3 — wait for code-freeze ack?',
+                options: [
+                  { label: 'wait' },
+                  { label: 'skip' },
+                ],
+              },
+              {
+                question: 'Q4 — rollback strategy?',
+                options: [
+                  { label: 'auto-rollback' },
+                  { label: 'manual-rollback' },
+                ],
+              },
+            ],
+          })
+          break
+        }
+
         // Default: simulate a normal text-only assistant response.
         const messageId = `msg-${Date.now()}`
         send(ws, { type: 'stream_start', messageId, sessionId: 'mock-sess-1' })
@@ -452,6 +572,22 @@ wss.on('connection', (ws) => {
 
       case 'register_push_token':
         // Silently accept
+        break
+
+      // #4697: ack the AskUserQuestion approve/deny tap. The app's
+      // `sendUserQuestionResponse` flips `answered` locally on a
+      // successful socket write (see SessionScreen handleSelectOption),
+      // so no server reply is strictly required to advance the UI —
+      // but logging here gives the mock a visible audit trail and
+      // keeps the wire trace consistent with the production handler
+      // path (ws-server.js processes `user_question_response` /
+      // `permission_response` symmetrically).
+      case 'user_question_response':
+        console.log(`[mock] user_question_response: answer="${msg.answer}" toolUseId="${msg.toolUseId || ''}"`)
+        break
+
+      case 'permission_response':
+        console.log(`[mock] permission_response: requestId="${msg.requestId}" response="${msg.response}"`)
         break
 
       case 'request_session_context':

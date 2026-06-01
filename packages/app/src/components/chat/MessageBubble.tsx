@@ -151,10 +151,21 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
       activeOpacity={0.7}
       onPress={handlePress}
       onLongPress={isSelecting ? undefined : handleLongPress}
+      // #4697: `approval-card-<id>` testID lets Maestro pin the AskUserQuestion
+      // and permission-request approve/deny render path on the real RN runtime.
+      // Applied to every bubble (cheap, deterministic, and lets the test
+      // assert on a stable per-message anchor instead of brittle text matching).
+      testID={`approval-card-${message.id}`}
       style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSystem && styles.systemBubble, isSelected && styles.selectedBubble]}
     >
       <View style={isPrompt && message.expiresAt && !message.answered ? styles.promptHeaderRow : undefined}>
-        <Text style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : isSystem ? styles.senderLabelSystem : styles.senderLabelClaude}>
+        <Text
+          // #4697: header testID — Maestro multi-question flow asserts on this
+          // to pin the first-question render (MessageBubble renders Q[0]; the
+          // server-side multi-question payload still arrives in `message.questions`,
+          // which downstream renderers will iterate once multi-question UI lands).
+          testID={isPrompt ? `approval-question-0` : undefined}
+          style={isUser ? styles.senderLabelUser : isPrompt ? styles.senderLabelPrompt : isError ? styles.senderLabelError : isSystem ? styles.senderLabelSystem : styles.senderLabelClaude}>
           {isUser ? 'You' : isPrompt ? (message.tool || 'Action Required') : isError ? 'Error' : isSystem ? 'System' : 'Claude'}
         </Text>
         {isPrompt && !message.answered && message.expiresAt && (
@@ -195,6 +206,13 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
             return (
               <TouchableOpacity
                 key={i}
+                // #4697: `approval-button-<value>` lets Maestro flows tap
+                // by semantic intent when the mock-server emits a known
+                // value (e.g. 'approve' / 'deny' for the AskUserQuestion
+                // fixture). The value-based id is the stable assertion
+                // anchor for E2E coverage of the v0.9.x prompt-delivery
+                // wedge surface (#4668 / #4679 / #4687 / #4648 / #4669).
+                testID={`approval-button-${opt.value}`}
                 style={[
                   styles.promptOptionButton,
                   isDisabled && !isChosen && styles.promptOptionDisabled,
