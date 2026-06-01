@@ -78,6 +78,20 @@ export interface ToolBubbleProps {
 // previously this file had a local copy that ignored `serverName`, so
 // MCP-tool headers could disagree with the ActivityIndicator chip.
 
+// #4667 — AskUserQuestion's tool_input shape is internal: the dashboard
+// already renders the structured question via the `user_question` event
+// (QuestionPrompt card). Surfacing the raw `{"questions":[...` JSON tail
+// in the collapsed summary or the expanded preview while the tool is
+// streaming exposes implementation detail and gets visually reconciled
+// against the proper card that lands moments later (two bubbles for the
+// same prompt). Suppress both the summary and the partial-preview block
+// for this tool — the bubble becomes a quiet placeholder with just the
+// tool name + pulse marker until the structured card takes over. Matches
+// option 1 in #4667 ("suppress tool_input_delta rendering for
+// AskUserQuestion") and aligns with the precedent of other internal
+// tools whose canonical render path is a dedicated card.
+const SUPPRESS_RAW_INPUT_TOOLS = new Set(['AskUserQuestion'])
+
 export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false, resultImages }: ToolBubbleProps) {
   // #4313 — tail bubbles mount expanded so the singleton trailing-tool
   // case matches the #4309 tail-group behavior. Initial-state only via
@@ -89,6 +103,12 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // ActivityIndicator's in-flight predicate. Without this the header
   // pulses forever for computer-use / screenshot tools.
   const hasResult = result !== undefined || (resultImages?.length ?? 0) > 0
+  // #4667 — internal-shape tools (currently AskUserQuestion) must never
+  // surface raw `tool_input` JSON in the chat surface; the structured
+  // render path owns the display. Gate computed once so both the
+  // collapsed summary and the expanded partial-preview branches stay
+  // in sync.
+  const suppressRawInput = SUPPRESS_RAW_INPUT_TOOLS.has(toolName)
   // #4081: prefer the structured `input` summary when present (server
   // gave us the full final input, e.g. via legacy non-streaming
   // providers or after `tool_result` lands). Otherwise fall back to the
@@ -96,7 +116,11 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // fails (mid-stream partial JSON), show the raw tail so users still
   // see the field forming. The collapsed-state preview is what surfaces
   // Bash early-abort UX (#4063).
+  // #4667 — short-circuit to '' for suppressed tools so the bubble
+  // header carries just the tool name. The structured QuestionPrompt
+  // card is the canonical render path.
   const summary = useMemo(() => {
+    if (suppressRawInput) return ''
     const fromInput = getInputSummary(input)
     if (fromInput) return fromInput
     if (!inputPartial) return ''
@@ -109,7 +133,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
     // (\`{"command":"\` …) is always visible — the structurally-meaningful
     // start of the JSON document, not its still-arriving end.
     return inputPartial.slice(0, 100)
-  }, [input, inputPartial])
+  }, [input, inputPartial, suppressRawInput])
   const resultId = `tool-result-${toolUseId}`
   // #4139: parse the TodoWrite result once and pass the result down,
   // rather than re-parsing inside TodoList (Copilot review on #4179).
@@ -127,14 +151,18 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // #4242: gate the parse behind `tryParseCompleteJson` — a chunk
   // whose tail isn't `}` or `]` can't be a complete document, so we
   // skip the parse + throw entirely on the N-1 mid-stream deltas.
+  // #4667 — suppressed tools also skip the expanded partial-preview
+  // block. The structured QuestionPrompt card carries the question
+  // text + options; rendering raw JSON beside it produces the
+  // double-bubble reconciliation problem this fix addresses.
   const partialPreview = useMemo(() => {
-    if (!expanded || result || !inputPartial) return null
+    if (!expanded || result || !inputPartial || suppressRawInput) return null
     const parsed = tryParseCompleteJson(inputPartial)
     if (parsed !== undefined) {
       return { text: JSON.stringify(parsed, null, 2), parsed: true }
     }
     return { text: inputPartial, parsed: false }
-  }, [expanded, result, inputPartial])
+  }, [expanded, result, inputPartial, suppressRawInput])
 
   const toggle = () => setExpanded(prev => !prev)
 

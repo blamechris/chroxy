@@ -479,4 +479,88 @@ describe('ToolBubble', () => {
       expect(screen.queryByText('contents')).not.toBeInTheDocument()
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // #4667 — AskUserQuestion bubble must NOT surface its raw `tool_input`
+  // JSON during streaming. The dashboard already renders the structured
+  // question via the dedicated QuestionPrompt card (driven by the
+  // `user_question` event), so any JSON leak from this bubble produces a
+  // jarring double-render where users see both `{"questions":[...` and
+  // the proper card. The fix suppresses both the collapsed summary and
+  // the expanded partial-preview block for `tool_name === 'AskUserQuestion'`.
+  // ---------------------------------------------------------------------------
+  describe('AskUserQuestion raw input suppression (#4667)', () => {
+    it('hides the collapsed summary while a partial AskUserQuestion tool_input streams in', () => {
+      // Mid-stream: `tool_input_delta` chunks have piled up an unparseable
+      // prefix of the question JSON. The legacy fallback would slice the
+      // first 100 chars of the buffer into the collapsed summary span —
+      // that is exactly the JSON tail the issue calls out.
+      render(
+        <ToolBubble
+          toolName="AskUserQuestion"
+          toolUseId="auq-partial"
+          inputPartial={'{"questions":[{"question":"Which testing framework should the project us'}
+        />,
+      )
+      // No summary span (the suppression short-circuits the fallback).
+      expect(screen.queryByTestId('tool-input-summary')).not.toBeInTheDocument()
+      // And the raw JSON tail never appears anywhere in the bubble.
+      const bubble = screen.getByTestId('tool-bubble-auq-partial')
+      expect(bubble.textContent).not.toContain('{"questions"')
+      expect(bubble.textContent).not.toContain('Which testing framework')
+    })
+
+    it('hides the collapsed summary even when the AskUserQuestion JSON parses cleanly', () => {
+      // Final delta completed the JSON document — the legacy
+      // `getInputSummary` / `getPartialSummary` path would happily
+      // extract a string field and surface it. Must still be suppressed:
+      // the structured QuestionPrompt card is the canonical render path.
+      render(
+        <ToolBubble
+          toolName="AskUserQuestion"
+          toolUseId="auq-complete"
+          input={{
+            questions: [
+              { question: 'Which framework?', options: [{ label: 'Vitest' }, { label: 'Jest' }] },
+            ],
+          }}
+        />,
+      )
+      expect(screen.queryByTestId('tool-input-summary')).not.toBeInTheDocument()
+      // Tool name still renders so the bubble is identifiable.
+      // formatToolName leaves PascalCase tool names untouched (split by
+      // `_` only), so "AskUserQuestion" stays as-is.
+      expect(screen.getByText('AskUserQuestion')).toBeInTheDocument()
+    })
+
+    it('does not render the expanded partial-preview block for AskUserQuestion', () => {
+      render(
+        <ToolBubble
+          toolName="AskUserQuestion"
+          toolUseId="auq-expanded"
+          inputPartial={'{"questions":[{"question":"Which testing framework should the project us'}
+        />,
+      )
+      // Force-expand the bubble — even open, the partial-preview block
+      // must not appear (the structured card is rendered elsewhere).
+      fireEvent.click(screen.getByRole('button'))
+      expect(screen.queryByTestId('tool-input-partial-auq-expanded')).not.toBeInTheDocument()
+      const bubble = screen.getByTestId('tool-bubble-auq-expanded')
+      expect(bubble.textContent).not.toContain('{"questions"')
+    })
+
+    it('still surfaces inputPartial for non-suppressed tools (regression guard)', () => {
+      // Control: Bash must keep streaming its `command` field into the
+      // collapsed summary so the early-abort UX (#4063) continues to
+      // work. A too-broad suppression would silently break this.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="bash-control"
+          inputPartial='{"command":"rm -rf /tmp/foo"}'
+        />,
+      )
+      expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('rm -rf /tmp/foo')
+    })
+  })
 })
