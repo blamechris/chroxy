@@ -23,6 +23,27 @@
  * Analysis: tail the JSONL file to find the keystroke patterns that
  * advance between questions, toggle multiSelect, and reach Submit.
  *
+ * 10+ option questions (#4625):
+ *   The 2026-05-30 empirical recording only covered questions with ≤9
+ *   options (single-digit hotkeys '1'..'9'). For questions with 10+
+ *   options, two TUI keystroke paths are theoretically possible — neither
+ *   has been verified live:
+ *     - Arrow-key navigation: '\x1b[B' (down) N-1 times + '\r' (Enter)
+ *       to commit. Risk: claude TUI's multi-question form layout may not
+ *       accept arrow keys (no empirical recording exists).
+ *     - Multi-digit hotkey (e.g. '10', '11'): the v0.9.x single-digit
+ *       commit-on-keystroke behaviour pinned in #4292 makes this
+ *       unlikely to work; the second digit would either be dropped or
+ *       parsed as the next question's input.
+ *   Until a recorder pass exists for either path, the chroxy driver
+ *   (claude-tui-session.js) bails with ASK_USER_QUESTION_TOO_MANY_OPTIONS
+ *   when the user picks an option at index ≥9 — the dashboard surfaces a
+ *   toast asking the user to re-prompt with fewer options. To extend the
+ *   driver, record a session against a 10+ option question and pick
+ *   options 10, 11, etc. with whichever keystroke pattern works, then
+ *   add the supported keys to the multi-question driver and remove the
+ *   too-many-options guard.
+ *
  * Exit:
  *   Ctrl+D — clean exit (closes recording file)
  *   Ctrl+\ — kill claude immediately
@@ -32,6 +53,7 @@ import { resolve } from 'node:path'
 import { writeFileSync, createWriteStream } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { flushAndExit } from './flush-and-exit.mjs'
 
 // npm workspaces hoists node-pty to the root node_modules/.
 const ptyMod = await import('/Users/blamechris/Projects/chroxy/node_modules/node-pty/lib/index.js')
@@ -43,12 +65,25 @@ const recordingPath = join(tmpdir(), `tui-form-recording-${Date.now()}.jsonl`)
 const recording = createWriteStream(recordingPath, { encoding: 'utf8' })
 const startMs = Date.now()
 
+// Once true, log() becomes a no-op. flushAndExit() calls recording.end()
+// internally and any later log() (e.g. a late term.onData chunk arriving
+// after we kicked off shutdown in the Ctrl+D path) would otherwise throw
+// ERR_STREAM_WRITE_AFTER_END (#4729 review feedback).
+let recordingClosed = false
+
 const log = (kind, data) => {
+  if (recordingClosed) return
   recording.write(JSON.stringify({
     t: Date.now() - startMs,
     kind,
     data,
   }) + '\n')
+}
+
+const closeRecording = (exitCode) => {
+  if (recordingClosed) return
+  recordingClosed = true
+  flushAndExit(recording, exitCode)
 }
 
 process.stdout.write(`\x1b[33m=== tui-form-recorder ===\x1b[0m\n`)
@@ -74,10 +109,13 @@ term.onData((chunk) => {
 })
 
 term.onExit(({ exitCode, signal }) => {
-  recording.end()
   process.stdout.write(`\n\x1b[33m=== claude exited (code=${exitCode} signal=${signal}) ===\x1b[0m\n`)
   process.stdout.write(`Recording: ${recordingPath}\n`)
-  process.exit(exitCode || 0)
+  // Wait for the recording stream to flush before exiting — process.exit
+  // does not wait for buffered writes and was silently truncating the JSONL
+  // (#4729). closeRecording guards against double-close from the Ctrl+D
+  // path also triggering onExit via SIGTERM.
+  closeRecording(exitCode || 0)
 })
 
 // Raw mode so we capture every keystroke (arrow keys, Tab, etc.) as bytes
@@ -113,9 +151,14 @@ process.stdin.on('data', (buf) => {
   if (CTRL_D_SEQUENCES.has(data)) {
     process.stdout.write(`\n\x1b[33m=== ending recording (Ctrl+D) ===\x1b[0m\n`)
     log('in', '<<CTRL-D EXIT>>')
-    recording.end()
     term.kill('SIGTERM')
-    process.exit(0)
+    // Wait for the recording stream to flush before exiting — the SIGTERM
+    // above races the JSONL flush, and process.exit does not wait for
+    // buffered writes (#4729). closeRecording also flips recordingClosed
+    // so any late onData chunk arriving after kill() becomes a no-op
+    // instead of throwing ERR_STREAM_WRITE_AFTER_END.
+    closeRecording(0)
+    return
   }
   // Pass through to claude + log
   log('in', data)

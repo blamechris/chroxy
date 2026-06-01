@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, utimesSync, unlinkSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest } from '../src/providers.js'
@@ -805,5 +805,369 @@ describe('resolveProviderLabel helper (#2953)', () => {
     assert.equal(resolveProviderLabel(undefined), 'unknown')
     assert.equal(resolveProviderLabel(null), 'unknown')
     assert.equal(resolveProviderLabel(''), 'unknown')
+  })
+})
+
+// #4658: BYOK + DeepSeek credential file reads in listProviders() previously
+// re-hit the filesystem (statSync + readFileSync + JSON.parse) on every call.
+// The dashboard polls list_providers per session open, so this was hot. The
+// fix caches the resolver result keyed on mtime+size of credentials.json (and
+// on the env-var value when env wins). The tests below verify:
+//   (a) cache hit on repeated reads with unchanged file (same reference)
+//   (b) cache miss + refresh when the file's mtime changes
+//   (c) cache invalidation when the file is deleted
+// Plus the same three behaviours for DeepSeek.
+describe('listProviders credential-file caching (#4658)', () => {
+  // Env vars the cache key is sensitive to. Saved/restored per test so a
+  // stray ANTHROPIC_API_KEY in the developer env doesn't suppress the file
+  // path under test.
+  const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'DEEPSEEK_API_KEY', 'HOME', 'CHROXY_CLAUDE_HOME', 'CHROXY_CLAUDE_CONFIG', 'CHROXY_CODEX_HOME', 'CHROXY_GEMINI_HOME']
+  let saved
+  let tmpHome
+  let _tmpClaudeHome
+  let _tmpCodexHome
+  let _tmpGeminiHome
+
+  function setup() {
+    saved = {}
+    for (const k of ENV_KEYS) {
+      saved[k] = process.env[k]
+      delete process.env[k]
+    }
+    tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-test-'))
+    process.env.HOME = tmpHome
+    mkdirSync(join(tmpHome, '.chroxy'), { recursive: true, mode: 0o700 })
+
+    // #3674-style isolation for the OAuth probes so they don't accidentally
+    // satisfy a different code path while we're exercising the BYOK/DeepSeek
+    // branches. listProviders() iterates every registered provider, so the
+    // claude-sdk OAuth path runs alongside the BYOK path on each call.
+    _tmpClaudeHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-claude-'))
+    process.env.CHROXY_CLAUDE_HOME = _tmpClaudeHome
+    process.env.CHROXY_CLAUDE_CONFIG = join(_tmpClaudeHome, '.claude.json')
+    _tmpCodexHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-codex-'))
+    process.env.CHROXY_CODEX_HOME = _tmpCodexHome
+    _tmpGeminiHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-cache-gemini-'))
+    process.env.CHROXY_GEMINI_HOME = _tmpGeminiHome
+
+    _resetCredsCacheForTest()
+  }
+
+  function teardown() {
+    // Guard each step so a partial setup() (e.g. mkdtempSync threw before
+    // tmpHome was assigned) doesn't make teardown throw and mask the
+    // original failure. Each cleanup is independent and best-effort.
+    if (saved) {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+    if (tmpHome) rmSync(tmpHome, { recursive: true, force: true })
+    if (_tmpClaudeHome) rmSync(_tmpClaudeHome, { recursive: true, force: true })
+    if (_tmpCodexHome) rmSync(_tmpCodexHome, { recursive: true, force: true })
+    if (_tmpGeminiHome) rmSync(_tmpGeminiHome, { recursive: true, force: true })
+    _resetCredsCacheForTest()
+  }
+
+  function writeCredFile(content) {
+    const path = join(tmpHome, '.chroxy', 'credentials.json')
+    writeFileSync(path, content, { mode: 0o600 })
+    chmodSync(path, 0o600)
+    return path
+  }
+
+  describe('claude-byok', () => {
+    // Smoking-gun cache hit: mutate the file content to a state that would
+    // FLIP the ready bit (valid key → empty/blank field), but preserve mtime
+    // and size so the cache key stays identical. A working cache returns the
+    // stale ready=true result; a non-cached call would read the new content
+    // and report ready=false. The byte-length parity assertion below is what
+    // makes this test deterministic — if the two payloads don't match, the
+    // size half of the key changes and the test devolves into something the
+    // existing "refreshes on mtime" case already covers.
+    it('returns the cached resolver result when mtime+size are unchanged', () => {
+      try {
+        setup()
+        // Two same-length JSON payloads so a content-only mutation preserves
+        // the (mtime,size) cache key. Renaming the field name keeps total
+        // bytes constant while making the resolver reject the file on a
+        // fresh re-read; if the cache is in effect, the stale ready=true
+        // result is returned instead.
+        const original = JSON.stringify({ anthropicApiKey: 'sk-ant-cached' })
+        const renamed = JSON.stringify({ anthroXicApiKey: 'sk-ant-cached' })
+        assert.equal(original.length, renamed.length,
+          'rename fixture must be byte-equal to original for the cache key to hit')
+
+        const path = writeCredFile(original)
+        // Pin mtime to a round value so utimesSync's lower precision doesn't
+        // drift when we restore it below. statSync on macOS reports
+        // nanosecond-precision mtimeMs but utimesSync only accepts second-
+        // granularity Dates, so reading then writing the same mtime can
+        // diverge by sub-millisecond. Pinning to an integer-second Date
+        // sidesteps that.
+        const pinned = new Date(Math.floor(Date.now() / 1000) * 1000)
+        utimesSync(path, pinned, pinned)
+        const first = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(first.ready, true, 'baseline: file with valid key must report ready=true')
+
+        // Mutate in place, then restore mtime+size so the cache key is
+        // byte-identical. With caching, the cached ready=true result is
+        // reused; without caching, the next call would re-read the file,
+        // see the missing field, and report ready=false.
+        const beforeStat = statSync(path)
+        writeFileSync(path, renamed, { mode: 0o600 })
+        chmodSync(path, 0o600)
+        utimesSync(path, pinned, pinned)
+        const afterStat = statSync(path)
+        assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs,
+          'mtime restore must succeed for this test to actually exercise the cache')
+        assert.equal(afterStat.size, beforeStat.size,
+          'size must match for the cache key to hit')
+
+        const second = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(second.ready, true,
+          'cache hit: stale-but-cached ready=true returned because (mtime,size) unchanged')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('refreshes the cache when credentials.json mtime changes', () => {
+      try {
+        setup()
+        const path = writeCredFile(JSON.stringify({ anthropicApiKey: 'sk-ant-original' }))
+        const firstDetail = listProviders().find(p => p.name === 'claude-byok').auth.detail
+        assert.match(firstDetail, /credentials\.json/)
+
+        // Bump mtime forward so the (mtime,size) key differs. Same file size
+        // would also work — just touch the mtime. We rewrite the contents to
+        // a key the resolver will read on the refresh.
+        writeFileSync(path, JSON.stringify({ anthropicApiKey: 'sk-ant-rotated' }), { mode: 0o600 })
+        chmodSync(path, 0o600)
+        // Defensive: bump mtime explicitly in case the rewrite happened
+        // inside the same sub-millisecond tick as the original write.
+        const future = new Date(Date.now() + 2000)
+        utimesSync(path, future, future)
+
+        const afterRefresh = listProviders().find(p => p.name === 'claude-byok').auth
+        // Still reports ready (file is still valid). The cache refresh is
+        // observable via the underlying resolver re-running — we verify
+        // refresh happened by mutating to a state that produces a different
+        // detail (clearing the field → "missing" reason).
+        assert.equal(afterRefresh.ready, true)
+
+        // Now blank the field to force the resolver into the "missing field"
+        // branch. If the cache had stuck, this would still report ready=true.
+        writeFileSync(path, JSON.stringify({}), { mode: 0o600 })
+        chmodSync(path, 0o600)
+        const future2 = new Date(Date.now() + 5000)
+        utimesSync(path, future2, future2)
+
+        const afterBlank = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(afterBlank.ready, false,
+          'cache must refresh on mtime change — otherwise we would still report ready=true after blanking')
+        assert.match(afterBlank.detail, /missing or empty "anthropicApiKey" field/)
+      } finally {
+        teardown()
+      }
+    })
+
+    it('invalidates the cache when credentials.json is deleted', () => {
+      try {
+        setup()
+        const path = writeCredFile(JSON.stringify({ anthropicApiKey: 'sk-ant-temporary' }))
+        const before = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(before.ready, true)
+
+        unlinkSync(path)
+
+        const after = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(after.ready, false,
+          'cache must drop the cached ready=true result when the file disappears')
+        assert.match(after.detail, /does not exist|ENOENT/)
+      } finally {
+        teardown()
+      }
+    })
+
+    it('does not return a stale file result after the env var is set (env precedence)', () => {
+      try {
+        setup()
+        writeCredFile(JSON.stringify({ anthropicApiKey: 'sk-ant-from-file' }))
+        const fileResult = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.match(fileResult.detail, /credentials\.json/)
+
+        process.env.ANTHROPIC_API_KEY = 'sk-ant-from-env'
+        const envResult = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(envResult.ready, true)
+        assert.equal(envResult.envVar, 'ANTHROPIC_API_KEY')
+        assert.match(envResult.detail, /ANTHROPIC_API_KEY set/)
+      } finally {
+        teardown()
+      }
+    })
+
+    // #4728 review: mtime+size+envValue is not sufficient — the resolver also
+    // refuses any file with mode more permissive than 0o600 as a security
+    // boundary. `chmod 0644` does NOT bump mtime or change size, so without
+    // mode in the cache key the dashboard would keep reporting ready=true
+    // until the next file write. Pinning the chmod path here.
+    it('refreshes when the file mode is loosened (chmod does not touch mtime/size)', () => {
+      try {
+        setup()
+        const path = writeCredFile(JSON.stringify({ anthropicApiKey: 'sk-ant-mode-test' }))
+        const before = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(before.ready, true, 'baseline: 0o600 file must be readable')
+
+        // Loosen the mode without rewriting contents. mtime and size are
+        // unchanged; only `stat.mode & 0o777` flips. The resolver should
+        // refuse on the next call and the cache must reflect that.
+        chmodSync(path, 0o644)
+
+        const after = listProviders().find(p => p.name === 'claude-byok').auth
+        assert.equal(after.ready, false,
+          'cache must refresh on mode change — otherwise dashboard lags resolver after chmod')
+        assert.match(after.detail, /mode 644|refusing to read|must be 0600/)
+      } finally {
+        teardown()
+      }
+    })
+  })
+
+  describe('deepseek', () => {
+    it('returns the cached auth object on repeated reads with unchanged file', () => {
+      try {
+        setup()
+        writeCredFile(JSON.stringify({ deepseekApiKey: 'sk-ds-cached' }))
+
+        const first = listProviders().find(p => p.name === 'deepseek').auth
+        const second = listProviders().find(p => p.name === 'deepseek').auth
+
+        assert.equal(first.ready, true)
+        assert.equal(second.ready, true)
+        assert.match(first.detail, /credentials\.json/)
+        assert.equal(first.detail, second.detail)
+      } finally {
+        teardown()
+      }
+    })
+
+    it('refreshes the cache when credentials.json mtime changes', () => {
+      try {
+        setup()
+        const path = writeCredFile(JSON.stringify({ deepseekApiKey: 'sk-ds-original' }))
+        const firstResult = listProviders().find(p => p.name === 'deepseek').auth
+        assert.equal(firstResult.ready, true)
+
+        // Blank the field so a successful refresh produces an observable
+        // change in ready state.
+        writeFileSync(path, JSON.stringify({}), { mode: 0o600 })
+        chmodSync(path, 0o600)
+        const future = new Date(Date.now() + 5000)
+        utimesSync(path, future, future)
+
+        const afterBlank = listProviders().find(p => p.name === 'deepseek').auth
+        assert.equal(afterBlank.ready, false,
+          'cache must refresh on mtime change — otherwise we would still report ready=true after blanking')
+        assert.match(afterBlank.detail, /missing or empty "deepseekApiKey" field/)
+      } finally {
+        teardown()
+      }
+    })
+
+    it('invalidates the cache when credentials.json is deleted', () => {
+      try {
+        setup()
+        const path = writeCredFile(JSON.stringify({ deepseekApiKey: 'sk-ds-temporary' }))
+        const before = listProviders().find(p => p.name === 'deepseek').auth
+        assert.equal(before.ready, true)
+
+        unlinkSync(path)
+
+        const after = listProviders().find(p => p.name === 'deepseek').auth
+        assert.equal(after.ready, false,
+          'cache must drop the cached ready=true result when the file disappears')
+        assert.match(after.detail, /does not exist|ENOENT/)
+      } finally {
+        teardown()
+      }
+    })
+
+    it('does not return a stale file result after the env var is set (env precedence)', () => {
+      try {
+        setup()
+        writeCredFile(JSON.stringify({ deepseekApiKey: 'sk-ds-from-file' }))
+        const fileResult = listProviders().find(p => p.name === 'deepseek').auth
+        assert.match(fileResult.detail, /credentials\.json/)
+
+        process.env.DEEPSEEK_API_KEY = 'sk-ds-from-env'
+        const envResult = listProviders().find(p => p.name === 'deepseek').auth
+        assert.equal(envResult.ready, true)
+        assert.equal(envResult.envVar, 'DEEPSEEK_API_KEY')
+        assert.match(envResult.detail, /DEEPSEEK_API_KEY set/)
+      } finally {
+        teardown()
+      }
+    })
+  })
+
+  // BYOK and DeepSeek share `~/.chroxy/credentials.json`. Make sure their
+  // cache slots don't trample each other — a mutation that only changes one
+  // field must still refresh the other slot too (because mtime moves).
+  it('byok and deepseek slots both refresh when credentials.json changes', () => {
+    try {
+      setup()
+      const path = writeCredFile(JSON.stringify({
+        anthropicApiKey: 'sk-ant-a',
+        deepseekApiKey: 'sk-ds-a',
+      }))
+      const byok1 = listProviders().find(p => p.name === 'claude-byok').auth
+      const ds1 = listProviders().find(p => p.name === 'deepseek').auth
+      assert.equal(byok1.ready, true)
+      assert.equal(ds1.ready, true)
+
+      // Mutate the file — drop both keys.
+      writeFileSync(path, JSON.stringify({}), { mode: 0o600 })
+      chmodSync(path, 0o600)
+      const future = new Date(Date.now() + 5000)
+      utimesSync(path, future, future)
+
+      const byok2 = listProviders().find(p => p.name === 'claude-byok').auth
+      const ds2 = listProviders().find(p => p.name === 'deepseek').auth
+      assert.equal(byok2.ready, false, 'BYOK cache must refresh on file change')
+      assert.equal(ds2.ready, false, 'DeepSeek cache must refresh on file change')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The cache is opt-in for the listProviders() poll path. Session-start
+  // paths (byok-session.js / deepseek-session.js) still call the resolvers
+  // directly. We can't directly observe those here, but we can pin the
+  // observable behaviour at the listProviders boundary: a freshly-written
+  // credentials.json reports ready=true immediately, not after a cache TTL
+  // expiry. This is the "no observable behaviour change" guarantee.
+  it('a freshly-written credentials.json reports ready=true on the very next listProviders call', () => {
+    try {
+      setup()
+      // No file yet — both BYOK and DeepSeek must report missing.
+      const beforeByok = listProviders().find(p => p.name === 'claude-byok').auth
+      const beforeDs = listProviders().find(p => p.name === 'deepseek').auth
+      assert.equal(beforeByok.ready, false)
+      assert.equal(beforeDs.ready, false)
+
+      writeCredFile(JSON.stringify({
+        anthropicApiKey: 'sk-ant-fresh',
+        deepseekApiKey: 'sk-ds-fresh',
+      }))
+
+      const afterByok = listProviders().find(p => p.name === 'claude-byok').auth
+      const afterDs = listProviders().find(p => p.name === 'deepseek').auth
+      assert.equal(afterByok.ready, true, 'new credentials.json must be picked up immediately, not after a TTL')
+      assert.equal(afterDs.ready, true, 'new credentials.json must be picked up immediately, not after a TTL')
+    } finally {
+      teardown()
+    }
   })
 })

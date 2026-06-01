@@ -677,16 +677,67 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // forcing a re-render of its own.
   const [preambleDraft, setPreambleDraft] = useState<string>('')
   const preambleDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // #4662: dirty-flag tracking mirrors QuietHoursEditor's #4570 pattern.
+  // The dirty flag flips on every edit and clears on session-switch
+  // hydrate / debounce flush / accept-snapshot. Read via a ref inside
+  // the hydration effect so we don't add it to the dep array (which
+  // would re-run the effect and re-apply the snapshot we just held).
+  const [preambleDirty, setPreambleDirty] = useState(false)
+  const preambleDirtyRef = useRef(false)
+  useEffect(() => { preambleDirtyRef.current = preambleDirty }, [preambleDirty])
+  // #4662: parked snapshot for the conflict banner. Set when a server
+  // broadcast diverges from the dirty draft. `undefined` = no conflict.
+  // The ref mirror lets `handleDiscardPreambleDraft` read the current
+  // snapshot without binding it via closure (which would force the
+  // callback to re-create on every snapshot change and defeat the
+  // `useCallback([])` dep contract). Mirrors the `preambleDirtyRef`
+  // pattern above.
+  const [preambleConflict, setPreambleConflict] = useState<string | undefined>(undefined)
+  const preambleConflictRef = useRef<string | undefined>(undefined)
+  useEffect(() => { preambleConflictRef.current = preambleConflict }, [preambleConflict])
+  // #4662: track the session the current draft belongs to. When
+  // activeSessionId changes mid-edit we MUST cancel the pending
+  // debounce — otherwise `setSessionPreamble` reads activeSessionId
+  // from the store at fire-time and leaks session A's draft text onto
+  // session B (gap 1 in #4662).
+  const preambleSessionRef = useRef<string | null>(activeSessionId ?? null)
   // Mirror the server-confirmed value into the local draft whenever the
   // active session changes (switching sessions) or the server broadcasts
-  // a new stored value (multi-client edit). Skip the mirror when the
-  // user is mid-edit — measured by whether the draft already matches a
-  // value we're about to flush — so a multi-client confirm doesn't
-  // overwrite half-typed text.
+  // a new stored value (multi-client edit). Two distinct cases:
+  //   1. Session switch — always re-hydrate AND cancel any pending
+  //      debounce. The leaked text would otherwise fire against the
+  //      new session.
+  //   2. Same-session snapshot arrives mid-edit — if it diverges from
+  //      the local draft, park it for the conflict banner. If it
+  //      matches the draft (own echo) clear dirty silently. If the
+  //      editor is clean, apply the snapshot.
   useEffect(() => {
     const serverValue = typeof activeSessionSessionPreamble === 'string' ? activeSessionSessionPreamble : ''
-    if (preambleDebounceRef.current) return  // mid-edit; don't clobber
+    const sessionChanged = preambleSessionRef.current !== (activeSessionId ?? null)
+    if (sessionChanged) {
+      // Drop any pending debounce — it closes over the old session's
+      // draft and would fire against the new active session.
+      if (preambleDebounceRef.current) {
+        clearTimeout(preambleDebounceRef.current)
+        preambleDebounceRef.current = null
+      }
+      preambleSessionRef.current = activeSessionId ?? null
+      setPreambleDraft(serverValue)
+      setPreambleDirty(false)
+      setPreambleConflict(undefined)
+      return
+    }
+    const isDirty = preambleDirtyRef.current
+    const matchesDraft = serverValue === preambleDraft
+    if (isDirty && !matchesDraft) {
+      // Park the snapshot for the user to resolve via the banner.
+      setPreambleConflict(serverValue)
+      return
+    }
+    // Clean apply (or snapshot already matches draft — e.g. our own echo).
     setPreambleDraft(serverValue)
+    setPreambleDirty(false)
+    setPreambleConflict(undefined)
   }, [activeSessionId, activeSessionSessionPreamble])  // eslint-disable-line react-hooks/exhaustive-deps
   // Clean up the pending debounce on unmount so we don't fire a stale
   // WS send after the panel closes.
@@ -695,6 +746,30 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
       clearTimeout(preambleDebounceRef.current)
       preambleDebounceRef.current = null
     }
+  }, [])
+
+  // #4662: user keeps their local draft — discard the parked snapshot.
+  // The next divergent broadcast will re-surface the banner.
+  const handleAcceptPreambleDraft = useCallback(() => {
+    setPreambleConflict(undefined)
+  }, [])
+
+  // #4662: user takes the remote snapshot — replace the draft, clear
+  // dirty, drop any pending debounce so we don't immediately overwrite
+  // the snapshot we just accepted. Side effects live OUTSIDE the
+  // setState updater (StrictMode would otherwise invoke them twice);
+  // we read the parked snapshot off the ref instead of via closure so
+  // the `useCallback([])` dep contract stays valid.
+  const handleDiscardPreambleDraft = useCallback(() => {
+    const snap = preambleConflictRef.current
+    if (snap === undefined) return
+    if (preambleDebounceRef.current) {
+      clearTimeout(preambleDebounceRef.current)
+      preambleDebounceRef.current = null
+    }
+    setPreambleDraft(snap)
+    setPreambleDirty(false)
+    setPreambleConflict(undefined)
   }, [])
 
   // #4559: shared copy for the inline "server disconnected" banner so the
@@ -1075,15 +1150,60 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                   <label htmlFor="session-preamble-input">
                     Always include this context in every message
                   </label>
+                  {/* #4662: conflict banner mirrors QuietHoursEditor
+                      (#4570). Renders when a divergent server snapshot
+                      arrives while the local draft is dirty. */}
+                  {preambleConflict !== undefined && (
+                    <div
+                      className="settings-hint session-preamble-conflict-banner"
+                      role="alert"
+                      data-testid="session-preamble-conflict-banner"
+                    >
+                      <p>
+                        Another client updated this session's preamble while
+                        you were editing. Keep your unsaved changes, or
+                        discard them and load the latest value?
+                      </p>
+                      <div className="settings-field">
+                        <button
+                          type="button"
+                          onClick={handleAcceptPreambleDraft}
+                          data-testid="session-preamble-conflict-accept"
+                        >
+                          Keep my edits
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDiscardPreambleDraft}
+                          data-testid="session-preamble-conflict-discard"
+                        >
+                          Discard and load latest
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <textarea
                     id="session-preamble-input"
                     value={preambleDraft}
                     onChange={(e) => {
                       const next = e.target.value
                       setPreambleDraft(next)
+                      setPreambleDirty(true)
+                      // #4662: capture the session at schedule-time so the
+                      // debounce only fires when activeSessionId still
+                      // points at the same session. Without this, a
+                      // mid-debounce session switch would call
+                      // setSessionPreamble(stale) against the new active
+                      // session (gap 1 of #4662). The schedule-time guard
+                      // is belt-and-braces — the activeSessionId effect
+                      // already cancels the debounce on switch — but it
+                      // closes the race window inside the timer callback.
+                      const scheduledSession = preambleSessionRef.current
                       if (preambleDebounceRef.current) clearTimeout(preambleDebounceRef.current)
                       preambleDebounceRef.current = setTimeout(() => {
                         preambleDebounceRef.current = null
+                        if (preambleSessionRef.current !== scheduledSession) return
+                        setPreambleDirty(false)
                         setSessionPreamble(next)
                       }, 400)
                     }}

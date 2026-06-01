@@ -515,9 +515,53 @@ describe('QuestionPrompt', () => {
       fireEvent.click(screen.getByTestId('question-multi-option-1-Yes').querySelector('input')!)
       fireEvent.click(screen.getByTestId('question-multi-submit'))
       expect(onSelect).toHaveBeenCalledTimes(1)
-      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string> | undefined
+      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
       expect(arg!['Which release strategy?']).toBe('Minor')
       expect(arg!['Confirm?']).toBe('Yes')
+    })
+
+    // #4621 — multiSelect questions emit native string[] (no JSON encoding)
+    it('emits native string[] for multi-select questions (no JSON encoding)', () => {
+      const onSelect = vi.fn()
+      const multi = {
+        question: 'Which areas?',
+        options: [
+          { label: 'App', value: 'App' },
+          { label: 'Tests', value: 'Tests' },
+          { label: 'Docs', value: 'Docs' },
+        ],
+        multiSelect: true,
+      }
+      const single = {
+        question: 'Confirm?',
+        options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }],
+      }
+      render(<MultiQuestionForm questions={[multi, single]} onSelect={onSelect} />)
+      fireEvent.click(screen.getByTestId('question-multi-option-0-App').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-option-0-Tests').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-option-1-Yes').querySelector('input')!)
+      fireEvent.click(screen.getByTestId('question-multi-submit'))
+      expect(onSelect).toHaveBeenCalledTimes(1)
+      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]>
+      // Native array — not a JSON-stringified string
+      expect(Array.isArray(arg['Which areas?'])).toBe(true)
+      expect(arg['Which areas?']).toEqual(['App', 'Tests'])
+      // Single-select stays as plain string
+      expect(arg['Confirm?']).toBe('Yes')
+    })
+
+    it('emits an empty string[] when no multi-select options are chosen', () => {
+      const onSelect = vi.fn()
+      const multi = {
+        question: 'Which areas?',
+        options: [{ label: 'App', value: 'App' }, { label: 'Tests', value: 'Tests' }],
+        multiSelect: true,
+      }
+      render(<MultiQuestionForm questions={[multi]} onSelect={onSelect} />)
+      fireEvent.click(screen.getByTestId('question-multi-submit'))
+      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]>
+      expect(Array.isArray(arg['Which areas?'])).toBe(true)
+      expect(arg['Which areas?']).toEqual([])
     })
 
     // #4624 — a11y: each per-question options block must be exposed to

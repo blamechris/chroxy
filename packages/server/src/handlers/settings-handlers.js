@@ -15,6 +15,10 @@ import {
 import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
 import { createLogger } from '../logger.js'
+import {
+  PER_SESSION_SETTINGS,
+  buildPerSessionSettingHandler,
+} from '../per-session-settings.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
 // These are safe file-operation tools that don't execute code or make network requests.
@@ -1110,68 +1114,6 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
 }
 
 /**
- * #3185 — toggle the per-session promptEvaluator flag. Strict-boolean
- * payload validation, idempotent (no-op when value unchanged so the
- * dashboard can re-send the current value without churning state-file
- * writes), and broadcast on actual change so multi-client UIs stay in
- * sync.
- *
- * Persistence is an immediate `serializeState()` flush rather than the
- * debounced `schedulePersist` other handlers use. Toggles are operator
- * actions — rare enough that the synchronous write is free, and a crash
- * within the debounce window would otherwise silently lose the change.
- */
-function handleSetPromptEvaluator(ws, client, msg, ctx) {
-  if (typeof msg.value !== 'boolean') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_prompt_evaluator requires a boolean `value`',
-    })
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  if (typeof entry.session.setPromptEvaluator !== 'function') {
-    // Defensive — every shipping provider extends BaseSession which adds
-    // the setter. A custom provider that bypasses BaseSession would land
-    // here; refuse rather than silently dropping the toggle.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluator toggling' })
-    return
-  }
-
-  const changed = entry.session.setPromptEvaluator(msg.value)
-  if (!changed) {
-    // Either invalid input (already validated above so unreachable) or
-    // a redundant set. Either way: no broadcast, no persist — the
-    // dashboard already shows the current value.
-    return
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'prompt_evaluator_changed',
-    sessionId,
-    value: entry.session.promptEvaluator,
-  })
-
-  // Persist immediately rather than waiting for the debounced
-  // schedulePersist — toggles are rare enough that the extra write is
-  // free, and a crash within the debounce window would otherwise
-  // silently lose the change. Keep best-effort: failures here log but
-  // don't surface to the client (the in-memory state is correct).
-  try {
-    ctx.sessionManager?.serializeState?.()
-  } catch (err) {
-    log.warn(`Failed to persist promptEvaluator toggle for ${sessionId}: ${err?.message || err}`)
-  }
-}
-
-/**
  * #3639 — set the per-session promptEvaluatorSkipPattern. Mirrors the
  * #3185 toggle handler: strict-typed payload validation, idempotent on
  * unchanged input, broadcast on actual change, immediate persist (rather
@@ -1252,121 +1194,6 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   }
 }
 
-/**
- * #3805 — toggle the per-session Chroxy context hint flag. Mirrors the
- * #3185 promptEvaluator handler: strict-boolean payload validation,
- * idempotent (no-op when value unchanged so the dashboard can re-send
- * the current value without churning state-file writes), and broadcast
- * on actual change so multi-client UIs stay in sync.
- *
- * Persistence is an immediate `serializeState()` flush rather than the
- * debounced `schedulePersist` other handlers use. Toggles are operator
- * actions — rare enough that the synchronous write is free, and a crash
- * within the debounce window would otherwise silently lose the change.
- */
-function handleSetChroxyContextHint(ws, client, msg, ctx) {
-  if (typeof msg.value !== 'boolean') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_chroxy_context_hint requires a boolean `value`',
-    })
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  if (typeof entry.session.setChroxyContextHint !== 'function') {
-    // Defensive — every shipping provider extends BaseSession which adds
-    // the setter. A custom provider that bypasses BaseSession would land
-    // here; refuse rather than silently dropping the toggle.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support chroxyContextHint toggling' })
-    return
-  }
-
-  const changed = entry.session.setChroxyContextHint(msg.value)
-  if (!changed) {
-    // Either invalid input (already validated above so unreachable) or a
-    // redundant set. Either way: no broadcast, no persist.
-    return
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'chroxy_context_hint_changed',
-    sessionId,
-    value: entry.session.chroxyContextHint,
-  })
-
-  try {
-    ctx.sessionManager?.serializeState?.()
-  } catch (err) {
-    log.warn(`Failed to persist chroxyContextHint toggle for ${sessionId}: ${err?.message || err}`)
-  }
-}
-
-/**
- * #4660 — set the per-session preamble (free-text context prepended to the
- * system prompt every turn). Mirrors the #3805 chroxyContextHint handler:
- * string-typed payload validation, idempotent (no-op when the trimmed value
- * matches what's already stored so the dashboard can re-emit on every
- * keystroke without churning state-file writes), and broadcast on actual
- * change so multi-client UIs stay in sync.
- *
- * Persistence is an immediate `serializeState()` flush rather than the
- * debounced `schedulePersist` other handlers use — same justification as
- * #3805: per-session settings are infrequent operator actions where the
- * sync write is free, and a crash within the debounce window would
- * otherwise silently lose the change.
- */
-function handleSetSessionPreamble(ws, client, msg, ctx) {
-  if (typeof msg.value !== 'string') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_session_preamble requires a string `value`',
-    })
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  if (typeof entry.session.setSessionPreamble !== 'function') {
-    // Defensive — every shipping provider extends BaseSession which adds
-    // the setter. A custom provider that bypasses BaseSession would land
-    // here; refuse rather than silently dropping the update.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support sessionPreamble' })
-    return
-  }
-
-  const changed = entry.session.setSessionPreamble(msg.value)
-  if (!changed) {
-    // No actual change (either redundant set, type-rejected at the setter,
-    // or a string that trims to the same stored value). No broadcast,
-    // no persist.
-    return
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'session_preamble_changed',
-    sessionId,
-    value: entry.session.sessionPreamble,
-  })
-
-  try {
-    ctx.sessionManager?.serializeState?.()
-  } catch (err) {
-    log.warn(`Failed to persist sessionPreamble for ${sessionId}: ${err?.message || err}`)
-  }
-}
-
 function handleSetPermissionRules(ws, client, msg, ctx) {
   const rules = msg.rules
 
@@ -1431,6 +1258,18 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   log.info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
 }
 
+// #4664: assemble the per-session-setting WS handlers from the registry.
+// Each setting's `requestType` (e.g. `'set_prompt_evaluator'`) is the
+// message-type key the dispatcher looks up; the factory-built handler
+// covers payload validation, session resolution, setter invocation,
+// broadcast, and immediate persist with the same shape every existing
+// hand-written handler used. Adding a new setting means appending one
+// entry to PER_SESSION_SETTINGS — no new handler boilerplate.
+const perSessionSettingHandlers = {}
+for (const settingDef of PER_SESSION_SETTINGS) {
+  perSessionSettingHandlers[settingDef.requestType] = buildPerSessionSettingHandler(settingDef)
+}
+
 export const settingsHandlers = {
   set_model: handleSetModel,
   set_permission_mode: handleSetPermissionMode,
@@ -1440,10 +1279,13 @@ export const settingsHandlers = {
   list_skills: handleListSkills,
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
-  set_prompt_evaluator: handleSetPromptEvaluator,
+  // promptEvaluatorSkipPattern keeps its bespoke handler because the
+  // payload shape (string-or-null + pre-validation regex compile to
+  // surface a distinct error code) doesn't fit the boolean/string
+  // factory. The other three per-session settings come from the
+  // registry above.
   set_prompt_evaluator_skip_pattern: handleSetPromptEvaluatorSkipPattern,
-  set_chroxy_context_hint: handleSetChroxyContextHint,
-  set_session_preamble: handleSetSessionPreamble,
+  ...perSessionSettingHandlers,
   skill_activate: handleSkillActivate,
   skill_deactivate: handleSkillDeactivate,
   skill_trust_accept: handleSkillTrustAccept,
