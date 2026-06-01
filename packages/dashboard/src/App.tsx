@@ -267,6 +267,14 @@ export function App() {
   const activeSessionCwd = useConnectionStore(s =>
     s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.cwd ?? null,
   )
+  // #4603: active session's provider name (e.g. `'claude-sdk'`,
+  // `'claude-cli'`) so the StreamStallChip can prefix its headline
+  // with the provider short label for one-glance triage. Subscribed
+  // here so a tab switch updates the chip's variant on the next render
+  // without a full message-map rebuild.
+  const activeSessionProvider = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider ?? null,
+  )
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
   const sessionStates = useConnectionStore(s => s.sessionStates)
@@ -1556,6 +1564,14 @@ export function App() {
     // most recent bubble (chatTailMessageId) — replayed historical stalls
     // surface the chip text + tooltip for diagnostics, but resending an
     // ancient user_input from a long-finished turn would be misleading.
+    //
+    // #4603: thread the active session's provider through so the chip
+    // headline can carry a short label ("SDK · ...", "CLI · ...") for
+    // one-glance triage, and hand the View-logs affordance a closure
+    // that switches the view to the System pane (where session-level
+    // context lives). The View-logs button is only shown on the tail
+    // entry — replaying historical stalls shouldn't offer to jump the
+    // operator out of the chat for an old event.
     if (storeMsg.type === 'error' && storeMsg.code === 'stream_stall') {
       const isTail = msg.id === chatTailMessageId
       const lastUserInput = isTail
@@ -1566,13 +1582,15 @@ export function App() {
           errorText={storeMsg.content}
           onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
           timeoutMs={streamStallTimeoutMs ?? undefined}
+          provider={activeSessionProvider ?? undefined}
+          onViewLogs={isTail ? () => setViewMode('system') : undefined}
         />
       )
     }
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, activeSessionProvider, setViewMode])
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders

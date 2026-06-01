@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.32] - 2026-06-01
+
+Test-coverage push closing the gaps identified in the 2026-05-31 testing audit. The v0.9.x prompt-delivery wedge fixes (#4668/#4679/#4687/#4648/#4669) were already pinned server-side; this release locks in the surfaces that still had no regression coverage — mobile-side approval flows, the desktop Tauri command surface, the CLI command layer, and the SDK/CLI session persistence roundtrip.
+
+### Added
+
+- **Pin #4689 synthesized toolUseId edge case for PostToolUse cleanup (#4703):** new regression test in `claude-tui-session.test.js` that arms a pending entry via PreToolUse with no `tool_use_id` (forces `_emitToolHookEvent` to synthesize one), then asserts PostToolUse with the same synthesized id clears both the `_pendingUserAnswers` Map entry and the `askuserquestion-active` lock dir. Reverting the #4689 fix at line 1438 of `claude-tui-session.js` fails the test.
+- **Maestro E2E coverage for plan-mode approval flow (#4704):** `plan-approval.yaml` (approve path) and `plan-approval-deny.yaml` (Give Feedback path) wired to a new `show-plan-approval` mock-server trigger that emits the production `plan_ready` envelope. testIDs added to `PlanApprovalCard` in `ChatView.tsx` (`plan-approval-card`, `plan-content`, `plan-approve-button`, `plan-deny-button`).
+- **Tauri command integration test harness (#4705):** new `packages/desktop/src-tauri/tests/command_integration.rs` with 46 integration tests covering all 21 registered Tauri commands beyond the existing `command_drift.rs` name-sync check. Includes a `save_setup_config` → `get_setup_state` roundtrip pinning the first-run wizard contract.
+- **Maestro E2E for terminal view + reconnect-after-tunnel-drop (#4706):** `terminal-view.yaml` exercises the Terminal mode toggle + xterm WebView mount via a new `show-terminal` mock-server trigger. `reconnect.yaml` simulates a tunnel drop via `simulate-disconnect` (now using `ws.terminate()`, see Fixed below) and verifies the reconnect banner + spinner appear and clear.
+- **Maestro E2E for AskUserQuestion approve/deny (#4697 / #4707):** `ask-user-question.yaml` (approve), `ask-user-question-deny.yaml` (deny), and `ask-user-question-multi.yaml` (4-question form per #4604 Chunk B). Pins the mobile-side approval round-trip — the exact surface where the v0.9.x prompt-delivery wedges manifested but where mobile E2E had zero coverage until now. testIDs added to `MessageBubble.tsx` (`approval-card-<id>`, `approval-question-<index>`, `approval-button-<value>`).
+- **SDK/CLI session-state persistence roundtrip coverage (#4700 / #4708):** every test in `sdk-session.test.js` and `cli-session.test.js` now uses a per-test temp `stateFilePath` (mirroring `session-manager.test.js`), and 8 new roundtrip tests pin the contract: happy-path metadata equality, corrupt-state graceful null, mismatched-id ignored, and Map serialization (the `[...map.entries()]` workaround that #4687 introduced for `_pendingUserAnswers`).
+- **E2E coverage for CLI commands (#4699 / #4709):** 30 tests across all 12 CLI command modules under `packages/server/tests/cli/`, with a new reusable `spawn-cli.js` helper that isolates HOME + `CHROXY_CONFIG_DIR` per spawn so tests never touch real `~/.chroxy/`. Random high-port allocation (40000–60000) avoids collisions with the dev daemon on 8765.
+
+### Changed
+
+- Added a small `RNActivityIndicator` to the reconnect banner in `SessionScreen.tsx` so the spinner is visible during tunnel-drop recovery (part of #4706 — wrapped in the existing flex row, no layout side effects).
+- Flipped 7 internal-crate modules in `packages/desktop/src-tauri/src/` from `private` to `pub` so they're callable from the new Tauri command integration test harness (part of #4705). No external API surface impact — `command_drift.rs` continues to pass unchanged.
+
+### Fixed
+
+- **Mock-server reconnect simulation: `ws.terminate()` instead of `ws.close(1006, ...)` (#4706):** RFC 6455 reserves close code 1006 — it cannot be sent in a Close frame. The `ws` library throws on the attempt, which the `try/catch` was swallowing, leaving the socket open and the reconnect flow hanging. `ws.terminate()` does an abrupt TCP teardown which clients observe as a local 1006 — exactly the shape of a real tunnel drop.
+
 ## [0.9.31] - 2026-05-31
 
 Phase 3 of `docs/investigations/prompt-delivery-wedge.md` — targeted fix for #4668 using the diagnosis produced by v0.9.30's instrumentation. When claude TUI emits parallel `AskUserQuestion` tool_use blocks in one assistant turn (which it does post-#4648 multi-question deny), the pre-fix single-field `_pendingUserAnswer` was overwritten by each new tool_use → the user's answer to question 1 routed to question 4's slot → the keystroke landed in a TUI form bound to the wrong toolUseId → PostToolUse never fired → 30s watchdog tore the turn down → dashboard showed "Couldn't deliver your answers". Same opaque symptom we had been chasing under #4678 for weeks, completely different root cause.

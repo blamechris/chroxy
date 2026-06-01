@@ -238,6 +238,73 @@ describe('ChatMessage', () => {
     )
     expect(screen.getByTestId('chat-message-msg-error-ok')).toBeInTheDocument()
   })
+
+  /**
+   * #4757 — chat markdown overflow fix. These tests assert the renderer
+   * still emits the <pre> / <code> structure that the CSS rules in
+   * theme/components.css target (`.msg pre`, `.msg pre code`,
+   * `.msg code`). jsdom doesn't measure layout, so the visual cap +
+   * horizontal-scroll behaviour is verified manually in the dashboard;
+   * here we lock in the contract that long content renders without
+   * throwing and lands inside the right elements so the CSS keeps
+   * applying.
+   */
+  describe('long markdown content (#4757)', () => {
+    it('renders a fenced block with a very long single line inside <pre><code>', () => {
+      const longLine = 'a'.repeat(220)
+      render(
+        <ChatMessage
+          id="msg-long-pre"
+          type="response"
+          content={'before\n```\n' + longLine + '\n```\nafter'}
+          timestamp={Date.now()}
+        />
+      )
+      const el = screen.getByTestId('chat-message-msg-long-pre')
+      const pre = el.querySelector('pre')
+      expect(pre).not.toBeNull()
+      const code = pre!.querySelector('code')
+      expect(code).not.toBeNull()
+      expect(code!.textContent).toContain(longLine)
+    })
+
+    it('renders an inline long-token code span inside <code> (no pre ancestor)', () => {
+      const longToken = 'x'.repeat(180)
+      render(
+        <ChatMessage
+          id="msg-long-inline"
+          type="response"
+          content={'see `' + longToken + '` for the path'}
+          timestamp={Date.now()}
+        />
+      )
+      const el = screen.getByTestId('chat-message-msg-long-inline')
+      const inlineCodes = Array.from(el.querySelectorAll('code')).filter(
+        c => !c.closest('pre')
+      )
+      expect(inlineCodes).toHaveLength(1)
+      expect(inlineCodes[0]!.textContent).toBe(longToken)
+    })
+
+    it('renders mixed inline + fenced content in one message without throwing', () => {
+      const longLine = 'z'.repeat(250)
+      const longToken = 'q'.repeat(150)
+      render(
+        <ChatMessage
+          id="msg-mixed"
+          type="response"
+          content={`Use the \`${longToken}\` flag:\n\n\`\`\`\n${longLine}\n\`\`\``}
+          timestamp={Date.now()}
+        />
+      )
+      const el = screen.getByTestId('chat-message-msg-mixed')
+      expect(el.querySelector('pre code')!.textContent).toContain(longLine)
+      const inline = Array.from(el.querySelectorAll('code')).find(
+        c => !c.closest('pre')
+      )
+      expect(inline!.textContent).toBe(longToken)
+    })
+  })
 })
 
 describe('ToolBubble', () => {

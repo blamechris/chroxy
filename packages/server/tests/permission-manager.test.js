@@ -497,6 +497,30 @@ describe('PermissionManager', () => {
       assert.deepEqual(result.updatedInput.answers, { 'Color?': 'Red' })
       assert.ok(!('Unknown?' in result.updatedInput.answers))
     })
+
+    // #4621 — answersMap values may be string[] (native multi-select),
+    // not just string. PermissionManager just forwards the value to the
+    // SDK's updatedInput.answers; the SDK accepts string[] for
+    // multi-select questions.
+    it('forwards string[] answersMap values verbatim for multi-select questions (#4621)', async () => {
+      const questions = [
+        { question: 'Areas?', multiSelect: true, options: [{ label: 'App' }, { label: 'Tests' }] },
+        { question: 'Strategy?', options: [{ label: 'Patch' }, { label: 'Minor' }] },
+      ]
+      const promise = pm._handleAskUserQuestion({ questions }, null)
+
+      pm.respondToQuestion('summary', {
+        'Areas?': ['App', 'Tests'],
+        'Strategy?': 'Minor',
+      })
+      const result = await promise
+      assert.deepEqual(result.updatedInput.answers, {
+        'Areas?': ['App', 'Tests'],
+        'Strategy?': 'Minor',
+      })
+      assert.ok(Array.isArray(result.updatedInput.answers['Areas?']),
+        'array value should be preserved (not coerced to string)')
+    })
   })
 
   // -- clearAll --

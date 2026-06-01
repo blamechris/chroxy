@@ -2045,6 +2045,159 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4732 — pre-first-output silence watchdog. The existing #4638
+  // streamStallTimeout only re-arms BETWEEN hook events; a turn where
+  // claude TUI accepts the prompt write but never emits ANY hook (stuck
+  // Anthropic API call, frozen dialog screen) had no recoverable
+  // watchdog short of the 2h hard cap. _firstOutputTimeout arms at
+  // _armResultTimeout() time and disarms on the first consumed hook
+  // event, surfacing a stream_stall with the same dashboard chip the
+  // inter-stream watchdog uses so the user can retry within minutes.
+  describe('first-output watchdog (#4732)', () => {
+    it('fires after _firstOutputTimeoutMs of zero hook events, clears busy state, emits stream_stall', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        // Long soft+hard+stream-stall so the first-output timer wins;
+        // short first-output so the test doesn't sleep for seconds.
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-first-output'
+      const TURN_AGE_MS = 100
+      session._activeTurn = { startedAt: Date.now() - TURN_AGE_MS, aborted: false }
+      const ptyWrites = []
+      session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push({ type: 'stream_end', ...e }))
+      session.on('result', (e) => events.push({ type: 'result', ...e }))
+      session.on('error', (e) => events.push({ type: 'error', ...e }))
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed by _armResultTimeout')
+      await new Promise((r) => setTimeout(r, 80))
+
+      assert.equal(session._isBusy, false, 'busy cleared')
+      assert.equal(session._currentMessageId, null, 'messageId nulled')
+      assert.ok(ptyWrites.includes('\x03'), 'Ctrl-C written to PTY')
+
+      const types = events.map((e) => e.type)
+      assert.deepEqual(types, ['stream_end', 'result', 'error'],
+        'fan-out order matches stream-stall path: stream_end → result → error')
+
+      const err = events.find((e) => e.type === 'error')
+      assert.equal(err.code, 'stream_stall', 'distinct code reuses dashboard chip wire')
+      assert.match(err.message, /No response/i)
+    })
+
+    it('is disarmed by the first consumed hook event (does not fire on healthy turn)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 50,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      // Disarm helper the sendMessage poll loop calls when any hook
+      // file is consumed; documents that the watchdog can be cleared
+      // without re-arming the inter-stream timer.
+      session._clearFirstOutputWatchdog()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared')
+
+      // Wait past the original window — should NOT fire.
+      await new Promise((r) => setTimeout(r, 80))
+      assert.equal(session._isBusy, true, 'still busy — watchdog disarmed before fire')
+    })
+
+    it('is disabled when firstOutputTimeoutMs=0 (operator opt-out)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 0,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-opt-out'
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer not armed when disabled')
+
+      await new Promise((r) => setTimeout(r, 30))
+      assert.equal(session._isBusy, true, 'still busy — watchdog opted out')
+    })
+
+    it('is cleared by _finishTurnError so a stalled-after-error fire cannot land', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = 'msg-fte'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      session._finishTurnError('test', 'msg-fte')
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared on error path')
+    })
+
+    it('is cleared by destroy() so a late fire cannot land on a torn-down session', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-d-fo'
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      await session.destroy()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared on destroy')
+    })
+
+    it('logs explicit elapsedMs line when fired', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-log'
+      session._activeTurn = { startedAt: Date.now() - 30, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+      session.on('stream_end', () => {})
+
+      const logs = []
+      const listener = (entry) => logs.push(entry)
+      addLogListener(listener)
+      try {
+        session._armResultTimeout()
+        await new Promise((r) => setTimeout(r, 80))
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const matched = logs.find((l) => /first-output watchdog fired/i.test(l.message ?? ''))
+      assert.ok(matched, 'log line present: ' + JSON.stringify(logs.map((l) => l.message).slice(-5)))
+      assert.match(matched.message, /elapsedMs=\d+/, 'log line includes elapsedMs')
+      assert.match(matched.message, /claude TUI did not respond/, 'log line includes did-not-respond marker')
+    })
+  })
+
   // #4641 — `_teardownTurn` is the shared helper extracted from
   // `_handleHardTimeout` and `_handleStreamStall`. Both call sites
   // already have their own end-to-end coverage (see `inactivity timer`
@@ -3262,8 +3415,8 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
-    // #4690 (review of #4687) — pin the watchdog teardown semantics when
-    // sibling pending entries exist in `_pendingUserAnswers`. Setup:
+    // #4691 — surgical watchdog teardown when sibling pending entries
+    // exist in `_pendingUserAnswers`. Setup:
     //
     //   1. PreToolUse arms A and B in the Map (parallel AskUserQuestion).
     //   2. respondToQuestion(A) consumes A's entry (surgical
@@ -3272,19 +3425,18 @@ describe('ClaudeTuiSession', () => {
     //   3. PostToolUse for A never arrives → watchdog fires →
     //      `_onAskUserQuestionStall(A)`.
     //
-    // CURRENT behaviour (claude-tui-session.js:2149 `_pendingUserAnswer =
-    // null` → back-compat setter → `_pendingUserAnswers.clear()`): the
-    // watchdog wipes EVERY pending entry, including B which had nothing
-    // to do with A's stall. The all-or-nothing collapse is intentional
-    // for the teardown sites listed at #4691 (destroy, hard timeout,
-    // interrupt) but the watchdog-with-siblings case is the borderline
-    // one: B's PostToolUse may still arrive, and its entry just got
-    // collapsed under it. The semantic question is open in #4691; this
-    // test pins the current behaviour so the change is loud when it
-    // happens — and asserts the error event still carries A's
-    // toolUseId (B's stall did not happen, so the error must not
-    // misattribute).
-    it('watchdog fire with N>1 sibling pending entries wipes the whole Map; error carries the timed-out toolUseId (#4690, #4691)', () => {
+    // Pre-#4691 behaviour was `_pendingUserAnswer = null` → back-compat
+    // setter → `_pendingUserAnswers.clear()`: the watchdog wiped EVERY
+    // pending entry, including B which had nothing to do with A's stall.
+    // Post-#4691: the watchdog only knows about A (the toolUseId it was
+    // armed with), so it surgically clears A via
+    // `_clearPendingAnswerByToolUseId('toolu_A_stall')` and leaves B
+    // intact. B's PostToolUse can still arrive without finding a
+    // collapsed entry. The other teardown sites (destroy, hard timeout,
+    // interrupt, _finishTurnError) remain all-or-nothing because the
+    // whole turn is over there — no live sibling can survive a turn
+    // ending — so wiping the Map matches their semantics exactly.
+    it('watchdog fire with N>1 sibling pending entries surgically clears ONLY the timed-out tool; siblings survive (#4691)', () => {
       mock.timers.enable({ apis: ['setTimeout'] })
       try {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
@@ -3329,21 +3481,121 @@ describe('ClaudeTuiSession', () => {
         assert.equal(errors[0].toolUseId, 'toolu_A_stall',
           'error attributes the stall to A (the timed-out tool), not B')
 
-        // Pinned current semantics: the teardown's
-        // `_pendingUserAnswer = null` flows through the back-compat
-        // setter → `_pendingUserAnswers.clear()` → B is wiped too. If
-        // #4691 lands a surgical teardown, this assertion will flip and
-        // both the test + the issue should be updated in the same commit.
-        assert.equal(session._pendingUserAnswers.size, 0,
-          'CURRENT semantics: watchdog clears entire Map (see #4691 for the open semantic question)')
-        assert.ok(!session._pendingUserAnswers.has('toolu_B_pending'),
-          'specifically: B\'s pending entry collapsed along with A\'s teardown')
+        // #4691 surgical-teardown semantics: the watchdog ONLY clears
+        // the entry it was armed for (A). Sibling B survives because its
+        // PostToolUse path is still live. A regression that re-introduces
+        // the pre-#4691 back-compat `_pendingUserAnswer = null` here
+        // would silently wipe B and re-create the #4691 state-shape
+        // mismatch.
+        assert.equal(session._pendingUserAnswers.size, 1,
+          'watchdog clears ONLY the timed-out tool, not the whole Map')
+        assert.ok(session._pendingUserAnswers.has('toolu_B_pending'),
+          'B SURVIVES — its turn is still live, do not collapse it under A\'s teardown')
+        assert.ok(!session._pendingUserAnswers.has('toolu_A_stall'),
+          'A is gone (it was the watchdog\'s target)')
 
         // Busy state cleared so the session is recoverable.
         assert.equal(session._isBusy, false, 'busy cleared')
       } finally {
         mock.timers.reset()
       }
+    })
+
+    // #4691 — single-pending-entry watchdog still tears the slot down
+    // (no regression from the surgical refactor). When only one entry
+    // is armed AND the watchdog fires for it, surgical clear and
+    // all-or-nothing clear produce the same end state — empty Map.
+    // This pins that the common single-question case isn't accidentally
+    // left behind by the per-toolUseId change.
+    it('watchdog fire with exactly 1 pending entry still clears it (single-question, #4691)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { uuid: 'test-watchdog-single', synthSeq: 0 }
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_solo',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'Q?', options: [{ label: 's1' }, { label: 's2' }] }] },
+        }, 'msg-watchdog-solo')
+
+        // respondToQuestion consumes the entry then we need to simulate
+        // the "no PostToolUse arrived" wedge by reinstating it (the
+        // production scenario where chroxy wrote the digit but TUI sat
+        // on a multi-question form). The watchdog still tears it down.
+        session.respondToQuestion('s1', undefined, 'toolu_solo')
+        session._pendingUserAnswers.set('toolu_solo', {
+          toolUseId: 'toolu_solo',
+          options: [{ label: 's1' }, { label: 's2' }],
+        })
+        session._lastPendingAnswerToolUseId = 'toolu_solo'
+
+        mock.timers.tick(31_000)
+
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].toolUseId, 'toolu_solo')
+        assert.equal(session._pendingUserAnswers.size, 0,
+          'single-entry case still ends empty (surgical clear of the only entry)')
+        assert.equal(session._isBusy, false, 'busy cleared')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    // #4691 — pin all-or-nothing semantics for the OTHER teardown sites
+    // (_finishTurnError / _handleHardTimeout / interrupt / destroy). The
+    // surgical-by-toolUseId fix only applies to the watchdog because it
+    // knows which tool stalled. The other paths end the whole turn —
+    // no sibling can survive a turn ending — so wiping the Map is the
+    // correct semantic. If a future refactor accidentally introduces a
+    // per-toolUseId clear at one of these sites, a stale entry could
+    // outlive the turn and misroute a late user_question_response into
+    // a dead PTY.
+    it('_finishTurnError wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-finish'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._finishTurnError('test-error', 'msg-finish')
+      assert.equal(session._pendingUserAnswers.size, 0,
+        '_finishTurnError ends the turn — every pending answer is now stale')
+    })
+
+    it('_handleHardTimeout wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-hard'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session._hardTimeoutMs = 1000
+      session._handleHardTimeout()
+      assert.equal(session._pendingUserAnswers.size, 0,
+        'hard timeout ends the turn — every pending answer is now stale')
+    })
+
+    it('interrupt() wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.interrupt()
+      assert.equal(session._pendingUserAnswers.size, 0,
+        'interrupt ends the turn — every pending answer is now stale')
     })
 
     it('watchdog is cleared on destroy() (clean teardown)', async () => {
@@ -3527,6 +3779,64 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._pendingUserAnswer, null, 'pending cleared')
     })
 
+    // #4621 — native string[] for multi-select answers (no JSON encoding).
+    // The wire protocol now accepts `Record<string, string | string[]>` so
+    // the dashboard can ship arrays directly. The driver MUST produce the
+    // exact same byte sequence as the legacy JSON-encoded shape.
+    it('accepts native string[] for multi-select answers (#4621)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'aa' }, { label: 'bb' }] },
+        { question: 'Q3?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }, { label: 'r' }] },
+        { question: 'Q4?', options: [{ label: 'x' }, { label: 'y' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_native_arr', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',          // → '1' (single, auto-advances)
+        'Q2?': 'bb',         // → '2' (single, auto-advances)
+        'Q3?': ['p', 'r'],   // → '1' '3' (NATIVE ARRAY, no JSON.stringify) + '\t'
+        'Q4?': 'y',          // → '2' (single, auto-advances)
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // Identical to the JSON-encoded shape — back-compat preserved.
+      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected identical byte sequence for native string[], got ${JSON.stringify(writes)}`)
+    })
+
+    // #4621 — labels containing commas survive the round-trip via native
+    // string[] (the legacy comma-split fallback corrupted these). Uses
+    // 2 questions so the multi-question driver kicks in (single-question
+    // path is text-driven, not answersMap-driven).
+    it('preserves comma-containing labels via native string[] (#4621)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'Hello, world' }, { label: 'foo' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_comma', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',                        // → '1'
+        'Q2?': ['Hello, world', 'foo'],    // → '1' '2' (both selected) + '\t'
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // Q1 → '1'; Q2 (multi) → '1' '2' + '\t'; Submit → '1'. The legacy
+      // comma-split would have split 'Hello, world' into ['Hello', 'world']
+      // which match nothing, defaulting to '1' only.
+      const expected = ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `native string[] should preserve comma-containing labels, got ${JSON.stringify(writes)}`)
+    })
+
     // Single-question regression guard: ensure the legacy text-driven path
     // still produces the exact pre-Chunk-B byte sequence (#4290 happy path).
     it('1-question form keeps the legacy text-driven byte sequence unchanged', async () => {
@@ -3661,6 +3971,215 @@ describe('ClaudeTuiSession', () => {
       // Back-compat: pre-Chunk-B callers reading `.options` get q[0].options.
       assert.deepEqual(session._pendingUserAnswer.options, questions[0].options,
         'options still points at questions[0].options for back-compat')
+    })
+
+    // #4625 — 10+ option questions. claude TUI's single-digit hotkey
+    // alphabet only covers indices 0..8 (digits '1'..'9'). The pre-#4625
+    // driver silently defaulted picks of options 10+ to option 1 (with a
+    // WARN buried in chroxy.log), so the user's explicit pick was
+    // dropped without any UI feedback. The fix surfaces a structured
+    // error before any keystroke is written so the dashboard can prompt
+    // the user to re-ask with fewer options.
+    describe('10+ option support (#4625)', () => {
+      // The 10-option case: user picked option 10 (index 9). The driver
+      // can't express index 9 in single-digit hotkey land, so it MUST
+      // emit ASK_USER_QUESTION_TOO_MANY_OPTIONS and tear down the turn
+      // instead of writing keystrokes that would silently land on option 1.
+      it('multi-question: pick of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS error + no PTY writes', async () => {
+        const writes = []
+        // The teardown writes Ctrl-C ('\x03') to unstick the TUI form,
+        // matching _onAskUserQuestionStall. Captured so we can assert
+        // the form bytes are NOT written (driver bailed before any digit
+        // keystroke), and the Ctrl-C IS written (recoverable teardown).
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_big'
+        session._activeTurn = { uuid: 'turn_big', synthSeq: 0, startedAt: Date.now() }
+        // Q1 has 12 options; user picked option 10 (label 'j').
+        const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenPlusOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_big', questions, options: questions[0].options }
+
+        const errors = []
+        const toolResults = []
+        const streamEnds = []
+        const results = []
+        session.on('error', (e) => errors.push(e))
+        session.on('tool_result', (tr) => toolResults.push(tr))
+        session.on('stream_end', (se) => streamEnds.push(se))
+        session.on('result', (r) => results.push(r))
+
+        session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // No FORM keystrokes written — bailed out before the PTY write
+        // path. The teardown's Ctrl-C ('\x03') IS expected so claude TUI
+        // unsticks from the form screen for the next turn.
+        assert.deepEqual(writes, ['\x03'],
+          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
+
+        // Structured error surfaced so the dashboard can render a toast.
+        assert.equal(errors.length, 1, 'exactly one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+        assert.equal(errors[0].toolUseId, 'toolu_big')
+        assert.match(errors[0].message, /option/i,
+          `error message mentions the option-count limitation, got ${errors[0].message}`)
+
+        // Full teardown so the dashboard's Working banner + Stop button +
+        // activeTools entry all clear (mirrors _onAskUserQuestionStall).
+        assert.equal(toolResults.length, 1, 'synthetic tool_result for activeTools clear')
+        assert.equal(toolResults[0].toolUseId, 'toolu_big')
+        assert.equal(streamEnds.length, 1, 'stream_end emitted to clear streamingMessageId')
+        assert.equal(streamEnds[0].messageId, 'msg_big')
+        assert.equal(results.length, 1, '_emitResult fanned for agent_idle')
+        assert.equal(session._isBusy, false, '_isBusy cleared')
+        assert.equal(session._currentMessageId, null, '_currentMessageId cleared')
+        assert.equal(session._activeTurn, null, '_activeTurn cleared')
+
+        // Pending cleared so subsequent answers don't write into a
+        // resolved-but-now-torn-down turn.
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after too-many error')
+
+        // No stall watchdog armed — the error is the resolution.
+        assert.equal(session._askUserQuestionWatchdog, null, 'watchdog NOT armed (error is the resolution)')
+
+        // WARN in chroxy.log so the wedge is greppable.
+        const warn = warnLines.find((m) => /AskUserQuestion multi-question: question has \d+ options/.test(m))
+        assert.ok(warn, `expected too-many-options WARN, got ${JSON.stringify(warnLines)}`)
+      })
+
+      // Boundary: a 10-option question where the user picked option 9 (the
+      // LAST representable digit) — driver MUST drive normally, not bail.
+      // This pins the exact edge of the supported range.
+      it('multi-question: pick of option 9 in a 10-option question still drives normally', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_edge', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // 'i' is index 8 → digit '9' (the highest supported digit).
+        session.respondToQuestion('', { 'Q1?': 'i', 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // Driver wrote normally — no too-many error.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // Q1 → '9', Q2 → '1', Submit → '1', wrapped in paste toggles.
+        assert.deepEqual(writes, ['\x1b[?2004l', '9', '1', '1', '\x1b[?2004h'],
+          `expected '9' + '1' + Submit sequence, got ${JSON.stringify(writes)}`)
+      })
+
+      // Multi-select toggle of an option at index ≥ 9 also fires the error.
+      // (Mirror of the single-select case to make sure the multi-select
+      // branch isn't accidentally exempt — both go through labelToDigit.)
+      // Form has 2 questions so the multi-question driver path is taken
+      // (the questions.length===1 branch falls into the legacy single-q
+      // writer which has its own #4292 fall-through-to-label-text path).
+      it('multi-question (multi-select): toggle of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_mb'
+        session._activeTurn = { uuid: 'turn_mb', synthSeq: 0, startedAt: Date.now() }
+        const elevenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: elevenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_multi_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // User toggled options 'a' (index 0 → digit '1') AND 'k' (index 10 → unrepresentable).
+        session.respondToQuestion('', { 'Q1?': JSON.stringify(['a', 'k']), 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // No FORM keystrokes — bailed before any digit write. Only the
+        // teardown Ctrl-C ('\x03') is present.
+        assert.deepEqual(writes, ['\x03'],
+          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
+        assert.equal(errors.length, 1, 'one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+        assert.equal(errors[0].toolUseId, 'toolu_multi_big')
+      })
+
+      // Multi-select via the comma-joined fallback wire encoding (the
+      // pre-Chunk-B back-compat path that resolveQuestionDigits accepts).
+      // Copilot review feedback: the pre-scan MUST split comma-joined
+      // multi-select strings same as resolveQuestionDigits, else an
+      // unrepresentable pick sent as "a,k" is treated as a single 3-char
+      // label and slips through to the silent default-to-option-1 path.
+      it('multi-question (multi-select): comma-joined "a,k" with k at index 10 surfaces the too-many error', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_cj'
+        session._activeTurn = { uuid: 'turn_cj', synthSeq: 0, startedAt: Date.now() }
+        const elevenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: elevenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_cj', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Comma-joined "a,k" — NOT JSON. k is at index 10 (unrepresentable).
+        session.respondToQuestion('', { 'Q1?': 'a,k', 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.deepEqual(writes, ['\x03'],
+          `expected Ctrl-C teardown only, got ${JSON.stringify(writes)}`)
+        assert.equal(errors.length, 1, 'one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+      })
+
+      // Negative: a 10+ option question where the dashboard sent NO
+      // answersMap (back-compat fallback). The pre-#4625 behavior of
+      // defaulting to option 1 is preserved — no error fires because
+      // the user didn't make an unrepresentable pick.
+      it('multi-question: 10+ options with NO answersMap keeps the default-to-option-1 back-compat (no error)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenPlus = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenPlus },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_nomap_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Old client: just text, no answersMap.
+        session.respondToQuestion('a')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // No error — the user's pick (option 1) IS representable; the
+        // default-to-option-1 fallback honors it for Q2 too. This is the
+        // pre-#4625 path; #4625 only fires when the user EXPLICITLY picks
+        // an index ≥ 9.
+        assert.equal(errors.length, 0, `expected no errors for back-compat path, got ${JSON.stringify(errors)}`)
+        // Q1 → '1', Q2 → '1', Submit → '1'.
+        assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '1', '\x1b[?2004h'],
+          `expected default-to-1 sequence even with 10+ options, got ${JSON.stringify(writes)}`)
+      })
     })
   })
 
@@ -3824,6 +4343,148 @@ describe('ClaudeTuiSession', () => {
         'setPermissionMode must NOT lazy-create the sidecar after skipPermissions start')
       assert.equal(session.permissionMode, 'auto',
         'in-process bookkeeping still updates so capabilities checks stay coherent')
+    })
+  })
+
+  describe('_assertBusyHasMessageId invariant (#4642)', () => {
+    // #4642: observability-only defensive instrumentation. Every sendMessage
+    // sets `_isBusy=true` AND `_currentMessageId` together (claude-tui-session.js
+    // lines 848/851), and every teardown clears both together. If a future
+    // regression breaks that pairing, the `if(messageId)` guards in
+    // _finishTurnError / _handleHardTimeout / _handleStreamStall /
+    // _onAskUserQuestionStall would silently skip stream_end and recreate the
+    // #4638 wedge. These tests pin the warn line so a regression is observable
+    // in chroxy.log rather than only triageable from screenshots.
+
+    let warnLines
+    let logSpy
+
+    beforeEach(() => {
+      warnLines = []
+      logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'claude-tui-session') {
+          warnLines.push(entry.message)
+        }
+      }
+      addLogListener(logSpy)
+    })
+
+    afterEach(() => {
+      if (logSpy) removeLogListener(logSpy)
+      logSpy = null
+      warnLines = null
+    })
+
+    it('emits a warn when _isBusy=true and _currentMessageId is null', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(violation, `expected an invariant-violation warn, got warnLines=${JSON.stringify(warnLines)}`)
+      // Pin the structured fields the warn carries — an operator greps for
+      // these; a future refactor that drops the callsite tag or the
+      // `_isBusy=true but _currentMessageId=null` phrasing should fail.
+      assert.match(violation, /test-callsite/, 'warn includes callsite tag for greppability')
+      assert.match(violation, /_isBusy=true/, 'warn names the busy flag')
+      assert.match(violation, /_currentMessageId=null/, 'warn names the missing id')
+      assert.match(violation, /#4638/, 'warn cross-references the wedge this prevents')
+    })
+
+    it('is a no-op when both _isBusy=true AND _currentMessageId are set (healthy state)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn when invariant holds, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('is a no-op when _isBusy=false (idle session — invariant only applies mid-turn)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = false
+      session._currentMessageId = null
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn on idle session, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _finishTurnError when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+
+      // Corrupt state: busy but no messageId. This is the contract violation
+      // the assertion exists to surface — a future regression that sets one
+      // without the other should fail this test.
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._finishTurnError('synthetic error', null)
+
+      const violation = warnLines.find((m) => /_finishTurnError/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_finishTurnError must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _handleHardTimeout when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._handleHardTimeout()
+
+      const violation = warnLines.find((m) => /_handleHardTimeout/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_handleHardTimeout must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _handleStreamStall when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._handleStreamStall()
+
+      const violation = warnLines.find((m) => /_handleStreamStall/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_handleStreamStall must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('does NOT fire from teardown sites when invariant holds (healthy turn end)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      // Healthy state: both set together as the contract requires.
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+      session._activeTurn = { messageId: 'msg-healthy', startedAt: Date.now(), aborted: false }
+
+      session._finishTurnError('synthetic error', 'msg-healthy')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn on healthy teardown, got warnLines=${JSON.stringify(warnLines)}`)
     })
   })
 })

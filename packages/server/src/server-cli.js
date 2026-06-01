@@ -460,6 +460,13 @@ export async function startCliServer(config) {
     resultTimeoutMs: startupTimeouts.resultTimeoutMs,
     hardTimeoutMs: startupTimeouts.hardTimeoutMs,
     streamStallTimeoutMs: startupTimeouts.streamStallTimeoutMs,
+    // #4601: per-provider streamStallTimeoutMs override map. SessionManager
+    // sanitises each entry against the same range gate as the global value
+    // (`allowZero: true`, 5s-24h ceiling) — bogus entries are dropped (with
+    // a warn) and the affected session falls through to the global value.
+    // The unsanitised object is forwarded as-is so SessionManager owns the
+    // single source of truth for validation.
+    providerStreamStallTimeoutMs: config.providerStreamStallTimeoutMs || null,
     // #4482: per-MCP-call timeout (ms). null = byok-mcp-client default (30s).
     // Unlike streamStallTimeoutMs, 0 is not a meaningful disable — every
     // MCP tool would look broken — so non-positive falls back to null.
