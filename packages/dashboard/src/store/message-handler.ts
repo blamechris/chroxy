@@ -63,7 +63,8 @@ import {
   handleDirectoryListing as sharedDirectoryListing,
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
-  handleSessionList as sharedSessionList,
+  buildSessionListPatches as sharedBuildSessionListPatches,
+  cumulativeUsageEquals as sharedCumulativeUsageEquals,
   handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
@@ -2134,156 +2135,153 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Multi-session messages ---
 
     case 'session_list': {
-      const sessionList = sharedSessionList(msg);
-      if (sessionList) {
-        // GC persisted messages for sessions that dropped out of the list
-        const prevSessionIds = Object.keys(get().sessionStates);
-        const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
-        const removedIds = prevSessionIds.filter((id) => !newSessionIdSet.has(id));
-        for (const prevId of removedIds) {
-          void clearPersistedSession(prevId);
+      // #4767: centralised dispatch — store-core precomputes GC + new-session
+      // ids + conversationId / cumulativeUsage / pendingShells patch maps;
+      // the consumer applies them with platform-specific side-effects
+      // (dashboard's activeModel lookup + isBusy → isIdle resync stay here).
+      const initialActiveId = get().activeSessionId;
+      const patches = sharedBuildSessionListPatches(
+        msg,
+        Object.keys(get().sessionStates),
+        initialActiveId,
+      );
+      if (!patches) break;
+      const {
+        sessionList,
+        removedIds,
+        newSessionIds,
+        conversationIdPatches,
+        cumulativeUsagePatches,
+        backgroundShellBuilders,
+      } = patches;
+      // GC persisted messages for sessions that dropped out of the list
+      for (const prevId of removedIds) {
+        void clearPersistedSession(prevId);
+      }
+      // Batch in-memory cleanup into a single state update
+      if (removedIds.length > 0) {
+        const patch: Partial<ConnectionState> = {};
+        const newStates = { ...get().sessionStates };
+        for (const id of removedIds) {
+          delete newStates[id];
         }
-        // Batch in-memory cleanup into a single state update
-        if (removedIds.length > 0) {
-          const patch: Partial<ConnectionState> = {};
-          const newStates = { ...get().sessionStates };
-          for (const id of removedIds) {
-            delete newStates[id];
-          }
-          patch.sessionStates = newStates;
-          // If the active session was removed, switch to next available
-          if (get().activeSessionId && removedIds.includes(get().activeSessionId!)) {
-            const remaining = Object.keys(newStates);
-            const nextId = remaining.length > 0 ? remaining[0] : null;
-            patch.activeSessionId = nextId;
-            if (nextId && newStates[nextId]) {
-              const ss = newStates[nextId];
-              patch.messages = ss.messages;
-              patch.streamingMessageId = ss.streamingMessageId;
-              patch.claudeReady = ss.claudeReady;
-              patch.activeModel = ss.activeModel;
-              patch.permissionMode = ss.permissionMode;
-              patch.contextUsage = ss.contextUsage;
-              patch.lastResultCost = ss.lastResultCost;
-              patch.lastResultDuration = ss.lastResultDuration;
-              patch.isIdle = ss.isIdle;
-            } else {
-              patch.messages = [];
-              patch.streamingMessageId = null;
-              patch.claudeReady = false;
-              patch.activeModel = null;
-              patch.permissionMode = null;
-              patch.contextUsage = null;
-              patch.lastResultCost = null;
-              patch.lastResultDuration = null;
-              patch.isIdle = true;
-            }
-          }
-          set(patch);
-        }
-        set({ sessions: sessionList });
-        // Sync activeModel from session list to prevent dropdown reset.
-        // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
-        // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
-        const activeSessionId = get().activeSessionId;
-        if (activeSessionId) {
-          const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
-          if (activeSessionInfo?.model) {
-            const fullId = activeSessionInfo.model as string;
-            const models = get().availableModels;
-            const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
-            set({ activeModel: matched ? matched.id : fullId });
+        patch.sessionStates = newStates;
+        // If the active session was removed, switch to next available
+        if (initialActiveId && removedIds.includes(initialActiveId)) {
+          const remaining = Object.keys(newStates);
+          const nextId = remaining.length > 0 ? remaining[0] : null;
+          patch.activeSessionId = nextId;
+          if (nextId && newStates[nextId]) {
+            const ss = newStates[nextId];
+            patch.messages = ss.messages;
+            patch.streamingMessageId = ss.streamingMessageId;
+            patch.claudeReady = ss.claudeReady;
+            patch.activeModel = ss.activeModel;
+            patch.permissionMode = ss.permissionMode;
+            patch.contextUsage = ss.contextUsage;
+            patch.lastResultCost = ss.lastResultCost;
+            patch.lastResultDuration = ss.lastResultDuration;
+            patch.isIdle = ss.isIdle;
+          } else {
+            patch.messages = [];
+            patch.streamingMessageId = null;
+            patch.claudeReady = false;
+            patch.activeModel = null;
+            patch.permissionMode = null;
+            patch.contextUsage = null;
+            patch.lastResultCost = null;
+            patch.lastResultDuration = null;
+            patch.isIdle = true;
           }
         }
-        // Initialize session state for any new sessions not yet tracked.
-        // #4639: seed `isIdle` from the server's authoritative `isBusy` so a
-        // fresh tab / new-session entry reflects the real working state
-        // instead of defaulting to `isIdle: true` and silently dropping the
-        // Working banner until the next live event arrives.
+        set(patch);
+      }
+      set({ sessions: sessionList });
+      // Sync activeModel from session list to prevent dropdown reset.
+      // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
+      // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
+      const activeSessionId = get().activeSessionId;
+      if (activeSessionId) {
+        const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
+        if (activeSessionInfo?.model) {
+          const fullId = activeSessionInfo.model as string;
+          const models = get().availableModels;
+          const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
+          set({ activeModel: matched ? matched.id : fullId });
+        }
+      }
+      // Initialize session state for any new sessions not yet tracked.
+      // #4639: seed `isIdle` from the server's authoritative `isBusy` so a
+      // fresh tab / new-session entry reflects the real working state
+      // instead of defaulting to `isIdle: true` and silently dropping the
+      // Working banner until the next live event arrives.
+      if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
-        let initStatesChanged = false;
-        for (const s of sessionList) {
-          if (!newInitStates[s.sessionId]) {
+        const sessionsBySid = new Map(sessionList.map((s) => [s.sessionId, s]));
+        for (const sid of newSessionIds) {
+          if (!newInitStates[sid]) {
             const fresh = createEmptySessionState();
-            if (typeof s.isBusy === 'boolean') fresh.isIdle = !s.isBusy;
-            newInitStates[s.sessionId] = fresh;
-            initStatesChanged = true;
+            const s = sessionsBySid.get(sid);
+            if (s && typeof s.isBusy === 'boolean') fresh.isIdle = !s.isBusy;
+            newInitStates[sid] = fresh;
           }
         }
-        if (initStatesChanged) {
-          set({ sessionStates: newInitStates });
-        }
-        // #4639: resync `isIdle` on EXISTING session states against the
-        // snapshot's `isBusy`. Without this, a session that became busy on
-        // the server while the dashboard's local handlers missed the flip
-        // (tab swap during a long turn, peer-tab triggered the work, race
-        // between agent_busy and history_replay) shows the wrong banner and
-        // the wrong Send/Stop button. The snapshot is the source of truth.
-        for (const s of sessionList) {
-          if (typeof s.isBusy !== 'boolean') continue;
-          if (!get().sessionStates[s.sessionId]) continue;
-          const desiredIsIdle = !s.isBusy;
-          updateSession(s.sessionId, (ss) =>
-            ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
-          );
-        }
-        // Sync conversationId from session list into session states
-        for (const s of sessionList) {
-          if (s.conversationId && get().sessionStates[s.sessionId]) {
-            updateSession(s.sessionId, (ss) =>
-              ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
-            );
-          }
-        }
-        // #4073: seed cumulativeUsage from the snapshot so refreshing the
-        // dashboard mid-session shows the running total without waiting
-        // for the next session_usage event to land. listSessions on the
-        // server emits the field with zero defaults when no result has
-        // landed yet — `cumulativeUsage` is undefined only when an older
-        // server omits it entirely.
-        for (const s of sessionList) {
-          if (s.cumulativeUsage && get().sessionStates[s.sessionId]) {
-            const snapshot = s.cumulativeUsage;
-            updateSession(s.sessionId, (ss) => {
-              const current = ss.cumulativeUsage;
-              if (
-                current &&
-                current.inputTokens === snapshot.inputTokens &&
-                current.outputTokens === snapshot.outputTokens &&
-                current.cacheReadTokens === snapshot.cacheReadTokens &&
-                current.cacheCreationTokens === snapshot.cacheCreationTokens &&
-                current.costUsd === snapshot.costUsd &&
-                current.turnsBilled === snapshot.turnsBilled
-              ) {
-                return {};
-              }
-              return { cumulativeUsage: snapshot };
-            });
-          }
-        }
-        // #4307: seed pendingBackgroundShells from the snapshot so a
-        // fresh tab / reconnect catches up to any sessions already
-        // waiting on background work without needing the next
-        // background_work_changed event to arrive. The
-        // `handleBackgroundWorkChanged` builder does the
-        // same-reference short-circuit so duplicate seeds don't
-        // re-render. The field is optional on `SessionInfo` because
-        // older servers omit it; treat `undefined` as "no waiting
-        // work" (empty array passthrough).
-        for (const s of sessionList) {
-          if (!get().sessionStates[s.sessionId]) continue;
-          const builder = sharedBackgroundWorkChanged(
-            { sessionId: s.sessionId, pending: s.pendingBackgroundShells ?? [] },
-            get().activeSessionId,
-          );
-          updateSession(s.sessionId, (ss) => {
-            const next = builder.applyTo(ss.pendingBackgroundShells);
-            return next === ss.pendingBackgroundShells
-              ? {}
-              : { pendingBackgroundShells: next };
-          });
-        }
+        set({ sessionStates: newInitStates });
+      }
+      // #4639: resync `isIdle` on EXISTING session states against the
+      // snapshot's `isBusy`. Without this, a session that became busy on
+      // the server while the dashboard's local handlers missed the flip
+      // (tab swap during a long turn, peer-tab triggered the work, race
+      // between agent_busy and history_replay) shows the wrong banner and
+      // the wrong Send/Stop button. The snapshot is the source of truth.
+      for (const s of sessionList) {
+        if (typeof s.isBusy !== 'boolean') continue;
+        if (!get().sessionStates[s.sessionId]) continue;
+        const desiredIsIdle = !s.isBusy;
+        updateSession(s.sessionId, (ss) =>
+          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+        );
+      }
+      // Sync conversationId from session list into session states
+      for (const [sid, cid] of conversationIdPatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          ss.conversationId !== cid ? { conversationId: cid } : {}
+        );
+      }
+      // #4073: seed cumulativeUsage from the snapshot so refreshing the
+      // dashboard mid-session shows the running total without waiting
+      // for the next session_usage event to land. listSessions on the
+      // server emits the field with zero defaults when no result has
+      // landed yet — `cumulativeUsage` is undefined only when an older
+      // server omits it entirely. Six-field equality short-circuit lives
+      // in store-core via {@link sharedCumulativeUsageEquals} (#4767).
+      for (const [sid, snapshot] of cumulativeUsagePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          sharedCumulativeUsageEquals(ss.cumulativeUsage, snapshot)
+            ? {}
+            : { cumulativeUsage: snapshot }
+        );
+      }
+      // #4307: seed pendingBackgroundShells from the snapshot so a
+      // fresh tab / reconnect catches up to any sessions already
+      // waiting on background work without needing the next
+      // background_work_changed event to arrive. The
+      // `handleBackgroundWorkChanged` builder does the
+      // same-reference short-circuit so duplicate seeds don't
+      // re-render. The field is optional on `SessionInfo` because
+      // older servers omit it; treat `undefined` as "no waiting
+      // work" (empty array passthrough).
+      for (const [sid, builder] of backgroundShellBuilders) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) => {
+          const next = builder.applyTo(ss.pendingBackgroundShells);
+          return next === ss.pendingBackgroundShells
+            ? {}
+            : { pendingBackgroundShells: next };
+        });
       }
       break;
     }

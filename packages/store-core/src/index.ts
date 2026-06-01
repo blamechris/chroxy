@@ -247,6 +247,8 @@ export type {
   SessionInterventionBuilder,
   AgentInfoBuilder,
   PendingBackgroundShellsBuilder,
+  // #4767 — centralised session_list dispatch (GC + cumulativeUsage + pendingShells seeding)
+  SessionListPatches,
   ServerMode,
   AuthOkPayload,
   CheckpointRestoredPayload,
@@ -344,6 +346,11 @@ export {
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
   handleSessionList,
+  // #4767 — centralised session_list dispatch helpers (used by both app + dashboard)
+  buildSessionListPatches,
+  cumulativeUsageEquals,
+  chunkSubscribeSessionIds,
+  SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext,
   handleSessionTimeout,
   handleSessionRestoreFailed,

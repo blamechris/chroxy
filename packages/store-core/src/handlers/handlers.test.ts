@@ -47,6 +47,10 @@ import {
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
   handleSessionList,
+  buildSessionListPatches,
+  cumulativeUsageEquals,
+  chunkSubscribeSessionIds,
+  SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext,
   handleSessionTimeout,
   handleSessionRestoreFailed,
@@ -101,6 +105,7 @@ import type {
   Checkpoint,
   ConnectedClient,
   ConversationSummary,
+  CumulativeUsage,
   DevPreview,
   ModelInfo,
   PendingBackgroundShell,
@@ -1615,6 +1620,260 @@ describe('handleSessionList', () => {
   it('returns empty array verbatim (auto-resume gate stays at call site)', () => {
     const empty: SessionInfo[] = []
     expect(handleSessionList({ sessions: empty })).toBe(empty)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// cumulativeUsageEquals
+// ---------------------------------------------------------------------------
+describe('cumulativeUsageEquals', () => {
+  const base: CumulativeUsage = {
+    inputTokens: 100,
+    outputTokens: 50,
+    cacheReadTokens: 10,
+    cacheCreationTokens: 5,
+    costUsd: 0.12,
+    turnsBilled: 3,
+  }
+
+  it('returns true when both snapshots match across all six fields', () => {
+    expect(cumulativeUsageEquals(base, { ...base })).toBe(true)
+  })
+
+  it('returns false when any single field differs', () => {
+    expect(cumulativeUsageEquals(base, { ...base, inputTokens: 101 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, outputTokens: 51 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, cacheReadTokens: 11 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, cacheCreationTokens: 6 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, costUsd: 0.13 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, turnsBilled: 4 })).toBe(false)
+  })
+
+  it('returns false when either side is null or undefined', () => {
+    // Preserves the prior inline `current && ...` guard — null `current`
+    // falls through and the candidate snapshot is applied as a no-op write.
+    expect(cumulativeUsageEquals(null, base)).toBe(false)
+    expect(cumulativeUsageEquals(base, null)).toBe(false)
+    expect(cumulativeUsageEquals(null, null)).toBe(false)
+    expect(cumulativeUsageEquals(undefined, base)).toBe(false)
+    expect(cumulativeUsageEquals(base, undefined)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildSessionListPatches (#4767)
+// ---------------------------------------------------------------------------
+describe('buildSessionListPatches', () => {
+  const makeSession = (
+    sessionId: string,
+    overrides: Partial<SessionInfo> = {},
+  ): SessionInfo => ({
+    sessionId,
+    name: sessionId,
+    cwd: '/tmp',
+    type: 'cli',
+    hasTerminal: false,
+    model: null,
+    permissionMode: null,
+    isBusy: false,
+    createdAt: 1000,
+    conversationId: null,
+    ...overrides,
+  })
+
+  it('returns null when handleSessionList rejects the message', () => {
+    expect(buildSessionListPatches({}, [], null)).toBeNull()
+    expect(buildSessionListPatches({ sessions: 'nope' }, [], null)).toBeNull()
+  })
+
+  it('exposes the parsed sessionList by reference', () => {
+    const sessions = [makeSession('s1')]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out).not.toBeNull()
+    expect(out!.sessionList).toBe(sessions)
+  })
+
+  it('computes removedIds for sessions that dropped out of the snapshot', () => {
+    const sessions = [makeSession('s2'), makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s1', 's2', 's3', 's4'], null)
+    expect(out!.removedIds).toEqual(['s1', 's4'])
+  })
+
+  it('preserves prevSessionStateIds order in removedIds (matches both prior inline loops)', () => {
+    const sessions = [makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s1', 's2', 's3', 's4'], null)
+    expect(out!.removedIds).toEqual(['s1', 's2', 's4'])
+  })
+
+  it('returns empty removedIds when nothing was removed', () => {
+    const sessions = [makeSession('s1'), makeSession('s2')]
+    const out = buildSessionListPatches({ sessions }, ['s1'], null)
+    expect(out!.removedIds).toEqual([])
+  })
+
+  it('lists new sessions not present in prevSessionStateIds in snapshot order', () => {
+    const sessions = [makeSession('s1'), makeSession('s2'), makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s2'], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's3'])
+  })
+
+  it('handles fully fresh state (empty prev, all sessions new)', () => {
+    const sessions = [makeSession('s1'), makeSession('s2')]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's2'])
+    expect(out!.removedIds).toEqual([])
+  })
+
+  it('skips malformed entries without sessionId (fail-soft)', () => {
+    // Behaviour-preserving: the prior inline loops dereference s.sessionId
+    // directly. Skipping silently here keeps the helper defensive against
+    // hypothetical future server bugs that the prior code would have
+    // crashed on.
+    const sessions = [
+      makeSession('s1'),
+      null as unknown as SessionInfo,
+      { foo: 'bar' } as unknown as SessionInfo,
+      makeSession('s2'),
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's2'])
+    expect(out!.backgroundShellBuilders.size).toBe(2)
+  })
+
+  it('emits conversationIdPatches for every session with a truthy conversationId', () => {
+    const sessions = [
+      makeSession('s1', { conversationId: 'conv-1' }),
+      makeSession('s2', { conversationId: null }),
+      makeSession('s3', { conversationId: 'conv-3' }),
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.conversationIdPatches.get('s1')).toBe('conv-1')
+    expect(out!.conversationIdPatches.has('s2')).toBe(false)
+    expect(out!.conversationIdPatches.get('s3')).toBe('conv-3')
+  })
+
+  it('emits cumulativeUsagePatches for every session with a defined cumulativeUsage snapshot', () => {
+    const usage: CumulativeUsage = {
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 3,
+      cacheCreationTokens: 4,
+      costUsd: 0.5,
+      turnsBilled: 6,
+    }
+    const sessions = [
+      makeSession('s1', { cumulativeUsage: usage }),
+      makeSession('s2'), // no cumulativeUsage field
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.cumulativeUsagePatches.get('s1')).toBe(usage)
+    expect(out!.cumulativeUsagePatches.has('s2')).toBe(false)
+  })
+
+  it('emits backgroundShellBuilders for every session (default empty pending list)', () => {
+    const sessions = [
+      makeSession('s1', {
+        pendingBackgroundShells: [
+          { shellId: 'sh1', command: 'sleep 1', startedAt: 1000 },
+        ],
+      }),
+      makeSession('s2'), // omitted field → empty list
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.backgroundShellBuilders.size).toBe(2)
+    const s1Builder = out!.backgroundShellBuilders.get('s1')!
+    expect(s1Builder.sessionId).toBe('s1')
+    const s1Applied = s1Builder.applyTo([])
+    expect(s1Applied).toEqual([
+      { shellId: 'sh1', command: 'sleep 1', startedAt: 1000 },
+    ])
+    const s2Builder = out!.backgroundShellBuilders.get('s2')!
+    // Empty pending list → applyTo on empty current returns existing
+    // empty array (reference-equality short-circuit).
+    const empty: PendingBackgroundShell[] = []
+    expect(s2Builder.applyTo(empty)).toBe(empty)
+  })
+
+  it('chunks non-active session ids into subscribeChunks of SESSION_LIST_SUBSCRIBE_CHUNK_SIZE', () => {
+    // Active id is excluded; remaining ids are sliced into batches.
+    const total = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE + 5 // active + (chunk_size + 4) non-active
+    const sessions = Array.from({ length: total }, (_, i) =>
+      makeSession(`s${i + 1}`),
+    )
+    const out = buildSessionListPatches({ sessions }, [], 's1')
+    expect(out!.subscribeChunks).toHaveLength(2)
+    expect(out!.subscribeChunks[0]).toHaveLength(SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)
+    expect(out!.subscribeChunks[1]).toHaveLength(4)
+    // Active id must not appear in any chunk.
+    const flat = out!.subscribeChunks.flat()
+    expect(flat).not.toContain('s1')
+  })
+
+  it('returns empty subscribeChunks when no non-active ids remain', () => {
+    const sessions = [makeSession('s1')]
+    const out = buildSessionListPatches({ sessions }, [], 's1')
+    expect(out!.subscribeChunks).toEqual([])
+  })
+
+  it('returns empty subscribeChunks when sessionList is empty (auto-resume path)', () => {
+    const out = buildSessionListPatches({ sessions: [] }, ['s1', 's2'], 's1')
+    expect(out!.sessionList).toEqual([])
+    expect(out!.removedIds).toEqual(['s1', 's2'])
+    expect(out!.subscribeChunks).toEqual([])
+  })
+
+  it('respects custom subscribeChunkSize, falls back to default on invalid input', () => {
+    const sessions = Array.from({ length: 7 }, (_, i) => makeSession(`s${i + 1}`))
+    const out = buildSessionListPatches({ sessions }, [], 's1', 3)
+    // 6 non-active ids / chunk_size 3 → 2 full chunks
+    expect(out!.subscribeChunks.map((c) => c.length)).toEqual([3, 3])
+    // Invalid sizes fall back to the constant default (would all fit in one chunk here).
+    const out2 = buildSessionListPatches({ sessions }, [], 's1', 0)
+    expect(out2!.subscribeChunks).toHaveLength(1)
+    expect(out2!.subscribeChunks[0]).toHaveLength(6)
+  })
+
+  it('chunkSubscribeSessionIds: filters out active id and chunks by size', () => {
+    const sessions = Array.from({ length: 7 }, (_, i) =>
+      makeSession(`s${i + 1}`),
+    )
+    expect(chunkSubscribeSessionIds(sessions, 's1', 3).map((c) => c.length)).toEqual([3, 3])
+    // No active filter when activeSessionId is null.
+    expect(chunkSubscribeSessionIds(sessions, null, 3).map((c) => c.length)).toEqual([3, 3, 1])
+    // Empty when only the active id is present.
+    expect(chunkSubscribeSessionIds([makeSession('s1')], 's1')).toEqual([])
+    // Skips malformed entries fail-soft.
+    const malformed = [
+      makeSession('s1'),
+      null as unknown as SessionInfo,
+      makeSession('s2'),
+    ]
+    expect(chunkSubscribeSessionIds(malformed, 's1')).toEqual([['s2']])
+  })
+
+  it('includes the active session in cumulativeUsage / conversationId / backgroundShell maps', () => {
+    // The subscribeChunks filter excludes the active id, but the patch
+    // maps must include it — both clients update the active session's
+    // sessionStates entry the same way as any other.
+    const sessions = [
+      makeSession('s1', {
+        conversationId: 'conv-1',
+        cumulativeUsage: {
+          inputTokens: 1,
+          outputTokens: 2,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0,
+          turnsBilled: 1,
+        },
+      }),
+    ]
+    const out = buildSessionListPatches({ sessions }, ['s1'], 's1')
+    expect(out!.conversationIdPatches.get('s1')).toBe('conv-1')
+    expect(out!.cumulativeUsagePatches.has('s1')).toBe(true)
+    expect(out!.backgroundShellBuilders.has('s1')).toBe(true)
+    // s1 is active → excluded from subscribe chunks.
+    expect(out!.subscribeChunks).toEqual([])
   })
 })
 
