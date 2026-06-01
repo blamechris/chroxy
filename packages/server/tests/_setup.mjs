@@ -1,0 +1,182 @@
+/**
+ * Server test setup — enforces isolation from the developer's real user state
+ * (`~/.chroxy/`, `~/.claude/`). Loaded once per test process via Node's
+ * `--import` flag (wired in `package.json` test scripts).
+ *
+ * See issue #4633 and `feedback_test_state_contamination.md`. The 2026-05-30
+ * incident clobbered the user's live `~/.chroxy/session-state.json` with
+ * test fixture data because individual tests forgot to pass a temp
+ * `stateFilePath`. This file installs a sandbox guard that throws the
+ * moment any test attempts to write to the real `~/.chroxy/` or `~/.claude/`
+ * trees, so the next forgetter fails LOUDLY at the offending call site
+ * instead of silently corrupting the developer's live state 76 days later.
+ *
+ * The guard monkey-patches the write-side of `fs` (sync + promises): any
+ * call whose resolved path falls under the real `~/.chroxy/` or `~/.claude/`
+ * throws `CHROXY_TEST_SANDBOX` with a stack trace pointing at the caller.
+ * Read-side fs calls are untouched, so tests that legitimately *read* the
+ * developer's real config (e.g. provider detection in
+ * `providers.test.js`) keep working.
+ *
+ * We deliberately do NOT override `process.env.HOME` globally. Several
+ * existing tests pass real `homedir()` / `process.cwd()` paths to
+ * validation helpers (`validateCwdAllowed`, `listFiles` home-fallback,
+ * environment manager workspaceRoots) that compare against the live
+ * `os.homedir()`. Rerouting HOME up-front breaks those tests in a way
+ * that's unrelated to the bug class we're fixing. A bare
+ * `new SessionManager()` is still caught — its first `writeFileSync` for
+ * the default `~/.chroxy/session-state.json` trips the guard.
+ *
+ * Tests that need to mutate `process.env.HOME` for their own purposes
+ * (e.g. `claude-tui-session.test.js`, `byok-credentials.test.js`) are fine
+ * — the guard locks onto the *real* home recorded at process startup, not
+ * whatever HOME currently is.
+ *
+ * Opt-out for the rare test that legitimately needs to write to the real
+ * home (none expected): set `process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'`
+ * scoped to the test, then restore.
+ */
+
+import fs from 'node:fs'
+import { homedir } from 'node:os'
+import { resolve, sep } from 'node:path'
+
+// --- Capture the real home for the guard --------------------------------------
+const REAL_HOME = homedir()
+const PROTECTED_ROOTS = [
+  resolve(REAL_HOME, '.chroxy') + sep,
+  resolve(REAL_HOME, '.claude') + sep,
+]
+// Also guard the bare files (e.g. `~/.claude.json` from byok-mcp-config)
+// because they live next to the dirs we protect.
+const PROTECTED_FILES = new Set([
+  resolve(REAL_HOME, '.claude.json'),
+])
+
+// --- Sandbox guard ------------------------------------------------------------
+function isProtected(rawPath) {
+  if (process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES === '1') return false
+  if (typeof rawPath !== 'string' && !(rawPath instanceof URL) && !(rawPath instanceof Buffer)) {
+    return false
+  }
+  let p
+  try {
+    if (rawPath instanceof URL) p = rawPath.pathname
+    else if (rawPath instanceof Buffer) p = rawPath.toString('utf8')
+    else p = rawPath
+    p = resolve(p)
+  } catch {
+    return false
+  }
+  if (PROTECTED_FILES.has(p)) return true
+  for (const root of PROTECTED_ROOTS) {
+    if (p === root.slice(0, -1) || p.startsWith(root)) return true
+  }
+  return false
+}
+
+function makeGuardError(method, target) {
+  const err = new Error(
+    `[chroxy-test-sandbox] BLOCKED ${method} to real user-state path: ${target}\n` +
+    `  This test attempted to write to the developer's actual ~/.chroxy or ~/.claude tree.\n` +
+    `  Pass a temp path explicitly (e.g. stateFilePath: tmpStateFile()) or set\n` +
+    `  process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1' if the write is intentional.\n` +
+    `  See packages/server/tests/_setup.mjs and issue #4633.`,
+  )
+  err.code = 'CHROXY_TEST_SANDBOX'
+  return err
+}
+
+const origWriteFileSync = fs.writeFileSync
+fs.writeFileSync = function patchedWriteFileSync(target, ...rest) {
+  if (isProtected(target)) throw makeGuardError('writeFileSync', String(target))
+  return origWriteFileSync.call(this, target, ...rest)
+}
+
+const origAppendFileSync = fs.appendFileSync
+fs.appendFileSync = function patchedAppendFileSync(target, ...rest) {
+  if (isProtected(target)) throw makeGuardError('appendFileSync', String(target))
+  return origAppendFileSync.call(this, target, ...rest)
+}
+
+const origRenameSync = fs.renameSync
+fs.renameSync = function patchedRenameSync(oldPath, newPath) {
+  if (isProtected(newPath)) throw makeGuardError('renameSync', String(newPath))
+  return origRenameSync.call(this, oldPath, newPath)
+}
+
+const origMkdirSync = fs.mkdirSync
+fs.mkdirSync = function patchedMkdirSync(target, ...rest) {
+  // Blocks any new directory under the real ~/.chroxy or ~/.claude. The
+  // top-level dirs themselves (PROTECTED_ROOTS) already exist, so a
+  // `mkdirSync('~/.chroxy', { recursive: true })` no-ops in practice —
+  // but we still flag it to surface unexpected callers in tests.
+  if (isProtected(target)) throw makeGuardError('mkdirSync', String(target))
+  return origMkdirSync.call(this, target, ...rest)
+}
+
+const origCreateWriteStream = fs.createWriteStream
+fs.createWriteStream = function patchedCreateWriteStream(target, ...rest) {
+  if (isProtected(target)) throw makeGuardError('createWriteStream', String(target))
+  return origCreateWriteStream.call(this, target, ...rest)
+}
+
+const origOpenSync = fs.openSync
+fs.openSync = function patchedOpenSync(target, flags, ...rest) {
+  // `flags` can be a string ('w', 'a', 'wx', 'w+', 'a+', 'ax') or a number
+  // (constants OR'd together: O_WRONLY=1, O_RDWR=2, O_CREAT=64, O_APPEND=1024…).
+  // We only block when the open is for writing; pure reads are fine.
+  let isWrite = false
+  if (typeof flags === 'string') {
+    isWrite = /[wa+]/.test(flags)
+  } else if (typeof flags === 'number') {
+    // O_WRONLY = 1, O_RDWR = 2, O_CREAT = 64, O_APPEND = 1024, O_TRUNC = 512
+    isWrite = (flags & 1) !== 0 || (flags & 2) !== 0 || (flags & 64) !== 0
+  }
+  if (isWrite && isProtected(target)) throw makeGuardError('openSync', String(target))
+  return origOpenSync.call(this, target, flags, ...rest)
+}
+
+if (fs.promises) {
+  const origWriteFile = fs.promises.writeFile
+  fs.promises.writeFile = function patchedWriteFile(target, ...rest) {
+    if (isProtected(target)) return Promise.reject(makeGuardError('promises.writeFile', String(target)))
+    return origWriteFile.call(this, target, ...rest)
+  }
+
+  const origAppendFile = fs.promises.appendFile
+  fs.promises.appendFile = function patchedAppendFile(target, ...rest) {
+    if (isProtected(target)) return Promise.reject(makeGuardError('promises.appendFile', String(target)))
+    return origAppendFile.call(this, target, ...rest)
+  }
+
+  const origRename = fs.promises.rename
+  fs.promises.rename = function patchedRename(oldPath, newPath) {
+    if (isProtected(newPath)) return Promise.reject(makeGuardError('promises.rename', String(newPath)))
+    return origRename.call(this, oldPath, newPath)
+  }
+
+  const origMkdir = fs.promises.mkdir
+  fs.promises.mkdir = function patchedMkdir(target, ...rest) {
+    if (isProtected(target)) return Promise.reject(makeGuardError('promises.mkdir', String(target)))
+    return origMkdir.call(this, target, ...rest)
+  }
+
+  const origOpen = fs.promises.open
+  fs.promises.open = function patchedOpen(target, flags, ...rest) {
+    let isWrite = false
+    if (typeof flags === 'string') isWrite = /[wa+]/.test(flags)
+    else if (typeof flags === 'number') isWrite = (flags & 1) !== 0 || (flags & 2) !== 0 || (flags & 64) !== 0
+    if (isWrite && isProtected(target)) {
+      return Promise.reject(makeGuardError('promises.open', String(target)))
+    }
+    return origOpen.call(this, target, flags, ...rest)
+  }
+}
+
+// --- Diagnostic ---------------------------------------------------------------
+// Quiet by default; set CHROXY_TEST_SANDBOX_DEBUG=1 to see the protected
+// paths once per process.
+if (process.env.CHROXY_TEST_SANDBOX_DEBUG === '1') {
+  console.error(`[chroxy-test-sandbox] guarded write paths under: ${REAL_HOME}/.chroxy, ${REAL_HOME}/.claude`)
+}

@@ -79,6 +79,21 @@ jobs:
             exit 1
           }
 
+      - name: Check tests pass stateFilePath to SessionManager
+        run: |
+          # Issue #4633 — every `new SessionManager(...)` in tests must include
+          # a `stateFilePath` option, otherwise the test writes to the real
+          # ~/.chroxy/session-state.json (or, in CI, to the runner home).
+          # The HOME-override sandbox in tests/_setup.mjs makes accidental
+          # contamination harmless, but the explicit option keeps the intent
+          # obvious in review and avoids surprise side effects.
+          if scripts/lint-tests-state-file-path.sh; then
+            echo "OK — every new SessionManager(...) in tests passes stateFilePath"
+          else
+            echo "::error::Tests instantiated SessionManager without stateFilePath. See packages/server/scripts/lint-tests-state-file-path.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     runs-on: ubuntu-24.04
