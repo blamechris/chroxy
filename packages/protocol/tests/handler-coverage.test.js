@@ -98,6 +98,7 @@ const PLATFORM_SPECIFIC = {
   'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'byok_credentials_status': 'dashboard', // paste-API-key form is dashboard-only (#4052); mobile app exposure tracked under the BYOK epic #4047
+  'multi_question_intervention': 'dashboard', // chroxy permission-hook deny surface (#4653) — dashboard renders a FooterBar counter chip + InterventionsPanel; mobile app exposure tracked as a follow-up since the app has no FooterBar equivalent
 }
 
 // ---------------------------------------------------------------------------
