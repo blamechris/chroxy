@@ -2,8 +2,11 @@
  * Tests for the global keyboard-shortcut dispatch hook (#4770).
  *
  * Boundary contract:
- *   - The hook registers exactly one `keydown` listener on window for
- *     the lifetime of the component, and tears it down on unmount.
+ *   - The hook keeps at most one `keydown` listener on window while
+ *     mounted. The underlying effect cycles the listener (remove + re-add)
+ *     whenever its captured props change (sessions, activeSessionId,
+ *     viewMode, setters) — net count stays at 1, and unmount tears it
+ *     down. The first test below pins both the mount + unmount counts.
  *   - Backspace outside text inputs is preventDefault'd (browser-back
  *     suppression).
  *   - The registry's `matchEvent` is the sole router for every
