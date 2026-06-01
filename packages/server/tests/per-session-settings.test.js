@@ -134,11 +134,11 @@ describe('forwardPerSessionSettingsToProviderOpts', () => {
 // ---- serializePerSessionSettings -------------------------------------------
 
 describe('serializePerSessionSettings', () => {
-  it('reads each setting through its coerce so corrupt session fields become safe values', () => {
+  it('falls back to defaultValue when the session field is undefined (Copilot review on #4751)', () => {
     const session = {
       // Simulate a custom provider that skips BaseSession's field
-      // initialiser — every defensive coerce in serializeState must still
-      // produce a valid wire shape.
+      // initialiser — defaultValue feeds the coerce so the wire shape
+      // is right (`false` / `false` / `''`), not `undefined` everywhere.
       promptEvaluator: undefined,
       chroxyContextHint: undefined,
       sessionPreamble: undefined,
@@ -147,6 +147,24 @@ describe('serializePerSessionSettings', () => {
     assert.equal(out.promptEvaluator, false)
     assert.equal(out.chroxyContextHint, false)
     assert.equal(out.sessionPreamble, '')
+  })
+
+  it('coerces a present but wrong-shape session field to the wire-safe form', () => {
+    // A hand-edited state file or a custom provider that initialised the
+    // field to a non-typeof-correct value: the coerce still runs and
+    // produces the safe wire shape (boolean via `!!v`, '' via
+    // `typeof v === 'string' ? v : ''`). defaultValue is NOT used here
+    // because the raw value is defined — only `undefined` triggers the
+    // defaultValue fallback.
+    const session = {
+      promptEvaluator: 'truthy-string',
+      chroxyContextHint: 0,
+      sessionPreamble: 42,
+    }
+    const out = serializePerSessionSettings(session)
+    assert.equal(out.promptEvaluator, true) // !! on truthy string
+    assert.equal(out.chroxyContextHint, false) // !! on 0
+    assert.equal(out.sessionPreamble, '') // non-string → ''
   })
 
   it('round-trips set values', () => {

@@ -237,11 +237,15 @@ export function forwardPerSessionSettingsToProviderOpts(providerOpts, source) {
 
 /**
  * Build the serialized per-session-settings dict for `serializeState`.
- * Each value is run through its `coerce` so a custom provider that
- * skipped BaseSession's field initialiser still writes a valid shape to
- * the state file (the same defensive-coerce guard the per-knob sites
- * already used: `!!entry.session.chroxyContextHint`,
- * `typeof entry.session.sessionPreamble === 'string' ? ... : ''`).
+ * Each value falls back to the setting's `defaultValue` when the session
+ * field is `undefined` (custom provider that skipped BaseSession's field
+ * initialiser, or a hand-edited state file), then runs through `coerce`
+ * to guarantee a wire-shape match (`boolean` for toggles, `string` for
+ * preamble). This mirrors the defensive guards the pre-refactor per-knob
+ * sites used (`!!entry.session.chroxyContextHint`,
+ * `typeof entry.session.sessionPreamble === 'string' ? ... : ''`) while
+ * giving `defaultValue` a single observable purpose (Copilot review on
+ * PR #4751).
  *
  * @param {object} session — a session instance (BaseSession subclass)
  * @returns {Record<string, any>} — dict ready to spread into the state-file entry
@@ -249,7 +253,9 @@ export function forwardPerSessionSettingsToProviderOpts(providerOpts, source) {
 export function serializePerSessionSettings(session) {
   const out = {}
   for (const def of PER_SESSION_SETTINGS) {
-    out[def.id] = def.coerce(session[def.id])
+    const raw = session[def.id]
+    const seed = raw === undefined ? def.defaultValue : raw
+    out[def.id] = def.coerce(seed)
   }
   return out
 }
