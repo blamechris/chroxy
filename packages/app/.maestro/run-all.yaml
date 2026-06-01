@@ -71,3 +71,24 @@ name: All E2E flows
 # the reconnect banner / spinner via mock-server 'simulate-disconnect'
 # trigger.
 - runFlow: reconnect.yaml
+
+# Flow 16: AskUserQuestion approve path (#4697) — pins the wire→render
+# → tap-approve → answered-state round-trip for the single-question
+# `user_question` envelope. Targets the *exact surface* of the v0.9.x
+# prompt-delivery wedges (#4668 / #4679 / #4687 / #4648 / #4669);
+# server-side regression coverage is locked in but mobile had zero
+# E2E pin for the approve round-trip until this flow.
+- runFlow: ask-user-question.yaml
+
+# Flow 17: AskUserQuestion deny path (#4697) — companion to the
+# approve flow; same fixture, taps Deny. Pins the deny tap against
+# the post-deny wedge regressions (#4648 / #4668 / #4679).
+- runFlow: ask-user-question-deny.yaml
+
+# Flow 18: AskUserQuestion multi-question form (#4697 / #4604 Chunk B)
+# — exercises the 4-question wire shape #4604 pinned at the server
+# level. Today MessageBubble renders Q[0] only; flow asserts Q[0]'s
+# render + round-trip and pins that handleUserQuestion accepts the
+# multi-question payload without bailing. Extends once mobile
+# renderer iterates all N questions.
+- runFlow: ask-user-question-multi.yaml

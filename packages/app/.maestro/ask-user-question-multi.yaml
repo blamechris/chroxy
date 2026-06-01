@@ -1,0 +1,131 @@
+appId: com.blamechris.chroxy
+name: ChatView AskUserQuestion multi-question form (#4697 / #4604 Chunk B)
+---
+
+# #4697 — Multi-question AskUserQuestion form coverage. Mirrors the
+# 4-question shape #4604 Chunk B pinned at the server level
+# (`packages/store-core/src/handlers/index.ts handleUserQuestion`
+# normalizes every entry in the wire `questions[]` array; Q[0] is
+# rendered today, the remaining entries are preserved on
+# `message.questions` for future renderer iteration).
+#
+# Trigger: 'show-ask-user-question-multi' user input → mock-server.mjs
+# emits a `user_question` envelope with 4 questions, each with a
+# distinct option set (so a regression that drops or merges questions
+# would surface as missing labels). The fixture seeding pattern is
+# documented in CLAUDE.md → "Fixture Seeding for Structured Renderers".
+#
+# Coverage today (MessageBubble only renders Q[0]):
+#   - Pin Q[0]'s prompt render (`approval-question-0`)
+#   - Pin Q[0]'s value-based option testIDs (`approval-button-approve`
+#     / `approval-button-deny`) — the canonical names for the
+#     multi-question form's first decision
+#   - Pin Q[0] question text — proves wire normalization preserved
+#     the first entry's `question` field intact
+#   - Tap Approve on Q[0] — proves the answered round-trip still
+#     works for the multi-question payload shape (a regression in
+#     handleUserQuestion that emitted `null` for multi-question
+#     shapes would never produce the prompt bubble, and this assert
+#     would fail at the `approval-question-0` wait).
+#
+# Future work (#4604 Chunk B's mobile follow-up):
+#   - When MessageBubble iterates `message.questions[]` to render
+#     all N questions, extend this flow to assert
+#     `approval-question-1` / `approval-question-2` /
+#     `approval-question-3` and tap-through each. Currently only
+#     Q[0] renders so the multi-question proof is wire-level:
+#     `handleUserQuestion` accepted the 4-entry payload without
+#     bailing.
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+- tapOn:
+    text: "Skip"
+    optional: true
+
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-ask-user-question-multi"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Wait for Q[0]'s prompt to render — same selector as the single-
+# question flow because Q[0] IS the rendered question.
+- extendedWaitUntil:
+    visible:
+      id: "approval-question-0"
+    timeout: 10000
+
+- takeScreenshot: ask-user-question-multi-prompt-rendered
+
+# Assert Q[0]'s options + the Q[0] question text rendered. The
+# distinct label on Q[0] ("Q1 — deploy to production?") proves the
+# wire normalization didn't accidentally render Q[1]'s question by
+# mistake.
+- assertVisible:
+    id: "approval-button-approve"
+- assertVisible:
+    id: "approval-button-deny"
+- assertVisible: "Q1 — deploy to production?"
+
+# Tap Approve to round-trip the answered state. The multi-question
+# wire shape uses the same `user_question_response { answer, toolUseId }`
+# the single-question path uses today (single answer field; the
+# multi-answer payload lands once mobile renders all N questions).
+- tapOn:
+    id: "approval-button-approve"
+- waitForAnimationToEnd
+
+- takeScreenshot: ask-user-question-multi-approved
+
+# Buttons remain in the tree post-answer.
+- assertVisible:
+    id: "approval-button-approve"
+- assertVisible:
+    id: "approval-button-deny"
