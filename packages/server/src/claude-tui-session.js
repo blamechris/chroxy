@@ -433,6 +433,11 @@ export class ClaudeTuiSession extends BaseSession {
   // transitions are sub-second once the session is up.
   static get SPAWN_WARMUP_MAX_MS() { return 15_000 }
   static get TURN_PROMPT_WAIT_MAX_MS() { return 5_000 }
+  // Wedge instrumentation (#4678 follow-up): hook-poll loop emits a
+  // heartbeat log line every HOOK_HEARTBEAT_MS of silent waiting (no
+  // stop-hook yet). Sized so healthy short turns (<5s end-to-end) emit
+  // zero heartbeats but wedges produce a 5s-cadence trail of state.
+  static get HOOK_HEARTBEAT_MS() { return 5_000 }
 
   get sessionId() {
     return this._sessionId
@@ -692,10 +697,30 @@ export class ClaudeTuiSession extends BaseSession {
     // doesn't populate `pid` (Copilot review on #4040). Tests that
     // explicitly want to skip the probe stub `_waitForPrompt` directly
     // rather than rely on this guard.
+    //
+    // Wedge instrumentation (#4678 follow-up): record elapsedMs +
+    // sawStatus + result on every exit path. The wedge symptom is
+    // `stream_start` then silence — without this log we cannot tell
+    // whether the call returned promptly (write stage stalled) or
+    // burned its 5s timeout (probe degraded). Routes via `_activeTurn`
+    // so the line is sourced from the same turn the caller is logging.
+    const startMs = Date.now()
+    const finish = (ready) => {
+      const elapsedMs = Date.now() - startMs
+      if (this._activeTurn) {
+        this._activeTurn.waitForPromptMs = elapsedMs
+        this._activeTurn.waitForPromptReady = ready
+        this._activeTurn.waitForPromptSawStatus = this._lastProbeSawStatus
+      }
+      log.info(`waitForPrompt (msg=${this._activeTurn?.messageId ?? 'none'} elapsedMs=${elapsedMs} sawStatus=${this._lastProbeSawStatus} ready=${ready})`)
+      return ready
+    }
     const pid = this._term && this._term.pid
-    if (!Number.isInteger(pid) || pid <= 0) return false
+    if (!Number.isInteger(pid) || pid <= 0) {
+      this._lastProbeSawStatus = false
+      return finish(false)
+    }
     const sessFile = ClaudeTuiSession.sessionFilePath(pid)
-    const start = Date.now()
     // Track whether we ever read a non-null status. Distinguishes
     // "claude wrote status but never reached idle" (real busy/stuck)
     // from "status field never appeared" (probe degraded — see the
@@ -707,20 +732,20 @@ export class ClaudeTuiSession extends BaseSession {
       if (status !== null) sawStatus = true
       return status !== null && status !== 'busy'
     }
-    while (Date.now() - start < timeoutMs) {
+    while (Date.now() - startMs < timeoutMs) {
       if (this._ptyExited) {
         this._lastProbeSawStatus = sawStatus
-        return false
+        return finish(false)
       }
       if (checkReady()) {
         this._lastProbeSawStatus = sawStatus
-        return true
+        return finish(true)
       }
       await new Promise((r) => setTimeout(r, 100))
     }
     const ready = checkReady()
     this._lastProbeSawStatus = sawStatus
-    return ready
+    return finish(ready)
   }
 
   /**
@@ -760,6 +785,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._currentMessageId = messageId
     const startedAt = Date.now()
     this._activeTurn = { messageId, startedAt, aborted: false, synthSeq: 0 }
+    // Wedge instrumentation (#4678 follow-up): entry log for grep'ing
+    // every turn from chroxy.log. Per-stage timings + completion get
+    // accumulated on _activeTurn and emitted in the summary line at
+    // turn finish (success or error). Together they let us reconstruct
+    // where the wedge actually sits without re-instrumenting the file.
+    log.info(`sendMessage start (msg=${messageId} sessionId=${this._sessionId} bytes=${Buffer.byteLength(prompt || '', 'utf8')} attachments=${attachments?.length || 0})`)
 
     // #4012: TUI can't accept inline multimodal blocks the way SDK/CLI
     // do, but it CAN read files via the Read tool. Materialize each
@@ -887,6 +918,14 @@ export class ClaudeTuiSession extends BaseSession {
     const HOOK_TIMEOUT_MS = this._hardTimeoutMs
     const pollStart = Date.now()
     let stopPayload = null
+    // Wedge instrumentation (#4678 follow-up): track loop progress so
+    // a wedge that manifests as "stuck waiting for stop-hook" produces
+    // a heartbeat log every HOOK_HEARTBEAT_MS — without this we cannot
+    // tell whether the loop is iterating but the sink dir stays empty,
+    // or whether the loop itself has stopped iterating.
+    let pollIters = 0
+    let lastHeartbeatMs = pollStart
+    const consumedAtStart = this._consumedFiles.size
 
     const drainHookFiles = () => {
       let entries
@@ -939,9 +978,27 @@ export class ClaudeTuiSession extends BaseSession {
       // _handleHardTimeout clears _isBusy; bail out cleanly if it fired.
       if (!this._isBusy) break
       drainHookFiles()
+      pollIters++
+      // Wedge instrumentation (#4678 follow-up): if the loop has been
+      // running >= HOOK_HEARTBEAT_MS since the last heartbeat with no
+      // stop-hook, emit a progress line. Sized at 5s so a healthy
+      // ~2-5s tool turn emits zero heartbeats while a wedge gets
+      // logged every 5s with sink-dir state.
+      const now = Date.now()
+      if (now - lastHeartbeatMs >= ClaudeTuiSession.HOOK_HEARTBEAT_MS) {
+        lastHeartbeatMs = now
+        let sinkFileCount = 0
+        try { sinkFileCount = readdirSync(this._sinkDir).length } catch {}
+        log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${this._consumedFiles.size - consumedAtStart} stopFound=false)`)
+      }
       if (stopPayload) break
       await new Promise((r) => setTimeout(r, 150))
     }
+    // Wedge instrumentation (#4678 follow-up): always log the loop's
+    // exit shape — whether it broke on stopPayload, abort, ptyExited,
+    // !isBusy, or timeout. Pair with sendMessage's final summary to
+    // reconstruct the wedge stage post-hoc.
+    log.info(`hookPoll exit (msg=${messageId} iters=${pollIters} elapsedMs=${Date.now() - pollStart} consumed=${this._consumedFiles.size - consumedAtStart} stopFound=${stopPayload ? 'yes' : 'no'} aborted=${this._activeTurn?.aborted ? 'yes' : 'no'} ptyExited=${this._ptyExited ? 'yes' : 'no'} stillBusy=${this._isBusy ? 'yes' : 'no'})`)
 
     if (!stopPayload) {
       let reason
@@ -991,6 +1048,10 @@ export class ClaudeTuiSession extends BaseSession {
       sessionId: this._sessionId,
     }, 'stop_hook_fired_without_post_hook')
 
+    // Wedge instrumentation (#4678 follow-up): summary log on success
+    // path, matching the one _finishTurnError emits on error paths so
+    // every turn lands one grep-able line regardless of outcome.
+    this._logSendMessageSummary('success')
     // Clear inactivity timers — turn done, nothing to backstop (#3920, #4638).
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
@@ -1054,6 +1115,28 @@ export class ClaudeTuiSession extends BaseSession {
    * @returns {Promise<boolean>} true if completed, false if aborted.
    */
   async _writePtyTextThrottled(text, { onAbort } = {}) {
+    // Wedge instrumentation (#4678 follow-up): track which path the
+    // write took, the byte/code-point count, and elapsed ms. The wedge
+    // symptom (`stream_start` then silence) is consistent with this
+    // function never returning OR returning but the bytes never being
+    // consumed by claude TUI. The log line at finish() distinguishes
+    // the two — if the line never appears in the log, the wedge is in
+    // here; if it appears with completed=true, the wedge is downstream
+    // (hook poll loop, or claude TUI itself).
+    const writeStartMs = Date.now()
+    const codePointCount = [...text].length
+    const byteLength = Buffer.byteLength(text, 'utf8')
+    const finish = (path, completed) => {
+      const elapsedMs = Date.now() - writeStartMs
+      if (this._activeTurn) {
+        this._activeTurn.writePath = path
+        this._activeTurn.writeMs = elapsedMs
+        this._activeTurn.writeBytes = byteLength
+        this._activeTurn.writeCompleted = completed
+      }
+      log.info(`writePtyText (msg=${this._activeTurn?.messageId ?? 'none'} path=${path} codePoints=${codePointCount} bytes=${byteLength} elapsedMs=${elapsedMs} completed=${completed})`)
+      return completed
+    }
     // #4678: multi-line prompts (from Shift+Enter in the dashboard
     // composer) need to be delivered as a single bracketed paste —
     // claude TUI v2.1.x treats raw \n in the input box as "insert
@@ -1093,7 +1176,7 @@ export class ClaudeTuiSession extends BaseSession {
         .replace(/\n+$/, '')
       if (this._activeTurn?.aborted || this._ptyExited) {
         onAbort?.()
-        return false
+        return finish('paste-abort', false)
       }
       // After stripping, an all-whitespace or all-control-bytes prompt
       // can collapse to an empty body. Sending the degenerate
@@ -1104,19 +1187,18 @@ export class ClaudeTuiSession extends BaseSession {
       // claiming to have sent and then waiting forever for a reply.
       if (body.length === 0) {
         onAbort?.()
-        return false
+        return finish('paste-empty', false)
       }
       this._term.write('\x1b[200~' + body + '\x1b[201~\r')
-      return true
+      return finish('paste', true)
     }
 
     this._term.write('\x1b[?2004l')
     try {
-      // #4276: huge prompts bypass the throttle. Counting code-points
-      // (not UTF-16 units) keeps the threshold consistent with how the
-      // loop iterates — an emoji-only 5000-char string [...].length is
-      // 5000, not 10000.
-      const codePointCount = [...text].length
+      // #4276: huge prompts bypass the throttle. Code-point count
+      // (counted once at function entry) keeps the threshold
+      // consistent with how the loop iterates — an emoji-only 5000-
+      // char string [...].length is 5000, not 10000.
       if (codePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
         // Re-check the turn lifecycle exactly once before the bulk
         // write — same shape as the loop's per-iter guards, so a
@@ -1124,11 +1206,11 @@ export class ClaudeTuiSession extends BaseSession {
         // flood a torn-down PTY with a huge payload.
         if (this._activeTurn?.aborted || this._ptyExited) {
           onAbort?.()
-          return false
+          return finish('bulk-abort', false)
         }
         this._term.write(text)
         this._term.write('\r')
-        return true
+        return finish('bulk', true)
       }
       for (const ch of text) {
         // #4275: re-check _ptyExited inside the loop, mirroring the
@@ -1138,7 +1220,7 @@ export class ClaudeTuiSession extends BaseSession {
         // pattern the rest of this file uses.
         if (this._activeTurn?.aborted || this._ptyExited) {
           onAbort?.()
-          return false
+          return finish('throttled-abort', false)
         }
         this._term.write(ch)
         if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
@@ -1146,7 +1228,7 @@ export class ClaudeTuiSession extends BaseSession {
         }
       }
       this._term.write('\r')
-      return true
+      return finish('throttled', true)
     } finally {
       // Always restore bracketed-paste mode, even on abort/throw. Write may
       // throw if PTY has exited mid-loop (#4287) — swallow so we don't mask
@@ -1330,7 +1412,27 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * Wedge instrumentation (#4678 follow-up): one-line per-turn summary
+   * with all the per-stage timings accumulated on _activeTurn during
+   * sendMessage. Called from both the success path and _finishTurnError
+   * so every turn ends with the same grep-able shape regardless of
+   * outcome. Reads from _activeTurn; safe to call when it is null.
+   */
+  _logSendMessageSummary(reason) {
+    const turn = this._activeTurn
+    if (!turn) {
+      log.info(`sendMessage done (msg=none reason=${reason})`)
+      return
+    }
+    const duration = Date.now() - turn.startedAt
+    log.info(`sendMessage done (msg=${turn.messageId} reason=${reason} duration=${duration}` +
+      ` waitForPromptMs=${turn.waitForPromptMs ?? 'n/a'} ready=${turn.waitForPromptReady ?? 'n/a'} sawStatus=${turn.waitForPromptSawStatus ?? 'n/a'}` +
+      ` writePath=${turn.writePath ?? 'n/a'} writeMs=${turn.writeMs ?? 'n/a'} writeBytes=${turn.writeBytes ?? 'n/a'} writeCompleted=${turn.writeCompleted ?? 'n/a'})`)
+  }
+
   _finishTurnError(message, callerMessageId) {
+    this._logSendMessageSummary('error')
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     // #4638: clear the stream-stall watchdog so a turn that fails or
