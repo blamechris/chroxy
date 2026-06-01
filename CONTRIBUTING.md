@@ -94,6 +94,17 @@ To keep the PR queue manageable, external contributions follow an automated stal
 
 PRs from the repo owner are exempt. Issues are not affected by this policy.
 
+### Exempt labels
+
+A PR carrying any of the following labels is parked indefinitely and will not be marked stale:
+
+- `pinned` — long-running work the maintainers want to keep visible
+- `needs-discussion` — waiting on a design or scope decision
+- `blocked:developer-program` — blocked on upstream (e.g. Apple/Google developer program access)
+- `priority: critical`, `priority: high` — high-priority work that shouldn't be auto-closed while in the queue
+
+If your PR is legitimately blocked on something outside your control, ask a maintainer to apply one of these labels.
+
 ### How to keep your PR open
 
 Just comment on the PR (anything works — a status update, a question, or a "still working on this") to reset the timer. Pushing new commits also counts as activity.
