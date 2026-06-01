@@ -121,6 +121,10 @@ import {
   isVisibleAppState,
 } from './message-handler';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
+import {
+  getWsCloseMessage,
+  getHealthCheckErrorMessage,
+} from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -150,50 +154,11 @@ const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
 const ERROR_RECONNECT_DELAY = 2000;
 
-/**
- * Map a WebSocket close code to a user-readable error message.
- *
- * Only codes the server actually sends are given specific messages:
- *   1008 — ws-auth.js: key exchange failure (encryption setup failed)
- *   4008 — ws-broadcaster.js / ws-client-sender.js: backpressure eviction
- *   1006 — abnormal closure / network drop (never sent explicitly; set by browser/RN)
- *   1000 — normal close initiated by the server (no error to show)
- *
- * All other codes fall through to a generic message.
- */
-export function getWsCloseMessage(code: number): string | null {
-  switch (code) {
-    case 1000:
-      // Normal close — no error to surface
-      return null;
-    case 1006:
-      // Abnormal closure — network drop, tunnel outage, etc.
-      return 'Connection lost — check your network';
-    case 1008:
-      // Policy violation — server couldn't complete key exchange (E2E encryption)
-      return 'Encryption failed — check that your app is up to date';
-    case 4008:
-      // Server-side backpressure eviction — client was too slow to consume messages
-      return 'Connection dropped — the server was overwhelmed, reconnecting';
-    default:
-      return 'Connection failed — check your network and server status';
-  }
-}
-
-/**
- * Map an HTTP health check failure to a user-readable error message.
- *
- *   AbortError     — fetch timed out (server not responding)
- *   HTTP 4xx/5xx   — server returned an error status
- *   Network error  — no network / tunnel down
- */
-export function getHealthCheckErrorMessage(err: { name?: string; message?: string }): string {
-  if (err.name === 'AbortError') return 'Server not responding — check your network';
-  if (err.message?.startsWith('HTTP 4')) return 'Server rejected the connection — check your token';
-  if (err.message?.startsWith('HTTP 5')) return 'Server error — the server may be restarting';
-  if (err.message?.startsWith('HTTP ')) return `Server unreachable (${err.message})`;
-  return 'Could not reach server — check your network';
-}
+// #4771: getWsCloseMessage and getHealthCheckErrorMessage now live in
+// @chroxy/store-core/ws-errors so the mobile app and dashboard share a
+// single tested mapping. Re-exported here for backward compatibility
+// with existing imports from `app/src/store/connection`.
+export { getWsCloseMessage, getHealthCheckErrorMessage } from '@chroxy/store-core';
 
 export const selectShowSession = (s: ConnectionState): boolean =>
   useConnectionLifecycleStore.getState().connectionPhase !== 'disconnected' || s.viewingCachedSession;
