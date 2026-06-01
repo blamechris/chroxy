@@ -32,6 +32,7 @@ import { resolve } from 'node:path'
 import { writeFileSync, createWriteStream } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { flushAndExit } from './flush-and-exit.mjs'
 
 // npm workspaces hoists node-pty to the root node_modules/.
 const ptyMod = await import('/Users/blamechris/Projects/chroxy/node_modules/node-pty/lib/index.js')
@@ -74,10 +75,12 @@ term.onData((chunk) => {
 })
 
 term.onExit(({ exitCode, signal }) => {
-  recording.end()
   process.stdout.write(`\n\x1b[33m=== claude exited (code=${exitCode} signal=${signal}) ===\x1b[0m\n`)
   process.stdout.write(`Recording: ${recordingPath}\n`)
-  process.exit(exitCode || 0)
+  // Wait for the recording stream to flush before exiting — process.exit
+  // does not wait for buffered writes and was silently truncating the JSONL
+  // (#4729). flushAndExit calls recording.end() internally.
+  flushAndExit(recording, exitCode || 0)
 })
 
 // Raw mode so we capture every keystroke (arrow keys, Tab, etc.) as bytes
@@ -113,9 +116,12 @@ process.stdin.on('data', (buf) => {
   if (CTRL_D_SEQUENCES.has(data)) {
     process.stdout.write(`\n\x1b[33m=== ending recording (Ctrl+D) ===\x1b[0m\n`)
     log('in', '<<CTRL-D EXIT>>')
-    recording.end()
     term.kill('SIGTERM')
-    process.exit(0)
+    // Wait for the recording stream to flush before exiting — the SIGTERM
+    // above races the JSONL flush, and process.exit does not wait for
+    // buffered writes (#4729). flushAndExit calls recording.end() internally.
+    flushAndExit(recording, 0)
+    return
   }
   // Pass through to claude + log
   log('in', data)
