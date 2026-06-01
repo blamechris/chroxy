@@ -84,13 +84,33 @@ term.onExit(({ exitCode, signal }) => {
 process.stdin.setRawMode(true)
 process.stdin.resume()
 
+// Ctrl+D detector — terminals with modify-other-keys / CSI u key encoding wrap
+// Ctrl+letter combos in CSI sequences instead of sending the raw control byte.
+// Without this coverage the recorder runs indefinitely when a user presses Ctrl+D
+// in those emulators (originally surfaced for iTerm during the #4604 pass,
+// extended to the broader CSI 27 / CSI u family for #4623).
+//
+// Accepted forms (verified against each terminal's docs / source):
+//   \x04                  — raw 0x04 EOT byte. Default tty behaviour: Terminal.app,
+//                           Alacritty (no modify-other-keys), plain xterm, tmux,
+//                           screen, and any terminal that hasn't been switched into
+//                           an enhanced keyboard mode.
+//   \x1b[27;5;100~        — xterm modifyOtherKeys=2 form: CSI 27 ; <mods> ; <code> ~
+//                           where 5 = Ctrl modifier and 100 = ASCII 'd'. Emitted by
+//                           iTerm2, Konsole, and xterm with `modifyOtherKeys=2`.
+//   \x1b[100;5u           — CSI u (fixterms / Paul Evans) form: <code> ; <mods> u.
+//                           Emitted by kitty, WezTerm with
+//                           `enable_csi_u_key_encoding = true`, foot, and other
+//                           terminals advertising the kitty keyboard protocol.
+const CTRL_D_SEQUENCES = new Set([
+  '\x04',
+  '\x1b[27;5;100~',
+  '\x1b[100;5u',
+])
+
 process.stdin.on('data', (buf) => {
   const data = buf.toString('binary')
-  // Ctrl+D — accept both plain 0x04 (most terminals) AND iTerm's modify-other-keys
-  // form `\x1b[27;5;100~` (CSI 27 = modify-other-keys, 5 = Ctrl modifier, 100 = ASCII
-  // 'd' lowercase). Without the second branch the script ran indefinitely after the
-  // user's Ctrl+D was eaten by iTerm's CSI encoding during the #4604 empirical pass.
-  if (data === '\x04' || data === '\x1b[27;5;100~') {
+  if (CTRL_D_SEQUENCES.has(data)) {
     process.stdout.write(`\n\x1b[33m=== ending recording (Ctrl+D) ===\x1b[0m\n`)
     log('in', '<<CTRL-D EXIT>>')
     recording.end()

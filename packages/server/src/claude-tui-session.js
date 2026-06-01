@@ -1653,43 +1653,18 @@ export class ClaudeTuiSession extends BaseSession {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._hardTimeoutMs)
     log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
-    const messageId = this._currentMessageId
-    // Best-effort interrupt the running TUI turn (Ctrl-C). Doesn't
-    // kill the PTY — claude TUI cancels the in-flight request and
-    // returns to the prompt. _isBusy=false below lets the next
-    // sendMessage proceed normally.
-    if (this._term) {
-      try { this._term.write('\x03') } catch { /* ignore */ }
-    }
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._hardTimeoutMs
-    this.emit('stream_end', { messageId })
-    // #4022: drop the per-turn attachment dir on hard timeout. Done
-    // BEFORE nulling _activeTurn so the helper still has access to the
-    // attachmentsDir path. No-op when the turn had no attachments.
-    this._cleanupTurnAttachments(this._activeTurn)
-    this._activeTurn = null
-    this._isBusy = false
-    this._currentMessageId = null
-    // #4286: clear any pending AskUserQuestion answer slot — same
-    // reason as in _finishTurnError. A user_question_response arriving
-    // after we've already fired Ctrl-C and emitted error/result has
-    // nowhere meaningful to go.
-    this._pendingUserAnswer = null
-    this._clearAskUserQuestionLock()
-    // #4604: same symmetry for the stall watchdog — see _finishTurnError.
-    if (this._askUserQuestionWatchdog) {
-      clearTimeout(this._askUserQuestionWatchdog)
-      this._askUserQuestionWatchdog = null
-    }
-    this.emit('error', { message: `Response timed out after ${friendly}` })
-    // #4010: emit result so the dashboard receives agent_idle and clears
-    // the Stop button. stream_end on its own only clears streamingMessageId.
-    // #4072: subscription-billed → cost: null. See companion sites above.
-    // #4628: sweep orphan tool_starts before the timeout-driven result.
-    this._emitResult(
-      { cost: null, duration, usage: null, sessionId: this._sessionId },
-      'hard_timeout',
-    )
+    // #4641: shared teardown helper. Flags preserve exact historical
+    // behaviour — hard-timeout emits stream_end unconditionally (even if
+    // messageId is null) and emits error BEFORE _emitResult; stream-stall
+    // gates stream_end on messageId and emits error AFTER. Both are kept
+    // as-is so this refactor is behaviour-preserving.
+    this._teardownTurn('hard_timeout', {
+      duration,
+      errorPayload: { message: `Response timed out after ${friendly}` },
+      errorBeforeResult: true,
+      gateStreamEndOnMessageId: false,
+    })
   }
 
   /**
@@ -1722,38 +1697,105 @@ export class ClaudeTuiSession extends BaseSession {
     log.warn(
       `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
     )
-    // Best-effort Ctrl-C so the TUI process unsticks for the next turn.
-    // Doesn't kill the PTY — claude cancels the in-flight request and
-    // returns to its prompt. Mirrors _handleHardTimeout.
+    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._streamStallTimeoutMs
+    // #4641: shared teardown helper. See companion call in _handleHardTimeout
+    // for the meaning of the asymmetric flags — preserved here as-is so this
+    // refactor introduces no behaviour change.
+    this._teardownTurn('stream_stall', {
+      duration,
+      errorPayload: {
+        code: 'stream_stall',
+        message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+      },
+      errorBeforeResult: false,
+      gateStreamEndOnMessageId: true,
+    })
+  }
+
+  /**
+   * #4641: shared per-turn teardown for the timeout/stall recovery paths
+   * (`_handleHardTimeout`, `_handleStreamStall`). Centralises the cleanup
+   * sequence so the next #4286/#4604-class symmetry fix only needs to
+   * touch one site.
+   *
+   * Sequence (matches the historical inline code in both callers):
+   *   1. Best-effort Ctrl-C into the PTY so claude TUI unsticks the
+   *      in-flight request and returns to its prompt. Doesn't kill the
+   *      process — _isBusy=false below lets the next sendMessage proceed.
+   *   2. Emit `stream_end` so the dashboard clears `streamingMessageId`.
+   *      The two callers disagree on whether to gate on `messageId`
+   *      (hard-timeout emits unconditionally, stream-stall gates),
+   *      hence the `gateStreamEndOnMessageId` flag — kept asymmetric
+   *      because changing either side would alter observable wire
+   *      behaviour for a contract-violation edge case (_isBusy=true with
+   *      a null _currentMessageId, tracked in #4642).
+   *   3. Drop the per-turn attachment dir (#4022), null `_activeTurn`,
+   *      clear `_isBusy` + `_currentMessageId`.
+   *   4. Clear the pending AskUserQuestion answer slot (#4286), the
+   *      askuserquestion-active lock (#4669), and the AskUserQuestion
+   *      stall watchdog (#4604) — all symmetric across teardown paths.
+   *   5. Emit `error` and `_emitResult` in the order the caller requests.
+   *      Hard-timeout historically fired error BEFORE result; stream-stall
+   *      after. The order is observable to listeners and the asymmetry
+   *      is preserved here verbatim (`errorBeforeResult` flag) so this
+   *      refactor is strictly behaviour-preserving — flipping the order
+   *      to a single canonical sequence is intentionally OUT OF SCOPE
+   *      and tracked separately if ever needed.
+   *
+   * `errorPayload` is optional — when omitted no error is emitted (none
+   * of the current callers exercise this, but it leaves room for future
+   * teardown paths that only want the cleanup half).
+   */
+  _teardownTurn(reason, {
+    duration,
+    errorPayload = null,
+    errorBeforeResult = false,
+    gateStreamEndOnMessageId = true,
+  } = {}) {
+    const messageId = this._currentMessageId
+    // 1. Best-effort Ctrl-C into the PTY.
     if (this._term) {
       try { this._term.write('\x03') } catch { /* ignore */ }
     }
-    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._streamStallTimeoutMs
-    if (messageId) this.emit('stream_end', { messageId })
-    // #4022: drop per-turn attachment dir on stall, same as hard timeout.
+    // 2. Emit stream_end (gated per caller).
+    if (gateStreamEndOnMessageId) {
+      if (messageId) this.emit('stream_end', { messageId })
+    } else {
+      this.emit('stream_end', { messageId })
+    }
+    // 3. Per-turn attachment + busy-state cleanup. _cleanupTurnAttachments
+    // runs BEFORE _activeTurn is nulled so the helper still has access
+    // to attachmentsDir; no-op when the turn had no attachments.
     this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
-    // #4286/#4604 symmetry — clear pending AskUserQuestion slot + watchdog
-    // so a late answer / late stall fire can't write to a torn-down turn.
+    // 4. AskUserQuestion-related slot/lock/watchdog symmetry.
     this._pendingUserAnswer = null
     this._clearAskUserQuestionLock()
     if (this._askUserQuestionWatchdog) {
       clearTimeout(this._askUserQuestionWatchdog)
       this._askUserQuestionWatchdog = null
     }
-    // #4628 sweep + result fan-out (event-normalizer turns result into
-    // result+agent_idle so the dashboard's activeTools and Stop button
-    // both clear).
-    this._emitResult(
-      { cost: null, duration, usage: null, sessionId: this._sessionId },
-      'stream_stall',
-    )
-    this.emit('error', {
-      code: 'stream_stall',
-      message: `Stream stalled — no response for ${friendly}. Try sending again.`,
-    })
+    // 5. Error + result emit, in the order the caller requests. The two
+    // existing callers disagree (hard-timeout: error first; stream-stall:
+    // result first), and that asymmetry is preserved exactly.
+    const emitResult = () => {
+      this._emitResult(
+        { cost: null, duration, usage: null, sessionId: this._sessionId },
+        reason,
+      )
+    }
+    const emitError = () => {
+      if (errorPayload) this.emit('error', errorPayload)
+    }
+    if (errorBeforeResult) {
+      emitError()
+      emitResult()
+    } else {
+      emitResult()
+      emitError()
+    }
   }
 
   /**
@@ -2130,8 +2172,14 @@ export class ClaudeTuiSession extends BaseSession {
    * and Stop) → emit `error{code:'ASK_USER_QUESTION_STALL'}` last so the
    * dashboard surfaces the user-facing toast AFTER state has settled.
    *
-   * Shape mirrors `_handleStreamStall` and `_handleHardTimeout` —
-   * extracting a shared `_teardownTurn` helper is tracked in #4641.
+   * Shape mirrors `_handleStreamStall` and `_handleHardTimeout` (which
+   * delegate to `_teardownTurn` per #4641). This path is NOT folded into
+   * `_teardownTurn` because it has additional side-effects (synthetic
+   * `tool_result` emit, clears all three inactivity timers, error
+   * payload carries `toolUseId`) that don't generalise to the other two
+   * teardown sites — bringing it in would either widen the helper's
+   * surface or split the call into multiple stages, neither of which
+   * earns its complexity today.
    *
    * No-ops on destroyed sessions and on sessions where PostToolUse
    * already arrived (would have cleared _pendingUserAnswer + busy state
