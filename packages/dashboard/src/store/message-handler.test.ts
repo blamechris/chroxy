@@ -3556,4 +3556,172 @@ describe('dashboard message-handler dispatch', () => {
       expect(ssB.lastClientActivityAt).toBe(100)
     })
   })
+
+  // #4639 — the Working banner desyncs across tabs / remounts because
+  // `sessionStates[id].isIdle` is initialised to `true` and only flipped by
+  // local events (`agent_busy` / `agent_idle`). When a new tab opens, when
+  // session_state is rebuilt for a previously-unobserved session, or when
+  // the server tells us via `session_activity` that a session is still
+  // in-flight, the dashboard must trust the server's authoritative `isBusy`
+  // flag over the local default.
+  describe('isIdle authoritative sync (#4639)', () => {
+    it('session_list seeds isIdle from server isBusy for a brand new session entry', () => {
+      // Fresh store with no session state for s1. session_list arrives with
+      // isBusy: true (the server considers the session in-flight). Pre-fix
+      // the dashboard would default isIdle to true and the Working banner
+      // would not render until the next live event landed.
+      store = createMockStore(baseState())
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: true } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss).toBeDefined()
+      expect(ss.isIdle).toBe(false)
+    })
+
+    it('session_list seeds isIdle: true for an idle session', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: false } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+    })
+
+    it('session_list resyncs isIdle on an existing session when server flips to busy', () => {
+      // Tab swap path: the session state exists with isIdle: true (default
+      // after createEmptySessionState), but the server is still in-flight.
+      // A periodic session_list snapshot should correct the local state so
+      // the banner re-appears for the user.
+      store = createMockStore(
+        baseState({
+          sessionStates: {
+            s1: { ...createEmptySessionState(), isIdle: true },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: true } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(false)
+    })
+
+    it('session_list resyncs isIdle on an existing session when server flips to idle', () => {
+      // The reverse case: a stuck local `isIdle: false` (e.g. missed an
+      // agent_idle event) gets corrected on the next snapshot.
+      store = createMockStore(
+        baseState({
+          sessionStates: {
+            s1: { ...createEmptySessionState(), isIdle: false },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: false } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+    })
+
+    it('session_activity sets isIdle: false when server reports busy', () => {
+      // The server already emits `session_activity` on stream_start / result
+      // (ws-forwarding.js), but pre-fix the dashboard had no handler for it
+      // — so peer-tab busy state never propagated. Wire it up.
+      store = createMockStore(
+        baseState({
+          sessionStates: {
+            s1: { ...createEmptySessionState(), isIdle: true },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_activity', sessionId: 's1', isBusy: true } as any,
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(false)
+    })
+
+    it('session_activity sets isIdle: true when server reports idle', () => {
+      store = createMockStore(
+        baseState({
+          sessionStates: {
+            s1: { ...createEmptySessionState(), isIdle: false },
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_activity', sessionId: 's1', isBusy: false } as any,
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+    })
+
+    it('session_activity is a no-op when the session is not in sessionStates', () => {
+      // Defensive: a session_activity for an unknown session must not crash
+      // or create a phantom entry — the session_list path is responsible
+      // for seeding new sessions.
+      store = createMockStore(baseState())
+      setStore(store)
+      handleMessage(
+        { type: 'session_activity', sessionId: 'unknown', isBusy: true } as any,
+        ctx() as any,
+      )
+      const states = (store.getState() as any).sessionStates
+      expect(states.unknown).toBeUndefined()
+    })
+
+    it('session_activity syncs the flat isIdle when the active session changes', () => {
+      // When the active session's busy state changes, the flat-state mirror
+      // (read by App.tsx's `isBusy={!isIdle}` props) must update too so the
+      // Stop/Send button switches without a tab interaction.
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessionStates: {
+            s1: { ...createEmptySessionState(), isIdle: true },
+          },
+          isIdle: true,
+        } as any),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_activity', sessionId: 's1', isBusy: true } as any,
+        ctx() as any,
+      )
+      expect((store.getState() as any).isIdle).toBe(false)
+    })
+  })
 })
