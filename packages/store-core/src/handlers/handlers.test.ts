@@ -19,6 +19,8 @@ import {
   handlePlanStarted,
   handlePlanReady,
   handleInactivityWarning,
+  handleMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,
@@ -6585,5 +6587,180 @@ describe('handleResultUsage', () => {
     expect(
       handleResultUsage({ sessionId: null }, 'active-1').sessionId,
     ).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleMultiQuestionIntervention (#4653)
+// ---------------------------------------------------------------------------
+describe('handleMultiQuestionIntervention', () => {
+  it('appends a new intervention entry when toolUseId is unseen', () => {
+    const builder = handleMultiQuestionIntervention(
+      {
+        sessionId: 'sess-1',
+        toolUseId: 'toolu_1',
+        questionCount: 3,
+        reason: 'multi_question',
+        timestamp: 1700000000000,
+      },
+      'active-1',
+    )
+    expect(builder).not.toBeNull()
+    expect(builder!.sessionId).toBe('sess-1')
+    const { interventions } = builder!.applyTo([])
+    expect(interventions).toHaveLength(1)
+    expect(interventions[0]).toEqual({
+      kind: 'multi_question',
+      toolUseId: 'toolu_1',
+      count: 3,
+      timestamp: 1700000000000,
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_2', questionCount: 2 },
+      'active-1',
+    )
+    expect(builder!.sessionId).toBe('active-1')
+  })
+
+  it('dedups repeats by toolUseId — returns the array unchanged so React skips a re-render', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_dup', count: 4, timestamp: 100 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_dup', questionCount: 4, timestamp: 200 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    // Same reference — referential equality preserved for the React diff.
+    expect(interventions).toBe(existing)
+  })
+
+  it('appends second distinct intervention to existing list', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_a', count: 2, timestamp: 100 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_b', questionCount: 5, timestamp: 200 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    expect(interventions).toHaveLength(2)
+    expect(interventions[1].toolUseId).toBe('toolu_b')
+    expect(interventions[1].count).toBe(5)
+  })
+
+  it('defaults timestamp to Date.now() when payload omits it', () => {
+    const before = Date.now()
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_now', questionCount: 2 },
+      'active-1',
+    )
+    const after = Date.now()
+    const { interventions } = builder!.applyTo([])
+    expect(interventions[0].timestamp).toBeGreaterThanOrEqual(before)
+    expect(interventions[0].timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('floors fractional questionCount (defence-in-depth against malformed payloads)', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_frac', questionCount: 3.7 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo([])
+    expect(interventions[0].count).toBe(3)
+  })
+
+  it('returns null when toolUseId is missing or non-string', () => {
+    expect(
+      handleMultiQuestionIntervention({ questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: '', questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 123, questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns null when questionCount is missing, non-finite, or negative', () => {
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a' }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: NaN }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention(
+        { toolUseId: 'a', questionCount: Number.POSITIVE_INFINITY },
+        'active-1',
+      ),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: -1 }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('ring-caps the array at MAX_SESSION_INTERVENTIONS (drops oldest entries)', async () => {
+    const { MAX_SESSION_INTERVENTIONS } = await import('../utils')
+    // Pre-fill exactly to the cap with synthetic entries
+    const existing = Array.from({ length: MAX_SESSION_INTERVENTIONS }, (_, i) => ({
+      kind: 'multi_question' as const,
+      toolUseId: `toolu_${i}`,
+      count: 2,
+      timestamp: i,
+    }))
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_new', questionCount: 7, timestamp: 9999 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    expect(interventions).toHaveLength(MAX_SESSION_INTERVENTIONS)
+    // Oldest dropped, newest at the end.
+    expect(interventions[0].toolUseId).toBe('toolu_1')
+    expect(interventions[interventions.length - 1].toolUseId).toBe('toolu_new')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// applyInterventionBuilder (#4653)
+// ---------------------------------------------------------------------------
+describe('applyInterventionBuilder', () => {
+  it('reports isFirst=true when this is the first intervention in an empty session', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_first', questionCount: 2 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, [])
+    expect(interventions).toHaveLength(1)
+    expect(isFirst).toBe(true)
+  })
+
+  it('reports isFirst=false on subsequent distinct interventions', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_prev', count: 2, timestamp: 1 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_next', questionCount: 3 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, existing)
+    expect(interventions).toHaveLength(2)
+    expect(isFirst).toBe(false)
+  })
+
+  it('reports isFirst=false when a duplicate skips the append (no inline-notice on stuck-model re-emit)', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_dup', count: 2, timestamp: 1 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_dup', questionCount: 2 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, existing)
+    expect(interventions).toBe(existing)
+    expect(isFirst).toBe(false)
   })
 })

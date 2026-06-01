@@ -351,6 +351,35 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: multi_question_intervention (#4653) ----
+
+  describe('multi_question_intervention event', () => {
+    it('forwards toolUseId, questionCount, reason and timestamp to the WS payload', () => {
+      const data = {
+        toolUseId: 'toolu_norm',
+        questionCount: 4,
+        reason: 'multi_question',
+        timestamp: 1700000000000,
+      }
+      const result = normalizer.normalize('multi_question_intervention', data, makeCtx())
+      assert.equal(result.messages.length, 1)
+      assert.deepEqual(result.messages[0].msg, {
+        type: 'multi_question_intervention',
+        toolUseId: 'toolu_norm',
+        questionCount: 4,
+        reason: 'multi_question',
+        timestamp: 1700000000000,
+      })
+    })
+
+    it('does not emit any sibling messages (session stays alive — no agent_idle/result)', () => {
+      const data = { toolUseId: 't', questionCount: 2, reason: 'multi_question', timestamp: 1 }
+      const result = normalizer.normalize('multi_question_intervention', data, makeCtx())
+      const types = result.messages.map((m) => m.msg.type)
+      assert.deepEqual(types, ['multi_question_intervention'])
+    })
+  })
+
   // ---- EVENT_MAP: result ----
 
   describe('result event', () => {

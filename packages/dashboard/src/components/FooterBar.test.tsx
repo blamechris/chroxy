@@ -5,7 +5,7 @@
  * busy indicator, and agent count.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { FooterBar } from './FooterBar'
 
 afterEach(cleanup)
@@ -282,6 +282,124 @@ describe('FooterBar', () => {
     it('chip is hidden when contextPercent is null (no usage data yet)', () => {
       render(<FooterBar {...baseProps} context="0 tokens" contextPercent={null} onCompact={vi.fn()} />)
       expect(screen.queryByTestId('btn-compact-session')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('#4653 chroxy intervention counter', () => {
+    it('hides the chip when interventions is empty or undefined', () => {
+      const { rerender } = render(<FooterBar {...baseProps} />)
+      expect(screen.queryByTestId('footer-interventions')).not.toBeInTheDocument()
+      rerender(<FooterBar {...baseProps} interventions={[]} />)
+      expect(screen.queryByTestId('footer-interventions')).not.toBeInTheDocument()
+    })
+
+    it('shows the counter chip with singular label for exactly one intervention', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_1', count: 3, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      const chip = screen.getByTestId('footer-interventions')
+      expect(chip).toBeInTheDocument()
+      expect(chip).toHaveTextContent('1 intervention')
+    })
+
+    it('shows plural label when count > 1', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'a', count: 2, timestamp: 1 },
+            { kind: 'multi_question', toolUseId: 'b', count: 3, timestamp: 2 },
+            { kind: 'multi_question', toolUseId: 'c', count: 4, timestamp: 3 },
+          ]}
+        />,
+      )
+      const chip = screen.getByTestId('footer-interventions')
+      expect(chip).toHaveTextContent('3 interventions')
+    })
+
+    it('panel is collapsed by default — list not in the DOM until click', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_x', count: 2, timestamp: 1 },
+          ]}
+        />,
+      )
+      expect(screen.queryByTestId('footer-interventions-panel')).not.toBeInTheDocument()
+    })
+
+    it('clicking the chip expands the panel and lists newest-first', () => {
+      const t1 = Date.now() - 60_000 // 1m ago
+      const t2 = Date.now() - 1_000  // 1s ago
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'older', count: 2, timestamp: t1 },
+            { kind: 'multi_question', toolUseId: 'newer', count: 3, timestamp: t2 },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      const panel = screen.getByTestId('footer-interventions-panel')
+      expect(panel).toBeInTheDocument()
+      // Newest-first: the "newer" row should appear before "older" in the rendered DOM.
+      const items = Array.from(panel.querySelectorAll('[data-testid^="intervention-"]'))
+      expect(items).toHaveLength(2)
+      expect(items[0]?.getAttribute('data-testid')).toBe('intervention-newer')
+      expect(items[1]?.getAttribute('data-testid')).toBe('intervention-older')
+    })
+
+    it('aria-expanded reflects the panel state', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_a', count: 2, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      const chip = screen.getByTestId('footer-interventions')
+      expect(chip).toHaveAttribute('aria-expanded', 'false')
+      fireEvent.click(chip)
+      expect(chip).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.click(chip)
+      expect(chip).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('describes the multi_question kind with the question count', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_q', count: 4, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      expect(screen.getByTestId('intervention-toolu_q')).toHaveTextContent('4 questions')
+      expect(screen.getByTestId('intervention-toolu_q')).toHaveTextContent(/ask one at a time/i)
+    })
+
+    it('close button collapses the panel', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_c', count: 2, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      expect(screen.getByTestId('footer-interventions-panel')).toBeInTheDocument()
+      fireEvent.click(screen.getByLabelText('Close interventions panel'))
+      expect(screen.queryByTestId('footer-interventions-panel')).not.toBeInTheDocument()
     })
   })
 })

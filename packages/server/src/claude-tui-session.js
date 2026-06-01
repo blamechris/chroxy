@@ -293,6 +293,22 @@ export class ClaudeTuiSession extends BaseSession {
     return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
   }
 
+  /**
+   * #4653: provider-specific events the SessionManager should forward as
+   * transient `session_event`s. `multi_question_intervention` fires from
+   * `_emitToolHookEvent` whenever PreToolUse sees an AskUserQuestion whose
+   * `questions[]` has length > 1 — i.e. the EXACT condition the bash
+   * permission-hook (`packages/server/hooks/permission-hook.sh`, #4648)
+   * denies on. The dashboard renders an inline notice + a session-footer
+   * counter so the user knows chroxy intercepted the multi-question form.
+   * Without this surface the user wonders if the model is being clever
+   * (asking one at a time naturally) or if chroxy is intervening — see
+   * the v0.9.24 dogfood feedback captured on #4653.
+   */
+  static get customEvents() {
+    return ['multi_question_intervention']
+  }
+
   constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, skipPermissions } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
 
@@ -1410,6 +1426,21 @@ export class ClaudeTuiSession extends BaseSession {
           // means even old dashboards no longer wedge the session, just
           // pick defaults the user can re-prompt past.
           log.warn(`AskUserQuestion has ${questionCount} questions — multi-question forms are not yet supported (see #4604). Only question 1 will be answered.`)
+          // #4653: surface the deny to the user. The bash permission-hook
+          // returns `permissionDecision: deny` for this exact payload
+          // shape (questions.length > 1), so this server-side mirror
+          // event reports the same decision through the WS wire. Without
+          // it, the deny is invisible — the user wonders if the model is
+          // being clever (asking one at a time naturally) or if chroxy
+          // intervened. Per-toolUseId so the dashboard can dedup repeats
+          // when claude TUI re-emits the same multi-q payload (a known
+          // failure mode pre-#4668).
+          this.emit('multi_question_intervention', {
+            toolUseId,
+            questionCount,
+            reason: 'multi_question',
+            timestamp: Date.now(),
+          })
         }
         this.emit('user_question', { toolUseId, questions })
       }
