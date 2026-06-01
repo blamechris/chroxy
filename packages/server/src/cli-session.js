@@ -186,6 +186,11 @@ export class CliSession extends BaseSession {
     this._respawnScheduled = false
     this._respawning = false
     this._interruptTimer = null
+    // #4602: distinguishes "user clicked Stop" (interrupt → child exits)
+    // from "child crashed" so _handleChildClose skips the misleading
+    // "exited unexpectedly" toast + auto-respawn on the stop path.
+    // Single-use: set by interrupt(), cleared by _handleChildClose / destroy.
+    this._intentionalStop = false
 
     // Hook manager (shared module)
     this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
@@ -1117,10 +1122,27 @@ export class CliSession extends BaseSession {
     this._processReady = false
     this._child = null
 
+    // #4602: capture-and-clear up front so the flag never leaks past a
+    // close, even when the _destroying / _respawning guards short-circuit
+    // (e.g. user clicks Stop → flag set → model switch fires
+    // _killAndRespawn → _respawning short-circuit hits, but the flag must
+    // not persist to silently swallow a real crash on a future close).
+    const wasIntentionalStop = this._intentionalStop
+    this._intentionalStop = false
+
     if (this._destroying) return
     if (this._respawning) return
 
     this._emitInterruptedTurnResult()
+
+    // #4602: user-initiated Stop sent SIGINT via interrupt(). The child
+    // exited cleanly as a result — do NOT show "exited unexpectedly" and
+    // do NOT auto-respawn the child the user explicitly stopped.
+    if (wasIntentionalStop) {
+      log.info(`Process exited (code ${code}) after user stop`)
+      this.emit('stopped', { code })
+      return
+    }
 
     log.info(`Process exited (code ${code}), scheduling respawn`)
     this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
@@ -1130,6 +1152,13 @@ export class CliSession extends BaseSession {
   /** Interrupt the current message (send SIGINT to child process) */
   interrupt() {
     if (!this._child) return
+
+    // #4602: mark the imminent child exit as user-initiated so
+    // _handleChildClose suppresses the "exited unexpectedly" error and the
+    // auto-respawn. If the child survives SIGINT (claude only aborts the
+    // current turn), the next natural exit will be a real crash — the flag
+    // is cleared in _handleChildClose on whichever exit fires first.
+    this._intentionalStop = true
 
     log.info('Sending SIGINT to claude process')
     this._child.kill('SIGINT')
@@ -1143,6 +1172,10 @@ export class CliSession extends BaseSession {
     }
     this._interruptTimer = setTimeout(() => {
       this._interruptTimer = null
+      // #4602: if the child survived SIGINT (claude only aborted the turn),
+      // clear the flag so a later natural crash still triggers respawn —
+      // otherwise the flag stays armed indefinitely and swallows real crashes.
+      this._intentionalStop = false
       if (this._isBusy) {
         log.warn('Interrupt safety timeout — force-clearing busy state')
         this._emitInterruptedTurnResult()
@@ -1154,6 +1187,7 @@ export class CliSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._respawning = false
+    this._intentionalStop = false
 
     // Clean up permission hook — destroy() now chains unregister() after any
     // in-flight register() promise, preventing a register-after-unregister race
