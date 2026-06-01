@@ -100,6 +100,18 @@ describe('formatQuestionAnswerSummary', () => {
       )
     })
 
+    it('renders Other / freeform single-question answers as the typed text (#4651)', () => {
+      // #4651 — single-question "Other" with freeform text. The summary
+      // chip should show the user's typed text, not the literal "Other"
+      // label that was used to pick the Other option in the menu.
+      expect(
+        formatQuestionAnswerSummary({
+          otherLabel: 'Other',
+          freeformText: 'my freeform thought',
+        }),
+      ).toBe('my freeform thought')
+    })
+
     it('only flattens arrays — non-array JSON values are kept as the raw string', () => {
       // MultiQuestionForm.handleSubmit only ever JSON-stringifies arrays
       // of option values (see handleSubmit in QuestionPrompt.tsx). The
@@ -117,13 +129,14 @@ describe('formatQuestionAnswerSummary', () => {
     })
   })
 
-  // #4621 — widen the wire shape to Record<string, string | string[]>.
-  // MultiQuestionForm now sends native string[] for multi-select instead
-  // of JSON-stringifying. The summary helper must accept arrays directly
-  // and render them as comma-joined labels — without leaking
+  // #4621 / #4735 — per-question wire was widened to
+  // `Record<string, string | string[]>` so multi-select answers can be
+  // emitted as native arrays. The summary helper renders the array form
+  // the same way as the pre-#4621 JSON-stringified form so mixed-version
+  // rehydrated state stays readable end-to-end — without leaking
   // `["App","Tests"]` JSON syntax (which the legacy back-compat path
   // also covered).
-  describe('multi-question form path (Record<string, string | string[]>) — #4621', () => {
+  describe('native string[] multi-select (#4621 / #4735)', () => {
     it('renders a native string[] multi-select as comma-joined labels', () => {
       const answer: Record<string, string | string[]> = {
         'Which areas?': ['App', 'Tests'],
@@ -133,14 +146,25 @@ describe('formatQuestionAnswerSummary', () => {
       )
     })
 
-    it('renders an empty string[] without brackets', () => {
+    it('renders a mixed string + string[] payload readably', () => {
+      const answer: Record<string, string | string[]> = {
+        'Which release strategy?': 'Minor',
+        'Which areas?': ['App', 'Tests', 'Docs'],
+        'Confirm?': 'Yes',
+      }
+      expect(formatQuestionAnswerSummary(answer)).toBe(
+        'Which release strategy?: Minor | Which areas?: App, Tests, Docs | Confirm?: Yes',
+      )
+    })
+
+    it('renders an empty native string[] as an empty value', () => {
       const answer: Record<string, string | string[]> = {
         'Which areas?': [],
       }
       expect(formatQuestionAnswerSummary(answer)).toBe('Which areas?: ')
     })
 
-    it('renders a single-item string[] without brackets or quotes', () => {
+    it('renders a single-item native string[] without brackets or quotes', () => {
       const answer: Record<string, string | string[]> = {
         'Which areas?': ['App'],
       }

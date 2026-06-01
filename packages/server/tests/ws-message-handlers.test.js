@@ -479,7 +479,9 @@ describe('handleSessionMessage', () => {
       // route to the right pending entry in its Map. Old 2-arg shape
       // (answer, answersMap) is preserved positionally; toolUseId is the
       // new trailing optional arg passed to every session type.
-      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes please', undefined, 'tool-xyz'])
+      // #4651: 4th arg is opts ({freeformText}); undefined when no
+      // freeformText present on the wire.
+      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes please', undefined, 'tool-xyz', undefined])
     })
 
     it('forwards answers map to respondToQuestion', async () => {
@@ -494,7 +496,8 @@ describe('handleSessionMessage', () => {
         answers: answersMap,
       }, ctx)
       assert.equal(entry.session.respondToQuestion.callCount, 1)
-      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes', answersMap, 'tool-abc'])
+      // #4651: 4th positional arg is opts; undefined here (no freeformText).
+      assert.deepStrictEqual(entry.session.respondToQuestion.lastCall, ['yes', answersMap, 'tool-abc', undefined])
     })
   })
 

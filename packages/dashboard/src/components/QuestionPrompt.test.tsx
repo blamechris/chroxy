@@ -281,6 +281,13 @@ describe('QuestionPrompt', () => {
     })
 
     it('submits the typed answer when Send is clicked from Other mode', () => {
+      // #4651 — Other-mode submissions now emit an object payload carrying
+      // both the typed text AND the option label that triggered Other-mode
+      // ("Other" by default; a model-supplied label like "Custom" if the
+      // model overrode the label). The connection store reads this shape
+      // to send a two-stage `user_question_response` (digit → freeform
+      // text) to the server, so claude TUI's text-input prompt receives
+      // the freeform answer instead of jump-nav-ing on the menu.
       const onSelect = vi.fn()
       render(
         <QuestionPrompt
@@ -292,7 +299,27 @@ describe('QuestionPrompt', () => {
       fireEvent.click(screen.getByText('Other'))
       fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'custom answer' } })
       fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-      expect(onSelect).toHaveBeenCalledWith('custom answer')
+      expect(onSelect).toHaveBeenCalledWith({ otherLabel: 'Other', freeformText: 'custom answer' })
+    })
+
+    it('still emits a plain string when no options exist (free-text-only AskUserQuestion)', () => {
+      // #4651 — the freeform object shape is reserved for the
+      // "Other option exists in a menu" path. A question with zero
+      // options (free-text-only fallback, #1245) doesn't render an
+      // "Other" button at all, so onSelect must keep the legacy
+      // string shape for back-compat with the server's free-text
+      // handler.
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question="Any thoughts?"
+          options={[]}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'free text' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      expect(onSelect).toHaveBeenCalledWith('free text')
     })
 
     it('Cancel returns to the option buttons without submitting', () => {
@@ -464,6 +491,85 @@ describe('QuestionPrompt', () => {
       expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
     })
 
+    // #4735 — `allowMultiQuestion` opt-in lifts the deferred-notice
+    // suppression for SDK-mode sessions whose underlying delivery path
+    // supports per-question answers natively (#4731). TUI sessions keep
+    // the deferred notice as before because their permission-hook denies
+    // multi-question tool_uses. App.tsx derives the flag from
+    // `session.provider !== 'claude-tui'`.
+    describe('allowMultiQuestion opt-in (#4735)', () => {
+      it('renders the interactive MultiQuestionForm when allowMultiQuestion is true', () => {
+        render(
+          <QuestionPrompt
+            question={q1.question}
+            options={q1.options}
+            questions={multiQuestions}
+            allowMultiQuestion
+            onSelect={vi.fn()}
+          />
+        )
+        expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
+        expect(screen.getByTestId('question-multi-submit')).toBeInTheDocument()
+        expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      })
+
+      it('renders the deferred notice when allowMultiQuestion is false (default)', () => {
+        render(
+          <QuestionPrompt
+            question={q1.question}
+            options={q1.options}
+            questions={multiQuestions}
+            allowMultiQuestion={false}
+            onSelect={vi.fn()}
+          />
+        )
+        expect(screen.getByTestId('multi-question-deferred-notice')).toBeInTheDocument()
+        expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+      })
+
+      it('still falls back to the single-question UI for N=1 even when allowMultiQuestion is true', () => {
+        // The opt-in flag only lifts the multi-question suppression; the
+        // N=1 path is unchanged so single-question regressions stay green.
+        render(
+          <QuestionPrompt
+            question="Just one?"
+            options={[{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }]}
+            questions={[{ question: 'Just one?', options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }] }]}
+            allowMultiQuestion
+            onSelect={vi.fn()}
+          />
+        )
+        expect(screen.getByTestId('question-prompt')).toBeInTheDocument()
+        expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+        expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      })
+
+      it('submitting the MultiQuestionForm propagates the answersMap through onSelect', () => {
+        const onSelect = vi.fn()
+        render(
+          <QuestionPrompt
+            question={q1.question}
+            options={q1.options}
+            questions={multiQuestions}
+            allowMultiQuestion
+            onSelect={onSelect}
+          />
+        )
+        // Strategy: pick "Patch"; Targets: pick "App" + "Tests"; Confirm: "Yes"
+        fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-App').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-Tests').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-2-Yes').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        expect(arg!['Which release strategy?']).toBe('Patch')
+        // Native string[] per #4735, not a JSON-stringified envelope.
+        expect(arg!['Which targets?']).toEqual(['App', 'Tests'])
+        expect(arg!['Confirm?']).toBe('Yes')
+      })
+    })
+
     it('falls back to single-question UI when answered is already set (multi-question post-answer summary path)', () => {
       // Once an answer is recorded, render the single-question collapse
       // UI — even for a multi-question payload. The deferred notice is
@@ -485,20 +591,20 @@ describe('QuestionPrompt', () => {
       expect(screen.getByTestId('question-answered-summary')).toBeInTheDocument()
     })
 
-    // #4731 — SDK / BYOK sessions answer multi-question forms natively via
-    // the in-process `canUseTool` permission flow, bypassing the TUI
-    // permission-hook deny. App.tsx looks up the active session's provider
-    // and sets `enableMultiQuestion={true}` for everything except
+    // #4731 / #4735 — SDK / BYOK sessions answer multi-question forms
+    // natively via the in-process `canUseTool` permission flow, bypassing
+    // the TUI permission-hook deny. App.tsx looks up the active session's
+    // provider and sets `allowMultiQuestion={true}` for everything except
     // `claude-tui` / `claude-cli`. When set, the interactive
     // MultiQuestionForm renders instead of the deferred notice.
-    it('renders MultiQuestionForm (not deferred notice) when enableMultiQuestion is true (#4731)', () => {
+    it('renders MultiQuestionForm (not deferred notice) when allowMultiQuestion is true (#4731)', () => {
       const onSelect = vi.fn()
       render(
         <QuestionPrompt
           question={q1.question}
           options={q1.options}
           questions={multiQuestions}
-          enableMultiQuestion
+          allowMultiQuestion
           onSelect={onSelect}
         />
       )
@@ -509,7 +615,7 @@ describe('QuestionPrompt', () => {
       expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
     })
 
-    it('still renders deferred notice when enableMultiQuestion is explicitly false (#4731)', () => {
+    it('still renders deferred notice when allowMultiQuestion is explicitly false (#4731)', () => {
       // Defensive: an explicit `false` from a TUI / CLI session must keep
       // the existing #4666 behavior so the user can't submit answers that
       // misroute through the keystroke driver.
@@ -518,7 +624,7 @@ describe('QuestionPrompt', () => {
           question={q1.question}
           options={q1.options}
           questions={multiQuestions}
-          enableMultiQuestion={false}
+          allowMultiQuestion={false}
           onSelect={vi.fn()}
         />
       )
@@ -561,48 +667,67 @@ describe('QuestionPrompt', () => {
       expect(arg!['Confirm?']).toBe('Yes')
     })
 
-    // #4621 — multiSelect questions emit native string[] (no JSON encoding)
-    it('emits native string[] for multi-select questions (no JSON encoding)', () => {
-      const onSelect = vi.fn()
-      const multi = {
-        question: 'Which areas?',
+    // #4621 / #4735 — multi-select answers used to be JSON.stringify'd
+    // into a single string because the wire schema was
+    // Record<string,string>. Post-#4621 the wire accepts
+    // Record<string, string | string[]>, so the form emits native arrays.
+    // The server still accepts the old JSON-string shape for back-compat;
+    // the dashboard prefers arrays so the SDK canUseTool callback
+    // receives the structured form without a JSON.parse hop.
+    describe('multi-select native array emission (#4621 / #4735)', () => {
+      const qMulti = {
+        question: 'Which targets?',
+        multiSelect: true,
         options: [
           { label: 'App', value: 'App' },
-          { label: 'Tests', value: 'Tests' },
           { label: 'Docs', value: 'Docs' },
+          { label: 'Tests', value: 'Tests' },
         ],
-        multiSelect: true,
       }
-      const single = {
-        question: 'Confirm?',
-        options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }],
-      }
-      render(<MultiQuestionForm questions={[multi, single]} onSelect={onSelect} />)
-      fireEvent.click(screen.getByTestId('question-multi-option-0-App').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-option-0-Tests').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-option-1-Yes').querySelector('input')!)
-      fireEvent.click(screen.getByTestId('question-multi-submit'))
-      expect(onSelect).toHaveBeenCalledTimes(1)
-      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]>
-      // Native array — not a JSON-stringified string
-      expect(Array.isArray(arg['Which areas?'])).toBe(true)
-      expect(arg['Which areas?']).toEqual(['App', 'Tests'])
-      // Single-select stays as plain string
-      expect(arg['Confirm?']).toBe('Yes')
-    })
 
-    it('emits an empty string[] when no multi-select options are chosen', () => {
-      const onSelect = vi.fn()
-      const multi = {
-        question: 'Which areas?',
-        options: [{ label: 'App', value: 'App' }, { label: 'Tests', value: 'Tests' }],
-        multiSelect: true,
-      }
-      render(<MultiQuestionForm questions={[multi]} onSelect={onSelect} />)
-      fireEvent.click(screen.getByTestId('question-multi-submit'))
-      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]>
-      expect(Array.isArray(arg['Which areas?'])).toBe(true)
-      expect(arg['Which areas?']).toEqual([])
+      it('emits multi-select answers as a native string[]', () => {
+        const onSelect = vi.fn()
+        render(<MultiQuestionForm questions={[qMulti]} onSelect={onSelect} />)
+        fireEvent.click(screen.getByTestId('question-multi-option-0-App').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-0-Tests').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        const val = arg!['Which targets?']
+        expect(Array.isArray(val)).toBe(true)
+        expect(val).toEqual(['App', 'Tests'])
+      })
+
+      it('emits empty multi-select as an empty array (not "[]" string)', () => {
+        const onSelect = vi.fn()
+        render(<MultiQuestionForm questions={[qMulti]} onSelect={onSelect} />)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        const val = arg!['Which targets?']
+        expect(Array.isArray(val)).toBe(true)
+        expect(val).toEqual([])
+      })
+
+      it('mixes native string single-select with native string[] multi-select per question', () => {
+        const qSingle = {
+          question: 'Strategy?',
+          options: [
+            { label: 'Patch', value: 'Patch' },
+            { label: 'Minor', value: 'Minor' },
+          ],
+        }
+        const onSelect = vi.fn()
+        render(<MultiQuestionForm questions={[qSingle, qMulti]} onSelect={onSelect} />)
+        fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-App').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-Docs').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        expect(arg!['Strategy?']).toBe('Patch')
+        expect(arg!['Which targets?']).toEqual(['App', 'Docs'])
+      })
     })
 
     // #4624 — a11y: each per-question options block must be exposed to

@@ -537,6 +537,29 @@ export interface InactivityWarning {
 }
 
 /**
+ * #4653 — one entry per chroxy-side intervention surfaced to the user.
+ *
+ * Currently only `multi_question` (the permission-hook deny for multi-question
+ * AskUserQuestion forms shipped in #4648). The shape is intentionally
+ * extensible so future intervention kinds (e.g. sibling-deny from #4668,
+ * stream-stall auto-recovery from #4475) can land here without a wire
+ * version bump.
+ *
+ * - `kind`: discriminator the renderer switches on for icon + copy
+ * - `toolUseId`: stable id of the original tool_use; the dashboard dedups
+ *   repeats by this so a stuck model re-emitting the same payload doesn't
+ *   inflate the counter falsely
+ * - `count`: secondary detail (e.g. number of questions in the denied form)
+ * - `timestamp`: server wall-clock when the deny happened
+ */
+export interface SessionIntervention {
+  kind: 'multi_question';
+  toolUseId: string;
+  count: number;
+  timestamp: number;
+}
+
+/**
  * Base session state shared by both the mobile app and web dashboard.
  *
  * Each consumer extends this with platform-specific fields:
@@ -622,4 +645,21 @@ export interface BaseSessionState {
   // user replies, and on `socket.onclose` since the server does not
   // replay `inactivity_warning` on reconnect.
   inactivityWarning: InactivityWarning | null;
+  /**
+   * #4653 — chroxy-side interventions surfaced to the user for this session.
+   * Append-only ring (max ~50 entries — see {@link MAX_SESSION_INTERVENTIONS}).
+   * Empty array when no intervention has fired; never `null` so the renderer's
+   * `.length` check is safe.
+   *
+   * Currently driven only by `multi_question_intervention` (the permission-hook
+   * deny for multi-question AskUserQuestion shipped in #4648); future
+   * intervention kinds (sibling-deny #4668, stream-stall auto-recovery #4475)
+   * append entries with their own discriminator without a wire version bump.
+   *
+   * NOT persisted across reconnects — the server does not replay intervention
+   * events, so the array resets on a fresh session_list snapshot. This is
+   * acceptable: the counter is a "what just happened" affordance, not an
+   * audit log.
+   */
+  interventions: SessionIntervention[];
 }

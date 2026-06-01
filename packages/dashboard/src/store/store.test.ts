@@ -1432,6 +1432,137 @@ describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
     // nothing.
     expect(terminalRawBuffer).not.toContain('User answered:');
   });
+
+  // #4735 — answerSummary flattens BOTH native string[] values AND the
+  // legacy JSON-stringified array envelope (pre-#4735 wire). Without
+  // this, a mixed-version replay where an old dashboard had stashed a
+  // JSON-stringified answer in local storage would leak `["App","Tests"]`
+  // syntax through the terminal echo and the `answer` summary field.
+  it('flattens legacy JSON-stringified array envelopes in the answer summary (#4735 back-compat)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const legacyAnswersMap = {
+      'Which targets?': JSON.stringify(['App', 'Tests']),
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(legacyAnswersMap, 'toolu_legacy');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    // Wire `answers` field passes the legacy JSON-string shape through
+    // unchanged (server back-compat for old encoders).
+    expect(payload.answers).toEqual(legacyAnswersMap);
+    // Summary string flattens BOTH the legacy JSON-string envelope and
+    // any native string[] values for the readable `answer` field.
+    expect(payload.answer).toBe(
+      'Which targets?: App, Tests | Confirm?: Yes',
+    );
+    // Terminal echo carries the flattened summary, NOT the JSON syntax.
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: Which targets?: App, Tests | Confirm?: Yes');
+    expect(terminalBuffer).not.toContain('["App"');
+  });
+
+  // #4735 — multi-question multi-select wire format. The widened wire
+  // (UserQuestionResponseSchema) accepts `string | string[]` per question.
+  // The store should forward the answers map shape verbatim AND populate
+  // the `answer` summary field with a comma-joined flattening of any
+  // array values so older servers reading only `answer` still see a
+  // human-readable line.
+  it('forwards multi-question Record<string, string | string[]> verbatim and flattens arrays in the answer summary (#4735)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const answersMap = {
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(answersMap, 'toolu_multi');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu_multi');
+    // answers field passes the map through unchanged — arrays stay arrays.
+    expect(payload.answers).toEqual({
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    });
+    expect(Array.isArray(payload.answers['Which targets?'])).toBe(true);
+    // Summary string flattens arrays as comma-joined labels so the
+    // string-only `answer` field stays readable on older servers.
+    expect(payload.answer).toBe(
+      'Which release strategy?: Patch | Which targets?: App, Tests | Confirm?: Yes',
+    );
+  });
+
+  it('emits {answer:<otherLabel>, freeformText} when called with the Other / freeform shape (#4651)', async () => {
+    // #4651 — single-question "Other" path. The dashboard sends both:
+    // - `answer` = the Other option's label, so the server can resolve
+    //   it to a 1-indexed digit (claude TUI hotkey) and write the digit
+    //   FIRST to swap the menu into text-input mode.
+    // - `freeformText` = the typed text, which the server writes after
+    //   the prompt-swap settles + Enter to submit.
+    // The Output-tab echo surfaces the typed text (not the literal
+    // "Other" label) to match the user's mental model of what they sent.
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'my custom answer' },
+      'toolu_other_freeform',
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'my custom answer',
+      toolUseId: 'toolu_other_freeform',
+    });
+    // No `answers` field — that's reserved for multi-question forms.
+    expect(sent[0]).not.toHaveProperty('answers');
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: my custom answer');
+  });
 });
 
 // ---------------------------------------------------------------------------

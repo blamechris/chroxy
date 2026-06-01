@@ -343,6 +343,7 @@ export declare const UserQuestionResponseSchema: z.ZodObject<{
     answer: z.ZodString;
     answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
+    freeformText: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ListDirectorySchema: z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
@@ -702,6 +703,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     answer: z.ZodString;
     answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
+    freeformText: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
     path: z.ZodOptional<z.ZodString>;

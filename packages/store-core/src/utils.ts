@@ -93,8 +93,21 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     mcpServers: [],
     devPreviews: [],
     inactivityWarning: null,
+    // #4653: empty ring for chroxy-side interventions. Never null so the
+    // dashboard's `.length`/`map` call sites don't need a guard.
+    interventions: [],
   };
 }
+
+/**
+ * #4653 — cap on the per-session intervention ring buffer. The dashboard
+ * counter only ever shows a number + a list of "recent" entries, so we don't
+ * need to keep more than this — a sustained intervention storm (e.g. a model
+ * fighting the multi-question deny) would otherwise bloat the in-memory state
+ * indefinitely. Chosen at 50 to comfortably show "the last batch" without
+ * imposing a UX cliff if the user is mid-debug-session.
+ */
+export const MAX_SESSION_INTERVENTIONS = 50
 
 /**
  * WS message types that count as agent activity for the

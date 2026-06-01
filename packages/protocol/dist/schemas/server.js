@@ -342,6 +342,34 @@ export const ServerInactivityWarningSchema = z.object({
     idleMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS),
     prefab: z.string(),
 });
+// #4653: chroxy-side intervention surfaced to the user. Currently only the
+// multi-question AskUserQuestion deny shipped in #4648 fires this event.
+// The dashboard / mobile app append a SessionIntervention entry to the
+// targeted session's interventions ring and render a FooterBar counter
+// chip + (first-time only) inline system ChatMessage so users can tell
+// chroxy intervened — without this surface the deny is invisible.
+//
+// `reason` is a discriminator that lets future intervention kinds land
+// without a wire version bump (sibling-deny from #4668 would extend the
+// enum here). `questionCount >= 2` because the permission-hook only
+// denies multi-question forms — single-question is the happy path.
+export const ServerMultiQuestionInterventionSchema = z.object({
+    type: z.literal('multi_question_intervention'),
+    // Stable id of the tool_use the hook denied. Dashboard dedups by this
+    // so a stuck model re-emitting the same payload doesn't inflate the
+    // counter falsely (the #4666 / #4668 failure mode).
+    toolUseId: z.string(),
+    // Question count from the denied AskUserQuestion form. Hook only fires
+    // for length > 1, so the floor is 2 — defence-in-depth against a server
+    // bug that would otherwise inject a "0 questions" entry into the UI.
+    questionCount: z.number().int().min(2).finite(),
+    reason: z.literal('multi_question'),
+    // Server wall-clock when the deny happened. Allowed to be 0 (epoch) so
+    // a clock-skewed dev environment doesn't bounce the event off the wire,
+    // but typical values are 1.7e12+ (post-2023). The client renders relative
+    // ("3s ago") from this.
+    timestamp: z.number().int().min(0).finite(),
+});
 export const ServerMcpServersSchema = z.object({
     type: z.literal('mcp_servers'),
     servers: z.array(z.object({

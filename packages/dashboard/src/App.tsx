@@ -46,6 +46,7 @@ import { ToolGroup } from './components/ToolGroup'
 import { PastedTextModal } from './components/PastedTextModal'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { StreamStallChip } from './components/StreamStallChip'
+import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
@@ -329,6 +330,10 @@ export function App() {
     pendingCommunitySkills: activePendingCommunitySkills,
     pendingTrustGrants: activePendingTrustGrants,
     pendingEvaluatorClarify,
+    // #4653: surface chroxy-side interventions (currently only the
+    // multi-question AskUserQuestion deny shipped in #4648) in the
+    // FooterBar counter chip so users can tell when chroxy intervened.
+    interventions,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -339,11 +344,27 @@ export function App() {
     [activeMismatched],
   )
 
+  // #4735 / #4731: the multi-question AskUserQuestion form is gated per
+  // session type. TUI / CLI sessions (`claude-tui` / `claude-cli`) keep
+  // the #4666 deferred notice because the permission-hook (#4648) denies
+  // multi-question tool_uses there and answers would misroute through
+  // `_pendingUserAnswer`. SDK / BYOK / Codex / Gemini sessions support
+  // per-question delivery natively (#4731) via the in-process
+  // `canUseTool` flow (`packages/server/src/sdk-session.js:30`), so the
+  // dashboard renders the interactive `MultiQuestionForm` for them and
+  // submits per-question answers (including multi-select arrays) on the
+  // widened wire. Reuses the `activeSessionProvider` selector declared
+  // above (#4603) so we don't re-derive the same value.
+  const allowMultiQuestionForm = useMemo(
+    () => activeSessionProvider != null && activeSessionProvider !== 'claude-tui' && activeSessionProvider !== 'claude-cli',
+    [activeSessionProvider],
+  )
+
   // #3839: dropdown-gating flags derived from the active session's provider
   // capabilities. Hoisted out of the JSX so the lookups don't re-run on every
   // render of <App>, which fires on most WS messages.
   const dropdownFlags = useMemo(() => {
-    const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
+    const activeProvider = activeSessionProvider
     const providerInfo = availableProviders.find(p => p.name === activeProvider)
     const caps = providerInfo?.capabilities
     // The store carries one `availableModels` slot tagged with the provider
@@ -364,7 +385,7 @@ export function App() {
       showPermissionMode: caps?.permissionModeSwitch !== false,
       showThinkingLevel: !!caps?.thinkingLevel,
     }
-  }, [sessions, activeSessionId, availableProviders, availableModelsProvider, activeModel])
+  }, [activeSessionProvider, availableProviders, availableModelsProvider, activeModel])
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
@@ -1445,6 +1466,33 @@ export function App() {
     [storeMessages],
   )
 
+  // #4615: track which `type: 'prompt'` bubbles have been invalidated by a
+  // subsequent ASK_USER_QUESTION_STALL error. The server emits the error
+  // when the Claude TUI never acknowledges an AskUserQuestion answer —
+  // typically a multi-question form wedge. The pending QuestionPrompt is
+  // now dead, so submitting it would fire keystrokes into a session that
+  // already discarded the prompt context. We suppress the interactive
+  // prompt render (the AskUserQuestionStallChip rendered for the error
+  // bubble below it carries the retry affordance).
+  const stalledPromptIds = useMemo(() => {
+    const stalled = new Set<string>()
+    let lastStallIndex = -1
+    for (let i = storeMessages.length - 1; i >= 0; i -= 1) {
+      const m = storeMessages[i]!
+      if (m.type === 'error' && m.code === 'ASK_USER_QUESTION_STALL') {
+        lastStallIndex = i
+        break
+      }
+    }
+    if (lastStallIndex >= 0) {
+      for (let i = 0; i < lastStallIndex; i += 1) {
+        const m = storeMessages[i]!
+        if (m.type === 'prompt' && !m.answered) stalled.add(m.id)
+      }
+    }
+    return stalled
+  }, [storeMessages])
+
   // Custom message renderer for permission prompts and tool bubbles
   const chatTailMessageId = chatMessages.length > 0
     ? chatMessages[chatMessages.length - 1]!.id
@@ -1495,32 +1543,35 @@ export function App() {
 
     // Question prompt (options or free-text fallback)
     if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
-      // #4731 — SDK / BYOK / Codex / Gemini sessions answer multi-question
-      // AskUserQuestion forms natively via the in-process `canUseTool`
-      // permission flow (`packages/server/src/sdk-session.js:30`). TUI /
-      // CLI sessions go through `permission-hook.sh` which still refuses
-      // any multi-question tool_use (#4648), so the deferred-notice render
-      // (#4666) stays the right call there. Anything not explicitly TUI /
-      // CLI is treated as multi-question-capable so newly-added providers
-      // default-on instead of silently regressing.
-      const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
-      const enableMultiQuestion = activeProvider != null && activeProvider !== 'claude-tui' && activeProvider !== 'claude-cli'
+      // #4615 — suppress unanswered prompts that have been invalidated by
+      // a subsequent ASK_USER_QUESTION_STALL. The chip rendered for the
+      // stall error carries the retry affordance; leaving the interactive
+      // prompt visible would let the user submit answers into a dead
+      // _pendingUserAnswer slot. Already-answered prompts still render
+      // (their answer summary is part of chat history).
+      if (stalledPromptIds.has(storeMsg.id)) return null
       return (
         <QuestionPrompt
           question={storeMsg.content}
           options={storeMsg.options}
           questions={storeMsg.questions}
           answered={storeMsg.answered}
-          enableMultiQuestion={enableMultiQuestion}
+          // #4735 / #4731 — SDK / BYOK / Codex / Gemini sessions get the
+          // interactive MultiQuestionForm; TUI / CLI sessions keep the
+          // #4666 deferred notice (their permission-hook still denies
+          // multi-question forms per #4648). Derivation lives at
+          // `allowMultiQuestionForm` above so the flag flips correctly
+          // on session-switch without a full re-render of every prompt.
+          allowMultiQuestion={allowMultiQuestionForm}
           onSelect={(answer) => {
-            // #4604 Chunk B — answer is `string` for single-question /
-            // free-text paths and `Record<string,string>` for multi-question
-            // forms. sendUserQuestionResponse handles both shapes;
-            // markPromptAnswered records a string summary on the bubble so
-            // the post-answer collapse UI has something readable to show.
-            // #4622 — formatQuestionAnswerSummary pretty-prints multi-select
-            // JSON-stringified arrays as comma-joined labels so the chip
-            // doesn't leak `["App","Tests"]` JSON syntax into UX copy.
+            // #4604 Chunk B / #4735 — answer is `string` for
+            // single-question / free-text paths and
+            // `Record<string, string | string[]>` for multi-question
+            // forms (multi-select values are native arrays on the
+            // widened wire). sendUserQuestionResponse handles both
+            // shapes; markPromptAnswered records a string summary on
+            // the bubble so the post-answer collapse UI has something
+            // readable to show.
             sendUserQuestionResponse(answer, storeMsg.toolUseId)
             markPromptAnswered(storeMsg.id, formatQuestionAnswerSummary(answer))
           }}
@@ -1595,9 +1646,31 @@ export function App() {
       )
     }
 
+    // #4615: dedicated chip for ASK_USER_QUESTION_STALL errors. The server
+    // emits `error{code: 'ASK_USER_QUESTION_STALL'}` (PR #4614) when the
+    // Claude TUI never acknowledges an AskUserQuestion answer — typically
+    // a multi-question form wedge. Generic red toast reads as "broken";
+    // this affordance signals "recoverable, just retry your original
+    // request" and offers a one-tap resend of the last user message.
+    // Mirrors the StreamStallChip pattern (#4476): retry only on tail
+    // entries so replayed historical stalls show the chip + tooltip for
+    // diagnostics but don't offer a misleading resend button.
+    if (storeMsg.type === 'error' && storeMsg.code === 'ASK_USER_QUESTION_STALL') {
+      const isTail = msg.id === chatTailMessageId
+      const lastUserInput = isTail
+        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
+        : undefined
+      return (
+        <AskUserQuestionStallChip
+          errorText={storeMsg.content}
+          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
+        />
+      )
+    }
+
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, activeSessionProvider, setViewMode])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, setViewMode, stalledPromptIds])
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders
@@ -2246,6 +2319,13 @@ export function App() {
         // when there's an active session to route the input through — without
         // that, the chip would have nowhere to send /compact to.
         onCompact={isConnected && activeSessionId ? () => sendInput('/compact') : undefined}
+        // #4653: the active session's chroxy-side intervention ring. Empty
+        // by default — the chip hides itself when nothing has fired.
+        interventions={interventions}
+        // #4653: threaded so the panel collapses on session switch (the
+        // FooterBar instance is shared across sessions, so without this
+        // the open panel would persist with stale entries).
+        activeSessionId={activeSessionId}
       />
 
       {/* Settings panel */}
