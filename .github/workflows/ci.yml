@@ -79,6 +79,23 @@ jobs:
             exit 1
           }
 
+      - name: Check tests pass stateFilePath to SessionManager
+        run: |
+          # Issue #4633 — every `new SessionManager(...)` in tests must include
+          # a `stateFilePath` option, otherwise the test writes to the real
+          # ~/.chroxy/session-state.json (or, in CI, to the runner home).
+          # The sandbox guard in tests/_setup.mjs (loaded via `node --import`)
+          # patches the write-side of `fs` to throw on real-home writes — it
+          # does NOT override HOME — so accidental contamination fails loudly,
+          # but the explicit option keeps the intent obvious in review and
+          # avoids surprise side effects.
+          if scripts/lint-tests-state-file-path.sh; then
+            echo "OK — every new SessionManager(...) in tests passes stateFilePath"
+          else
+            echo "::error::Tests instantiated SessionManager without stateFilePath. See packages/server/scripts/lint-tests-state-file-path.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     runs-on: ubuntu-24.04
@@ -313,9 +330,28 @@ jobs:
           #    drift it was trying to resolve. Treated as an upkeep task that
           #    lands in a dedicated PR when the whole transitive set has caught
           #    up, not a per-PR release blocker.
+          #
+          # 3. "issues with Metro config" — the monorepo intentionally uses a
+          #    custom metro.config.js that does NOT extend "expo/metro-config"
+          #    because the chroxy mock-server resolver + workspace symlink
+          #    handling require a hand-built config. Tracked as a P2 migration.
+          #
+          # 4. "no duplicate dependencies are installed" — npm workspaces hoist
+          #    some expo-* packages to the root while expo's own nested deps
+          #    keep their own copies (expo-font, expo-asset, expo-modules-core,
+          #    @expo/fingerprint). Harmless at runtime; same upkeep-task class
+          #    as (2) above.
+          #
+          # 5. "Validate packages against React Native Directory" — the RN
+          #    directory metadata occasionally flags packages as unmaintained
+          #    upstream (e.g. expo-live-activity). We accept the warning until
+          #    a replacement lands; not a per-PR release blocker.
           filtered_failures=$(printf '%s\n' "$failures" \
             | grep -v "Check for app config fields that may not be synced in a non-CNG project" \
             | grep -v "Check that packages match versions required by installed Expo SDK" \
+            | grep -v "Check for issues with Metro config" \
+            | grep -v "Check that no duplicate dependencies are installed" \
+            | grep -v "Validate packages against React Native Directory package metadata" \
             || true)
           if [ -n "$filtered_failures" ]; then
             echo "::error::expo-doctor reported check failures above. Fix them or extend the allowlist in .github/workflows/ci.yml if the warning is genuinely accepted."

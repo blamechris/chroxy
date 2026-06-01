@@ -2045,6 +2045,190 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4641 — `_teardownTurn` is the shared helper extracted from
+  // `_handleHardTimeout` and `_handleStreamStall`. Both call sites
+  // already have their own end-to-end coverage (see `inactivity timer`
+  // and `stream-stall watchdog` describe blocks above) which is the
+  // primary behaviour pin. These tests exercise the helper's flag
+  // surface directly so the asymmetry between callers stays visible:
+  //   - `gateStreamEndOnMessageId: false` (hard-timeout) emits
+  //     stream_end even when messageId is null.
+  //   - `gateStreamEndOnMessageId: true` (stream-stall) skips the
+  //     stream_end when messageId is null.
+  //   - `errorBeforeResult: true` (hard-timeout) places `error` before
+  //     `result` in the fan-out.
+  //   - `errorBeforeResult: false` (stream-stall) places `result`
+  //     before `error`.
+  //   - Common cleanup (Ctrl-C, attachment dir drop, busy/messageId
+  //     null, AskUserQuestion slot/lock/watchdog clear) happens
+  //     regardless of flags.
+  describe('_teardownTurn shared helper (#4641)', () => {
+    it('clears per-turn state and writes Ctrl-C regardless of flags', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = 'msg-helper'
+      session._activeTurn = { startedAt: Date.now() - 50, aborted: false }
+      session._pendingUserAnswer = { toolUseId: 'toolu_helper' }
+      session._askUserQuestionWatchdog = setTimeout(() => {}, 60_000)
+      const ptyWrites = []
+      session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
+
+      session._teardownTurn('helper_unit', { duration: 50 })
+
+      assert.ok(ptyWrites.includes('\x03'), 'Ctrl-C written to PTY')
+      assert.equal(session._activeTurn, null, '_activeTurn nulled')
+      assert.equal(session._isBusy, false, '_isBusy cleared')
+      assert.equal(session._currentMessageId, null, '_currentMessageId nulled')
+      assert.equal(session._pendingUserAnswer, null, '_pendingUserAnswer cleared')
+      assert.equal(session._askUserQuestionWatchdog, null, 'AskUserQuestion watchdog cleared')
+    })
+
+    it('emits stream_end + result; skips error when no errorPayload given', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-noerr'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push({ type: 'stream_end', ...e }))
+      session.on('result', (e) => events.push({ type: 'result', ...e }))
+      session.on('error', (e) => events.push({ type: 'error', ...e }))
+
+      session._teardownTurn('helper_no_error', { duration: 10 })
+
+      const types = events.map((e) => e.type)
+      assert.deepEqual(types, ['stream_end', 'result'], 'no error emitted without errorPayload')
+    })
+
+    it('errorBeforeResult=true emits error → result (hard-timeout shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-order-a'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+      session.on('result', () => events.push('result'))
+      session.on('error', () => events.push('error'))
+
+      session._teardownTurn('helper_err_first', {
+        duration: 1,
+        errorPayload: { message: 'boom' },
+        errorBeforeResult: true,
+      })
+
+      assert.deepEqual(events, ['stream_end', 'error', 'result'],
+        'fan-out: stream_end → error → result when errorBeforeResult=true')
+    })
+
+    it('errorBeforeResult=false emits result → error (stream-stall shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-order-b'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+      session.on('result', () => events.push('result'))
+      session.on('error', () => events.push('error'))
+
+      session._teardownTurn('helper_result_first', {
+        duration: 1,
+        errorPayload: { code: 'stream_stall', message: 'stalled' },
+        errorBeforeResult: false,
+      })
+
+      assert.deepEqual(events, ['stream_end', 'result', 'error'],
+        'fan-out: stream_end → result → error when errorBeforeResult=false (default)')
+    })
+
+    it('gateStreamEndOnMessageId=true skips stream_end when messageId is null (stream-stall shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = null  // contract violation, but the gate exists for a reason (#4642)
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+
+      session._teardownTurn('helper_gated', {
+        duration: 1,
+        errorPayload: { message: 'x' },
+        gateStreamEndOnMessageId: true,
+      })
+
+      assert.deepEqual(events, [], 'stream_end suppressed when messageId is null and gate is on')
+    })
+
+    it('gateStreamEndOnMessageId=false emits stream_end with null messageId (hard-timeout shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = null
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push(e))
+
+      session._teardownTurn('helper_ungated', {
+        duration: 1,
+        errorPayload: { message: 'x' },
+        gateStreamEndOnMessageId: false,
+      })
+
+      assert.equal(events.length, 1, 'stream_end emitted unconditionally')
+      assert.equal(events[0].messageId, null, 'messageId propagated as null — matches historical hard-timeout behaviour')
+    })
+
+    it('forwards duration + sessionId into the result event payload', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-reason'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._sessionId = 'sess-helper-42'
+      session._term = { write: () => {}, kill: () => {} }
+
+      let resultEvent = null
+      session.on('result', (e) => { resultEvent = e })
+
+      session._teardownTurn('hard_timeout', { duration: 42 })
+
+      assert.ok(resultEvent, 'result event fired')
+      assert.equal(resultEvent.cost, null, 'cost null (subscription billing) — matches inline historical payload')
+      assert.equal(resultEvent.duration, 42, 'duration propagated from caller')
+      assert.equal(resultEvent.usage, null, 'usage null (no token accounting on the teardown path)')
+      assert.equal(resultEvent.sessionId, 'sess-helper-42', 'sessionId stamped from _sessionId')
+    })
+  })
+
   describe('PTY output ring buffer (#3919)', () => {
     it('keeps a tail of recent output with ANSI stripped', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
@@ -2648,6 +2832,210 @@ describe('ClaudeTuiSession', () => {
       session._handleHardTimeout()
       assert.equal(session._pendingUserAnswer, null, 'hard timeout clears pending answer')
     })
+
+    // #4693 — the diagnostic added in #4687 (PTY tail hex dump before each
+    // answer write) is unbounded per-turn: a multi-question retry-as-singles
+    // wedge can fire 4+ respondToQuestion calls in succession, each pumping
+    // ~70 hex-dump lines into chroxy.log. Rate-limit to once per turn — the
+    // first answer write still captures the diagnostic; subsequent writes
+    // in the same turn emit a compact one-line skip notice instead of the
+    // full dump.
+    it('respondToQuestion PTY tail hex dump is rate-limited to once per turn (#4693)', async () => {
+      const hexDumpLines = []
+      const skipLines = []
+      const logSpy = (entry) => {
+        if (entry.component !== 'claude-tui-session') return
+        if (entry.level !== 'info') return
+        if (/respondToQuestion PTY tail before write/.test(entry.message)) hexDumpLines.push(entry.message)
+        if (/respondToQuestion PTY tail hex dump skipped/.test(entry.message)) skipLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        session._term = { write: () => {}, kill: () => {} }
+        // Mark a single active turn so the rate-limiter has a stable scope.
+        session._activeTurn = { messageId: 'msg-hex-rate', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+
+        // Three sibling AskUserQuestion tool_uses in the SAME turn (mirrors
+        // the multi-question retry-as-singles wedge that motivated #4693).
+        for (const id of ['toolu_one', 'toolu_two', 'toolu_three']) {
+          session._emitToolHookEvent('PreToolUse', {
+            tool_use_id: id,
+            tool_name: 'AskUserQuestion',
+            tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }, { label: 'B' }] }] },
+          }, 'msg-hex-rate')
+        }
+
+        // Dashboard answers all three in quick succession.
+        session.respondToQuestion('A', undefined, 'toolu_one')
+        session.respondToQuestion('B', undefined, 'toolu_two')
+        session.respondToQuestion('A', undefined, 'toolu_three')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.equal(
+          hexDumpLines.length, 1,
+          `expected exactly 1 hex dump for 3 same-turn answers, got ${hexDumpLines.length}: ${JSON.stringify(hexDumpLines.map((l) => l.split('\n')[0]))}`,
+        )
+        assert.equal(
+          skipLines.length, 2,
+          `expected 2 compact skip notices for the rate-limited calls, got ${skipLines.length}`,
+        )
+
+        // After a new turn starts, the next answer emits a fresh hex dump.
+        hexDumpLines.length = 0
+        skipLines.length = 0
+        session._activeTurn = { messageId: 'msg-hex-rate-2', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_turn2',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
+        }, 'msg-hex-rate-2')
+        session.respondToQuestion('A', undefined, 'toolu_turn2')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.equal(hexDumpLines.length, 1, 'new turn resets the rate-limit; first answer emits the dump again')
+        assert.equal(skipLines.length, 0, 'no skip notice on the first answer of a new turn')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
+
+    // #4690 (review of #4687) — pin the Map-isolation invariant on the
+    // PostToolUse cleanup path. The PreToolUse branch arms one entry in
+    // `_pendingUserAnswers` per tool_use_id; PostToolUse for tool A must
+    // surgically clear ONLY A's entry via `_clearPendingAnswerByToolUseId`
+    // (claude-tui-session.js:1438-1440). A future refactor that goes back
+    // to the pre-#4668 all-or-nothing wipe (e.g. `_pendingUserAnswer = null`
+    // in the PostToolUse branch → setter calls Map.clear()) would silently
+    // wipe sibling B's pending entry and re-introduce the #4668 wedge.
+    // This test pins per-tool isolation so that regression is loud.
+    it('PostToolUse for tool A leaves tool B\'s pending entry intact (Map isolation, #4690)', () => {
+      // Two parallel AskUserQuestion tool_uses arrive in one turn (the
+      // #4668 setup). Both armed in the Map under their own toolUseIds.
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+      }, 'msg-aq-AB')
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_B',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }] }] },
+      }, 'msg-aq-AB')
+
+      assert.equal(session._pendingUserAnswers.size, 2, 'both A and B armed')
+      assert.ok(session._pendingUserAnswers.has('toolu_A'), 'A present pre-PostToolUse')
+      assert.ok(session._pendingUserAnswers.has('toolu_B'), 'B present pre-PostToolUse')
+
+      // PostToolUse for tool A only — must NOT touch B's pending entry.
+      const resultEvents = []
+      session.on('tool_result', (e) => resultEvents.push(e))
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_response: { selectedLabel: 'a1' },
+      }, 'msg-aq-AB')
+
+      // The cleanup branch fires for A only.
+      assert.equal(session._pendingUserAnswers.size, 1, 'exactly one entry left after PostToolUse(A)')
+      assert.ok(!session._pendingUserAnswers.has('toolu_A'), 'A cleared by its own PostToolUse')
+      assert.ok(session._pendingUserAnswers.has('toolu_B'),
+        'B SURVIVES — PostToolUse(A) must not wipe sibling entries')
+
+      // The tool_result for A still fired (Map cleanup is in addition to,
+      // not instead of, the normal PostToolUse fan-out).
+      assert.equal(resultEvents.length, 1, 'tool_result for A still emitted')
+      assert.equal(resultEvents[0].toolUseId, 'toolu_A')
+
+      // B's entry is unchanged — same options shape we armed it with.
+      const bEntry = session._pendingUserAnswers.get('toolu_B')
+      assert.equal(bEntry.toolUseId, 'toolu_B')
+      assert.deepEqual(bEntry.options, [{ label: 'b1' }, { label: 'b2' }],
+        'B\'s options array preserved verbatim')
+    })
+
+    // #4690 (review of #4687) — pin the fallback path in respondToQuestion
+    // when the dashboard omits `toolUseId` but multiple pending entries
+    // exist. Per claude-tui-session.js:1896-1899 the current contract is:
+    //   1. Emit a warn log naming the omitted-toolUseId condition + Map
+    //      size + the pending keys (greppable in chroxy.log so the wedge
+    //      symptom is visible).
+    //   2. Fall back to the back-compat `_pendingUserAnswer` getter, which
+    //      returns the MOST-RECENTLY-SET entry (insertion order via
+    //      `_lastPendingAnswerToolUseId`).
+    //   3. Consume that entry only (surgical _clearPendingAnswerByToolUseId
+    //      on `entry.toolUseId`); siblings remain pending.
+    //
+    // The fallback is intentional — legacy mobile clients that don't pass
+    // toolUseId would otherwise wedge. The behaviour decision (warn vs.
+    // drop) is tracked separately in #4688; #4690 pins the CURRENT
+    // semantics so any future change to "drop on ambiguity" is loud, not
+    // silent.
+    it('respondToQuestion: no toolUseId + N>1 pending fires WARN, routes to most-recent, preserves siblings (#4690)', async () => {
+      // Capture warn lines so we can assert on the #4688 diagnostic.
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.component !== 'claude-tui-session') return
+        if (entry.level === 'warn') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+        // Arm A first, then B — Map insertion order tracks "most recent".
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_first',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+        }, 'msg-fallback')
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_second',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }, { label: 'b3' }] }] },
+        }, 'msg-fallback')
+
+        assert.equal(session._pendingUserAnswers.size, 2, 'precondition: both pending')
+        assert.equal(session._lastPendingAnswerToolUseId, 'toolu_second',
+          'precondition: "most recent" pointer is at B (the second insert)')
+
+        // Dashboard sends an answer matching B's option, but OMITS toolUseId
+        // (legacy client path). Per fallback contract: warn + route to B,
+        // leave A alone.
+        session.respondToQuestion('b3', undefined, undefined)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // (1) WARN log fires naming the fallback condition. Pre-#4688
+        // this was silent and the wedge symptom required a code read to
+        // diagnose.
+        const fallbackWarn = warnLines.find(
+          (m) => /omitted toolUseId/.test(m) && /falling back to most-recent/.test(m),
+        )
+        assert.ok(fallbackWarn,
+          `expected fallback warn, got warnLines=${JSON.stringify(warnLines)}`)
+        assert.match(fallbackWarn, /2 pending entries/,
+          'warn includes the Map size for triage')
+        assert.match(fallbackWarn, /toolu_first/, 'warn lists pending keys (A)')
+        assert.match(fallbackWarn, /toolu_second/, 'warn lists pending keys (B)')
+
+        // (2) Most-recent entry (B) received the answer — PTY write of the
+        // 1-indexed digit for "b3" (option 3 of toolu_second's options).
+        assert.equal(writes[0], '\x1b[?2004l', 'bracketed-paste-disable')
+        assert.equal(writes[1], '3',
+          'wrote 1-indexed digit for B\'s option "b3" — routed to most-recent entry')
+
+        // (3) A's entry is UNTOUCHED — the surgical
+        // _clearPendingAnswerByToolUseId(entry.toolUseId) on the fallback
+        // path only removes the entry it consumed, not every sibling.
+        assert.equal(session._pendingUserAnswers.size, 1,
+          'one entry left after fallback consumed the most-recent')
+        assert.ok(session._pendingUserAnswers.has('toolu_first'),
+          'A (the older entry) SURVIVES — fallback must not collapse the Map')
+        assert.ok(!session._pendingUserAnswers.has('toolu_second'),
+          'B (the consumed most-recent) is gone')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
   })
 
   // #4604 — observability + watchdog around AskUserQuestion. The root
@@ -2869,6 +3257,90 @@ describe('ClaudeTuiSession', () => {
         // cleared by PostToolUse, so no late fire.
         mock.timers.tick(60_000)
         assert.equal(errors.length, 0, 'watchdog cancelled by PostToolUse, no late stall error')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    // #4690 (review of #4687) — pin the watchdog teardown semantics when
+    // sibling pending entries exist in `_pendingUserAnswers`. Setup:
+    //
+    //   1. PreToolUse arms A and B in the Map (parallel AskUserQuestion).
+    //   2. respondToQuestion(A) consumes A's entry (surgical
+    //      `_clearPendingAnswerByToolUseId`) AND arms the stall watchdog
+    //      with A's toolUseId. B remains pending in the Map.
+    //   3. PostToolUse for A never arrives → watchdog fires →
+    //      `_onAskUserQuestionStall(A)`.
+    //
+    // CURRENT behaviour (claude-tui-session.js:2149 `_pendingUserAnswer =
+    // null` → back-compat setter → `_pendingUserAnswers.clear()`): the
+    // watchdog wipes EVERY pending entry, including B which had nothing
+    // to do with A's stall. The all-or-nothing collapse is intentional
+    // for the teardown sites listed at #4691 (destroy, hard timeout,
+    // interrupt) but the watchdog-with-siblings case is the borderline
+    // one: B's PostToolUse may still arrive, and its entry just got
+    // collapsed under it. The semantic question is open in #4691; this
+    // test pins the current behaviour so the change is loud when it
+    // happens — and asserts the error event still carries A's
+    // toolUseId (B's stall did not happen, so the error must not
+    // misattribute).
+    it('watchdog fire with N>1 sibling pending entries wipes the whole Map; error carries the timed-out toolUseId (#4690, #4691)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { uuid: 'test-watchdog-siblings', synthSeq: 0 }
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+
+        // Arm both A and B in the Map.
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_A_stall',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+        }, 'msg-watchdog-AB')
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_B_pending',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }] }] },
+        }, 'msg-watchdog-AB')
+        assert.equal(session._pendingUserAnswers.size, 2, 'precondition: A and B armed')
+
+        // Dashboard answers A — consumes A's entry, arms the watchdog with
+        // A's toolUseId, leaves B pending.
+        session.respondToQuestion('a1', undefined, 'toolu_A_stall')
+
+        // State after respondToQuestion: A is gone, B is still pending.
+        assert.ok(!session._pendingUserAnswers.has('toolu_A_stall'),
+          'A consumed by respondToQuestion')
+        assert.ok(session._pendingUserAnswers.has('toolu_B_pending'),
+          'B still pending — its turn has not started yet')
+        assert.equal(session._pendingUserAnswers.size, 1, 'only B left')
+
+        // PostToolUse for A never arrives. Cross the watchdog threshold.
+        mock.timers.tick(31_000)
+
+        // Error fires for the toolUseId we ARMED the watchdog with (A) —
+        // NOT for B which had nothing to do with the stall.
+        assert.equal(errors.length, 1, 'exactly one stall error')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_STALL')
+        assert.equal(errors[0].toolUseId, 'toolu_A_stall',
+          'error attributes the stall to A (the timed-out tool), not B')
+
+        // Pinned current semantics: the teardown's
+        // `_pendingUserAnswer = null` flows through the back-compat
+        // setter → `_pendingUserAnswers.clear()` → B is wiped too. If
+        // #4691 lands a surgical teardown, this assertion will flip and
+        // both the test + the issue should be updated in the same commit.
+        assert.equal(session._pendingUserAnswers.size, 0,
+          'CURRENT semantics: watchdog clears entire Map (see #4691 for the open semantic question)')
+        assert.ok(!session._pendingUserAnswers.has('toolu_B_pending'),
+          'specifically: B\'s pending entry collapsed along with A\'s teardown')
+
+        // Busy state cleared so the session is recoverable.
+        assert.equal(session._isBusy, false, 'busy cleared')
       } finally {
         mock.timers.reset()
       }
@@ -3352,6 +3824,148 @@ describe('ClaudeTuiSession', () => {
         'setPermissionMode must NOT lazy-create the sidecar after skipPermissions start')
       assert.equal(session.permissionMode, 'auto',
         'in-process bookkeeping still updates so capabilities checks stay coherent')
+    })
+  })
+
+  describe('_assertBusyHasMessageId invariant (#4642)', () => {
+    // #4642: observability-only defensive instrumentation. Every sendMessage
+    // sets `_isBusy=true` AND `_currentMessageId` together (claude-tui-session.js
+    // lines 848/851), and every teardown clears both together. If a future
+    // regression breaks that pairing, the `if(messageId)` guards in
+    // _finishTurnError / _handleHardTimeout / _handleStreamStall /
+    // _onAskUserQuestionStall would silently skip stream_end and recreate the
+    // #4638 wedge. These tests pin the warn line so a regression is observable
+    // in chroxy.log rather than only triageable from screenshots.
+
+    let warnLines
+    let logSpy
+
+    beforeEach(() => {
+      warnLines = []
+      logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'claude-tui-session') {
+          warnLines.push(entry.message)
+        }
+      }
+      addLogListener(logSpy)
+    })
+
+    afterEach(() => {
+      if (logSpy) removeLogListener(logSpy)
+      logSpy = null
+      warnLines = null
+    })
+
+    it('emits a warn when _isBusy=true and _currentMessageId is null', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(violation, `expected an invariant-violation warn, got warnLines=${JSON.stringify(warnLines)}`)
+      // Pin the structured fields the warn carries — an operator greps for
+      // these; a future refactor that drops the callsite tag or the
+      // `_isBusy=true but _currentMessageId=null` phrasing should fail.
+      assert.match(violation, /test-callsite/, 'warn includes callsite tag for greppability')
+      assert.match(violation, /_isBusy=true/, 'warn names the busy flag')
+      assert.match(violation, /_currentMessageId=null/, 'warn names the missing id')
+      assert.match(violation, /#4638/, 'warn cross-references the wedge this prevents')
+    })
+
+    it('is a no-op when both _isBusy=true AND _currentMessageId are set (healthy state)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn when invariant holds, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('is a no-op when _isBusy=false (idle session — invariant only applies mid-turn)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._isBusy = false
+      session._currentMessageId = null
+
+      session._assertBusyHasMessageId('test-callsite')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn on idle session, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _finishTurnError when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+
+      // Corrupt state: busy but no messageId. This is the contract violation
+      // the assertion exists to surface — a future regression that sets one
+      // without the other should fail this test.
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._finishTurnError('synthetic error', null)
+
+      const violation = warnLines.find((m) => /_finishTurnError/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_finishTurnError must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _handleHardTimeout when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._handleHardTimeout()
+
+      const violation = warnLines.find((m) => /_handleHardTimeout/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_handleHardTimeout must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('fires from _handleStreamStall when invariant is broken at that callsite', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._isBusy = true
+      session._currentMessageId = null
+
+      session._handleStreamStall()
+
+      const violation = warnLines.find((m) => /_handleStreamStall/.test(m) && /invariant violation/.test(m))
+      assert.ok(violation, `_handleStreamStall must emit the invariant warn, got warnLines=${JSON.stringify(warnLines)}`)
+    })
+
+    it('does NOT fire from teardown sites when invariant holds (healthy turn end)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._term = { write: () => {}, kill: () => {} }
+
+      // Healthy state: both set together as the contract requires.
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+      session._activeTurn = { messageId: 'msg-healthy', startedAt: Date.now(), aborted: false }
+
+      session._finishTurnError('synthetic error', 'msg-healthy')
+
+      const violation = warnLines.find((m) => /invariant violation/.test(m))
+      assert.ok(!violation, `must NOT warn on healthy teardown, got warnLines=${JSON.stringify(warnLines)}`)
     })
   })
 })

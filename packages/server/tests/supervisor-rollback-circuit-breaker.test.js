@@ -1,4 +1,4 @@
-import { describe, it, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert'
 import { EventEmitter } from 'events'
 import { mkdtempSync, rmSync } from 'fs'
@@ -90,6 +90,18 @@ function createTestSupervisor(overrides = {}) {
 describe('Supervisor rollback circuit breaker', () => {
   let tmpDirs = []
   let supervisors = []
+  let savedConfigDir
+
+  beforeEach(() => {
+    // Supervisor.start() calls writeConnectionInfo() which writes to
+    // ~/.chroxy/connection.json unless CHROXY_CONFIG_DIR is set (#4633).
+    // Point it at a tmp dir so the sandbox guard doesn't fire and the
+    // developer's real connection.json isn't clobbered.
+    const cfgDir = mkdtempSync(join(tmpdir(), 'chroxy-supervisor-cb-cfg-'))
+    tmpDirs.push(cfgDir)
+    savedConfigDir = process.env.CHROXY_CONFIG_DIR
+    process.env.CHROXY_CONFIG_DIR = cfgDir
+  })
 
   afterEach(() => {
     for (const s of supervisors) {
@@ -103,6 +115,8 @@ describe('Supervisor rollback circuit breaker', () => {
       try { rmSync(dir, { recursive: true, force: true }) } catch {}
     }
     tmpDirs = []
+    if (savedConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = savedConfigDir
   })
 
   function setup(overrides) {

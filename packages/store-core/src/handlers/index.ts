@@ -3117,6 +3117,21 @@ export function handleUserQuestion(
   if (firstNormalized == null) return null
   const questionContent = firstNormalized.question
   const options = firstNormalized.options
+  // #4613 — honour the wire `timestamp` field when present (number). Mirrors
+  // the #4607 fix for handleToolStart. The server's history ring buffer
+  // stamps `timestamp: Date.now()` at append time
+  // (session-message-history.js:208-216) and forwards it on every replay —
+  // question events are part of that ring buffer. Pre-#4613 we always
+  // overwrote with `Date.now()`, so a question prompt that originally fired
+  // at 10:00 showed as "just now" if the user tabbed away and the dashboard
+  // rebuilt the prompt ChatMessage during history_replay. Lower-impact than
+  // #4607 (affects bubble display only, not the timer pill), but still a
+  // correctness bug. The fallback to `Date.now()` covers live (non-replay)
+  // user_question broadcasts, which never carry `msg.timestamp` on the wire.
+  const wireTimestamp =
+    typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp)
+      ? msg.timestamp
+      : Date.now()
   const chatMessage: ChatMessage = {
     id: nextMessageId('question'),
     type: 'prompt',
@@ -3126,7 +3141,7 @@ export function handleUserQuestion(
     // is just an N=1 case of the multi-question shape). Renderers can
     // detect multi-question by `questions.length > 1` and switch UI.
     questions: normalizedAll,
-    timestamp: Date.now(),
+    timestamp: wireTimestamp,
   }
   if (typeof msg.toolUseId === 'string') {
     chatMessage.toolUseId = msg.toolUseId

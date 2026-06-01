@@ -13,7 +13,7 @@
  * interrupt/setModel/setPermissionMode plus a static `capabilities` getter.
  * See sdk-session.js or cli-session.js for a worked example.
  */
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
@@ -274,7 +274,11 @@ function getProviderAuthInfo(name, ProviderClass) {
   // file paths. The `detail` string carries the diagnostic of *which*
   // file/var supplied the key.
   if (name === 'claude-byok') {
-    const resolved = resolveAnthropicApiKey()
+    const resolved = _cachedResolveCredentialFile(
+      'byok',
+      process.env.ANTHROPIC_API_KEY,
+      resolveAnthropicApiKey,
+    )
     if (resolved.key) {
       return {
         ready: true,
@@ -303,7 +307,11 @@ function getProviderAuthInfo(name, ProviderClass) {
   // ready:false whenever the user stored the key in credentials.json
   // rather than exporting DEEPSEEK_API_KEY.
   if (name === 'deepseek') {
-    const resolved = resolveDeepSeekApiKey()
+    const resolved = _cachedResolveCredentialFile(
+      'deepseek',
+      process.env.DEEPSEEK_API_KEY,
+      resolveDeepSeekApiKey,
+    )
     if (resolved.key) {
       return {
         ready: true,
@@ -599,6 +607,132 @@ function _hasGeminiOAuthCreds() {
 }
 
 /**
+ * mtime+size keyed cache for the BYOK + DeepSeek credential file reads (#4658).
+ *
+ * Unlike the OAuth probes above — which use a 5s TTL because the underlying
+ * `claude login` / `codex login` / `gemini login` state spans multiple files
+ * and parse paths — the BYOK + DeepSeek resolvers read a single well-known
+ * file (`~/.chroxy/credentials.json`) and the auth signal is just "is this
+ * file present, mode-0600, and does it still contain the relevant field?".
+ *
+ * That lets us cache on `{mtimeMs, size}` instead of a clock-based TTL:
+ *   - Same env var + file unchanged → reuse cached resolver result without
+ *     re-reading + JSON.parsing the file
+ *   - File mtime or size changed → re-read and refresh the cache
+ *   - File deleted (stat fails) → drop the cache, let resolver re-derive
+ *     the "missing" reason from scratch
+ *
+ * Caching is keyed per slot (`byok`, `deepseek`) so a write to credentials.json
+ * for one provider doesn't blow away the other's cached result. The env-var
+ * value is folded into the key so an env mutation (set/unset/change) naturally
+ * invalidates — the resolvers short-circuit on a populated env var without
+ * touching the file, so caching that path safely avoids the stat too.
+ *
+ * Lives in providers.js (not in *-credentials.js) intentionally — the rest of
+ * the codebase calls `resolveAnthropicApiKey()` / `resolveDeepSeekApiKey()`
+ * directly (byok-session.js / deepseek-session.js for the actual API call)
+ * and those paths must NOT be cached: a session start happens once and needs
+ * the live file. Only the dashboard-poll path through `listProviders()` is hot
+ * enough to justify the cache.
+ */
+let _credFileCache = {
+  byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+  deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+}
+
+// Env-var names per slot, used for the canonical "not set and file does not
+// exist" reason when we short-circuit the ENOENT case (#4728 review). Kept
+// here rather than passed in so the wrapper signature stays minimal.
+const _SLOT_ENV_VAR = {
+  byok: 'ANTHROPIC_API_KEY',
+  deepseek: 'DEEPSEEK_API_KEY',
+}
+
+/**
+ * Cache wrapper around a credential-file resolver. The resolver itself does
+ * the file read; this helper short-circuits to the cached resolver result when
+ * the env var is unchanged AND either (env-var path was taken last time) or
+ * (the file's stat-mtime+size+mode still matches what we cached).
+ *
+ * `mode` participates in the key because the underlying resolvers refuse any
+ * file mode more permissive than 0o600 as a security boundary
+ * (byok-credentials.js / deepseek-credentials.js). `chmod 0644` does NOT
+ * update mtime or size on POSIX, so without mode in the key the cache would
+ * keep returning ready=true with the key after the user runs chmod — the
+ * dashboard would lag the resolver's actual rejection until the next file
+ * write. Including `mode` makes the dashboard match resolver behaviour.
+ *
+ * @param {'byok' | 'deepseek'} slot
+ * @param {string | undefined} envValue - current value of the relevant env var
+ * @param {() => object} resolve - the underlying *-credentials resolver
+ * @returns {object} resolver result
+ */
+function _cachedResolveCredentialFile(slot, envValue, resolve) {
+  const entry = _credFileCache[slot]
+  const credPath = join(homedir(), '.chroxy', 'credentials.json')
+
+  // Env var precedence: when it's set the resolver never touches the file, so
+  // the cache hit just needs the env value to match.
+  if (typeof envValue === 'string' && envValue.length > 0) {
+    if (entry.envValue === envValue && entry.path === null && entry.result) {
+      return entry.result
+    }
+    const result = resolve()
+    _credFileCache[slot] = { envValue, path: null, mtimeMs: null, size: null, mode: null, result }
+    return result
+  }
+
+  // No env var → resolver consults the file. Stat first; if the file is gone
+  // or the stat throws, drop any cached entry. ENOENT is the hot "user never
+  // configured BYOK" case — short-circuit and synthesize the resolver's
+  // missing-reason string directly so we don't pay for a second statSync()
+  // inside the resolver (#4728 review). Any other stat error falls through
+  // to the resolver so its richer error message wins (e.g. EACCES surfaces
+  // "unable to stat ... permission denied").
+  let stat
+  try {
+    stat = statSync(credPath)
+  } catch (err) {
+    _credFileCache[slot] = { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null }
+    if (err.code === 'ENOENT') {
+      return {
+        key: null,
+        source: 'none',
+        reason: `${_SLOT_ENV_VAR[slot]} not set and ${credPath} does not exist`,
+      }
+    }
+    return resolve()
+  }
+
+  // Cache key includes credPath so an HOME change invalidates even if the
+  // new file coincidentally has the same mtime+size+mode as the cached old
+  // one, and includes the low 9 mode bits so a chmod 0644 (which doesn't
+  // touch mtime) flips the cached result to match the resolver's refusal.
+  const mode = stat.mode & 0o777
+  if (
+    entry.envValue === null
+    && entry.path === credPath
+    && entry.mtimeMs === stat.mtimeMs
+    && entry.size === stat.size
+    && entry.mode === mode
+    && entry.result
+  ) {
+    return entry.result
+  }
+
+  const result = resolve()
+  _credFileCache[slot] = {
+    envValue: null,
+    path: credPath,
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    mode,
+    result,
+  }
+  return result
+}
+
+/**
  * Test-only hook to drop the cached creds-probe results so suites that mutate
  * the override env vars (or write/delete files under any `CHROXY_*_HOME`
  * without changing the env-var values) start from a clean slate. Production
@@ -610,6 +744,10 @@ export function _resetCredsCacheForTest() {
     claude: { value: null, expiresAt: 0, key: null },
     codex: { value: null, expiresAt: 0, key: null },
     gemini: { value: null, expiresAt: 0, key: null },
+  }
+  _credFileCache = {
+    byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+    deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
   }
 }
 
