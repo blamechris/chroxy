@@ -586,6 +586,137 @@ describe('ToolBubble', () => {
       // the tool already resolved (even with no output).
       fireEvent.click(screen.getByRole('button'))
       expect(screen.queryByTestId('tool-input-partial-bash-empty-result')).not.toBeInTheDocument()
+  // #4655 — collapsed bubbles must never leak raw `tool_input` JSON for tools
+  // whose input shape has none of the hardcoded PRIORITY_FIELDS (ToolSearch,
+  // MCP tools, custom user tools, future Anthropic tools). The fix lives in
+  // `tool-summary.ts` (generic key:value fallback); these fixtures pin the
+  // dashboard render contract end-to-end so the leak surface stays sealed.
+  //
+  // The canonical bug fixture is ToolSearch — reported live during the
+  // v0.9.24 dogfood as
+  //   `ToolSearch {"matches":["AskUserQuestion"],"query":"select:AskUser...`
+  // (raw JSON head). The fix renders
+  //   `ToolSearch query: "select:AskUserQuestion", max_results: 5`
+  // instead.
+  // ---------------------------------------------------------------------------
+  describe('unknown-shape tool_input never leaks raw JSON (#4655)', () => {
+    it('renders ToolSearch input as a compact key:value summary instead of raw JSON', () => {
+      render(
+        <ToolBubble
+          toolName="ToolSearch"
+          toolUseId="ts-final"
+          input={{ query: 'select:AskUserQuestion', max_results: 5 }}
+          result="matched 1 tool"
+        />,
+      )
+      const summary = screen.getByTestId('tool-input-summary')
+      // Compact, key:value form — generic fallback.
+      expect(summary).toHaveTextContent('query: "select:AskUserQuestion", max_results: 5')
+      // The canonical leak: a raw JSON object brace must NEVER appear in the
+      // collapsed summary for any unknown-shape tool input.
+      expect(summary.textContent).not.toContain('{"query"')
+      expect(summary.textContent).not.toContain('"matches"')
+    })
+
+    it('renders MCP tool input with arbitrary keys as compact key:value summary', () => {
+      // MCP tools have per-server schemas — no allowlist can keep up. The
+      // generic fallback is the only sustainable answer.
+      render(
+        <ToolBubble
+          toolName="mcp__fs__list_directory"
+          toolUseId="mcp-final"
+          serverName="fs"
+          input={{ url: 'https://example.com', timeout_ms: 5000 }}
+          result="[]"
+        />,
+      )
+      const summary = screen.getByTestId('tool-input-summary')
+      expect(summary).toHaveTextContent('url: "https://example.com", timeout_ms: 5000')
+      expect(summary.textContent).not.toContain('{"url"')
+    })
+
+    it('renders generic unknown-shape input (no priority field, no recognised structure)', () => {
+      // Catch-all: future tool with totally arbitrary shape. The generic
+      // fallback must still produce a useful preview, never raw JSON.
+      render(
+        <ToolBubble
+          toolName="future_tool"
+          toolUseId="future-final"
+          input={{ foo: 'bar', enabled: true, retries: 3 }}
+          result=""
+        />,
+      )
+      const summary = screen.getByTestId('tool-input-summary')
+      expect(summary).toHaveTextContent('foo: "bar", enabled: true, retries: 3')
+      expect(summary.textContent).not.toContain('{"foo"')
+    })
+
+    it('renders ToolSearch inputPartial as compact summary during streaming (parseable)', () => {
+      // Streaming finished — the partial buffer is now valid JSON but still
+      // lacks a priority field. Pre-fix this fell through to `inputPartial
+      // .slice(0, 100)` and leaked raw JSON head into the collapsed bubble.
+      render(
+        <ToolBubble
+          toolName="ToolSearch"
+          toolUseId="ts-partial"
+          inputPartial='{"query":"select:AskUserQuestion","max_results":5}'
+        />,
+      )
+      const summary = screen.getByTestId('tool-input-summary')
+      expect(summary).toHaveTextContent('query: "select:AskUserQuestion", max_results: 5')
+      expect(summary.textContent).not.toContain('{"query"')
+    })
+
+    it('renders a nested unknown-shape input without leaking nested JSON', () => {
+      // Object-shape value at top level — the canonical worst-case leak
+      // (Read tool nested input was the #4648 case). Generic fallback
+      // collapses nested objects to `{...}` placeholders.
+      render(
+        <ToolBubble
+          toolName="custom_tool"
+          toolUseId="custom-nested"
+          input={{ options: { recursive: true, follow: false }, name: 'scan' }}
+          result="done"
+        />,
+      )
+      const summary = screen.getByTestId('tool-input-summary')
+      expect(summary).toHaveTextContent('options: {...}, name: "scan"')
+      // The nested object's keys must NOT leak as raw JSON.
+      expect(summary.textContent).not.toContain('"recursive"')
+      expect(summary.textContent).not.toContain('"follow"')
+    })
+
+    it('preserves the verbatim mid-stream fallback for genuinely unparseable inputPartial', () => {
+      // Regression guard: the mid-stream Bash early-abort UX (#4063)
+      // depends on the verbatim-tail fallback when the buffer can't yet
+      // parse. The generic fallback only applies to parsed objects.
+      render(
+        <ToolBubble
+          toolName="ToolSearch"
+          toolUseId="ts-midstream"
+          inputPartial='{"query":"select:Ask'
+        />,
+      )
+      const summary = screen.getByTestId('tool-input-summary')
+      // Mid-stream: still shows the verbatim head so users see the
+      // buffer forming.
+      expect(summary.textContent).toContain('{"query":"select:Ask')
+    })
+
+    it('preserves the existing Bash priority-field summary (regression guard)', () => {
+      // Belt-and-braces: a known-shape tool must keep its nice extracted
+      // summary even after the generic-fallback path lands.
+      render(
+        <ToolBubble
+          toolName="Bash"
+          toolUseId="bash-regression"
+          input={{ command: 'rm -rf node_modules' }}
+        />,
+      )
+      const summary = screen.getByTestId('tool-input-summary')
+      expect(summary).toHaveTextContent('rm -rf node_modules')
+      // No generic key:value rendering for known shapes.
+      expect(summary.textContent).not.toContain('command:')
     })
   })
 })

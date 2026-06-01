@@ -110,15 +110,21 @@ describe('ToolBubble collapsed preview — partial-input field priority (#4243)'
       expect(getCollapsedPreview(root)).toBe('do the thing');
     });
 
-    it('falls back to the raw pretty-printed JSON when partial has no priority field', () => {
-      // No command/file_path/path/description — preserve legacy behaviour
-      // so the user still sees what fields are forming.
+    it('renders compact key:value summary when partial has no priority field (#4655)', () => {
+      // No command/file_path/path/description — pre-#4655 this fell
+      // through to raw JSON head (`{"foo":"bar","baz":"qux"}`). The
+      // generic-fallback summary in `tool-summary.ts` now renders a
+      // compact key:value listing so unknown-shape tools (ToolSearch,
+      // MCP tools, custom user tools) never leak raw JSON.
       const root = renderBubble(makeToolMessage({
         toolInputPartial: '{"foo":"bar","baz":"qux"}',
       }));
       const preview = getCollapsedPreview(root);
-      expect(preview).toMatch(/"foo"/);
-      expect(preview).toMatch(/"bar"/);
+      // Compact key:value form — value strings are quoted, keys are not.
+      expect(preview).toContain('foo: "bar"');
+      expect(preview).toContain('baz: "qux"');
+      // The raw JSON object brace must NEVER appear in the collapsed bubble.
+      expect(preview).not.toContain('{"foo"');
     });
   });
 
@@ -152,13 +158,18 @@ describe('ToolBubble collapsed preview — partial-input field priority (#4243)'
       expect(getCollapsedPreview(root)).toBe('plain text input that should pass through unchanged');
     });
 
-    it('falls back to legacy truncated content when content JSON has no priority fields', () => {
+    it('renders compact key:value summary when content JSON has no priority fields (#4655)', () => {
+      // Pre-#4655: the legacy fallback showed the raw JSON head
+      // (`{"foo":"bar","baz":"qux"}`). The generic-fallback summary
+      // now renders compact key:value form so unknown-shape tools
+      // (ToolSearch, MCP, etc.) never leak raw JSON.
       const root = renderBubble(makeToolMessage({
         content: JSON.stringify({ foo: 'bar', baz: 'qux' }),
       }));
       const preview = getCollapsedPreview(root);
-      // No priority field → no extraction → show the raw JSON head.
-      expect(preview).toMatch(/"foo"/);
+      expect(preview).toContain('foo: "bar"');
+      expect(preview).toContain('baz: "qux"');
+      expect(preview).not.toContain('{"foo"');
     });
 
     it('truncates extracted summaries longer than 60 chars with the legacy ellipsis', () => {
@@ -194,6 +205,50 @@ describe('ToolBubble collapsed preview — partial-input field priority (#4243)'
         toolInputPartial: '{"command":"streaming-stale"}',
       }));
       expect(getCollapsedPreview(root)).toBe('final-cmd');
+    });
+  });
+
+  // #4655 — collapsed bubbles must never leak raw `tool_input` JSON for
+  // tools whose input shape has none of the hardcoded PRIORITY_FIELDS
+  // (ToolSearch, MCP tools, custom user tools, future Anthropic tools).
+  // The fix lives in `tool-summary.ts` (generic key:value fallback);
+  // these fixtures pin the mobile contract so iOS/Android stay in lock-
+  // step with the dashboard.
+  describe('unknown-shape tool_input never leaks raw JSON (#4655)', () => {
+    it('renders ToolSearch input as compact key:value summary instead of raw JSON', () => {
+      // Canonical bug fixture — reported live during v0.9.24 dogfood.
+      const root = renderBubble(makeToolMessage({
+        tool: 'ToolSearch',
+        content: 'ToolSearch',
+        toolInputPartial: '{"query":"select:AskUserQuestion","max_results":5}',
+      }));
+      const preview = getCollapsedPreview(root);
+      expect(preview).toContain('query: "select:AskUserQuestion"');
+      expect(preview).toContain('max_results: 5');
+      expect(preview).not.toContain('{"query"');
+    });
+
+    it('renders MCP tool input with arbitrary keys as compact summary', () => {
+      // MCP tools have per-server schemas — no allowlist can keep up.
+      const root = renderBubble(makeToolMessage({
+        tool: 'mcp__fs__read_file',
+        content: JSON.stringify({ url: 'https://example.com', timeout_ms: 5000 }),
+      }));
+      const preview = getCollapsedPreview(root);
+      expect(preview).toContain('url: "https://example.com"');
+      expect(preview).toContain('timeout_ms: 5000');
+      expect(preview).not.toContain('{"url"');
+    });
+
+    it('collapses nested object values to `{...}` placeholders, never raw JSON', () => {
+      const root = renderBubble(makeToolMessage({
+        tool: 'custom_tool',
+        content: JSON.stringify({ options: { recursive: true }, name: 'scan' }),
+      }));
+      const preview = getCollapsedPreview(root);
+      expect(preview).toContain('options: {...}');
+      expect(preview).toContain('name: "scan"');
+      expect(preview).not.toContain('"recursive"');
     });
   });
 });

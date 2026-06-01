@@ -28,6 +28,64 @@ const PRIORITY_FIELDS = ['command', 'file_path', 'filePath', 'path', 'descriptio
 
 const PREVIEW_MAX_LEN = 100
 
+// #4655 — generic-fallback summary for tools whose input shape has none
+// of the PRIORITY_FIELDS (ToolSearch `{query, max_results}`, arbitrary
+// MCP tool inputs, custom tools, future Anthropic tools, etc.). Without
+// this, callers fall through to rendering raw JSON head (`{"matches":
+// ["Ask...`) in the collapsed bubble — a leak surface that grows with
+// every new tool shape. The generic summary trades structural-but-ugly
+// JSON for a compact key:value listing that's still legible.
+//
+// Cap at PREVIEW_MAX_LEN to match the priority-field summary contract.
+// Nested objects/arrays render as `{...}` / `[N]` placeholders so a
+// big value doesn't blow the budget on one key. When the first key
+// would already overflow, fall back to listing key names only.
+function buildGenericSummary(obj: Record<string, unknown>): string | null {
+  const keys = Object.keys(obj)
+  if (keys.length === 0) return null
+
+  const parts: string[] = []
+  let totalLen = 0
+  for (const key of keys) {
+    const value = obj[key]
+    const rendered = `${key}: ${renderGenericValue(value)}`
+    // +2 for the ", " separator between parts after the first.
+    const additional = parts.length === 0 ? rendered.length : rendered.length + 2
+    if (totalLen + additional > PREVIEW_MAX_LEN) break
+    parts.push(rendered)
+    totalLen += additional
+  }
+
+  if (parts.length === 0) {
+    // First key:value already overflowed — degrade to a bare key-count
+    // summary so something useful still shows ("3 keys: query,
+    // max_results, foo"). Caps at PREVIEW_MAX_LEN.
+    const head = `${keys.length} key${keys.length === 1 ? '' : 's'}: ${keys.join(', ')}`
+    return head.slice(0, PREVIEW_MAX_LEN)
+  }
+
+  const joined = parts.join(', ')
+  // The remaining keys are implied by the truncation; we don't tack on
+  // `…` because the bubble itself is already a disclosure widget that
+  // expands to the full JSON.
+  return joined.slice(0, PREVIEW_MAX_LEN)
+}
+
+function renderGenericValue(value: unknown): string {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string') {
+    // Quoted so it's visually distinct from key names. Long strings get
+    // truncated inside the quotes so the suffix is still visible
+    // structure.
+    return value.length > 40 ? `"${value.slice(0, 37)}..."` : `"${value}"`
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) return `[${value.length}]`
+  if (typeof value === 'object') return '{...}'
+  return String(value)
+}
+
 function pickPriorityString(obj: Record<string, unknown>): string | null {
   // Top-level pass first — the common case for documented tool input shapes.
   for (const field of PRIORITY_FIELDS) {
@@ -58,7 +116,6 @@ function pickPriorityString(obj: Record<string, unknown>): string | null {
  *
  *   - the buffer isn't yet valid JSON (mid-stream)
  *   - the parse yields a non-object (`null`, string, number)
- *   - none of the priority fields are non-empty strings
  *
  * Callers render the verbatim accumulator head when this returns null
  * so the JSON still shows assembling on-screen.
@@ -66,13 +123,23 @@ function pickPriorityString(obj: Record<string, unknown>): string | null {
  * #4242: route the parse through `tryParseCompleteJson` so a chunk
  * that can't structurally be complete JSON yet (doesn't end in `}` or
  * `]`) short-circuits without paying the parse cost.
+ *
+ * #4655: when the parsed object has no priority field, fall back to a
+ * generic key:value summary (`query: "select:foo", max_results: 5`)
+ * instead of returning null and letting the caller leak raw JSON head.
+ * The old behaviour was bounded only by the hardcoded PRIORITY_FIELDS
+ * allowlist — every new tool shape (ToolSearch, MCP tools, custom
+ * user tools, future Anthropic tools) extended the leak surface. The
+ * generic fallback removes the per-tool maintenance burden.
  */
 export function getPartialSummary(partial: string): string | null {
   const parsed = tryParseCompleteJson(partial)
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
   const summary = pickPriorityString(parsed as Record<string, unknown>)
-  if (!summary) return null
-  return summary.slice(0, PREVIEW_MAX_LEN)
+  if (summary) return summary.slice(0, PREVIEW_MAX_LEN)
+  // #4655: structured-but-unknown shape — build a compact key:value
+  // summary so collapsed bubbles never leak raw JSON.
+  return buildGenericSummary(parsed as Record<string, unknown>)
 }
 
 /**
@@ -112,5 +179,10 @@ export function getInputSummary(input: Record<string, unknown> | string | null |
       if (typeof nested === 'string' && nested.length > 0) return nested.slice(0, PREVIEW_MAX_LEN)
     }
   }
-  return ''
+  // #4655: structured-but-unknown shape (ToolSearch, MCP tools, etc.) —
+  // build a compact key:value summary so callers never have to fall
+  // back to raw JSON head. The bubble itself remains a disclosure
+  // widget that expands to the full pretty-printed JSON.
+  const generic = buildGenericSummary(inputObj)
+  return generic ?? ''
 }
