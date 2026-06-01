@@ -2073,16 +2073,30 @@ export class ClaudeTuiSession extends BaseSession {
         const opts = Array.isArray(q.options) ? q.options : []
         if (opts.length <= 9) continue
         const raw = map[q.question]
-        // Gather every label the user picked for this question (single- or multi-select).
+        // Gather every label the user picked for this question (single- or
+        // multi-select). MUST mirror resolveQuestionDigits' multi-select
+        // parsing — array → JSON-encoded array → comma-joined list — so
+        // an unrepresentable pick sent via the comma-joined fallback
+        // (e.g. "a,k") isn't accidentally treated as a single 3-char
+        // label and missed (Copilot review feedback). For single-select
+        // we don't split on comma because option labels may legitimately
+        // contain commas; the multi-select code path is the only one
+        // that defined comma-joining as a wire encoding.
         let labels = []
-        if (typeof raw === 'string' && raw.length > 0) {
-          let parsed = null
-          try { parsed = JSON.parse(raw) } catch { parsed = null }
-          labels = Array.isArray(parsed)
-            ? parsed.filter((s) => typeof s === 'string')
-            : [raw]
-        } else if (Array.isArray(raw)) {
+        if (Array.isArray(raw)) {
           labels = raw.filter((s) => typeof s === 'string')
+        } else if (typeof raw === 'string' && raw.length > 0) {
+          if (q.multiSelect) {
+            let parsed = null
+            try { parsed = JSON.parse(raw) } catch { parsed = null }
+            if (Array.isArray(parsed)) {
+              labels = parsed.filter((s) => typeof s === 'string')
+            } else {
+              labels = raw.split(',').map((s) => s.trim()).filter(Boolean)
+            }
+          } else {
+            labels = [raw]
+          }
         }
         for (const label of labels) {
           const idx = opts.findIndex((o) => o && o.label === label)

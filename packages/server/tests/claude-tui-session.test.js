@@ -3806,6 +3806,39 @@ describe('ClaudeTuiSession', () => {
         assert.equal(errors[0].toolUseId, 'toolu_multi_big')
       })
 
+      // Multi-select via the comma-joined fallback wire encoding (the
+      // pre-Chunk-B back-compat path that resolveQuestionDigits accepts).
+      // Copilot review feedback: the pre-scan MUST split comma-joined
+      // multi-select strings same as resolveQuestionDigits, else an
+      // unrepresentable pick sent as "a,k" is treated as a single 3-char
+      // label and slips through to the silent default-to-option-1 path.
+      it('multi-question (multi-select): comma-joined "a,k" with k at index 10 surfaces the too-many error', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_cj'
+        session._activeTurn = { uuid: 'turn_cj', synthSeq: 0, startedAt: Date.now() }
+        const elevenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: elevenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_cj', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Comma-joined "a,k" — NOT JSON. k is at index 10 (unrepresentable).
+        session.respondToQuestion('', { 'Q1?': 'a,k', 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.deepEqual(writes, ['\x03'],
+          `expected Ctrl-C teardown only, got ${JSON.stringify(writes)}`)
+        assert.equal(errors.length, 1, 'one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+      })
+
       // Negative: a 10+ option question where the dashboard sent NO
       // answersMap (back-compat fallback). The pre-#4625 behavior of
       // defaulting to option 1 is preserved — no error fires because
