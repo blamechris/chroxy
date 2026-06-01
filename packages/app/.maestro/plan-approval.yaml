@@ -1,0 +1,139 @@
+appId: com.blamechris.chroxy
+name: PlanApprovalCard approve path
+---
+
+# #4696 — End-to-end coverage for the plan-mode approval flow in the chat
+# view. The mobile app surfaces a `PlanApprovalCard` at the bottom of the
+# chat scroll when the server emits `plan_ready` (after ExitPlanMode).
+# Tapping Approve sends the canonical PLAN_APPROVAL_MESSAGE ("Go ahead
+# with the plan") through `sendInput` and clears plan state.
+#
+# Trigger: 'show-plan-approval' user input → mock-server.mjs emits a
+# `plan_ready` wire message with two `allowedPrompts`. The fixture
+# seeding pattern is documented in CLAUDE.md → "Fixture Seeding for
+# Structured Renderers".
+#
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17),
+# iPhone 17 Pro Max (iOS 26.1), portrait.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Note: this flow is self-contained (no `runFlow: setup/...`) because
+# the existing setup/ flows target Expo Go (appId host.exp.Exponent),
+# whereas this needs the chroxy dev client (com.blamechris.chroxy).
+# Mirrors the same launch sequence as chat-todolist.yaml.
+
+# Launch via the dev client's deep link so we skip the
+# "Development Build / pick a dev server" screen and load the
+# chroxy bundle directly. `clearState: true` resets app data but NOT
+# the SecureStore Keychain entry that holds saved connections, so the
+# app may auto-connect to a previously-used server — the conditional
+# below handles both fresh and warm starts.
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet that shows on first launch of a dev build.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip the onboarding carousel if it's showing.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+      - hideKeyboard
+      - tapOn:
+          id: "connect-submit"
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Make sure Chat tab is selected.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that makes the mock server emit `plan_ready`.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-plan-approval"
+
+# Send the message.
+- tapOn:
+    id: "chat-send-button"
+
+# Dismiss the keyboard so the plan card sits where we expect on-screen.
+- hideKeyboard
+
+# Wait for the plan approval card to render — testID set on the outer
+# View in ChatView.tsx PlanApprovalCard. The card mounts via the
+# `isPlanPending` flag flipped by the plan_ready handler.
+- extendedWaitUntil:
+    visible:
+      id: "plan-approval-card"
+    timeout: 10000
+
+# Assert the plan content (allowedPrompts list) renders. testID set on
+# the inner prompts View — present whenever allowedPrompts.length > 0,
+# which the mock guarantees.
+- assertVisible:
+    id: "plan-content"
+
+# Assert both action buttons are present.
+- assertVisible:
+    id: "plan-approve-button"
+- assertVisible:
+    id: "plan-deny-button"
+
+# Screenshot the plan approval card before tapping Approve.
+- takeScreenshot: plan-approval-card
+
+# Tap Approve — SessionScreen handleApprovePlan sends the canonical
+# PLAN_APPROVAL_MESSAGE ("Go ahead with the plan") through sendInput
+# and calls clearPlanState, which flips isPlanPending false and
+# unmounts the card.
+- tapOn:
+    id: "plan-approve-button"
+- waitForAnimationToEnd
+
+# The card should unmount once plan state clears. The default mock
+# branch echoes the approval message back as an assistant response,
+# so the chat should land back at the input.
+- extendedWaitUntil:
+    notVisible:
+      id: "plan-approval-card"
+    timeout: 5000
+
+# Confirm the canonical approval message was sent (appears as a
+# user bubble in chat history).
+- assertVisible:
+    text: ".*Go ahead with the plan.*"
+
+# Screenshot the post-approval chat state.
+- takeScreenshot: plan-approval-approved
