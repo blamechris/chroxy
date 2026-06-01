@@ -19,7 +19,7 @@
  * that fires `onSelect(answersMap)`. The N=1 case falls back to the
  * legacy single-question UI so single-question pins keep passing.
  */
-import { useState, useRef, useEffect } from 'react'
+import { useId, useState, useRef, useEffect } from 'react'
 import { OTHER_OPTION_VALUE, type ChatMessageQuestion } from '@chroxy/store-core'
 
 export interface QuestionPromptProps {
@@ -119,6 +119,10 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
   const [singleSelectByIdx, setSingleSelectByIdx] = useState<Record<number, string>>({})
   const [multiSelectByIdx, setMultiSelectByIdx] = useState<Record<number, string[]>>({})
   const submittedRef = useRef(false)
+  // #4624 — stable id prefix for aria-labelledby. Each question text gets
+  // `${labelIdPrefix}-${idx}` so duplicate question texts don't collide
+  // and screen readers can announce the group label.
+  const labelIdPrefix = useId()
 
   const handleRadioChange = (idx: number, value: string) => {
     setSingleSelectByIdx((prev) => ({ ...prev, [idx]: value }))
@@ -164,10 +168,18 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
 
   return (
     <div className="question-prompt question-prompt--multi" data-testid="question-prompt-multi">
-      {questions.map((q, idx) => (
+      {questions.map((q, idx) => {
+        const isMultiSelect = q.multiSelect === true
+        const labelId = `${labelIdPrefix}-q-${idx}`
+        return (
         <div key={`q-${idx}`} className="question-prompt-multi-row" data-testid={`question-multi-row-${idx}`}>
-          <div className="question-text">{q.question}</div>
-          <div className={`question-options${q.multiSelect ? ' question-options--multi' : ''}`}>
+          <div className="question-text" id={labelId}>{q.question}</div>
+          <div
+            className={`question-options${isMultiSelect ? ' question-options--multi' : ''}`}
+            role={isMultiSelect ? 'group' : 'radiogroup'}
+            aria-labelledby={labelId}
+            {...(isMultiSelect ? {} : { 'aria-required': true })}
+          >
             {q.options.map((opt) => {
               const inputId = `q-${idx}-${opt.value}`
               const inputName = `q-${idx}`
@@ -195,12 +207,14 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
             })}
           </div>
         </div>
-      ))}
+        )
+      })}
       <button
         type="button"
         className="question-multi-submit"
         data-testid="question-multi-submit"
         disabled={!canSubmit}
+        aria-disabled={!canSubmit}
         onClick={handleSubmit}
       >
         Submit
