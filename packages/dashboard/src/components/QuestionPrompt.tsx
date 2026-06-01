@@ -13,14 +13,33 @@
  * rendered by the parent and remains visible at all times.
  *
  * #4604 Chunk B — multi-question forms: when `questions` is supplied
- * with more than one entry, the component renders an inline form with
- * one selection control per question (radio for single-select,
- * checkboxes for multiSelect) and a single Submit button at the bottom
- * that fires `onSelect(answersMap)`. The N=1 case falls back to the
- * legacy single-question UI so single-question pins keep passing.
+ * with more than one entry AND `allowMultiQuestion` is true (#4735),
+ * the component renders an inline form with one selection control per
+ * question (radio for single-select, checkboxes for multiSelect) and a
+ * single Submit button at the bottom that fires `onSelect(answersMap)`.
+ * The N=1 case falls back to the legacy single-question UI so
+ * single-question pins keep passing.
+ *
+ * #4666 / #4735 — when `allowMultiQuestion` is false (TUI sessions whose
+ * permission-hook denies multi-question), the component renders a
+ * non-interactive deferred notice instead so the user can't submit
+ * answers that misroute through `_pendingUserAnswer`. SDK-mode sessions
+ * (#4731 native delivery) pass `allowMultiQuestion={true}` to lift the
+ * suppression.
  */
 import { useId, useState, useRef, useEffect } from 'react'
 import { OTHER_OPTION_VALUE, type ChatMessageQuestion } from '@chroxy/store-core'
+
+/**
+ * #4735 — per-question answer payload emitted by the multi-question form.
+ * Values are either a string (single-select chosen value, free-form
+ * "Other" text) or a string[] (multi-select chosen values). The wire
+ * schema (`UserQuestionResponseSchema`) and server consumers
+ * (`PermissionManager.respondToQuestion`, `ClaudeTuiSession`) accept
+ * both shapes; pre-#4735 builds used to JSON-stringify the array into a
+ * single string for back-compat, but the native form is preferred.
+ */
+export type MultiQuestionAnswersMap = Record<string, string | string[]>
 
 /**
  * #4651 — payload shape emitted when the user picks "Other" on a single-
@@ -47,32 +66,45 @@ export interface QuestionPromptProps {
    */
   questions?: ChatMessageQuestion[]
   /**
+   * #4735 — opt-in flag for SDK-mode sessions to render the interactive
+   * `MultiQuestionForm` instead of the #4666 deferred notice. TUI
+   * sessions (`provider === 'claude-tui'`) leave this false because the
+   * permission-hook denies multi-question tool_uses there; SDK / BYOK
+   * / Codex sessions pass `true` because the underlying delivery path
+   * supports per-question answers natively (#4731). Defaults to false
+   * so existing callers (and tests) keep their #4666 deferred-notice
+   * behaviour unless they explicitly opt in.
+   */
+  allowMultiQuestion?: boolean
+  /**
    * Fires with one of three shapes:
    * - `string` — legacy single-question / free-text-only path (back-compat).
-   * - `Record<string, string | string[]>` — multi-question form (#4604
-   *   Chunk B), keyed by `question.question` with multi-select values
-   *   as native `string[]` arrays of chosen labels (#4621).
+   * - `MultiQuestionAnswersMap` (`Record<string, string | string[]>`) —
+   *   multi-question form (#4604 Chunk B / #4735), keyed by
+   *   `question.question` with multi-select values as native `string[]`
+   *   arrays of chosen labels (#4621 / #4735).
    * - `OtherFreeformAnswer` — single-question "Other" with freeform text
    *   (#4651), carrying both the Other option's label (for digit lookup
    *   on the server) and the typed text.
    */
-  onSelect: (answer: string | Record<string, string | string[]> | OtherFreeformAnswer) => void
+  onSelect: (answer: string | MultiQuestionAnswersMap | OtherFreeformAnswer) => void
 }
 
-export function QuestionPrompt({ question, options, answered, questions, onSelect }: QuestionPromptProps) {
+export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, onSelect }: QuestionPromptProps) {
   const isMultiQuestion = Array.isArray(questions) && questions.length > 1
 
-  // #4666: the permission-hook (`packages/server/hooks/permission-hook.sh`,
-  // shipped in #4648 / v0.9.24) unconditionally denies any AskUserQuestion
-  // whose `questions[]` has length > 1 because the TUI keystroke driver
-  // can't reliably answer combined multi-question forms. The dashboard
-  // still receives the tool_use event though (broadcast is independent of
-  // the permission decision), so rendering the interactive MultiQuestionForm
-  // here would let the user submit answers that route through
-  // `_pendingUserAnswer` to the wrong question slot — see the live trace in
-  // #4666 / #4668. Render a non-interactive placeholder instead so the user
-  // understands chroxy is waiting for Claude to retry one-at-a-time.
+  // #4666 / #4735 — TUI sessions: permission-hook denies any AskUserQuestion
+  // with `questions[]` length > 1 because the TUI keystroke driver can't
+  // reliably answer combined forms. The dashboard still receives the
+  // tool_use event (broadcast is independent of the deny), so we render a
+  // non-interactive notice to prevent misrouted answers via
+  // `_pendingUserAnswer`. SDK-mode sessions (#4731) flip
+  // `allowMultiQuestion` on and render the live `MultiQuestionForm` so
+  // per-question answers reach the SDK's canUseTool callback natively.
   if (isMultiQuestion && answered == null) {
+    if (allowMultiQuestion) {
+      return <MultiQuestionForm questions={questions} onSelect={onSelect} />
+    }
     return <MultiQuestionDeferredNotice count={questions.length} />
   }
 
@@ -115,18 +147,24 @@ function MultiQuestionDeferredNotice({ count }: { count: number }) {
  * directly, so no JSON encoding is required and the server's TUI driver
  * receives the chosen labels without a round-trip through JSON.parse.
  *
- * #4666 — intentionally retained but not currently rendered by
- * `QuestionPrompt`. The permission-hook denies multi-question
- * AskUserQuestion tool_uses, so showing the interactive form would let
- * the user submit answers that misroute via the single `_pendingUserAnswer`
- * field. Once #4668's `Map<toolUseId, ...>` refactor lands, native
- * multi-question support can be re-enabled by flipping the gate in
- * `QuestionPrompt` back to rendering this component. Exported so that
- * `noUnusedLocals` doesn't strip it while it sits dormant.
+ * #4735 — multi-select values are emitted as native `string[]` arrays
+ * via the widened wire shape (`Record<string, string | string[]>`).
+ * Pre-#4735 builds JSON-stringified the array into a single string for
+ * back-compat; the server still accepts both shapes
+ * (`ClaudeTuiSession.resolveQuestionDigits` parses JSON or comma-joined
+ * strings, `PermissionManager.respondToQuestion` passes the value
+ * through unchanged so the SDK receives the array on its canUseTool
+ * callback).
+ *
+ * #4666 / #4735 — gated behind `allowMultiQuestion` in `QuestionPrompt`
+ * so TUI sessions fall back to the deferred notice (the TUI keystroke
+ * driver can't reliably answer combined multi-question forms). SDK /
+ * BYOK / Codex sessions render this form directly because the SDK's
+ * canUseTool delivery accepts per-question answers natively (#4731).
  */
 export interface MultiQuestionFormProps {
   questions: ChatMessageQuestion[]
-  onSelect: (answersMap: Record<string, string | string[]>) => void
+  onSelect: (answersMap: MultiQuestionAnswersMap) => void
 }
 
 export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProps) {
@@ -158,13 +196,17 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
   const handleSubmit = () => {
     if (submittedRef.current) return
     submittedRef.current = true
-    const answersMap: Record<string, string | string[]> = {}
+    const answersMap: MultiQuestionAnswersMap = {}
     questions.forEach((q, idx) => {
       if (q.multiSelect) {
-        // #4621 — emit a native string[]. The wire schema accepts
-        // `string | string[]` directly; the server's TUI driver iterates
-        // the array (or falls back to JSON.parse + comma-split for
-        // legacy payloads from older dashboards).
+        // #4621 / #4735 — emit multi-select as a native `string[]` via
+        // the widened wire shape. Pre-#4621 dashboards JSON.stringified
+        // the array so the schema (`Record<string,string>`) accepted
+        // it; the server side already handled both forms (the TUI
+        // driver parses JSON or comma-joined strings; the SDK path
+        // passes the value through unchanged). Sending arrays natively
+        // gives the SDK canUseTool callback the structured shape it
+        // expects without a JSON.parse hop.
         answersMap[q.question] = multiSelectByIdx[idx] || []
       } else {
         const chosen = singleSelectByIdx[idx]

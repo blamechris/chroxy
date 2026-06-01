@@ -73,6 +73,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import {
   setStore,
   wsSend,
@@ -1563,17 +1564,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     toolUseId?: string,
   ) => {
     const { socket, activeSessionId, sessionStates } = get();
-    // #4604 Chunk B / #4621 / #4651 — split the wire payload by call shape:
+    // #4604 Chunk B / #4621 / #4651 / #4735 — split the wire payload by call shape:
     // - string `answer`: legacy single-question / free-text path. Wire
     //   shape stays `{ type, answer, toolUseId? }` so older servers
     //   keep working without schema migration.
-    // - Record `answer`: multi-question form (Chunk B). Populate the
-    //   `answers` field (protocol accepts `string | string[]` per
-    //   #4621) AND a string `answer` summary so a server running an
-    //   older build that only reads `answer` falls through to its
-    //   default-to-option-1 path (a noisy WARN in chroxy.log) instead
-    //   of stalling the form. Multi-select array values are joined
-    //   into the summary as `App, Tests` for human readability.
+    // - Record `answer`: multi-question form. Populate the `answers`
+    //   field (`UserQuestionResponseSchema` accepts
+    //   `Record<string, string | string[]>` per #4621) AND a string
+    //   `answer` summary so a server running an older build that only
+    //   reads `answer` falls through to its default-to-option-1 path
+    //   (a noisy WARN in chroxy.log) instead of stalling the form.
+    //   Multi-select values flow through as native arrays — the
+    //   summary helper flattens them to comma-joined labels so the
+    //   string-only `answer` field stays readable.
+    //
+    //   Delegate to `formatQuestionAnswerSummary` so the legacy
+    //   JSON-stringified array envelope (pre-#4621 wire: a single
+    //   value like `'["App","Tests"]'` for multi-select) is also
+    //   flattened here — otherwise the terminal echo + the required
+    //   string `answer` field can leak `["App","Tests"]` JSON syntax
+    //   when mixed-version rehydrated state replays an old answersMap.
+    //   The helper detects array-shaped values AND JSON-stringified
+    //   arrays and renders both the same way (comma-joined labels).
     // - {otherLabel, freeformText} (#4651): single-question Other path.
     //   `answer` carries the Other option's label so the server can
     //   resolve it to a 1-indexed digit; `freeformText` carries the
@@ -1598,12 +1610,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (isFreeformAnswer) {
       const f = answer as { otherLabel: string; freeformText: string };
       answerSummary = f.freeformText;
-    } else if (isMultiAnswer) {
-      answerSummary = Object.entries(answer as Record<string, string | string[]>)
-        .map(([q, v]) => `${q}: ${Array.isArray(v) ? v.join(', ') : v}`)
-        .join(' | ');
     } else {
-      answerSummary = answer as string;
+      // Delegate to the shared summary helper so multi-question Records
+      // (and the legacy JSON-stringified array envelope from #4621) both
+      // render consistently — comma-joined labels for multi-select, no
+      // leaked JSON syntax in the terminal echo or wire `answer` field.
+      answerSummary = formatQuestionAnswerSummary(
+        answer as string | Record<string, string | string[]>,
+      );
     }
     const payload: Record<string, unknown> = { type: 'user_question_response', answer: isFreeformAnswer
       ? (answer as { otherLabel: string; freeformText: string }).otherLabel

@@ -629,13 +629,14 @@ export interface ConnectionState {
    * requestId — last write wins. */
   markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
   /**
-   * #4604 Chunk B / #4621 / #4651 — answer may be one of three shapes:
+   * #4604 Chunk B / #4621 / #4651 / #4735 — answer may be one of three shapes:
    * - `string`: legacy single-question / free-text path (back-compat).
    * - `Record<string, string | string[]>`: multi-question form, keyed
    *   by question text. Multi-select values are emitted as native
-   *   `string[]` (#4621) so consumers don't have to JSON.parse to
-   *   recover the chosen labels. The Record path populates the wire's
-   *   `answers` field.
+   *   `string[]` (#4621 / #4735) so consumers don't have to JSON.parse
+   *   to recover the chosen labels. Pre-#4621 builds JSON-stringified
+   *   the array into a single string for back-compat (still accepted by
+   *   the server). The Record path populates the wire's `answers` field.
    * - `{otherLabel, freeformText}`: single-question "Other" with freeform
    *   text (#4651). The store sets `answer` to `otherLabel` (so the server
    *   can resolve it to a 1-indexed TUI digit) and `freeformText` to the

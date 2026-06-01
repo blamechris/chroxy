@@ -9,17 +9,20 @@
  * 1. `string` — the legacy single-question / free-text path. Returned
  *    verbatim.
  * 2. `Record<string, string | string[]>` — the multi-question form path
- *    (#4604 Chunk B). One entry per question, keyed by question text.
- *    Multi-select values arrive as native `string[]` (#4621) and are
- *    pretty-printed as comma-joined labels (`App, Tests`) instead of
- *    `["App","Tests"]` JSON syntax.
+ *    (#4604 Chunk B, widened in #4621 / #4735). One entry per question,
+ *    keyed by question text. Multi-select values arrive as native
+ *    `string[]` (#4621) via the widened wire
+ *    (`UserQuestionResponseSchema` accepts `string | string[]` per
+ *    question). The summary helper pretty-prints those arrays as
+ *    `App, Tests` instead of `["App","Tests"]` JSON syntax.
  *
  *    For back-compat with payloads sent by older dashboards still using
- *    the pre-#4621 wire shape, a JSON-stringified array value is also
- *    detected and flattened the same way. Non-array JSON shapes
- *    (objects, numbers) keep their raw stringified form — the form only
- *    ever produced array JSON, so anything else didn't come from us and
- *    we'd rather surface it as-is than mangle it.
+ *    the pre-#4621 wire shape (`Record<string,string>` with the array
+ *    JSON-stringified into a single string), a JSON-stringified array
+ *    value is also detected and flattened the same way. Non-array JSON
+ *    shapes (objects, numbers) keep their raw stringified form — the
+ *    form only ever produced array JSON, so anything else didn't come
+ *    from us and we'd rather surface it as-is than mangle it.
  */
 
 /**
