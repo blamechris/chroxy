@@ -295,6 +295,28 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * claude-tui explicitly deletes ANTHROPIC_API_KEY from the spawn env and
+   * routes via OAuth/Keychain — the interactive TUI under a PTY bypasses
+   * programmatic credit metering. Marked ready up front; the on-disk OAuth
+   * probe can't see Keychain credentials.
+   *
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth() {
+    const envVars = this.preflight.credentials.envVars
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint: 'run `claude login` if not yet authed',
+      detail: 'Claude subscription (interactive TUI under PTY — bypasses programmatic credit metering)',
+    }
+  }
+
   static getFallbackModels() {
     return FALLBACK_MODELS
   }

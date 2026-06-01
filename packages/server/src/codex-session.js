@@ -411,6 +411,58 @@ export class CodexSession extends JsonlSubprocessSession {
     }
   }
 
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Codex authenticates via OPENAI_API_KEY env OR the OAuth tokens cached
+   * under `~/.codex/auth.json` by `codex login`. The CLI works fine even
+   * when the file's OPENAI_API_KEY field is null because the tokens block
+   * carries the round-trip (#4301). Env wins; OAuth file fallback covers
+   * users who logged in via the CLI instead of exporting a key.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ hasCodexOAuthCreds: () => boolean }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `OpenAI API (${matched} set)`,
+      }
+    }
+    if (helpers.hasCodexOAuthCreds()) {
+      return {
+        ready: true,
+        source: 'oauth',
+        envVar: null,
+        envVars,
+        hint,
+        detail: 'OpenAI API (OAuth from `codex login`)',
+      }
+    }
+    const resolvedHint = hint
+      ? `${hint} or run \`codex login\``
+      : 'run `codex login` or set OPENAI_API_KEY'
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: resolvedHint,
+      detail: envVars.length ? `Not configured — ${resolvedHint}` : 'Not configured',
+    }
+  }
+
   constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, resumeSessionId } = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // _buildArgs() omits the `-c model=...` flag so Codex CLI defers

@@ -179,6 +179,61 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Tries env vars first; falls back to the on-disk `claude login` OAuth
+   * probe so the dashboard reports ready when the user has logged in via
+   * subscription without exporting a key. Without the probe the dashboard
+   * would lie about ready=true after #3674.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ hasClaudeOAuthCreds: () => boolean }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      const identity = matched === 'ANTHROPIC_API_KEY'
+        ? 'Anthropic API'
+        : matched === 'CLAUDE_CODE_OAUTH_TOKEN'
+          ? 'Anthropic API (OAuth token)'
+          : 'Claude subscription'
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `${identity} (${matched} set)`,
+      }
+    }
+
+    if (helpers.hasClaudeOAuthCreds()) {
+      return {
+        ready: true,
+        source: 'oauth',
+        envVar: null,
+        envVars,
+        hint,
+        detail: 'Claude subscription (OAuth from `claude login`)',
+      }
+    }
+
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: hint || 'run `claude login` or set ANTHROPIC_API_KEY',
+      detail: `Not configured — ${hint || 'run \`claude login\` or set ANTHROPIC_API_KEY'}`,
+    }
+  }
+
+  /**
    * Minimal model list for the per-provider registry (#2956). The live
    * Agent SDK push (`supportedModels()`) replaces this at runtime; the
    * fallback ships only short aliases so the dropdown is never empty

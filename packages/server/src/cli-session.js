@@ -124,6 +124,29 @@ export class CliSession extends BaseSession {
   }
 
   /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Host `claude-cli` always bills the Claude subscription: spawn-env.js's
+   * `claude` denylist strips ANTHROPIC_API_KEY before the subprocess starts,
+   * so the env var is irrelevant — the CLI auths via the host's ~/.claude
+   * OAuth state. Mark ready up front; the on-disk OAuth probe doesn't see
+   * Keychain credentials and would otherwise misreport unconfigured.
+   *
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth() {
+    const envVars = this.preflight.credentials.envVars
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint: 'run `claude login` if not yet authed',
+      detail: 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)',
+    }
+  }
+
+  /**
    * Per-provider fallback model list (#2956). Shared with SdkSession via
    * the module-level `FALLBACK_MODELS`. The default Claude registry is
    * what this provider uses at runtime — this static exists so
