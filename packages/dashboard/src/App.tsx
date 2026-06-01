@@ -9,14 +9,11 @@ import { useShallow } from 'zustand/react/shallow'
 import {
   DEFAULT_CONTEXT_WINDOW,
   deriveSessionVisualStatus,
-  groupMessages,
-  applyStreamingOverlay,
   formatPasteMarker,
   expandPasteMarkers,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
-import type { ChatMessage } from './store/connection'
 import type { BaseSessionState } from '@chroxy/store-core'
 import type { ChatViewMessage } from './components/ChatView'
 
@@ -30,7 +27,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
-import { processImageFiles, processBase64Image, filterImageFiles } from './utils/image-utils'
+import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
@@ -63,13 +60,14 @@ import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
 import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
 import { formatBindingForDisplay, parseBinding } from './shortcuts/registry'
-import { readClipboardImage } from './utils/clipboard-image'
 import { writeText as clipboardWriteText } from './utils/clipboard'
 import { formatQuestionAnswerSummary } from './utils/questionAnswerSummary'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
+import { useShortcutDispatch } from './hooks/useShortcutDispatch'
+import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
@@ -116,20 +114,6 @@ function formatContext(usage: { inputTokens: number; outputTokens: number } | nu
   if (total < 1000) return `${total} tokens`
   const k = total / 1000
   return Number.isInteger(k) ? `${k}k tokens` : `${k.toFixed(1)}k tokens`
-}
-
-/** Map store ChatMessage to ChatViewMessage */
-function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
-  return {
-    id: msg.id,
-    type: msg.type === 'prompt' ? 'response' : msg.type,
-    content: msg.content,
-    timestamp: msg.timestamp,
-    // #4476: propagate the structured error code so the chat-view
-    // renderMessage path can switch error bubbles into the
-    // StreamStallChip variant.
-    ...(msg.code ? { code: msg.code } : {}),
-  }
 }
 
 type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments'
@@ -681,176 +665,29 @@ export function App() {
     setImageAttachments(prev => [...prev, ...attachments])
   }, [])
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      // Prevent Backspace from triggering browser/webview "back" navigation
-      const target = e.target instanceof HTMLElement ? e.target : null
-      if (e.key === 'Backspace' && (!target || (!['INPUT', 'TEXTAREA'].includes(target.tagName) && !target.isContentEditable))) {
-        e.preventDefault()
-        return
-      }
-      // Ctrl+V on macOS in Tauri = paste image from clipboard (#3748).
-      // Cmd+V remains the native text paste (handled by the OS / textarea
-      // onPaste handler, untouched here). On non-Mac platforms Ctrl+V is
-      // the native text paste — we leave it alone there. On non-Tauri
-      // (web dashboard) there's no way to read the OS clipboard image
-      // reliably, so the shortcut only fires inside the Tauri webview.
-      if (
-        isTauri() &&
-        isMacPlatform() &&
-        e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        !e.shiftKey &&
-        (e.key === 'v' || e.key === 'V')
-      ) {
-        e.preventDefault()
-        void (async () => {
-          try {
-            const image = await readClipboardImage()
-            if (!image) {
-              useConnectionStore.getState().addInfoNotification('No image on clipboard')
-              return
-            }
-            // Use processBase64Image (not processImageFiles) to skip the
-            // base64 → Blob → File → FileReader → base64 round-trip the
-            // File path would otherwise perform on a payload we already
-            // have in the canonical shape (#3796 review).
-            const { accepted, rejected } = await processBase64Image(image.base64, image.mediaType, image.name)
-            if (accepted) {
-              appendImageAttachments([accepted])
-            } else if (rejected) {
-              useConnectionStore.getState().addInfoNotification(rejected)
-            }
-          } catch (err) {
-            useConnectionStore.getState().addInfoNotification(
-              `Failed to read clipboard image: ${err instanceof Error ? err.message : String(err)}`,
-            )
-          }
-        })()
-        return
-      }
-      // #3852 / #4412: customizable shortcuts win first. The registry
-      // is the single source of truth for the entire global keydown
-      // ladder — every dispatch below is a registry id, never a raw
-      // combo, so user rebinds in Settings propagate automatically.
-      // The registry already evaluates `disabledInTextInput` and
-      // `enabled` predicates internally (see registry.ts matchEvent),
-      // so the per-branch text-input gates the old ladder did inline
-      // are gone — they live on the ShortcutDef instead.
-      //
-      // Note: we deliberately do NOT gate ALL shortcuts on text-input
-      // focus — palette / sidebar / settings / new-session / etc.
-      // should fire even when a textarea has focus. Only shortcuts
-      // declared with `disabledInTextInput: true` are suppressed by
-      // the registry (Shift+Tab, ?).
-      const matchedId = shortcutRegistry.matchEvent(e, 'global')
-      if (matchedId) {
-        // session.switch.N — index from id suffix; preventDefault only
-        // when we actually have a session for that slot so unused
-        // slots don't swallow OS-level Cmd+digit shortcuts.
-        if (matchedId.startsWith('session.switch.')) {
-          const idx = parseInt(matchedId.slice('session.switch.'.length), 10) - 1
-          const target = sessions[idx]
-          if (target) {
-            e.preventDefault()
-            handleSwitchSession(target.sessionId)
-          }
-          return
-        }
-        // session.close (Cmd+W) — Tauri-only via registry `enabled`
-        // predicate. Additional in-action guard: only close when more
-        // than one session exists, otherwise let the event bubble so
-        // Cmd+W still closes the desktop window when there's nothing
-        // left to close inside the app.
-        if (matchedId === 'session.close') {
-          if (activeSessionId && sessions.length > 1) {
-            e.preventDefault()
-            handleCloseSession(activeSessionId)
-          }
-          return
-        }
-        // help.toggle — registry already gates text-input focus, but
-        // the overlay-stack check is App-state knowledge it can't
-        // own. Keep it here.
-        if (matchedId === 'help.toggle') {
-          const overlays = document.querySelectorAll('[data-modal-overlay]')
-          const onlyShortcutHelp = overlays.length === 1 && overlays[0]?.classList.contains('shortcut-help-overlay')
-          if (overlays.length === 0 || onlyShortcutHelp) {
-            e.preventDefault()
-            setShortcutHelpOpen(prev => !prev)
-          }
-          return
-        }
-        e.preventDefault()
-        switch (matchedId) {
-          case 'palette.toggle':
-          case 'palette.toggle.vscode':
-            setPaletteOpen(prev => !prev)
-            break
-          case 'sidebar.toggle':
-            setSidebarOpen(prev => !prev)
-            break
-          case 'settings.open':
-            setSettingsOpen(prev => !prev)
-            break
-          case 'session.new':
-            setShowCreateSession(true)
-            break
-          case 'view.toggleChatTerminal':
-            setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
-            break
-          case 'view.cycleSplit':
-            setSplitMode(prev => {
-              const next = prev === null ? 'horizontal' : prev === 'horizontal' ? 'vertical' : null
-              persistSplitMode(next)
-              return next
-            })
-            break
-          case 'session.copyTranscript':
-            handleCopyTranscript()
-            break
-          case 'session.interrupt':
-            sendInterrupt()
-            break
-          case 'session.prev':
-          case 'session.next': {
-            const currentIdx = sessions.findIndex(s => s.sessionId === activeSessionId)
-            if (currentIdx < 0) break
-            const nextIdx = matchedId === 'session.prev'
-              ? (currentIdx - 1 + sessions.length) % sessions.length
-              : (currentIdx + 1) % sessions.length
-            handleSwitchSession(sessions[nextIdx]!.sessionId)
-            break
-          }
-          case 'session.togglePlanMode': {
-            const state = useConnectionStore.getState()
-            const currentMode = state.permissionMode
-            if (currentMode === 'plan') {
-              // Switch back to previous mode (default to 'approve')
-              setPermissionMode(state.previousPermissionMode || 'approve')
-            } else {
-              setPermissionMode('plan')
-            }
-            break
-          }
-          default:
-            // Unknown registry id reached the dispatch table — most
-            // likely a definition was added in defaults.ts without an
-            // App-side handler. Fail loud in dev so the gap is
-            // obvious; silently ignore in prod so a stray
-            // localStorage override can't brick the app.
-            if (import.meta.env?.DEV) {
-              // eslint-disable-next-line no-console
-              console.warn(`[shortcuts] no handler for matched id "${matchedId}"`)
-            }
-        }
-        return
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript, shortcutRegistry, appendImageAttachments, setPermissionMode])
+  // #4770: keydown dispatch (Backspace prevention + Tauri Ctrl+V image
+  // paste + registry-routed shortcuts) lives in useShortcutDispatch so
+  // App stays under the SRP threshold and the dispatch ladder is
+  // independently testable.
+  useShortcutDispatch({
+    shortcutRegistry,
+    sessions,
+    activeSessionId,
+    viewMode,
+    setViewMode,
+    setSplitMode,
+    setPaletteOpen,
+    setSidebarOpen,
+    setSettingsOpen,
+    setShowCreateSession,
+    setShortcutHelpOpen,
+    handleSwitchSession,
+    handleCloseSession,
+    handleCopyTranscript,
+    sendInterrupt,
+    setPermissionMode,
+    appendImageAttachments,
+  })
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -908,52 +745,27 @@ export function App() {
     }
   }, [serverErrors, isCreatingSession])
 
-  // Convert store messages to ChatViewMessage[], filtering out system events
-  // and collapsing contiguous tool_use/thinking runs into a single synthetic
-  // `tool_group` row (#3747). The full group payload is kept in
-  // `chatToolGroupPayloads` so renderMessage can look it up by synthetic id.
-  const chatFilteredMessages = useMemo(
-    () => storeMessages.filter(m => m.type !== 'system'),
-    [storeMessages],
-  )
-  const chatDisplayGroups = useMemo(() => {
-    const base = groupMessages(chatFilteredMessages)
-    return applyStreamingOverlay(base, chatFilteredMessages, streamingMessageId ?? null)
-  }, [chatFilteredMessages, streamingMessageId])
-  // Singleton activity groups (1 tool, no thinking) pass through as plain
-  // `tool_use` rows so the existing ToolBubble — with its full expandable
-  // result panel — stays reachable. Groups only collapse into one
-  // `tool_group` row when there is a run of 2+ messages worth collapsing
-  // (#3794 review).
-  const chatToolGroupPayloads = useMemo(() => {
-    const map = new Map<string, { messages: ChatMessage[]; isActive: boolean }>()
-    for (const g of chatDisplayGroups) {
-      if (g.type === 'activity' && g.messages.length >= 2) {
-        map.set(g.key, { messages: g.messages, isActive: g.isActive })
-      }
-    }
-    return map
-  }, [chatDisplayGroups])
-  const chatMessages = useMemo<ChatViewMessage[]>(
-    () =>
-      chatDisplayGroups.map((g) => {
-        if (g.type === 'single') return toChatViewMessage(g.message)
-        if (g.messages.length < 2) {
-          // Singleton — emit as the original tool_use / thinking row.
-          return toChatViewMessage(g.messages[0]!)
-        }
-        const last = g.messages[g.messages.length - 1]
-        return {
-          id: g.key,
-          type: 'tool_group',
-          content: '',
-          timestamp: last?.timestamp ?? 0,
-        }
-      }),
-    [chatDisplayGroups],
-  )
+  // #4770: chat-message pipeline (filter system events + group activity
+  // runs + apply streaming overlay + flatten to ChatViewMessage[]) is
+  // extracted to `useChatMessages` so the derivations are independently
+  // testable. The hook also exposes `storeMsgMap` (O(1) renderMessage
+  // lookup) and `stalledPromptIds` (#4615 — prompts invalidated by a
+  // subsequent ASK_USER_QUESTION_STALL) because both are pure
+  // storeMessages derivations that only the renderer consumes.
+  const {
+    chatMessages,
+    chatToolGroupPayloads,
+    chatTailMessageId,
+    storeMsgMap,
+    stalledPromptIds,
+  } = useChatMessages({
+    storeMessages,
+    streamingMessageId,
+  })
 
-  // System events for the System tab
+  // System events for the System tab — uses the same toChatViewMessage
+  // mapping the chat pipeline does so both surfaces present rows in the
+  // same shape.
   const systemMessages = useMemo(
     () => storeMessages.filter(m => m.type === 'system').map(toChatViewMessage),
     [storeMessages],
@@ -1458,43 +1270,8 @@ export function App() {
     startServer()
   }, [])
 
-  // Build id->message map for O(1) lookups in renderMessage
-  const storeMsgMap = useMemo(
-    () => new Map(storeMessages.map(m => [m.id, m])),
-    [storeMessages],
-  )
-
-  // #4615: track which `type: 'prompt'` bubbles have been invalidated by a
-  // subsequent ASK_USER_QUESTION_STALL error. The server emits the error
-  // when the Claude TUI never acknowledges an AskUserQuestion answer —
-  // typically a multi-question form wedge. The pending QuestionPrompt is
-  // now dead, so submitting it would fire keystrokes into a session that
-  // already discarded the prompt context. We suppress the interactive
-  // prompt render (the AskUserQuestionStallChip rendered for the error
-  // bubble below it carries the retry affordance).
-  const stalledPromptIds = useMemo(() => {
-    const stalled = new Set<string>()
-    let lastStallIndex = -1
-    for (let i = storeMessages.length - 1; i >= 0; i -= 1) {
-      const m = storeMessages[i]!
-      if (m.type === 'error' && m.code === 'ASK_USER_QUESTION_STALL') {
-        lastStallIndex = i
-        break
-      }
-    }
-    if (lastStallIndex >= 0) {
-      for (let i = 0; i < lastStallIndex; i += 1) {
-        const m = storeMessages[i]!
-        if (m.type === 'prompt' && !m.answered) stalled.add(m.id)
-      }
-    }
-    return stalled
-  }, [storeMessages])
-
-  // Custom message renderer for permission prompts and tool bubbles
-  const chatTailMessageId = chatMessages.length > 0
-    ? chatMessages[chatMessages.length - 1]!.id
-    : null
+  // Custom message renderer for permission prompts and tool bubbles.
+  // `chatTailMessageId` is sourced from `useChatMessages` above (#4770).
   const renderMessage = useCallback((msg: ChatViewMessage) => {
     // Tool-group synthetic row (#3747) — id is a group key, not a store id.
     if (msg.type === 'tool_group') {
