@@ -2045,6 +2045,190 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4641 — `_teardownTurn` is the shared helper extracted from
+  // `_handleHardTimeout` and `_handleStreamStall`. Both call sites
+  // already have their own end-to-end coverage (see `inactivity timer`
+  // and `stream-stall watchdog` describe blocks above) which is the
+  // primary behaviour pin. These tests exercise the helper's flag
+  // surface directly so the asymmetry between callers stays visible:
+  //   - `gateStreamEndOnMessageId: false` (hard-timeout) emits
+  //     stream_end even when messageId is null.
+  //   - `gateStreamEndOnMessageId: true` (stream-stall) skips the
+  //     stream_end when messageId is null.
+  //   - `errorBeforeResult: true` (hard-timeout) places `error` before
+  //     `result` in the fan-out.
+  //   - `errorBeforeResult: false` (stream-stall) places `result`
+  //     before `error`.
+  //   - Common cleanup (Ctrl-C, attachment dir drop, busy/messageId
+  //     null, AskUserQuestion slot/lock/watchdog clear) happens
+  //     regardless of flags.
+  describe('_teardownTurn shared helper (#4641)', () => {
+    it('clears per-turn state and writes Ctrl-C regardless of flags', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = 'msg-helper'
+      session._activeTurn = { startedAt: Date.now() - 50, aborted: false }
+      session._pendingUserAnswer = { toolUseId: 'toolu_helper' }
+      session._askUserQuestionWatchdog = setTimeout(() => {}, 60_000)
+      const ptyWrites = []
+      session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
+
+      session._teardownTurn('helper_unit', { duration: 50 })
+
+      assert.ok(ptyWrites.includes('\x03'), 'Ctrl-C written to PTY')
+      assert.equal(session._activeTurn, null, '_activeTurn nulled')
+      assert.equal(session._isBusy, false, '_isBusy cleared')
+      assert.equal(session._currentMessageId, null, '_currentMessageId nulled')
+      assert.equal(session._pendingUserAnswer, null, '_pendingUserAnswer cleared')
+      assert.equal(session._askUserQuestionWatchdog, null, 'AskUserQuestion watchdog cleared')
+    })
+
+    it('emits stream_end + result; skips error when no errorPayload given', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-noerr'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push({ type: 'stream_end', ...e }))
+      session.on('result', (e) => events.push({ type: 'result', ...e }))
+      session.on('error', (e) => events.push({ type: 'error', ...e }))
+
+      session._teardownTurn('helper_no_error', { duration: 10 })
+
+      const types = events.map((e) => e.type)
+      assert.deepEqual(types, ['stream_end', 'result'], 'no error emitted without errorPayload')
+    })
+
+    it('errorBeforeResult=true emits error → result (hard-timeout shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-order-a'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+      session.on('result', () => events.push('result'))
+      session.on('error', () => events.push('error'))
+
+      session._teardownTurn('helper_err_first', {
+        duration: 1,
+        errorPayload: { message: 'boom' },
+        errorBeforeResult: true,
+      })
+
+      assert.deepEqual(events, ['stream_end', 'error', 'result'],
+        'fan-out: stream_end → error → result when errorBeforeResult=true')
+    })
+
+    it('errorBeforeResult=false emits result → error (stream-stall shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-order-b'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+      session.on('result', () => events.push('result'))
+      session.on('error', () => events.push('error'))
+
+      session._teardownTurn('helper_result_first', {
+        duration: 1,
+        errorPayload: { code: 'stream_stall', message: 'stalled' },
+        errorBeforeResult: false,
+      })
+
+      assert.deepEqual(events, ['stream_end', 'result', 'error'],
+        'fan-out: stream_end → result → error when errorBeforeResult=false (default)')
+    })
+
+    it('gateStreamEndOnMessageId=true skips stream_end when messageId is null (stream-stall shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = null  // contract violation, but the gate exists for a reason (#4642)
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', () => events.push('stream_end'))
+
+      session._teardownTurn('helper_gated', {
+        duration: 1,
+        errorPayload: { message: 'x' },
+        gateStreamEndOnMessageId: true,
+      })
+
+      assert.deepEqual(events, [], 'stream_end suppressed when messageId is null and gate is on')
+    })
+
+    it('gateStreamEndOnMessageId=false emits stream_end with null messageId (hard-timeout shape)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = null
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push(e))
+
+      session._teardownTurn('helper_ungated', {
+        duration: 1,
+        errorPayload: { message: 'x' },
+        gateStreamEndOnMessageId: false,
+      })
+
+      assert.equal(events.length, 1, 'stream_end emitted unconditionally')
+      assert.equal(events[0].messageId, null, 'messageId propagated as null — matches historical hard-timeout behaviour')
+    })
+
+    it('forwards duration + sessionId into the result event payload', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-reason'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._sessionId = 'sess-helper-42'
+      session._term = { write: () => {}, kill: () => {} }
+
+      let resultEvent = null
+      session.on('result', (e) => { resultEvent = e })
+
+      session._teardownTurn('hard_timeout', { duration: 42 })
+
+      assert.ok(resultEvent, 'result event fired')
+      assert.equal(resultEvent.cost, null, 'cost null (subscription billing) — matches inline historical payload')
+      assert.equal(resultEvent.duration, 42, 'duration propagated from caller')
+      assert.equal(resultEvent.usage, null, 'usage null (no token accounting on the teardown path)')
+      assert.equal(resultEvent.sessionId, 'sess-helper-42', 'sessionId stamped from _sessionId')
+    })
+  })
+
   describe('PTY output ring buffer (#3919)', () => {
     it('keeps a tail of recent output with ANSI stripped', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
