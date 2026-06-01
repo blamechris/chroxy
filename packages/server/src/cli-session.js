@@ -10,7 +10,7 @@ import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContex
 import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
-import { parseMcpToolName } from './mcp-tools.js'
+import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { createLogger } from './logger.js'
@@ -716,26 +716,14 @@ export class CliSession extends BaseSession {
               ctx.toolInputChunks = ''
               ctx.toolInputBytes = 0
               ctx.toolInputOverflow = false
-              // Use the tool's content_block.id as the tool_start messageId
-              // so each tool in a multi-tool turn has a distinct id. Sharing
-              // the turn-level messageId across tools collides with the
-              // post-tool stream_start id and corrupts client message state.
-              // Mirrors sdk-session.js. Reused for toolUseId so the wire
-              // schema (`ServerToolStartSchema.toolUseId: z.string()`) holds
-              // even on the defensive fallback path.
-              const toolId = event.content_block.id || `${messageId}-tool`
-              const toolStartData = {
-                messageId: toolId,
-                toolUseId: toolId,
-                tool: event.content_block.name,
-                input: null,
-              }
-              const mcp = parseMcpToolName(event.content_block.name)
-              if (mcp) toolStartData.serverName = mcp.serverName
+              // Delegate to the shared parser so CliSession + SdkSession
+              // emit identical tool_start payloads (see
+              // claude-stream-parser.js for the toolId-derivation rules).
+              const toolStartData = buildToolStartData(messageId, event.content_block)
               this.emit('tool_start', toolStartData)
               // #4628: track so _clearMessageState (or _emitResult) can
               // sweep on turn-end if the API ever drops a tool_result.
-              this._trackToolStart(toolId, event.content_block.name)
+              this._trackToolStart(toolStartData.toolUseId, event.content_block.name)
             }
             break
           }
@@ -771,52 +759,8 @@ export class CliSession extends BaseSession {
           }
 
           case 'content_block_stop': {
-            // toolInputChunks is falsy ('') after overflow discard, so the
-            // AskUserQuestion parse path is naturally skipped on overflow.
-            if (ctx && ctx.currentToolName === 'AskUserQuestion' && ctx.toolInputChunks) {
-              try {
-                const input = JSON.parse(ctx.toolInputChunks)
-                log.info(`AskUserQuestion detected (${ctx.currentToolUseId})`)
-                this._waitingForAnswer = true
-                this.emit('user_question', {
-                  toolUseId: ctx.currentToolUseId,
-                  questions: input.questions,
-                })
-              } catch (err) {
-                log.error(`Failed to parse AskUserQuestion input: ${err.message}`)
-              }
-            }
-            if (ctx && ctx.currentToolName === 'Task' && ctx.toolInputChunks) {
-              try {
-                const input = JSON.parse(ctx.toolInputChunks)
-                const description = (typeof input.description === 'string'
-                  ? input.description : 'Background task').slice(0, 200)
-                const agentInfo = {
-                  toolUseId: ctx.currentToolUseId,
-                  description,
-                  startedAt: Date.now(),
-                }
-                this._activeAgents.set(ctx.currentToolUseId, agentInfo)
-                this.emit('agent_spawned', agentInfo)
-              } catch (err) {
-                log.warn(`Failed to parse Task tool input: ${err.message}`)
-              }
-            }
-            if (ctx && ctx.currentToolName === 'EnterPlanMode') {
-              this._inPlanMode = true
-              this.emit('plan_started')
-            }
-            if (ctx && ctx.currentToolName === 'ExitPlanMode') {
-              let allowedPrompts = []
-              if (ctx.toolInputChunks) {
-                try {
-                  const input = JSON.parse(ctx.toolInputChunks)
-                  allowedPrompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts : []
-                } catch (err) {
-                  log.warn(`Failed to parse ExitPlanMode input: ${err.message}`)
-                }
-              }
-              this._planAllowedPrompts = allowedPrompts
+            if (ctx && ctx.currentToolName) {
+              this._applyToolInputSemantics(ctx)
             }
             if (ctx) {
               ctx.currentContentBlockType = null
@@ -903,6 +847,88 @@ export class CliSession extends BaseSession {
         // Message complete — ready for next message
         this._clearMessageState()
         break
+      }
+    }
+  }
+
+  /**
+   * Apply session-state side effects for tools whose accumulated
+   * `toolInputChunks` JSON drives plan-mode flags, agent tracking, or
+   * user-question prompts. Called at `content_block_stop` once the full
+   * tool input has been buffered. Delegates the wire-format parsing to
+   * the shared {@link extractToolInputSemantics} so SdkSession (which
+   * receives the full input directly in `_handleToolUseBlock`) cannot
+   * drift in how it interprets the same tool names.
+   *
+   * `ctx.toolInputChunks` is the empty string after overflow discard, so
+   * AskUserQuestion / Task / ExitPlanMode paths that need a real payload
+   * are naturally skipped on overflow; EnterPlanMode takes the no-input
+   * path and still fires.
+   *
+   * @param {{ currentToolName: string|null, currentToolUseId: string|null, toolInputChunks: string }} ctx
+   * @private
+   */
+  _applyToolInputSemantics(ctx) {
+    const toolName = ctx.currentToolName
+    const toolUseId = ctx.currentToolUseId
+    let parsed = null
+    if (ctx.toolInputChunks) {
+      try {
+        parsed = JSON.parse(ctx.toolInputChunks)
+      } catch (err) {
+        // Parse-failure logging matches the per-tool pre-extraction
+        // messages so existing log scraping continues to work.
+        if (toolName === 'AskUserQuestion') {
+          log.error(`Failed to parse AskUserQuestion input: ${err.message}`)
+          return
+        }
+        if (toolName === 'Task') {
+          log.warn(`Failed to parse Task tool input: ${err.message}`)
+          return
+        }
+        if (toolName === 'ExitPlanMode') {
+          log.warn(`Failed to parse ExitPlanMode input: ${err.message}`)
+          // ExitPlanMode falls through with parsed=null so the empty
+          // allowedPrompts default still applies.
+        }
+      }
+    }
+
+    const semantics = extractToolInputSemantics(toolName, parsed)
+    if (!semantics) return
+
+    switch (semantics.kind) {
+      case 'ask_user_question': {
+        // The pre-extraction code required successfully-parsed input to
+        // proceed; preserve that by gating on a non-null parsed payload.
+        if (!parsed) return
+        log.info(`AskUserQuestion detected (${toolUseId})`)
+        this._waitingForAnswer = true
+        this.emit('user_question', {
+          toolUseId,
+          questions: semantics.payload.questions,
+        })
+        return
+      }
+      case 'task': {
+        if (!parsed) return
+        const agentInfo = {
+          toolUseId,
+          description: semantics.payload.description,
+          startedAt: Date.now(),
+        }
+        this._activeAgents.set(toolUseId, agentInfo)
+        this.emit('agent_spawned', agentInfo)
+        return
+      }
+      case 'enter_plan': {
+        this._inPlanMode = true
+        this.emit('plan_started')
+        return
+      }
+      case 'exit_plan': {
+        this._planAllowedPrompts = semantics.payload.allowedPrompts
+        return
       }
     }
   }

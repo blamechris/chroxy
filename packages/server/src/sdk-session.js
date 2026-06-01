@@ -11,7 +11,7 @@ import {
   isRunInBackgroundInput,
   parseBashOutputShellId,
 } from './background-shells.js'
-import { parseMcpToolName } from './mcp-tools.js'
+import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { createLogger } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
@@ -677,23 +677,14 @@ export class SdkSession extends BaseSession {
                     this.emit('stream_start', { messageId })
                   }
                 } else if (blockType === 'tool_use') {
-                  // Reuse a single derived toolId for both fields so the wire
-                  // schema (`ServerToolStartSchema.toolUseId: z.string()`)
-                  // holds even on the defensive fallback path. Mirrors
-                  // cli-session.js.
-                  const toolId = event.content_block.id || `${messageId}-tool`
-                  const toolStartData = {
-                    messageId: toolId,
-                    toolUseId: toolId,
-                    tool: event.content_block.name,
-                    input: null,
-                  }
-                  const mcp = parseMcpToolName(event.content_block.name)
-                  if (mcp) toolStartData.serverName = mcp.serverName
+                  // Delegate to the shared parser so CliSession + SdkSession
+                  // emit identical tool_start payloads (see
+                  // claude-stream-parser.js for the toolId-derivation rules).
+                  const toolStartData = buildToolStartData(messageId, event.content_block)
                   this.emit('tool_start', toolStartData)
                   // #4628: defense-in-depth — track so _emitResult sweep
                   // catches any orphan if the API ever drops a tool_result.
-                  this._trackToolStart(toolId, event.content_block.name)
+                  this._trackToolStart(toolStartData.toolUseId, event.content_block.name)
                 }
                 break
               }
@@ -1062,18 +1053,25 @@ export class SdkSession extends BaseSession {
       this.clearBackgroundShell(bashOutputId)
     }
 
-    if (block.name === 'Task') {
-      const input = block.input || {}
-      const description = (typeof input.description === 'string'
-        ? input.description : 'Background task').slice(0, 200)
+    // Delegate Task / EnterPlanMode / ExitPlanMode interpretation to the
+    // shared parser so SdkSession and CliSession cannot drift on tool
+    // semantics. AskUserQuestion is intentionally skipped here — it flows
+    // through the canUseTool callback in _handleAskUserQuestion() and
+    // never reaches this code path.
+    const semantics = extractToolInputSemantics(block.name, block.input)
+    if (!semantics) return
+    if (semantics.kind === 'task') {
       const agentInfo = {
         toolUseId: block.id,
-        description,
+        description: semantics.payload.description,
         startedAt: Date.now(),
       }
       this._activeAgents.set(block.id, agentInfo)
       this.emit('agent_spawned', agentInfo)
     }
+    // EnterPlanMode / ExitPlanMode are not currently surfaced by SdkSession
+    // (plan-mode flow is CliSession-only today). Extracting via the shared
+    // parser leaves the door open without changing observable behavior.
   }
 
   /**
