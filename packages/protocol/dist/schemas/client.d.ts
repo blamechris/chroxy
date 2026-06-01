@@ -341,7 +341,7 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
 export declare const UserQuestionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ListDirectorySchema: z.ZodObject<{
@@ -700,7 +700,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;

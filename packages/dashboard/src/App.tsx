@@ -1487,12 +1487,23 @@ export function App() {
 
     // Question prompt (options or free-text fallback)
     if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
+      // #4731 — SDK / BYOK / Codex / Gemini sessions answer multi-question
+      // AskUserQuestion forms natively via the in-process `canUseTool`
+      // permission flow (`packages/server/src/sdk-session.js:30`). TUI /
+      // CLI sessions go through `permission-hook.sh` which still refuses
+      // any multi-question tool_use (#4648), so the deferred-notice render
+      // (#4666) stays the right call there. Anything not explicitly TUI /
+      // CLI is treated as multi-question-capable so newly-added providers
+      // default-on instead of silently regressing.
+      const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
+      const enableMultiQuestion = activeProvider != null && activeProvider !== 'claude-tui' && activeProvider !== 'claude-cli'
       return (
         <QuestionPrompt
           question={storeMsg.content}
           options={storeMsg.options}
           questions={storeMsg.questions}
           answered={storeMsg.answered}
+          enableMultiQuestion={enableMultiQuestion}
           onSelect={(answer) => {
             // #4604 Chunk B — answer is `string` for single-question /
             // free-text paths and `Record<string,string>` for multi-question

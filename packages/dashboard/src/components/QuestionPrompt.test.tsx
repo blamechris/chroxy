@@ -484,6 +484,47 @@ describe('QuestionPrompt', () => {
       // Single-q UI renders the answered summary (free-text variant).
       expect(screen.getByTestId('question-answered-summary')).toBeInTheDocument()
     })
+
+    // #4731 — SDK / BYOK sessions answer multi-question forms natively via
+    // the in-process `canUseTool` permission flow, bypassing the TUI
+    // permission-hook deny. App.tsx looks up the active session's provider
+    // and sets `enableMultiQuestion={true}` for everything except
+    // `claude-tui` / `claude-cli`. When set, the interactive
+    // MultiQuestionForm renders instead of the deferred notice.
+    it('renders MultiQuestionForm (not deferred notice) when enableMultiQuestion is true (#4731)', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          enableMultiQuestion
+          onSelect={onSelect}
+        />
+      )
+      // Interactive multi-question form renders…
+      expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
+      expect(screen.getByTestId('question-multi-submit')).toBeInTheDocument()
+      // …and the TUI-mode deferred notice is gone.
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+    })
+
+    it('still renders deferred notice when enableMultiQuestion is explicitly false (#4731)', () => {
+      // Defensive: an explicit `false` from a TUI / CLI session must keep
+      // the existing #4666 behavior so the user can't submit answers that
+      // misroute through the keystroke driver.
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          enableMultiQuestion={false}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.getByTestId('multi-question-deferred-notice')).toBeInTheDocument()
+      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+    })
   })
 
   // #4666: MultiQuestionForm stays exported but unused by QuestionPrompt.

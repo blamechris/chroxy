@@ -35,6 +35,20 @@ export interface QuestionPromptProps {
    */
   questions?: ChatMessageQuestion[]
   /**
+   * #4731 — opt the active session into the interactive multi-question
+   * form. Pre-#4731, the TUI permission-hook (#4648) refuses any
+   * multi-question AskUserQuestion so the dashboard suppression at
+   * #4666 was always-on. SDK / BYOK sessions never traverse that hook
+   * (in-process `canUseTool` short-circuits it — see
+   * `packages/server/src/sdk-session.js:30`), so they can safely answer
+   * multi-question forms natively. The parent App.tsx looks up the
+   * active session's provider and sets `enableMultiQuestion` true for
+   * everything except `claude-tui` / `claude-cli`; when omitted or
+   * false the legacy deferred-notice render path is kept (back-compat
+   * for tests / older callers).
+   */
+  enableMultiQuestion?: boolean
+  /**
    * Fires with either a plain string (single-question / free-text path,
    * back-compat) or a `Record<string,string>` map (multi-question form,
    * keyed by `question.question` with multi-select values
@@ -43,20 +57,26 @@ export interface QuestionPromptProps {
   onSelect: (answer: string | Record<string, string>) => void
 }
 
-export function QuestionPrompt({ question, options, answered, questions, onSelect }: QuestionPromptProps) {
+export function QuestionPrompt({ question, options, answered, questions, enableMultiQuestion, onSelect }: QuestionPromptProps) {
   const isMultiQuestion = Array.isArray(questions) && questions.length > 1
 
-  // #4666: the permission-hook (`packages/server/hooks/permission-hook.sh`,
-  // shipped in #4648 / v0.9.24) unconditionally denies any AskUserQuestion
-  // whose `questions[]` has length > 1 because the TUI keystroke driver
-  // can't reliably answer combined multi-question forms. The dashboard
-  // still receives the tool_use event though (broadcast is independent of
-  // the permission decision), so rendering the interactive MultiQuestionForm
-  // here would let the user submit answers that route through
-  // `_pendingUserAnswer` to the wrong question slot — see the live trace in
-  // #4666 / #4668. Render a non-interactive placeholder instead so the user
-  // understands chroxy is waiting for Claude to retry one-at-a-time.
+  // #4731: SDK-mode sessions get the interactive MultiQuestionForm because
+  // their `canUseTool` permission flow accepts a per-question `answers`
+  // map natively (`PermissionManager.respondToQuestion`,
+  // `packages/server/src/permission-manager.js:336`). The legacy deferred
+  // notice (#4666) only applies to TUI / CLI sessions where the
+  // permission-hook (`packages/server/hooks/permission-hook.sh`, shipped in
+  // #4648 / v0.9.24) unconditionally denies multi-question forms because
+  // the PTY keystroke driver can't reliably answer them.
   if (isMultiQuestion && answered == null) {
+    if (enableMultiQuestion) {
+      return (
+        <MultiQuestionForm
+          questions={questions}
+          onSelect={(answersMap) => onSelect(answersMap)}
+        />
+      )
+    }
     return <MultiQuestionDeferredNotice count={questions.length} />
   }
 
