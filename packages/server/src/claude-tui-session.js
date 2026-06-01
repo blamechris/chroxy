@@ -1922,7 +1922,28 @@ export class ClaudeTuiSession extends BaseSession {
     // tells us exactly what the TUI was showing when our keystroke
     // landed — single-keystroke wedges almost always come from a form
     // misalignment that's visible in the trailing render bytes.
-    log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
+    //
+    // #4693: rate-limit to once per turn. The multi-question retry-as-
+    // singles wedge fires 4+ respondToQuestion calls in succession; each
+    // hex dump is ~70 lines (1024 bytes formatted 16/line + header), so an
+    // unbounded emission pumps 280+ lines of diagnostic per affected turn.
+    // We stash the emission flag on the active turn object so it resets
+    // automatically on every new sendMessage() (which allocates a fresh
+    // `_activeTurn`). Subsequent answers in the same turn emit a compact
+    // one-line skip notice carrying the tool ids so a log reader can still
+    // grep all answer-write events without scanning past 200+ hex lines.
+    const turn = this._activeTurn
+    if (turn && !turn.hexDumpEmitted) {
+      log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
+      turn.hexDumpEmitted = true
+    } else if (turn) {
+      log.info(`respondToQuestion PTY tail hex dump skipped (tool=${prevToolUseId || '?'}) — already emitted for turn msg=${turn.messageId || '?'}`)
+    } else {
+      // No active turn (defensive — tests that drive respondToQuestion
+      // directly without sendMessage(), late watchdog teardown races).
+      // Emit the dump so the diagnostic is still useful in those paths.
+      log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
+    }
 
     const armWatchdog = () => {
       // #4604: arm a stall watchdog. If claude TUI never emits PostToolUse
