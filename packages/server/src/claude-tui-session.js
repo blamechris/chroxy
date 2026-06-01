@@ -102,6 +102,22 @@ const CLAUDE = resolveBinary('claude', [
 // dashboard can prompt the user to retry. Root cause is fixed in Chunk B.
 const ASK_USER_QUESTION_WATCHDOG_MS = 30 * 1000
 
+// #4651 — settle delay between the "Other" digit write and the freeform
+// text write. After we press the Other digit, claude TUI swaps from the
+// option-select menu to a text-input prompt. Writing the freeform text
+// too quickly races that swap (the keystrokes land at the menu and jump-
+// nav fires — same footgun as #4288). 150 ms covers the observed local-
+// loop swap time with comfortable margin; tune via the empirical
+// recording in scripts/tui-form-recorder.mjs if dogfood reveals a wedge.
+const OTHER_FREEFORM_SETTLE_MS = 150
+
+// #4651 — additional watchdog window granted after the Other digit lands
+// so the freeform text write + claude TUI's text-input acknowledgement
+// have time to complete. Without this, the existing 30s ASK_USER_QUESTION
+// watchdog can fire mid-freeform-write on a slow PTY (laggy tunnel,
+// emoji-heavy text) and tear down a turn that's actively progressing.
+const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
+
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
 // block headless spawn. The dialog is interactive-only — without this, the
 // PTY would render "Is this a project you trust?" and wait for Enter.
@@ -2144,10 +2160,24 @@ export class ClaudeTuiSession extends BaseSession {
    *
    * No-op when no pending answer.
    *
-   * @param {string} text — the chosen answer (single-question path); ignored on the multi-question path when answersMap is populated
-   * @param {object} [answersMap] — `{ [questionText]: string | string[] }`; required for multi-question forms (Chunk B)
+   * @param {string} text — the chosen answer (single-question path); on the
+   *   Other / freeform path (#4651) this is the Other option's label, used
+   *   to resolve the 1-indexed TUI digit. Ignored on the multi-question
+   *   path when answersMap is populated.
+   * @param {object} [answersMap] — `{ [questionText]: string | string[] }`;
+   *   required for multi-question forms (Chunk B).
+   * @param {string} [toolUseId] — #4668: target the specific pending entry
+   *   to answer when multiple AskUserQuestion tool_uses are in flight in
+   *   the same turn. When omitted, falls back to the most-recently-set
+   *   pending entry via the back-compat getter.
+   * @param {object} [opts] — extra options.
+   * @param {string} [opts.freeformText] — #4651 single-question Other path:
+   *   when set, the session writes the Other digit (resolved from `text`),
+   *   waits ~150 ms for claude TUI's option-menu → text-input prompt swap,
+   *   then writes `freeformText` + Enter. Dropped when the chosen option
+   *   doesn't exist or sits beyond the single-digit hotkey range.
    */
-  respondToQuestion(text, answersMap, toolUseId) {
+  respondToQuestion(text, answersMap, toolUseId, opts) {
     // #4668: route to the specific pending entry the dashboard answered
     // for. Pre-#4668 chroxy stored a single pending answer in a field
     // and respondToQuestion always read THAT field — so when claude TUI
@@ -2157,6 +2187,16 @@ export class ClaudeTuiSession extends BaseSession {
     // it up in the Map; if not (legacy clients), fall back to the most-
     // recently-set entry via the back-compat getter so behaviour matches
     // pre-#4668 for the single-pending case.
+    //
+    // #4651: `opts.freeformText` triggers the Other / freeform path —
+    // server resolves the chosen option label to its 1-indexed digit,
+    // writes the digit to open claude TUI's text-input prompt, waits
+    // ~150 ms for the prompt swap, then writes the freeform text + Enter
+    // to submit. Mutually exclusive with answersMap (multi-question
+    // Other is out of scope per #4648).
+    const freeformText = (opts && typeof opts.freeformText === 'string' && opts.freeformText.length > 0)
+      ? opts.freeformText
+      : null
     let entry = null
     if (toolUseId && this._pendingUserAnswers.has(toolUseId)) {
       entry = this._pendingUserAnswers.get(toolUseId)
@@ -2251,6 +2291,60 @@ export class ClaudeTuiSession extends BaseSession {
     // single-q path is text-driven, not answersMap-driven.
     if (questions.length <= 1) {
       if (text.length === 0) return
+
+      // #4651 — Other / freeform path. The dashboard picked the "Other"
+      // option AND typed freeform text. claude TUI accepts this as a
+      // two-stage flow: press the Other digit (swaps the option-select
+      // menu to a text-input prompt), wait for the swap, then type the
+      // freeform text + Enter. Resolve the chosen label → digit via the
+      // same 1-indexed lookup as the happy path. When the chosen option
+      // doesn't exist (or sits beyond the single-digit hotkey range),
+      // drop the answer — blindly writing the freeform text at the
+      // digit menu is the #4288 jump-nav footgun and the dashboard
+      // shouldn't have been able to send freeformText for an
+      // AskUserQuestion without an Other option in the first place.
+      if (freeformText) {
+        if (!Array.isArray(options) || options.length === 0) {
+          log.warn(`respondToQuestion: freeformText supplied for question with no options (tool=${prevToolUseId || '?'}) — dropping`)
+          return
+        }
+        const otherIdx = options.findIndex((o) => o && o.label === text)
+        if (otherIdx < 0 || otherIdx >= 9) {
+          log.warn(`respondToQuestion: freeformText supplied but chosen option "${text}" not found (or beyond single-digit hotkey range) in pending options for tool=${prevToolUseId || '?'} — dropping`)
+          return
+        }
+        const otherDigit = String(otherIdx + 1)
+        // Stage 1: write the digit. _writePtyTextThrottled appends \r —
+        // for the option-select menu the trailing \r commits the digit
+        // (same shape as the happy single-select path).
+        // Stage 2: after OTHER_FREEFORM_SETTLE_MS, write the freeform
+        // text + \r via the same throttled writer. claude TUI's text-
+        // input prompt accepts typed input directly (no jump-nav),
+        // and the trailing \r submits.
+        const tag = prevToolUseId || '?'
+        ;(async () => {
+          const stage1ok = await this._writePtyTextThrottled(otherDigit).catch((err) => {
+            log.warn(`respondToQuestion Other-digit PTY write failed: ${err.message} (tool=${tag})`)
+            return false
+          })
+          if (!stage1ok) return
+          await new Promise((resolve) => setTimeout(resolve, OTHER_FREEFORM_SETTLE_MS))
+          // Re-arm the watchdog so the freeform write phase has a fresh
+          // OTHER_FREEFORM_WATCHDOG_MS window — the stage-1 arm already
+          // counted the settle delay against the original 30s budget.
+          if (this._askUserQuestionWatchdog) clearTimeout(this._askUserQuestionWatchdog)
+          this._askUserQuestionWatchdog = setTimeout(() => {
+            this._askUserQuestionWatchdog = null
+            this._onAskUserQuestionStall(prevToolUseId)
+          }, OTHER_FREEFORM_WATCHDOG_MS)
+          await this._writePtyTextThrottled(freeformText).catch((err) => {
+            log.warn(`respondToQuestion Other-freeform PTY write failed: ${err.message} (tool=${tag})`)
+          })
+        })()
+        armWatchdog()
+        return
+      }
+
       // #4290: if the chosen label matches one of the structured options
       // exactly, write the 1-indexed TUI shortcut (e.g. "2") instead of
       // the label text. v0.9.3 wrote the raw label and claude TUI's

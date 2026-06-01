@@ -553,7 +553,13 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // wedge is correlatable from chroxy.log alone (toolUseId + map-key
     // count distinguishes the SDK's per-question form from the TUI's
     // single-answer string).
-    log.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0}`)
+    // #4651: log freeformText presence so the Other-path two-stage write
+    // is greppable in chroxy.log without leaking the user's text.
+    // Copilot review (#4753): explicit boolean — `&&` of a string yields
+    // the string, not a boolean, which downstream conditionals can read
+    // but is confusing in a `freeform=${...}` log template.
+    const hasFreeform = typeof msg.freeformText === 'string' && msg.freeformText.length > 0
+    log.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0} freeform=${hasFreeform ? msg.freeformText.length : 0}`)
     // #4668: forward msg.toolUseId so claude-tui-session can route the
     // answer to the right pending entry in its Map. Sessions that don't
     // care about toolUseId (cli-session, sdk-session via permission-
@@ -561,7 +567,12 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // a safe addition. ByokSession's respondToQuestion forwards to
     // _permissions.respondToQuestion which similarly ignores trailing
     // args it doesn't read.
-    entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId)
+    // #4651: forward msg.freeformText as a final opts object — claude-tui-
+    // session uses it to drive the two-stage Other-path write (digit →
+    // text-input prompt → freeform text + Enter). Other providers ignore
+    // the trailing arg.
+    const opts = hasFreeform ? { freeformText: msg.freeformText } : undefined
+    entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId, opts)
   }
 }
 

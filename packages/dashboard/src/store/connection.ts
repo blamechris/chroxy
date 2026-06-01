@@ -1558,9 +1558,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
-  sendUserQuestionResponse: (answer: string | Record<string, string | string[]>, toolUseId?: string) => {
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
+    toolUseId?: string,
+  ) => {
     const { socket, activeSessionId, sessionStates } = get();
-    // #4604 Chunk B / #4621 — split the wire payload by call shape:
+    // #4604 Chunk B / #4621 / #4651 — split the wire payload by call shape:
     // - string `answer`: legacy single-question / free-text path. Wire
     //   shape stays `{ type, answer, toolUseId? }` so older servers
     //   keep working without schema migration.
@@ -1571,15 +1574,45 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //   default-to-option-1 path (a noisy WARN in chroxy.log) instead
     //   of stalling the form. Multi-select array values are joined
     //   into the summary as `App, Tests` for human readability.
-    const isMultiAnswer = typeof answer !== 'string'
-    const answerSummary = isMultiAnswer
-      ? Object.entries(answer as Record<string, string | string[]>)
-          .map(([q, v]) => `${q}: ${Array.isArray(v) ? v.join(', ') : v}`)
-          .join(' | ')
-      : (answer as string);
-    const payload: Record<string, unknown> = { type: 'user_question_response', answer: answerSummary };
+    // - {otherLabel, freeformText} (#4651): single-question Other path.
+    //   `answer` carries the Other option's label so the server can
+    //   resolve it to a 1-indexed digit; `freeformText` carries the
+    //   typed text so the server can drive a two-stage TUI write
+    //   (digit → text-input prompt → freeform text + Enter). Older
+    //   servers that ignore `freeformText` fall through to the legacy
+    //   path and type the label literally — a clean degradation.
+    // Copilot review (#4753): tighten the freeform-shape detection to
+    // avoid misclassifying a multi-question Record whose question keys
+    // happen to be literally "freeformText" and "otherLabel" (rare, but
+    // possible if the model phrases a question that way). The freeform
+    // shape is an object with EXACTLY those two keys AND both string
+    // values — anything else falls through to the multi-question path.
+    const isFreeformAnswer = typeof answer === 'object' && answer !== null
+      && !Array.isArray(answer)
+      && Object.keys(answer).length === 2
+      && 'freeformText' in answer && 'otherLabel' in answer
+      && typeof (answer as Record<string, unknown>).freeformText === 'string'
+      && typeof (answer as Record<string, unknown>).otherLabel === 'string';
+    const isMultiAnswer = !isFreeformAnswer && typeof answer !== 'string';
+    let answerSummary: string;
+    if (isFreeformAnswer) {
+      const f = answer as { otherLabel: string; freeformText: string };
+      answerSummary = f.freeformText;
+    } else if (isMultiAnswer) {
+      answerSummary = Object.entries(answer as Record<string, string | string[]>)
+        .map(([q, v]) => `${q}: ${Array.isArray(v) ? v.join(', ') : v}`)
+        .join(' | ');
+    } else {
+      answerSummary = answer as string;
+    }
+    const payload: Record<string, unknown> = { type: 'user_question_response', answer: isFreeformAnswer
+      ? (answer as { otherLabel: string; freeformText: string }).otherLabel
+      : answerSummary };
     if (isMultiAnswer) {
       payload.answers = answer;
+    }
+    if (isFreeformAnswer) {
+      payload.freeformText = (answer as { otherLabel: string; freeformText: string }).freeformText;
     }
     if (toolUseId) payload.toolUseId = toolUseId;
     // #4296: echo the resolved answer to the terminal buffer so the Output
