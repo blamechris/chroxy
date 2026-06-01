@@ -62,7 +62,12 @@ export function createClientSender(log, opts = {}) {
         const lastWarn = client._lastBackpressureWarn || 0
         if (now - lastWarn >= warnThrottleMs) {
           client._lastBackpressureWarn = now
-          log.warn(`Backpressure: client ${client.id} bufferedAmount ${buffered} exceeds warning threshold (${warnThreshold} bytes)`)
+          // Wedge instrumentation (#4678 follow-up): include the message
+          // type so we can correlate a warn at restore-time with which
+          // broadcast tipped the buffer. Without the type we cannot tell
+          // whether the restore session_list broadcast or a subsequent
+          // stream_start broadcast pushed past the threshold.
+          log.warn(`Backpressure: client ${client.id} bufferedAmount ${buffered} exceeds warning threshold (${warnThreshold} bytes) type=${message?.type || 'unknown'}`)
         }
       }
     } catch (err) {
