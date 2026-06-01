@@ -176,4 +176,108 @@ describe('permission-hook.sh — sibling AskUserQuestion deny (#4668)', () => {
     assert.match(decision.hookSpecificOutput.permissionDecisionReason, /one question at a time/i,
       'multi-question deny text should win over the sibling-pending text')
   })
+
+  /**
+   * #4670: concurrent-burst proof of sibling-lock atomicity.
+   *
+   * The pre-existing tests in this file invoke runHook serially — they prove
+   * the deny *logic* fires once a lock exists, but never exercise the race
+   * the hook is designed to mitigate. The production wedge (chroxy.log
+   * forensic on session 9ea82aed, 2026-05-31) was N parallel hook processes
+   * spawned within milliseconds of each other when claude TUI emitted N
+   * AskUserQuestion tool_use blocks in one assistant turn.
+   *
+   * The hook now uses `mkdir` AS the atomic check-and-claim (POSIX guarantees
+   * at most one mkdir per parent directory wins; the rest see EEXIST). These
+   * tests prove that guarantee survives the actual race: spawning N hooks in
+   * parallel against the same CHROXY_SINK_DIR must produce exactly one allow
+   * and N-1 denies. Any future regression to a check-then-claim split (e.g.,
+   * `if [ -d "$LOCK" ]; then deny; else mkdir; fi`) would show up here as
+   * the allow count drifting above 1.
+   */
+  describe('concurrent-burst sibling-lock atomicity (#4670)', () => {
+    const burstSizes = [4, 20]
+
+    for (const n of burstSizes) {
+      it(`exactly 1 of ${n} parallel hooks acquires the lock; the rest deny`, async () => {
+        // Spawn N hook processes in parallel against the same sink dir.
+        // Promise.all + spawn (rather than awaiting each) is the closest
+        // node-test approximation of "4 hooks firing within milliseconds"
+        // that the production forensic captured. The kernel scheduler
+        // interleaves mkdir calls across the N child processes.
+        const labels = Array.from({ length: n }, (_, i) => String.fromCharCode(65 + (i % 26)) + i)
+        const results = await Promise.all(
+          labels.map((label) => runHook(JSON.stringify(singleQuestion(label)), { CHROXY_SINK_DIR: sinkDir })),
+        )
+
+        // Every hook must exit 0 — a non-zero exit means the script crashed
+        // (e.g. arithmetic error from a botched stat fallback), which would
+        // leave the caller in an undefined permission state. Pin this even
+        // though it's implied by the JSON parse below, because a crashing
+        // hook is a worse outcome than a wrong decision.
+        for (const r of results) {
+          assert.equal(r.status, 0, `hook exited non-zero: stderr=${r.stderr}`)
+        }
+
+        const decisions = results.map((r) => {
+          try {
+            return JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision
+          } catch (err) {
+            assert.fail(`hook stdout did not parse as JSON: ${r.stdout} (stderr=${r.stderr})`)
+          }
+        })
+
+        const allows = decisions.filter((d) => d === 'allow').length
+        const denies = decisions.filter((d) => d === 'deny').length
+
+        // The load-bearing invariant: at most one allow no matter how many
+        // hooks race. mkdir's POSIX atomicity is what makes this true; if a
+        // future refactor splits check-and-claim, this assertion catches it.
+        assert.equal(allows, 1,
+          `expected exactly 1 allow in a burst of ${n}, got ${allows} (decisions: ${decisions.join(',')})`)
+        assert.equal(denies, n - 1,
+          `expected ${n - 1} denies in a burst of ${n}, got ${denies} (decisions: ${decisions.join(',')})`)
+
+        // The lock dir must exist after the burst — the winner claimed it
+        // and no loser should have removed it on the way out (only the
+        // stale-recovery branch removes the lock, and a fresh-claim race
+        // shouldn't hit that branch since the winner's mtime is <60s).
+        assert.ok(existsSync(join(sinkDir, 'askuserquestion-active')),
+          'winner\'s lock must survive the burst — losers must not rm the active lock')
+
+        // Every denier must surface the sibling-pending phrasing rather than
+        // the multi-question phrasing — the test payload is single-question.
+        // Pinning the phrase guards against the deny text accidentally
+        // diverging between the EEXIST branch and the post-recovery branch
+        // in the hook (both should produce the same reason).
+        const denyReasons = results
+          .filter((_, i) => decisions[i] === 'deny')
+          .map((r) => JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecisionReason)
+        for (const reason of denyReasons) {
+          assert.match(reason, /pending/i,
+            'sibling deny must mention the pending sibling (not the multi-question phrasing)')
+          assert.match(reason, /parallel/i)
+        }
+      })
+    }
+
+    it('no losers corrupt sink state — only the lock dir is created', async () => {
+      // Defense-in-depth: a buggy loser branch might create stray files
+      // (e.g., a half-written lock contents file) in the sink dir. Verify
+      // that after a parallel burst, the sink contains *only* the single
+      // lock directory we expect. Catches regressions where someone adds
+      // a "second attempt" or "telemetry write" to the loser path that
+      // leaves debris behind.
+      const n = 8
+      await Promise.all(
+        Array.from({ length: n }, (_, i) =>
+          runHook(JSON.stringify(singleQuestion(`Q${i}`)), { CHROXY_SINK_DIR: sinkDir })),
+      )
+
+      const { readdirSync } = await import('fs')
+      const entries = readdirSync(sinkDir)
+      assert.deepEqual(entries, ['askuserquestion-active'],
+        `sink dir should contain only the lock after a burst, got: ${entries.join(',')}`)
+    })
+  })
 })
