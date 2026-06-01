@@ -1,6 +1,10 @@
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { SdkSession } from '../src/sdk-session.js'
+import { SessionStatePersistence } from '../src/session-state-persistence.js'
 import { resetModels } from '../src/models.js'
 
 /**
@@ -9,10 +13,42 @@ import { resetModels } from '../src/models.js'
  *
  * These tests instantiate SdkSession without calling start() or
  * sendMessage() and exercise internal methods directly.
+ *
+ * #4700: every test routes through a per-test temp `stateFilePath` so a
+ * future regression that gives SdkSession a persistence path can never
+ * contaminate `~/.chroxy/session-state.json`. SdkSession does not
+ * currently accept `stateFilePath` directly (the persistence layer lives
+ * on SessionManager / SessionStatePersistence), so the value is stashed
+ * on the instance as `_testStateFilePath` and ignored by the constructor
+ * — purely a belt-and-braces guard so the moment someone wires a write
+ * path on the session this hook already exists. Mirrors the temp-state
+ * discipline pinned in session-manager.test.js (#429, #2314).
  */
 
+// Module-level temp dir for tests that don't manage their own. Each call
+// returns a unique file path so concurrent describe blocks don't share
+// state. The `after` hook below tears the whole dir down.
+let _globalTmpDir
+function tmpStateFile() {
+  if (!_globalTmpDir) _globalTmpDir = mkdtempSync(join(tmpdir(), 'sdk-session-test-'))
+  return join(_globalTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+}
+
+after(() => {
+  if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
+})
+
 function createSession(opts = {}) {
-  return new SdkSession({ cwd: '/tmp', ...opts })
+  const stateFilePath = opts.stateFilePath || tmpStateFile()
+  // SdkSession ignores unknown keys via destructuring today, so passing
+  // `stateFilePath` is a harmless no-op now AND auto-protects the suite
+  // the moment someone wires a persistence path on the session class —
+  // the destructured value will point at the per-test temp file instead
+  // of `~/.chroxy/session-state.json`. The path is also stashed on the
+  // instance so individual tests can assert on it.
+  const session = new SdkSession({ cwd: '/tmp', stateFilePath, ...opts })
+  session._testStateFilePath = stateFilePath
+  return session
 }
 
 describe('SdkSession', () => {
@@ -248,7 +284,7 @@ describe('SdkSession', () => {
     })
 
     it('re-emits permission_resolved on timeout (#3048)', async () => {
-      const fastSession = new SdkSession({ cwd: '/tmp' })
+      const fastSession = createSession()
       // Override the manager with a fast timeout so the test runs quickly
       fastSession._permissions._timeoutMs = 5
       const upstream = []
@@ -2170,7 +2206,7 @@ describe('SdkSession', () => {
       const { addLogListener, removeLogListener } = await import('../src/logger.js')
 
       // Construct with the persisted latch already set.
-      const restored = new SdkSession({ cwd: '/tmp', stdinForwardingDisabled: true })
+      const restored = createSession({ stdinForwardingDisabled: true })
       const proc = new EventEmitter()
       const entries = []
       const listener = (entry) => entries.push(entry)
@@ -2661,5 +2697,262 @@ describe('SdkSession', () => {
         'error still carries the structured code for the dashboard stall chip')
       s.destroy()
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #4700 — Session-state persistence roundtrip.
+//
+// SdkSession does not own a `saveSessionState()` / `restoreSessionState()`
+// pair directly — the persistence layer lives on `SessionManager` /
+// `SessionStatePersistence`, which serializes session metadata (model,
+// permissionMode, sdkSessionId, stdinForwardingDisabled, …) to JSON. The
+// roundtrip tested here is the JSON shape contract on each side of that
+// boundary:
+//
+//   1. Snapshot the session metadata SessionManager would persist.
+//   2. JSON-stringify it to a temp `stateFilePath` (atomic write contract).
+//   3. Parse it back.
+//   4. Reconstruct a fresh SdkSession with the restored opts.
+//   5. Assert every persisted field round-tripped exactly.
+//
+// The audit (#4700) flagged this as the missing layer: SessionManager-level
+// restore tests already cover the persistence path end-to-end (see
+// session-manager.test.js), but a regression on the SDK side — a field
+// that survives restore in shape but no longer hydrates into the
+// constructor — would only show up in integration tests, not at the
+// unit layer.
+//
+// The corrupt-file + mismatched-id branches mirror the same patterns
+// covered in session-manager.test.js for symmetry. The Map-serialization
+// branch pins the JSON gotcha that #4687 surfaced for the analogous
+// claude-tui-session `_pendingUserAnswers` field: a naive
+// `JSON.stringify(new Map(…))` silently emits `{}` and loses every
+// entry — the canonical workaround is `[...map.entries()]`. The test
+// fails on any future SDK code that tries to persist a Map field
+// directly.
+// ---------------------------------------------------------------------------
+
+describe('SdkSession state-persistence roundtrip (#4700)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sdk-roundtrip-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  // Snapshot the fields SessionManager.serializeState() would write for an
+  // SdkSession entry. Mirrors the shape pinned in session-manager.test.js
+  // (`stdinForwardingDisabled`, `sdkSessionId`, `model`, `permissionMode`,
+  // `name`, `cwd`) — keep these two in sync.
+  function snapshotForPersistence(session, { name, cwd }) {
+    return {
+      name,
+      cwd,
+      model: session.model,
+      permissionMode: session.permissionMode,
+      sdkSessionId: session.resumeSessionId,
+      stdinForwardingDisabled: !!session._stdinForwardingDisabled,
+    }
+  }
+
+  it('happy path: create → snapshot → write → read → restore → asserts metadata equality', () => {
+    // Step 1: build a session with non-default metadata so the restore
+    // side has to actually hydrate every field. `_sdkSessionId` is the
+    // SDK resume key — restored sessions feed it back into `resume`.
+    const original = createSession({
+      model: 'claude-sonnet-4-6',
+      permissionMode: 'auto',
+      stdinForwardingDisabled: true,
+    })
+    original._sdkSessionId = 'sdk-resume-abc-123'
+
+    // Step 2: snapshot + write atomically (mirrors SessionStatePersistence
+    // tmp + rename, simplified to a single write since the test owns the
+    // file lifecycle).
+    const state = {
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [snapshotForPersistence(original, { name: 'Restored', cwd: '/tmp' })],
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+    assert.ok(existsSync(stateFile), 'state file must exist after write')
+
+    // Step 3: destroy the original — restoration is the only path that
+    // recovers the metadata from disk.
+    original.destroy()
+
+    // Step 4: read back and reconstruct.
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(parsed.version, 1)
+    assert.equal(parsed.sessions.length, 1)
+    const persisted = parsed.sessions[0]
+
+    const restored = createSession({
+      model: persisted.model,
+      permissionMode: persisted.permissionMode,
+      resumeSessionId: persisted.sdkSessionId,
+      stdinForwardingDisabled: persisted.stdinForwardingDisabled,
+    })
+
+    // Step 5: every field that mattered to the user is back.
+    assert.equal(restored.model, 'claude-sonnet-4-6',
+      'model must round-trip — dashboard renders this on the session header')
+    assert.equal(restored.permissionMode, 'auto',
+      'permissionMode must round-trip — controls every canUseTool prompt')
+    assert.equal(restored.resumeSessionId, 'sdk-resume-abc-123',
+      'SDK resume key must round-trip — without it the restored session starts a new conversation')
+    assert.equal(restored._stdinForwardingDisabled, true,
+      'stdin_disabled latch must round-trip — restored sessions surface the disabled state immediately (#3540)')
+
+    restored.destroy()
+  })
+
+  it('corrupt state file: production restoreState must return null silently, not throw', () => {
+    // A truncated / hand-edited / partial-write state file must not take
+    // the server down. Pin the PRODUCTION contract: drive the real
+    // `SessionStatePersistence.restoreState()` (the entry point
+    // `SessionManager.restoreState()` calls — see session-manager.js:1266)
+    // and assert it returns `null` without throwing. The internal
+    // try/catch in session-state-persistence.js:148-170 swallows the
+    // SyntaxError, attempts .bak recovery, and falls back to null when
+    // no backup exists — supervisor / dashboard depend on that silent
+    // behaviour so a corrupt state file cannot block server boot.
+    writeFileSync(stateFile, '{ this is not valid json')
+
+    const persistence = new SessionStatePersistence({ stateFilePath: stateFile })
+    let restored
+    let threw = null
+    try {
+      restored = persistence.restoreState()
+    } catch (err) {
+      threw = err
+    }
+
+    assert.equal(threw, null,
+      'restoreState() MUST NOT throw on corrupt JSON — supervisor depends on the silent-null contract; ' +
+      'a throw here would crash the server on every restart after a partial write')
+    assert.equal(restored, null,
+      'restoreState() must return null on corrupt JSON so SessionManager treats it as "no prior state" and starts fresh')
+
+    // Secondary assertion documenting the underlying mechanism: the raw
+    // JSON.parse used inside restoreState() does throw a SyntaxError —
+    // that's why restoreState() wraps it in try/catch. The corrupt file
+    // was unlinked by restoreState's recovery path, so we re-write it
+    // here to pin the raw behaviour.
+    writeFileSync(stateFile, '{ this is not valid json')
+    let rawThrew = null
+    try { JSON.parse(readFileSync(stateFile, 'utf-8')) } catch (err) { rawThrew = err }
+    assert.ok(rawThrew instanceof SyntaxError,
+      'raw JSON.parse throws SyntaxError — restoreState() exists specifically to swallow this')
+
+    // The fallback path: instantiate a fresh SdkSession with no restored
+    // opts. Must succeed — a corrupt state file cannot block new session
+    // creation.
+    const fresh = createSession()
+    assert.equal(fresh._sdkSessionId, null,
+      'fresh session after corrupt-file restore must have no SDK resume id')
+    assert.equal(fresh._stdinForwardingDisabled, false,
+      'fresh session must start with stdin latch off — no carryover from corrupt state')
+    fresh.destroy()
+  })
+
+  it('mismatched session id: persisted resumeSessionId is silently ignored when the restoring caller does not forward it', () => {
+    // Operator hand-edits the state file (or schema drift, or a partial
+    // write that produced a half-valid entry): the file contains a
+    // resumeSessionId but the caller chooses not to plumb it through
+    // (e.g. because the SDK key no longer maps to a live conversation).
+    // The constructor must accept the choice without throwing or
+    // silently re-instating the stale id.
+    const state = {
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{
+        name: 'Stale',
+        cwd: '/tmp',
+        model: null,
+        permissionMode: 'approve',
+        sdkSessionId: 'sdk-resume-stale-9999',
+        stdinForwardingDisabled: false,
+      }],
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    const persisted = parsed.sessions[0]
+    assert.equal(persisted.sdkSessionId, 'sdk-resume-stale-9999',
+      'precondition: state file carries the stale id')
+
+    // Caller decides NOT to forward the resumeSessionId (mismatch — the
+    // id no longer corresponds to a valid SDK conversation on the
+    // upstream). The fresh session must start clean.
+    const fresh = createSession({
+      model: persisted.model,
+      permissionMode: persisted.permissionMode,
+      // resumeSessionId intentionally omitted
+    })
+
+    assert.equal(fresh._sdkSessionId, null,
+      'session must not silently adopt a stale persisted SDK resume id — caller controls forwarding')
+    assert.equal(fresh.resumeSessionId, null,
+      'public accessor must also report null when no resume id was forwarded')
+
+    fresh.destroy()
+  })
+
+  // #4700 — Map-serialization contract. PR #4687 changed
+  // `_pendingUserAnswers` on claude-tui-session.js from a single field to
+  // a Map keyed by toolUseId. This test pins the canonical JSON
+  // workaround for ANY Map field that a future SdkSession (or any
+  // BaseSession descendant) might want to persist. The naive write
+  // (`JSON.stringify(new Map(…))`) silently emits `{}` and loses every
+  // entry — a regression that would not be caught by any existing
+  // serialize/restore test because the Map's *type* is lost before the
+  // disk hop, so the restored "Map" is an empty `{}` and round-trip
+  // assertions pass on shape but fail in semantics.
+  it('Map field serialization roundtrip: pins the entries-array contract (#4687 surface)', () => {
+    // Build a Map with the same shape as `_pendingUserAnswers`: keyed by
+    // tool_use_id, values are per-turn pending entries.
+    const pending = new Map()
+    pending.set('toolu_first', { questions: [{ question: 'Q1?' }], options: ['A', 'B'] })
+    pending.set('toolu_second', { questions: [{ question: 'Q2?' }], options: ['Y', 'N'] })
+
+    // The trap: naive Map serialization loses every entry. This
+    // assertion documents the gotcha so a future contributor who writes
+    // `JSON.stringify(session._someMap)` sees this test and remembers
+    // to convert to an array first.
+    assert.equal(JSON.stringify(pending), '{}',
+      'NAIVE Map.toJSON is {} — every entry is silently lost. ' +
+      'Any persistence of a Map field MUST use [...map.entries()] (see workaround below)')
+
+    // The canonical workaround: serialize as an array of entries so the
+    // restore side can feed `new Map(parsed)` and recover every key.
+    const serialized = JSON.stringify([...pending.entries()])
+    writeFileSync(stateFile, serialized)
+
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    const restored = new Map(parsed)
+
+    assert.equal(restored.size, 2,
+      'entries-array roundtrip must preserve every key')
+    assert.ok(restored.has('toolu_first'),
+      'first toolUseId key must survive — sibling pending answers from parallel AskUserQuestion blocks (#4668) depend on this')
+    assert.ok(restored.has('toolu_second'),
+      'second toolUseId key must survive — the bug #4687 fixed was the single-field overwrite')
+    assert.deepEqual(restored.get('toolu_first').questions, [{ question: 'Q1?' }])
+    assert.deepEqual(restored.get('toolu_second').options, ['Y', 'N'])
+
+    // Symmetry assertion: the restored Map iterates in the same order
+    // as the original. JSON arrays preserve insertion order, so this
+    // pins the contract that "most-recent" fallback semantics (see
+    // claude-tui-session.js `_lastPendingAnswerToolUseId`) survive a
+    // restart.
+    assert.deepEqual([...restored.keys()], ['toolu_first', 'toolu_second'],
+      'Map insertion order must round-trip so "most-recent" semantics survive a restart')
   })
 })

@@ -48,3 +48,15 @@ name: All E2E flows
 # #4496 mobile chip adoption of the server's `error{code:'stream_stall'}`
 # wire signal via mock-server 'show-stream-stall' trigger.
 - runFlow: stream-stall-chip.yaml
+
+# Flow 12: PlanApprovalCard approve path (#4696) — exercises the
+# plan_ready → PlanApprovalCard mount → Approve → canonical
+# PLAN_APPROVAL_MESSAGE send + clearPlanState chain via mock-server
+# 'show-plan-approval' trigger.
+- runFlow: plan-approval.yaml
+
+# Flow 13: PlanApprovalCard deny/feedback path (#4696) — sibling that
+# verifies the Give Feedback button focuses the input without
+# dismissing the card, and that sending a rebuttal afterwards clears
+# plan state.
+- runFlow: plan-approval-deny.yaml
