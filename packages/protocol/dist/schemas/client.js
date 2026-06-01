@@ -368,10 +368,22 @@ export const NotificationPrefsSetSchema = z.object({
     requestId: z.string().max(128).optional(),
     prefs: NotificationPrefsPatchSchema,
 }).passthrough();
+/**
+ * #4621 — `answers` values are widened to `string | string[]` so the
+ * multi-question form (#4604 Chunk B) can ship native arrays for
+ * `multiSelect: true` questions instead of JSON-stringifying them.
+ * The legacy JSON-encoded string shape is still accepted for back-compat
+ * with in-flight payloads during deploy and with older dashboards that
+ * haven't picked up the new wire shape. Array values are capped at 100
+ * entries (mirroring the per-answer-map cap) to bound parse cost.
+ */
 export const UserQuestionResponseSchema = z.object({
     type: z.literal('user_question_response'),
     answer: z.string().max(100_000),
-    answers: z.record(z.string(), z.string().max(100_000)).refine((obj) => Object.keys(obj).length <= 100, { message: 'Too many answers (max 100)' }).optional(),
+    answers: z.record(z.string(), z.union([
+        z.string().max(100_000),
+        z.array(z.string().max(100_000)).max(100),
+    ])).refine((obj) => Object.keys(obj).length <= 100, { message: 'Too many answers (max 100)' }).optional(),
     toolUseId: z.string().max(256).optional(),
 });
 export const ListDirectorySchema = z.object({

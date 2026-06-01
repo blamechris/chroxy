@@ -3527,6 +3527,64 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._pendingUserAnswer, null, 'pending cleared')
     })
 
+    // #4621 — native string[] for multi-select answers (no JSON encoding).
+    // The wire protocol now accepts `Record<string, string | string[]>` so
+    // the dashboard can ship arrays directly. The driver MUST produce the
+    // exact same byte sequence as the legacy JSON-encoded shape.
+    it('accepts native string[] for multi-select answers (#4621)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'aa' }, { label: 'bb' }] },
+        { question: 'Q3?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }, { label: 'r' }] },
+        { question: 'Q4?', options: [{ label: 'x' }, { label: 'y' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_native_arr', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',          // → '1' (single, auto-advances)
+        'Q2?': 'bb',         // → '2' (single, auto-advances)
+        'Q3?': ['p', 'r'],   // → '1' '3' (NATIVE ARRAY, no JSON.stringify) + '\t'
+        'Q4?': 'y',          // → '2' (single, auto-advances)
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // Identical to the JSON-encoded shape — back-compat preserved.
+      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected identical byte sequence for native string[], got ${JSON.stringify(writes)}`)
+    })
+
+    // #4621 — labels containing commas survive the round-trip via native
+    // string[] (the legacy comma-split fallback corrupted these). Uses
+    // 2 questions so the multi-question driver kicks in (single-question
+    // path is text-driven, not answersMap-driven).
+    it('preserves comma-containing labels via native string[] (#4621)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'Hello, world' }, { label: 'foo' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_comma', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',                        // → '1'
+        'Q2?': ['Hello, world', 'foo'],    // → '1' '2' (both selected) + '\t'
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // Q1 → '1'; Q2 (multi) → '1' '2' + '\t'; Submit → '1'. The legacy
+      // comma-split would have split 'Hello, world' into ['Hello', 'world']
+      // which match nothing, defaulting to '1' only.
+      const expected = ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `native string[] should preserve comma-containing labels, got ${JSON.stringify(writes)}`)
+    })
+
     // Single-question regression guard: ensure the legacy text-driven path
     // still produces the exact pre-Chunk-B byte sequence (#4290 happy path).
     it('1-question form keeps the legacy text-driven byte sequence unchanged', async () => {

@@ -338,10 +338,19 @@ export declare const NotificationPrefsSetSchema: z.ZodObject<{
         bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
     }, z.core.$strip>;
 }, z.core.$loose>;
+/**
+ * #4621 — `answers` values are widened to `string | string[]` so the
+ * multi-question form (#4604 Chunk B) can ship native arrays for
+ * `multiSelect: true` questions instead of JSON-stringifying them.
+ * The legacy JSON-encoded string shape is still accepted for back-compat
+ * with in-flight payloads during deploy and with older dashboards that
+ * haven't picked up the new wire shape. Array values are capped at 100
+ * entries (mirroring the per-answer-map cap) to bound parse cost.
+ */
 export declare const UserQuestionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ListDirectorySchema: z.ZodObject<{
@@ -700,7 +709,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
