@@ -37,6 +37,11 @@ test('chroxy_ask_user tool schema mirrors AskUserQuestion input shape', () => {
   assert.equal(item.properties.question.type, 'string')
   assert.equal(item.properties.options.type, 'array')
   assert.equal(item.properties.multiSelect.type, 'boolean')
+  // AskUserQuestion accepts single-option questions in production
+  // (see claude-tui-session.test.js around line 2610). The spike schema
+  // mirrors that; minItems must NOT be > 1 or the spike would reject a
+  // valid AskUserQuestion-shaped payload during a steering bake-off.
+  assert.equal(item.properties.options.minItems, 1)
 
   // options[].label is the single load-bearing field — the keystroke
   // driver maps labels to digits; the MCP shim returns labels back.
@@ -93,4 +98,35 @@ test('handleChroxyAskUser rejects empty questions array', async () => {
     () => handleChroxyAskUser({ questions: [] }),
     /questions array is required/,
   )
+})
+
+test('handleChroxyAskUser fails fast on malformed per-question payloads', async () => {
+  // Silent placeholder fabrication would hide call-shape bugs and make
+  // a steering bake-off look healthier than it is. The handler must
+  // reject each malformed shape with a specific per-index error.
+  await assert.rejects(
+    () => handleChroxyAskUser({ questions: [{ options: [{ label: 'A' }] }] }),
+    /questions\[0\]\.question must be a non-empty string/,
+  )
+  await assert.rejects(
+    () => handleChroxyAskUser({ questions: [{ question: 'Q', options: [] }] }),
+    /questions\[0\]\.options must be a non-empty array/,
+  )
+  await assert.rejects(
+    () => handleChroxyAskUser({ questions: [{ question: 'Q', options: [{}] }] }),
+    /questions\[0\]\.options\[0\]\.label must be a non-empty string/,
+  )
+})
+
+test('handleChroxyAskUser accepts single-option AskUserQuestion-shaped payload', async () => {
+  // Mirrors the in-tree single-option AskUserQuestion shape at
+  // claude-tui-session.test.js around line 2610. If this regresses,
+  // the spike has structurally diverged from the runtime shape it
+  // exists to test against.
+  const result = await handleChroxyAskUser({
+    questions: [{ question: 'Q?', options: [{ label: 'A' }] }],
+  })
+  const parsed = JSON.parse(result.content[0].text)
+  assert.equal(parsed.answers.length, 1)
+  assert.equal(parsed.answers[0].answer, 'A')
 })

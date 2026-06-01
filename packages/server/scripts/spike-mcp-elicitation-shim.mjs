@@ -45,6 +45,7 @@
  */
 
 import { argv, stdin, stdout, stderr, exit } from 'node:process'
+import { fileURLToPath } from 'node:url'
 
 // --- Tool definition --------------------------------------------------------
 // Mirrors the AskUserQuestion input shape observed at
@@ -77,7 +78,13 @@ export const CHROXY_ASK_USER_TOOL = Object.freeze({
             question: { type: 'string', minLength: 1 },
             options: {
               type: 'array',
-              minItems: 2,
+              // AskUserQuestion's runtime accepts single-option questions
+              // (see packages/server/tests/claude-tui-session.test.js
+              // around line 2610 — `options: [{ label: 'A' }]`). Mirror
+              // that here so the spike does not structurally reject a
+              // valid AskUserQuestion-shaped payload during a steering
+              // bake-off.
+              minItems: 1,
               maxItems: 5,
               items: {
                 type: 'object',
@@ -137,14 +144,32 @@ function replyError(id, code, message) {
 // JSON-RPC round-trip is fully exercised end-to-end without dragging
 // in the WS server.
 export async function handleChroxyAskUser(params) {
-  const questions = Array.isArray(params?.questions) ? params.questions : []
-  if (questions.length === 0) {
+  const questions = Array.isArray(params?.questions) ? params.questions : null
+  if (!questions || questions.length === 0) {
     throw new Error('questions array is required and must be non-empty')
   }
+  // Fail fast on malformed per-question payloads instead of papering
+  // over them with synthesized labels. A silent placeholder would hide
+  // call-shape bugs during a steering bake-off and make the spike look
+  // healthier than it is — the production wiring would have no such
+  // tolerance because chroxy needs the real label to round-trip the
+  // answer back through `user_question` / `respondToQuestion`.
   const answers = questions.map((q, i) => {
-    const firstOption = q?.options?.[0]
-    const label = firstOption?.label || `option-${i + 1}`
-    return { question: q?.question || `q${i + 1}`, answer: q?.multiSelect ? [label] : label }
+    if (!q || typeof q !== 'object') {
+      throw new Error(`questions[${i}] must be an object`)
+    }
+    if (typeof q.question !== 'string' || q.question.length === 0) {
+      throw new Error(`questions[${i}].question must be a non-empty string`)
+    }
+    if (!Array.isArray(q.options) || q.options.length === 0) {
+      throw new Error(`questions[${i}].options must be a non-empty array`)
+    }
+    const firstOption = q.options[0]
+    if (!firstOption || typeof firstOption.label !== 'string' || firstOption.label.length === 0) {
+      throw new Error(`questions[${i}].options[0].label must be a non-empty string`)
+    }
+    const label = firstOption.label
+    return { question: q.question, answer: q.multiSelect ? [label] : label }
   })
   return {
     content: [
@@ -214,11 +239,17 @@ function serve() {
 }
 
 function printConfig() {
+  // Use fileURLToPath rather than `new URL(import.meta.url).pathname`:
+  // on Windows the latter produces a leading-slash drive path
+  // (`/C:/foo/bar`) and can leave percent-encoded segments, which would
+  // emit a broken `mcpServers` block. See packages/server/tests/_setup.mjs
+  // for the established cross-platform pattern.
+  const here = fileURLToPath(import.meta.url)
   const config = {
     mcpServers: {
       chroxy: {
         command: 'node',
-        args: [new URL(import.meta.url).pathname, '--serve'],
+        args: [here, '--serve'],
       },
     },
   }
