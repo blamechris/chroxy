@@ -261,8 +261,8 @@ describe('notification prefs handlers (#4541)', () => {
       assert.equal(existsSync(prefsPath), false)
     })
 
-    it('accepts a valid 64-char hex device key', () => {
-      const validKey = 'a'.repeat(64)
+    it('accepts a valid Expo-shaped device key', () => {
+      const validKey = 'ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]'
       const ctx = makeCtx(pushManager)
       inputHandlers.notification_prefs_set(
         makeWs(), { id: 'c1' },
