@@ -37,9 +37,23 @@
  * scoped to the test, then restore.
  */
 
-import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// CRITICAL: Patch `node:fs` via the CJS object obtained from `createRequire`,
+// NOT via an ESM default import. ESM `import fs from 'node:fs'` returns a
+// Module Namespace Exotic Object whose property writes do NOT propagate to
+// later `import { writeFileSync } from 'node:fs'` consumers — those bindings
+// are snapshotted at link-time from the CJS module's original exports.
+// `createRequire('node:fs')` gives us the live CJS `module.exports`; any
+// production code that does `import { writeFileSync } from 'fs'` then sees
+// our patched value because the ESM named exports are derived from this same
+// object at link time. This must run BEFORE any other module imports `node:fs`
+// — Node's `--import` flag in `package.json` enforces that ordering.
+const require = createRequire(import.meta.url)
+const fs = require('node:fs')
 
 // --- Capture the real home for the guard --------------------------------------
 const REAL_HOME = homedir()
@@ -61,7 +75,11 @@ function isProtected(rawPath) {
   }
   let p
   try {
-    if (rawPath instanceof URL) p = rawPath.pathname
+    // `fileURLToPath` handles cross-platform quirks (Windows `file:///C:/...`
+    // yields `C:\...`, percent-encoded segments are decoded). Falling back to
+    // `.pathname` would leave a leading slash on Windows and break comparison
+    // against `os.homedir()`-derived paths.
+    if (rawPath instanceof URL) p = fileURLToPath(rawPath)
     else if (rawPath instanceof Buffer) p = rawPath.toString('utf8')
     else p = rawPath
     p = resolve(p)
@@ -78,7 +96,7 @@ function isProtected(rawPath) {
 function makeGuardError(method, target) {
   const err = new Error(
     `[chroxy-test-sandbox] BLOCKED ${method} to real user-state path: ${target}\n` +
-    `  This test attempted to write to the developer's actual ~/.chroxy or ~/.claude tree.\n` +
+    `  This test attempted to write to (or move from/to) the developer's actual ~/.chroxy or ~/.claude tree.\n` +
     `  Pass a temp path explicitly (e.g. stateFilePath: tmpStateFile()) or set\n` +
     `  process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1' if the write is intentional.\n` +
     `  See packages/server/tests/_setup.mjs and issue #4633.`,
@@ -101,7 +119,12 @@ fs.appendFileSync = function patchedAppendFileSync(target, ...rest) {
 
 const origRenameSync = fs.renameSync
 fs.renameSync = function patchedRenameSync(oldPath, newPath) {
-  if (isProtected(newPath)) throw makeGuardError('renameSync', String(newPath))
+  // Check BOTH paths: a `renameSync('~/.chroxy/session-state.json', '/tmp/x')`
+  // would silently relocate real user state without tripping a newPath-only
+  // guard. The whole point of the sandbox is to prevent that.
+  if (isProtected(oldPath) || isProtected(newPath)) {
+    throw makeGuardError('renameSync', `${String(oldPath)} -> ${String(newPath)}`)
+  }
   return origRenameSync.call(this, oldPath, newPath)
 }
 
@@ -152,7 +175,10 @@ if (fs.promises) {
 
   const origRename = fs.promises.rename
   fs.promises.rename = function patchedRename(oldPath, newPath) {
-    if (isProtected(newPath)) return Promise.reject(makeGuardError('promises.rename', String(newPath)))
+    // Mirror the sync guard: a rename OUT of ~/.chroxy is still data loss.
+    if (isProtected(oldPath) || isProtected(newPath)) {
+      return Promise.reject(makeGuardError('promises.rename', `${String(oldPath)} -> ${String(newPath)}`))
+    }
     return origRename.call(this, oldPath, newPath)
   }
 

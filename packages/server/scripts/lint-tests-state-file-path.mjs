@@ -5,8 +5,10 @@
  * `~/.chroxy/session-state.json` and the test silently writes to the
  * developer's (or CI runner's) real user state file.
  *
- * The setup hook in `tests/_setup.mjs` reroutes HOME to a tmp dir as a
- * safety net, but the explicit option is still required so the intent is
+ * The sandbox guard in `tests/_setup.mjs` (loaded via `node --import`)
+ * patches the write-side of `fs` to throw if any path resolves under the
+ * real `~/.chroxy` or `~/.claude` tree — it does NOT override `HOME`. The
+ * explicit `stateFilePath` option is still required so the intent is
  * obvious in review and a future setup-hook regression cannot reintroduce
  * the original bug class.
  *

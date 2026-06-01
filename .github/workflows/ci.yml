@@ -84,9 +84,11 @@ jobs:
           # Issue #4633 — every `new SessionManager(...)` in tests must include
           # a `stateFilePath` option, otherwise the test writes to the real
           # ~/.chroxy/session-state.json (or, in CI, to the runner home).
-          # The HOME-override sandbox in tests/_setup.mjs makes accidental
-          # contamination harmless, but the explicit option keeps the intent
-          # obvious in review and avoids surprise side effects.
+          # The sandbox guard in tests/_setup.mjs (loaded via `node --import`)
+          # patches the write-side of `fs` to throw on real-home writes — it
+          # does NOT override HOME — so accidental contamination fails loudly,
+          # but the explicit option keeps the intent obvious in review and
+          # avoids surprise side effects.
           if scripts/lint-tests-state-file-path.sh; then
             echo "OK — every new SessionManager(...) in tests passes stateFilePath"
           else
