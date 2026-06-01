@@ -1427,17 +1427,26 @@ export class ClaudeTuiSession extends BaseSession {
     // clearing was all-or-nothing; with the Map there may be sibling
     // pending answers from other tool_uses in the same turn that
     // shouldn't be wiped when this one completes.
-    if (toolName === 'AskUserQuestion' && payload.tool_use_id) {
-      this._clearPendingAnswerByToolUseId(payload.tool_use_id)
+    //
+    // #4689: clear by the resolved local `toolUseId`, not by raw
+    // `payload.tool_use_id`. When the hook payload omits `tool_use_id`
+    // (older claude builds, certain MCP tools), `_emitToolHookEvent`
+    // synthesizes a stable id at line ~1340 and the PreToolUse branch
+    // above stores the pending entry under THAT synthesized id. Gating
+    // cleanup on `payload.tool_use_id` would skip the clear for those
+    // builds and leak Map entries indefinitely.
+    if (toolName === 'AskUserQuestion' && toolUseId) {
+      this._clearPendingAnswerByToolUseId(toolUseId)
     }
     // #4669 cleanup: drop the askuserquestion-active sibling lock for THIS
     // tool_use's PostToolUse (the original PostToolUse hook in
     // writeHookSettings() does this via tee/grep/rm — duplicated here for
     // the defensive path where the hook script's cleanup didn't run, e.g.
     // when claude TUI emitted PostToolUse but the hook chain raced with
-    // turn teardown). Cheap idempotent rm.
-    if (toolName === 'AskUserQuestion' && this._sinkDir) {
-      try { rmSync(join(this._sinkDir, 'askuserquestion-active'), { recursive: true, force: true }) } catch {}
+    // turn teardown). Cheap idempotent rm via the canonical helper so
+    // teardown/cleanup behaviour stays consistent (#4692).
+    if (toolName === 'AskUserQuestion') {
+      this._clearAskUserQuestionLock()
     }
     // #4604: PostToolUse means claude accepted the answer (single-question
     // happy path). Cancel the stall watchdog so it doesn't fire a spurious
@@ -1879,6 +1888,14 @@ export class ClaudeTuiSession extends BaseSession {
       // the back-compat getter. Maintains the pre-#4668 behaviour for
       // single-pending cases and for callers that haven't been updated
       // to pass toolUseId.
+      //
+      // #4688: warn when the dashboard omitted toolUseId AND we have
+      // multiple pending entries — the back-compat fallback picks the
+      // most-recent entry by insertion order, which may not be what
+      // the user intended. Loud log so the wedge symptom is greppable.
+      if (!toolUseId && this._pendingUserAnswers.size > 1) {
+        log.warn(`respondToQuestion: dashboard omitted toolUseId but ${this._pendingUserAnswers.size} pending entries exist (keys=${[...this._pendingUserAnswers.keys()].join(',')}) — falling back to most-recent which may misroute`)
+      }
       entry = this._pendingUserAnswer
     }
     const prevToolUseId = entry?.toolUseId || null
