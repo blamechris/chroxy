@@ -1851,6 +1851,41 @@ describe('buildSessionListPatches', () => {
     expect(chunkSubscribeSessionIds(malformed, 's1')).toEqual([['s2']])
   })
 
+  it('chunkSubscribeSessionIds: clamps chunk size to SESSION_LIST_SUBSCRIBE_CHUNK_SIZE', () => {
+    // 25 non-active sessions; caller requests chunk of 100 → clamped to 20
+    // so the server's SubscribeSessionsSchema.max(20) never sees a bigger chunk.
+    const sessions = Array.from({ length: 26 }, (_, i) => makeSession(`s${i + 1}`))
+    const chunks = chunkSubscribeSessionIds(sessions, 's1', 100)
+    expect(chunks.map((c) => c.length)).toEqual([SESSION_LIST_SUBSCRIBE_CHUNK_SIZE, 5])
+    // Exact match: requesting the cap explicitly behaves the same as the default.
+    expect(chunkSubscribeSessionIds(sessions, 's1', SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)).toEqual(
+      chunkSubscribeSessionIds(sessions, 's1'),
+    )
+  })
+
+  it('chunkSubscribeSessionIds: coerces non-integer chunk sizes via Math.floor', () => {
+    // 7 non-active ids; chunk 2.5 → floor(2.5) = 2 → ceil(7/2) = 4 chunks
+    const sessions = Array.from({ length: 8 }, (_, i) => makeSession(`s${i + 1}`))
+    const chunks = chunkSubscribeSessionIds(sessions, 's1', 2.5)
+    expect(chunks.map((c) => c.length)).toEqual([2, 2, 2, 1])
+    // No element duplicated and no element skipped.
+    expect(chunks.flat()).toEqual(['s2', 's3', 's4', 's5', 's6', 's7', 's8'])
+  })
+
+  it('chunkSubscribeSessionIds: rejects invalid chunk sizes (≤0, NaN, ∞, sub-1 floats)', () => {
+    const sessions = Array.from({ length: 6 }, (_, i) => makeSession(`s${i + 1}`))
+    // 0, negative, NaN, Infinity all fall back to the default constant.
+    for (const bad of [0, -1, NaN, Infinity, -Infinity]) {
+      const chunks = chunkSubscribeSessionIds(sessions, 's1', bad)
+      expect(chunks).toHaveLength(1)
+      expect(chunks[0]).toHaveLength(5) // 6 sessions - 1 active = 5 ids
+    }
+    // 0.5 → floor → 0 → fallback to default.
+    const subOne = chunkSubscribeSessionIds(sessions, 's1', 0.5)
+    expect(subOne).toHaveLength(1)
+    expect(subOne[0]).toHaveLength(5)
+  })
+
   it('includes the active session in cumulativeUsage / conversationId / backgroundShell maps', () => {
     // The subscribeChunks filter excludes the active id, but the patch
     // maps must include it — both clients update the active session's

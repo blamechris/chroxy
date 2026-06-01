@@ -1189,10 +1189,14 @@ export function handleSessionList(msg: Record<string, unknown>): SessionInfo[] |
 }
 
 /**
- * Default chunk size for `subscribe_sessions` messages produced by
- * {@link buildSessionListPatches}. Matches the server-side
- * `ServerSubscribeSessionsSchema` max-ids bound; consumers may override
- * via the optional `subscribeChunkSize` parameter.
+ * Default (and maximum) chunk size for `subscribe_sessions` messages
+ * produced by {@link buildSessionListPatches}. Matches the protocol-level
+ * `SubscribeSessionsSchema` `.max(20)` bound (client→server message — the
+ * server validates incoming `subscribe_sessions` payloads against this
+ * cap). Consumers may pass a SMALLER override via the optional
+ * `subscribeChunkSize` parameter; {@link chunkSubscribeSessionIds} clamps
+ * larger / non-integer / non-positive values to this constant so a buggy
+ * caller can never produce payloads the server will reject.
  *
  * Co-located here (rather than per-consumer) so the app and dashboard
  * can't drift out of sync — see #4767 acceptance criteria.
@@ -1401,16 +1405,34 @@ export function buildSessionListPatches(
  * Returns `[]` when there are no non-active ids to subscribe (empty
  * sessionList, or list contains only the active session). Defensive
  * against malformed entries (missing/non-string sessionId — skipped).
+ *
+ * `subscribeChunkSize` is normalised to an integer in
+ * `[1, SESSION_LIST_SUBSCRIBE_CHUNK_SIZE]`:
+ * - Non-integers (e.g. `0.5`, `2.5`) would cause `i += chunkSize` to walk
+ *   off the grid and `slice(i, i + chunkSize)` to coerce via truncation,
+ *   producing duplicated / skipped ids — `Math.floor` removes the
+ *   fractional part defensively.
+ * - Values `<= 0` or non-numeric fall back to the default constant.
+ * - Values `> SESSION_LIST_SUBSCRIBE_CHUNK_SIZE` are clamped down so a
+ *   buggy caller can never emit a chunk the server's
+ *   `SubscribeSessionsSchema.max(20)` would reject.
  */
 export function chunkSubscribeSessionIds(
   sessionList: SessionInfo[],
   activeSessionId: string | null,
   subscribeChunkSize: number = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
 ): string[][] {
-  const chunkSize =
-    typeof subscribeChunkSize === 'number' && subscribeChunkSize > 0
-      ? subscribeChunkSize
+  const requested =
+    typeof subscribeChunkSize === 'number' &&
+    Number.isFinite(subscribeChunkSize) &&
+    subscribeChunkSize > 0
+      ? Math.floor(subscribeChunkSize)
       : SESSION_LIST_SUBSCRIBE_CHUNK_SIZE
+  // Floor may produce 0 if 0 < value < 1 (e.g. 0.5) — fall back to default.
+  const normalised = requested >= 1 ? requested : SESSION_LIST_SUBSCRIBE_CHUNK_SIZE
+  // Clamp to the protocol-enforced cap so callers can't produce
+  // payloads that violate SubscribeSessionsSchema.max(20).
+  const chunkSize = Math.min(normalised, SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)
   const ids: string[] = []
   for (const s of sessionList) {
     if (!s || typeof s.sessionId !== 'string') continue
