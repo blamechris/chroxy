@@ -330,6 +330,10 @@ export function App() {
     pendingCommunitySkills: activePendingCommunitySkills,
     pendingTrustGrants: activePendingTrustGrants,
     pendingEvaluatorClarify,
+    // #4653: surface chroxy-side interventions (currently only the
+    // multi-question AskUserQuestion deny shipped in #4648) in the
+    // FooterBar counter chip so users can tell when chroxy intervened.
+    interventions,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -2292,6 +2296,13 @@ export function App() {
         // when there's an active session to route the input through — without
         // that, the chip would have nowhere to send /compact to.
         onCompact={isConnected && activeSessionId ? () => sendInput('/compact') : undefined}
+        // #4653: the active session's chroxy-side intervention ring. Empty
+        // by default — the chip hides itself when nothing has fired.
+        interventions={interventions}
+        // #4653: threaded so the panel collapses on session switch (the
+        // FooterBar instance is shared across sessions, so without this
+        // the open panel would persist with stale entries).
+        activeSessionId={activeSessionId}
       />
 
       {/* Settings panel */}

@@ -3716,6 +3716,89 @@
   color: var(--text-secondary);
 }
 
+/* #4653 — chroxy-side intervention counter chip + expandable panel. */
+.footer-interventions {
+  background: var(--accent-amber-light, rgba(255, 193, 7, 0.12));
+  color: var(--accent-amber, #b45309);
+  border: 1px solid var(--accent-amber, #b45309);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.footer-interventions:hover,
+.footer-interventions.open {
+  background: var(--accent-amber, #b45309);
+  color: var(--text-on-accent, #fff);
+}
+
+.footer-interventions-panel {
+  position: absolute;
+  bottom: 32px;
+  right: 8px;
+  width: min(360px, calc(100vw - 16px));
+  max-height: 50vh;
+  overflow-y: auto;
+  background: var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-primary, #333);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  font-size: 12px;
+}
+
+.footer-interventions-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-primary, #333);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.footer-interventions-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.footer-interventions-close:hover {
+  color: var(--text-primary);
+}
+
+.footer-interventions-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.footer-interventions-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-primary, #2a2a2a);
+}
+
+.footer-interventions-item:last-child {
+  border-bottom: none;
+}
+
+.footer-interventions-reason {
+  color: var(--text-primary);
+}
+
+.footer-interventions-meta {
+  color: var(--text-secondary);
+  font-size: 10px;
+  margin-top: 2px;
+}
+
 .footer-busy {
   width: 6px;
   height: 6px;

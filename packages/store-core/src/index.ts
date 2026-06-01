@@ -53,6 +53,8 @@ export type {
   Checkpoint,
   BaseSessionState,
   InactivityWarning,
+  // #4653: chroxy-side intervention ring (multi-q deny etc.)
+  SessionIntervention,
   // Git result element types (#3132)
   GitFileStatus,
   GitBranch,
@@ -139,6 +141,8 @@ export {
   createEmptyBaseSessionState,
   ACTIVITY_EVENT_TYPES,
   isActivityEvent,
+  // #4653: ring cap for SessionIntervention list on BaseSessionState
+  MAX_SESSION_INTERVENTIONS,
 } from './utils'
 
 // #4123: shared cost formatters used by both dashboard sidebar badge
@@ -239,6 +243,8 @@ export type {
   PlanAllowedPrompt,
   ThinkingLevel,
   DevPreviewBuilder,
+  // #4653 — builder for the chroxy-side intervention append/dedup/ring-cap path
+  SessionInterventionBuilder,
   AgentInfoBuilder,
   PendingBackgroundShellsBuilder,
   ServerMode,
@@ -309,6 +315,9 @@ export {
   handlePlanStarted,
   handlePlanReady,
   handleInactivityWarning,
+  // #4653 — chroxy-side multi-question deny notification
+  handleMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,

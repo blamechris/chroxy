@@ -211,6 +211,11 @@ const EMPTY_ACTIVE_TOOLS: never[] = [];
 // #4307: stable empty reference for `pendingBackgroundShells` —
 // same `useShallow` stability rationale as the others above.
 const EMPTY_PENDING_BACKGROUND_SHELLS: never[] = [];
+// #4653: stable empty reference for `interventions` — same `useShallow`
+// stability rationale as the others above. SessionIntervention[] in the
+// type system; never[] here because the array is provably empty and
+// TypeScript widens `never[]` to any element type at the call site.
+const EMPTY_INTERVENTIONS: never[] = [];
 
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
@@ -766,6 +771,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #3899: no warning is ever surfaced in the flat-state fallback;
       // inactivity_warning only arrives once SessionStates is populated.
       inactivityWarning: null,
+      // #4653: no chroxy intervention is ever surfaced in the flat-state
+      // fallback — intervention events are routed by sessionId, which only
+      // populates after a session_list snapshot lands.
+      interventions: EMPTY_INTERVENTIONS,
     };
   },
 

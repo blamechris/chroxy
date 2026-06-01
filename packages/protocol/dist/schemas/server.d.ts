@@ -264,6 +264,13 @@ export declare const ServerInactivityWarningSchema: z.ZodObject<{
     idleMs: z.ZodNumber;
     prefab: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerMultiQuestionInterventionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"multi_question_intervention">;
+    toolUseId: z.ZodString;
+    questionCount: z.ZodNumber;
+    reason: z.ZodLiteral<"multi_question">;
+    timestamp: z.ZodNumber;
+}, z.core.$strip>;
 export declare const ServerMcpServersSchema: z.ZodObject<{
     type: z.ZodLiteral<"mcp_servers">;
     servers: z.ZodArray<z.ZodObject<{
