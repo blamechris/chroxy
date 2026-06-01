@@ -1042,6 +1042,11 @@ export class ClaudeTuiSession extends BaseSession {
    * — the bulk path may trip claude's paste detector but that's
    * preferable to multi-minute silent hangs.
    *
+   * Multi-line input (any embedded `\n`) takes a separate fast-path
+   * (#4678): the body is normalised, wrapped in CSI bracketed-paste
+   * markers, and delivered as a single atomic write — see the inline
+   * comment in the function body for the why.
+   *
    * @param {string} text — the text to write (no trailing CR; \r appended)
    * @param {object} [opts]
    * @param {() => void} [opts.onAbort] — called if abort tripped; caller
@@ -1049,6 +1054,62 @@ export class ClaudeTuiSession extends BaseSession {
    * @returns {Promise<boolean>} true if completed, false if aborted.
    */
   async _writePtyTextThrottled(text, { onAbort } = {}) {
+    // #4678: multi-line prompts (from Shift+Enter in the dashboard
+    // composer) need to be delivered as a single bracketed paste —
+    // claude TUI v2.1.x treats raw \n in the input box as "insert
+    // newline in multi-line composition" with no way to break out via
+    // a subsequent \r (the bare \r is also interpreted as a newline
+    // when the cursor is in a multi-line composition). Wrapping the
+    // content in CSI bracketed-paste markers (\x1b[200~ ... \x1b[201~)
+    // tells claude TUI the content was pasted; on receipt of the close
+    // marker the input is ready to submit and the trailing \r fires.
+    //
+    // Single-line content keeps the per-char throttled write — the
+    // #4269 throttle exists to defeat claude TUI's heuristic paste
+    // detector when the input is typed input (not a real paste). For
+    // genuine paste we use the explicit markers and rely on claude TUI
+    // honouring DEC mode 2004 for those bytes.
+    const hasNewlines = /\r?\n/.test(text)
+    if (hasNewlines) {
+      // Normalise CRLF → LF so the pasted body contains a single line
+      // break per logical newline. Trailing newlines are dropped so
+      // the close marker lands at the end of the visible content
+      // rather than after an empty trailing line. Embedded paste-end
+      // markers (`\x1b[201~`) are stripped from the body — leaving
+      // them intact would let attacker-controlled content (an MCP tool
+      // result echoed into a follow-up prompt, an evaluator rewrite,
+      // any future content-injection path) terminate the bracketed
+      // paste early and land the suffix as typed input in claude TUI.
+      // Defense-in-depth; the typing-user case is zero-risk today.
+      // Order matters: strip embedded \x1b[201~ markers BEFORE the
+      // trailing-newline strip. Removing markers can expose trailing
+      // newlines that were hidden by them — e.g. "\n\x1b[201~\n" needs
+      // to become "" (empty body → abort), not "\n" (a degenerate
+      // one-newline paste). Doing trailing-strip first would keep the
+      // newline that the marker was masking.
+      const body = text
+        .replace(/\r\n/g, '\n')
+        .replace(/\x1b\[201~/g, '')
+        .replace(/\n+$/, '')
+      if (this._activeTurn?.aborted || this._ptyExited) {
+        onAbort?.()
+        return false
+      }
+      // After stripping, an all-whitespace or all-control-bytes prompt
+      // can collapse to an empty body. Sending the degenerate
+      // `\x1b[200~\x1b[201~\r` produces a CR-on-empty-input — at best
+      // a no-op, at worst behaviour the TUI doesn't expect. Drop the
+      // turn cleanly via the abort path so the caller sees a finished
+      // turn (no message ever leaves chroxy) rather than chroxy
+      // claiming to have sent and then waiting forever for a reply.
+      if (body.length === 0) {
+        onAbort?.()
+        return false
+      }
+      this._term.write('\x1b[200~' + body + '\x1b[201~\r')
+      return true
+    }
+
     this._term.write('\x1b[?2004l')
     try {
       // #4276: huge prompts bypass the throttle. Counting code-points

@@ -872,13 +872,18 @@ describe('ClaudeTuiSession', () => {
       assert.equal(writes[2 + codePoints.length], '\x1b[?2004h', 'final write is bracketed-paste re-enable')
     })
 
-    it('throttles multi-line prompts too — embedded \\n passes through as a single-char write', async () => {
-      // The original symptom was triggered by multi-line input — claude
-      // sees an embedded \n in a bulk write and shows "+1 lines paste
-      // again to expand". With per-char throttling the \n arrives at
-      // typing speed, the same way a human typing Enter mid-prompt
-      // would. We do not strip or rewrite the prompt — that would
-      // silently mangle the user's text.
+    it('delivers multi-line prompts via a single bracketed-paste write (#4678)', async () => {
+      // #4678 superseded the per-char throttle for multi-line input.
+      // Claude TUI v2.1.x treats embedded \n in the input box as
+      // "insert newline in multi-line composition" and the trailing
+      // bare \r we appended was being interpreted as another newline
+      // rather than submit — the input box stayed in composition mode
+      // forever and the 5-min stream-stall watchdog was the only escape.
+      // Multi-line prompts now wrap the body in CSI bracketed-paste
+      // markers (\x1b[200~ ... \x1b[201~) so claude TUI receives the
+      // block as a paste and the trailing \r fires as submit. The
+      // per-char throttle is still used for single-line input (#4269
+      // paste-detector defence) — see the emoji/CJK test below.
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
@@ -900,17 +905,16 @@ describe('ClaudeTuiSession', () => {
       const multiline = 'line one\nline two\nline three'
       await session.sendMessage(multiline)
 
-      // #4274: count code-points, not UTF-16 units (no difference for
-      // pure ASCII like this fixture — the emoji/CJK fixture below
-      // covers the divergence).
-      const codePoints = [...multiline]
-      assert.equal(writes.length, codePoints.length + 3)
-      // Char writes must reproduce the multi-line content verbatim,
-      // including the embedded \n bytes as their own single-char writes.
-      const charWrites = writes.slice(1, 1 + codePoints.length)
-      assert.equal(charWrites.join(''), multiline, 'multi-line prompt body reproduced verbatim')
-      const newlineWrites = charWrites.filter((c) => c === '\n')
-      assert.equal(newlineWrites.length, 2, 'each embedded \\n is its own single-char write')
+      // Exactly ONE write for the whole multi-line input — no per-char
+      // throttle for this path. The disable/enable mode-2004 wrap is
+      // also skipped because bracketed paste IS the mode signal.
+      assert.equal(writes.length, 1, 'multi-line prompt sent as one atomic paste, not per-char')
+      const sent = writes[0]
+      assert.ok(sent.startsWith('\x1b[200~'), `must start with paste-start CSI (got ${JSON.stringify(sent.slice(0, 10))})`)
+      assert.ok(sent.endsWith('\x1b[201~\r'), `must end with paste-end CSI + CR (got ${JSON.stringify(sent.slice(-12))})`)
+      assert.ok(sent.includes(multiline), 'body preserves embedded \\n chars verbatim inside the paste')
+      const newlineCount = (sent.match(/\n/g) || []).length
+      assert.equal(newlineCount, 2, 'each embedded \\n survives literally inside the bracketed-paste body')
     })
 
     // #4274: bare String#length counts UTF-16 code units, so a single
