@@ -519,5 +519,82 @@ describe('QuestionPrompt', () => {
       expect(arg!['Which release strategy?']).toBe('Minor')
       expect(arg!['Confirm?']).toBe('Yes')
     })
+
+    // #4624 — a11y: each per-question options block must be exposed to
+    // assistive tech as a labelled group so screen readers announce the
+    // question text once per group rather than re-reading it on every
+    // option. Single-select uses radiogroup + aria-required, multi-select
+    // uses plain group. Question text gets a stable id referenced by
+    // aria-labelledby. Submit mirrors aria-disabled with disabled state.
+    describe('a11y (#4624)', () => {
+      const single = {
+        question: 'Pick exactly one',
+        options: [{ label: 'A', value: 'A' }, { label: 'B', value: 'B' }],
+      }
+      const multi = {
+        question: 'Pick any',
+        options: [{ label: 'X', value: 'X' }, { label: 'Y', value: 'Y' }],
+        multiSelect: true,
+      }
+
+      it('renders single-select options as a radiogroup with aria-labelledby + aria-required', () => {
+        render(<MultiQuestionForm questions={[single]} onSelect={vi.fn()} />)
+        const row = screen.getByTestId('question-multi-row-0')
+        const group = row.querySelector('.question-options')!
+        expect(group.getAttribute('role')).toBe('radiogroup')
+        expect(group.getAttribute('aria-required')).toBe('true')
+        const labelledBy = group.getAttribute('aria-labelledby')
+        expect(labelledBy).toBeTruthy()
+        const labelEl = row.querySelector(`#${labelledBy}`)
+        expect(labelEl).not.toBeNull()
+        expect(labelEl!.textContent).toBe('Pick exactly one')
+      })
+
+      it('renders multi-select options as a group (not radiogroup) with aria-labelledby and no aria-required', () => {
+        render(<MultiQuestionForm questions={[multi]} onSelect={vi.fn()} />)
+        const row = screen.getByTestId('question-multi-row-0')
+        const group = row.querySelector('.question-options')!
+        expect(group.getAttribute('role')).toBe('group')
+        expect(group.getAttribute('aria-required')).toBeNull()
+        const labelledBy = group.getAttribute('aria-labelledby')
+        expect(labelledBy).toBeTruthy()
+        const labelEl = row.querySelector(`#${labelledBy}`)
+        expect(labelEl).not.toBeNull()
+        expect(labelEl!.textContent).toBe('Pick any')
+      })
+
+      it('assigns distinct aria-labelledby ids per question so duplicate text does not collide', () => {
+        render(
+          <MultiQuestionForm
+            questions={[single, multi, { ...single, question: 'Pick exactly one' }]}
+            onSelect={vi.fn()}
+          />
+        )
+        const ids = [0, 1, 2].map((i) => {
+          const row = screen.getByTestId(`question-multi-row-${i}`)
+          return row.querySelector('.question-options')!.getAttribute('aria-labelledby')
+        })
+        expect(new Set(ids).size).toBe(3)
+        ids.forEach((id) => expect(id).toBeTruthy())
+      })
+
+      it('Submit button mirrors aria-disabled with disabled state', () => {
+        const { rerender } = render(<MultiQuestionForm questions={[single]} onSelect={vi.fn()} />)
+        const submit = screen.getByTestId('question-multi-submit')
+        expect(submit).toBeDisabled()
+        expect(submit.getAttribute('aria-disabled')).toBe('true')
+
+        fireEvent.click(screen.getByTestId('question-multi-option-0-A').querySelector('input')!)
+        expect(submit).not.toBeDisabled()
+        expect(submit.getAttribute('aria-disabled')).toBe('false')
+
+        // Re-render with only a multi-select question — Submit is enabled by
+        // default (multi-select can submit zero selections).
+        rerender(<MultiQuestionForm questions={[multi]} onSelect={vi.fn()} />)
+        const submit2 = screen.getByTestId('question-multi-submit')
+        expect(submit2).not.toBeDisabled()
+        expect(submit2.getAttribute('aria-disabled')).toBe('false')
+      })
+    })
   })
 })
