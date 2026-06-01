@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.30] - 2026-05-31
+
+Phase 1 of `docs/investigations/prompt-delivery-wedge.md` — the multi-session-restore wedge (chroxy logs `stream_start` then nothing for minutes) has been chased across 20+ PRs without isolating which stage of `sendMessage` actually stalls. This release adds pure-instrumentation timing logs at every stage so the next live repro produces a single grep-able trail pinpointing the wedge stage. Zero behaviour change; v0.9.31 will ship a targeted fix once the next repro is captured.
+
+### Added
+
+- **Per-stage timing logs for prompt delivery (#4681):** `claude-tui-session.js` now logs (a) `sendMessage start` on entry with sessionId/byte-count, (b) `waitForPrompt` exit with elapsedMs + `sawStatus` + `ready`, (c) `writePtyText` exit with path (paste/bulk/throttled) + bytes + elapsedMs + completed, (d) `hookPoll heartbeat` every 5s of silent waiting with sink-file count + actual `stopFound` state, (e) `hookPoll exit` capturing iters/consumed/abort/ptyExited/stillBusy, (f) `sendMessage done` summary via `_logSendMessageSummary` called from both the success path and `_finishTurnError` so every turn ends with the same shape regardless of outcome. New `HOOK_HEARTBEAT_MS=5000` static. ws-client-sender backpressure warn now includes the `message?.type` so we can correlate a warn at restore-time with which broadcast tipped the buffer. The companion investigation tracker doc (`docs/investigations/prompt-delivery-wedge.md`) captures the 4-wave lineage of prior PRs, the ranked wedge-point candidates from the code-trace audit, and the three-phase plan this release opens. Follow-up #4682 will extend the per-turn summary to the `_handleStreamStall` / `_handleHardTimeout` / spawn-onExit teardown paths.
+
 ## [0.9.29] - 2026-05-31
 
 Hot-fix for the v0.9.28 dogfood: multi-line dashboard prompts (anything with an embedded newline from Shift+Enter in the composer) silently wedged claude TUI's input box. The TUI v2.1.x composer treats raw `\n` as "insert newline in multi-line composition" with no way to break out via a subsequent `\r` — the prompt appeared in the input but never submitted, leaving the dashboard's "Working…" indicator running against a TUI doing nothing. This blocked end-to-end testing of the v0.9.28 multi-question fixes because the test prompts themselves were multi-line.
