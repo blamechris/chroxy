@@ -73,6 +73,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import {
   setStore,
   wsSend,
@@ -1564,12 +1565,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //   Multi-select values flow through as native arrays — the
     //   summary helper flattens them to comma-joined labels so the
     //   string-only `answer` field stays readable.
+    //
+    //   Delegate to `formatQuestionAnswerSummary` so the legacy
+    //   JSON-stringified array envelope (pre-#4735 wire: a single
+    //   value like `'["App","Tests"]'` for multi-select) is also
+    //   flattened here — otherwise the terminal echo + the required
+    //   string `answer` field can leak `["App","Tests"]` JSON syntax
+    //   when mixed-version rehydrated state replays an old answersMap.
+    //   The helper detects array-shaped values AND JSON-stringified
+    //   arrays and renders both the same way (comma-joined labels).
     const isMultiAnswer = typeof answer !== 'string'
-    const answerSummary = isMultiAnswer
-      ? Object.entries(answer as Record<string, string | string[]>)
-          .map(([q, v]) => `${q}: ${Array.isArray(v) ? v.join(', ') : v}`)
-          .join(' | ')
-      : (answer as string);
+    const answerSummary = formatQuestionAnswerSummary(
+      answer as string | Record<string, string | string[]>,
+    );
     const payload: Record<string, unknown> = { type: 'user_question_response', answer: answerSummary };
     if (isMultiAnswer) {
       payload.answers = answer;

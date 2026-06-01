@@ -1433,6 +1433,49 @@ describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
     expect(terminalRawBuffer).not.toContain('User answered:');
   });
 
+  // #4735 — answerSummary flattens BOTH native string[] values AND the
+  // legacy JSON-stringified array envelope (pre-#4735 wire). Without
+  // this, a mixed-version replay where an old dashboard had stashed a
+  // JSON-stringified answer in local storage would leak `["App","Tests"]`
+  // syntax through the terminal echo and the `answer` summary field.
+  it('flattens legacy JSON-stringified array envelopes in the answer summary (#4735 back-compat)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const legacyAnswersMap = {
+      'Which targets?': JSON.stringify(['App', 'Tests']),
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(legacyAnswersMap, 'toolu_legacy');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    // Wire `answers` field passes the legacy JSON-string shape through
+    // unchanged (server back-compat for old encoders).
+    expect(payload.answers).toEqual(legacyAnswersMap);
+    // Summary string flattens BOTH the legacy JSON-string envelope and
+    // any native string[] values for the readable `answer` field.
+    expect(payload.answer).toBe(
+      'Which targets?: App, Tests | Confirm?: Yes',
+    );
+    // Terminal echo carries the flattened summary, NOT the JSON syntax.
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: Which targets?: App, Tests | Confirm?: Yes');
+    expect(terminalBuffer).not.toContain('["App"');
+  });
+
   // #4735 — multi-question multi-select wire format. The widened wire
   // (UserQuestionResponseSchema) accepts `string | string[]` per question.
   // The store should forward the answers map shape verbatim AND populate
