@@ -154,10 +154,12 @@ const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
 const ERROR_RECONNECT_DELAY = 2000;
 
-// #4771: getWsCloseMessage and getHealthCheckErrorMessage now live in
-// @chroxy/store-core/ws-errors so the mobile app and dashboard share a
-// single tested mapping. Re-exported here for backward compatibility
-// with existing imports from `app/src/store/connection`.
+// #4771: getWsCloseMessage and getHealthCheckErrorMessage are now
+// defined in `packages/store-core/src/ws-errors.ts` and exported from
+// the package public entrypoint (`@chroxy/store-core`) so the mobile
+// app and dashboard share a single tested mapping. Re-exported here
+// for backward compatibility with existing imports from
+// `app/src/store/connection`.
 export { getWsCloseMessage, getHealthCheckErrorMessage } from '@chroxy/store-core';
 
 export const selectShowSession = (s: ConnectionState): boolean =>

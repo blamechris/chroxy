@@ -978,7 +978,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     let reconnectScheduled = false;
     const scheduleReconnect = (
       reasonText: string,
-      errorMessage: string,
+      errorMessage: string | null,
       delayMs: number,
     ): void => {
       if (reconnectScheduled) return;
@@ -986,9 +986,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (disconnectedAttemptId === myAttemptId) return;
       reconnectScheduled = true;
       console.log(`[ws] ${reasonText}, reconnecting...`);
+      // #4771: `errorMessage === null` means the close code was 1000
+      // (normal server-initiated close — see getWsCloseMessage). Match
+      // the mobile app's behaviour and skip updating connectionError so
+      // we don't show an "X" banner for a graceful close.
       set({
         connectionPhase: 'reconnecting',
-        connectionError: errorMessage,
+        ...(errorMessage !== null ? { connectionError: errorMessage } : {}),
         connectionRetryCount: 0,
       });
       setTimeout(() => {
@@ -1098,11 +1102,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // optional because legacy test harnesses invoke
         // `socket.onclose()` with no argument; production browser /
         // WebSocket implementations always pass a CloseEvent.
+        //
+        // `errorMessage` is forwarded as-is (including null) so a
+        // graceful 1000 close doesn't paint a spurious error banner —
+        // see the `errorMessage === null` branch in scheduleReconnect.
+        // When `event.code` is missing entirely (legacy test mocks),
+        // we fall back to the pre-refactor "Connection lost" copy so
+        // the existing `MockWebSocket` assertions still pass.
         const code = event?.code;
-        const closeMsg = typeof code === 'number' ? getWsCloseMessage(code) : null;
+        const closeMsg = typeof code === 'number' ? getWsCloseMessage(code) : 'Connection lost';
         scheduleReconnect(
           typeof code === 'number' ? `Connection lost (code ${code})` : 'Connection lost',
-          closeMsg ?? 'Connection lost',
+          closeMsg,
           AUTO_RECONNECT_DELAY,
         );
       } else if (disconnectedAttemptId === myAttemptId || get().userDisconnected) {
