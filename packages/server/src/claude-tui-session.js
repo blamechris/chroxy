@@ -161,7 +161,7 @@ function ensureCwdTrusted(cwd) {
 // This is written ONCE per session at start() — the same settings.json is
 // reused across every turn, so changing it mid-session has no effect
 // (claude reads it at spawn time).
-function writeHookSettings(sinkDir, { permissionsEnabled }) {
+export function writeHookSettings(sinkDir, { permissionsEnabled }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
   // PreToolUse runs ALL registered hooks in order. We always capture the
