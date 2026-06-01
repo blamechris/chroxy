@@ -38,8 +38,9 @@
  */
 
 import { createRequire } from 'node:module'
-import { homedir } from 'node:os'
-import { resolve, sep } from 'node:path'
+import { mkdtempSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // CRITICAL: Patch `node:fs` via the CJS object obtained from `createRequire`,
@@ -54,6 +55,18 @@ import { fileURLToPath } from 'node:url'
 // — Node's `--import` flag in `package.json` enforces that ordering.
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
+
+// --- Redirect CHROXY_CONFIG_DIR to a per-process tmp dir ----------------------
+// Production helpers (models.js, connection-info.js, checkpoint-manager.js)
+// already honour `CHROXY_CONFIG_DIR`. Pointing it at a tmp dir up-front means
+// every code path that defaults to `~/.chroxy/...` lands in the tmp dir
+// instead — no per-test plumbing required, no real-home writes possible.
+// Tests that explicitly need to override it (e.g. supervisor.test.js) can
+// still set it in their own beforeEach and restore in afterEach — Node's
+// env reads are dynamic.
+if (!process.env.CHROXY_CONFIG_DIR) {
+  process.env.CHROXY_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-'))
+}
 
 // --- Capture the real home for the guard --------------------------------------
 const REAL_HOME = homedir()

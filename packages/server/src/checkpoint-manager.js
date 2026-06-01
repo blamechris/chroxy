@@ -13,7 +13,13 @@ const log = createLogger('checkpoint')
 
 const execFileAsync = promisify(execFileCb)
 
-const DEFAULT_CHECKPOINTS_DIR = join(homedir(), '.chroxy', 'checkpoints')
+// Resolve at call time, not module-load time, so tests that set
+// CHROXY_CONFIG_DIR in beforeEach are respected. Mirrors models.js and
+// connection-info.js (#4633).
+function defaultCheckpointsDir() {
+  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  return join(configDir, 'checkpoints')
+}
 const MAX_CHECKPOINTS_PER_SESSION = 50
 
 /**
@@ -63,15 +69,16 @@ export class CheckpointManager extends EventEmitter {
   /**
    * @param {object} [options]
    * @param {string} [options.checkpointsDir] - Override the on-disk directory
-   *   for checkpoint state files. Defaults to `~/.chroxy/checkpoints`. Tests
-   *   should pass a tmp directory to avoid contaminating the developer's
-   *   real state (#4633).
+   *   for checkpoint state files. Defaults to `$CHROXY_CONFIG_DIR/checkpoints`
+   *   (or `~/.chroxy/checkpoints` when unset). Tests should pass a tmp
+   *   directory (or set `CHROXY_CONFIG_DIR`) to avoid contaminating the
+   *   developer's real state (#4633).
    */
   constructor(options = {}) {
     super()
     this._checkpoints = new Map() // sessionId -> Checkpoint[]
     this._counters = new Map() // sessionId -> monotonic counter for default names
-    this._checkpointsDir = options.checkpointsDir || DEFAULT_CHECKPOINTS_DIR
+    this._checkpointsDir = options.checkpointsDir || defaultCheckpointsDir()
     this._ensureDir()
   }
 
