@@ -35,12 +35,19 @@ describe('getPartialSummary (#4243)', () => {
     expect(getPartialSummary('{"command":"rm -rf ')).toBeNull()
   })
 
-  it('returns null when none of the priority fields are strings', () => {
-    expect(getPartialSummary('{"foo":"bar"}')).toBeNull()
+  // #4655 — these used to return null and let the dashboard render
+  // `inputPartial.slice(0, 100)` (raw JSON head) as the collapsed
+  // preview. Now the generic-summary fallback kicks in so the bubble
+  // never leaks raw JSON for unknown shapes (ToolSearch, MCP tools,
+  // etc.). The priority-field path is still preferred when present.
+  it('falls back to generic key:value summary when no priority field is a string (#4655)', () => {
+    expect(getPartialSummary('{"foo":"bar"}')).toBe('foo: "bar"')
   })
 
-  it('returns null when a priority field is present but not a string', () => {
-    expect(getPartialSummary('{"command":42}')).toBeNull()
+  it('falls back to generic key:value summary when a priority field is present but not a string (#4655)', () => {
+    // The non-string priority field is rendered like any other key —
+    // we no longer special-case it as "missing".
+    expect(getPartialSummary('{"command":42}')).toBe('command: 42')
   })
 
   it('returns null on null / non-object parses', () => {
@@ -120,14 +127,19 @@ describe('nested priority-field walk (#4648 — Read tool input)', () => {
 
   it('nested walk stops at one level (no recursion)', () => {
     // Pathological deep nesting must NOT be walked — bounded preview cost
-    // is load-bearing on hot ToolBubble render path.
+    // is load-bearing on hot ToolBubble render path. #4655: the
+    // generic-fallback now renders the top-level key as `{...}` so
+    // unknown shapes never leak raw JSON; the nested filePath is
+    // intentionally not extracted.
     const deep = { a: { b: { c: { filePath: '/should/not/match' } } } }
-    expect(getInputSummary(deep)).toBe('')
+    expect(getInputSummary(deep)).toBe('a: {...}')
   })
 
   it('nested walk does not descend into arrays', () => {
+    // #4655: same as above — the array renders as `[N]`, never
+    // recursing into its elements to extract a nested filePath.
     const arr = { items: [{ filePath: '/should/not/match' }] }
-    expect(getInputSummary(arr)).toBe('')
+    expect(getInputSummary(arr)).toBe('items: [1]')
   })
 
   it('top-level priority wins over nested priority', () => {
@@ -139,5 +151,154 @@ describe('nested priority-field walk (#4648 — Read tool input)', () => {
   it('nested walk caps at PREVIEW_MAX_LEN like top-level', () => {
     const long = 'z'.repeat(500)
     expect(getInputSummary({ file: { filePath: long } })).toHaveLength(100)
+  })
+})
+
+// #4655 — generic-fallback summary for tools whose input shape has none
+// of the PRIORITY_FIELDS. Pre-fix this fell through to raw JSON head
+// (`{"matches":["AskUser..."],"query":"select:...","total_d...`) in the
+// collapsed bubble — verified live during v0.9.24 dogfood for the
+// ToolSearch tool. The class of bug grows with every new tool shape
+// (MCP tools, custom user tools, future Anthropic tools) — extending
+// PRIORITY_FIELDS per-tool is unbounded maintenance, hence the
+// generic-fallback path.
+describe('generic-fallback summary for unknown tool shapes (#4655)', () => {
+  describe('getInputSummary', () => {
+    it('renders ToolSearch input as compact key:value list', () => {
+      // Real ToolSearch shape — no priority field, two top-level keys.
+      // The collapsed bubble previously leaked the raw JSON head.
+      expect(getInputSummary({ query: 'select:AskUserQuestion', max_results: 5 }))
+        .toBe('query: "select:AskUserQuestion", max_results: 5')
+    })
+
+    it('renders MCP-style input with arbitrary keys as compact key:value list', () => {
+      // MCP tool inputs follow per-server schemas; no allowlist can keep up.
+      expect(getInputSummary({ url: 'https://example.com', timeout_ms: 5000 }))
+        .toBe('url: "https://example.com", timeout_ms: 5000')
+    })
+
+    it('renders boolean and null values inline', () => {
+      // Primitive rendering must cover the JSON value spectrum.
+      expect(getInputSummary({ enabled: true, retries: 0, cursor: null }))
+        .toBe('enabled: true, retries: 0, cursor: null')
+    })
+
+    it('renders nested objects as `{...}` placeholders, never raw JSON', () => {
+      // A nested object in an unknown-shape input is the canonical leak
+      // vector — must NOT inline-render its contents.
+      const out = getInputSummary({ options: { recursive: true, follow: false }, name: 'scan' })
+      expect(out).toBe('options: {...}, name: "scan"')
+      // Defensively pin: no curly brace from a nested object payload should leak.
+      expect(out).not.toContain('"recursive"')
+    })
+
+    it('renders arrays as `[N]` length placeholders', () => {
+      expect(getInputSummary({ items: [1, 2, 3], action: 'sort' }))
+        .toBe('items: [3], action: "sort"')
+    })
+
+    it('truncates long string values inside quotes so structure stays visible', () => {
+      const long = 'a'.repeat(120)
+      const out = getInputSummary({ query: long })
+      // Quoted, truncated to 37 chars + ellipsis inside the quotes.
+      expect(out).toBe(`query: "${'a'.repeat(37)}..."`)
+    })
+
+    it('caps the whole summary at PREVIEW_MAX_LEN (100 chars)', () => {
+      // Many short keys whose combined render exceeds the budget —
+      // later keys must be dropped, not truncated mid-value.
+      const wide: Record<string, unknown> = {}
+      for (let i = 0; i < 30; i++) wide[`k${i}`] = `v${i}`
+      const out = getInputSummary(wide)
+      expect(out.length).toBeLessThanOrEqual(100)
+    })
+
+    it('degrades to key-count summary when the first key:value would overflow', () => {
+      // The first key is itself longer than the budget — fall back to a
+      // plain "N keys: ..." listing so something useful still renders.
+      const longKey = 'x'.repeat(150)
+      const out = getInputSummary({ [longKey]: 'value', a: 1, b: 2 })
+      expect(out.startsWith('3 keys: ')).toBe(true)
+      expect(out.length).toBeLessThanOrEqual(100)
+    })
+
+    it('degrades cleanly without slicing mid-key when the first key name overflows', () => {
+      // Regression guard for Copilot finding on the degradation branch:
+      // a 150-char first key must NOT appear as a sliced partial
+      // identifier. The fallback drops keys that don't fit and emits
+      // only the prefix + any fitting names — never a half-rendered
+      // identifier.
+      const longKey = 'x'.repeat(150)
+      const out = getInputSummary({ [longKey]: 'value', shortA: 1, shortB: 2 })
+      expect(out.startsWith('3 keys: ')).toBe(true)
+      // The over-budget key must NOT appear at all (even partially):
+      // the rest after the prefix may only contain shorter key names
+      // that fit. No `xxxxxxxx...` partial-identifier leaks.
+      expect(out).not.toMatch(/xxxx/)
+      expect(out.length).toBeLessThanOrEqual(100)
+    })
+
+    it('degrades to key-count summary listing only keys that fit within budget', () => {
+      // Long first key, shorter follow-ups — the prefix + shorter keys
+      // should fit, the long key should be dropped entirely.
+      const longKey = 'x'.repeat(150)
+      const out = getInputSummary({ [longKey]: 'value', foo: 1, bar: 2 })
+      // Shorter keys remain visible; long key omitted entirely.
+      expect(out).toContain('foo')
+      expect(out).toContain('bar')
+      expect(out).not.toContain('x')
+    })
+
+    it('escapes embedded quotes in string values so previews stay unambiguous', () => {
+      // Naive `"${value}"` produced ambiguous `"foo "bar" baz"` previews —
+      // route through JSON.stringify so embedded quotes are escaped.
+      expect(getInputSummary({ note: 'foo "bar" baz' }))
+        .toBe('note: "foo \\"bar\\" baz"')
+    })
+
+    it('escapes embedded newlines so collapsed bubbles stay single-line', () => {
+      // A `\n` in the string would otherwise produce a multi-line
+      // collapsed summary and blow the bubble height. JSON.stringify
+      // emits `\\n` (escape sequence), keeping the preview one line.
+      expect(getInputSummary({ note: 'line1\nline2' }))
+        .toBe('note: "line1\\nline2"')
+    })
+
+    it('escapes backslashes in string values', () => {
+      // Use a non-PRIORITY_FIELD key (`win_path`) so we hit the generic
+      // fallback rather than the priority-field path.
+      expect(getInputSummary({ win_path: 'C:\\Users\\foo' }))
+        .toBe('win_path: "C:\\\\Users\\\\foo"')
+    })
+
+    it('returns "" for an empty object (no keys to summarize)', () => {
+      expect(getInputSummary({})).toBe('')
+    })
+
+    it('priority field wins over generic fallback even when both could apply', () => {
+      // Regression guard: adding the generic fallback must not displace
+      // the existing field-priority behaviour for known shapes.
+      expect(getInputSummary({ command: 'ls', extra: 'meta' })).toBe('ls')
+    })
+  })
+
+  describe('getPartialSummary', () => {
+    it('renders parseable ToolSearch input via the generic fallback', () => {
+      // The collapsed bubble must never leak raw JSON for unknown shapes —
+      // this is the canonical regression fixture.
+      const json = JSON.stringify({ query: 'select:AskUserQuestion', max_results: 5 })
+      expect(getPartialSummary(json)).toBe('query: "select:AskUserQuestion", max_results: 5')
+    })
+
+    it('still returns null for mid-stream unparseable buffers', () => {
+      // The Bash early-abort UX (#4063) depends on the verbatim-tail
+      // fallback for mid-stream chunks — the generic fallback only
+      // applies to fully-parsed structured objects.
+      expect(getPartialSummary('{"query":"select:')).toBeNull()
+    })
+
+    it('returns null for parseable but empty object (nothing to summarize)', () => {
+      expect(getPartialSummary('{}')).toBeNull()
+    })
   })
 })
