@@ -77,7 +77,16 @@ export function isFreeformAnswer(value: unknown): value is OtherFreeformAnswer {
   // footgun.
   const keys = Object.keys(value);
   if (keys.length !== 2) return false;
-  if (!('otherLabel' in value) || !('freeformText' in value)) return false;
+  // `hasOwnProperty.call` rather than `'key' in value` so an object with
+  // two unrelated OWN keys but `otherLabel` / `freeformText` inherited
+  // from its prototype (e.g.
+  // `Object.create({ otherLabel: 'x', freeformText: 'y' })`) cannot slip
+  // through. The `in` operator walks the prototype chain — that breaks
+  // the stated "exactly two named keys" guarantee and would let a
+  // prototype-pollution payload misroute as freeform. Same defence the
+  // `isVoiceInputMode` guard uses (#4853).
+  if (!Object.prototype.hasOwnProperty.call(value, 'otherLabel')) return false;
+  if (!Object.prototype.hasOwnProperty.call(value, 'freeformText')) return false;
   const record = value as Record<string, unknown>;
   return typeof record.otherLabel === 'string'
     && typeof record.freeformText === 'string';

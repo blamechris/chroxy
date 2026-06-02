@@ -147,6 +147,50 @@ describe('isFreeformAnswer (#4875)', () => {
     })
   })
 
+  describe('rejects prototype-pollution-style payloads', () => {
+    it('returns false when otherLabel + freeformText are inherited, not own', () => {
+      // Copilot review of #4900: an object with two unrelated OWN keys
+      // but `otherLabel` / `freeformText` inherited via its prototype
+      // chain MUST be rejected. The guard uses `hasOwnProperty.call`
+      // rather than `'key' in value` so the `in` operator's prototype-
+      // walking behaviour cannot let a tampered payload pass.
+      const proto = { otherLabel: 'tampered', freeformText: 'tampered' }
+      const value = Object.create(proto) as Record<string, unknown>
+      value.foo = 'a'
+      value.bar = 'b'
+      // Sanity: confirm the test fixture actually triggers the unsafe
+      // path the guard is defending against — Object.keys returns only
+      // own keys (length 2 from foo/bar), and `'otherLabel' in value`
+      // returns true via the prototype chain.
+      expect(Object.keys(value).length).toBe(2)
+      expect('otherLabel' in value).toBe(true)
+      expect('freeformText' in value).toBe(true)
+      // Guard must still reject.
+      expect(isFreeformAnswer(value)).toBe(false)
+    })
+
+    it('returns false for an object created with Object.create(null) and the wrong own keys', () => {
+      // Null-prototype objects are the other classic prototype-pollution
+      // shape. Two own keys named anything other than the named pair
+      // must still fail even though there's no prototype to inherit
+      // from.
+      const value = Object.create(null) as Record<string, unknown>
+      value.foo = 'a'
+      value.bar = 'b'
+      expect(isFreeformAnswer(value)).toBe(false)
+    })
+
+    it('returns true for an object created with Object.create(null) and the right own keys', () => {
+      // Conversely, a null-prototype object with the canonical own keys
+      // is still a valid freeform shape — the guard is structural, not
+      // identity-based. Documents the intentional behaviour.
+      const value = Object.create(null) as Record<string, unknown>
+      value.otherLabel = 'Other'
+      value.freeformText = 'typed'
+      expect(isFreeformAnswer(value)).toBe(true)
+    })
+  })
+
   describe('narrows the type for the caller', () => {
     it('narrows `unknown` to `OtherFreeformAnswer` after a passing guard', () => {
       const raw: unknown = { otherLabel: 'Other', freeformText: 'typed' }
