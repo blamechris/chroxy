@@ -195,6 +195,20 @@ export {
   formatToolName,
 } from './group-messages'
 
+// #4806: shared ChatView message pipeline — lifted from dashboard's
+// `useChatMessages` hook so both dashboard and mobile derive the same
+// chat-view representation (closes the silent #4615 stalled-prompt gap
+// on mobile as a side effect).
+export type {
+  ChatViewMessage,
+  ChatViewPipelineResult,
+} from './buildChatViewMessages'
+
+export {
+  buildChatViewMessages,
+  toChatViewMessage,
+} from './buildChatViewMessages'
+
 // #4243: shared tool-input summary helpers — both dashboard and mobile
 // ToolBubble derive the collapsed-preview string from the same
 // field-priority extraction (`command` → `file_path` → `path` →

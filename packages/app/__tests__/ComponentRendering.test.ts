@@ -147,9 +147,12 @@ describe('ChatView component', () => {
     expect(chatViewSrc).toMatch(/Starting Claude Code\.\.\./)
   })
 
-  test('imports groupMessages from the shared store-core selector', () => {
-    expect(chatViewSrc).toMatch(/import\s*\{[^}]*groupMessages[^}]*\}\s*from\s*'@chroxy\/store-core'/)
-    expect(chatViewSrc).toMatch(/import\s*\{[^}]*applyStreamingOverlay[^}]*\}\s*from\s*'@chroxy\/store-core'/)
+  test('imports buildChatViewMessages from the shared store-core pipeline (#4806)', () => {
+    // Previously imported groupMessages + applyStreamingOverlay directly;
+    // now delegates to the shared buildChatViewMessages pure function
+    // (single source of truth for filter + group + overlay + tail-id +
+    // stalledPromptIds across dashboard + mobile).
+    expect(chatViewSrc).toMatch(/import\s*\{[^}]*buildChatViewMessages[^}]*\}\s*from\s*'@chroxy\/store-core'/)
   })
 
   test('listens for reduce motion accessibility setting', () => {
