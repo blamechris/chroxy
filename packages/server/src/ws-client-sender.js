@@ -1,4 +1,5 @@
 import { encrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
+import { metrics } from './metrics.js'
 
 /** Backpressure thresholds (bytes) */
 const WARN_THRESHOLD = 64 * 1024    // 64KB — log warning
@@ -12,6 +13,16 @@ const WARN_THROTTLE_MS = 30_000
  * Handles JSON serialization, optional encryption, sequence numbering,
  * post-auth queue buffering, flush-overflow buffering, and post-send
  * backpressure monitoring.
+ *
+ * Post-send backpressure is intentionally distinct from the pre-send
+ * check in `WsBroadcaster._sendOneWithBackpressure` (#4775). The
+ * broadcaster only protects multi-recipient broadcast paths; single-
+ * recipient sends from `WsServer._send` (pong, token_rotated,
+ * auth_fail, rate_limited, server_status, error, etc.) bypass the
+ * broadcaster entirely, so this post-send path is the only thing that
+ * evicts a slow client on those code paths. Per #4804 both paths must
+ * emit `backpressure.disconnects` so alerting catches either eviction
+ * source — see `metrics.inc('backpressure.disconnects')` below.
  *
  * @param {object} log - Logger with .error() and .warn() methods
  * @param {object} [opts] - Optional overrides (for testing)
@@ -56,6 +67,10 @@ export function createClientSender(log, opts = {}) {
       const buffered = ws.bufferedAmount
       if (buffered > evictThreshold && client) {
         log.warn(`Backpressure: evicting client ${client.id} — bufferedAmount ${buffered} exceeds ${evictThreshold} bytes`)
+        // #4804: unify observability with WsBroadcaster._sendOneWithBackpressure
+        // so both backpressure systems feed the same metric. Without this the
+        // single-recipient eviction path silently bypasses alerting.
+        metrics.inc('backpressure.disconnects')
         ws.close(4008, 'Backpressure: slow client evicted')
       } else if (buffered > warnThreshold && client) {
         const now = Date.now()
