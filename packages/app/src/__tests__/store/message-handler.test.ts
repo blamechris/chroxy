@@ -289,6 +289,100 @@ describe('session_stopped handler (#4879)', () => {
   });
 });
 
+// #4909: the `session_stopped` event is transient and NOT recorded into
+// per-session history (#4868 wire path), so it isn't replayed on reconnect.
+// However, the client-side `stoppedAt`/`stoppedCode` derived state survives
+// the WebSocket teardown in Zustand store memory — the strip flashes back
+// into view until activity resumes. `history_replay_start` is the canonical
+// "reconnect handshake" event and clears the stale marker for the same
+// reason it clears `activeAgents`/`isPlanPending`.
+describe('history_replay_start clears stale session_stopped marker (#4909)', () => {
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  it('clears stoppedAt + stoppedCode on history_replay_start for the target session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), stoppedAt: 1700000000000, stoppedCode: 143 },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+  });
+
+  it('clears stoppedAt for a background (non-active) session reconnecting', () => {
+    // The strip can flash on an inactive session too — `history_replay_start`
+    // targets `replayTargetId` (per-session) rather than activeSessionId so
+    // a background session reconnecting also sheds its stale marker.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: { ...createEmptySessionState(), stoppedAt: 1700000000000, stoppedCode: 0 },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s2.stoppedAt).toBeNull();
+    expect(state.sessionStates.s2.stoppedCode).toBeNull();
+    // s1 (active, not the replay target) is untouched.
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+  });
+
+  it('no-op when neither field is set (avoids unnecessary state churn)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const sessionStatesBefore = store.getState().sessionStates;
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    const sessionStatesAfter = store.getState().sessionStates;
+
+    // The empty patch optimization in updateSession should leave the
+    // sessionStates map reference unchanged when there's nothing to clear.
+    expect(sessionStatesAfter.s1.stoppedAt).toBeNull();
+    expect(sessionStatesAfter.s1.stoppedCode).toBeNull();
+    expect(sessionStatesAfter).toBe(sessionStatesBefore);
+  });
+
+  it('handles unknown session id without throwing (defensive — server may race)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() =>
+      _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'unknown-id' }),
+    ).not.toThrow();
+
+    expect(store.getState().sessionStates).not.toHaveProperty('unknown-id');
+  });
+});
+
 describe('session_timeout handler', () => {
   it('removes timed-out session from sessionStates and sessions list', () => {
     const store = createMockStore({
