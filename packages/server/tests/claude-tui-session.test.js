@@ -4676,6 +4676,76 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._pendingUserAnswer, null, 'pending cleared')
     })
 
+    // #4882 — minimal reproduction of the all-single-select wedge: a TWO-
+    // question pure-single-select form. The #4882 issue body specifically
+    // calls out "a 2+ question all-single-select prompt" as the empirical
+    // target; pinning the 2-q variant alongside the 3-q variant above makes
+    // the minimum failing shape explicit so a future regression that subtly
+    // breaks the smallest-N case can't slip past tests that only assert
+    // against larger forms.
+    //
+    // Q2 picks option 2 ('q' → '2') rather than option 1 so the last
+    // single-select digit is DISTINCT from the Submit screen's '1' — that
+    // way a future reorder bug that swapped the Q2 digit and the Submit
+    // digit would change the pinned byte sequence (currently `'2','2','1'`)
+    // instead of being invisible inside `'1','1','1'`.
+    //
+    // NOTE: this pins the bytes the DRIVER writes per the #4867 fix; the
+    // upstream empirical recorder pass against a live claude TUI is still
+    // outstanding (tracked under #4882) — until that runs, the trailing
+    // `\r` and the 150ms settle remain "best-effort defensive" not
+    // "empirically confirmed". Driver shape pinned here so any reconciliation
+    // PR after the recorder pass updates this test alongside the empirical
+    // findings recorded under #4882.
+    it('drives a pure all-single-select 2-question form with settle + trailing Enter (#4882)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_all_single_2q', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'b',  // → '2' (auto-advances)
+        'Q2?': 'q',  // → '2' (auto-advances to Submit screen) — distinct from Submit's '1'
+      }
+
+      session.respondToQuestion('', answersMap)
+      // Wait past the 150ms settle + per-char throttle + Enter.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      // Byte sequence (pinned by #4867 driver fix; empirical confirmation
+      // outstanding under #4882): paste-disable, Q1 → '2', Q2 → '2',
+      // [settle 150ms], Submit '1', trailing Enter '\r', paste-enable.
+      // Q2's '2' is intentionally distinct from Submit's '1' so a reorder
+      // regression would mutate the pinned sequence (see test comment above).
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '2', '2', '1', '\r', '\x1b[?2004h'],
+        `expected all-single-select 2-q sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // The settle MUST land between the last single-select digit (Q2's '2')
+      // and the Submit '1'. After paste-disable (idx 0), Q1 writes '2' (idx 1),
+      // Q2 writes '2' (idx 2), then the 150ms settle fires, then Submit '1'
+      // (idx 3). Measure the gap between idx 2 and idx 3.
+      const q2DigitWriteIdx = 2
+      const submitWriteIdx = 3
+      assert.equal(writes[q2DigitWriteIdx], '2', 'Q2 single-select pick at index 2')
+      assert.equal(writes[submitWriteIdx], '1', 'Submit at index 3')
+      const gapMs = writeEvents[submitWriteIdx].t - writeEvents[q2DigitWriteIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `expected settle gap >= 140ms between Q2 digit and Submit, got ${gapMs}ms`,
+      )
+
+      assert.equal(session._pendingUserAnswer, null, 'pending cleared')
+    })
+
     // #4635 — when ONLY the last question is single-select (e.g. multi
     // then single), still need the settle. Mirror of the all-single-select
     // case but with a leading multi-select to confirm the settle decision
