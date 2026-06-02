@@ -471,6 +471,75 @@ describe('WsBroadcaster', () => {
     })
   })
 
+  describe('backpressure eviction dedupe (#4834)', () => {
+    beforeEach(() => {
+      metrics.reset()
+    })
+
+    it('closes the client EXACTLY ONCE across N broadcasts after maxDrops', () => {
+      // Once a slow client crosses maxDrops, ws.close() is called. ws.close()
+      // is async — subsequent broadcasts in the same synchronous chain still
+      // see bufferedAmount > threshold and would otherwise re-fire close +
+      // re-increment backpressure.disconnects. Dedupe via sticky _evicted.
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      // Make close() count invocations
+      let closeCount = 0
+      const originalClose = ws1.close
+      ws1.close = (code, reason) => { closeCount++; originalClose.call(ws1, code, reason) }
+      const client1 = createFakeClient({ id: 'c1' })
+      clients.set(ws1, client1)
+
+      // 10 broadcasts. First 3 drop and trigger close. Remaining 7 should
+      // NOT re-call close or re-increment backpressure.disconnects.
+      for (let i = 0; i < 10; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(closeCount, 1, 'ws.close called exactly once')
+      assert.equal(metrics.get('backpressure.disconnects'), 1, 'disconnect metric incremented exactly once')
+    })
+
+    it('sets sticky client._evicted flag on first eviction', () => {
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      const client1 = createFakeClient({ id: 'c1' })
+      clients.set(ws1, client1)
+
+      // Trigger maxDrops worth of broadcasts
+      for (let i = 0; i < 5; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(client1._evicted, true, 'client marked evicted')
+    })
+
+    it('eviction dedupe is per-client (a separate client object still evicts)', () => {
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+
+      const wsA = createFakeWs({ bufferedAmount: 200 })
+      const clientA = createFakeClient({ id: 'cA' })
+      const wsB = createFakeWs({ bufferedAmount: 200 })
+      const clientB = createFakeClient({ id: 'cB' })
+      clients.set(wsA, clientA)
+      clients.set(wsB, clientB)
+
+      for (let i = 0; i < 10; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(wsA.closed, true, 'client A closed')
+      assert.equal(wsB.closed, true, 'client B closed')
+      assert.equal(metrics.get('backpressure.disconnects'), 2, 'one disconnect per client')
+    })
+  })
+
   describe('_broadcastClientJoined() backpressure', () => {
     it('skips peers in backpressure and increments their drop counter', () => {
       broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
