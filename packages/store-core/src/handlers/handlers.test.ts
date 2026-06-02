@@ -1001,15 +1001,20 @@ describe('handleSessionStopped', () => {
     expect(result.patch.stoppedAt).toBe(1_700_000_000_000)
   })
 
-  it('returns stoppedCode: null when code is non-numeric (defensive)', () => {
-    // ServerSessionStoppedSchema enforces integer at the protocol layer,
-    // but the handler is also called from untrusted/test paths — collapse
-    // anything non-numeric to null rather than poisoning stoppedCode with
-    // a string or NaN that the renderer would have to defend against.
+  it('returns stoppedCode: null when code is non-integer (defensive)', () => {
+    // ServerSessionStoppedSchema enforces integer at the protocol layer
+    // (`z.number().int()`), but the handler is also called from
+    // untrusted/test paths — collapse anything non-integer to null
+    // rather than poisoning stoppedCode with a string, NaN, Infinity,
+    // or a fractional value (which would render "exit 1.5" in the UI).
     expect(handleSessionStopped({ code: 'not a number' }, null, fixedNow).patch.stoppedCode).toBeNull()
     expect(handleSessionStopped({ code: null }, null, fixedNow).patch.stoppedCode).toBeNull()
     expect(handleSessionStopped({ code: NaN }, null, fixedNow).patch.stoppedCode).toBeNull()
     expect(handleSessionStopped({ code: Infinity }, null, fixedNow).patch.stoppedCode).toBeNull()
+    // Fractional values get the same treatment — the schema is `int()`,
+    // not `finite()`, so a buggy producer sending 1.5 must NOT render.
+    expect(handleSessionStopped({ code: 1.5 }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: -0.1 }, null, fixedNow).patch.stoppedCode).toBeNull()
   })
 
   it('returns sessionId: null when no sessionId on msg AND no active session (broadcast guard semantics handled by caller)', () => {

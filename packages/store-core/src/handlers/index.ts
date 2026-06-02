@@ -1180,12 +1180,16 @@ export function handleSessionStopped(
   activeSessionId: string | null,
   now: () => number = Date.now,
 ): SessionPatch {
-  // `code` is optional on the wire (ServerSessionStoppedSchema). Preserve
-  // 0 explicitly — it's the common clean-SIGINT-exit case and is a
-  // meaningful signal, not a "missing" value. Non-finite numbers (NaN,
-  // Infinity from a buggy producer) collapse to null so renderers don't
-  // need to defend against them.
-  const code = typeof msg.code === 'number' && Number.isFinite(msg.code) ? msg.code : null
+  // `code` is optional on the wire (ServerSessionStoppedSchema declares it
+  // as `z.number().int()`). Mirror that integer constraint here so a
+  // buggy producer can't poison `stoppedCode` with a fractional value
+  // (e.g. rendering "exit 1.5") or with NaN / Infinity. `Number.isInteger`
+  // already excludes all three failure modes; matches the existing
+  // protocol-int validation pattern used elsewhere in this file (see
+  // `protoRaw` around line 798). Preserve 0 explicitly — it's the common
+  // clean-SIGINT-exit case and is a meaningful signal, not a "missing"
+  // value.
+  const code = typeof msg.code === 'number' && Number.isInteger(msg.code) ? msg.code : null
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
     patch: {
