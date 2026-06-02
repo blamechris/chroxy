@@ -50,6 +50,7 @@ import {
   handleStreamStart as sharedStreamStart,
   handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
+  parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
@@ -115,7 +116,6 @@ import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
   Checkpoint,
-  ConnectedClient,
   ConnectionContext,
   ConnectionState,
   CustomAgent,
@@ -973,77 +973,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!ctx.isReconnect) hapticSuccess();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
-      // Extract server context fields via shared handler (#3102).
-      // The shared handler accepts both 'cli' and 'terminal'; the app has no
-      // terminal view so we narrow 'terminal' to null (matches prior inline
+      // #4766: full wire-shape decode lives in the shared parser
+      // (handleAuthOk + parseConnectedClients). The shared handler accepts
+      // both 'cli' and 'terminal' as serverMode; the app has no terminal
+      // view so we narrow 'terminal' to null (matches prior inline
       // `msg.serverMode === 'cli' ? 'cli' : null` behaviour).
-      const authPayload = sharedAuthOk(msg);
-      const authServerMode: 'cli' | null = authPayload.serverMode === 'cli' ? 'cli' : null;
-      const authSessionCwd = authPayload.sessionCwd;
-      const authServerVersion = authPayload.serverVersion;
-      const authLatestVersion = authPayload.latestVersion;
-      const authServerCommit = authPayload.serverCommit;
-      const authProtocolVersion = authPayload.protocolVersion;
-      // #3760: server-advertised inactivity timeout. Older servers omit this
-      // field — leave it null so ActivityIndicator falls back to its built-in
-      // reference timeout. Mirror the server's Number.isFinite guard so
-      // Infinity/NaN never reach the store.
-      const authResultTimeoutMs =
-        typeof msg.resultTimeoutMs === 'number' &&
-        Number.isFinite(msg.resultTimeoutMs) &&
-        msg.resultTimeoutMs > 0
-          ? msg.resultTimeoutMs
-          : null;
-      // Parse connected clients list with self-detection via clientId
-      const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
-      const clients: ConnectedClient[] = rawClients
-        .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
-        .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
-          clientId: c.clientId,
-          deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
-          deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
-          platform: typeof c.platform === 'string' ? c.platform : 'unknown',
-          isSelf: c.clientId === myClientId,
-        }));
+      const auth = sharedAuthOk(msg);
+      const authServerMode: 'cli' | null = auth.serverMode === 'cli' ? 'cli' : null;
+      const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
-      // Parse web feature status from auth_ok
-      const webFeaturesRaw = msg.webFeatures as Record<string, unknown> | undefined;
-      const webFeatures = webFeaturesRaw ? {
-        available: !!webFeaturesRaw.available,
-        remote: !!webFeaturesRaw.remote,
-        teleport: !!webFeaturesRaw.teleport,
-      } : { available: false, remote: false, teleport: false };
-
-      // #4560: parse server-advertised capability map. Older servers omit the
-      // field; treat absence as "no advertised capabilities" so feature-gated
-      // UI hides itself fail-closed (rather than silently no-oping clicks
-      // against unimplemented WS handlers). Coerce values to boolean so a
-      // malformed entry can't accidentally enable a gate.
-      const capabilitiesRaw = msg.capabilities as Record<string, unknown> | undefined;
-      const serverCapabilities: Record<string, boolean> = {};
-      if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
-        for (const [k, v] of Object.entries(capabilitiesRaw)) {
-          serverCapabilities[k] = v === true;
-        }
-      }
-
-
-      // On reconnect, preserve messages and terminal buffer
       // If server provided a sessionToken (via pairing), use it for future auth
-      const effectiveToken = typeof msg.sessionToken === 'string' ? msg.sessionToken : ctx.token;
+      const effectiveToken = auth.sessionToken ?? ctx.token;
       const connectedState = {
         viewingCachedSession: false,
         socket: ctx.socket,
         claudeReady: false,
         streamingMessageId: null,
-        myClientId: myClientId, // kept for backward compat; canonical source is useMultiClientStore
+        myClientId: auth.myClientId, // kept for backward compat; canonical source is useMultiClientStore
         connectedClients: clients, // kept for backward compat; canonical source is useMultiClientStore
         // Clear shutdown state on successful connect
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
-        webFeatures,
+        webFeatures: auth.webFeatures,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -1059,23 +1011,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         });
       }
       // Sync multi-client store (canonical source for multi-client state)
-      useMultiClientStore.getState().setMyClientId(myClientId);
+      useMultiClientStore.getState().setMyClientId(auth.myClientId);
       useMultiClientStore.getState().setConnectedClients(clients);
       // Sync connection lifecycle store
       useConnectionLifecycleStore.getState().setConnectionPhase('connected');
       useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, effectiveToken);
       useConnectionLifecycleStore.getState().setServerInfo({
         serverMode: authServerMode,
-        serverVersion: authServerVersion,
-        latestVersion: authLatestVersion,
-        serverCommit: authServerCommit,
-        serverProtocolVersion: authProtocolVersion,
-        serverResultTimeoutMs: authResultTimeoutMs,
-        sessionCwd: authSessionCwd,
+        serverVersion: auth.serverVersion,
+        latestVersion: auth.latestVersion,
+        serverCommit: auth.serverCommit,
+        serverProtocolVersion: auth.protocolVersion,
+        serverResultTimeoutMs: auth.resultTimeoutMs,
+        // #4766: previously dropped on mobile — StreamStallChip couldn't
+        // humanise the headline phrase without this. Dashboard already
+        // threaded it; now the shared parser exposes it to both.
+        streamStallTimeoutMs: auth.streamStallTimeoutMs,
+        sessionCwd: auth.sessionCwd,
         // #4560: overwrite stale capabilities from a previous connection on
         // every auth_ok so a reconnect against a different (or older) server
         // can't have UI gates left enabled by previously-advertised flags.
-        serverCapabilities,
+        serverCapabilities: auth.serverCapabilities,
       });
       useConnectionLifecycleStore.getState().setConnectionError(null, 0);
       useConnectionLifecycleStore.getState().setUserDisconnected(false);
@@ -1084,7 +1040,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       startHeartbeat(ctx.socket);
 
       // Initiate key exchange if server requires encryption
-      if (msg.encryption === 'required') {
+      if (auth.encryption === 'required') {
         _ctx.pendingKeyPair = createKeyPair();
         _ctx.pendingSalt = generateConnectionSalt();
         // Send key_exchange plaintext (before encryption is active)
