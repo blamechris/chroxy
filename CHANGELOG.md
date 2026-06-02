@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.35] - 2026-06-02
+
+Bug-fix release driven by a live two-session reproduction: clicking a large-history CLI session tab in the dashboard reliably triggered a "Reconnecting…" loop and bounced the user back to the first session, making the offending session unreachable. Diagnosis traced this to a P0 trap composed of two server bugs (#4833 backpressure-eviction during chunked history replay + #4835 active-session-reset on every reconnect) plus a long-tail of voice-input + question-flow + docker auth polish from prior audits.
+
+### Added
+
+- **Per-device active-session persistence (#4835 → #4847):** `~/.chroxy/device-preferences.json` records the last `activeSessionId` per `deviceId`. On reconnect, `sendPostAuthInfo` restores the persisted session instead of falling back to `defaultSessionId || firstSessionId`. Boundary cases: `boundSessionId` clients still win their fail-closed path; if the persisted session was destroyed, falls back to `firstSessionId` without erroring; multi-device users keep independent active sessions. File is `0600`. Pruning of stale entries tracked in #4849; atomic writes tracked in #4850.
+- **Bearer-token authority threat model doc (#4830 → #4839):** `docs/security/bearer-token-authority.md` formalises trust boundaries, token lifecycle, paired vs bound vs unbound clients, and TLS-via-Cloudflare-tunnel posture. Linked from CLAUDE.md.
+- **`useDebouncedSetter` hook (#4739 → #4842):** new shared hook in `packages/dashboard/src/hooks/`. Migrated `SettingsPanel` preamble + `QuietHoursEditor` (net −92 lines in SettingsPanel.tsx). Includes regression fixes for asymmetric-equals field-clobber on own-echo and optimistic-flush on save.
+
+### Changed
+
+- **`VoiceInputMode` consolidated in `@chroxy/store-core` (#4825 → #4841):** single canonical declaration in `packages/store-core/src/types.ts`. Mobile `useSpeechRecognition.ts` + dashboard `useVoiceInput.ts` re-export for back-compat. Exhaustive `Record<VoiceInputMode, true>` guard in `SettingsPanel` so new modes light up a type error instead of silently falling through. Shim removal tracked in #4852; runtime type-guard helper tracked in #4853.
+- **`SpeechModule.start()` options extracted into a single helper (#4827 → #4837):** `buildStartOptions(lang)` in `useSpeechRecognition.ts`. Both fresh-start and continuous-restart paths now route through it — drift between sites is structurally impossible.
+
+### Fixed
+
+- **🚨 P0 — dashboard "Reconnecting…" loop on tab switch (#4833 → #4845):** `replayHistory` chunked by message count (20), not bytes. A single chunk with fat `tool_result` payloads (file reads, diffs, long shell output) could push `bufferedAmount` past the 1 MB eviction threshold in `ws-client-sender.js`, triggering `ws.close(4008)` and an immediate reconnect. With #4835 still active, this created an unbreakable trap for large-history sessions. Fix adds `scheduleAfterDrain()` + mid-chunk early-break at 256 KB to both `replayHistory` and `flushPostAuthQueue`.
+- **🚨 P0 — active session resets on every reconnect (#4835 → #4847):** see "Added" above. Compounds #4833: every eviction would bounce the dashboard back to `firstSessionId`, and clicking the original session re-triggered the eviction. Net effect: large-history sessions were unreachable from the dashboard. Now persisted per-device.
+- **Backpressure eviction logged + metric-incremented N times per single close (#4834 → #4843):** `ws.close()` is async, so subsequent sends in the same synchronous chain re-tripped the eviction check. Added sticky `client._evicted` flag in both `ws-client-sender.js` (post-send path) and `ws-broadcaster.js` (`_sendOneWithBackpressure`). Single close = single log + single metric increment.
+- **`useSpeechRecognition.startListening` now tears down a prior session (#4826 → #4838):** mirrors the #4789 stop-path teardown so calling `start()` while a session is mid-flight aborts the prior recogniser before starting fresh. Adds `inFlightRef` to track in-flight state synchronously (avoids the React-state race the old code had). Async-abort end-event race defence-in-depth tracked in #4851.
+- **`isRecognizing` no longer flickers on soft-error restart in continuous mode (#4829 → #4836):** soft errors (`no-speech`, `network`, `speech-timeout`) in continuous mode used to flip `isRecognizing` false then immediately back to true on the auto-restart, causing a brief UI blip. Now gated on continuous-mode + soft-error: leave `isRecognizing` true across the restart, mirroring the dashboard's `useVoiceInput.onerror` behaviour. Hard errors still flip false.
+- **Docker provider auth hint no longer suggests `claude login` on the host (#4780 → #4844):** static `preflight()` override on `DockerSession` + `DockerSdkSession` drops `CLAUDE_CODE_OAUTH_TOKEN` from envVars (not forwarded by `_startContainer` anyway) and surfaces container-aware `ANTHROPIC_API_KEY` guidance instead of inheriting the misleading host-CLI hint.
+- **Mic toggle in dashboard SettingsPanel — clearer labels + a11y (#4796 → #4840):** `aria-describedby` links the mode picker to its hint row, and the hint copy now quotes the dropdown labels verbatim instead of inventing "Continuous mode" / "Silence mode" shorthand. (The bounce-back-on-click symptom was actually fixed back in #4789; this PR ships the remaining clarity ACs and adds two regression tests.)
+- **Single-question `AskUserQuestion` no longer silently drops with 10+ options (#4746 → #4846):** parity with the #4625 multi-question fix. The single-question path now teardown with `ASK_USER_QUESTION_TOO_MANY_OPTIONS` at `idx >= 9` instead of silently picking the wrong (or no) option. Native >9-option support tracked in #4848.
+
 ## [Unreleased]
 
 ### Changed
