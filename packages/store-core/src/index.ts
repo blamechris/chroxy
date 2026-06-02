@@ -16,14 +16,11 @@ export { DEFAULT_CONTEXT_WINDOW } from './types'
 // TS error in the guard, not a silent drop at the call site.
 export { isVoiceInputMode } from './types'
 
-// #4875: shared typed predicate + type for the AskUserQuestion "Other /
-// freeform" answer payload. Mobile store + mobile screen now narrow off
-// this single guard so widening `SelectOptionValue` to a third object
-// shape can't silently misroute it as freeform. The dashboard store
-// still has its own inline 5-condition detector and its own
-// `OtherFreeformAnswer` declaration; migrating it is tracked in #4901
-// so this export becomes the single source of truth across all three
-// call sites.
+// #4875 / #4901: shared typed predicate + type for the AskUserQuestion
+// "Other / freeform" answer payload. Mobile store + mobile screen (#4875)
+// and the dashboard store + `QuestionPrompt.tsx` (#4901) all narrow off
+// this single guard, so widening `SelectOptionValue` to a third object
+// shape can't silently misroute it as freeform on either client.
 export { isFreeformAnswer } from './freeform-answer'
 export type { OtherFreeformAnswer } from './freeform-answer'
 
