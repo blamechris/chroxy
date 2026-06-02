@@ -422,23 +422,20 @@ export interface MessageInputActions {
   /**
    * Send a `user_question_response` answer to the server.
    *
-   * Accepts two answer shapes:
+   * Accepts three answer shapes:
    * - `string` — legacy single-question / free-text path. Wire shape stays
    *   `{ type, answer, toolUseId? }` so older servers keep working.
    * - `Record<string, string | string[]>` — multi-question form path
-   *   (#4604 / #4621 / #4735). Populates the `answers` field per
-   *   `UserQuestionResponseSchema` (which accepts `string | string[]` per
-   *   question) AND a flattened string `answer` summary so older servers
-   *   reading only `answer` still see a readable line.
-   *
-   * Mirrors the `string` and `Record<string, string | string[]>` branches of
-   * `sendUserQuestionResponse` on the dashboard (#4760). The dashboard
-   * additionally accepts a `{ otherLabel, freeformText }` shape for the
-   * single-question Other / freeform path (#4651); mobile parity for that
-   * shape is tracked separately in #4755 and is out of scope here.
+   *   (#4604 / #4621 / #4735 / #4761). Populates the `answers` field per
+   *   `UserQuestionResponseSchema` and a flattened string `answer` summary.
+   * - `{ otherLabel, freeformText }` — single-question Other / freeform
+   *   path (#4755, mobile parity with dashboard #4651). Wire payload is
+   *   `{answer: <otherLabel>, freeformText: <typed text>}` so the server
+   *   drives the two-stage TUI write (Other digit → text-input prompt →
+   *   freeform text + Enter).
    */
   sendUserQuestionResponse: (
-    answer: string | Record<string, string | string[]>,
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
     toolUseId?: string,
   ) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;

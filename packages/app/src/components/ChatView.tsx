@@ -19,6 +19,7 @@ import { COLORS } from '../constants/colors';
 import { ActivityGroup } from './chat/ActivityGroup';
 import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
+import type { SelectOptionValue } from './chat/MessageBubble';
 import { buildChatViewMessages } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 
@@ -28,7 +29,16 @@ export interface ChatViewProps {
   messages: ChatMessage[];
   scrollViewRef: React.RefObject<ScrollView | null>;
   claudeReady: boolean;
-  onSelectOption: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
+  /**
+   * #4755 — `value` is `string` for regular option taps + zero-options
+   * free-text answers, or `{otherLabel, freeformText}` (`OtherFreeformAnswer`)
+   * when the user picked the synthesized "Other" option and typed
+   * freeform text. The widened shape rides through to
+   * `sendUserQuestionResponse`, which serializes the wire payload
+   * (`answer: <otherLabel>, freeformText`). See
+   * `MessageBubble.SelectOptionValue` for the union type.
+   */
+  onSelectOption: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;

@@ -24,6 +24,7 @@ import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
+import type { SelectOptionValue } from '../components/chat/MessageBubble';
 import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { WebTasksPanel } from '../components/WebTasksPanel';
@@ -671,17 +672,42 @@ export function SessionScreen() {
   };
 
   // Handle tapping a prompt option
-  const handleSelectOption = (value: string, messageId: string, requestId?: string, toolUseId?: string) => {
+  // #4755 — `value` widened to `SelectOptionValue` to carry the
+  // single-question Other / freeform payload (`{otherLabel, freeformText}`).
+  // We forward the object shape directly to `sendUserQuestionResponse` so
+  // the wire layer can emit `{answer: <otherLabel>, freeformText}` for the
+  // server's two-stage TUI write (Other digit → text-input prompt →
+  // freeform text + Enter). The local `markPromptAnswered` summary stores
+  // the typed text — not the literal "Other" label — matching the
+  // post-answer UX of the free-text-only path (#1245) so the chat bubble
+  // shows what the user actually wrote. Mirrors dashboard App.tsx +
+  // `formatQuestionAnswerSummary` for the freeform shape (#4651).
+  const handleSelectOption = (
+    value: SelectOptionValue,
+    messageId: string,
+    requestId?: string,
+    toolUseId?: string,
+  ) => {
+    const isFreeformAnswer = typeof value === 'object' && value !== null
+      && 'otherLabel' in value && 'freeformText' in value;
     let sent: 'sent' | 'queued' | false = false;
     if (toolUseId) {
       sent = sendUserQuestionResponse(value, toolUseId);
     } else if (requestId) {
-      sent = sendPermissionResponse(requestId, value);
+      // Permission responses are decision strings ('allow' / 'deny' / etc.)
+      // and never carry an Other / freeform payload — coerce to string so
+      // the type stays sound even though this branch isn't reachable for
+      // the freeform shape in practice.
+      sent = sendPermissionResponse(requestId, isFreeformAnswer ? value.freeformText : (value as string));
     } else {
-      sent = sendInput(hasTerminal ? value + '\r' : value);
+      const literal = isFreeformAnswer ? value.freeformText : (value as string);
+      sent = sendInput(hasTerminal ? literal + '\r' : literal);
     }
     if (sent === 'sent') {
-      markPromptAnswered(messageId, value);
+      // For the freeform shape, store the typed text (not the label) so
+      // the answered-state UI renders the user's actual answer.
+      const summary = isFreeformAnswer ? value.freeformText : (value as string);
+      markPromptAnswered(messageId, summary);
     }
   };
 
