@@ -46,6 +46,7 @@ import { StreamStallChip } from './components/StreamStallChip'
 import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
+import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
@@ -1727,6 +1728,11 @@ export function App() {
 
   return (
     <div id="app" className={sidebarRepos.length > 0 ? 'with-sidebar' : ''}>
+      {/* #4873 — single page-level live region that announces only the
+          SETTLED connection phase after a debounce. Replaces the
+          per-status-dot role=status announcements that flooded SR
+          users during reconnect storms. */}
+      <ConnectionAnnouncer phase={connectionPhase} />
       {/* Reconnect banner */}
       <ReconnectBanner
         visible={isReconnecting}
@@ -1765,9 +1771,15 @@ export function App() {
               discoverable label, leaving Tauri/WKWebView and SR users with
               nothing on hover. Pair `title` (browser hover tooltip) with
               `aria-label` (screen-reader announcement) so both surfaces
-              get a label. The status dot also gets `role="status"` so SR
-              tooling treats it as a live region rather than a decorative
-              span. */}
+              get a label.
+              #4873 — the status dot intentionally does NOT carry
+              `role="status"`. role=status implies aria-live=polite,
+              which made reconnect-storm churn (connecting →
+              reconnecting → connected → reconnecting…) verbally hammer
+              SR users with every intermediate transition. aria-label
+              alone keeps the dot discoverable on focus/hover, and the
+              page-level debounced ConnectionAnnouncer (mounted above)
+              announces only the settled phase. */}
           {(() => {
             const versionLabel = `Chroxy server v${serverVersion ?? __APP_VERSION__}`
             return (
@@ -1796,7 +1808,6 @@ export function App() {
                 className={`status-dot ${phase}`}
                 title={label}
                 aria-label={label}
-                role="status"
               />
             )
           })()}

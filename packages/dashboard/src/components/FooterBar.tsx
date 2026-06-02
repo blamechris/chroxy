@@ -175,13 +175,23 @@ export function FooterBar({
         >
           v{version}
         </span>
+        {/* #4873 — dot no longer carries `role="status"`. The polite
+            live region used to announce every reconnect intermediate
+            (connecting → reconnecting → connected → reconnecting…),
+            spamming SR users. The aria-label still gives the dot a
+            spoken name on focus/hover. The page-level
+            ConnectionAnnouncer (App.tsx) handles debounced settled-state
+            announcements. */}
         <span
           className={`footer-status-dot ${dotClass}`}
           title={statusFullLabel}
           aria-label={statusFullLabel}
-          role="status"
         />
-        <span className="footer-status-label">{statusLabel}</span>
+        {/* #4873 — visible label is aria-hidden to avoid a duplicate
+            SR announcement next to the dot (which already carries the
+            full spoken label via aria-label). Sighted users still see
+            the text. */}
+        <span className="footer-status-label" aria-hidden="true">{statusLabel}</span>
         {cwd && (
           <span
             className="footer-cwd"

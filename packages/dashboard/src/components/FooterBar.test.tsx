@@ -261,6 +261,42 @@ describe('FooterBar', () => {
   })
 
   // -----------------------------------------------------------------
+  // #4873 — the footer status dot must NOT carry role="status" /
+  // aria-live, because reconnect-storm churn (connecting →
+  // reconnecting → connected → reconnecting…) would announce every
+  // intermediate state to SR users. The dot is still discoverable on
+  // focus/hover via aria-label; settled-state announcements are
+  // handled by the page-level ConnectionAnnouncer.
+  // Also: avoid duplicate SR announcement between the dot and the
+  // adjacent visible status-label.
+  // -----------------------------------------------------------------
+  describe('#4873 footer status dot avoids polite live-region churn', () => {
+    it('connection status dot does NOT carry role="status"', () => {
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="reconnecting" />)
+      const dot = container.querySelector('.footer-status-dot')
+      expect(dot, 'footer-status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('role'), 'status dot must NOT be role=status').not.toBe('status')
+    })
+
+    it('connection status dot does NOT carry aria-live', () => {
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="reconnecting" />)
+      const dot = container.querySelector('.footer-status-dot')
+      expect(dot!.getAttribute('aria-live'), 'status dot must not be a live region').toBeNull()
+    })
+
+    it('footer-status-label is aria-hidden to avoid duplicate SR announcement with the dot', () => {
+      // The dot already carries the spoken label via aria-label, so
+      // the adjacent visible text would be announced twice if both
+      // were exposed. Hide the visible label from SR while keeping
+      // the dot's aria-label as the spoken name.
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="connected" />)
+      const label = container.querySelector('.footer-status-label')
+      expect(label, 'footer-status-label must exist').toBeTruthy()
+      expect(label!.getAttribute('aria-hidden')).toBe('true')
+    })
+  })
+
+  // -----------------------------------------------------------------
   // #3857 — high-utilization compact-suggestion chip
   // -----------------------------------------------------------------
   describe('#3857 compact suggestion at high context utilization', () => {

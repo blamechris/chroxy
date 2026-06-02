@@ -124,13 +124,18 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               // screen readers ignore `title` on a bare span. `aria-label`
               // duplicates the same human-readable string so SR users hear
               // "session working" / "session idle" rather than nothing.
+              // #4873 — the dot intentionally does NOT carry
+              // `role="status"`. With N tabs and frequent busy/idle
+              // churn from background agents, a polite live region per
+              // tab would make the chat unusable on a screen reader.
+              // aria-label keeps the dot discoverable on focus/hover
+              // without flooding the SR queue.
               return (
                 <span
                   className={`tab-status-dot status-${effectiveStatus}`}
                   data-testid="status-dot"
                   title={STATUS_LABELS[effectiveStatus]}
                   aria-label={STATUS_LABELS[effectiveStatus]}
-                  role="status"
                 />
               )
             })()}

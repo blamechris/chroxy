@@ -2029,6 +2029,32 @@ describe('App', () => {
       expect(dot!.getAttribute('aria-label'), 'status-dot needs aria-label for SR').toBeTruthy()
     })
 
+    // #4873 — header status dot must NOT carry role="status" / aria-live.
+    // The per-element live region announced every reconnect intermediate
+    // (connecting → reconnecting → connected → reconnecting…), spamming
+    // SR users. The page-level ConnectionAnnouncer (mounted in App)
+    // handles settled-state announcements instead.
+    it('header status dot does NOT carry role="status" (#4873)', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      const header = container.querySelector('#header')
+      const dot = header!.querySelector('.status-dot')
+      expect(dot, 'header status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('role'), 'status-dot must NOT be role=status').not.toBe('status')
+      expect(dot!.getAttribute('aria-live'), 'status-dot must not be a live region').toBeNull()
+    })
+
+    // #4873 — the page-level live region IS rendered, so SR users still
+    // get a settled-state announcement after the debounce window.
+    it('renders a page-level ConnectionAnnouncer live region (#4873)', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      const announcer = container.querySelector('[data-testid="connection-announcer"]')
+      expect(announcer, 'page-level connection announcer must exist').toBeTruthy()
+      expect(announcer!.getAttribute('role')).toBe('status')
+      expect(announcer!.getAttribute('aria-live')).toBe('polite')
+    })
+
     it('version badge exposes both title and aria-label', () => {
       stateOverrides = connectedWithSession
       const { container } = render(<App />)

@@ -399,6 +399,19 @@ describe('SessionBar', () => {
       expect(dot.getAttribute('aria-label'), 'status-dot needs aria-label').toBeTruthy()
     })
 
+    // #4873 — the per-tab status dot must NOT carry role="status".
+    // With N tabs and frequent busy/idle churn from background agents,
+    // a polite live region on each dot would make the chat unusable
+    // on a screen reader. aria-label keeps the dot discoverable on
+    // focus/hover without flooding the SR queue.
+    it('per-tab status dot does NOT carry role="status" (#4873)', () => {
+      renderRichTab()
+      const tab = screen.getByTestId('session-tab-s1')
+      const dot = within(tab).getByTestId('status-dot')
+      expect(dot.getAttribute('role'), 'status-dot must NOT be role=status').not.toBe('status')
+      expect(dot.getAttribute('aria-live'), 'status-dot must not be a live region').toBeNull()
+    })
+
     it('tab cwd chip has both title and aria-label', () => {
       const { container } = renderRichTab()
       const cwd = container.querySelector('.tab-cwd')
