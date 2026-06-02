@@ -295,9 +295,13 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     // Fresh user-initiated start: clear the continuous-mode bookkeeping so
     // a prior session's user-stop or restart-counter doesn't carry over.
     // NOTE: any in-flight web recognition is torn down inside the `web` branch
-    // below — and that teardown re-flips userStoppedRef to true BEFORE calling
-    // abort(), so the OLD onend doesn't re-arm against the NEW recogniser.
-    // We then flip it back to false right before constructing the new one.
+    // below — and that teardown nulls the OLD recogniser's event handlers
+    // BEFORE calling abort(), so the spec-mandated `abort()`-triggered onend
+    // becomes a no-op and cannot re-arm against the NEW recogniser even
+    // though both refs (userStoppedRef, restartCountRef) have just been
+    // reset to their "fresh session" values here. Handler nulling is the
+    // sole defence on this path; the unmount path adds a second defence
+    // (userStoppedRef = true) for symmetry with onerror's hard-stop branch.
     userStoppedRef.current = false
     restartCountRef.current = 0
 
