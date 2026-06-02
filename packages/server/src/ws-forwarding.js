@@ -261,7 +261,7 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
 /** Execute registration descriptors returned by the normalizer */
 function executeRegistrations(registrations, sessionId, ctx) {
   if (!registrations) return
-  const { permissionSessionMap, questionSessionMap, registerQuestionRoute } = ctx
+  const { permissionSessionMap, questionSessionMap, registerQuestionRoute, registerPermissionRoute } = ctx
   for (const reg of registrations) {
     // #3736: registrations support an explicit action ('set' | 'delete'),
     // defaulting to 'set' for backwards compatibility. The delete action is
@@ -276,7 +276,17 @@ function executeRegistrations(registrations, sessionId, ctx) {
         permissionSessionMap.delete(reg.key)
       } else {
         const mappedSessionId = reg.value ?? sessionId
-        permissionSessionMap.set(reg.key, mappedSessionId)
+        // #4798: prefer the WsServer-provided helper so dispatch also auto-
+        // subscribes eligible clients to the permission's session — keeps the
+        // settings-handler's subscription guard symmetric with
+        // _broadcastToSession's recipient filter. Falls back to a bare Map.set
+        // when ctx doesn't carry the helper (legacy unit tests that wire
+        // setupForwarding directly without a WsServer).
+        if (typeof registerPermissionRoute === 'function') {
+          registerPermissionRoute(reg.key, mappedSessionId)
+        } else {
+          permissionSessionMap.set(reg.key, mappedSessionId)
+        }
         // Diagnostic correlation log for #2832 — paired with
         // [session-binding-resend] and [session-binding-reject]. Allows
         // grepping the origin session for any requestId that later gets

@@ -337,6 +337,30 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     }
   }
 
+  // #4798 (audit P0 symmetry with #4788): for UNBOUND clients, require the
+  // originSessionId to match the client's active or subscribed sessions
+  // before routing the decision. Without this, an unbound dashboard tab
+  // could approve/deny a permission for any session by replaying a known
+  // requestId — arguably MORE dangerous than the question hijack vector
+  // (#4788) because permission decisions gate file writes / shell exec.
+  // Mirrors the default filter used by _broadcastToSession (ws-broadcaster.js:106)
+  // so the set of clients permitted to RESPOND to a permission is the same
+  // set that could legitimately have RECEIVED it. Leaves the mapping
+  // intact so the legitimate subscribed client can still respond.
+  //
+  // Paired with the WsServer-side `_registerPermissionRoute` helper which
+  // auto-subscribes eligible clients at dispatch time — that keeps the
+  // legitimate "view A → get permission for A → switch to B → respond"
+  // flow working after this guard lands.
+  if (!client.boundSessionId && originSessionId) {
+    const subscribed = originSessionId === client.activeSessionId
+      || (client.subscribedSessionIds && client.subscribedSessionIds.has(originSessionId))
+    if (!subscribed) {
+      log.warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
+      return
+    }
+  }
+
   ctx.permissionSessionMap.delete(requestId)
 
   let resolved = false
