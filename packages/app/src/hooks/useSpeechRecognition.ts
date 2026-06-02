@@ -77,6 +77,35 @@ export interface UseSpeechRecognitionReturn {
  */
 const MAX_CONTINUOUS_RESTARTS = 5;
 
+/**
+ * Errors that hard-stop continuous mode rather than letting the `end`
+ * handler re-arm recognition. Mirrors `HARD_STOP_ERRORS` in the dashboard's
+ * `useVoiceInput`. Without this set, an error event followed by an `end`
+ * event would re-arm recognition while the UI state shows stopped — the
+ * engine keeps the mic open silently with no UI feedback (Copilot finding
+ * on #4813).
+ *
+ * - `'not-allowed'` / `'service-not-allowed'`: permission/availability —
+ *   retrying would re-fail.
+ * - `'audio-capture'`: mic hardware gone.
+ * - `'aborted'`: user/system invoked `abort()`; restarting would race the
+ *   teardown.
+ * - `'interrupted'` (iOS): audio session interrupted by phone call/Siri;
+ *   honour the system event and stop.
+ * - `'language-not-supported'`: locale invalid — retrying re-throws.
+ *
+ * Soft errors (`no-speech`, `network`, `speech-timeout`, etc.) are left for
+ * the `end` handler so continuous mode can re-arm across normal silence gaps.
+ */
+const HARD_STOP_ERRORS: ReadonlySet<string> = new Set([
+  'not-allowed',
+  'service-not-allowed',
+  'audio-capture',
+  'aborted',
+  'interrupted',
+  'language-not-supported',
+]);
+
 export function useSpeechRecognition(
   options: UseSpeechRecognitionOptions = {},
 ): UseSpeechRecognitionReturn {
@@ -160,6 +189,17 @@ export function useSpeechRecognition(
     // Don't treat abort as a user-visible error
     if (event.error !== 'aborted') {
       setError(event.message || event.error);
+    }
+    // Hard errors must suppress the continuous-mode `end` restart branch.
+    // Without flipping `userStoppedRef`, an error event followed by an
+    // `end` event (the spec-mandated sequence) would let the restart path
+    // re-arm recognition while the UI shows stopped (`isRecognizing` is
+    // cleared below) — the engine would silently hold the mic with no UI
+    // to release it. Soft errors (no-speech, network, speech-timeout) fall
+    // through so continuous mode can re-arm across normal silence gaps.
+    // Mirrors the dashboard's `onerror` hard-stop branch.
+    if (HARD_STOP_ERRORS.has(event.error)) {
+      userStoppedRef.current = true;
     }
     setIsRecognizing(false);
   });

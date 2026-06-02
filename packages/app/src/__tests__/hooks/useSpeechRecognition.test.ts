@@ -429,4 +429,65 @@ describe('useSpeechRecognition', () => {
     });
     expect(MockModule.start).toHaveBeenCalledTimes(startsAfterUnmount);
   });
+
+  // ---- #4813 Copilot finding: error→end must not re-arm in continuous mode ----
+
+  describe('voiceInputMode: continuous error→end restart suppression', () => {
+    it.each([
+      'not-allowed',
+      'service-not-allowed',
+      'audio-capture',
+      'aborted',
+      'interrupted',
+      'language-not-supported',
+    ])('does NOT restart on end after hard error (%s)', async (errCode) => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      // Hard error fires — should mark stop as user/terminal so the
+      // subsequent `end` event doesn't re-arm a recogniser the UI thinks
+      // is stopped.
+      actSync(() => {
+        eventHandlers['error']?.({ error: errCode, message: errCode });
+      });
+      expect(result.current.isRecognizing).toBe(false);
+
+      // Spec-mandated `end` after error must NOT restart, otherwise the
+      // engine silently holds the mic while the UI shows stopped.
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+      expect(result.current.isRecognizing).toBe(false);
+    });
+
+    it.each([
+      'no-speech',
+      'network',
+      'speech-timeout',
+    ])('DOES restart on end after soft error (%s) in continuous mode', async (errCode) => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      // Soft error fires — `end` should still re-arm so continuous mode
+      // can recover from transient silence/network blips. (The mic flicker
+      // during the restart blip is a separate cosmetic issue — see #4829.)
+      actSync(() => {
+        eventHandlers['error']?.({ error: errCode, message: errCode });
+      });
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+    });
+  });
 });
