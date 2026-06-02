@@ -1189,6 +1189,18 @@ export class WsServer {
     // Broadcast structured log entries to dashboard clients.
     // Re-entrancy guard prevents infinite recursion when _broadcast() itself
     // logs (e.g. backpressure debug messages) and log level is set to debug.
+    //
+    // #4787 (P0 security): unscoped log entries (no entry.sessionId) MUST NOT
+    // fan out to bound clients (mobile pairings into a single per-task
+    // session) — pre-fix, server-side logs that lacked withSession() context
+    // leaked PTY hex dumps, toolUseIds, prompt sizes and attachment names from
+    // every session to every authenticated WS client. Only 1 of 114
+    // createLogger() call sites uses withSession(), so the fall-through
+    // covered almost the entire log stream. Restrict unscoped entries to
+    // unbound clients (operator dashboards have boundSessionId == null and
+    // legitimately want to see everything). The durable fix is a
+    // loggerForSession factory + lint to force per-call-site scoping —
+    // tracked as a follow-up.
     let inLogBroadcast = false
     this._logListener = (entry) => {
       if (inLogBroadcast) return
@@ -1197,7 +1209,10 @@ export class WsServer {
         if (entry.sessionId) {
           this._broadcastToSession(entry.sessionId, { type: 'log_entry', ...entry })
         } else {
-          this._broadcast({ type: 'log_entry', ...entry })
+          this._broadcast(
+            { type: 'log_entry', ...entry },
+            (client) => !client.boundSessionId
+          )
         }
       } finally {
         inLogBroadcast = false
