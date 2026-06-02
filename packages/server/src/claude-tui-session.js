@@ -2636,7 +2636,7 @@ export class ClaudeTuiSession extends BaseSession {
         if (!q.multiSelect) continue // single-select 10+ now driven via arrow nav
         const raw = map[q.question]
         // Gather every label the user toggled for this multi-select.
-        // MUST mirror resolveQuestionDigits' multi-select parsing —
+        // MUST mirror resolveQuestionKeystrokes' multi-select parsing —
         // array → JSON-encoded array → comma-joined list — so an
         // unrepresentable toggle sent via the comma-joined fallback
         // (e.g. "a,k") isn't accidentally treated as a single 3-char
@@ -2837,12 +2837,14 @@ export class ClaudeTuiSession extends BaseSession {
    * followed by Enter (`\r`) to commit (#4848).
    *
    * Wrapped in bracketed-paste-disable / re-enable exactly once (same
-   * defense as _writePtyTextThrottled and _writePtyMultiQuestionSequence)
-   * and each keystroke is throttled by PROMPT_CHAR_DELAY_MS so claude TUI's
-   * paste detector doesn't reject the burst. Each arrow is one
-   * `_term.write` call (3 bytes); the throttle pauses BETWEEN tokens so
-   * the cumulative arrival rate stays well under any reasonable paste
-   * threshold.
+   * defense as _writePtyTextThrottled and _writePtyMultiQuestionSequence).
+   * A PROMPT_CHAR_DELAY_MS pause runs BETWEEN each Down-arrow write so
+   * claude TUI's paste detector doesn't reject the burst. The trailing
+   * Enter (`\r`) and the bracketed-paste re-enable write fire
+   * immediately after the final delay — no extra pause separates them
+   * from the last arrow (the arrival rate at that point is already well
+   * under any reasonable paste threshold). Each arrow is one `_term.write`
+   * call (3 bytes); 10 arrows ≈ 30 bytes total form-byte payload.
    *
    * **Open assumption (#4848):** the empirical recorder pass against a
    * 10+ option AskUserQuestion was not run before this PR — arrow-key
