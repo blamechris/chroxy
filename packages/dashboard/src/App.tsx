@@ -292,8 +292,12 @@ export function App() {
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
 
-  // Voice input (Tauri only — no-op in browser)
-  const voiceInput = useVoiceInput()
+  // Voice input mode is persisted on inputSettings (#4785). Default is
+  // 'continuous' — click to start, click to stop, mic stays lit across
+  // silence gaps. Pre-#4785 behaviour ('auto-pause' on silence) available
+  // via the Voice input section of SettingsPanel.
+  const voiceInputMode = useConnectionStore(s => s.inputSettings.voiceInputMode)
+  const voiceInput = useVoiceInput({ mode: voiceInputMode })
 
   // Session-level state via useShallow — includes messages from sessionStates.
   // stream_end/result handlers force a new messages[] reference so useShallow

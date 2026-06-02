@@ -987,6 +987,13 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     updateInputSettings({ chatEnterToSend: e.target.value === 'enter' })
   }, [updateInputSettings])
 
+  const handleVoiceInputModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    const next = e.target.value
+    if (next === 'continuous' || next === 'auto-pause') {
+      updateInputSettings({ voiceInputMode: next })
+    }
+  }, [updateInputSettings])
+
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: KeyboardEvent) => {
@@ -1087,6 +1094,23 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               >
                 <option value="enter">Enter</option>
                 <option value="cmd-enter">Cmd/Ctrl+Enter</option>
+              </select>
+            </div>
+            {/* #4785: voice input behaviour. `continuous` keeps the mic
+                lit across silence gaps until the user clicks stop.
+                `auto-pause` is the pre-#4785 behaviour (Web Speech ends
+                on silence). Only affects the web engine; the Tauri
+                native engine has its own end-of-utterance semantics. */}
+            <div className="settings-field">
+              <label htmlFor="voice-input-mode">Voice input</label>
+              <select
+                id="voice-input-mode"
+                aria-label="Voice input mode"
+                value={inputSettings.voiceInputMode}
+                onChange={handleVoiceInputModeChange}
+              >
+                <option value="continuous">Keep listening until I click stop</option>
+                <option value="auto-pause">Stop automatically on pause</option>
               </select>
             </div>
           </section>

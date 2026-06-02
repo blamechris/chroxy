@@ -61,6 +61,7 @@ import type {
   ChatMessage,
   ConnectionContext,
   ConnectionState,
+  InputSettings,
   ServerEntry,
   SessionInfo,
   SessionState,
@@ -416,6 +417,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
+    voiceInputMode: 'continuous',
   },
   savedConnection: null,
   userDisconnected: false,
@@ -793,8 +795,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const raw = localStorage.getItem(STORAGE_KEY_INPUT_SETTINGS);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed.chatEnterToSend === 'boolean' || typeof parsed.terminalEnterToSend === 'boolean') {
-          set((state) => ({ inputSettings: { ...state.inputSettings, ...parsed } }));
+        // Validated, narrowed merge so a stray key in localStorage can't
+        // shoehorn arbitrary state into the store. Each field is checked
+        // independently because the persisted blob may pre-date #4785 and
+        // not include `voiceInputMode`.
+        const next: Partial<InputSettings> = {};
+        if (typeof parsed.chatEnterToSend === 'boolean') next.chatEnterToSend = parsed.chatEnterToSend;
+        if (typeof parsed.terminalEnterToSend === 'boolean') next.terminalEnterToSend = parsed.terminalEnterToSend;
+        if (parsed.voiceInputMode === 'continuous' || parsed.voiceInputMode === 'auto-pause') {
+          next.voiceInputMode = parsed.voiceInputMode;
+        }
+        if (Object.keys(next).length > 0) {
+          set((state) => ({ inputSettings: { ...state.inputSettings, ...next } }));
         }
       }
     } catch {

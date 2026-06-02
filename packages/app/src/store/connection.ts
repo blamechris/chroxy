@@ -312,6 +312,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
+    // #4785: mobile voice path lives in useSpeechRecognition (expo-speech-recognition),
+    // which has its own end-of-utterance semantics. Field is type-satisfied here so
+    // the shared @chroxy/store-core InputSettings stays a single shape across app +
+    // dashboard; wiring it to mobile behaviour is tracked separately.
+    voiceInputMode: 'continuous',
   },
   viewingCachedSession: false,
   viewMode: 'chat',

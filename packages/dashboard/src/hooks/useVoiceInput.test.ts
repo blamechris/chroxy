@@ -296,8 +296,8 @@ describe('useVoiceInput', () => {
       expect(result.current.isRecording).toBe(false)
     })
 
-    it('clears recording on onend', async () => {
-      const { result } = renderHook(() => useVoiceInput())
+    it('clears recording on onend in auto-pause mode', async () => {
+      const { result } = renderHook(() => useVoiceInput({ mode: 'auto-pause' }))
 
       await waitFor(() => expect(result.current.isAvailable).toBe(true))
 
@@ -310,6 +310,181 @@ describe('useVoiceInput', () => {
         lastRecognition!.onend?.()
       })
       expect(result.current.isRecording).toBe(false)
+    })
+
+    // Regression guard for #4786 review: auto-pause mode must preserve the
+    // pre-#4785 behaviour of surfacing soft errors (no-speech, network) to
+    // the user. Continuous mode deliberately swallows them so the restart
+    // loop doesn't flash a toast on every silence gap, but auto-pause is
+    // the "old behaviour" mode and the error channel must keep working.
+    it('surfaces soft errors (no-speech) in auto-pause mode', async () => {
+      const { result } = renderHook(() => useVoiceInput({ mode: 'auto-pause' }))
+
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+      act(() => {
+        result.current.start()
+      })
+
+      act(() => {
+        lastRecognition!.onerror?.({ error: 'no-speech' })
+      })
+
+      expect(result.current.error).toMatch(/no speech/i)
+      expect(result.current.isRecording).toBe(false)
+    })
+
+    it('does NOT surface soft errors in continuous mode (silent restart path)', async () => {
+      const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+      act(() => {
+        result.current.start()
+      })
+
+      act(() => {
+        lastRecognition!.onerror?.({ error: 'no-speech' })
+      })
+
+      expect(result.current.error).toBeNull()
+    })
+
+    // #4785: continuous mode is the new default. The Web Speech API auto-ends
+    // recognition after ~5-10s of silence; the hook compensates by restarting
+    // on each `onend` until the user explicitly clicks stop.
+    describe('continuous mode (#4785)', () => {
+      it('default mode is continuous — silence-triggered onend restarts recognition', async () => {
+        const { result } = renderHook(() => useVoiceInput())
+
+        await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+        act(() => {
+          result.current.start()
+        })
+        const recognition = lastRecognition!
+        expect(recognition.start).toHaveBeenCalledTimes(1)
+        expect(result.current.isRecording).toBe(true)
+
+        act(() => {
+          recognition.onend?.()
+        })
+
+        // Restart was issued; isRecording stays true (no UI flicker).
+        expect(recognition.start).toHaveBeenCalledTimes(2)
+        expect(result.current.isRecording).toBe(true)
+      })
+
+      it('explicit user stop does NOT trigger restart in continuous mode', async () => {
+        const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+        await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+        act(() => {
+          result.current.start()
+        })
+        const recognition = lastRecognition!
+
+        act(() => {
+          result.current.stop()
+          // stop() flips userStoppedRef → onend should clear isRecording, not restart.
+          recognition.onend?.()
+        })
+
+        expect(recognition.start).toHaveBeenCalledTimes(1) // no restart
+        expect(result.current.isRecording).toBe(false)
+      })
+
+      it('auto-pause mode does NOT restart on onend even after multiple cycles', async () => {
+        const { result } = renderHook(() => useVoiceInput({ mode: 'auto-pause' }))
+
+        await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+        act(() => {
+          result.current.start()
+        })
+        const recognition = lastRecognition!
+
+        act(() => {
+          recognition.onend?.()
+        })
+
+        expect(recognition.start).toHaveBeenCalledTimes(1) // no restart
+        expect(result.current.isRecording).toBe(false)
+      })
+
+      it('hard errors (not-allowed) stop continuous mode without restart', async () => {
+        const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+        await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+        act(() => {
+          result.current.start()
+        })
+        const recognition = lastRecognition!
+
+        act(() => {
+          // Hard error → marks user-stop and clears isRecording. The subsequent
+          // onend from the underlying engine should NOT restart.
+          recognition.onerror?.({ error: 'not-allowed' })
+          recognition.onend?.()
+        })
+
+        expect(recognition.start).toHaveBeenCalledTimes(1) // no restart
+        expect(result.current.isRecording).toBe(false)
+        expect(result.current.error).toMatch(/permission|microphone/i)
+      })
+
+      it('caps continuous restarts at MAX_CONTINUOUS_RESTARTS to avoid wedge loops', async () => {
+        const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+        await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+        act(() => {
+          result.current.start()
+        })
+        const recognition = lastRecognition!
+
+        // Fire onend repeatedly with no intervening onresult — restart counter
+        // increments each time and eventually the hook gives up.
+        for (let i = 0; i < 10; i++) {
+          act(() => { recognition.onend?.() })
+        }
+
+        // Initial start + 5 restarts = 6 total calls; subsequent onends are no-ops.
+        expect(recognition.start).toHaveBeenCalledTimes(6)
+        expect(result.current.isRecording).toBe(false)
+      })
+
+      it('successful onresult resets the restart counter (long sessions stay healthy)', async () => {
+        const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+        await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+        act(() => {
+          result.current.start()
+        })
+        const recognition = lastRecognition!
+
+        // Burn 3 restarts with no transcript, then deliver one.
+        for (let i = 0; i < 3; i++) {
+          act(() => { recognition.onend?.() })
+        }
+        act(() => {
+          recognition.onresult?.({
+            resultIndex: 0,
+            results: [{ isFinal: true, 0: { transcript: 'hi' } }],
+          })
+        })
+
+        // After a successful onresult, counter resets → 5 fresh restarts allowed.
+        for (let i = 0; i < 5; i++) {
+          act(() => { recognition.onend?.() })
+        }
+
+        // Initial + 3 (pre-result) + 5 (post-result) = 9
+        expect(recognition.start).toHaveBeenCalledTimes(9)
+      })
     })
 
     it('stop() calls recognition.stop()', async () => {

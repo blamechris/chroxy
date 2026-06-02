@@ -152,6 +152,15 @@ export interface ContextUsage {
 export interface InputSettings {
   chatEnterToSend: boolean;
   terminalEnterToSend: boolean;
+  /**
+   * Voice input behaviour. `'continuous'` keeps the mic open across silence
+   * gaps until the user explicitly clicks stop (the hook restarts Web Speech
+   * recognition on each silence-triggered `onend`). `'auto-pause'` lets the
+   * browser auto-stop on silence — the previous behaviour, kept for users who
+   * prefer it (#4785). Defaults to `'continuous'` so new users get the
+   * click-to-start / click-to-stop experience by default.
+   */
+  voiceInputMode: 'continuous' | 'auto-pause';
 }
 
 /** Default context window size (tokens) used when model metadata doesn't specify one. */
