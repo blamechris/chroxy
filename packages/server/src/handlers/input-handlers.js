@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
 
@@ -574,7 +574,21 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // the string, not a boolean, which downstream conditionals can read
     // but is confusing in a `freeform=${...}` log template.
     const hasFreeform = typeof msg.freeformText === 'string' && msg.freeformText.length > 0
-    log.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0} freeform=${hasFreeform ? msg.freeformText.length : 0}`)
+    // #4792: scope this entry to the question's session so the WsServer
+    // log fan-out (#4787) routes it to the bound dashboard for that
+    // session rather than dropping it for all bound clients. The line
+    // carries toolUseId + freeform.length — useful for correlating
+    // multi-question form wedges per-session in chroxy.log.
+    //
+    // Legacy single-session mode (ws-message-handlers.js createCliSessionAdapter)
+    // serves `getSession(undefined)` from a synthetic default entry, so
+    // `questionSessionId` can legitimately be falsy here. In that mode
+    // there's exactly one session and no cross-session fan-out leak risk,
+    // so fall back to the unscoped `log` instead of throwing — multi-session
+    // deployments always have a real sessionId from the toolUseId map or
+    // client.activeSessionId.
+    const qlog = questionSessionId ? loggerForSession('ws', questionSessionId) : log
+    qlog.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0} freeform=${hasFreeform ? msg.freeformText.length : 0}`)
     // #4668: forward msg.toolUseId so claude-tui-session can route the
     // answer to the right pending entry in its Map. Sessions that don't
     // care about toolUseId (cli-session, sdk-session via permission-

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url'
 import { BaseSession } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
-import { createLogger } from './logger.js'
+import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
@@ -365,6 +365,13 @@ export class ClaudeTuiSession extends BaseSession {
     // uses so the existing permission HTTP route routes us with no changes.
     this._hookSecret = this._port ? randomBytes(32).toString('hex') : null
     this._sessionId = null   // upstream claude conversation uuid, assigned at start()
+    // #4792: session-scoped logger. Assigned in start() once _sessionId is
+    // generated. Until then, code paths that need to log MUST fall back to
+    // the module-level `log` (e.g. trust pre-write failure, sink dir create
+    // failure). Per-session log lines (sendMessage, respondToQuestion,
+    // attachment materialization) prefer `this._log` so the WsServer log
+    // listener can route them to the right bound client (#4787, #4793).
+    this._log = null
     this._sinkDir = null     // created on start, removed on destroy
     this._term = null        // persistent PTY for the session's lifetime
     this._settingsPath = null
@@ -636,6 +643,13 @@ export class ClaudeTuiSession extends BaseSession {
     // Generate the upstream session uuid here so the JSONL path is
     // predictable + so claude resumes the same conversation across turns.
     this._sessionId = randomUUID()
+    // #4792: now that the session id exists, bind the per-instance logger
+    // so subsequent log lines carry sessionId and route correctly through
+    // the WsServer log fan-out (#4787). Anything that logs before this
+    // point uses the module-level `log` (unscoped) and only reaches
+    // unbound dashboard clients — that is the desired behaviour for
+    // pre-start setup failures.
+    this._log = loggerForSession('claude-tui-session', this._sessionId)
 
     // #4044: skipPermissions wins over port — when the user opts in to
     // unmediated TUI behaviour, the hook installation + sidecar write must
@@ -966,7 +980,11 @@ export class ClaudeTuiSession extends BaseSession {
     // accumulated on _activeTurn and emitted in the summary line at
     // turn finish (success or error). Together they let us reconstruct
     // where the wedge actually sits without re-instrumenting the file.
-    log.info(`sendMessage start (msg=${messageId} sessionId=${this._sessionId} bytes=${Buffer.byteLength(prompt || '', 'utf8')} attachments=${attachments?.length || 0})`)
+    // #4792: prefer the session-bound logger so the entry routes to the
+    // correct bound dashboard client. Falls back to module-level `log`
+    // only if start() hasn't run (defensive — sendMessage on an unstarted
+    // session is a misuse, but the fallback keeps the diagnostic alive).
+    ;(this._log || log).info(`sendMessage start (msg=${messageId} sessionId=${this._sessionId} bytes=${Buffer.byteLength(prompt || '', 'utf8')} attachments=${attachments?.length || 0})`)
 
     // #4012: TUI can't accept inline multimodal blocks the way SDK/CLI
     // do, but it CAN read files via the Read tool. Materialize each
@@ -1002,10 +1020,12 @@ export class ClaudeTuiSession extends BaseSession {
           // distinct warn lines so ops can grep for either degradation:
           //   - regular truncation: some files dropped from the list
           //   - bareFallback: even one entry exceeded the cap (worst)
+          // #4792: same session-scoped logger fallback as sendMessage start.
+          const slog = this._log || log
           if (suffixResult.bareFallback) {
-            log.warn(`TUI attachment suffix bare-fallback fired (msg=${messageId} count=${files.length} cap=${suffixResult.cap}B) — all file paths omitted from prompt suffix; agent will only see the size-cap marker. Pathological path-generation regression?`)
+            slog.warn(`TUI attachment suffix bare-fallback fired (msg=${messageId} count=${files.length} cap=${suffixResult.cap}B) — all file paths omitted from prompt suffix; agent will only see the size-cap marker. Pathological path-generation regression?`)
           } else if (suffixResult.truncated) {
-            log.warn(`TUI attachment suffix truncated (msg=${messageId} suffixBytes=${suffixResult.byteLength} cap=${suffixResult.cap}B omitted=${suffixResult.omitted} of=${files.length})`)
+            slog.warn(`TUI attachment suffix truncated (msg=${messageId} suffixBytes=${suffixResult.byteLength} cap=${suffixResult.cap}B omitted=${suffixResult.omitted} of=${files.length})`)
           }
         }
       } catch (err) {
@@ -2398,17 +2418,24 @@ export class ClaudeTuiSession extends BaseSession {
     // `_activeTurn`). Subsequent answers in the same turn emit a compact
     // one-line skip notice carrying the tool ids so a log reader can still
     // grep all answer-write events without scanning past 200+ hex lines.
+    // #4792: PTY tail hex dumps are the highest-volume, most-sensitive
+    // unscoped log lines pre-fix — they emit literal terminal bytes
+    // (user prompts, answer text, attachment names) on every
+    // respondToQuestion. Routing them through the session-bound logger
+    // makes the audit story clean: only operators bound to this session
+    // (or unbound) see the dump (#4787 fan-out filter).
+    const slog = this._log || log
     const turn = this._activeTurn
     if (turn && !turn.hexDumpEmitted) {
-      log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
+      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
       turn.hexDumpEmitted = true
     } else if (turn) {
-      log.info(`respondToQuestion PTY tail hex dump skipped (tool=${prevToolUseId || '?'}) — already emitted for turn msg=${turn.messageId || '?'}`)
+      slog.info(`respondToQuestion PTY tail hex dump skipped (tool=${prevToolUseId || '?'}) — already emitted for turn msg=${turn.messageId || '?'}`)
     } else {
       // No active turn (defensive — tests that drive respondToQuestion
       // directly without sendMessage(), late watchdog teardown races).
       // Emit the dump so the diagnostic is still useful in those paths.
-      log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
+      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
     }
 
     const armWatchdog = () => {

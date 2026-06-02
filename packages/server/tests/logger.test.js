@@ -698,3 +698,105 @@ describe('withSession', () => {
     assert.equal(entries[0].sessionId, undefined)
   })
 })
+
+describe('loggerForSession (#4792)', () => {
+  afterEach(() => {
+    setLogListener(null)
+  })
+
+  it('is exported as a function', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    assert.equal(typeof loggerForSession, 'function')
+  })
+
+  it('returns a logger pre-bound to a session id', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = loggerForSession('claude-tui-session', 'sess-abc')
+    log.info('hello')
+    log.warn('careful')
+    log.error('boom')
+
+    assert.equal(entries.length, 3)
+    for (const e of entries) {
+      assert.equal(e.sessionId, 'sess-abc', 'every entry must carry the bound session id')
+      assert.equal(e.component, 'claude-tui-session')
+    }
+  })
+
+  it('exposes the standard logger surface (debug/info/warn/error/log/withSession)', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const log = loggerForSession('ws', 'sess-1')
+    assert.equal(typeof log.debug, 'function')
+    assert.equal(typeof log.info, 'function')
+    assert.equal(typeof log.warn, 'function')
+    assert.equal(typeof log.error, 'function')
+    assert.equal(typeof log.log, 'function')
+    assert.equal(typeof log.withSession, 'function')
+  })
+
+  it('is equivalent to createLogger(component).withSession(sessionId)', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const direct = []
+    const factory = []
+
+    setLogListener((entry) => direct.push(entry))
+    createLogger('eq').withSession('sess-eq').info('direct line')
+
+    setLogListener(null)
+    setLogListener((entry) => factory.push(entry))
+    loggerForSession('eq', 'sess-eq').info('factory line')
+
+    assert.equal(direct[0].component, factory[0].component)
+    assert.equal(direct[0].sessionId, factory[0].sessionId)
+    assert.equal(direct[0].level, factory[0].level)
+  })
+
+  it('further .withSession(...) rebinds the session id', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = loggerForSession('ws', 'sess-a').withSession('sess-b')
+    log.info('rebound')
+
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].sessionId, 'sess-b',
+      'an explicit follow-up withSession should override the factory-bound id')
+  })
+
+  it('throws if sessionId is missing — the factory exists to prevent unscoped session logs', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    assert.throws(
+      () => loggerForSession('component-name'),
+      /sessionId/,
+      'calling loggerForSession without a sessionId defeats the point — must throw',
+    )
+    assert.throws(
+      () => loggerForSession('component-name', ''),
+      /sessionId/,
+      'empty string sessionId must also throw',
+    )
+    assert.throws(
+      () => loggerForSession('component-name', null),
+      /sessionId/,
+      'null sessionId must also throw',
+    )
+  })
+
+  it('throws if component is missing', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    assert.throws(
+      () => loggerForSession(undefined, 'sess-1'),
+      /component/,
+      'calling loggerForSession without a component must throw',
+    )
+    assert.throws(
+      () => loggerForSession('', 'sess-1'),
+      /component/,
+      'empty string component must also throw',
+    )
+  })
+})
