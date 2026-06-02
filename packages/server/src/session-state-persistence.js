@@ -33,41 +33,54 @@ export class SessionStatePersistence {
 
   /**
    * Serialize session state to disk.
+   *
+   * Write order (audited in #4908): rotate the current file to `.bak` FIRST,
+   * then call `writeFileRestricted(mainPath, data)` which atomically writes
+   * via its own internal `.tmp` + rename on POSIX (and direct `writeFileSync`
+   * on Windows — see {@link writeFileRestricted}).
+   *
+   * Why rotate-then-write (not write-then-rotate)? Both orders are crash-safe,
+   * but rotate-first lets us reuse the shared atomic-write helper rather than
+   * hand-rolling a second `.tmp` + rename layer (the bespoke wrapper that
+   * #4874 collapsed elsewhere — this file was deferred per the #4874 issue
+   * body and audited separately in #4908):
+   *   - If we crash AFTER rotate but BEFORE the write completes, `restoreState`
+   *     falls back to `.bak` (see {@link restoreState} — when the main file is
+   *     missing or unparseable it reads from `.bak`) which still holds the
+   *     prior generation.
+   *   - `writeFileRestricted` is atomic on POSIX (internal rename replaces the
+   *     destination), so a partial write of the new generation cannot leave
+   *     half-written bytes at `mainPath`.
+   *   - On Windows, `writeFileRestricted` does a direct `writeFileSync` — that
+   *     matches the prior behavior (the old code's `.tmp` write was also a
+   *     direct `writeFileSync`; the only "atomic" step on Windows was the
+   *     final `renameSync`, which still depends on the OS).
+   *
+   * `_rotateToBak`'s Windows retry-and-restore-`.bak` flow stays intact under
+   * the new order: the snapshot-and-restore happens before the main write, so
+   * a failed rotation leaves `.bak` holding whichever generation it held
+   * before serialize ran. The Windows `unlinkSync(mainPath)` step (NTFS
+   * EEXIST workaround) is no longer needed — after rotation, `mainPath`
+   * either does not exist (rotate succeeded) or holds the same bytes as
+   * `.bak` (rotate failed). `writeFileSync` on Windows overwrites either way.
+   *
    * @param {object} state - The complete state object to write (version, timestamp, sessions, costs, etc.)
    * @returns {object} The state that was written
    */
   serializeState(state) {
     const dir = dirname(this._stateFilePath)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    const tmpPath = this._stateFilePath + '.tmp'
     const bakPath = this._stateFilePath + '.bak'
-    writeFileRestricted(tmpPath, JSON.stringify(state, null, 2))
-    // Rotate the current file to .bak so one generation survives a crash
-    // or partial write during the rename below. Best-effort — a missing
+    // Rotate the current file to .bak BEFORE writing the new generation so
+    // one generation survives a crash mid-write. Best-effort — a missing
     // source file (first write) or rename failure must not block the new write.
     if (fs.existsSync(this._stateFilePath)) {
       this._rotateToBak(this._stateFilePath, bakPath)
     }
-    if (this._isWindows) {
-      try { fs.unlinkSync(this._stateFilePath) } catch (err) {
-        if (err && err.code !== 'ENOENT') {
-          log.error(`Failed to remove existing state file: ${err.message}`)
-        }
-      }
-    }
-    try {
-      fs.renameSync(tmpPath, this._stateFilePath)
-    } catch (err) {
-      // Clean up the orphaned .tmp file so it doesn't leak on disk across
-      // retries. Suppress ENOENT (nothing to clean up) and any secondary
-      // unlink error (we must re-throw the original rename failure).
-      try { fs.unlinkSync(tmpPath) } catch (cleanupErr) {
-        if (cleanupErr && cleanupErr.code !== 'ENOENT') {
-          log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
-        }
-      }
-      throw err
-    }
+    // writeFileRestricted is atomic on POSIX (internal .tmp + rename) and a
+    // direct writeFileSync on Windows. Cleanup of the orphan .tmp on rename
+    // failure is handled inside the helper.
+    writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2))
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
   }
