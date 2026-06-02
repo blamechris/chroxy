@@ -6,7 +6,7 @@
  */
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
 
@@ -30,7 +30,9 @@ function handleSwitchSession(ws, client, msg, ctx) {
   // pairing-issued session token that was bound to a specific session,
   // prevent them from switching to any other session.
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    log.warn(`Client ${client.id} attempted to switch to session ${targetId} but is bound to ${client.boundSessionId}`)
+    // #4828: session-scoped to the bound session — the binding-mismatch
+    // warn belongs to the OWNER of `boundSessionId`, not the request target.
+    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} attempted to switch to session ${targetId} but is bound to ${client.boundSessionId}`)
     ctx.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
@@ -58,7 +60,8 @@ function handleSwitchSession(ws, client, msg, ctx) {
   if (ctx.devicePreferences && !client.boundSessionId && client.deviceInfo?.deviceId) {
     ctx.devicePreferences.setActiveSessionId(client.deviceInfo.deviceId, targetId)
   }
-  log.info(`Client ${client.id} switched to session ${targetId}`)
+  // #4828: session-scoped — the switch is into `targetId`.
+  loggerForSession('ws', targetId).info(`Client ${client.id} switched to session ${targetId}`)
   ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
   ctx.sendSessionInfo(ws, targetId)
   ctx.replayHistory(ws, targetId)

@@ -9,7 +9,7 @@
  * web-task-handlers.js, and environment-handlers.js. Consolidated here to
  * reduce file fragmentation (each file had 1–4 small functions).
  */
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
@@ -55,7 +55,11 @@ function handleExtensionMessage(ws, client, msg, ctx) {
   if (typeof entry.session.handleExtensionMessage === 'function') {
     entry.session.handleExtensionMessage({ provider, subtype, data })
   } else {
-    log.debug(`extension_message (${provider}/${subtype}) received; session does not handle it`)
+    // #4828: session-scoped — targetSessionId is in scope and bound.
+    // Legacy single-session callers may surface an empty value, so fall
+    // back to module-level `log` rather than throwing inside
+    // loggerForSession (same pattern as the settings-handlers sites).
+    ;(targetSessionId ? loggerForSession('ws', targetSessionId) : log).debug(`extension_message (${provider}/${subtype}) received; session does not handle it`)
   }
 }
 

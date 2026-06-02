@@ -61,6 +61,21 @@ const REQUIRES_FACTORY_IMPORT = new Set([
   // migration list and the deferred-sweep follow-up issue for the rest.
   'claude-tui-session.js',
   'handlers/input-handlers.js',
+  // #4828 second wave — sweep across the remaining per-session
+  // surfaces. claude-tui-session.js stays from the first wave; sdk-session
+  // and cli-session now bind `this._log` on the init message (where the
+  // session id becomes known) and route every post-init log line through
+  // it. The handler files migrated every session-aware call site to
+  // `loggerForSession('ws', sessionId)`. None of these can promote into
+  // FORBIDS_BARE_CREATELOGGER yet because each one keeps a module-level
+  // `createLogger('...')` for the pre-session-id / cross-session
+  // fallback paths.
+  'sdk-session.js',
+  'cli-session.js',
+  'handlers/conversation-handlers.js',
+  'handlers/feature-handlers.js',
+  'handlers/session-handlers.js',
+  'handlers/settings-handlers.js',
 ])
 
 /**

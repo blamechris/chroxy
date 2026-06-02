@@ -13,7 +13,7 @@ import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
-import { createLogger } from './logger.js'
+import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 
 const log = createLogger('cli-session')
@@ -194,6 +194,11 @@ export class CliSession extends BaseSession {
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sessionId = null
+    // #4828: session-scoped logger, lazily bound when the CLI emits its
+    // `init` message (where session_id becomes known). Pre-init log lines
+    // stay on the module-level `log` — same fallback pattern as SdkSession
+    // / ClaudeTuiSession.
+    this._log = null
     this._child = null
     this._rl = null
     this._stderrRL = null
@@ -318,14 +323,17 @@ export class CliSession extends BaseSession {
     this._stderrRL = stderrRL
     stderrRL.on('line', (line) => {
       if (line.trim()) {
-        log.info(`stderr: ${line}`)
+        // #4828: session-scoped when init has fired (stderr arrives both
+        // pre- and post-init; the fallback covers the pre-init case).
+        ;(this._log || log).info(`stderr: ${line}`)
       }
     })
 
     // Absorb EPIPE and other low-level stdin errors so they don't become
     // unhandled exceptions. Writes are already wrapped in try/catch below.
     child.stdin.on('error', (err) => {
-      log.warn(`stdin error (ignored): ${err.message}`)
+      // #4828: session-scoped when init has fired.
+      ;(this._log || log).warn(`stdin error (ignored): ${err.message}`)
     })
 
     child.on('error', (err) => {
@@ -350,7 +358,9 @@ export class CliSession extends BaseSession {
     // _clearMessageState() after each result.
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
-      log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
+      // #4828: session-scoped when init has fired (dequeue can race with
+      // the very-first init so the fallback is intentional).
+      ;(this._log || log).info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
   }
@@ -399,7 +409,9 @@ export class CliSession extends BaseSession {
         this.emit('error', { message: 'Pending message queue full (max 3) — message discarded' })
         return
       }
-      log.info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
+      // #4828: session-scoped when init has fired (queuing typically happens
+      // pre-init or during respawn — both can race with the binding).
+      ;(this._log || log).info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
       this._pendingQueue.push({ prompt, attachments, options })
       return
     }
@@ -459,11 +471,16 @@ export class CliSession extends BaseSession {
       },
     })
 
-    log.info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
+    // #4828: session-scoped when init has fired. The very first message
+    // sends pre-init (CLI's `init` arrives in the first response), so the
+    // first turn falls back to module-level `log`; all subsequent sends
+    // route through `this._log`.
+    ;(this._log || log).info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
     try {
       this._child.stdin.write(ndjson + '\n')
     } catch (err) {
-      log.error(`stdin.write failed (sendMessage): ${err.message}`)
+      // #4828: session-scoped when init has fired.
+      ;(this._log || log).error(`stdin.write failed (sendMessage): ${err.message}`)
       this._clearMessageState()
       this.emit('error', { message: `Failed to send message: ${err.message}` })
       return
@@ -543,7 +560,8 @@ export class CliSession extends BaseSession {
     if (!this._isBusy) return
     const idleMs = this._resultTimeoutMs
     const friendly = formatIdleDuration(idleMs)
-    log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
+    // #4828: session-scoped (inactivity warning fires from active turn).
+    ;(this._log || log).info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
     this.emit('inactivity_warning', {
       messageId: this._currentMessageId,
       idleMs,
@@ -562,7 +580,8 @@ export class CliSession extends BaseSession {
   _handleHardTimeout() {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._hardTimeoutMs)
-    log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
+    // #4828: session-scoped (hard-cap fires from active turn).
+    ;(this._log || log).warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
     // Fire permission_expired for every pending permission we know about
     // so the client clears the stale prompt.
     for (const requestId of this._pendingPermissionIds) {
@@ -585,7 +604,8 @@ export class CliSession extends BaseSession {
   _handleStreamStall() {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._streamStallTimeoutMs)
-    log.warn(
+    // #4828: session-scoped (stall fires from active turn).
+    ;(this._log || log).warn(
       `Stream stalled (${friendly}, messageId=${this._currentMessageId}) — clearing busy state for retry`,
     )
     this._emitInterruptedTurnResult(this._streamStallTimeoutMs)
@@ -682,13 +702,17 @@ export class CliSession extends BaseSession {
         if (data.subtype === 'init') {
           this._sessionId = data.session_id
           this._respawnCount = 0
+          // #4828: bind the session-scoped logger now that session_id is
+          // known. Subsequent log lines route through the WsServer log
+          // fan-out (#4787) to dashboards bound to this session.
+          this._log = loggerForSession('cli-session', data.session_id)
           // #3687: persist the actual model the CLI booted with so
           // sendSessionInfo (replay on reconnect / tab switch) reports the
           // truth instead of `null` when the user didn't specify a model.
           if (typeof data.model === 'string' && data.model) {
             this.bootedModel = data.model
           }
-          log.info(`Session initialized: ${data.session_id}`)
+          ;(this._log || log).info(`Session initialized: ${data.session_id}`)
           this.emit('ready', {
             sessionId: data.session_id,
             model: data.model,
@@ -697,7 +721,8 @@ export class CliSession extends BaseSession {
           // Emit MCP server status if present (including empty list to clear stale state)
           if (Array.isArray(data.mcp_servers)) {
             if (data.mcp_servers.length > 0) {
-              log.info(`MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+              // #4828: session-scoped (post-init).
+              ;(this._log || log).info(`MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
             }
             this.emit('mcp_servers', { servers: data.mcp_servers })
           }
@@ -705,7 +730,8 @@ export class CliSession extends BaseSession {
           // Forward non-init system events (e.g. usage limits, sub-agent
           // notifications) as system messages to the client
           const text = data.message || data.text || data.subtype || 'System event'
-          log.info(`System event (${data.subtype || 'unknown'}): ${text}`)
+          // #4828: session-scoped (non-init system event arrives after init).
+          ;(this._log || log).info(`System event (${data.subtype || 'unknown'}): ${text}`)
           this.emit('message', {
             type: 'system',
             content: text,
@@ -768,7 +794,8 @@ export class CliSession extends BaseSession {
                 if (ctx.toolInputBytes + chunkBytes > this._maxToolInput) {
                   ctx.toolInputChunks = ''
                   ctx.toolInputOverflow = true
-                  log.warn(`toolInputChunks exceeded ${this._maxToolInput} bytes, discarding buffer`)
+                  // #4828: session-scoped (stream_event fires post-init).
+                  ;(this._log || log).warn(`toolInputChunks exceeded ${this._maxToolInput} bytes, discarding buffer`)
                   this.emit('error', {
                     message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${ctx.currentToolName || 'unknown tool'} — input was truncated`,
                   })
@@ -910,15 +937,16 @@ export class CliSession extends BaseSession {
         // Parse-failure logging matches the per-tool pre-extraction
         // messages so existing log scraping continues to work.
         if (toolName === 'AskUserQuestion') {
-          log.error(`Failed to parse AskUserQuestion input: ${err.message}`)
+          // #4828: session-scoped (tool parsing runs strictly post-init).
+          ;(this._log || log).error(`Failed to parse AskUserQuestion input: ${err.message}`)
           return
         }
         if (toolName === 'Task') {
-          log.warn(`Failed to parse Task tool input: ${err.message}`)
+          ;(this._log || log).warn(`Failed to parse Task tool input: ${err.message}`)
           return
         }
         if (toolName === 'ExitPlanMode') {
-          log.warn(`Failed to parse ExitPlanMode input: ${err.message}`)
+          ;(this._log || log).warn(`Failed to parse ExitPlanMode input: ${err.message}`)
           // ExitPlanMode falls through with parseSucceeded=false so the
           // empty allowedPrompts default still applies.
         }
@@ -935,7 +963,8 @@ export class CliSession extends BaseSession {
         // `parseSucceeded` (truthiness of `parsed` would drop legal
         // falsy JSON values).
         if (!parseSucceeded) return
-        log.info(`AskUserQuestion detected (${toolUseId})`)
+        // #4828: session-scoped.
+        ;(this._log || log).info(`AskUserQuestion detected (${toolUseId})`)
         this._waitingForAnswer = true
         this.emit('user_question', {
           toolUseId,
@@ -1001,7 +1030,8 @@ export class CliSession extends BaseSession {
         if (this._destroying) return
         if (!this._processReady || this._pendingQueue.length === 0) return
         const pending = this._pendingQueue.shift()
-        log.info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
+        // #4828: session-scoped (post-result, post-init).
+        ;(this._log || log).info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
         this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
       })
     }
@@ -1021,6 +1051,9 @@ export class CliSession extends BaseSession {
     this._respawning = true
     this._processReady = false
     this._sessionId = null
+    // #4828: drop the session-scoped logger so the next init re-binds it
+    // to the fresh session_id rather than leaking the stale one.
+    this._log = null
 
     // The new child process has no conversation state — and on Claude CLI
     // the append/system bucket rides on `--append-system-prompt` at spawn,
@@ -1085,7 +1118,8 @@ export class CliSession extends BaseSession {
       // Force-kill after 10s if process doesn't exit cleanly
       const forceKillTimer = setTimeout(() => {
         if (!didClose) {
-          log.warn('Process did not exit after 10s, force-killing')
+          // #4828: session-scoped if init has fired before kill.
+          ;(this._log || log).warn('Process did not exit after 10s, force-killing')
           try {
             forceKill(oldChild)
           } catch (_err) {
@@ -1123,7 +1157,8 @@ export class CliSession extends BaseSession {
    */
   setModel(model) {
     if (!super.setModel(model)) return
-    log.info(`Model changed to ${this.model || 'default'}, restarting process`)
+    // #4828: session-scoped if init has fired before the model change.
+    ;(this._log || log).info(`Model changed to ${this.model || 'default'}, restarting process`)
     this._killAndRespawn()
   }
 
@@ -1134,7 +1169,8 @@ export class CliSession extends BaseSession {
     // the in-flight `claude -p` process is killed and respawned, dropping the
     // current turn. This is by design (parity with SDK auto-resolve of pending
     // prompts); see #3735 for the regression test pinning this behavior.
-    log.info(`Permission mode changed to ${mode}, restarting process`)
+    // #4828: session-scoped if init has fired.
+    ;(this._log || log).info(`Permission mode changed to ${mode}, restarting process`)
     this._killAndRespawn()
   }
 
@@ -1156,7 +1192,8 @@ export class CliSession extends BaseSession {
     try {
       this._child.stdin.write(ndjson + '\n')
     } catch (err) {
-      log.error(`stdin.write failed (respondToQuestion): ${err.message}`)
+      // #4828: session-scoped (respondToQuestion fires strictly post-init).
+      ;(this._log || log).error(`stdin.write failed (respondToQuestion): ${err.message}`)
     }
   }
 
@@ -1198,12 +1235,14 @@ export class CliSession extends BaseSession {
     // exited cleanly as a result — do NOT show "exited unexpectedly" and
     // do NOT auto-respawn the child the user explicitly stopped.
     if (wasIntentionalStop) {
-      log.info(`Process exited (code ${code}) after user stop`)
+      // #4828: session-scoped if init had fired before the stop.
+      ;(this._log || log).info(`Process exited (code ${code}) after user stop`)
       this.emit('stopped', { code })
       return
     }
 
-    log.info(`Process exited (code ${code}), scheduling respawn`)
+    // #4828: session-scoped if init had fired.
+    ;(this._log || log).info(`Process exited (code ${code}), scheduling respawn`)
     this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
     this._scheduleRespawn()
   }
@@ -1219,7 +1258,8 @@ export class CliSession extends BaseSession {
     // is cleared in _handleChildClose on whichever exit fires first.
     this._intentionalStop = true
 
-    log.info('Sending SIGINT to claude process')
+    // #4828: session-scoped if init has fired.
+    ;(this._log || log).info('Sending SIGINT to claude process')
     this._child.kill('SIGINT')
 
     // Safety: if still busy after 5s, force-clear state.
@@ -1236,7 +1276,8 @@ export class CliSession extends BaseSession {
       // otherwise the flag stays armed indefinitely and swallows real crashes.
       this._intentionalStop = false
       if (this._isBusy) {
-        log.warn('Interrupt safety timeout — force-clearing busy state')
+        // #4828: session-scoped.
+        ;(this._log || log).warn('Interrupt safety timeout — force-clearing busy state')
         this._emitInterruptedTurnResult()
       }
     }, 5000)

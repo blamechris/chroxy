@@ -22,7 +22,7 @@ import {
 } from '../byok-credentials.js'
 import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 import {
   PER_SESSION_SETTINGS,
   buildPerSessionSettingHandler,
@@ -99,7 +99,12 @@ function handleSetModel(ws, client, msg, ctx) {
     const providerAllowed = getProviderAllowedModels(entry.provider)
     if (providerAllowed) {
       if (!providerAllowed.includes(msg.model)) {
-        log.warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        // #4828: session-scoped — modelSessionId identifies the affected
+        // session. Legacy single-session adapters may surface an empty
+        // sessionId, so fall back to the module-level `log` rather than
+        // throwing inside loggerForSession (matches the input-handlers
+        // pattern from #4823).
+        ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
         sendError(
           ws,
           msg?.requestId,
@@ -108,7 +113,8 @@ function handleSetModel(ws, client, msg, ctx) {
         )
         return
       }
-      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      // #4828: session-scoped (single-session fallback as above).
+      ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
       // broadcast them verbatim. toShortModelId() is a Claude-specific
@@ -123,7 +129,8 @@ function handleSetModel(ws, client, msg, ctx) {
 
   if (ALLOWED_MODEL_IDS.has(msg.model)) {
     if (entry) {
-      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      // #4828: session-scoped (single-session fallback).
+      ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
@@ -154,7 +161,8 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
           // Unknown provider — allow through (fail open for forward-compat).
         }
         if (ProviderClass && ProviderClass.capabilities?.permissionModeSwitch === false) {
-          log.warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
+          // #4828: session-scoped (single-session fallback).
+          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
           sendError(
             ws,
             msg?.requestId,
@@ -197,20 +205,24 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       //    escalate. Only the primary API token can flip to auto.
       if (msg.mode === 'auto') {
         if (client.boundSessionId) {
-          log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
+          // #4828: session-scoped to the bound session — that's the
+          // session the rejection belongs to.
+          loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_FORBIDDEN_BOUND_CLIENT',
             'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.')
           return
         }
         if (ctx.config?.allowAutoPermissionMode !== true) {
-          log.warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
+          // #4828: session-scoped (single-session fallback).
+          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_DISABLED_BY_CONFIG',
             'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.')
           return
         }
       }
       if (msg.mode === 'auto' && !msg.confirmed) {
-        log.info(`Auto mode requested by ${client.id}, awaiting confirmation`)
+        // #4828: session-scoped (single-session fallback).
+        ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).info(`Auto mode requested by ${client.id}, awaiting confirmation`)
         ctx.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',
@@ -218,10 +230,12 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         })
       } else {
         const previousMode = entry.session.permissionMode || 'unknown'
+        // #4828: session-scoped (single-session fallback).
+        const _pmLog = permModeSessionId ? loggerForSession('ws', permModeSessionId) : log
         if (msg.mode === 'auto') {
-          log.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
+          _pmLog.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
         } else {
-          log.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
+          _pmLog.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
         }
         // BaseSession exposes the mode on the public `permissionMode` field.
         // The earlier `_permissionMode` read was a typo that always resolved
@@ -238,7 +252,8 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         // leaving the user staring at fresh prompts in supposed bypass mode.
         const actualMode = entry.session.permissionMode
         if (actualMode !== msg.mode) {
-          log.warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
+          // #4828: session-scoped (single-session fallback).
+          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
           sendError(ws, msg?.requestId, 'PERMISSION_MODE_NOT_APPLIED',
             `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`)
           return
@@ -306,7 +321,9 @@ function handlePermissionResponse(ws, client, msg, ctx) {
         (ageMs !== null && ageMs > 30_000) ||
         (createdAt && clientConnectedAt && clientConnectedAt > createdAt)
       )
-      log.warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
+      // #4828: session-scoped to the bound session — the reject belongs
+      // to the OWNER of `boundSessionId`, not the mismatched `originSessionId`.
+      loggerForSession('ws', client.boundSessionId).warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
         requestId,
         decision,
         clientId: client.id,
@@ -356,7 +373,10 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     const subscribed = originSessionId === client.activeSessionId
       || (client.subscribedSessionIds && client.subscribedSessionIds.has(originSessionId))
     if (!subscribed) {
-      log.warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
+      // #4828: session-scoped — the permission belongs to `originSessionId`
+      // when known. Fall back to module-level `log` when the request had
+      // no mapping AND the client isn't bound (legacy / unknown route).
+      ;(originSessionId ? loggerForSession('ws', originSessionId) : log).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
       return
     }
   }
@@ -832,7 +852,8 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
     try {
       trustStore.flush()
     } catch (err) {
-      log.warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
+      // #4828: session-scoped — `sessionId` is in scope (L772 above).
+      loggerForSession('ws', sessionId).warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
       sendError(
         ws,
         msg?.requestId,
@@ -1071,7 +1092,8 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
   try {
     trustStore.grantCommunityTrust(msg.author, { realPath: resolvedPath })
   } catch (err) {
-    log.warn(`skill_trust_grant: flush failed (${err && err.message ? err.message : err})`)
+    // #4828: session-scoped — `sessionId` is in scope earlier in the handler.
+    loggerForSession('ws', sessionId).warn(`skill_trust_grant: flush failed (${err && err.message ? err.message : err})`)
     sendError(
       ws,
       msg?.requestId,
@@ -1194,7 +1216,8 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   try {
     ctx.sessionManager?.serializeState?.()
   } catch (err) {
-    log.warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
+    // #4828: session-scoped.
+    loggerForSession('ws', sessionId).warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
   }
 }
 
@@ -1255,7 +1278,8 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   // Broadcast updated rules to all session clients
   const currentRules = entry.session.getPermissionRules ? entry.session.getPermissionRules() : rules
   ctx.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
-  log.info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
+  // #4828: session-scoped.
+  loggerForSession('ws', sessionId).info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
 }
 
 // #4664: assemble the per-session-setting WS handlers from the registry.
