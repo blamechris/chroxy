@@ -1,10 +1,10 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
-import { existsSync, readFileSync, mkdirSync, renameSync, unlinkSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import { homedir } from 'os'
-import { isWindows, writeFileRestricted } from './platform.js'
+import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { DockerBackend } from './environments/backends/docker.js'
 
@@ -769,26 +769,12 @@ export class EnvironmentManager extends EventEmitter {
         environments: Array.from(this._environments.values()),
       }
 
-      const tmpPath = this._statePath + '.tmp'
-      writeFileRestricted(tmpPath, JSON.stringify(data, null, 2))
-      if (isWindows) {
-        try { unlinkSync(this._statePath) } catch (e) {
-          if (e && e.code !== 'ENOENT') log.error(`Failed to remove existing state file: ${e.message}`)
-        }
-      }
-      try {
-        renameSync(tmpPath, this._statePath)
-      } catch (renameErr) {
-        // Clean up the orphaned .tmp so it doesn't leak across retries.
-        // Suppress ENOENT (nothing to clean up). Log but do not re-throw any
-        // secondary unlink error — the original rename error is what matters.
-        try { unlinkSync(tmpPath) } catch (cleanupErr) {
-          if (cleanupErr && cleanupErr.code !== 'ENOENT') {
-            log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
-          }
-        }
-        throw renameErr
-      }
+      // writeFileRestricted is atomic on POSIX (#4850) and cleans up
+      // its intermediate `.tmp` on rename failure (#4874) — no manual
+      // tmp+rename wrapper needed here. On Windows it falls through to
+      // a direct writeFileSync which overwrites the destination, so the
+      // pre-#4874 unlinkSync(EEXIST) workaround is no longer required.
+      writeFileRestricted(this._statePath, JSON.stringify(data, null, 2))
     } catch (err) {
       log.error(`Failed to persist environment state: ${err.message}`)
     }
