@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
@@ -702,16 +702,29 @@ export function SettingsBar({
               testID="session-interventions-sheet"
             >
               <Text style={styles.costSheetTitle}>Recent chroxy interventions</Text>
-              {[...(interventions ?? [])].reverse().map((iv) => (
-                <View
-                  key={iv.toolUseId}
-                  style={styles.interventionRow}
-                  testID={`session-intervention-${iv.toolUseId}`}
-                >
-                  <Text style={styles.interventionReason}>{describeIntervention(iv)}</Text>
-                  <Text style={styles.interventionMeta}>{formatInterventionTimestamp(iv.timestamp)}</Text>
-                </View>
-              ))}
+              {/* #4862 (Copilot review): the interventions ring is capped at 50
+                  entries (MAX_SESSION_INTERVENTIONS in store-core). Without a
+                  scroll container, on smaller devices a full ring would push
+                  the Close button off-screen and strand the modal. Constrain
+                  the list area and let it scroll; the title + Close button
+                  stay pinned outside the scroll region. */}
+              <ScrollView
+                style={styles.interventionList}
+                contentContainerStyle={styles.interventionListContent}
+                showsVerticalScrollIndicator
+                testID="session-interventions-scroll"
+              >
+                {[...(interventions ?? [])].reverse().map((iv) => (
+                  <View
+                    key={iv.toolUseId}
+                    style={styles.interventionRow}
+                    testID={`session-intervention-${iv.toolUseId}`}
+                  >
+                    <Text style={styles.interventionReason}>{describeIntervention(iv)}</Text>
+                    <Text style={styles.interventionMeta}>{formatInterventionTimestamp(iv.timestamp)}</Text>
+                  </View>
+                ))}
+              </ScrollView>
               <TouchableOpacity
                 style={styles.costSheetDismiss}
                 onPress={() => setInterventionsOpen(false)}
@@ -912,6 +925,18 @@ const styles = StyleSheet.create({
   interventionMeta: {
     color: COLORS.textMuted,
     fontSize: 11,
+  },
+  // #4862 (Copilot review) — scroll container for the recent-interventions
+  // list. maxHeight keeps the modal card bounded on small devices so the
+  // Close button outside the ScrollView is always reachable, even at the
+  // ring's 50-entry cap. marginVertical separates the list from the title
+  // and the Close button.
+  interventionList: {
+    maxHeight: 280,
+    marginVertical: 8,
+  },
+  interventionListContent: {
+    paddingBottom: 4,
   },
   agentSection: {
     gap: 4,

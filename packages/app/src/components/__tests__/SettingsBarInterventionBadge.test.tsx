@@ -7,7 +7,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Text } from 'react-native';
+import { Text, View } from 'react-native';
 import {
   SettingsBar,
   describeIntervention,
@@ -201,5 +201,24 @@ describe('SettingsBar intervention badge rendering (#4764)', () => {
     const oldest = root.findByProps({ testID: 'session-intervention-toolu_a' });
     expect(newest).toBeTruthy();
     expect(oldest).toBeTruthy();
+    // #4862 (Copilot review) — explicit ordering assertion so a regression
+    // in the `.reverse()` call is caught. Walk every rendered row testID in
+    // document order and check that newest (toolu_b) comes BEFORE oldest
+    // (toolu_a). `findAll` returns nodes in tree order, so the row testIDs
+    // collected from the sheet subtree are the visible order on screen.
+    // Filter on the View host type to avoid the testID prop being collected
+    // from a child Text that inherits via parent layout (defensive).
+    const renderedRowIds = sheet
+      .findAll(
+        (node) =>
+          node.type === View &&
+          typeof node.props.testID === 'string' &&
+          node.props.testID.startsWith('session-intervention-toolu_'),
+      )
+      .map((node) => node.props.testID as string);
+    expect(renderedRowIds).toEqual([
+      'session-intervention-toolu_b',
+      'session-intervention-toolu_a',
+    ]);
   });
 });
