@@ -1363,13 +1363,50 @@ export class ClaudeTuiSession extends BaseSession {
       return finish('paste', true)
     }
 
+    // #4805: single-line throttled path used to feed `freeformText`
+    // verbatim into _term.write — no defense against C0 control bytes
+    // or ANSI CSI / OSC sequences embedded in the input. The newline
+    // bracketed-paste branch above (#4678) already strips embedded
+    // `\x1b[201~` markers and explicitly cites attacker-controlled MCP
+    // tool results as the threat model; the single-line branch has the
+    // same input shape and now applies the parallel defense.
+    //
+    // Stripped (in this order, since the first match wins):
+    //   - ANSI CSI: ESC [ <params> <final> (final is A-Z or a-z)
+    //   - OSC: ESC ] <payload> (BEL | ESC \) — title-set + friends
+    //   - Other C0 control bytes \x00-\x08 + \x0b-\x1a + \x1c-\x1f
+    //     + \x7f, plus any leftover lone ESC (\x1b) — excludes \t
+    //     (normal printable whitespace) and \r/\n (which never reach
+    //     this path; the multi-line branch handles them)
+    // Note: the CSI / OSC alternations come BEFORE the C0 range so a
+    // full escape sequence is matched as one unit. If the lone-byte
+    // class came first the regex would peel off the \x1b introducer
+    // and leave the [<final> bytes as printable garbage.
+    // Known damage paths covered:
+    //   - \x03 (Ctrl-C) aborts the active TUI form
+    //   - OSC \x1b]0;...\x07 rewrites the window title on some hosts
+    //   - Long CSI sequences desync the input-mode state machine and
+    //     trigger the recurring wedge symptom class
+    const originalLength = text.length
+    text = text.replace(
+      // eslint-disable-next-line no-control-regex
+      /\x1b\[[\d;]*[A-Za-z]|\x1b\][\s\S]*?(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g,
+      '',
+    )
+    if (text.length !== originalLength) {
+      log.warn(`writePtyText (msg=${this._activeTurn?.messageId ?? 'none'}) stripped ${originalLength - text.length} control/escape bytes from single-line input (#4805)`)
+    }
+    // Re-compute counts now that the body may have shrunk so the bulk-
+    // path threshold check + finish() bookkeeping stay accurate.
+    const sanitizedCodePointCount = [...text].length
+
     this._term.write('\x1b[?2004l')
     try {
       // #4276: huge prompts bypass the throttle. Code-point count
       // (counted once at function entry) keeps the threshold
       // consistent with how the loop iterates — an emoji-only 5000-
       // char string [...].length is 5000, not 10000.
-      if (codePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
+      if (sanitizedCodePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
         // Re-check the turn lifecycle exactly once before the bulk
         // write — same shape as the loop's per-iter guards, so a
         // caller that aborted between scheduling and execution doesn't
