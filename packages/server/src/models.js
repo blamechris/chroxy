@@ -1,4 +1,4 @@
-import { readFileSync, renameSync, unlinkSync, mkdirSync } from 'fs'
+import { readFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { writeFileRestricted } from './platform.js'
@@ -471,15 +471,22 @@ export function createModelsRegistry(hooks = {}) {
     const snapshot = snapshotString()
     if (snapshot === lastSavedSnapshot) return true
 
-    const tmpPath = `${path}.tmp-${process.pid}`
     try {
       mkdirSync(dirname(path), { recursive: true })
-      writeFileRestricted(tmpPath, JSON.stringify({
+      // Pass a per-pid `tmpSuffix` so two concurrent POSIX processes
+      // (test runner + main daemon, or two test workers) writing the
+      // same cache do not race on the same intermediate `.tmp` file
+      // (#4874). The suffix is a POSIX-only contract — on Windows
+      // `writeFileRestricted` ignores `tmpSuffix` and writes directly to
+      // the target path (see `platform.js`), so the per-pid hint has no
+      // effect there. writeFileRestricted handles atomic rename +
+      // cleanup internally on POSIX since #4874; no manual rename/unlink
+      // wrapper is needed here.
+      writeFileRestricted(path, JSON.stringify({
         models: activeModels,
         defaultModelId,
         savedAt: Date.now(),
-      }, null, 2))
-      renameSync(tmpPath, path)
+      }, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
       lastSavedSnapshot = snapshot
       return true
     } catch (err) {
@@ -488,7 +495,6 @@ export function createModelsRegistry(hooks = {}) {
       // lost on restart — surface at warn level so operators can diagnose
       // from ~/.chroxy/logs/chroxy.log.
       log.warn(`saveCache: failed to persist models cache to ${path}: ${err?.code || ''} ${err?.message || err}`.trim())
-      try { unlinkSync(tmpPath) } catch {}
       return false
     }
   }

@@ -58,12 +58,19 @@ describe('platform', () => {
         assert.strictEqual(mode, 0o600)
       })
 
-      it('writes atomically via <path>.tmp + rename — leaves original intact when rename fails (#4850)', () => {
-        // Simulates the process being killed (SIGKILL / OOM) between the
-        // tmp-write and the rename. The contract is: readers never see a
-        // half-written `filePath` — they see either the previous version
-        // (this test) or the new one. The `.tmp` leftover is acceptable;
-        // a subsequent successful write will overwrite it.
+      it('writes atomically via <path>.tmp + rename — leaves original intact and cleans up tmp when rename fails (#4850, #4874)', () => {
+        // Simulates `renameSync` failing AFTER the tmp file is fully
+        // written (EIO from the shim below). The contract under test is
+        // two-part: (1) readers of `filePath` never see a half-written
+        // version — they observe either the previous generation (this
+        // test) or the new one once rename succeeds; (2) since #4874 the
+        // intermediate `.tmp` is unlinked in-process when rename fails so
+        // it does not leak across retries (environment-manager.js and
+        // session-state-persistence.js used to hand-roll this cleanup).
+        // The previous-generation guarantee is what protected callers
+        // pre-#4874 when the process was killed mid-write (SIGKILL / OOM)
+        // — same crash-safety contract, exercised here via a synthetic
+        // rename failure rather than a real signal.
         //
         // We run the actual write in a subprocess because monkey-patching
         // `fs.renameSync` in-process doesn't propagate to `platform.js`'s
@@ -119,13 +126,60 @@ try {
         const parsed = JSON.parse(after) // would throw if half-written
         assert.strictEqual(parsed.generation, 1)
 
-        // The .tmp sidecar was created (proves we went through the
-        // atomic write path) and contains the new content. Production
-        // readers ignore the `.tmp` suffix — `connection-info.js` and
-        // `device-preferences.js` only read the target path.
+        // The intermediate `.tmp` sidecar is cleaned up on rename failure
+        // (#4874) so it does not leak across retries.
         const tmpPath = `${filePath}.tmp`
-        assert.strictEqual(existsSync(tmpPath), true)
-        assert.strictEqual(readFileSync(tmpPath, 'utf-8'), JSON.stringify({ generation: 2 }))
+        assert.strictEqual(existsSync(tmpPath), false, '.tmp sidecar must be cleaned up on rename failure')
+      })
+
+      it('honours a custom tmpSuffix option and routes the intermediate file through it (#4874)', () => {
+        // Two concurrent processes writing the same target with a per-pid
+        // suffix must not race on the same intermediate file. We can't
+        // truly fork here, but we can prove the suffix is honoured by
+        // observing the intermediate path on a rename failure. The shim
+        // also suppresses the cleanup unlink so the post-crash file is
+        // still on disk for inspection.
+        const filePath = join(tmpDir, 'models-cache.json')
+        const shim = join(tmpDir, 'throw-on-rename-suffix.mjs')
+        const runner = join(tmpDir, 'runner-suffix.mjs')
+        const sentinelPath = join(tmpDir, 'observed-tmp-path.txt')
+        const shimSrc = `
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const fs = require('node:fs')
+const origRename = fs.renameSync
+const origUnlink = fs.unlinkSync
+fs.renameSync = (oldPath, newPath) => {
+  if (newPath === ${JSON.stringify(filePath)}) {
+    fs.writeFileSync(${JSON.stringify(sentinelPath)}, oldPath)
+    const err = new Error('simulated mid-write crash')
+    err.code = 'EIO'
+    throw err
+  }
+  return origRename.call(this, oldPath, newPath)
+}
+// Swallow the cleanup unlink so we can inspect the intermediate path later.
+fs.unlinkSync = (p) => {
+  if (typeof p === 'string' && p.includes('.tmp-')) return
+  return origUnlink.call(this, p)
+}
+`
+        const runnerSrc = `
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+try {
+  writeFileRestricted(${JSON.stringify(filePath)}, 'payload', { tmpSuffix: '.tmp-12345' })
+  process.exit(0)
+} catch {
+  process.exit(2)
+}
+`
+        writeFileRestricted(shim, shimSrc)
+        writeFileRestricted(runner, runnerSrc)
+        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
+
+        const observed = readFileSync(sentinelPath, 'utf-8')
+        assert.strictEqual(observed, `${filePath}.tmp-12345`, 'tmpSuffix must drive the intermediate path')
       })
 
       it('cleans up the .tmp sidecar on successful write (#4850)', () => {
@@ -136,6 +190,16 @@ try {
         writeFileRestricted(filePath, 'final')
         assert.strictEqual(readFileSync(filePath, 'utf-8'), 'final')
         assert.strictEqual(existsSync(`${filePath}.tmp`), false)
+      })
+
+      it('cleans up the custom-suffix sidecar on successful write (#4874)', () => {
+        // Same contract as the default `.tmp` cleanup, exercised via the
+        // models.js `tmpSuffix: \`.tmp-${process.pid}\`` path so the
+        // per-pid intermediate does not leak after a clean save.
+        const filePath = join(tmpDir, 'models-cache.json')
+        writeFileRestricted(filePath, 'final', { tmpSuffix: '.tmp-99999' })
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), 'final')
+        assert.strictEqual(existsSync(`${filePath}.tmp-99999`), false)
       })
 
       it('preserves 0o600 on the renamed target (#4850)', () => {
