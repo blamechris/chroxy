@@ -1194,7 +1194,7 @@ export function SessionScreen() {
               numberOfLines={1}
             >
               {activeSessionStoppedCode !== null && activeSessionStoppedCode !== 0
-                ? `Session stopped. exit ${activeSessionStoppedCode}`
+                ? `Session stopped. (exit ${activeSessionStoppedCode})`
                 : 'Session stopped.'}
             </Text>
           </View>

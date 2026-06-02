@@ -1163,7 +1163,7 @@ export function handleSessionError(
  *
  * The patch sets `stoppedAt` to `now()` so renderers can show a calm
  * informational status strip ("Session stopped." / with optional
- * "exit N" suffix for non-zero exits). `stoppedCode` carries the child
+ * "(exit N)" suffix for non-zero exits). `stoppedCode` carries the child
  * process exit code when the server reported one — null otherwise. Both
  * fields are cleared (back to null) by `handleClaudeReady`'s patch when
  * the server restarts the child after the operator's next input.

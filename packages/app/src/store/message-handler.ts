@@ -1398,7 +1398,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       //
       // Sets `stoppedAt` + `stoppedCode` on the target session — the
       // SessionScreen reads those fields to render a subtle, info-styled
-      // status strip ("Session stopped." / "Session stopped. exit N").
+      // status strip ("Session stopped." / "Session stopped. (exit N)").
       // Both fields are cleared automatically by `handleClaudeReady`
       // (which returns `stoppedAt: null, stoppedCode: null`) when the
       // server restarts the child after the operator's next input.
