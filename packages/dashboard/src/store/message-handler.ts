@@ -2312,6 +2312,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'session_stopped': {
+      // #4878: quiet, informational confirmation when CliSession exits
+      // cleanly after a user-initiated Stop. The wire path was wired in
+      // #4868 (CliSession 'stopped' → SessionManager → ws-forwarding →
+      // ServerSessionStoppedSchema). Routed through `addInfoNotification`
+      // (info-level toast, not the red `addServerError` reserved for
+      // crashes / STREAM_ERROR / ABORT) so the operator gets a positive
+      // "you clicked Stop and the session did indeed stop" confirmation.
+      //
+      // A non-zero exit code is surfaced as a small diagnostic suffix
+      // (e.g. "Session stopped. (exit 143)" for SIGTERM). Code 0 is the
+      // common clean-exit case and gets no decoration — the bare
+      // "Session stopped." carries the full signal there. Missing code
+      // (future in-process providers per the #4756 follow-up) is also
+      // bare; surfacing "(exit undefined)" would be noisier than useful.
+      const stoppedCode = typeof msg.code === 'number' ? msg.code : null;
+      const stoppedMessage = stoppedCode != null && stoppedCode !== 0
+        ? `Session stopped. (exit ${stoppedCode})`
+        : 'Session stopped.';
+      get().addInfoNotification(stoppedMessage);
+      break;
+    }
+
     // --- History replay ---
 
     case 'history_replay_start': {
