@@ -5,7 +5,9 @@
  *   - has role=status + aria-live=polite (so SR announces)
  *   - debounces phase churn (reconnect storm = one announcement)
  *   - announces only SETTLED phase after debounce
- *   - does not announce on first paint (initial empty)
+ *   - does not announce SYNCHRONOUSLY on first paint (initial empty)
+ *     — the initial phase IS announced, but only after the debounce
+ *     window settles
  *   - re-announces when a NEW settled phase arrives
  *   - cancels stale timers on unmount (no setState-after-unmount)
  */
@@ -37,17 +39,19 @@ describe('ConnectionAnnouncer (#4873)', () => {
     expect(region.style.position).toBe('absolute')
   })
 
-  it('does not announce anything on first paint', () => {
+  it('delays the initial-phase announcement until after the debounce window', () => {
     const { getByTestId } = render(<ConnectionAnnouncer phase="connecting" debounceMs={50} />)
     const region = getByTestId('connection-announcer')
-    // Region exists but is empty until the debounce timer fires for
-    // the first NEW phase value (initial paint is not a transition).
+    // Region exists but is empty SYNCHRONOUSLY on first paint — the
+    // mount effect has scheduled a timer but it hasn't fired yet, so
+    // SR hears nothing immediately.
     expect(region.textContent).toBe('')
     act(() => {
       vi.advanceTimersByTime(50)
     })
-    // After the debounce, the initial phase IS announced — but only
-    // once, and only after settling.
+    // After the debounce window the initial phase IS announced (once,
+    // and only after settling). The delay coalesces a fast initial
+    // flap into a single announcement of the settled state.
     expect(region.textContent).toBe('Connecting to Chroxy server')
   })
 

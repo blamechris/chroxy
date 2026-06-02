@@ -75,9 +75,14 @@ export function ConnectionAnnouncer({
   phase,
   debounceMs = 1500,
 }: ConnectionAnnouncerProps) {
-  // The text currently in the live region. Initially empty so SR does
-  // not announce on first mount (the dashboard's first paint is not a
-  // state change worth narrating).
+  // The text currently in the live region. Initially empty so the
+  // first paint does not announce SYNCHRONOUSLY. The mount effect
+  // still schedules a debounced timer for the initial phase, so SR
+  // will hear that phase after `debounceMs` (e.g. dashboard mounting
+  // in `connecting` → "Connecting to Chroxy server" ~1.5s later).
+  // This delay is intentional: it coalesces a fast initial flap
+  // (connecting → connected within the debounce window) into a
+  // single announcement of the settled state.
   const [announced, setAnnounced] = useState('')
   // Track the last phase we actually announced so we don't re-announce
   // the same settled state if the debounce timer trips on a no-op
