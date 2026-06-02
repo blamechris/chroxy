@@ -427,6 +427,10 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Run verify-entitlements.sh tests (#4801)
+        working-directory: packages/desktop
+        run: bash scripts/verify-entitlements.test.sh
+
   scripts-tests:
     name: Scripts Tests
     runs-on: ubuntu-24.04

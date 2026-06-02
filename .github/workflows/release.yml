@@ -223,6 +223,18 @@ jobs:
         working-directory: packages/desktop
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg -c "$TAURI_CONFIG_OVERRIDE"
 
+      - name: Verify .app entitlements (#4801 regression guard)
+        shell: bash
+        working-directory: packages/desktop
+        run: |
+          APP_PATH="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 2 -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found under src-tauri/target/universal-apple-darwin/release/bundle/macos" >&2
+            exit 1
+          fi
+          echo "Verifying entitlements on $APP_PATH"
+          bash scripts/verify-entitlements.sh "$APP_PATH"
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
