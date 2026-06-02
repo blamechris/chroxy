@@ -3112,7 +3112,11 @@ describe('ClaudeTuiSession', () => {
     it('respondToQuestion is a no-op when no pending answer (defensive)', () => {
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
-      session._pendingUserAnswer = null
+      // #4802: explicit clear-all replaces the old `_pendingUserAnswer = null`
+      // back-compat setter (the implicit-clear pattern is now forbidden — it
+      // silently wiped sibling AskUserQuestion entries that still had answers
+      // in flight on the wire, per the audit P1.2 root cause).
+      session._pendingUserAnswers_clearAll()
 
       session.respondToQuestion('whatever')
       assert.equal(writes.length, 0, 'no PTY writes when there is no pending answer')
@@ -3429,21 +3433,28 @@ describe('ClaudeTuiSession', () => {
       )
     })
 
-    // #4286 (review-caught): _finishTurnError and _handleHardTimeout
-    // were the two asymmetric exits that left the answer slot dirty
-    // (interrupt/destroy already clear it). Pin both so a regression
-    // doesn't re-introduce a late user_question_response writing into
-    // a dead turn.
-    it('_finishTurnError clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+    // #4286 + #4802 (audit P1.2): _finishTurnError's original #4286 fix
+    // wiped the pending-answer slot for symmetry with interrupt/destroy,
+    // but the audit re-evaluated that decision once `_pendingUserAnswer`
+    // became a Map (#4668). `_finishTurnError` runs on paths that do NOT
+    // issue Ctrl-C (PTY exit / Stop hook timeout / prompt-write failure),
+    // so a parallel sibling AskUserQuestion's late answer may still be
+    // legitimately consumable. Post-#4802 `_finishTurnError` PRESERVES
+    // the Map; `_handleHardTimeout` (which DOES Ctrl-C via _teardownTurn)
+    // still wipes — see the #4691 + #4802 audit tests further down for
+    // the per-callsite intent matrix.
+    it('_finishTurnError preserves _pendingUserAnswer (audit P1.2 #4802)', () => {
       session._pendingUserAnswer = { toolUseId: 'toolu_aq_finish' }
       session.on('error', () => {})  // swallow
       session._currentMessageId = 'msg-x'
       session._activeTurn = { startedAt: Date.now(), aborted: false }
       session._finishTurnError('test-error', 'msg-x')
-      assert.equal(session._pendingUserAnswer, null, 'finishTurnError clears pending answer')
+      assert.ok(session._pendingUserAnswer, 'finishTurnError preserves pending answer (#4802)')
+      assert.equal(session._pendingUserAnswer.toolUseId, 'toolu_aq_finish',
+        'entry survives so a late respondToQuestion can still consume it')
     })
 
-    it('_handleHardTimeout clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+    it('_handleHardTimeout clears _pendingUserAnswer (symmetry with interrupt/destroy via Ctrl-C)', () => {
       session._pendingUserAnswer = { toolUseId: 'toolu_aq_hard' }
       session.on('error', () => {})
       session._isBusy = true
@@ -4016,16 +4027,25 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
-    // #4691 — pin all-or-nothing semantics for the OTHER teardown sites
-    // (_finishTurnError / _handleHardTimeout / interrupt / destroy). The
-    // surgical-by-toolUseId fix only applies to the watchdog because it
-    // knows which tool stalled. The other paths end the whole turn —
-    // no sibling can survive a turn ending — so wiping the Map is the
-    // correct semantic. If a future refactor accidentally introduces a
-    // per-toolUseId clear at one of these sites, a stale entry could
-    // outlive the turn and misroute a late user_question_response into
-    // a dead PTY.
-    it('_finishTurnError wipes ALL pending entries (turn-level teardown, #4691)', () => {
+    // #4802 — per-callsite intent audit. Each teardown site now picks an
+    // explicit method (`_pendingUserAnswers_clearAll()` or
+    // `_clearPendingAnswerByToolUseId(tid)`) instead of routing through
+    // a back-compat `_pendingUserAnswer = null` setter that implicitly
+    // wiped the entire Map. The audit flagged `_finishTurnError` in
+    // particular: it does NOT issue Ctrl-C and is invoked for several
+    // "turn ended unexpectedly" reasons (PTY exit, Stop hook timeout,
+    // prompt-write failure) where a sibling AskUserQuestion's answer can
+    // still be in flight on the wire. Wiping the sibling there hits the
+    // "no matching pending entry — dropping" path in respondToQuestion
+    // and produces the silent #4668-class wedge described in #4802.
+    //
+    // Post-#4802: `_finishTurnError` PRESERVES the Map (no clear-all);
+    // late respondToQuestion calls still find their entry. The other
+    // turn-ending sites (`_teardownTurn` via hard timeout / stream stall /
+    // first-output timeout, `interrupt()`, `destroy()`) keep clear-all
+    // because they all issue Ctrl-C (or kill the PTY outright), so any
+    // late keystroke would be writing into a torn-down TUI anyway.
+    it('_finishTurnError preserves pending entries (surgical, audit P1.2 #4802)', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
       session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
@@ -4035,8 +4055,10 @@ describe('ClaudeTuiSession', () => {
       session._currentMessageId = 'msg-finish'
       session._activeTurn = { startedAt: Date.now(), aborted: false }
       session._finishTurnError('test-error', 'msg-finish')
-      assert.equal(session._pendingUserAnswers.size, 0,
-        '_finishTurnError ends the turn — every pending answer is now stale')
+      assert.equal(session._pendingUserAnswers.size, 2,
+        '_finishTurnError must NOT wipe pending entries — siblings can have answers in flight (#4802)')
+      assert.ok(session._pendingUserAnswers.has('toolu_one'), 'sibling one preserved')
+      assert.ok(session._pendingUserAnswers.has('toolu_two'), 'sibling two preserved')
     })
 
     it('_handleHardTimeout wipes ALL pending entries (turn-level teardown, #4691)', () => {
@@ -4052,7 +4074,7 @@ describe('ClaudeTuiSession', () => {
       session._hardTimeoutMs = 1000
       session._handleHardTimeout()
       assert.equal(session._pendingUserAnswers.size, 0,
-        'hard timeout ends the turn — every pending answer is now stale')
+        'hard timeout ends the turn with Ctrl-C — every pending answer is now stale')
     })
 
     it('interrupt() wipes ALL pending entries (turn-level teardown, #4691)', () => {
@@ -4064,7 +4086,64 @@ describe('ClaudeTuiSession', () => {
       session._term = { write: () => {}, kill: () => {} }
       session.interrupt()
       assert.equal(session._pendingUserAnswers.size, 0,
-        'interrupt ends the turn — every pending answer is now stale')
+        'interrupt ends the turn with Ctrl-C — every pending answer is now stale')
+    })
+
+    // #4802 — pin the parallel-questions-with-mid-flight-stall regression
+    // scenario from the audit verbatim. The audit's failure mode:
+    //
+    //   1. Turn emits AskUserQuestion A + B in parallel (post-#4668 deny
+    //      retry-as-singles shape).
+    //   2. PostToolUse for A arrives → A's entry is cleared surgically.
+    //   3. Stream stalls for an UNRELATED reason (Stop hook timeout, PTY
+    //      exit, etc.) → `_finishTurnError` runs.
+    //   4. Pre-#4802 the back-compat `_pendingUserAnswer = null` setter
+    //      called `_pendingUserAnswers.clear()` and wiped B.
+    //   5. B's answer arrives microseconds later from the dashboard,
+    //      finds the Map empty, hits the "no matching pending entry —
+    //      dropping" path, and silently wedges.
+    //
+    // Post-#4802: `_finishTurnError` does NOT wipe — B survives so the
+    // late response can still consume it.
+    it('parallel A+B with mid-flight _finishTurnError preserves sibling B (audit P1.2 #4802)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-parallel-stall'
+      session._activeTurn = { startedAt: Date.now(), aborted: false, uuid: 'test-4802' }
+
+      // (1) Two parallel AskUserQuestion tool_uses arrive in one turn.
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+      }, 'msg-parallel-stall')
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_B',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }] }] },
+      }, 'msg-parallel-stall')
+      assert.equal(session._pendingUserAnswers.size, 2, 'precondition: A and B armed')
+
+      // (2) PostToolUse for A only — A cleared, B still pending.
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_response: { selectedLabel: 'a1' },
+      }, 'msg-parallel-stall')
+      assert.ok(!session._pendingUserAnswers.has('toolu_A'), 'A cleared by its own PostToolUse')
+      assert.ok(session._pendingUserAnswers.has('toolu_B'), 'B still pending pre-stall')
+
+      // (3) Stream stalls for an unrelated reason → _finishTurnError fires.
+      session._finishTurnError('Stop hook timeout', 'msg-parallel-stall')
+
+      // (4) Pre-#4802: B was wiped by the back-compat null setter →
+      //     `_pendingUserAnswers.clear()`. Post-#4802: B SURVIVES — a
+      //     late response from the dashboard can still consume it.
+      assert.ok(session._pendingUserAnswers.has('toolu_B'),
+        'B\'s pending answer SURVIVES the unrelated turn teardown — late dashboard response must still find its entry (#4802)')
+      assert.equal(session._pendingUserAnswers.size, 1, 'only B remains (A already consumed)')
     })
 
     it('watchdog is cleared on destroy() (clean teardown)', async () => {

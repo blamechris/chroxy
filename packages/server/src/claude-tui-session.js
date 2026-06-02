@@ -448,22 +448,48 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * Back-compat setter: writing `_pendingUserAnswer = null` (the pattern
-   * used at every turn-teardown site) clears the entire Map. Writing an
-   * entry sets it in the Map keyed by its toolUseId AND updates the
-   * "most recent" pointer. Pre-#4668 callers don't need to change.
+   * Back-compat setter: writing an entry sets it in the Map keyed by its
+   * toolUseId AND updates the "most recent" pointer. Pre-#4668 callers
+   * that wrote `_pendingUserAnswer = { ... }` don't need to change.
+   *
+   * #4802: the previous null-branch behaviour (`= null` → Map.clear()) is
+   * removed. Implicit clear-all at every teardown site silently wiped
+   * sibling AskUserQuestion entries that still had answers in flight
+   * (see `_pendingUserAnswers_clearAll` for the audit + the per-callsite
+   * rationale). Writing null now throws so the regression is loud — each
+   * callsite must pick `_pendingUserAnswers_clearAll()` (intentional
+   * turn-level wipe with documented reason) or
+   * `_clearPendingAnswerByToolUseId(tid)` (surgical, the watchdog path)
+   * explicitly.
    */
   set _pendingUserAnswer(entry) {
     if (entry === null || entry === undefined) {
-      this._pendingUserAnswers.clear()
-      this._lastPendingAnswerToolUseId = null
-      return
+      throw new Error('_pendingUserAnswer = null/undefined forbidden (#4802) — use _pendingUserAnswers_clearAll() or _clearPendingAnswerByToolUseId(tid) so the destructive intent is visible at the call site')
     }
     const toolUseId = entry.toolUseId
     if (toolUseId) {
       this._pendingUserAnswers.set(toolUseId, entry)
       this._lastPendingAnswerToolUseId = toolUseId
     }
+  }
+
+  /**
+   * #4802: explicit clear-all for the turn-level teardown sites that
+   * unambiguously kill the PTY for the current turn (Ctrl-C via
+   * `_teardownTurn` / `interrupt()`, or SIGTERM via `destroy()`). After
+   * any of those, even a surviving Map entry can't be served — claude
+   * TUI is no longer waiting on its prompt — so wiping the slot keeps
+   * a late `respondToQuestion` from writing into a torn-down form.
+   *
+   * NOT used by `_finishTurnError` (no Ctrl-C, sibling answers may still
+   * be valid for the brief race window — see audit P1.2) nor by the
+   * AskUserQuestion stall watchdog (knows the exact `toolUseId` that
+   * stalled, so it calls `_clearPendingAnswerByToolUseId` instead per
+   * #4691).
+   */
+  _pendingUserAnswers_clearAll() {
+    this._pendingUserAnswers.clear()
+    this._lastPendingAnswerToolUseId = null
   }
 
   /** Internal: drop a specific pending answer entry (PostToolUse cleanup). */
@@ -1779,12 +1805,23 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
-    // #4286: symmetry with interrupt() / destroy(). A turn failing or
-    // timing out while AskUserQuestion is pending must clear the answer
-    // slot — otherwise a late user_question_response (e.g. the user
-    // clicked the QuestionPrompt right as the hard timeout fired) would
-    // attempt a PTY write that no longer matches a live turn.
-    this._pendingUserAnswer = null
+    // #4286 / #4802: deliberately do NOT call
+    // `_pendingUserAnswers_clearAll()` here. The original #4286 fix
+    // wiped the single-field slot to keep late user_question_response
+    // events from writing into a dead turn — but post-#4668 the field is
+    // a Map, and the audit (P1.2 #4802) flagged that the implicit wipe
+    // collapsed sibling AskUserQuestion entries that still had legitimate
+    // answers in flight. `_finishTurnError` runs on PTY-exit / Stop-hook
+    // timeout / prompt-write failure paths that do NOT issue Ctrl-C, so
+    // a parallel sibling's response that's already on the wire (#4668
+    // retry-as-singles shape) can still validly consume its entry. Late
+    // arrivals after the PTY has truly stopped responding will no-op in
+    // `respondToQuestion` (write throws / TUI ignores) — far better than
+    // silently dropping the legitimate response and re-creating the
+    // #4668 wedge. The other turn-ending sites
+    // (`_teardownTurn` / `interrupt()` / `destroy()`) still call
+    // `_pendingUserAnswers_clearAll()` because they DO issue Ctrl-C or
+    // kill the PTY outright.
     this._clearAskUserQuestionLock()
     // #4604: same symmetry for the stall watchdog. The guard in
     // _onAskUserQuestionStall (`!_pendingUserAnswer && !_isBusy`) would
@@ -2111,8 +2148,15 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
-    // 4. AskUserQuestion-related slot/lock/watchdog symmetry.
-    this._pendingUserAnswer = null
+    // 4. AskUserQuestion-related slot/lock/watchdog symmetry. #4802:
+    //    explicit `_pendingUserAnswers_clearAll()` (was an implicit
+    //    `_pendingUserAnswer = null` via the back-compat setter). Safe
+    //    here because _teardownTurn always issues Ctrl-C above
+    //    (step 1), so the TUI has dropped its current AskUserQuestion
+    //    form — any sibling pending entry can no longer be served and
+    //    leaving it would just risk a late respondToQuestion writing
+    //    stale keystrokes into whatever form the next turn brings up.
+    this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
     if (this._askUserQuestionWatchdog) {
       clearTimeout(this._askUserQuestionWatchdog)
@@ -2198,9 +2242,14 @@ export class ClaudeTuiSession extends BaseSession {
       // sendMessage() works normally. Matches _handleHardTimeout.
       try { this._term.write('\x03') } catch { /* ignore */ }
     }
-    // #4278: also drop any pending AskUserQuestion so a subsequent
+    // #4278 / #4802: drop any pending AskUserQuestion so a subsequent
     // user_question_response can't write into a torn-down context.
-    this._pendingUserAnswer = null
+    // Explicit `_pendingUserAnswers_clearAll()` (was an implicit
+    // `_pendingUserAnswer = null` → Map.clear() via the back-compat
+    // setter). Safe here: interrupt() writes Ctrl-C to the PTY above,
+    // so the TUI is no longer waiting on any AskUserQuestion form —
+    // every sibling pending entry is now equally stale.
+    this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
     // #4604: cancel the stall watchdog too. interrupt() does NOT clear
     // _isBusy directly (Ctrl-C surfaces async via _finishTurn*), so without
@@ -2859,9 +2908,13 @@ export class ClaudeTuiSession extends BaseSession {
     this._processReady = false
     this._isBusy = false
     this._activeTurn = null
-    // #4278: drop any pending AskUserQuestion so a late
-    // user_question_response can't write into a dead PTY.
-    this._pendingUserAnswer = null
+    // #4278 / #4802: drop any pending AskUserQuestion so a late
+    // user_question_response can't write into a dead PTY. Explicit
+    // `_pendingUserAnswers_clearAll()` (was an implicit
+    // `_pendingUserAnswer = null` → Map.clear() via the back-compat
+    // setter). Unambiguous here: destroy() SIGTERMs the PTY below and
+    // nulls `_term`, so every pending entry is permanently unservable.
+    this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
