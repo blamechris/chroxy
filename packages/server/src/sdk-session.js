@@ -390,6 +390,18 @@ export class SdkSession extends BaseSession {
     // The per-call `error` event still fires on every refused sendMessage so
     // client UI feedback is unaffected.
     this._lastRefusedWarnTs = 0
+
+    // #4881: provider parity with CliSession's #4602 _intentionalStop flag.
+    // Set by `interrupt()` immediately before aborting the active SDK query
+    // generator, then consumed inside `_callQuery`'s try/catch/finally so a
+    // user-initiated Stop:
+    //   - suppresses the normal "Query error: AbortError" error emit, and
+    //   - emits a single transient `stopped` event (no `code` — SdkSession is
+    //     in-process, no child-process exit status to carry).
+    // Cleared on every consume path (close, error, destroy) so the flag never
+    // leaks past one turn — matches the single-use semantic CliSession pins
+    // in `_handleChildClose` (capture-and-clear up front).
+    this._intentionalStop = false
   }
 
   get sessionId() {
@@ -885,15 +897,38 @@ export class SdkSession extends BaseSession {
       if (streamState.hasStreamStarted) {
         this.emit('stream_end', { messageId })
       }
+      // #4881: capture-and-clear before any branch so the flag never leaks
+      // past this turn even when _destroying short-circuits the emits below.
+      // Mirrors CliSession._handleChildClose (#4602).
+      const wasIntentionalStop = this._intentionalStop
+      this._intentionalStop = false
       if (!this._destroying) {
-        // #4828: session-scoped when init has fired; falls back to module
-        // `log` for pre-init query failures (e.g. spawn refused).
-        ;(this._log || log).error(`Query error: ${err.message}`)
-        this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
+        if (wasIntentionalStop) {
+          // #4881: user clicked Stop — interrupt() set the flag, the SDK
+          // generator threw an AbortError as a result. Skip the loud "Query
+          // error" surface and emit the quiet `stopped` event for parity
+          // with CliSession. No `code` because SDK runs in-process — there
+          // is no child-process exit status to carry.
+          ;(this._log || log).info('Query aborted after user stop')
+          this.emit('stopped', {})
+        } else {
+          // #4828: session-scoped when init has fired; falls back to module
+          // `log` for pre-init query failures (e.g. spawn refused).
+          ;(this._log || log).error(`Query error: ${err.message}`)
+          this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
+        }
       }
       this._clearMessageState()
     } finally {
       this._query = null
+      // #4881: safety-net clear of _intentionalStop. The catch block clears
+      // it on the throw path (AbortError after interrupt()), but if
+      // query.interrupt() races a `result` message arriving first, the
+      // for-await loop exits normally, skipping the catch. Without this
+      // clear, the flag would stay armed until the next turn's catch and
+      // mis-trigger a spurious `stopped` emit there. Idempotent — the
+      // catch path already cleared it on the throw path.
+      this._intentionalStop = false
       // Dequeue any follow-up messages that arrived while busy
       if (this._pendingInput?.length && !this._destroying) {
         // #3562: if the SidecarProcess latched stdin_disabled mid-turn (e.g.
@@ -1340,6 +1375,12 @@ export class SdkSession extends BaseSession {
   async interrupt() {
     if (!this._query) return
 
+    // #4881: mark the imminent query teardown as user-initiated so the
+    // _callQuery catch block suppresses the AbortError-flavored "Query error"
+    // emit and instead surfaces a quiet `stopped` event. Cleared in the
+    // catch/finally (single-use, mirrors CliSession#4602).
+    this._intentionalStop = true
+
     // #4828: session-scoped (interrupt() only meaningful with an active query).
     ;(this._log || log).info('Interrupting query')
     try {
@@ -1545,6 +1586,9 @@ export class SdkSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._pendingInput = []
+    // #4881: clear so a teardown after interrupt() never leaks the flag past
+    // this session instance. Mirrors CliSession.destroy() (#4602).
+    this._intentionalStop = false
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
