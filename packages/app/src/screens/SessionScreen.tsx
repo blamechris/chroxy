@@ -20,6 +20,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, stripAnsi, nextMessageId } from '../store/connection';
 import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
 import type { SessionIntervention } from '@chroxy/store-core';
+// #4875: shared typed predicate for the AskUserQuestion freeform shape.
+// Replaces the looser 2-condition inline check (`'otherLabel' in &&
+// 'freeformText' in`) with the same 5-condition guard the store layer
+// uses, so widening `SelectOptionValue` to a third object shape can't
+// silently misroute it as freeform.
+import { isFreeformAnswer } from '@chroxy/store-core';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
@@ -688,25 +694,30 @@ export function SessionScreen() {
     requestId?: string,
     toolUseId?: string,
   ) => {
-    const isFreeformAnswer = typeof value === 'object' && value !== null
-      && 'otherLabel' in value && 'freeformText' in value;
+    // #4875: shared `isFreeformAnswer` guard from @chroxy/store-core
+    // narrows `value` to `OtherFreeformAnswer` in the true branch, so the
+    // string-branch arms can drop the `as string` cast in favour of plain
+    // assignment. The previous inline 2-condition check (`'otherLabel' in
+    // && 'freeformText' in`) was looser than the store-layer detector and
+    // would have silently misrouted a future third object shape; the
+    // shared guard keeps both call sites in lockstep.
+    const freeform = isFreeformAnswer(value);
     let sent: 'sent' | 'queued' | false = false;
     if (toolUseId) {
       sent = sendUserQuestionResponse(value, toolUseId);
     } else if (requestId) {
       // Permission responses are decision strings ('allow' / 'deny' / etc.)
-      // and never carry an Other / freeform payload — coerce to string so
-      // the type stays sound even though this branch isn't reachable for
-      // the freeform shape in practice.
-      sent = sendPermissionResponse(requestId, isFreeformAnswer ? value.freeformText : (value as string));
+      // and never carry an Other / freeform payload — the freeform branch
+      // is defence-in-depth only; in practice this site sees `string`.
+      sent = sendPermissionResponse(requestId, freeform ? value.freeformText : value);
     } else {
-      const literal = isFreeformAnswer ? value.freeformText : (value as string);
+      const literal = freeform ? value.freeformText : value;
       sent = sendInput(hasTerminal ? literal + '\r' : literal);
     }
     if (sent === 'sent') {
       // For the freeform shape, store the typed text (not the label) so
       // the answered-state UI renders the user's actual answer.
-      const summary = isFreeformAnswer ? value.freeformText : (value as string);
+      const summary = freeform ? value.freeformText : value;
       markPromptAnswered(messageId, summary);
     }
   };

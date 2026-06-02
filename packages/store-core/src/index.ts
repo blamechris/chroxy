@@ -16,6 +16,14 @@ export { DEFAULT_CONTEXT_WINDOW } from './types'
 // TS error in the guard, not a silent drop at the call site.
 export { isVoiceInputMode } from './types'
 
+// #4875: shared typed predicate + type for the AskUserQuestion "Other /
+// freeform" answer payload. Replaces three duplicate inline shape checks
+// (mobile store, mobile screen, dashboard store) with one source of truth
+// so widening `SelectOptionValue` to a third object shape can't silently
+// misroute it as freeform.
+export { isFreeformAnswer } from './freeform-answer'
+export type { OtherFreeformAnswer } from './freeform-answer'
+
 export type {
   MessageAttachment,
   ToolResultImage,

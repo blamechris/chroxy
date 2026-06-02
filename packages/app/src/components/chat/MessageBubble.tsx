@@ -9,6 +9,12 @@ import {
   LayoutAnimation,
 } from 'react-native';
 import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
+// #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
+// so the mobile store, the mobile screen, and (eventually) the dashboard
+// can converge on a single declaration paired with the shared
+// `isFreeformAnswer` guard. Re-exported below for the existing call sites
+// (SessionScreen, ChatView, MessageBubble's own onSelectOption signature).
+import type { OtherFreeformAnswer } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -34,10 +40,12 @@ import { StreamStallChip } from '../StreamStallChip';
  * options free-text-only AskUserQuestions (#1245) so older servers that
  * ignore `freeformText` keep working unchanged.
  */
-export interface OtherFreeformAnswer {
-  otherLabel: string;
-  freeformText: string;
-}
+// #4875: the interface itself lives in `@chroxy/store-core/freeform-answer`
+// (single source of truth, paired with the `isFreeformAnswer` guard); re-
+// exported here for downstream importers (ChatView, SessionScreen) that
+// already pull `SelectOptionValue` from this file. Keeping the re-export
+// avoids churning every existing call site for the type alias.
+export type { OtherFreeformAnswer };
 
 export type SelectOptionValue = string | OtherFreeformAnswer;
 

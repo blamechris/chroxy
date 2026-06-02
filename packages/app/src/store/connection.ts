@@ -124,6 +124,11 @@ import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
   getHealthCheckErrorMessage,
+  // #4875: shared typed predicate for the AskUserQuestion freeform shape.
+  // Replaces the inline 5-condition check that previously diverged from
+  // the looser SessionScreen variant; both call sites now narrow off the
+  // same guard.
+  isFreeformAnswer,
 } from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
@@ -1216,24 +1221,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //
     // Freeform shape detection is tight (exactly the two named keys, both
     // strings) so a multi-question Record whose keys happen to be those
-    // names doesn't get misrouted into the freeform branch.
-    const isFreeformAnswer = typeof answer === 'object' && answer !== null
-      && !Array.isArray(answer)
-      && Object.keys(answer).length === 2
-      && 'freeformText' in answer && 'otherLabel' in answer
-      && typeof (answer as Record<string, unknown>).freeformText === 'string'
-      && typeof (answer as Record<string, unknown>).otherLabel === 'string';
-    const isMultiAnswer = !isFreeformAnswer && typeof answer !== 'string';
+    // names doesn't get misrouted into the freeform branch. The guard
+    // lives in `@chroxy/store-core/freeform-answer` so the dashboard
+    // store, the mobile screen layer, and this site all narrow off one
+    // shared predicate (#4875).
+    const freeform = isFreeformAnswer(answer);
+    const isMultiAnswer = !freeform && typeof answer !== 'string';
     const payload: Record<string, unknown> = {
       type: 'user_question_response',
-      answer: isFreeformAnswer
-        ? (answer as { otherLabel: string }).otherLabel
+      answer: freeform
+        ? answer.otherLabel
         : isMultiAnswer
           ? formatQuestionAnswerSummary(answer as Record<string, string | string[]>)
           : (answer as string),
     };
-    if (isFreeformAnswer) {
-      payload.freeformText = (answer as { freeformText: string }).freeformText;
+    if (freeform) {
+      payload.freeformText = answer.freeformText;
     } else if (isMultiAnswer) {
       payload.answers = answer;
     }
