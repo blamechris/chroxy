@@ -61,6 +61,8 @@ import {
   handleCheckpointRestored as sharedCheckpointRestored,
   handleError as sharedError,
   handleSessionError as sharedSessionError,
+  // #4879: quiet user-initiated Stop confirmation handler
+  handleSessionStopped as sharedSessionStopped,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
@@ -1382,6 +1384,34 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         } else {
           Alert.alert('Session Error', parsed.message ?? 'Unknown error');
         }
+      }
+      break;
+    }
+
+    case 'session_stopped': {
+      // #4879: quiet, informational confirmation when CliSession exits
+      // cleanly after a user-initiated Stop. The wire path was wired in
+      // #4868 (CliSession 'stopped' → SessionManager → ws-forwarding →
+      // ServerSessionStoppedSchema). Distinct from `session_error` (which
+      // flips `health: 'crashed'` and surfaces a loud red banner): the
+      // operator tapped Stop, the child process did indeed stop.
+      //
+      // Sets `stoppedAt` + `stoppedCode` on the target session — the
+      // SessionScreen reads those fields to render a subtle, info-styled
+      // status strip ("Session stopped." / "Session stopped. exit N").
+      // Both fields are cleared automatically by `handleClaudeReady`
+      // (which returns `stoppedAt: null, stoppedCode: null`) when the
+      // server restarts the child after the operator's next input.
+      //
+      // NO Alert / push notification — this is intentionally NOT an
+      // error UX. The active session's inline banner carries the full
+      // signal; for inactive sessions the absence of a session_error
+      // already conveys "no crash, clean stop" and adding a notification
+      // here would just be noise.
+      const stoppedPatch = sharedSessionStopped(msg, get().activeSessionId);
+      const stoppedTarget = stoppedPatch.sessionId;
+      if (stoppedTarget && get().sessionStates[stoppedTarget]) {
+        updateSession(stoppedTarget, () => stoppedPatch.patch);
       }
       break;
     }

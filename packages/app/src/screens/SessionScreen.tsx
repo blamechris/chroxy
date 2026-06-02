@@ -237,6 +237,18 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].health : 'healthy';
   });
+  // #4879: quiet user-initiated Stop marker. Set by the `session_stopped`
+  // handler (sharedSessionStopped); cleared on next claude_ready. Drives
+  // the subtle "Session stopped." status strip below — distinct from the
+  // loud red crashed banner reserved for unexpected exits.
+  const activeSessionStoppedAt = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].stoppedAt : null;
+  });
+  const activeSessionStoppedCode = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].stoppedCode : null;
+  });
   const isPlanPending = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].isPlanPending : false;
@@ -1160,6 +1172,35 @@ export function SessionScreen() {
         </View>
       )}
 
+      {/* #4879: Quiet stopped status strip for active session — surfaced
+          when the server confirms a user-initiated Stop (session_stopped
+          wire message, wired in #4868). Intentionally informational
+          rather than error-styled: this is positive feedback that the
+          Stop tap landed. Suppressed when health === 'crashed' so the
+          loud red crash banner above isn't doubled up on the unlikely
+          race where both arrive (defensive — the server only emits
+          stopped for clean exits per CliSession._handleChildClose). The
+          strip auto-clears on the next `claude_ready` (typically when
+          the operator sends another message). */}
+      {activeSessionHealth !== 'crashed' && activeSessionStoppedAt !== null && (
+        <View
+          testID="session-stopped-banner"
+          style={[styles.reconnectingBanner, styles.stoppedBanner]}
+        >
+          <View style={styles.errorBannerContent}>
+            <Text
+              testID="session-stopped-banner-text"
+              style={styles.stoppedBannerText}
+              numberOfLines={1}
+            >
+              {activeSessionStoppedCode !== null && activeSessionStoppedCode !== 0
+                ? `Session stopped. exit ${activeSessionStoppedCode}`
+                : 'Session stopped.'}
+            </Text>
+          </View>
+        </View>
+      )}
+
       {/* Server error banners */}
       {serverErrors.map((err) => (
         <View
@@ -1725,6 +1766,18 @@ const styles = StyleSheet.create({
     color: COLORS.accentRed,
     fontSize: 12,
     fontWeight: '600',
+  },
+  // #4879: subtle "Session stopped." status strip. Uses the muted
+  // backgroundCard surface (greyed out, NOT the red/orange accent banners
+  // reserved for crashes / warnings) and textMuted copy so the operator
+  // reads it as a calm confirmation rather than an error.
+  stoppedBanner: {
+    backgroundColor: COLORS.backgroundCard,
+  },
+  stoppedBannerText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '500',
   },
   sheetOverlay: {
     flex: 1,
