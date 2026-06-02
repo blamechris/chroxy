@@ -411,6 +411,40 @@ describe('SessionStatePersistence backup rotation (regression: #2906)', () => {
     assert.equal(existsSync(stateFile), false)
     assert.ok(existsSync(stateFile + '.bak'), '.bak preserved for future recovery')
   })
+
+  // #4908 crash-safety pin: serializeState was collapsed onto the shared
+  // writeFileRestricted helper, which requires rotation to happen BEFORE the
+  // new write — otherwise a mid-write crash could replace the main file with
+  // partial bytes and the AFTER-rotation step would then move that partial
+  // copy into .bak, destroying the prior-generation recovery copy. Spy on the
+  // instance's `_rotateToBak` method (instance binding, not an imported one,
+  // so we can replace it directly) and capture filesystem state at the moment
+  // rotation is invoked.
+  it('rotates BEFORE writing the new generation (crash-safety pin for #4908)', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'gen1', name: 'Gen1', cwd: '/tmp' }] })
+
+    // Capture main file contents at the moment _rotateToBak runs. Rotate-then-
+    // write means main still holds Gen1 at this point; write-then-rotate would
+    // mean main already holds Gen2.
+    let mainAtRotation = null
+    const originalRotate = p._rotateToBak.bind(p)
+    p._rotateToBak = function spyRotate(mainPath, bakPath) {
+      mainAtRotation = existsSync(mainPath) ? JSON.parse(readFileSync(mainPath, 'utf-8')) : null
+      return originalRotate(mainPath, bakPath)
+    }
+
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'gen2', name: 'Gen2', cwd: '/tmp' }] })
+
+    assert.ok(mainAtRotation, '_rotateToBak must be called while main still exists (rotate-then-write order)')
+    assert.equal(mainAtRotation.sessions[0].name, 'Gen1',
+      'at rotation time, main must hold the PRIOR generation — proves rotation runs BEFORE the new write')
+
+    const main = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    const bak = JSON.parse(readFileSync(stateFile + '.bak', 'utf-8'))
+    assert.equal(main.sessions[0].name, 'Gen2')
+    assert.equal(bak.sessions[0].name, 'Gen1')
+  })
 })
 
 describe('SessionStatePersistence Windows .bak rotation (regression: #2908)', () => {
@@ -462,8 +496,13 @@ describe('SessionStatePersistence Windows .bak rotation (regression: #2908)', ()
     })
 
     assert.ok(unlinkedBak, 'should unlink the locked .bak before retrying rotation')
-    // Rename called: (1) initial rotate (threw), (2) retry rotate, (3) tmp → main
-    assert.equal(renameCalls, 3, 'should call rename three times: initial rotate + retry + final tmp→main')
+    // Rename called twice via fs.renameSync (rotation path): (1) initial rotate
+    // (threw EPERM), (2) retry rotate (succeeded). The final main-file write is
+    // delegated to writeFileRestricted (#4908 collapse) which imports its rename
+    // binding directly from 'fs' as a named import — that call bypasses
+    // mock.method(fs, 'renameSync', ...) so it is not visible here. The
+    // existsSync post-condition verifies the write happened.
+    assert.equal(renameCalls, 2, 'fs.renameSync called twice in rotation path: initial rotate + retry (final write goes through writeFileRestricted)')
     assert.ok(existsSync(stateFile), 'main state file should exist after serialize')
     assert.ok(existsSync(stateFile + '.bak'), '.bak should exist after successful retry')
     const bak = JSON.parse(readFileSync(stateFile + '.bak', 'utf-8'))
@@ -490,7 +529,11 @@ describe('SessionStatePersistence Windows .bak rotation (regression: #2908)', ()
       p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'new', name: 'New', cwd: '/tmp' }] })
     })
 
-    assert.ok(renameCalls >= 3, 'rotate attempted twice, then final tmp → main')
+    // fs.renameSync called twice (rotation initial + retry, both threw EBUSY).
+    // The main write goes through writeFileRestricted whose internal rename
+    // bypasses mock.method(fs, ...) — see the EPERM test above. The existsSync
+    // post-condition verifies the new generation was still written.
+    assert.ok(renameCalls >= 2, 'rotate attempted twice (initial + retry)')
     assert.ok(existsSync(stateFile), 'main state file must still be written when rotation fails')
     const main = JSON.parse(readFileSync(stateFile, 'utf-8'))
     assert.equal(main.sessions[0].name, 'New', 'new state should be persisted even if .bak rotation failed')
