@@ -636,8 +636,11 @@ describe('permission/question routing to originating session', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
 
-    // Simulate permission request from Session A (populates _permissionSessionMap)
-    server._permissionSessionMap.set('perm-routing-1', 'sess-a')
+    // Simulate permission request from Session A (populates _permissionSessionMap
+    // AND auto-subscribes connected clients to sess-a, mirroring the production
+    // dispatch path so the #4798 subscription guard sees the client as a
+    // legitimate recipient even after they switch_session away).
+    server._registerPermissionRoute('perm-routing-1', 'sess-a')
 
     // Switch client to Session B
     send(ws, { type: 'switch_session', sessionId: 'sess-b' })
@@ -805,6 +808,57 @@ describe('permission/question routing to originating session', () => {
     await waitFor(() => sessionBGotQuestion, { label: 'sessionB fallback question' })
 
     assert.equal(sessionBGotQuestion, true, 'Should fall back to activeSessionId when toolUseId not in routing map')
+
+    ws.close()
+  })
+
+  // #4798 (P0 symmetry with #4788): integration regression for the
+  // cross-session permission hijack vector. An unbound client active on
+  // session B must NOT be able to approve/deny a permission belonging to
+  // session A by replaying a leaked requestId. The map entry is populated
+  // by a bare `.set()` (NOT via _registerPermissionRoute) to simulate the
+  // attacker-replay scenario where the attacker client never received the
+  // legitimate dispatch event.
+  it('rejects unbound client permission_response when not subscribed to the originSessionId (#4798)', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+
+    let sessionAGotPermission = false
+    let sessionBGotPermission = false
+    sessionsMap.get('sess-a').session.respondToPermission = () => { sessionAGotPermission = true }
+    sessionsMap.get('sess-b').session.respondToPermission = () => { sessionBGotPermission = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Switch the client to session B (attacker tab is viewing B, not A).
+    send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(messages, 'session_switched', 2000)
+
+    // Simulate a leaked requestId for session A. NOTE: we use the raw
+    // Map.set() — NOT _registerPermissionRoute() — to model the attacker
+    // scenario where the attacker client never received the dispatch and
+    // is replaying a requestId it learned through a side channel.
+    server._permissionSessionMap.set('perm-hijack-1', 'sess-a')
+
+    // Attacker submits a decision for session A. Must be dropped because
+    // the unbound client is neither active on nor subscribed to sess-a.
+    send(ws, { type: 'permission_response', requestId: 'perm-hijack-1', decision: 'allow' })
+
+    // Give the server a moment to process — there's no positive ack so
+    // we sample the side effects after a short delay.
+    await new Promise((r) => setTimeout(r, 100))
+
+    assert.equal(sessionAGotPermission, false, 'Session A must NOT receive the hijacked decision')
+    assert.equal(sessionBGotPermission, false, 'Session B must not receive it either (no cross-routing)')
+    assert.equal(server._permissionSessionMap.get('perm-hijack-1'), 'sess-a',
+      'mapping preserved so the legitimate client can still respond')
 
     ws.close()
   })

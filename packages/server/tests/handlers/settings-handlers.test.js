@@ -533,6 +533,229 @@ describe('settings-handlers', () => {
         assert.match(rejectLog.message, /"decision":"deny"/)
       })
     })
+
+    // #4798 (audit P0 symmetry with #4788): UNBOUND clients (boundSessionId
+    // === null) must be subscribed to or actively viewing the session that
+    // owns the permission requestId before the handler routes their
+    // decision. Without this guard, an unbound dashboard tab can
+    // approve/deny a permission for any session by replaying a leaked
+    // requestId — arguably MORE dangerous than the question hijack vector
+    // because permission decisions gate file writes / shell exec. Mirrors
+    // the default filter in _broadcastToSession (ws-broadcaster.js:106)
+    // and the user_question_response guard added in #4788.
+    describe('subscription guard for unbound clients (#4798)', () => {
+      it('drops an unbound client\'s permission_response when originSessionId is neither active nor subscribed', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-leak', true]])
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // The leaked requestId belongs to session s1.
+        ctx.permissionSessionMap.set('perm-leak', 's1')
+        // Attacker tab: unbound, actively viewing s2, NOT subscribed to s1.
+        const attacker = makeClient({
+          id: 'attacker',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), attacker, {
+          requestId: 'perm-leak',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 0,
+          'unbound client without subscription/active match must NOT route the decision')
+        assert.equal(sessionB.respondToPermission.callCount, 0,
+          'and must not bleed onto the attacker\'s own session either')
+        assert.equal(ctx.permissionSessionMap.get('perm-leak'), 's1',
+          'mapping must stay intact so the legitimate client can still respond')
+      })
+
+      it('routes the decision when the unbound client\'s activeSessionId matches the originSessionId', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-ok-active', true]])
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.permissionSessionMap.set('perm-ok-active', 's1')
+        const client = makeClient({
+          id: 'legit-active',
+          boundSessionId: null,
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(),
+        })
+
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-ok-active',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 1,
+          'unbound client with matching activeSessionId must route normally')
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow'])
+        assert.equal(ctx.permissionSessionMap.has('perm-ok-active'), false,
+          'mapping must be consumed when the decision is routed')
+      })
+
+      it('routes the decision when the unbound client is subscribed to the originSessionId (even if active session differs)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-ok-sub', true]])
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        ctx.permissionSessionMap.set('perm-ok-sub', 's1')
+        // Multi-session dashboard pattern: active tab is s2, but s1 is
+        // subscribed (sidebar / background tab keeping the wire open).
+        const client = makeClient({
+          id: 'legit-subscribed',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-ok-sub',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 1,
+          'subscribed unbound client must route normally — matches _broadcastToSession filter')
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow'])
+      })
+
+      it('leaves the bound-client guard unchanged (different code path)', () => {
+        // The existing bound-client guard already early-returns when the
+        // bound session doesn't match the originSessionId. This test pins
+        // that the new subscription guard doesn't accidentally relax it.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-x', true]])
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.permissionSessionMap.set('perm-x', 's1')
+        const boundElsewhere = makeClient({
+          id: 'bound-other',
+          boundSessionId: 's2',
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(['s1']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), boundElsewhere, {
+          requestId: 'perm-x',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 0,
+          'bound-client guard takes precedence — boundSessionId mismatch always wins')
+        assert.equal(ctx.permissionSessionMap.get('perm-x'), 's1',
+          'mapping preserved when the bound-elsewhere client is rejected')
+      })
+
+      // #4798 Wave 2 regression: mirrors the ws-server-permissions integration
+      // test for the legitimate "view A → get permission for A → switch to B →
+      // respond" flow. In production, the WsServer-side _registerPermissionRoute
+      // helper auto-subscribes the originating viewer to the permission's
+      // session at dispatch time, so the unbound subscription guard above
+      // still passes after the client switches activeSessionId away.
+      it('routes the decision after switch_session when dispatch auto-subscribed the client to the originating session (#4798 Wave 2)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-after-switch', true]])
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // Production: when the permission for s1 dispatched, the WsServer-side
+        // helper called permissionSessionMap.set('perm-after-switch', 's1')
+        // AND subscribedSessionIds.add('s1') for this client.
+        ctx.permissionSessionMap.set('perm-after-switch', 's1')
+        // The user then tapped "switch to session B" — session-handlers.js
+        // adds 's2' to subscribedSessionIds and sets activeSessionId='s2',
+        // but leaves the prior 's1' subscription intact.
+        const client = makeClient({
+          id: 'viewer-after-switch',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-after-switch',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 1,
+          'after-switch decision must route to the originating session A')
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow'])
+        assert.equal(sessionB.respondToPermission.callCount, 0,
+          'must not bleed onto the now-active session B')
+        assert.equal(ctx.permissionSessionMap.has('perm-after-switch'), false,
+          'mapping consumed on successful route')
+      })
+
+      it('tolerates a missing subscribedSessionIds set (defensive — old client shapes)', () => {
+        // The handler must not throw if subscribedSessionIds is undefined
+        // (e.g. a test fixture or legacy client struct). It should fall
+        // through to the activeSessionId check.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-y', true]])
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.permissionSessionMap.set('perm-y', 's1')
+        const client = makeClient({
+          id: 'no-subscribed-set',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          // subscribedSessionIds intentionally omitted
+        })
+
+        // Should not throw, and should drop the decision (no match).
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-y',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 0,
+          'undefined subscribedSessionIds + non-matching active must drop')
+        assert.equal(ctx.permissionSessionMap.get('perm-y'), 's1',
+          'mapping preserved on guard rejection')
+      })
+
+      it('drops legacy pendingPermissions path too when unbound client is not subscribed', () => {
+        // The handler falls through to ctx.pendingPermissions when the SDK
+        // path doesn't resolve. The subscription guard must apply BEFORE
+        // that fallback so the legacy path can't be used to bypass the
+        // session check.
+        const ctx = makeCtx()
+        ctx.pendingPermissions = new Map([['perm-legacy-leak', { resolve: () => {} }]])
+        ctx.permissions = { resolvePermission: createSpy() }
+        ctx.permissionSessionMap.set('perm-legacy-leak', 's1')
+
+        const attacker = makeClient({
+          id: 'attacker-legacy',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), attacker, {
+          requestId: 'perm-legacy-leak',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(ctx.permissions.resolvePermission.callCount, 0,
+          'legacy pendingPermissions resolver must not be invoked on the hijack path')
+        assert.equal(ctx.permissionSessionMap.get('perm-legacy-leak'), 's1',
+          'mapping preserved on guard rejection — legitimate client can still respond')
+      })
+    })
   })
 
   describe('set_permission_rules', () => {

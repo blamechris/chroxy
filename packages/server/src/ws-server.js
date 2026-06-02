@@ -505,6 +505,11 @@ export class WsServer {
       pushManager,
       pendingPermissions: this._pendingPermissions,
       permissionSessionMap: this._permissionSessionMap,
+      // #4798: same auto-subscribe helper used by ws-forwarding's dispatch
+      // path. Hook-originated HTTP permission requests also need to seed
+      // subscribedSessionIds on connected viewers so the settings-handler
+      // subscription guard accepts the legitimate response.
+      registerPermissionRoute: (requestId, sessionId) => self._registerPermissionRoute(requestId, sessionId),
       getSessionManager: () => self.sessionManager,
       // Pass pairingManager so the HTTP /permission-response fallback can
       // enforce session binding — see 2026-04-11 audit blocker 5.
@@ -1241,6 +1246,11 @@ export class WsServer {
       // re-opening the cross-session hijack vector (unconnected / future
       // clients are still unable to answer).
       registerQuestionRoute: (toolUseId, sessionId) => this._registerQuestionRoute(toolUseId, sessionId),
+      // #4798: symmetry with registerQuestionRoute — auto-subscribe eligible
+      // clients to the permission's session at dispatch time so the
+      // settings-handlers subscription guard naturally passes for legitimate
+      // viewers (including the "view A → switch to B → respond" flow).
+      registerPermissionRoute: (requestId, sessionId) => this._registerPermissionRoute(requestId, sessionId),
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
       broadcastSessionList: () => this._handlerCtx.broadcastSessionList(),
@@ -1441,6 +1451,39 @@ export class WsServer {
       if (!client.authenticated) continue
       // Don't auto-subscribe a client bound to a *different* session — the
       // bound binding is the security contract for that client.
+      if (client.boundSessionId && client.boundSessionId !== sessionId) continue
+      if (!client.subscribedSessionIds) continue
+      client.subscribedSessionIds.add(sessionId)
+    }
+  }
+
+  /**
+   * #4798 (P0 symmetry with #4788): register a permission route for
+   * `requestId` against `sessionId` AND auto-subscribe every currently-eligible
+   * authenticated client to `sessionId`. Mirrors `_registerQuestionRoute` — the
+   * settings-handler's permission_response subscription guard (the "unbound
+   * client must be subscribed or active on the permission's session" check)
+   * stays symmetric with `_broadcastToSession`'s default recipient filter:
+   * any client that was eligible to RECEIVE the permission request is now
+   * eligible to RESPOND to it, even after a `switch_session` flips their
+   * `activeSessionId` away.
+   *
+   * Without the auto-subscribe at dispatch, the Wave 1 guard would silently
+   * drop the legitimate "view A → get permission for A → switch to B →
+   * respond" flow because `switch_session` only adds the new target to
+   * `subscribedSessionIds`; the originating session A would be in neither
+   * set after the switch.
+   *
+   * Same bound-client filter as the question variant: clients paired to a
+   * different session never get quietly subscribed elsewhere. Clients that
+   * connect AFTER dispatch are still unable to respond — that's the desired
+   * hijack-prevention property.
+   */
+  _registerPermissionRoute(requestId, sessionId) {
+    this._permissionSessionMap.set(requestId, sessionId)
+    if (!sessionId) return
+    for (const [, client] of this.clients) {
+      if (!client.authenticated) continue
       if (client.boundSessionId && client.boundSessionId !== sessionId) continue
       if (!client.subscribedSessionIds) continue
       client.subscribedSessionIds.add(sessionId)

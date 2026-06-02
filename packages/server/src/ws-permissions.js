@@ -56,7 +56,7 @@ function sanitizeToolInput(input) {
  * @param {Object} [opts.rateLimit] - Override RateLimiter config for POST /permission. Mainly for tests; production uses the 30+10 default below.
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
@@ -157,7 +157,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         ownerSession.notifyPermissionPending(requestId)
       }
       if (ownerSessionId) {
-        permissionSessionMap.set(requestId, ownerSessionId)
+        // #4798: prefer the WsServer-provided helper so dispatch also auto-
+        // subscribes eligible clients to the permission's session — keeps the
+        // settings-handler subscription guard symmetric with the broadcast
+        // filter. Fall back to a bare Map.set when the helper isn't wired
+        // (unit-test fixtures construct the handler directly).
+        if (typeof registerPermissionRoute === 'function') {
+          registerPermissionRoute(requestId, ownerSessionId)
+        } else {
+          permissionSessionMap.set(requestId, ownerSessionId)
+        }
       }
       // Diagnostic correlation log for #2832 — paired with
       // [session-binding-resend] and [session-binding-reject]. The
@@ -431,7 +440,17 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               } else {
                 log.debug(`[session-binding-resend] permission ${requestId} resent (sessionId=${sessionId}, client=unknown)`)
               }
-              permissionSessionMap.set(requestId, sessionId)
+              // #4798: prefer the auto-subscribing helper so re-sending a
+              // pending permission also seeds subscribedSessionIds on
+              // eligible clients — matches the dispatch-time behaviour and
+              // keeps the settings-handler subscription guard symmetric
+              // across the reconnect path. The bare Map.set fallback covers
+              // unit-test fixtures that construct the handler directly.
+              if (typeof registerPermissionRoute === 'function') {
+                registerPermissionRoute(requestId, sessionId)
+              } else {
+                permissionSessionMap.set(requestId, sessionId)
+              }
               const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = permData
               sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs, sessionId })
             }
