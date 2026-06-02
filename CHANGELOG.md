@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Removed fake-coverage ChatMessage markdown overflow tests (#4803, audit P3.3):** the `describe('long markdown content (#4757)')` block in `packages/dashboard/src/components/ChatMessage.test.tsx` was structural-only — every assertion (`code.textContent`, `inlineCodes.length`, "doesn't throw") passed on the pre-PR commit, so removing the CSS fix in `components.css` (`max-width: 100%`, `min-width: 0`, `overflow-wrap: anywhere`) would not fail any test. jsdom doesn't measure layout, so unit tests cannot verify wrapping. The block is deleted with a comment pointing at the CSS rules; #4757 remains manually verified per release. A real visual-regression harness (Playwright screenshot of a narrow viewport with a 220-char fenced line) is tracked as a future enhancement.
+
 ## [0.9.34] - 2026-06-02
 
 P0 hotfix release closing the four highest-severity findings from the v0.9.33 8-agent swarm-audit (`docs/audit-results/code-quality-v0.9.33/`). Two are real cross-session security exposures introduced by the bound-mobile pairing model (log fan-out leaks PTY contents + tool-use IDs to any paired client; unbound clients can hijack another session's pending AskUserQuestion using leaked IDs). Two are correctness regressions from the v0.9.33 work itself (voice-input unmount race introduced by #4786 continuous mode; `streamStallTimeoutMs` per-provider override silently dropped by Codex/Gemini middle-layer destructures — exactly the `feedback_jsonl_subprocess_middle_layer` trap pattern, landing for the 3rd time despite a memory note).
