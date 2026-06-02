@@ -4356,11 +4356,14 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #4635 — last q (Q4) is single-select → 150ms settle is inserted
+      // before Submit; bump wait past settle + Enter.
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
       // Expected sequence: paste-disable, digits + Tab interleaved per the
-      // multi-question driver, '1' to confirm Submit, paste-enable.
-      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\x1b[?2004h']
+      // multi-question driver, '1' to confirm Submit, '\r' defensive Enter
+      // (#4635), paste-enable.
+      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\r', '\x1b[?2004h']
       assert.deepEqual(writes, expected,
         `expected empirical byte sequence, got ${JSON.stringify(writes)}`)
       assert.equal(session._pendingUserAnswer, null, 'pending cleared')
@@ -4388,10 +4391,11 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #4635 — last q (Q4) is single-select → settle + trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
       // Identical to the JSON-encoded shape — back-compat preserved.
-      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\x1b[?2004h']
+      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\r', '\x1b[?2004h']
       assert.deepEqual(writes, expected,
         `expected identical byte sequence for native string[], got ${JSON.stringify(writes)}`)
     })
@@ -4414,12 +4418,14 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // Last q is multi-select → no settle delay, just trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 150))
 
-      // Q1 → '1'; Q2 (multi) → '1' '2' + '\t'; Submit → '1'. The legacy
+      // Q1 → '1'; Q2 (multi) → '1' '2' + '\t'; Submit → '1' + '\r' (#4635).
+      // Last q is multi-select so NO settle delay before Submit. The legacy
       // comma-split would have split 'Hello, world' into ['Hello', 'world']
       // which match nothing, defaulting to '1' only.
-      const expected = ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\x1b[?2004h']
+      const expected = ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\r', '\x1b[?2004h']
       assert.deepEqual(writes, expected,
         `native string[] should preserve comma-containing labels, got ${JSON.stringify(writes)}`)
     })
@@ -4463,10 +4469,12 @@ describe('ClaudeTuiSession', () => {
       // Old dashboard sends just the freeform string of q1's answer —
       // we don't have an answersMap.
       session.respondToQuestion('a')
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #4635 — last q (Q3) is single-select → settle + trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
-      // Q1 → '1', Q2 (multi-select) → '1' + '\t' (advance), Q3 → '1', Submit → '1'.
-      assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '\t', '1', '1', '\x1b[?2004h'],
+      // Q1 → '1', Q2 (multi-select) → '1' + '\t' (advance), Q3 → '1',
+      // Submit → '1' + '\r' (#4635).
+      assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '\t', '1', '1', '\r', '\x1b[?2004h'],
         `expected default-to-option-1 sequence, got ${JSON.stringify(writes)}`)
 
       const missingMapWarn = warnLines.find((m) => /didn't send answersMap/.test(m))
@@ -4494,14 +4502,161 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #4635 — last q (Q3) is single-select → settle + trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
-      assert.deepEqual(writes, ['\x1b[?2004l', '2', '1', '3', '1', '\x1b[?2004h'],
+      assert.deepEqual(writes, ['\x1b[?2004l', '2', '1', '3', '1', '\r', '\x1b[?2004h'],
         `expected partial-map sequence, got ${JSON.stringify(writes)}`)
 
       const missingQWarn = warnLines.find((m) => /no resolvable answer for q=/.test(m) && /Q2/.test(m))
       assert.ok(missingQWarn, `expected WARN about Q2 missing, got ${JSON.stringify(warnLines)}`)
       assert.match(missingQWarn, /defaulting to option 1/)
+    })
+
+    // #4635 — pure all-single-select multi-question form. v0.9.20 driver
+    // wrote `digit, digit, digit, digit, '1'` for a 4-q all-single-select
+    // form and claude TUI never emitted PostToolUse — the 30s stall
+    // watchdog fired. The mixed-form path works because the explicit
+    // `'\t'` after a multi-select question gives claude TUI a settle
+    // beat between commit and the next render; on a pure single-select
+    // sequence the LAST digit auto-advances directly to the Submit screen
+    // and the 1ms per-char throttle writes the Submit `'1'` before the
+    // Submit screen renders, so it gets swallowed.
+    //
+    // Fix layer 1: insert a render-settling pause before the Submit `'1'`
+    // when the LAST question is single-select (mirrors the
+    // OTHER_FREEFORM_SETTLE_MS pattern from #4651).
+    // Fix layer 2: append `'\r'` after the Submit `'1'` as a defensive
+    // commit — harmless on the mixed path per the single-q precedent
+    // (#4290 trailing Enter is redundant but harmless), potentially
+    // saves the all-single-select Submit screen if it actually requires
+    // Enter instead of auto-submit on `'1'`.
+    it('drives a pure all-single-select 3-question form with settle + trailing Enter (#4635)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+        { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }, { label: 'z' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_all_single', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',  // → '1' (auto-advances)
+        'Q2?': 'q',  // → '2' (auto-advances)
+        'Q3?': 'z',  // → '3' (auto-advances to Submit screen)
+      }
+
+      session.respondToQuestion('', answersMap)
+      // Wait longer than the 150ms settle delay + per-char throttle + Enter.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      // Byte sequence: paste-disable, Q1 → '1', Q2 → '2', Q3 → '3',
+      // [settle 150ms — no byte written], Submit '1', trailing Enter '\r',
+      // paste-enable.
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '1', '2', '3', '1', '\r', '\x1b[?2004h'],
+        `expected all-single-select sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // The settle MUST land between the last single-select digit ('3')
+      // and the Submit '1'. Measure the gap — pre-fix it was ~1ms (the
+      // PROMPT_CHAR_DELAY_MS), post-fix it's >= MULTI_QUESTION_SUBMIT_SETTLE_MS (150).
+      const lastDigitIdx = writes.lastIndexOf('3')
+      const submitIdx = writes.indexOf('1', lastDigitIdx + 1)
+      assert.ok(lastDigitIdx >= 0 && submitIdx > lastDigitIdx, 'found last digit + submit in sequence')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[lastDigitIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `expected settle gap >= 140ms between last single-select digit and Submit, got ${gapMs}ms`,
+      )
+
+      assert.equal(session._pendingUserAnswer, null, 'pending cleared')
+    })
+
+    // #4635 — when ONLY the last question is single-select (e.g. multi
+    // then single), still need the settle. Mirror of the all-single-select
+    // case but with a leading multi-select to confirm the settle decision
+    // is driven by the LAST question's shape, not the form's overall shape.
+    it('inserts settle delay when only the LAST question is single-select (#4635)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_multi_then_single', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': ['a', 'b'],  // → '1' '2' (toggles) + '\t' (commit + advance)
+        'Q2?': 'q',          // → '2' (auto-advances to Submit)
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '1', '2', '\t', '2', '1', '\r', '\x1b[?2004h'],
+        `expected multi-then-single sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // Gap between Q2's '2' and Submit '1' must include the settle.
+      const q2DigitIdx = writes.lastIndexOf('2')
+      const submitIdx = writes.indexOf('1', q2DigitIdx + 1)
+      assert.ok(q2DigitIdx >= 0 && submitIdx > q2DigitIdx, 'found Q2 digit + submit')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[q2DigitIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `expected settle gap >= 140ms before Submit when last q is single-select, got ${gapMs}ms`,
+      )
+    })
+
+    // #4635 — when the last question is multi-select, NO settle delay is
+    // needed (the explicit '\t' already commits + advances cleanly).
+    // Pin that the settle is NOT inserted in that path so we don't slow
+    // down forms that already work.
+    it('does NOT insert settle delay when LAST question is multi-select (#4635)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_single_then_multi', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',          // → '1' (auto-advances)
+        'Q2?': ['p', 'q'],   // → '1' '2' (toggles) + '\t' (commit + advance to Submit)
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const writes = writeEvents.map((e) => e.data)
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\r', '\x1b[?2004h'],
+        `expected single-then-multi sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // Tab → Submit gap should be ~per-char throttle (1ms), NOT 150ms.
+      const tabIdx = writes.indexOf('\t')
+      const submitIdx = writes.indexOf('1', tabIdx + 1)
+      const gapMs = writeEvents[submitIdx].t - writeEvents[tabIdx].t
+      assert.ok(
+        gapMs < 50,
+        `multi-select Tab → Submit must NOT incur settle, got ${gapMs}ms`,
+      )
     })
 
     // Pre-Chunk-B watchdog still arms for multi-question forms — if claude
@@ -4646,12 +4801,13 @@ describe('ClaudeTuiSession', () => {
 
         // 'i' is index 8 → digit '9' (the highest supported digit).
         session.respondToQuestion('', { 'Q1?': 'i', 'Q2?': 'x' })
-        await new Promise((resolve) => setTimeout(resolve, 100))
+        // #4635 — last q (Q2) is single-select → settle + trailing \r.
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         // Driver wrote normally — no too-many error.
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
-        // Q1 → '9', Q2 → '1', Submit → '1', wrapped in paste toggles.
-        assert.deepEqual(writes, ['\x1b[?2004l', '9', '1', '1', '\x1b[?2004h'],
+        // Q1 → '9', Q2 → '1', Submit → '1' + '\r' (#4635), wrapped in paste toggles.
+        assert.deepEqual(writes, ['\x1b[?2004l', '9', '1', '1', '\r', '\x1b[?2004h'],
           `expected '9' + '1' + Submit sequence, got ${JSON.stringify(writes)}`)
       })
 
@@ -4744,15 +4900,16 @@ describe('ClaudeTuiSession', () => {
 
         // Old client: just text, no answersMap.
         session.respondToQuestion('a')
-        await new Promise((resolve) => setTimeout(resolve, 100))
+        // #4635 — last q (Q2) is single-select → settle + trailing \r.
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         // No error — the user's pick (option 1) IS representable; the
         // default-to-option-1 fallback honors it for Q2 too. This is the
         // pre-#4625 path; #4625 only fires when the user EXPLICITLY picks
         // an index ≥ 9.
         assert.equal(errors.length, 0, `expected no errors for back-compat path, got ${JSON.stringify(errors)}`)
-        // Q1 → '1', Q2 → '1', Submit → '1'.
-        assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '1', '\x1b[?2004h'],
+        // Q1 → '1', Q2 → '1', Submit → '1' + '\r' (#4635).
+        assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '1', '\r', '\x1b[?2004h'],
           `expected default-to-1 sequence even with 10+ options, got ${JSON.stringify(writes)}`)
       })
 
