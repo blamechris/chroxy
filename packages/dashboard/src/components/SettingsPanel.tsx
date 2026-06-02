@@ -16,6 +16,7 @@ import {
   formatPlatform,
   formatRelativeTime,
 } from '@chroxy/store-core'
+import type { VoiceInputMode } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import {
   getTunnelMode,
@@ -988,9 +989,13 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   }, [updateInputSettings])
 
   const handleVoiceInputModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    // #4825: narrow against the consolidated VoiceInputMode union so adding
+    // a future mode (e.g. 'push-to-talk') to store-core forces this guard
+    // to be updated.
     const next = e.target.value
     if (next === 'continuous' || next === 'auto-pause') {
-      updateInputSettings({ voiceInputMode: next })
+      const mode: VoiceInputMode = next
+      updateInputSettings({ voiceInputMode: mode })
     }
   }, [updateInputSettings])
 

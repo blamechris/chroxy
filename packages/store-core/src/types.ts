@@ -149,18 +149,26 @@ export interface ContextUsage {
   cacheRead: number;
 }
 
+/**
+ * Voice input behaviour. `'continuous'` keeps the mic open across silence
+ * gaps until the user explicitly clicks stop (the hook restarts Web Speech
+ * recognition on each silence-triggered `onend`). `'auto-pause'` lets the
+ * browser auto-stop on silence — the previous behaviour, kept for users who
+ * prefer it (#4785). Defaults to `'continuous'` so new users get the
+ * click-to-start / click-to-stop experience by default.
+ *
+ * #4825: consolidated here so the mobile `useSpeechRecognition` hook, the
+ * dashboard `useVoiceInput` hook, the dashboard `SettingsPanel` change
+ * handler, and the mobile `SettingsScreen` picker all share one declaration.
+ * Add a new mode (e.g. `'push-to-talk'`) once here and the type-checker will
+ * flag every site that needs to handle it.
+ */
+export type VoiceInputMode = 'continuous' | 'auto-pause';
+
 export interface InputSettings {
   chatEnterToSend: boolean;
   terminalEnterToSend: boolean;
-  /**
-   * Voice input behaviour. `'continuous'` keeps the mic open across silence
-   * gaps until the user explicitly clicks stop (the hook restarts Web Speech
-   * recognition on each silence-triggered `onend`). `'auto-pause'` lets the
-   * browser auto-stop on silence — the previous behaviour, kept for users who
-   * prefer it (#4785). Defaults to `'continuous'` so new users get the
-   * click-to-start / click-to-stop experience by default.
-   */
-  voiceInputMode: 'continuous' | 'auto-pause';
+  voiceInputMode: VoiceInputMode;
 }
 
 /** Default context window size (tokens) used when model metadata doesn't specify one. */

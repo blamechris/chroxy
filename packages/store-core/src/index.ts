@@ -23,6 +23,10 @@ export type {
   ContextUsage,
   CumulativeUsage,
   InputSettings,
+  // #4825: consolidated VoiceInputMode union previously declared in
+  // packages/app/src/hooks/useSpeechRecognition.ts and
+  // packages/dashboard/src/hooks/useVoiceInput.ts.
+  VoiceInputMode,
   ModelInfo,
   SessionInfo,
   AgentInfo,
