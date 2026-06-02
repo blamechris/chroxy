@@ -19,7 +19,7 @@ import { COLORS } from '../constants/colors';
 import { ActivityGroup } from './chat/ActivityGroup';
 import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
-import { groupMessages, applyStreamingOverlay } from '@chroxy/store-core';
+import { buildChatViewMessages } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 
 // -- Props --
@@ -194,25 +194,28 @@ export function ChatView({
     setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
 
-  // Structural grouping — only re-runs when messages change (not on streaming deltas)
-  const baseGroups = useMemo(() => groupMessages(messages), [messages]);
-
-  // Overlay streaming isActive flag — cheap to recompute on every delta
-  const displayGroups = useMemo(
-    () => applyStreamingOverlay(baseGroups, messages, streamingMessageId),
-    [baseGroups, streamingMessageId, messages],
+  // #4806: shared ChatView message pipeline (lifted from dashboard's
+  // `useChatMessages`). Single source of truth for filter + group +
+  // overlay + tail-id + stalledPromptIds — both dashboard and mobile
+  // derive identically. The mobile renderer below consumes
+  // `displayGroups` (groups, not flattened rows) so it can keep using
+  // ActivityGroup / MessageBubble; `chatTailMessageId` and
+  // `stalledPromptIds` (#4615) flow straight through.
+  const {
+    displayGroups,
+    chatTailMessageId,
+    stalledPromptIds,
+  } = useMemo(
+    () => buildChatViewMessages(messages, streamingMessageId),
+    [messages, streamingMessageId],
   );
 
-  // #4496: tail message id + last user input — used to gate the
-  // stream-stall chip's Retry button. Mirrors the dashboard's `isTail`
-  // check (only the most recent stall retry-button-wires; historical
-  // replayed stalls render chip text only). Walking messages once here
-  // is cheaper than recomputing per bubble.
+  // #4496: last user input — used to gate the stream-stall chip's Retry
+  // button. Mirrors the dashboard's `isTail` check (only the most recent
+  // stall retry-button-wires; historical replayed stalls render chip
+  // text only). Walking messages once here is cheaper than recomputing
+  // per bubble.
   const sendInput = useConnectionStore((s) => s.sendInput);
-  const chatTailMessageId = useMemo(
-    () => (messages.length > 0 ? messages[messages.length - 1].id : null),
-    [messages],
-  );
   const lastUserInputContent = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].type === 'user_input') return messages[i].content;
@@ -299,6 +302,20 @@ export function ChatView({
             );
           }
           const msg = group.message;
+          // #4615 (mobile parity via #4806): suppress unanswered prompts
+          // invalidated by a subsequent ASK_USER_QUESTION_STALL. The
+          // pending prompt has already been discarded server-side; the
+          // stall-chip rendered for the error bubble below carries the
+          // retry affordance. Mirrors the dashboard App.tsx renderMessage
+          // gating that has been live since #4615.
+          if (
+            msg.type === 'prompt' &&
+            msg.options &&
+            !msg.requestId &&
+            stalledPromptIds.has(msg.id)
+          ) {
+            return null;
+          }
           const isSearchMatch = searchMatchIds?.has(msg.id) ?? false;
           const isCurrentMatch = currentMatchId === msg.id;
           return (
