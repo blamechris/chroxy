@@ -355,16 +355,18 @@ describe('auth_ok handler', () => {
       expect(store.getState().serverMode).toBe('cli')
     })
 
-    it('sets serverMode to terminal when serverMode is terminal', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
-      handleMessage(createAuthOkMessage({ serverMode: 'terminal' }), ctx as any)
-
-      expect(store.getState().serverMode).toBe('terminal')
-    })
-
     it('sets serverMode to null for unknown mode', () => {
+      // #4810: the wire protocol only emits 'cli'; 'terminal' and other
+      // values are treated as unknown (previously 'terminal' was accepted).
       const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
       handleMessage(createAuthOkMessage({ serverMode: 'unknown_mode' }), ctx as any)
+
+      expect(store.getState().serverMode).toBeNull()
+    })
+
+    it('sets serverMode to null when serverMode is terminal (dead branch, #4810)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({ serverMode: 'terminal' }), ctx as any)
 
       expect(store.getState().serverMode).toBeNull()
     })

@@ -419,8 +419,8 @@ export interface ConnectionState {
   // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
   userDisconnected: boolean;
 
-  // Server mode: 'cli' (headless) or 'terminal' (PTY/tmux)
-  serverMode: 'cli' | 'terminal' | null;
+  // Server mode: 'cli' (headless). The wire protocol only emits 'cli' (#4810).
+  serverMode: 'cli' | null;
 
   // Server context (from auth_ok)
   sessionCwd: string | null;
