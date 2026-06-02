@@ -1100,7 +1100,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 lit across silence gaps until the user clicks stop.
                 `auto-pause` is the pre-#4785 behaviour (Web Speech ends
                 on silence). Only affects the web engine; the Tauri
-                native engine has its own end-of-utterance semantics. */}
+                native engine has its own end-of-utterance semantics.
+                #4796: labels reworded — "Stop automatically on pause"
+                was ambiguous (silence? tab pause? network?). The new
+                wording calls out the trigger (silence) explicitly. */}
             <div className="settings-field">
               <label htmlFor="voice-input-mode">Voice input</label>
               <select
@@ -1110,8 +1113,18 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 onChange={handleVoiceInputModeChange}
               >
                 <option value="continuous">Keep listening until I click stop</option>
-                <option value="auto-pause">Stop automatically on pause</option>
+                <option value="auto-pause">Stop after silence (browser decides)</option>
               </select>
+              <p className="settings-hint" data-testid="voice-input-mode-hint">
+                Click the mic button to start dictation and click again
+                to stop — the button is a toggle, not push-to-hold.
+                Continuous mode keeps the mic on through pauses and
+                restarts recognition automatically. Silence mode lets
+                the browser end recognition after a short pause in
+                speech. Only applies to the browser speech engine — the
+                macOS native speech helper manages its own
+                end-of-utterance timing.
+              </p>
             </div>
           </section>
 

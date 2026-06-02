@@ -12,6 +12,27 @@ vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
 }))
 
+// #4796 — capture the options the App passes into useVoiceInput so we can
+// assert the store's `inputSettings.voiceInputMode` is threaded through.
+// This closes audit Tester #2 (the wiring chain had zero test coverage —
+// a store-selector typo or stale-closure bug would have silently broken
+// the user-facing setting with green CI).
+const voiceInputModeSpy = vi.fn<(opts: { mode?: 'continuous' | 'auto-pause' } | undefined) => void>()
+vi.mock('./hooks/useVoiceInput', () => ({
+  useVoiceInput: (opts?: { mode?: 'continuous' | 'auto-pause' }) => {
+    voiceInputModeSpy(opts)
+    return {
+      isRecording: false,
+      transcript: '',
+      error: null,
+      isAvailable: false,
+      engine: 'none' as const,
+      start: vi.fn(),
+      stop: vi.fn(),
+    }
+  },
+}))
+
 // #4673 — control the clipboard helper per-test so we can assert that the
 // "Copied!" check mark only fires when the helper actually wrote. Default
 // to a successful write so the unrelated render-smoke tests stay green.
@@ -123,7 +144,7 @@ vi.mock('./store/connection', () => {
     fetchFileList: vi.fn(),
     fetchSlashCommands: vi.fn(),
     defaultProvider: 'claude-sdk',
-    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
+    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' },
     updateInputSettings: vi.fn(),
     conversationHistory: [],
     fetchConversationHistory: vi.fn(),
@@ -168,6 +189,9 @@ beforeEach(() => {
   // localStorage; clearing the key keeps loadOverrides() returning {}.
   try { localStorage.removeItem('chroxy_persist_shortcut_overrides_v1') } catch { /* jsdom always provides localStorage */ }
   __setSharedRegistryForTesting(createShortcutRegistry(DEFAULT_SHORTCUTS))
+  // #4796 — reset between cases so per-test mode assertions only see the
+  // current render's invocations.
+  voiceInputModeSpy.mockReset()
 })
 
 afterEach(cleanup)
@@ -1550,6 +1574,37 @@ describe('App', () => {
       })
       expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       expect(btn.getAttribute('title')).toContain('Copied!')
+    })
+  })
+
+  // #4796 — wiring guard for `useVoiceInput({ mode })`. Audit Tester #2
+  // flagged that the chain `SettingsPanel.tsx -> updateInputSettings ->
+  // inputSettings.voiceInputMode -> App.tsx selector -> useVoiceInput({ mode })`
+  // had zero test coverage. A store-selector typo (e.g. `inputSettings.mode`)
+  // or stale closure in `modeRef` would silently break the user-facing
+  // setting without any test failing — the bug would only show up in
+  // manual QA, which is what happened in #4796. These tests pin the
+  // store-to-hook contract.
+  describe('voice input mode wiring (#4796)', () => {
+    it('passes the store inputSettings.voiceInputMode through to useVoiceInput as the mode option', () => {
+      stateOverrides = {
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'auto-pause' as const },
+      }
+      render(<App />)
+      // The hook must be invoked with the exact mode persisted in the store.
+      // Use `mock.calls` rather than `toHaveBeenCalledWith` so we can spot
+      // any extra "mode" call from a strict-mode double render.
+      const modes = voiceInputModeSpy.mock.calls.map(c => c[0]?.mode)
+      expect(modes).toContain('auto-pause')
+    })
+
+    it('passes "continuous" when the store has the default voiceInputMode', () => {
+      stateOverrides = {
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' as const },
+      }
+      render(<App />)
+      const modes = voiceInputModeSpy.mock.calls.map(c => c[0]?.mode)
+      expect(modes).toContain('continuous')
     })
   })
 })
