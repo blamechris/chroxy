@@ -69,3 +69,48 @@ Running autonomous in parallel with another agent. Each non-trivial decision (qu
 
 Cap at 16; 14 leaves headroom for any Wave-2/3 follow-up issues that get filed as decompositions during the run.
 
+## v0.9.35 PR review round 2 (between marathons)
+
+PR [#4854](https://github.com/blamechris/chroxy/pull/4854) first merge attempt blocked: `base branch policy prohibits the merge` despite MERGEABLE + green CI. Per CLAUDE.md merge-gate triage (conflicts → CI → threads): 3 unresolved Copilot threads.
+
+- **CHANGELOG ordering** — `[Unreleased]` must be the first section per Keep a Changelog. Fixed; also folded the markdown-overflow test removal that was sitting in `[Unreleased]` into `[0.9.35]`'s `### Changed`.
+- **Docker hint wording** — "no longer suggests `claude login` on the host" misled (hint applies *inside* containers; non-container providers keep the host hint unchanged). Reworded.
+- **`decisions-made-during-2-session.md` at repo root** — moved to `docs/decisions/2026-06-02-overnight-marathon.md` matching the existing dated convention. (That's this file.)
+
+All 3 fixed in `02ed331d6`, threads resolved via `resolveReviewThread`, merged at SHA `35236540c`, tagged `v0.9.35` → release workflow auto-triggered.
+
+## Marathon 2 — 16 issues, mostly converged in Wave 1
+
+Started 2026-06-02T09:18:31Z. End-of-marathon 2026-06-02T19:05Z. **Total elapsed ~9.8 hours** (mostly waiting on parallel-agent + CI cycles; my own active work was a small fraction).
+
+### What landed
+17 PRs merged → tagged v0.9.36:
+
+| Wave | PRs |
+|------|-----|
+| W1 implementations (16) | #4855 (#4851) #4856 (#4852) #4857 (#4629) #4858 (#4853) #4859 (#4761) #4860 (#4685) #4861 (#4630) #4862 (#4764) #4863 (#4849) #4864 (#4755) #4865 (#4850) #4866 (#4848) #4867 (#4635) #4868 (#4756) #4869 (#4828) — 15 of 16 done; #4778 timed out |
+| W2 retry (1) | #4885 (#4778) — straightforward narrow-scope retry after W1 timeout |
+| Fix-CI (1) | #4886 — cross-PR test-timing collision between #4866 (added 100ms-wait tests) and #4867 (added 150ms settle). Bumped waits to 300ms per Copilot review. |
+
+### Cross-PR breakages encountered + resolutions
+1. **#4861 (#4630) rebase conflict** in `App.test.tsx` — same-location describe block collision with merged #4860 tests. Resolved by keeping BOTH describe blocks side-by-side.
+2. **#4864 (#4755) rebase conflict** in `types.ts` + `connection.ts` — two PRs (#4761 multi-question Record + #4755 Other/freeform) BOTH widened `sendUserQuestionResponse` signature. Resolved by unioning the type to all three shapes (`string | Record<...> | { otherLabel, freeformText }`) and ordering shape-detection: freeform-check first, then multi-answer fallthrough, then string.
+3. **#4869 (#4828) rebase conflict** in `claude-tui-session.js` — logger sweep PR conflicted with #4866's arrow-nav rewrite at the >9-option branch (HEAD had new arrow-nav code; INCOMING had logger-swap on the OLD teardown code that no longer exists). Resolved by taking HEAD's new code and applying the logger-swap pattern to it.
+4. **Cross-PR test breakage on main** (#4866 vs #4867): post-merge, main went red because #4867's settle delay broke #4866's freshly-merged arrow-nav tests. Cut #4886 per the `batch_merge_cross_pr_test_breakage.md` memory's "tiny fix-PR on main" pattern. Copilot reviewed #4886 and asked for 200→300ms bump (200 felt too tight in CI); FIX applied + threads resolved.
+
+### 14 new follow-up issues filed
+- **Voice / dashboard:** #4870 (toast severity), #4871 (sidebar clipboard), #4872 (mobile VoiceInputMode validation gap), #4873 (status-dot live-region), #4874 (writeFileRestricted callers audit), #4875 (shared isFreeformAnswer predicate), #4876 (mobile touch target sweep), #4877 (Maestro freeform flow)
+- **Server / TUI:** #4878 (dashboard session_stopped toast), #4879 (mobile session_stopped status), #4881 (SDK/Codex/Gemini stopped emit), #4882 (recorder pass on all-single-select), #4883 (tighten lastIsSingleSelect detection), #4884 (verify trailing \r on mixed forms)
+
+### Surprises worth memory candidates
+1. **#4858 verdict was Request Changes**, but only because agent-review caught the SAME bug pattern exists on mobile (#4872 filed). PR itself is correctly scoped to dashboard per its issue. Marked DONE because the deferral paper trail is clean — but it's worth noting that reviewers sometimes Request Changes for "this fix should also apply to X" out-of-scope concerns. Treating those as DONE + follow-up is the right call.
+2. **Two PRs touching the same hot path (#4866 #4848 arrow-nav, #4867 #4635 settle) collided in main post-merge.** Both passed CI individually but interacted badly. The `batch_merge_cross_pr_test_breakage.md` recipe ("tiny fix-PR on main, not in the conflicted branch") still works exactly as documented — kept main red for ~20 minutes total.
+
+### v0.9.36 release
+- PR [#4888](https://github.com/blamechris/chroxy/pull/4888) merged at SHA `da997ba4d`.
+- Tagged `v0.9.36` → `release.yml` workflow auto-triggers DMG/MSI builds in CI background.
+- Same `[Unreleased]`-on-top Keep-a-Changelog gotcha from v0.9.35 fixed proactively this time.
+
+### Local Tauri NOT rebuilt for v0.9.36
+User asked me to NOT close their Tauri at start of session ("Also wait to close my existing tauri I have 2 cli sessions running"). They OK'd closing in the morning when sessions were done, and we did rebuild for v0.9.35. For v0.9.36 the rebuild is deferred until they're back. The running daemon is v0.9.35 (post-trap-fix), which already addresses the "Reconnecting…" loop they originally hit. v0.9.36 wins are nice-to-haves but not regression-triggers for any active session.
+
