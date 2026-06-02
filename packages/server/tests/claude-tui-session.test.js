@@ -4640,7 +4640,7 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 200))
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
       const writes = writeEvents.map((e) => e.data)
       assert.deepEqual(
@@ -4744,13 +4744,18 @@ describe('ClaudeTuiSession', () => {
         session.on('error', (e) => errors.push(e))
 
         session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
-        await new Promise((resolve) => setTimeout(resolve, 100))
+        // 300ms wait: the #4867 last-question-single-select settle is 150ms;
+        // 300ms leaves comfortable margin under CI load (Copilot review on
+        // #4886 flagged 200ms as too tight). Sibling settle-path tests in
+        // this file use 300ms for the same reason.
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         // No too-many error — arrow nav drives the form.
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
         // Q1 → 9× Down + Enter (idx 9 nav), Q2 → '1' (single-digit), Submit → '1',
-        // wrapped in paste-disable/enable.
-        const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '1', '1', '\x1b[?2004h']
+        // then defensive trailing '\r' (#4867 — guards against last-question
+        // single-select forms not auto-committing), wrapped in paste-disable/enable.
+        const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '1', '1', '\r', '\x1b[?2004h']
         assert.deepEqual(writes, expected,
           `expected arrow-nav + digits sequence, got ${JSON.stringify(writes)}`)
 
@@ -4774,10 +4779,11 @@ describe('ClaudeTuiSession', () => {
         session.on('error', (e) => errors.push(e))
 
         session.respondToQuestion('', { 'Q1?': 'o-29', 'Q2?': 'y' })
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
-        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '2', '1', '\x1b[?2004h']
+        // Trailing '\r' is the #4867 last-question-single-select defensive Enter.
+        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '2', '1', '\r', '\x1b[?2004h']
         assert.deepEqual(writes, expected,
           `expected 29× Down + Enter + Q2 digit + Submit, got ${JSON.stringify(writes)}`)
       })
@@ -4960,7 +4966,7 @@ describe('ClaudeTuiSession', () => {
         session.on('error', (e) => errors.push(e))
 
         session.respondToQuestion('s-29')
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
         const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '\x1b[?2004h']
