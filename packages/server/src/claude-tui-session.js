@@ -2871,9 +2871,13 @@ export class ClaudeTuiSession extends BaseSession {
     // Focus lands on `❯ 1. Submit answers / 2. Cancel` after the last
     // question — press 1 to confirm submission.
     // #4884: tag the Submit position with a marker object so
-    // _writePtyMultiQuestionSequence can record the wall-clock at which
-    // Submit-'1' actually hit the PTY (used by _emitToolHookEvent's
-    // PostToolUse handler to log the Submit→PostToolUse delta).
+    // _writePtyMultiQuestionSequence can record the wall-clock at the
+    // point the writer reaches Submit (immediately before the `'1'` is
+    // written to the PTY, after any preceding settle has elapsed). Used
+    // by _emitToolHookEvent's PostToolUse handler to log the
+    // Submit→PostToolUse delta — the marker timestamp is the lower bound
+    // for when '1' actually leaves the writer (within
+    // PROMPT_CHAR_DELAY_MS of the actual write).
     if (prevToolUseId) {
       sequence.push({ type: 'mark', label: 'submit', toolUseId: prevToolUseId })
     }
@@ -2928,7 +2932,7 @@ export class ClaudeTuiSession extends BaseSession {
    * `_multiQuestionSubmitAt`. PostToolUse for that toolUseId logs the
    * delta — forensic evidence the defensive trailing '\r' lands harmlessly.
    *
-   * @param {Array<string|number|object>} sequence — strings to write, numbers to sleep, marker objects to timestamp
+   * @param {Array<string|number|{type:'mark',label:string,toolUseId:string}>} sequence — strings to write, numbers to sleep, marker objects to timestamp
    * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
    */
   async _writePtyMultiQuestionSequence(sequence) {
