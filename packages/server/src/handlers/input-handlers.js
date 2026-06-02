@@ -148,6 +148,62 @@ async function handleInput(ws, client, msg, ctx) {
   const attCount = attachments?.length || 0
   log.debug(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
+  // #4733 — wire-arrival fingerprint. Logs the byte/codepoint/whitespace
+  // shape of the inbound `data` so a corrupted-text reproduction can be
+  // localized to the dashboard boundary vs the server's PTY write path
+  // by correlating against the `writePtyText (msg=… codePoints=… bytes=…)`
+  // line in `claude-tui-session.js`. No content is logged — only counts —
+  // so this stays safe to enable when the env flag is set.
+  //
+  // Concretely, the original #4733 repro showed `writePtyText … codePoints=332`
+  // for a message the user intended at ~360 chars with ~24 spaces missing.
+  // Without an inbound-side counter we cannot tell whether the 28-codepoint
+  // delta was stripped before the WS arrived, in `trim()` (leading/trailing
+  // only, max +2 codepoints), in the evaluator rewrite path (#3635), or by
+  // the throttle. The four counts here pin which boundary stripped them.
+  //
+  // Gated behind `CHROXY_LOG_WIRE_FINGERPRINT=1` so it stays off by default
+  // — the input handler is the hot path for every typed/pasted user message
+  // and an unconditional info-level log line per message is too noisy for
+  // production user logs. Flip the env var when actively investigating
+  // #4733 (or any future "text stripped between dashboard and PTY" report).
+  if (process.env.CHROXY_LOG_WIRE_FINGERPRINT === '1' && typeof text === 'string' && text.length > 0) {
+    // Strip a SINGLE trailing newline (CR, LF, or CRLF) before fingerprinting
+    // so counts line up with `_writePtyTextThrottled` in claude-tui-session.js,
+    // which strips one trailing newline before the bracketed-paste body. Shift+
+    // Enter ends multi-line dashboard drafts with a trailing \n; counting it
+    // here would inflate `codePoints`/`wsTotal` by 1 (or 2 for \r\n) and skew
+    // the dashboard-vs-PTY boundary correlation by the same amount.
+    let fp = text
+    if (fp.endsWith('\r\n')) fp = fp.slice(0, -2)
+    else if (fp.endsWith('\n') || fp.endsWith('\r')) fp = fp.slice(0, -1)
+    const bytes = Buffer.byteLength(fp, 'utf8')
+    const codePoints = [...fp].length
+    // Counts ALL interior whitespace runs as one-per-run AND total chars
+    // separately — the run count survives a "double-space collapsed to
+    // single" bug (each run keeps at least one char) while the total
+    // catches "all interior spaces stripped" (run count → 0, total → 0).
+    let whitespaceTotal = 0
+    let whitespaceRuns = 0
+    let maxWordLen = 0
+    let currWordLen = 0
+    let inWhitespace = false
+    for (const ch of fp) {
+      if (/\s/.test(ch)) {
+        whitespaceTotal += 1
+        if (!inWhitespace) whitespaceRuns += 1
+        inWhitespace = true
+        if (currWordLen > maxWordLen) maxWordLen = currWordLen
+        currWordLen = 0
+      } else {
+        inWhitespace = false
+        currWordLen += 1
+      }
+    }
+    if (currWordLen > maxWordLen) maxWordLen = currWordLen
+    log.info(`input wire-fingerprint (client=${client.id} session=${targetSessionId} bytes=${bytes} codePoints=${codePoints} wsTotal=${whitespaceTotal} wsRuns=${whitespaceRuns} maxWordLen=${maxWordLen}) (#4733)`)
+  }
+
   if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
     sendSessionError(ws, ctx, 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.')
     return

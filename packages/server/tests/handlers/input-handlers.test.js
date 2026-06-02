@@ -214,6 +214,102 @@ describe('input-handlers', () => {
           `reserved id must be rejected and replaced by a server-generated uin-… (got ${msgId})`)
       }
     })
+
+    // #4733 — interior-whitespace preservation invariant. The original
+    // repro showed a typed prompt with ~24 spaces stripped between the
+    // dashboard composer and what the model actually received. The first
+    // wire-level boundary on the server is `inputHandlers.input` — if
+    // interior whitespace doesn't survive THIS step, no downstream fix
+    // would help. These tests pin the count-preservation contract:
+    //   - whitespace count of the forwarded `sendMessage` argument
+    //     equals the whitespace count of the inbound `data` modulo the
+    //     leading/trailing `trim()` (`data?.trim()` is leading+trailing
+    //     only).
+    //   - interior spaces, tabs, and embedded newlines all survive.
+    // If a future change adds an interior-whitespace normalization (e.g.
+    // a `replace(/\s+/g, ' ')` for "cleanliness"), one of these will fire.
+    describe('interior-whitespace preservation (#4733)', () => {
+      function countInteriorWhitespace(s) {
+        const trimmed = s.trim()
+        let n = 0
+        for (const ch of trimmed) if (/\s/.test(ch)) n += 1
+        return n
+      }
+
+      it('preserves every interior space in a typed multi-sentence prompt', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        // Mirrors the shape of the #4733 repro: ~360 char prompt with
+        // ~60 interior whitespace chars across multiple sentences.
+        const prompt =
+          'Hello I am in chroxy in a tui session. What do we need to do to start working on this? ' +
+          'Please note any issues I surface regarding chroxy (the interface governing this TUI session) ' +
+          'please file them in my chroxy repo.'
+        const expectedWs = countInteriorWhitespace(prompt)
+        assert.ok(expectedWs >= 30, 'sanity: test prompt has lots of interior whitespace')
+
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        assert.equal(session.sendMessage.callCount, 1, 'message must forward to session')
+        const forwarded = session.sendMessage.lastCall[0]
+        assert.equal(forwarded, prompt, 'forwarded prompt must equal inbound prompt verbatim (no transform)')
+        assert.equal(
+          countInteriorWhitespace(forwarded),
+          expectedWs,
+          `interior whitespace count must survive — typed input must NOT be stripped to run-on words`,
+        )
+      })
+
+      it('preserves consecutive spaces (no double-space collapse)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const prompt = 'a  b   c    d'
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        assert.equal(session.sendMessage.lastCall[0], prompt,
+          'multiple-space runs must NOT be collapsed to single spaces')
+      })
+
+      it('preserves tabs and interior newlines (Shift+Enter drafts)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const prompt = 'line one\nline\ttwo\nline three'
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        assert.equal(session.sendMessage.lastCall[0], prompt,
+          'tabs and embedded newlines must pass through verbatim')
+      })
+
+      it('strips only leading + trailing whitespace, NOT interior', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const prompt = '   hello world   foo bar   '
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        // The handler's `trimmed = text?.trim()` is leading+trailing
+        // only; interior runs must survive intact. The forwarded text
+        // is the trimmed form (when no evaluator is configured, which
+        // is the default).
+        assert.equal(session.sendMessage.lastCall[0], 'hello world   foo bar',
+          'trim removes leading/trailing only; interior runs intact')
+      })
+    })
   })
 
   describe('interrupt', () => {
