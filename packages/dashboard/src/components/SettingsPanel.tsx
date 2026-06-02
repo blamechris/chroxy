@@ -1100,18 +1100,43 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 lit across silence gaps until the user clicks stop.
                 `auto-pause` is the pre-#4785 behaviour (Web Speech ends
                 on silence). Only affects the web engine; the Tauri
-                native engine has its own end-of-utterance semantics. */}
+                native engine has its own end-of-utterance semantics.
+                #4796: labels reworded — "Stop automatically on pause"
+                was ambiguous (silence? tab pause? network?). The new
+                wording calls out the trigger (silence) explicitly. */}
             <div className="settings-field">
               <label htmlFor="voice-input-mode">Voice input</label>
               <select
                 id="voice-input-mode"
                 aria-label="Voice input mode"
+                aria-describedby="voice-input-mode-hint"
                 value={inputSettings.voiceInputMode}
                 onChange={handleVoiceInputModeChange}
               >
                 <option value="continuous">Keep listening until I click stop</option>
-                <option value="auto-pause">Stop automatically on pause</option>
+                <option value="auto-pause">Stop after silence (browser decides)</option>
               </select>
+              {/* #4796: hint copy quotes the dropdown labels verbatim
+                  so users can map each sentence back to the option they
+                  selected. Earlier wording used "Continuous mode" /
+                  "Silence mode" shorthand which could read like a third
+                  mode and didn't match the dropdown labels. */}
+              <p
+                id="voice-input-mode-hint"
+                className="settings-hint"
+                data-testid="voice-input-mode-hint"
+              >
+                Click the mic button to start dictation and click again
+                to stop — the button is a toggle, not push-to-hold.
+                <strong> &ldquo;Keep listening until I click stop&rdquo;</strong>{' '}
+                holds the mic open through pauses and restarts recognition
+                automatically.{' '}
+                <strong>&ldquo;Stop after silence (browser decides)&rdquo;</strong>{' '}
+                lets the browser end recognition after a short silence
+                in your speech. Only applies to the browser speech
+                engine — the macOS native speech helper manages its own
+                end-of-utterance timing.
+              </p>
             </div>
           </section>
 

@@ -50,7 +50,7 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     setTheme: mockSetTheme,
     defaultProvider: 'claude-sdk',
     setDefaultProvider: vi.fn(),
-    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
+    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' },
     updateInputSettings: mockUpdateInputSettings,
     availableProviders: [],
     // Per-session promptEvaluator toggle defaults — overridden by the
@@ -2143,6 +2143,94 @@ describe('SettingsPanel', () => {
       setMockState({ notificationPrefs: null, serverCapabilities: {} })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.getByTestId('notification-prefs-not-supported')).toBeInTheDocument()
+    })
+  })
+
+  // #4796 — voice input mode settings: confirm the user-facing labels are
+  // present (avoids ambiguous wording like "Stop automatically on pause"),
+  // that the persisted value drives the rendered select, that changing the
+  // select round-trips through `updateInputSettings` (the persistence
+  // wiring that closes the audit Tester #2 gap), and that the explanatory
+  // hint row is rendered alongside the control.
+  describe('Voice input mode (#4796)', () => {
+    it('renders the voice input select with the persisted value from store', () => {
+      setMockState({
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'auto-pause' },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode') as HTMLSelectElement
+      expect(select.value).toBe('auto-pause')
+    })
+
+    it('uses user-facing labels — no ambiguous "Stop on pause" wording', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode')
+      const optionTexts = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '')
+      // Continuous mode label must explicitly mention "click stop" so the
+      // user knows the mic stays lit between silences.
+      expect(optionTexts.some(t => /click stop/i.test(t))).toBe(true)
+      // Auto-pause label must explain what triggers the stop — "silence"
+      // rather than the older, ambiguous "pause" wording.
+      expect(optionTexts.some(t => /silence/i.test(t))).toBe(true)
+      // Regression guard: the old confusing label must not survive.
+      expect(optionTexts.every(t => !/Stop automatically on pause/i.test(t))).toBe(true)
+    })
+
+    it('persists the mode change via updateInputSettings when user picks auto-pause', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode')
+      fireEvent.change(select, { target: { value: 'auto-pause' } })
+      expect(mockUpdateInputSettings).toHaveBeenCalledWith({ voiceInputMode: 'auto-pause' })
+    })
+
+    it('persists the mode change via updateInputSettings when user picks continuous', () => {
+      setMockState({
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'auto-pause' },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode')
+      fireEvent.change(select, { target: { value: 'continuous' } })
+      expect(mockUpdateInputSettings).toHaveBeenCalledWith({ voiceInputMode: 'continuous' })
+    })
+
+    it('renders the explanatory hint row beneath the voice input control', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      expect(hint).toBeInTheDocument()
+      // The hint should explain BOTH modes and call out the browser-only
+      // caveat so users on the macOS native engine know it doesn't apply.
+      expect(hint.textContent ?? '').toMatch(/silence/i)
+    })
+
+    // #4796 review feedback (Copilot): the hint must be programmatically
+    // linked to the select via aria-describedby so screen readers announce
+    // it on focus. Without this the explanation is accessibility-invisible
+    // even though the dashboard already uses the pattern in
+    // CreateSessionModal.tsx (aria-describedby="permission-mode-hint").
+    it('links the voice input select to the hint via aria-describedby for screen readers', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode') as HTMLSelectElement
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      // The select's aria-describedby must point at the hint's id, and the
+      // hint must actually carry that id — otherwise assistive tech can't
+      // resolve the reference. Both halves of the contract are asserted.
+      const describedBy = select.getAttribute('aria-describedby')
+      expect(describedBy).toBe('voice-input-mode-hint')
+      expect(hint.id).toBe('voice-input-mode-hint')
+    })
+
+    // #4796 review feedback (Copilot): the hint copy must reference the
+    // actual dropdown option labels rather than coining shorthand names
+    // ("Silence mode", "Continuous mode") that could read like a third
+    // mode. Regression guard against re-introducing the bare shorthand.
+    it('hint copy quotes the dropdown option labels verbatim, not shorthand mode names', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      const text = hint.textContent ?? ''
+      // Both option labels must appear verbatim somewhere in the hint so
+      // the user can map each sentence back to the dropdown choice.
+      expect(text).toMatch(/Keep listening until I click stop/)
+      expect(text).toMatch(/Stop after silence \(browser decides\)/)
     })
   })
 })
