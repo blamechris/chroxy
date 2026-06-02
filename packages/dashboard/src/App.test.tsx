@@ -1626,8 +1626,16 @@ describe('App', () => {
       })
       const firstCall = addServerErrorMock.mock.calls[0]
       expect(firstCall).toBeDefined()
-      const [message] = firstCall!
+      const [message, action, severity] = firstCall!
       expect(message).toMatch(/clipboard/i)
+      // #4870 — a failed clipboard write is non-destructive (the user just
+      // needs to retry). Match the #4148 convention by tagging the toast
+      // as a 'warning' so it renders yellow rather than the red 'error'
+      // reserved for STREAM_ERROR / ABORT. The recovery `action` slot
+      // stays undefined because we have nothing meaningful to wire a
+      // one-click retry to from this call site.
+      expect(action).toBeUndefined()
+      expect(severity).toBe('warning')
       // Must NOT also flash the success indicator (that was the #4673 bug;
       // this test pins the negative too so a future regression on either
       // axis is caught).
