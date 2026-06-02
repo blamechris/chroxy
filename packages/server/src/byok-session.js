@@ -129,6 +129,48 @@ export class ClaudeByokSession extends BaseSession {
     }
   }
 
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * BYOK checks ANTHROPIC_API_KEY env AND the ~/.chroxy/credentials.json
+   * file (mode 0600 enforced by the resolver). Both paths surface as
+   * source: 'env' because the dashboard's SettingsPanel tone legend only
+   * knows about 'oauth'|'env'|'missing'|'none' (SettingsPanel.tsx:316-320);
+   * the `detail` string disambiguates which path supplied the key.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ cachedResolveCredentialFile: Function }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+    const resolved = helpers.cachedResolveCredentialFile(
+      'byok',
+      env.ANTHROPIC_API_KEY,
+      resolveAnthropicApiKey,
+    )
+    if (resolved.key) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: resolved.source === 'env' ? 'ANTHROPIC_API_KEY' : null,
+        envVars,
+        hint: '',
+        detail: `Anthropic API (${resolved.source === 'env' ? 'ANTHROPIC_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `Anthropic API (${resolved.reason})`,
+    }
+  }
+
   static getFallbackModels() {
     return FALLBACK_MODELS
   }

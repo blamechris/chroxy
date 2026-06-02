@@ -39,6 +39,45 @@ export class DockerSdkSession extends SdkSession {
     return { ...SdkSession.capabilities, containerized: true }
   }
 
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Mirror of DockerSession.resolveAuth — overrides SdkSession's OAuth
+   * fallback because the container has no ~/.claude state, so env var is
+   * the only valid path. See DockerSession for the full rationale.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      const identity = matched === 'CLAUDE_CODE_OAUTH_TOKEN'
+        ? 'Anthropic API (OAuth token forwarded to container)'
+        : 'Anthropic API (forwarded to container)'
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `${identity} (${matched} set)`,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: hint || 'set ANTHROPIC_API_KEY (forwarded to the container at run time)',
+      detail: 'Not configured — container providers need ANTHROPIC_API_KEY on the host (no OAuth fallback inside the container)',
+    }
+  }
+
   constructor(opts = {}) {
     super(opts)
     const containerId = opts.containerId?.trim() || null
