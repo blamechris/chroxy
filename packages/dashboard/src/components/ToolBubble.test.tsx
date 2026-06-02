@@ -586,6 +586,9 @@ describe('ToolBubble', () => {
       // the tool already resolved (even with no output).
       fireEvent.click(screen.getByRole('button'))
       expect(screen.queryByTestId('tool-input-partial-bash-empty-result')).not.toBeInTheDocument()
+    })
+  })
+
   // #4655 — collapsed bubbles must never leak raw `tool_input` JSON for tools
   // whose input shape has none of the hardcoded PRIORITY_FIELDS (ToolSearch,
   // MCP tools, custom user tools, future Anthropic tools). The fix lives in
