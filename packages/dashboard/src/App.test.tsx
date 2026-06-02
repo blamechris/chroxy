@@ -1657,6 +1657,85 @@ describe('App', () => {
     })
   })
 
+  // #4871 — the sidebar context-menu's copyToClipboard callback (used for
+  // "Copy path" on session/repo rows and "Copy Conversation ID" on
+  // resumable rows) routed through `clipboardWriteText` but explicitly
+  // "fell through quietly" on failure — the same Tauri-WKWebView /
+  // non-secure-context failure modes that motivated #4629 left the user
+  // with zero feedback and a stale paste. PR #4857 fixed the
+  // handleCopyTranscript path; this is the sibling fix. The callback now
+  // surfaces a 'warning'-severity toast (per #4870 — a failed clipboard
+  // write is non-destructive, not red-error-worthy).
+  describe('sidebar copyToClipboard callback failure feedback (#4871)', () => {
+    const connectedWithRepoSession = {
+      connectionPhase: 'connected' as const,
+      sessions: [{
+        sessionId: 's1',
+        name: 'Alpha',
+        cwd: '/tmp/repo',
+        type: 'cli' as const,
+        hasTerminal: true,
+        model: null,
+        permissionMode: null,
+        isBusy: false,
+        createdAt: Date.now(),
+        conversationId: null,
+      }],
+      activeSessionId: 's1',
+    }
+
+    it('surfaces a warning-severity toast when the clipboard helper returns false', async () => {
+      clipboardWriteTextMock.mockResolvedValue(false)
+      stateOverrides = connectedWithRepoSession
+      render(<App />)
+
+      // Right-click the session row to open the sidebar context menu, then
+      // click "Copy path" — the same callback that wires "Copy Conversation
+      // ID" on resumable rows. The session-row path is easier to bootstrap
+      // (no conversationHistory fixture required).
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.contextMenu(row)
+      const menu = screen.getByRole('menu')
+      expect(menu).toBeInTheDocument()
+
+      const copyPath = within(menu).getByRole('menuitem', { name: /copy path/i })
+      fireEvent.click(copyPath)
+
+      await waitFor(() => {
+        expect(clipboardWriteTextMock).toHaveBeenCalledWith('/tmp/repo')
+      })
+      await waitFor(() => {
+        expect(addServerErrorMock).toHaveBeenCalledTimes(1)
+      })
+      const firstCall = addServerErrorMock.mock.calls[0]
+      expect(firstCall).toBeDefined()
+      const [message, action, severity] = firstCall!
+      expect(message).toMatch(/clipboard/i)
+      // Severity arg pinned to 'warning' (#4870 convention).
+      expect(action).toBeUndefined()
+      expect(severity).toBe('warning')
+    })
+
+    it('does NOT surface a toast on a successful copy (no green confirmation by design)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(true)
+      stateOverrides = connectedWithRepoSession
+      render(<App />)
+
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.contextMenu(row)
+      const menu = screen.getByRole('menu')
+      const copyPath = within(menu).getByRole('menuitem', { name: /copy path/i })
+      fireEvent.click(copyPath)
+
+      await waitFor(() => {
+        expect(clipboardWriteTextMock).toHaveBeenCalledWith('/tmp/repo')
+      })
+      // Resolve the microtask so the .then() handler runs.
+      await Promise.resolve()
+      expect(addServerErrorMock).not.toHaveBeenCalled()
+    })
+  })
+
   // #4796 — wiring guard for `useVoiceInput({ mode })`. Audit Tester #2
   // flagged that the chain `SettingsPanel.tsx -> updateInputSettings ->
   // inputSettings.voiceInputMode -> App.tsx selector -> useVoiceInput({ mode })`

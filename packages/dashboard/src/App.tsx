@@ -705,10 +705,22 @@ export function App() {
       copyToClipboard: (text) => {
         // #4673: route through the clipboard helper so Tauri builds use the
         // native plugin instead of navigator.clipboard (which silently
-        // no-ops in WKWebView). Failures fall through quietly — the user
-        // can still see the conversation id by hovering or re-running the
-        // search.
-        void clipboardWriteText(text)
+        // no-ops in WKWebView).
+        // #4871: surface a visible warning toast on failure so the user
+        // knows the OS clipboard was NOT written (Tauri plugin rejected,
+        // navigator.clipboard missing in a non-secure context, etc.).
+        // Mirrors the #4857 / #4629 pattern applied to handleCopyTranscript
+        // above. Severity is 'warning' (not the default 'error') per #4870 —
+        // a failed clipboard write is non-destructive, the user just retries.
+        void clipboardWriteText(text).then((ok) => {
+          if (!ok) {
+            useConnectionStore.getState().addServerError(
+              'Failed to copy to clipboard. Please try again.',
+              undefined,
+              'warning',
+            )
+          }
+        })
       },
       openCreateSessionAt: (cwd) => {
         setPendingCwd(cwd)
