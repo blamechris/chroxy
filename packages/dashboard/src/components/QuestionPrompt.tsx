@@ -28,7 +28,12 @@
  * suppression.
  */
 import { useId, useState, useRef, useEffect } from 'react'
-import { OTHER_OPTION_VALUE, type ChatMessageQuestion } from '@chroxy/store-core'
+// #4901: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
+// so the dashboard store, the mobile store, and the mobile screen all
+// converge on a single declaration paired with the shared
+// `isFreeformAnswer` guard. Re-exported below for the existing dashboard
+// call sites that import it from this file.
+import { OTHER_OPTION_VALUE, type ChatMessageQuestion, type OtherFreeformAnswer } from '@chroxy/store-core'
 
 /**
  * #4735 — per-question answer payload emitted by the multi-question form.
@@ -47,11 +52,14 @@ export type MultiQuestionAnswersMap = Record<string, string | string[]>
  * shape to send a two-stage `user_question_response` (server writes the
  * Other digit to claude TUI, waits for the text-input prompt swap, then
  * writes the freeform text + Enter).
+ *
+ * #4901: the interface itself lives in `@chroxy/store-core/freeform-answer`
+ * (single source of truth, paired with the `isFreeformAnswer` guard); re-
+ * exported here so existing dashboard importers (and any downstream
+ * components that pull the type from this file) keep working unchanged.
+ * Mirrors the mobile `MessageBubble.tsx` re-export pattern landed in #4875.
  */
-export interface OtherFreeformAnswer {
-  otherLabel: string
-  freeformText: string
-}
+export type { OtherFreeformAnswer }
 
 export interface QuestionPromptProps {
   question: string

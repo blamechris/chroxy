@@ -34,11 +34,11 @@
  * + Enter). Older servers that ignore `freeformText` fall through to the
  * legacy path and type the label literally — a clean degradation.
  *
- * Mirrors the dashboard's `OtherFreeformAnswer` (still re-exported from
- * `packages/dashboard/src/components/QuestionPrompt.tsx` for backward
- * compatibility) and the mobile `OtherFreeformAnswer` from
- * `packages/app/src/components/chat/MessageBubble.tsx`. Both call sites
- * should converge on this declaration over time.
+ * Both `packages/dashboard/src/components/QuestionPrompt.tsx` (#4901) and
+ * `packages/app/src/components/chat/MessageBubble.tsx` (#4875) now re-
+ * export this declaration as a type-only re-export, so all three call
+ * sites (mobile store, mobile screen, dashboard store) converge on the
+ * single source of truth here.
  */
 export interface OtherFreeformAnswer {
   otherLabel: string;

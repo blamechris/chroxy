@@ -1566,6 +1566,197 @@ describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #4901 — migration to shared `isFreeformAnswer` predicate from store-core.
+// ---------------------------------------------------------------------------
+// Pin behaviour after replacing the inline 5-condition shape detector in
+// `sendUserQuestionResponse` with the shared `isFreeformAnswer` typed-guard
+// from `@chroxy/store-core/freeform-answer` (mobile counterpart migrated in
+// #4875 / PR #4900). The migration MUST be a behaviour-neutral refactor:
+// the wire payload, the `appendTerminalData` echo, the `runningSince`
+// optimistic bump, and the negative-misroute defence (the original Copilot
+// review concern in #4753) all stay identical. These tests mirror the
+// mobile #4755 block in `packages/app/src/__tests__/store/connection.test.ts`.
+describe('sendUserQuestionResponse Other / freeform shape (#4901 shared-guard migration)', () => {
+  it('preserves a model-supplied custom Other label on the wire', async () => {
+    // Defends against a future regression where we forget to thread
+    // `otherLabel` through and instead hard-code the literal "Other"
+    // string — the server's digit-lookup would then resolve to the wrong
+    // hotkey for any custom-label Other option. Mirrors the mobile
+    // counterpart at app/__tests__/store/connection.test.ts (#4755).
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Something else', freeformText: 'typed' },
+      'toolu-custom-other',
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'user_question_response',
+      answer: 'Something else',
+      freeformText: 'typed',
+      toolUseId: 'toolu-custom-other',
+    });
+  });
+
+  it('omits toolUseId from the wire payload when not provided', async () => {
+    // Mirrors the mobile counterpart (#4755). Zero-options free-text
+    // AskUserQuestions historically lack a tool pairing.
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'no-tooluse case' },
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'no-tooluse case',
+    });
+    expect(sent[0]).not.toHaveProperty('toolUseId');
+  });
+
+  // The Copilot review concern from #4753: a multi-question Record whose
+  // keys happen to literally be `otherLabel` and `freeformText` must NOT
+  // misroute through the freeform branch. The shared guard enforces the
+  // tightest possible shape (exactly two keys AND both string values), so
+  // any non-string value (string[] for a multi-select, etc.) falls
+  // through to the multi-question Record path with `answers` populated
+  // and the freeform `freeformText` field absent.
+  it('does NOT misroute a multi-question Record whose keys happen to be otherLabel + freeformText with non-string values', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    // A model-phrased multi-question form whose question keys happen to
+    // literally be `otherLabel` and `freeformText` AND whose answers are
+    // arrays (multi-select). The shared guard rejects this (array values
+    // fail the `typeof === 'string'` check), so it must serialize as a
+    // multi-question Record on the wire.
+    const adversarial = {
+      otherLabel: ['Patch', 'Minor'],
+      freeformText: ['App', 'Tests'],
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(
+      adversarial as unknown as Record<string, string | string[]>,
+      'toolu-adversarial',
+    );
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as Record<string, unknown>;
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu-adversarial');
+    // Multi-question path: `answers` carries the verbatim map.
+    expect(payload.answers).toEqual(adversarial);
+    // Freeform-only field MUST be absent — proof we did not misroute.
+    expect(payload).not.toHaveProperty('freeformText');
+  });
+
+  // The acceptance criteria says no behavioural change to the
+  // `appendTerminalData` echo path. This pin defends against an accidental
+  // narrowing or branch reordering during the migration that would skip
+  // the terminal echo for freeform answers (the cyan "User answered:" line
+  // landed in #4296 and gates on `answerSummary` being non-empty).
+  it('still echoes the freeform text into the terminal buffer (#4296 / #4901 acceptance)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const mockSocket = {
+      readyState: 1,
+      send: () => { /* swallow */ },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'typed answer for echo pin' },
+      'toolu-echo',
+    );
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    // ANSI is stripped by the dashboard's terminal-buffer pipeline
+    // (cyan/yellow distinction lives in the rawBuffer / terminal renderer).
+    // The acceptance criteria pin here is just that the cyan-prefixed echo
+    // line still fires for freeform answers under the shared guard — i.e.
+    // the post-detection branch that calls `appendTerminalData` is taken.
+    expect(terminalBuffer).toContain('User answered: typed answer for echo pin');
+    // The "> " prefix is part of the echo template — if it disappears it
+    // means the echo path was bypassed and only the formatQuestionAnswerSummary
+    // fallback wrote into the buffer.
+    expect(terminalBuffer).toContain('> User answered:');
+  });
+
+  // Mirrors mobile #4755 third test: legacy string answers must keep the
+  // back-compat wire shape — `freeformText` MUST be absent so older
+  // servers cannot misclassify a plain option tap as an Other / freeform
+  // send (Zod schema strict-mode would also reject extras here).
+  it('keeps the legacy {answer:<string>, toolUseId} shape for plain string answers and OMITS freeformText', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu-string');
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu-string',
+    });
+    expect(sent[0]).not.toHaveProperty('freeformText');
+    expect(sent[0]).not.toHaveProperty('answers');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #4312 — optimistic busy-state bump on answer send
 // ---------------------------------------------------------------------------
 // sendInput (the regular chat path) implicitly puts the dashboard into a

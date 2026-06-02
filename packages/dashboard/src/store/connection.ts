@@ -119,6 +119,14 @@ import {
   // `Record<VoiceInputMode, true>` in store-core, so adding a new mode
   // to the union cannot silently drop here the way a `===` chain would.
   isVoiceInputMode,
+  // #4901: shared typed predicate for the AskUserQuestion freeform shape.
+  // Replaces the inline 5-condition check that previously duplicated the
+  // mobile store's detector (mobile migrated in #4875 / PR #4900). All
+  // three call sites (mobile store, mobile screen, dashboard store) now
+  // narrow off the same guard, and the `value is OtherFreeformAnswer`
+  // narrowing lets the post-detection `as { otherLabel, freeformText }`
+  // casts drop out.
+  isFreeformAnswer,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 import {
@@ -1656,17 +1664,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // possible if the model phrases a question that way). The freeform
     // shape is an object with EXACTLY those two keys AND both string
     // values — anything else falls through to the multi-question path.
-    const isFreeformAnswer = typeof answer === 'object' && answer !== null
-      && !Array.isArray(answer)
-      && Object.keys(answer).length === 2
-      && 'freeformText' in answer && 'otherLabel' in answer
-      && typeof (answer as Record<string, unknown>).freeformText === 'string'
-      && typeof (answer as Record<string, unknown>).otherLabel === 'string';
-    const isMultiAnswer = !isFreeformAnswer && typeof answer !== 'string';
+    //
+    // #4901: the shape check now lives in `@chroxy/store-core/freeform-answer`
+    // (single source of truth, mobile already migrated in #4875 / PR #4900).
+    // The `value is OtherFreeformAnswer` narrowing means the post-detection
+    // accesses (`answer.otherLabel`, `answer.freeformText`) no longer need
+    // `as { otherLabel: string; freeformText: string }` casts.
+    const freeform = isFreeformAnswer(answer);
+    const isMultiAnswer = !freeform && typeof answer !== 'string';
     let answerSummary: string;
-    if (isFreeformAnswer) {
-      const f = answer as { otherLabel: string; freeformText: string };
-      answerSummary = f.freeformText;
+    if (freeform) {
+      answerSummary = answer.freeformText;
     } else {
       // Delegate to the shared summary helper so multi-question Records
       // (and the legacy JSON-stringified array envelope from #4621) both
@@ -1676,14 +1684,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         answer as string | Record<string, string | string[]>,
       );
     }
-    const payload: Record<string, unknown> = { type: 'user_question_response', answer: isFreeformAnswer
-      ? (answer as { otherLabel: string; freeformText: string }).otherLabel
+    const payload: Record<string, unknown> = { type: 'user_question_response', answer: freeform
+      ? answer.otherLabel
       : answerSummary };
     if (isMultiAnswer) {
       payload.answers = answer;
     }
-    if (isFreeformAnswer) {
-      payload.freeformText = (answer as { otherLabel: string; freeformText: string }).freeformText;
+    if (freeform) {
+      payload.freeformText = answer.freeformText;
     }
     if (toolUseId) payload.toolUseId = toolUseId;
     // #4296: echo the resolved answer to the terminal buffer so the Output
