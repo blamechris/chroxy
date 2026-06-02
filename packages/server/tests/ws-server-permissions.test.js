@@ -671,14 +671,19 @@ describe('permission/question routing to originating session', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
 
-    // Simulate question from Session A (populates _questionSessionMap)
-    server._questionSessionMap.set('q-routing-1', 'sess-a')
+    // Simulate question from Session A (populates _questionSessionMap AND
+    // auto-subscribes connected clients to sess-a, mirroring the production
+    // dispatch path so the #4788 subscription guard sees the client as a
+    // legitimate recipient even after they switch_session away).
+    server._registerQuestionRoute('q-routing-1', 'sess-a')
 
     // Switch client to Session B
     send(ws, { type: 'switch_session', sessionId: 'sess-b' })
     await waitForMessage(messages, 'session_switched', 2000)
 
-    // Respond to the question — should route to Session A
+    // Respond to the question — should route to Session A even though the
+    // client's active session is now sess-b (subscribedSessionIds still
+    // contains sess-a from the auto-subscribe at dispatch).
     send(ws, { type: 'user_question_response', toolUseId: 'q-routing-1', answer: 'yes' })
     await waitFor(() => sessionAGotQuestion, { label: 'sessionA question routed' })
 

@@ -545,6 +545,21 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   // correct client can still respond.
   if (client.boundSessionId && client.boundSessionId !== questionSessionId) return
 
+  // #4788 (audit P0.2): for UNBOUND clients, require the questionSessionId
+  // to match the client's active or subscribed sessions before routing the
+  // answer. Without this, an unbound dashboard tab could submit an answer
+  // for any session by replaying a known toolUseId — paired with the log
+  // leak in #4787 this enables cross-session answer hijacking. Mirrors the
+  // default filter used by _broadcastToSession (ws-broadcaster.js:106) so
+  // the set of clients permitted to ANSWER a question is the same set that
+  // could legitimately have RECEIVED it. Leaves the mapping intact so the
+  // legitimate subscribed client can still respond.
+  if (!client.boundSessionId) {
+    const subscribed = questionSessionId === client.activeSessionId
+      || (client.subscribedSessionIds && client.subscribedSessionIds.has(questionSessionId))
+    if (!subscribed) return
+  }
+
   if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
 
   const entry = ctx.sessionManager.getSession(questionSessionId)

@@ -1232,6 +1232,15 @@ export class WsServer {
       pushManager: this.pushManager,
       permissionSessionMap: this._permissionSessionMap,
       questionSessionMap: this._questionSessionMap,
+      // #4788 Wave 2: hand the question-route registration through a helper so
+      // dispatch and routing-guard stay symmetric. When a question is
+      // registered for session S, every currently-connected client that's
+      // permitted to see broadcasts for S gets auto-subscribed to S — this
+      // mirrors _broadcastToSession's recipient filter so the new
+      // input-handlers guard naturally passes for legitimate viewers without
+      // re-opening the cross-session hijack vector (unconnected / future
+      // clients are still unable to answer).
+      registerQuestionRoute: (toolUseId, sessionId) => this._registerQuestionRoute(toolUseId, sessionId),
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
       broadcastSessionList: () => this._handlerCtx.broadcastSessionList(),
@@ -1397,6 +1406,45 @@ export class WsServer {
    */
   _broadcastToSession(sessionId, message, filter) {
     this._broadcaster._broadcastToSession(sessionId, message, filter)
+  }
+
+  /**
+   * #4788 Wave 2: register an AskUserQuestion route for `toolUseId` against
+   * `sessionId` AND auto-subscribe every currently-eligible authenticated
+   * client to `sessionId`. This keeps the input-handler's subscription guard
+   * (handlers/input-handlers.js — the "unbound client must be subscribed or
+   * active on the question's session" check) symmetric with
+   * `_broadcastToSession`'s default recipient filter: any client that was
+   * eligible to RECEIVE the question is now eligible to ANSWER it, even after
+   * a `switch_session` flips their `activeSessionId` away.
+   *
+   * Wave 1 closed a cross-session answer-hijack vector (#4788) by requiring
+   * unbound clients to be subscribed before routing a `user_question_response`.
+   * That broke the legitimate "view A → get question for A → switch to B →
+   * answer" flow because `switch_session` only adds the *new* target to
+   * `subscribedSessionIds`; the originating session A was in neither set.
+   * Auto-subscribing at dispatch time means the client that legitimately
+   * received the question keeps the membership it needs to answer it.
+   *
+   * Bound clients are filtered out so a client paired to session X can never
+   * be quietly subscribed to session Y. Unbound clients always get added —
+   * matching `_broadcastToSession`'s default filter (which only requires
+   * `activeSessionId === sessionId || subscribedSessionIds.has(sessionId)`,
+   * but auto-subscribe seeds the latter so the filter passes for everyone
+   * currently connected). Clients that connect AFTER dispatch are still
+   * unable to answer; that's the desired hijack-prevention property.
+   */
+  _registerQuestionRoute(toolUseId, sessionId) {
+    this._questionSessionMap.set(toolUseId, sessionId)
+    if (!sessionId) return
+    for (const [, client] of this.clients) {
+      if (!client.authenticated) continue
+      // Don't auto-subscribe a client bound to a *different* session — the
+      // bound binding is the security contract for that client.
+      if (client.boundSessionId && client.boundSessionId !== sessionId) continue
+      if (!client.subscribedSessionIds) continue
+      client.subscribedSessionIds.add(sessionId)
+    }
   }
 
   /** Count unauthenticated connections for pre-auth limit enforcement */

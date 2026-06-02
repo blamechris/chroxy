@@ -261,7 +261,7 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
 /** Execute registration descriptors returned by the normalizer */
 function executeRegistrations(registrations, sessionId, ctx) {
   if (!registrations) return
-  const { permissionSessionMap, questionSessionMap } = ctx
+  const { permissionSessionMap, questionSessionMap, registerQuestionRoute } = ctx
   for (const reg of registrations) {
     // #3736: registrations support an explicit action ('set' | 'delete'),
     // defaulting to 'set' for backwards compatibility. The delete action is
@@ -289,7 +289,18 @@ function executeRegistrations(registrations, sessionId, ctx) {
       if (action === 'delete') {
         questionSessionMap.delete(reg.key)
       } else {
-        questionSessionMap.set(reg.key, reg.value ?? sessionId)
+        const mappedSessionId = reg.value ?? sessionId
+        // #4788 Wave 2: prefer the WsServer-provided helper so dispatch also
+        // auto-subscribes eligible clients to the question's session — keeps
+        // the input-handler's subscription guard symmetric with
+        // _broadcastToSession's recipient filter. Falls back to a bare Map.set
+        // when ctx doesn't carry the helper (legacy unit tests that wire
+        // setupForwarding directly without a WsServer).
+        if (typeof registerQuestionRoute === 'function') {
+          registerQuestionRoute(reg.key, mappedSessionId)
+        } else {
+          questionSessionMap.set(reg.key, mappedSessionId)
+        }
       }
     }
   }
