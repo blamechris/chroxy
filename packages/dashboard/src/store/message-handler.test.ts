@@ -878,7 +878,14 @@ describe('dashboard message-handler dispatch', () => {
 
       it('does not reorder a non-empty (reconnect-replayed) response slot', () => {
         // Simulate reconnect replay where a previous turn's response is
-        // already populated. A subsequent delta on it should NOT reorder.
+        // already populated. A subsequent delta on it must NOT reorder the
+        // existing slot — the #4297 reorder gate is `content === ''`.
+        //
+        // Post-#4889: because a tool_use follows the populated response,
+        // the new delta materializes into a continuation slot at the end
+        // instead of concatenating onto the existing content. The original
+        // response is preserved in place (no reorder), the tool stays at
+        // index 1, and the new text lands in a fresh `-cont-` bubble.
         const replayedResp = {
           id: 'resp-replay',
           type: 'response' as const,
@@ -904,10 +911,17 @@ describe('dashboard message-handler dispatch', () => {
         vi.runAllTimers()
 
         const ss = (store.getState() as any).sessionStates.s1
-        // Response stays at index 0 (the reorder gate is content === '').
+        // Original response stays at index 0 with its replayed content intact
+        // (no reorder, no concatenation).
         expect(ss.messages[0].id).toBe('resp-replay')
-        expect(ss.messages[0].content).toBe('Existing replayed content. more text')
+        expect(ss.messages[0].content).toBe('Existing replayed content. ')
+        // Tool remains at index 1.
         expect(ss.messages[1].id).toBe('toolu_x')
+        // The new delta lands in a continuation slot appended at the end.
+        const last = ss.messages[ss.messages.length - 1]
+        expect(last.type).toBe('response')
+        expect(last.content).toBe('more text')
+        expect(last.id).toMatch(/^resp-replay-cont-/)
       })
 
       it('reorders empty response slot in flat-state branch (legacy/pre-session bootstrap)', () => {
@@ -948,6 +962,221 @@ describe('dashboard message-handler dispatch', () => {
         expect(last.id).toBe('flat-resp')
         expect(last.content).toBe('flat summary')
         expect(flat[0].id).toBe('flat-tool')
+      })
+    })
+
+    // #4889 — when an assistant turn streams text → tool → text → tool → text,
+    // the server reuses ONE messageId for the entire response. The #4297 fix
+    // (reorder empty slot to end) only handles the FIRST delta — subsequent
+    // text chunks (after intervening tool_use messages) concatenate into the
+    // same content field with no separator, producing `…before filing.Filing
+    // now.Filed:` and losing paragraph breaks.
+    //
+    // Fix: when a delta arrives for a non-empty response that already has a
+    // tool_use appended after it, materialize a fresh response continuation
+    // slot at the end of the messages array (suffixed id `-cont-N`). Each
+    // post-tool text chunk becomes its own response bubble — formatTranscript
+    // already separates response messages with `\n\n`.
+    describe('post-tool text chunks split into continuation slots (#4889)', () => {
+      it('creates a new response slot when delta arrives for a response with tool_use appended after it', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        // text-A → tool → text-B → tool → text-C
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'Let me check chroxy before filing.' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: { command: 'gh issue list' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'tool_result', toolUseId: 'toolu_a', result: 'ok', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'Filing now.' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_b',
+            tool: 'Bash',
+            toolUseId: 'toolu_b',
+            input: { command: 'gh issue create' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'tool_result', toolUseId: 'toolu_b', result: 'https://...', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'Filed: https://github.com/...' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        // Three distinct response bubbles, each carrying one chunk
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        const tools = ss.messages.filter((m: any) => m.type === 'tool_use')
+        expect(responses).toHaveLength(3)
+        expect(tools).toHaveLength(2)
+        expect(responses[0].content).toBe('Let me check chroxy before filing.')
+        expect(responses[1].content).toBe('Filing now.')
+        expect(responses[2].content).toBe('Filed: https://github.com/...')
+        // No `.X` (period followed by capital with no space) across boundaries —
+        // the join in formatTranscript inserts `\n\n` so the concatenation is safe.
+        const joined = responses.map((r: any) => r.content).join('\n\n')
+        expect(joined).not.toMatch(/\.[A-Z]/)
+      })
+
+      it('places each continuation slot AFTER the preceding tool_use (#4297 ordering preserved)', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'preamble' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: { command: 'ls' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'summary' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        // [response('preamble'), tool, response('summary')]
+        expect(ss.messages).toHaveLength(3)
+        expect(ss.messages[0].type).toBe('response')
+        expect(ss.messages[0].content).toBe('preamble')
+        expect(ss.messages[1].type).toBe('tool_use')
+        expect(ss.messages[1].id).toBe('toolu_a')
+        expect(ss.messages[2].type).toBe('response')
+        expect(ss.messages[2].content).toBe('summary')
+      })
+
+      it('does not split when consecutive deltas arrive without an intervening tool', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'hello ' },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'resp-1', sessionId: 's1', delta: 'world' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        // No tool ran — single response slot with concatenated deltas
+        expect(ss.messages).toHaveLength(1)
+        expect(ss.messages[0].type).toBe('response')
+        expect(ss.messages[0].content).toBe('hello world')
+      })
+
+      it('splits in the flat-messages branch (legacy/pre-session bootstrap)', () => {
+        const flatBase = baseState({
+          activeSessionId: null,
+          sessions: [],
+          sessionStates: {},
+          messages: [],
+        }) as Record<string, unknown>
+        flatBase.addMessage = (m: unknown) => {
+          const s = store.getState() as { messages: unknown[] }
+          ;(store as { setState: (p: Record<string, unknown>) => void }).setState({
+            messages: [...s.messages, m],
+          })
+        }
+        store = createMockStore(flatBase)
+        setStore(store)
+
+        handleMessage({ type: 'stream_start', messageId: 'flat-resp' }, ctx() as any)
+        handleMessage(
+          { type: 'stream_delta', messageId: 'flat-resp', delta: 'part 1' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'flat-tool',
+            tool: 'Bash',
+            toolUseId: 'flat-tool',
+            input: { command: 'ls' },
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'stream_delta', messageId: 'flat-resp', delta: 'part 2' },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const flat = (store.getState() as any).messages
+        const responses = flat.filter((m: any) => m.type === 'response')
+        const tools = flat.filter((m: any) => m.type === 'tool_use')
+        expect(responses).toHaveLength(2)
+        expect(tools).toHaveLength(1)
+        expect(responses[0].content).toBe('part 1')
+        expect(responses[1].content).toBe('part 2')
       })
     })
   })

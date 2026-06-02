@@ -1398,6 +1398,14 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     deltaId = newId;
   } else if (_deltaIdRemaps.has(deltaId)) {
     deltaId = _deltaIdRemaps.get(deltaId)!;
+    // Allow chained remaps: when the post-tool continuation split (#4889)
+    // later remaps `deltaId` → `deltaId-cont-...`, the original incoming
+    // id needs to resolve through both hops on subsequent deltas.
+    while (_deltaIdRemaps.has(deltaId)) {
+      const next = _deltaIdRemaps.get(deltaId)!;
+      if (next === deltaId) break;
+      deltaId = next;
+    }
   } else {
     // Defensive: server reuses messageId for tool_start and the post-tool
     // stream_start. If stream_start was dropped or hasn't registered the
@@ -1443,6 +1451,69 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
           }));
         }
         deltaId = suffixed;
+      }
+    }
+  }
+
+  // #4889 — post-tool continuation split. The server reuses ONE messageId for
+  // an entire assistant turn even when text → tool → text → tool → text. The
+  // #4297 reorder only fires on the FIRST delta (gated on content === '');
+  // subsequent text chunks concatenate into the same response.content with no
+  // separator — producing `…before filing.Filing now.Filed:` and losing
+  // paragraph breaks.
+  //
+  // Detect the boundary by checking whether a tool_use was appended AFTER the
+  // currently-resolved response slot. If so, materialize a fresh continuation
+  // slot at the end (`<deltaId>-cont-<ts>`) and chain a remap so subsequent
+  // deltas for the same incoming messageId route to the new slot. The split
+  // mirrors the `-post-` permission-boundary pattern already in this file.
+  // Skipped while the session is replaying — replayed history is reassembled
+  // server-side and must not be re-split on the client.
+  {
+    const splitTargetId = capturedSessionId;
+    const splitEffectiveId = (splitTargetId && get().sessionStates[splitTargetId])
+      ? splitTargetId
+      : get().activeSessionId;
+    const isReplaying = splitEffectiveId ? _replayingSessions.has(splitEffectiveId) : false;
+    if (!isReplaying) {
+      const splitMessages = (splitEffectiveId && get().sessionStates[splitEffectiveId])
+        ? get().sessionStates[splitEffectiveId]!.messages
+        : get().messages;
+      const slotIdx = splitMessages.findIndex((m) => m.id === deltaId);
+      if (slotIdx >= 0) {
+        const slot = splitMessages[slotIdx]!;
+        // Buffered (not-yet-flushed) text counts as content for the split
+        // decision — otherwise a chunk that hasn't hit the 100ms flush yet
+        // would look empty and we'd append onto it.
+        const bufferedContent = pendingDeltas.get(deltaId)?.delta || '';
+        const hasContent = slot.type === 'response'
+          && (slot.content.length > 0 || bufferedContent.length > 0);
+        const toolAfter = hasContent
+          && splitMessages.slice(slotIdx + 1).some((m) => m.type === 'tool_use');
+        if (toolAfter) {
+          const contId = `${deltaId}-cont-${Date.now()}`;
+          // Chain the remap: the next delta for the original incoming id will
+          // resolve through both hops (handled by the while-loop above).
+          _deltaIdRemaps.set(deltaId, contId);
+          const contMsg: ChatMessage = {
+            id: contId,
+            type: 'response',
+            content: '',
+            timestamp: Date.now(),
+          };
+          if (splitEffectiveId && get().sessionStates[splitEffectiveId]) {
+            updateSession(splitEffectiveId, (ss) => ({
+              streamingMessageId: contId,
+              messages: [...ss.messages, contMsg],
+            }));
+          } else {
+            set((state: ConnectionState) => ({
+              streamingMessageId: contId,
+              messages: [...state.messages, contMsg],
+            }));
+          }
+          deltaId = contId;
+        }
       }
     }
   }
