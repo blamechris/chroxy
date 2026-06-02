@@ -2173,6 +2173,14 @@ export class ClaudeTuiSession extends BaseSession {
     gateStreamEndOnMessageId = true,
   } = {}) {
     const messageId = this._currentMessageId
+    // #4682: per-turn summary log so the wedge-mode teardown paths
+    // (hard_timeout, stream_stall) land the same grep-able
+    // `sendMessage done` line as the success and _finishTurnError paths.
+    // Placed before any state mutation so the helper sees populated
+    // turn fields (messageId, startedAt, waitForPrompt*, write*).
+    // PR #4681 added the summary helper for the wedge investigation;
+    // missing it on the stream-stall path defeated the whole point.
+    this._logSendMessageSummary(reason)
     // 1. Best-effort Ctrl-C into the PTY.
     if (this._term) {
       try { this._term.write('\x03') } catch { /* ignore */ }
