@@ -4715,6 +4715,247 @@ describe('ClaudeTuiSession', () => {
         'options still points at questions[0].options for back-compat')
     })
 
+    // #4884 — extend trailing-`'\r'` coverage to MIXED multi-question forms
+    // (single + multi-select mix). The #4867 fix added a defensive trailing
+    // `'\r'` for ALL multi-question forms; #4886 fixed the cross-PR test
+    // breakage. Live verification ran on the all-single-select shape (the
+    // wedge case). The mixed-form path inherits the trailing `'\r'` based
+    // on the #4290 single-q precedent, but the issue (#4884) calls out that
+    // mixed multi-question is a different TUI state — explicit assertion-
+    // level coverage of every mixed-form last-question shape pins that
+    // shape drift in the driver doesn't silently drop the trailing `'\r'`.
+    describe('trailing \\r on mixed multi-question forms (#4884)', () => {
+      // Shape: S+M (last is multi-select). #4867 sequence ends with
+      // `'\t'` (commit + advance to Submit) + `'1'` (Submit) + `'\r'`
+      // (defensive trailer). No settle — `'\t'` already settles.
+      it('S+M shape: trailing \\r lands immediately after Submit (no settle)', async () => {
+        const writeEvents = []
+        session._term = {
+          write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+          kill: () => {},
+        }
+        const questions = [
+          { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_sm', questions, options: questions[0].options }
+
+        session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': ['p', 'q'] })
+        await new Promise((resolve) => setTimeout(resolve, 200))
+
+        const writes = writeEvents.map((e) => e.data)
+        assert.deepEqual(
+          writes,
+          ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\r', '\x1b[?2004h'],
+          `S+M shape must end with Submit '1' + trailing '\\r', got ${JSON.stringify(writes)}`,
+        )
+
+        // The Submit → '\r' gap must be ~per-char throttle (1ms), proving
+        // the trailing '\r' lands AFTER Submit-'1' (the issue's concern
+        // is the inverse — that it'd race ahead and land on the prompt).
+        const submitIdx = writes.lastIndexOf('1')
+        const enterIdx = writes.lastIndexOf('\r')
+        assert.ok(submitIdx >= 0 && enterIdx > submitIdx, 'trailing \\r is after Submit')
+        const gapMs = writeEvents[enterIdx].t - writeEvents[submitIdx].t
+        assert.ok(
+          gapMs < 50,
+          `Submit '1' → trailing '\\r' gap must be ~per-char throttle, got ${gapMs}ms`,
+        )
+      })
+
+      // Shape: M+S+M (multi → single → multi). Last is multi → no settle,
+      // trailing '\r' still pinned. Catches a regression where someone
+      // gates the trailing '\r' on the lastIsSingleSelect branch.
+      it('M+S+M shape: trailing \\r still pinned (no settle)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+          { question: 'Q3?', multiSelect: true, options: [{ label: 'x' }, { label: 'y' }, { label: 'z' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_msm', questions, options: questions[0].options }
+
+        session.respondToQuestion('', {
+          'Q1?': ['a'],         // → '1' + '\t'
+          'Q2?': 'q',            // → '2' (auto-advances)
+          'Q3?': ['x', 'z'],     // → '1' '3' + '\t'
+        })
+        await new Promise((resolve) => setTimeout(resolve, 200))
+
+        // Last q is multi → no settle. Submit '1' + trailing '\r' still pinned.
+        assert.deepEqual(
+          writes,
+          ['\x1b[?2004l', '1', '\t', '2', '1', '3', '\t', '1', '\r', '\x1b[?2004h'],
+          `M+S+M sequence with trailing '\\r' broke, got ${JSON.stringify(writes)}`,
+        )
+      })
+
+      // Shape: S+M+S (single → multi → single). Last is single → settle
+      // fires AND trailing '\r' still pinned. The settle proves the
+      // last-q-shape decision; the '\r' proves the defensive trailer.
+      it('S+M+S shape: settle fires AND trailing \\r still pinned', async () => {
+        const writeEvents = []
+        session._term = {
+          write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+          kill: () => {},
+        }
+        const questions = [
+          { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+          { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_sms', questions, options: questions[0].options }
+
+        session.respondToQuestion('', {
+          'Q1?': 'a',           // → '1'
+          'Q2?': ['p', 'q'],    // → '1' '2' + '\t'
+          'Q3?': 'y',           // → '2' (auto-advances; last q so settle fires)
+        })
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        const writes = writeEvents.map((e) => e.data)
+        assert.deepEqual(
+          writes,
+          ['\x1b[?2004l', '1', '1', '2', '\t', '2', '1', '\r', '\x1b[?2004h'],
+          `S+M+S sequence with trailing '\\r' broke, got ${JSON.stringify(writes)}`,
+        )
+
+        // Settle present: gap between last single-digit ('2' of Q3) and
+        // Submit '1' >= 140ms.
+        const q3DigitIdx = writes.indexOf('2', writes.indexOf('\t'))
+        const submitIdx = writes.indexOf('1', q3DigitIdx + 1)
+        const settleMs = writeEvents[submitIdx].t - writeEvents[q3DigitIdx].t
+        assert.ok(settleMs >= 140, `expected settle >= 140ms for last-q single-select, got ${settleMs}ms`)
+
+        // Trailing '\r' immediately after Submit (no settle).
+        const enterIdx = writes.lastIndexOf('\r')
+        assert.ok(enterIdx > submitIdx, 'trailing \\r is after Submit')
+        const trailerGapMs = writeEvents[enterIdx].t - writeEvents[submitIdx].t
+        assert.ok(
+          trailerGapMs < 50,
+          `Submit '1' → trailing '\\r' gap must be ~per-char throttle, got ${trailerGapMs}ms`,
+        )
+      })
+
+      // Forensic timing log (#4884 acceptance criterion #1): when PostToolUse
+      // for AskUserQuestion arrives after a multi-question submit, an INFO
+      // line emits the wall-clock delta from Submit-'1' write to PostToolUse
+      // arrival. After ~10 live captures (per the issue's AC#2), the log
+      // line can be downgraded to DEBUG.
+      it('PostToolUse logs Submit→PostToolUse delta at INFO (#4884)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        // Mixed S+M+S form — last is single so settle path also exercised.
+        const questions = [
+          { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+          { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_forensic', questions, options: questions[0].options }
+
+        session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': ['p'], 'Q3?': 'y' })
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        // The Submit marker recorded a timestamp on the session — verify
+        // the writer dispatched the marker BEFORE the Submit byte.
+        assert.ok(
+          session._multiQuestionSubmitAt.has('toolu_forensic'),
+          `expected Submit marker timestamp recorded for the form, got keys=${[...session._multiQuestionSubmitAt.keys()].join(',')}`,
+        )
+
+        // Simulate the matching PostToolUse arriving 50ms later.
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_forensic',
+          tool_name: 'AskUserQuestion',
+          tool_response: '',
+        }, 'msg-post-forensic')
+
+        const forensicInfo = infoLines.find((m) => /Submit.PostToolUse=\d+ms/.test(m) && /toolu_forensic/.test(m))
+        assert.ok(
+          forensicInfo,
+          `expected INFO forensic line for #4884, got infoLines=${JSON.stringify(infoLines)}`,
+        )
+        assert.match(forensicInfo, /#4884/, 'forensic INFO line references the issue for triage')
+
+        // Submit-time entry is consumed on PostToolUse so the Map doesn't
+        // accumulate stale entries across many forms.
+        assert.equal(
+          session._multiQuestionSubmitAt.has('toolu_forensic'),
+          false,
+          'submit-time entry cleared after the forensic log fires',
+        )
+      })
+
+      // Negative: PostToolUse for a non-multi-question AskUserQuestion (the
+      // single-question text-driven path doesn't record a Submit marker)
+      // does NOT emit the forensic log. Pins the scope to multi-question
+      // forms so the log doesn't accidentally fire for single-q happy paths.
+      it('PostToolUse for single-question form does NOT emit forensic log (#4884)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const questions = [
+          { question: 'Solo?', options: [{ label: 'a' }, { label: 'b' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_only', questions, options: questions[0].options }
+
+        session.respondToQuestion('a')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // Single-question path does NOT use _writePtyMultiQuestionSequence,
+        // so no Submit marker is recorded.
+        assert.equal(
+          session._multiQuestionSubmitAt.has('toolu_single_only'),
+          false,
+          'single-question path must not record a Submit marker',
+        )
+
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_single_only',
+          tool_name: 'AskUserQuestion',
+          tool_response: '',
+        }, 'msg-single-post')
+
+        const forensicInfo = infoLines.find((m) => /Submit.PostToolUse=\d+ms/.test(m))
+        assert.equal(
+          forensicInfo,
+          undefined,
+          `single-question path must not emit forensic INFO, got infoLines=${JSON.stringify(infoLines)}`,
+        )
+      })
+
+      // Cleanup: when a teardown path (stall watchdog, _teardownTurn) wipes
+      // _pendingUserAnswers, the parallel _multiQuestionSubmitAt entries
+      // must also be cleared. Otherwise a teardown that wins the race
+      // against PostToolUse leaks the submit-time entry until destroy().
+      it('_pendingUserAnswers_clearAll wipes parallel submit-time entries (#4884)', () => {
+        session._multiQuestionSubmitAt.set('toolu_a', Date.now())
+        session._multiQuestionSubmitAt.set('toolu_b', Date.now())
+        session._pendingUserAnswers.set('toolu_a', { toolUseId: 'toolu_a', questions: [], options: [] })
+
+        session._pendingUserAnswers_clearAll()
+
+        assert.equal(session._multiQuestionSubmitAt.size, 0, 'submit-time map cleared in lockstep')
+      })
+
+      // Per-toolUseId cleanup parity: _clearPendingAnswerByToolUseId
+      // (the PostToolUse cleanup path) also drops the matching submit-time
+      // entry so a late-arriving PostToolUse for a torn-down form doesn't
+      // emit a forensic log with a stale (wall-clock-impossible) delta.
+      it('_clearPendingAnswerByToolUseId drops matching submit-time entry (#4884)', () => {
+        session._multiQuestionSubmitAt.set('toolu_x', Date.now())
+        session._multiQuestionSubmitAt.set('toolu_y', Date.now())
+        session._pendingUserAnswers.set('toolu_x', { toolUseId: 'toolu_x', questions: [], options: [] })
+        session._pendingUserAnswers.set('toolu_y', { toolUseId: 'toolu_y', questions: [], options: [] })
+
+        session._clearPendingAnswerByToolUseId('toolu_x')
+
+        assert.equal(session._multiQuestionSubmitAt.has('toolu_x'), false, 'cleared toolu_x submit time')
+        assert.equal(session._multiQuestionSubmitAt.has('toolu_y'), true, 'kept toolu_y submit time (per-id scope)')
+      })
+    })
+
     // #4625 — 10+ option questions. claude TUI's single-digit hotkey
     // alphabet only covers indices 0..8 (digits '1'..'9'). The pre-#4625
     // driver silently defaulted picks of options 10+ to option 1 (with a

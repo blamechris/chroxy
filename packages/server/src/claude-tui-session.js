@@ -441,6 +441,17 @@ export class ClaudeTuiSession extends BaseSession {
     // _onAskUserQuestionStall clears busy state + emits an error so the
     // session is recoverable. Cleared on PostToolUse + destroy().
     this._askUserQuestionWatchdog = null
+    // #4884: forensic timing for the defensive trailing '\r' added in
+    // #4867 / #4886 — record the wall-clock at which Submit-'1' is written
+    // to the PTY for each multi-question form, keyed by toolUseId. On the
+    // matching PostToolUse we log the delta at INFO so live mixed-form
+    // submissions generate evidence that the trailing '\r' (which lands
+    // ~1ms after Submit-'1' on the mixed path) is harmless. Map (not
+    // single field) to mirror _pendingUserAnswers — parallel AskUserQuestion
+    // tool_use blocks in one turn each get an independent submit-time entry.
+    // Entries are pruned when the matching PostToolUse fires OR when the
+    // teardown / watchdog stall path clears the form.
+    this._multiQuestionSubmitAt = new Map()
     // #4732: effective pre-first-output timeout in ms. Distinct from
     // _streamStallTimeoutMs (#4638) — that watchdog only re-arms BETWEEN
     // hook events, so a turn where claude TUI accepts the prompt write
@@ -516,12 +527,21 @@ export class ClaudeTuiSession extends BaseSession {
   _pendingUserAnswers_clearAll() {
     this._pendingUserAnswers.clear()
     this._lastPendingAnswerToolUseId = null
+    // #4884: parallel cleanup so stale submit-timing entries don't leak
+    // when a teardown path wipes the pending answers (the forensic log
+    // only fires when PostToolUse arrives; if teardown won the race, the
+    // submit-time entry would otherwise sit there until destroy()).
+    if (this._multiQuestionSubmitAt) this._multiQuestionSubmitAt.clear()
   }
 
   /** Internal: drop a specific pending answer entry (PostToolUse cleanup). */
   _clearPendingAnswerByToolUseId(toolUseId) {
     if (!toolUseId) return
     this._pendingUserAnswers.delete(toolUseId)
+    // #4884: parallel cleanup of the submit-timing entry for the same
+    // toolUseId. Idempotent — no-op when the entry was already consumed
+    // by PostToolUse's delta log.
+    if (this._multiQuestionSubmitAt) this._multiQuestionSubmitAt.delete(toolUseId)
     if (this._lastPendingAnswerToolUseId === toolUseId) {
       // Advance the "most recent" pointer to whichever entry was set most
       // recently after the one we just removed (insertion-order via Map
@@ -1692,6 +1712,22 @@ export class ClaudeTuiSession extends BaseSession {
     // above stores the pending entry under THAT synthesized id. Gating
     // cleanup on `payload.tool_use_id` would skip the clear for those
     // builds and leak Map entries indefinitely.
+    // #4884: forensic timing for the defensive trailing '\r' (#4867 / #4886).
+    // If this PostToolUse matches a multi-question form we just drove,
+    // log the wall-clock from Submit-'1' write to PostToolUse arrival at
+    // INFO. The trailing '\r' is sent ~1ms after Submit-'1' (per-char
+    // throttle), so any "spurious empty-prompt activity" theory shows up
+    // as an outlier-large delta. After ~10 captured submissions show
+    // clean numbers, this log line can be downgraded to DEBUG. MUST run
+    // before _clearPendingAnswerByToolUseId below — that helper also
+    // clears _multiQuestionSubmitAt in lockstep with _pendingUserAnswers,
+    // so the timestamp would be gone by the time we read it.
+    if (toolName === 'AskUserQuestion' && toolUseId && this._multiQuestionSubmitAt.has(toolUseId)) {
+      const submitAt = this._multiQuestionSubmitAt.get(toolUseId)
+      this._multiQuestionSubmitAt.delete(toolUseId)
+      const deltaMs = Date.now() - submitAt
+      ;(this._log || log).info(`AskUserQuestion multi-question: Submit→PostToolUse=${deltaMs}ms (tool=${toolUseId}) — forensic for #4884 trailing-'\\r' verification`)
+    }
     if (toolName === 'AskUserQuestion' && toolUseId) {
       this._clearPendingAnswerByToolUseId(toolUseId)
     }
@@ -2834,6 +2870,13 @@ export class ClaudeTuiSession extends BaseSession {
     }
     // Focus lands on `❯ 1. Submit answers / 2. Cancel` after the last
     // question — press 1 to confirm submission.
+    // #4884: tag the Submit position with a marker object so
+    // _writePtyMultiQuestionSequence can record the wall-clock at which
+    // Submit-'1' actually hit the PTY (used by _emitToolHookEvent's
+    // PostToolUse handler to log the Submit→PostToolUse delta).
+    if (prevToolUseId) {
+      sequence.push({ type: 'mark', label: 'submit', toolUseId: prevToolUseId })
+    }
     sequence.push('1')
     // #4635 — defensive trailing Enter. The empirical mixed-form recording
     // pinned `'1'` as immediate-submit (no Enter needed); on the mixed
@@ -2844,6 +2887,11 @@ export class ClaudeTuiSession extends BaseSession {
     // is one of the live-debugged hypotheses for the wedge (Option B in
     // the issue). Costs nothing on the path that already works; potentially
     // saves the path that doesn't.
+    // #4884: per the issue, mixed-form (single + multi mix) live verification
+    // of the trailing `\r` was deferred — the #4290 single-q precedent
+    // applies, but mixed multi-question is a different TUI state. The
+    // Submit-mark above + PostToolUse delta log give forensic evidence
+    // that the trailing `\r` lands harmlessly on every mixed-form submit.
     sequence.push('\r')
 
     const keystrokeCount = sequence.filter((x) => typeof x === 'string').length
@@ -2873,7 +2921,14 @@ export class ClaudeTuiSession extends BaseSession {
    * needs a beat after the last single-select auto-advance — see
    * MULTI_QUESTION_SUBMIT_SETTLE_MS).
    *
-   * @param {Array<string|number>} sequence — strings to write, numbers to sleep
+   * #4884 — sequence entries may also be `{ type: 'mark', label, toolUseId }`
+   * marker objects. Markers are not written to the PTY; they record the
+   * wall-clock at the point the writer reaches them (after any preceding
+   * settle has elapsed but BEFORE the next byte is written) into
+   * `_multiQuestionSubmitAt`. PostToolUse for that toolUseId logs the
+   * delta — forensic evidence the defensive trailing '\r' lands harmlessly.
+   *
+   * @param {Array<string|number|object>} sequence — strings to write, numbers to sleep, marker objects to timestamp
    * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
    */
   async _writePtyMultiQuestionSequence(sequence) {
@@ -2884,6 +2939,13 @@ export class ClaudeTuiSession extends BaseSession {
         if (this._activeTurn?.aborted || this._ptyExited) return false
         if (typeof item === 'number') {
           if (item > 0) await new Promise((resolve) => setTimeout(resolve, item))
+          continue
+        }
+        if (item && typeof item === 'object' && item.type === 'mark') {
+          // #4884 — record submit-time marker for the PostToolUse delta log.
+          if (item.label === 'submit' && item.toolUseId) {
+            this._multiQuestionSubmitAt.set(item.toolUseId, Date.now())
+          }
           continue
         }
         this._term.write(item)
