@@ -2281,6 +2281,24 @@
   color: var(--text-muted);
 }
 
+/* #4685: pending-permission placeholder shown when an AskUserQuestion
+   permission_request is still unresolved on this session. The full
+   question payload (text, options, multi-question form, deferred notice,
+   free-text input) is suppressed until the user clicks Allow on the
+   matching permission prompt — pre-fix the content rendered the moment
+   the wire `user_question` event arrived, leaking model-supplied text
+   before consent. Mirrors the deferred-notice variant's muted tone so
+   the gap reads as "waiting" rather than "broken". */
+.question-prompt--pending-permission {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.question-prompt--pending-permission .question-text {
+  margin-bottom: 0;
+  color: var(--text-muted);
+}
+
 /* #4634: multi-question AskUserQuestion form (#4604 Chunk B / #4620).
    The component renders these class names but they previously had no
    CSS rules — Submit fell back to the native browser button (gray-on-

@@ -274,6 +274,54 @@ describe('setupForwarding', () => {
     })
   })
 
+  // #4756 — `stopped` event surfaces through the normalizer as a
+  // `session_stopped` broadcast targeted at subscribers of the affected
+  // session (NOT global broadcast). Pairs with the wiring in
+  // session-manager.js's `_wireSessionEvents` (transient list) and the
+  // `stopped` handler in event-normalizer.js.
+  describe('stopped event (#4756)', () => {
+    it('broadcasts session_stopped via broadcastToSession (not global)', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-stop',
+        event: 'stopped',
+        data: { code: 0 },
+      })
+
+      // Must route per-session — only subscribers of sess-stop should see
+      // the confirmation, not every connected client.
+      assert.equal(ctx.broadcastToSession.mock.calls.length, 1)
+      const [sid, msg] = ctx.broadcastToSession.mock.calls[0].arguments
+      assert.equal(sid, 'sess-stop')
+      assert.equal(msg.type, 'session_stopped')
+      assert.equal(msg.sessionId, 'sess-stop')
+      assert.equal(msg.code, 0)
+      // Must NOT also fire global broadcast for this event.
+      assert.equal(ctx.broadcast.mock.calls.length, 0)
+    })
+
+    it('does not emit session_activity (informational, not busy/idle)', () => {
+      // session_activity is fired on stream_start/result only — `stopped`
+      // is a lifecycle signal, not a busy-state flip, so the sidebar
+      // activity feed should not light up for it.
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-stop',
+        event: 'stopped',
+        data: { code: 0 },
+      })
+
+      const activityCall = ctx.broadcast.mock.calls.find(
+        c => c.arguments[0]?.type === 'session_activity',
+      )
+      assert.equal(activityCall, undefined, 'stopped must not trigger session_activity')
+    })
+  })
+
   describe('setupForwarding with cliSession', () => {
     it('sets up CLI forwarding when cliSession provided (no sessionManager)', () => {
       const cliSession = new EventEmitter()
@@ -401,6 +449,23 @@ describe('setupCliForwarding', () => {
     ctx.cliSession.emit('custom_internal', { foo: 'bar' })
 
     assert.equal(ctx.broadcast.mock.calls.length, 0)
+  })
+
+  // #4756: legacy-cli mode must also forward the `stopped` event so the
+  // single-CLI confirmation reaches connected clients. The legacy path
+  // uses `broadcast` (no per-session routing) since there's only one CLI.
+  it('forwards stopped event as session_stopped broadcast (#4756)', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('stopped', { code: 0 })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const stoppedMsg = calls.find(m => m.type === 'session_stopped')
+    assert.ok(stoppedMsg, 'expected session_stopped broadcast from legacy-cli')
+    assert.equal(stoppedMsg.code, 0)
+    // Legacy-cli path: ctx.sessionId is null → normalizer omits sessionId
+    assert.ok(!('sessionId' in stoppedMsg), 'legacy-cli session_stopped should omit sessionId')
   })
 
   // #3240: skill_changed must reach legacy single-CLI users so the trust

@@ -412,6 +412,31 @@ export declare const ServerSessionRestoreFailedSchema: z.ZodObject<{
     originalHistoryPreserved: z.ZodBoolean;
     historyLength: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
+/**
+ * #4756: user-initiated Stop confirmation broadcast. CliSession emits a
+ * `stopped` event from `_handleChildClose` when the child process exits
+ * cleanly after a Stop click (interrupt() set `_intentionalStop`). The
+ * SessionManager + ws-forwarding paths surface it as this `session_stopped`
+ * wire message so clients can render a quiet "Session stopped." confirmation
+ * — distinct from `session_error` (crash) which fires for unexpected exits
+ * that trigger the auto-respawn path.
+ *
+ * `sessionId` is injected by `_broadcastToSession` on the multi-session
+ * path, so it's optional on the schema for consumers that construct the
+ * message without it pre-broadcast (matches the `cost_update` / `session_usage`
+ * pattern). The legacy-cli path doesn't carry a sessionId at all.
+ *
+ * `code` is the child process exit code (number). Typically 0 on a clean
+ * SIGINT exit, but kept on the wire so clients can render the numeric code
+ * for non-zero exits (e.g. 143 = SIGTERM). Optional because future providers
+ * that adopt the `stopped` event for parity (see #4756 follow-up) may not
+ * have a meaningful exit code (e.g. in-process SDK session).
+ */
+export declare const ServerSessionStoppedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_stopped">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    code: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
 export declare const ServerProviderListSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_list">;
     providers: z.ZodArray<z.ZodObject<{
@@ -786,6 +811,7 @@ export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchem
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>;
 export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>;
 export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>;
+export type ServerSessionStoppedMessage = z.infer<typeof ServerSessionStoppedSchema>;
 export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;

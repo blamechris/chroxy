@@ -19,6 +19,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, stripAnsi, nextMessageId } from '../store/connection';
 import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
+import type { SessionIntervention } from '@chroxy/store-core';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
@@ -60,6 +61,7 @@ const EMPTY_AGENTS: AgentInfo[] = [];
 const EMPTY_MCP_SERVERS: McpServer[] = [];
 const EMPTY_DEV_PREVIEWS: DevPreview[] = [];
 const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
+const EMPTY_INTERVENTIONS: SessionIntervention[] = [];
 
 // Message sent when user taps "Approve" on a plan approval card
 const PLAN_APPROVAL_MESSAGE = 'Go ahead with the plan';
@@ -269,6 +271,13 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].costThresholdWarning : null;
   });
   const costBudget = useConnectionStore((s) => s.costBudget);
+  // #4764 — chroxy-side intervention ring for the active session. Drives the
+  // session-header counter badge and the tap-to-expand recent-interventions
+  // sheet (mirrors the dashboard's FooterBar surface from #4758).
+  const interventions = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].interventions : EMPTY_INTERVENTIONS;
+  });
   const devPreviews = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].devPreviews : EMPTY_DEV_PREVIEWS;
@@ -992,6 +1001,7 @@ export function SessionScreen() {
           serverMode={serverMode}
           isIdle={isIdle}
           activeAgents={activeAgents}
+          interventions={interventions}
           connectedClients={connectedClients}
           customAgents={customAgents}
           mcpServers={mcpServers}

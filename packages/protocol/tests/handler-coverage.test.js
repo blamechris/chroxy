@@ -46,6 +46,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
+  'session_stopped', // #4756 user-initiated Stop confirmation — wire path is wired (CliSession → SessionManager → ws-forwarding → ServerSessionStoppedSchema) but client UX (quiet toast / status update) is the follow-up tracked in #4756's issue body item 3; until then the absence of `session_error` already conveys "no crash, clean stop"
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
@@ -97,7 +98,10 @@ const PLATFORM_SPECIFIC = {
   'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'byok_credentials_status': 'dashboard', // paste-API-key form is dashboard-only (#4052); mobile app exposure tracked under the BYOK epic #4047
-  'multi_question_intervention': 'dashboard', // chroxy permission-hook deny surface (#4653) — dashboard renders a FooterBar counter chip + InterventionsPanel; mobile app exposure tracked as a follow-up since the app has no FooterBar equivalent
+  // 'multi_question_intervention' is now handled by both dashboard (#4758)
+  // and mobile app (#4764 / PR #4862); no PLATFORM_SPECIFIC entry needed.
+  // Coverage test passes because each handler has a
+  // `case 'multi_question_intervention':` clause.
   'session_activity': 'dashboard', // server-broadcast busy/idle flips (#4639) — dashboard syncs sessionStates[id].isIdle so the Working banner survives tab swap; mobile app exposure tracked alongside the rest of the dashboard-only handlers
 }
 

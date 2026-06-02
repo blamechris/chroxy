@@ -138,6 +138,112 @@ export function createDevicePreferences({ filePath } = {}) {
     },
 
     /**
+     * Drop entries that are no longer useful and persist the result. See
+     * #4849. Two prune criteria are applied in this order:
+     *
+     *   1. Stale-session: `activeSessionId` is not a string OR
+     *      `sessionExists(activeSessionId)` returns false AND the entry's
+     *      `updatedAt` is older than `staleSessionGraceMs` (default `0` —
+     *      remove immediately). The grace window exists so a brief
+     *      restart-induced gap, where the SessionManager has not yet
+     *      restored the session the device was viewing, does not nuke a
+     *      perfectly valid preference. Callers that have a fully-restored
+     *      SessionManager can leave `staleSessionGraceMs` at its default.
+     *
+     *   2. Age-based: `updatedAt` is older than `maxAgeMs`. Skipped when
+     *      `maxAgeMs` is null/undefined.
+     *
+     * Malformed entries (missing or non-string `activeSessionId`, missing
+     * `updatedAt`) are always pruned — they cannot do anything useful and
+     * carrying them forward would propagate the malformation.
+     *
+     * The file is only re-written when at least one entry is removed —
+     * the no-op case is free (no disk I/O), so this method is safe to
+     * call eagerly on startup even when the store is empty.
+     *
+     * @param {object} [opts]
+     * @param {(sessionId: string) => boolean} [opts.sessionExists]
+     *   Predicate that returns true iff the SessionManager still knows
+     *   about `sessionId`. When omitted, the stale-session check is
+     *   skipped entirely (only the age-based check applies).
+     * @param {number} [opts.maxAgeMs]
+     *   Drop entries older than this many ms regardless of session
+     *   existence. Default null — no age cap. A value of `0` is treated
+     *   as "no cap" (matches the PR description and avoids the foot-gun
+     *   where `now - updatedAt > 0` would evict every entry). Negative
+     *   or non-finite values are coerced to "no cap" as well.
+     * @param {number} [opts.staleSessionGraceMs]
+     *   Don't drop stale-session entries younger than this many ms.
+     *   Default 0 — drop stale-session entries immediately. Negative or
+     *   non-finite values are coerced to 0 so a typo can't defeat the
+     *   grace guard.
+     * @returns {number} Number of entries removed.
+     */
+    prune({ sessionExists, maxAgeMs, staleSessionGraceMs } = {}) {
+      const state = load()
+      const deviceIds = Object.keys(state.devices)
+      if (deviceIds.length === 0) return 0
+
+      // Clamp inputs to sane non-negative finite numbers. This is now a
+      // public API, so direct callers (and tests) get the same safety
+      // net that parseDevicePrefsDuration provides for the env-var path.
+      // `maxAgeMs === 0` is normalised to null ("no cap") because a
+      // literal-zero cap would evict every entry and the PR description
+      // promises 0 disables the cap.
+      const ageCapMs = (typeof maxAgeMs === 'number' && Number.isFinite(maxAgeMs) && maxAgeMs > 0)
+        ? maxAgeMs
+        : null
+      const grace = (typeof staleSessionGraceMs === 'number' && Number.isFinite(staleSessionGraceMs) && staleSessionGraceMs > 0)
+        ? staleSessionGraceMs
+        : 0
+
+      const now = Date.now()
+      let removed = 0
+
+      for (const deviceId of deviceIds) {
+        const entry = state.devices[deviceId]
+        const activeSessionId = entry && typeof entry.activeSessionId === 'string'
+          ? entry.activeSessionId
+          : null
+        const updatedAt = entry && typeof entry.updatedAt === 'number'
+          ? entry.updatedAt
+          : null
+
+        // Malformed: cannot use this entry, evict.
+        if (!activeSessionId || updatedAt == null) {
+          delete state.devices[deviceId]
+          removed += 1
+          continue
+        }
+
+        // Age-based: hard cap regardless of session existence. Skipped
+        // when ageCapMs is null (caller passed 0 / null / undefined /
+        // negative / non-finite).
+        if (ageCapMs != null && now - updatedAt > ageCapMs) {
+          delete state.devices[deviceId]
+          removed += 1
+          continue
+        }
+
+        // Stale-session: drop if the SessionManager no longer knows about
+        // the persisted id AND the entry is older than the grace window.
+        if (typeof sessionExists === 'function' && !sessionExists(activeSessionId)) {
+          if (now - updatedAt >= grace) {
+            delete state.devices[deviceId]
+            removed += 1
+            continue
+          }
+        }
+      }
+
+      if (removed > 0) {
+        log.info(`Pruned ${removed} stale device-preferences entr${removed === 1 ? 'y' : 'ies'}`)
+        persist()
+      }
+      return removed
+    },
+
+    /**
      * Clear the recorded preference for `deviceId`. Currently unused by
      * production code, but exposed so future "forget this device" UI
      * doesn't have to reach into the cache shape.

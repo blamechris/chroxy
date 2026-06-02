@@ -36,7 +36,16 @@ vi.mock('./hooks/useVoiceInput', () => ({
 // #4673 — control the clipboard helper per-test so we can assert that the
 // "Copied!" check mark only fires when the helper actually wrote. Default
 // to a successful write so the unrelated render-smoke tests stay green.
-const clipboardWriteTextMock = vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true))
+// #4629 — also expose an `addServerErrorMock` so the failure-path test
+// can assert the dashboard surfaces a visible toast when the clipboard
+// write fails (the original bug was a silent no-op + misleading
+// "Copied!" tooltip). Both are declared via `vi.hoisted()` because
+// `vi.mock()` factories are hoisted to the top of the file before any
+// top-level `const`, so a plain const would hit a TDZ ReferenceError.
+const { clipboardWriteTextMock, addServerErrorMock } = vi.hoisted(() => ({
+  clipboardWriteTextMock: vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true)),
+  addServerErrorMock: vi.fn<(message: string, action?: unknown, severity?: unknown) => void>(),
+}))
 vi.mock('./utils/clipboard', () => ({
   writeText: (text: string) => clipboardWriteTextMock(text),
 }))
@@ -60,6 +69,19 @@ let capturedOnRestart: ((sessionId: string) => void) | null = null
 vi.mock('./components/MultiTerminalView', () => ({
   MultiTerminalView: (props: { className?: string }) => (
     <div data-testid="multi-terminal-view-mock" className={props.className} />
+  ),
+}))
+
+// #4685 — PermissionPrompt reads `availableProviders` and calls
+// `isRuleEligibleProvider`, both of which need a richer store mock than the
+// App smoke harness provides. The #4685 gate tests below mount a permission
+// message (requestId + expiresAt + !answered) which would otherwise drive
+// the real PermissionPrompt to crash on the missing helper. Stub it here so
+// the gate tests stay focused on App-level derivation; PermissionPrompt has
+// its own dedicated suite in PermissionPrompt.test.tsx.
+vi.mock('./components/PermissionPrompt', () => ({
+  PermissionPrompt: (props: { requestId: string; tool: string }) => (
+    <div data-testid={`permission-prompt-mock-${props.requestId}`} data-tool={props.tool} />
   ),
 }))
 
@@ -135,6 +157,10 @@ vi.mock('./store/connection', () => {
     setModel: vi.fn(),
     setPermissionMode: vi.fn(),
     dismissServerError: vi.fn(),
+    // #4629 — surfaced when the clipboard write fails so the user sees a
+    // visible error instead of a silent no-op. Backed by the top-level
+    // `addServerErrorMock` so tests can assert on the call args directly.
+    addServerError: addServerErrorMock,
     dismissSessionNotification: vi.fn(),
     markPromptAnsweredByRequestId: vi.fn(),
     sessionNotifications: [],
@@ -184,6 +210,9 @@ beforeEach(() => {
   // overrides don't bleed through.
   clipboardWriteTextMock.mockReset()
   clipboardWriteTextMock.mockResolvedValue(true)
+  // #4629 — reset between cases so the failure-path test only sees the
+  // calls it triggered.
+  addServerErrorMock.mockReset()
   // #4432 — reset the shared shortcut registry so per-test rebinds
   // don't bleed between cases. The registry persists overrides to
   // localStorage; clearing the key keeps loadOverrides() returning {}.
@@ -1575,6 +1604,49 @@ describe('App', () => {
       expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       expect(btn.getAttribute('title')).toContain('Copied!')
     })
+
+    // #4629 — the original bug was that a failed clipboard write would
+    // silently swallow the failure and the "Copied!" tooltip flashed
+    // anyway. PR #4676 (for #4673) fixed the misleading flash but the
+    // user still got zero feedback when the write fell through. The third
+    // acceptance criterion on #4629 explicitly calls this out: "If
+    // clipboard write fails, user sees an error (not a misleading
+    // 'Copied!' tooltip)". Surface a server-error toast so the user knows
+    // the OS clipboard wasn't actually written.
+    it('surfaces a server-error toast when the clipboard helper returns false (#4629)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(false)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const btn = screen.getByTestId('btn-copy-transcript')
+      fireEvent.click(btn)
+
+      await waitFor(() => {
+        expect(addServerErrorMock).toHaveBeenCalledTimes(1)
+      })
+      const firstCall = addServerErrorMock.mock.calls[0]
+      expect(firstCall).toBeDefined()
+      const [message] = firstCall!
+      expect(message).toMatch(/clipboard/i)
+      // Must NOT also flash the success indicator (that was the #4673 bug;
+      // this test pins the negative too so a future regression on either
+      // axis is caught).
+      expect(btn.textContent).not.toContain('✓')
+    })
+
+    it('does NOT surface a server-error toast on a successful copy (#4629)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(true)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const btn = screen.getByTestId('btn-copy-transcript')
+      fireEvent.click(btn)
+
+      await waitFor(() => {
+        expect(btn.textContent).toContain('✓')
+      })
+      expect(addServerErrorMock).not.toHaveBeenCalled()
+    })
   })
 
   // #4796 — wiring guard for `useVoiceInput({ mode })`. Audit Tester #2
@@ -1605,6 +1677,233 @@ describe('App', () => {
       render(<App />)
       const modes = voiceInputModeSpy.mock.calls.map(c => c[0]?.mode)
       expect(modes).toContain('continuous')
+    })
+  })
+
+  // #4685 — App-level integration tests for the AskUserQuestion content
+  // gate. The component-level tests in QuestionPrompt.test.tsx prove the
+  // placeholder branch given a prop; these prove App.tsx ACTUALLY computes
+  // `pendingPermission=true` when the active session has both an unresolved
+  // `AskUserQuestion` permission_request AND a `user_question`-derived
+  // prompt message, and that the gate flips OFF on allow / STAYS ON on
+  // deny. A future change that renames `m.tool` or moves `requestId`
+  // placement on the permission ChatMessage would silently regress the
+  // fix — these tests pin the App-side derivation. Mirrors Copilot review
+  // comment #2 on #4860.
+  describe('AskUserQuestion content gate — App-level derivation (#4685)', () => {
+    const connectedState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    // Two messages mirror the TUI race in the wild: the permission hook's
+    // HTTP /permission broadcast creates a `permission_request` ChatMessage
+    // (tool='AskUserQuestion', requestId set), and the in-process
+    // user_question event creates a separate `prompt` ChatMessage carrying
+    // the model-supplied question text + options (no requestId).
+    const askUserQuestionMessages = [
+      {
+        id: 'perm-1',
+        type: 'prompt',
+        content: 'AskUserQuestion: pick your fighter',
+        tool: 'AskUserQuestion',
+        requestId: 'req-aq-1',
+        options: [
+          { label: 'Allow', value: 'allow' },
+          { label: 'Deny', value: 'deny' },
+        ],
+        expiresAt: Date.now() + 300_000,
+        timestamp: 1,
+      },
+      {
+        id: 'q-1',
+        type: 'prompt',
+        content: 'Pick your fighter',
+        options: [
+          { label: 'Ryu', value: 'ryu' },
+          { label: 'Ken', value: 'ken' },
+        ],
+        questions: [
+          { question: 'Pick your fighter', options: [{ label: 'Ryu', value: 'ryu' }, { label: 'Ken', value: 'ken' }] },
+        ],
+        timestamp: 2,
+      },
+    ]
+
+    it('renders the placeholder (and hides question content) when the AskUserQuestion permission_request is unresolved', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: {},
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      // Placeholder renders…
+      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // …and the model-supplied question + option labels are NOT in the
+      // chat pane (gate works end-to-end through App's derivation).
+      expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
+      expect(within(chatPane).queryByText('Ryu')).not.toBeInTheDocument()
+      expect(within(chatPane).queryByText('Ken')).not.toBeInTheDocument()
+    })
+
+    it('flips OFF the gate (reveals content) when the permission resolves to `allow`', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: { 'req-aq-1': 'allow' },
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      // Placeholder is gone…
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      // …and the actual question + options are visible.
+      expect(within(chatPane).getByText('Pick your fighter')).toBeInTheDocument()
+      expect(within(chatPane).getByText('Ryu')).toBeInTheDocument()
+      expect(within(chatPane).getByText('Ken')).toBeInTheDocument()
+    })
+
+    it('flips OFF the gate when the permission resolves to `allowSession`', () => {
+      // Same behaviour as `allow` — both are "user explicitly approved
+      // seeing the question content."
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: { 'req-aq-1': 'allowSession' },
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(within(chatPane).getByText('Pick your fighter')).toBeInTheDocument()
+    })
+
+    it('KEEPS the gate ON when the permission resolves to `deny` (#4685 Copilot review)', () => {
+      // Issue #4685 expected behavior: "(b) Question bubble renders only
+      // after the permission flow completes (and shows the redacted/denied
+      // state if user clicks Deny)". Pre-Copilot-review the gate flipped
+      // off on ANY resolved entry, surfacing the model-supplied question
+      // text + options after a denial — exactly defeating the gate. This
+      // test pins the deny-keeps-gate-on rule end-to-end through App's
+      // derivation.
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: { 'req-aq-1': 'deny' },
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      // Placeholder STILL renders — deny does not un-gate.
+      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // Question content stays hidden.
+      expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
+      expect(within(chatPane).queryByText('Ryu')).not.toBeInTheDocument()
+    })
+
+    it('KEEPS the gate ON when the cross-client permission_resolved set `m.answered = "deny"` on the permission message', () => {
+      // The cross-client path lives on the per-message `answered` field
+      // rather than the store's `resolvedPermissions` map (see
+      // message-handler.ts:1705 — handlePermissionResolved sets answered
+      // for the cross-client view, NOT resolvedPermissions). Mirror the
+      // resolvedPermissions deny test for the per-message branch.
+      const denyAnsweredMessages = [
+        { ...askUserQuestionMessages[0], answered: 'deny' as const, answeredAt: Date.now() },
+        askUserQuestionMessages[1],
+      ]
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: denyAnsweredMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: {},
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
+    })
+
+    it('does NOT activate the gate when there is no AskUserQuestion permission_request in the session', () => {
+      // Defensive: a `user_question` without a paired permission_request
+      // (e.g. SDK / CLI / BYOK / Codex / Gemini providers, which short-
+      // circuit AskUserQuestion in PermissionManager — no permission_request
+      // is ever broadcast) MUST render the QuestionPrompt content
+      // immediately. The gate is TUI-specific by construction and a no-op
+      // elsewhere; pin that here so a future change can't accidentally
+      // gate every provider's AskUserQuestion.
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: [askUserQuestionMessages[1]], // user_question only, no permission_request
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: {},
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(within(chatPane).getByText('Pick your fighter')).toBeInTheDocument()
     })
   })
 })

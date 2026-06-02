@@ -555,6 +555,54 @@ describe('useSpeechRecognition', () => {
       expect(MockModule.start).toHaveBeenCalledTimes(3);
     });
 
+    // ---- #4851: end-handler defence-in-depth for the abort-end race ----
+    // Reproduces the residual race the start-path teardown (#4826) cannot
+    // close on the mobile platform: `SpeechModule.abort()` queues `onend`
+    // asynchronously, but the sync block resets `userStoppedRef = false`
+    // BEFORE the queued `onend` fires. Without the `inFlightRef.current`
+    // gate in the end handler, the stale queued end satisfies every re-arm
+    // condition and starts a stale recogniser on top of the new session.
+    it('end-handler ignores stale onend fired between abort and new start (#4851)', async () => {
+      // Simulate the native engine queuing onend asynchronously from abort().
+      // Wire abort() to schedule an `end` on the microtask queue — this is
+      // the race window: the next sync block clears inFlightRef before the
+      // queued end fires.
+      MockModule.abort.mockImplementation(() => {
+        Promise.resolve().then(() => {
+          eventHandlers['end']?.({});
+        });
+      });
+
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      // Second startListening triggers the prior-teardown branch:
+      //   1) userStoppedRef = true (sync)
+      //   2) SpeechModule.abort() — queues onend on microtask queue
+      //   3) inFlightRef = false (sync)
+      //   4) userStoppedRef = false (sync, fresh-session bookkeeping)
+      //   5) await permission / lang
+      //   6) SpeechModule.start() — fresh session
+      // Between (4) and (6), the queued onend from step 2 fires. Without
+      // the inFlightRef gate, every other re-arm condition is satisfied
+      // (continuous + !userStoppedRef + mounted + counter<cap) and the
+      // end handler calls SpeechModule.start() against the prior session
+      // BEFORE the fresh session's start() lands — exactly the dual-mic
+      // window the dashboard #4789 closed via handler nulling.
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      // Two start() calls total: the original and the fresh session.
+      // If the stale queued end re-armed, this would be 3.
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+      expect(MockModule.abort).toHaveBeenCalledTimes(1);
+    });
+
     it('does NOT abort when no prior session is in-flight', async () => {
       const { result } = renderHookSimple(() => useSpeechRecognition());
 

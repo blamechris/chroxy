@@ -58,6 +58,21 @@ export interface QuestionPromptProps {
   options: { label: string; value: string }[]
   answered?: string
   /**
+   * #4685 — when true, an `AskUserQuestion` permission_request for the
+   * owning session is still unresolved (the user has NOT clicked Allow
+   * yet). Gate ALL question content (text, options, multi-question form,
+   * deferred notice, free-text input) behind this flag and render only a
+   * neutral "Pending permission to view question…" placeholder until
+   * permission is granted. Without this gate the dashboard surfaces the
+   * full question payload before the user has consented to see it —
+   * defeating the purpose of the permission prompt. The flag flips back
+   * to false once `resolvedPermissions[requestId]` is set OR the matching
+   * permission prompt is `answered`, at which point the normal content
+   * renders. Default false so legacy callers (and tests) keep their
+   * pre-#4685 behaviour unless they explicitly opt in.
+   */
+  pendingPermission?: boolean
+  /**
    * #4604 Chunk B — full per-question payload for multi-question forms.
    * Always populated by store-core handleUserQuestion (questions[0]
    * mirrors the top-level `question` + `options`). When length > 1 the
@@ -92,7 +107,27 @@ export interface QuestionPromptProps {
   onSelect: (answer: string | MultiQuestionAnswersMap | OtherFreeformAnswer) => void
 }
 
-export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, onSelect }: QuestionPromptProps) {
+export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, pendingPermission, onSelect }: QuestionPromptProps) {
+  // #4685 — gate ALL question content (text, options, multi-question
+  // form, deferred notice, free-text input) behind the
+  // `pendingPermission` flag. Render only a neutral placeholder until
+  // the user has clicked Allow on the AskUserQuestion permission prompt.
+  // Without this gate the dashboard surfaces the full question payload
+  // (and the model-supplied options, which can be social-engineering
+  // text) before the user has consented to see it — defeating the
+  // purpose of the permission prompt.
+  if (pendingPermission) {
+    return (
+      <div
+        className="question-prompt question-prompt--pending-permission"
+        data-testid="question-prompt-pending-permission"
+        role="status"
+      >
+        <div className="question-text">Pending permission to view question…</div>
+      </div>
+    )
+  }
+
   const isMultiQuestion = Array.isArray(questions) && questions.length > 1
 
   // #4666 / #4735 / #4731 — TUI / CLI sessions: permission-hook denies any

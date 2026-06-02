@@ -115,27 +115,6 @@ function permissionMessageForError(error: string): string {
   return `Speech recognition error: ${error}`
 }
 
-/**
- * Voice input behaviour. The union itself lives in `@chroxy/store-core`
- * (#4825) — re-exported here so existing imports of `VoiceInputMode` from
- * this module keep working without churn. See `InputSettings.voiceInputMode`
- * in store-core for the persisted setting; this hook accepts it as a runtime
- * option so the caller (App.tsx) reads the store once and the hook stays
- * store-agnostic.
- *
- * - `'continuous'`: when the Web Speech engine fires `onend` due to silence,
- *   the hook restarts recognition automatically. The mic stays lit until the
- *   user explicitly calls `stop()`. This is the click-to-start / click-to-stop
- *   experience #4785 was filed for.
- *
- * - `'auto-pause'`: original behaviour — `onend` ends the session. Kept for
- *   users who prefer the browser's silence-stop semantics.
- *
- * Only the web engine is affected. The native (Tauri) engine has its own
- * end-of-utterance semantics driven by the Swift helper and is out of scope.
- */
-export type { VoiceInputMode }
-
 export interface UseVoiceInputOptions {
   mode?: VoiceInputMode
 }
