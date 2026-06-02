@@ -343,12 +343,24 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
 
       recognition.onerror = (event) => {
         // Hard errors (permission denied, mic gone, user aborted) always
-        // surface to the user and stop the session even in continuous mode.
-        // Soft errors (no-speech, network) get the silent restart treatment
-        // via onend below — that's the whole point of continuous mode.
+        // surface to the user and stop the session in both modes.
         if (HARD_STOP_ERRORS.has(event.error)) {
           setError(permissionMessageForError(event.error))
           userStoppedRef.current = true
+          setIsRecording(false)
+          return
+        }
+        // Soft errors (no-speech, network):
+        //   - In `auto-pause` mode we preserve pre-#4785 behaviour and surface
+        //     every error to the user so the message channel still works the
+        //     same way it did before this PR.
+        //   - In `continuous` mode we deliberately swallow soft errors so the
+        //     `onend` restart path can re-arm without the UI flashing a
+        //     `no-speech` toast on every silence gap — that's the whole point
+        //     of continuous mode. `isRecording` is left alone here; `onend`
+        //     is the single source of truth for clearing it.
+        if (modeRef.current === 'auto-pause') {
+          setError(permissionMessageForError(event.error))
           setIsRecording(false)
         }
       }

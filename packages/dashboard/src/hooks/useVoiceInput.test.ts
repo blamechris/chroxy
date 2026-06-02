@@ -312,6 +312,44 @@ describe('useVoiceInput', () => {
       expect(result.current.isRecording).toBe(false)
     })
 
+    // Regression guard for #4786 review: auto-pause mode must preserve the
+    // pre-#4785 behaviour of surfacing soft errors (no-speech, network) to
+    // the user. Continuous mode deliberately swallows them so the restart
+    // loop doesn't flash a toast on every silence gap, but auto-pause is
+    // the "old behaviour" mode and the error channel must keep working.
+    it('surfaces soft errors (no-speech) in auto-pause mode', async () => {
+      const { result } = renderHook(() => useVoiceInput({ mode: 'auto-pause' }))
+
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+      act(() => {
+        result.current.start()
+      })
+
+      act(() => {
+        lastRecognition!.onerror?.({ error: 'no-speech' })
+      })
+
+      expect(result.current.error).toMatch(/no speech/i)
+      expect(result.current.isRecording).toBe(false)
+    })
+
+    it('does NOT surface soft errors in continuous mode (silent restart path)', async () => {
+      const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+      act(() => {
+        result.current.start()
+      })
+
+      act(() => {
+        lastRecognition!.onerror?.({ error: 'no-speech' })
+      })
+
+      expect(result.current.error).toBeNull()
+    })
+
     // #4785: continuous mode is the new default. The Web Speech API auto-ends
     // recognition after ~5-10s of silence; the hook compensates by restarting
     // on each `onend` until the user explicitly clicks stop.
