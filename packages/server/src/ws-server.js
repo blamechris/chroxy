@@ -83,8 +83,12 @@ export function resolveDiagnosticsRateLimit(overrideOpts) {
 /**
  * Parse a duration value coming from a `CHROXY_DEVICE_PREFS_*_MS` env var.
  * Accepts:
- *   - a non-negative integer string → that many milliseconds
- *   - "0" → 0 (effectively disables the cap by making everything "older")
+ *   - a non-negative numeric string → that many milliseconds (fractional
+ *     values are floored, e.g. `"1.9"` → 1)
+ *   - `"0"` → 0 (the literal zero; callers decide what 0 means — the
+ *     device-preferences `prune()` treats `maxAgeMs === 0` as "no age
+ *     cap", so setting `CHROXY_DEVICE_PREFS_MAX_AGE_MS=0` disables the
+ *     hard age cap rather than evicting every entry)
  *   - empty / null / non-numeric → fall back to `defaultMs`
  *
  * Negative numbers are silently coerced to the default so a typo can't
@@ -519,11 +523,21 @@ export class WsServer {
           process.env.CHROXY_DEVICE_PREFS_STALE_GRACE_MS,
           30 * 24 * 60 * 60 * 1000,
         )
-        this._devicePreferences.prune({
-          sessionExists: (id) => !!sessionManager.getSession?.(id),
+        // Only enable stale-session pruning when SessionManager actually
+        // exposes getSession. With optional chaining, `getSession?.(id)`
+        // silently returns undefined when the method is missing — every
+        // session would look "stale" and the prune would evict everything
+        // past the grace window. Belt-and-braces: when the predicate is
+        // omitted, prune() skips the stale-session arm and only the
+        // age-based cap (if any) applies.
+        const pruneOpts = {
           maxAgeMs,
           staleSessionGraceMs: staleGraceMs,
-        })
+        }
+        if (typeof sessionManager.getSession === 'function') {
+          pruneOpts.sessionExists = (id) => !!sessionManager.getSession(id)
+        }
+        this._devicePreferences.prune(pruneOpts)
       } catch (err) {
         // A prune failure must never block server startup — the next mutation
         // will reload the file anyway, and the worst case is a slightly

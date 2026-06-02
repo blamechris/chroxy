@@ -168,10 +168,15 @@ export function createDevicePreferences({ filePath } = {}) {
      *   skipped entirely (only the age-based check applies).
      * @param {number} [opts.maxAgeMs]
      *   Drop entries older than this many ms regardless of session
-     *   existence. Default null — no age cap.
+     *   existence. Default null — no age cap. A value of `0` is treated
+     *   as "no cap" (matches the PR description and avoids the foot-gun
+     *   where `now - updatedAt > 0` would evict every entry). Negative
+     *   or non-finite values are coerced to "no cap" as well.
      * @param {number} [opts.staleSessionGraceMs]
      *   Don't drop stale-session entries younger than this many ms.
-     *   Default 0 — drop stale-session entries immediately.
+     *   Default 0 — drop stale-session entries immediately. Negative or
+     *   non-finite values are coerced to 0 so a typo can't defeat the
+     *   grace guard.
      * @returns {number} Number of entries removed.
      */
     prune({ sessionExists, maxAgeMs, staleSessionGraceMs } = {}) {
@@ -179,8 +184,20 @@ export function createDevicePreferences({ filePath } = {}) {
       const deviceIds = Object.keys(state.devices)
       if (deviceIds.length === 0) return 0
 
+      // Clamp inputs to sane non-negative finite numbers. This is now a
+      // public API, so direct callers (and tests) get the same safety
+      // net that parseDevicePrefsDuration provides for the env-var path.
+      // `maxAgeMs === 0` is normalised to null ("no cap") because a
+      // literal-zero cap would evict every entry and the PR description
+      // promises 0 disables the cap.
+      const ageCapMs = (typeof maxAgeMs === 'number' && Number.isFinite(maxAgeMs) && maxAgeMs > 0)
+        ? maxAgeMs
+        : null
+      const grace = (typeof staleSessionGraceMs === 'number' && Number.isFinite(staleSessionGraceMs) && staleSessionGraceMs > 0)
+        ? staleSessionGraceMs
+        : 0
+
       const now = Date.now()
-      const grace = typeof staleSessionGraceMs === 'number' ? staleSessionGraceMs : 0
       let removed = 0
 
       for (const deviceId of deviceIds) {
@@ -199,8 +216,10 @@ export function createDevicePreferences({ filePath } = {}) {
           continue
         }
 
-        // Age-based: hard cap regardless of session existence.
-        if (typeof maxAgeMs === 'number' && now - updatedAt > maxAgeMs) {
+        // Age-based: hard cap regardless of session existence. Skipped
+        // when ageCapMs is null (caller passed 0 / null / undefined /
+        // negative / non-finite).
+        if (ageCapMs != null && now - updatedAt > ageCapMs) {
           delete state.devices[deviceId]
           removed += 1
           continue

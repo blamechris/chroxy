@@ -307,6 +307,72 @@ describe('device-preferences (#4835)', () => {
       assert.equal(removed, 0)
       assert.equal(prefs.getActiveSessionId('device-A'), 'sess-1')
     })
+
+    // Input clamping — pinned per Copilot review on #4863. prune() is part
+    // of the public store API now; direct callers (and tests) must not be
+    // able to silently nuke the file by passing a bogus duration.
+    it('treats maxAgeMs === 0 as "no age cap" (matches PR description)', () => {
+      const prefs = createDevicePreferences({ filePath })
+      prefs.setActiveSessionId('device-A', 'sess-live')
+      prefs.setActiveSessionId('device-B', 'sess-live')
+
+      // If 0 were taken literally, `now - updatedAt > 0` would evict every
+      // entry on the very next tick. The "disable the cap" contract means
+      // it must be a no-op for the age-based arm.
+      const removed = prefs.prune({
+        sessionExists: () => true,
+        maxAgeMs: 0,
+      })
+      assert.equal(removed, 0, 'maxAgeMs=0 must mean "no cap", not "evict everything"')
+      assert.equal(prefs.getActiveSessionId('device-A'), 'sess-live')
+      assert.equal(prefs.getActiveSessionId('device-B'), 'sess-live')
+    })
+
+    it('coerces a negative maxAgeMs to "no cap" instead of evicting everything', () => {
+      const prefs = createDevicePreferences({ filePath })
+      prefs.setActiveSessionId('device-A', 'sess-live')
+
+      // Negative cap would be a foot-gun: `now - updatedAt > -1` is true
+      // for every entry. Clamping to "no cap" matches parseDevicePrefsDuration's
+      // env-var behaviour (negatives → default).
+      const removed = prefs.prune({
+        sessionExists: () => true,
+        maxAgeMs: -1,
+      })
+      assert.equal(removed, 0)
+      assert.equal(prefs.getActiveSessionId('device-A'), 'sess-live')
+    })
+
+    it('coerces a negative staleSessionGraceMs to 0 (no grace) instead of skipping the guard', () => {
+      const prefs = createDevicePreferences({ filePath })
+      prefs.setActiveSessionId('device-A', 'sess-destroyed')
+
+      // The original code took `staleSessionGraceMs` as-is; a negative
+      // value would have left `now - updatedAt >= -1` always true, which
+      // happens to do the right thing here (evict immediately), but only
+      // by accident. Clamping makes the behaviour intentional.
+      const removed = prefs.prune({
+        sessionExists: () => false,
+        staleSessionGraceMs: -1,
+      })
+      assert.equal(removed, 1)
+      assert.equal(prefs.getActiveSessionId('device-A'), null)
+    })
+
+    it('coerces a non-finite maxAgeMs to "no cap"', () => {
+      const prefs = createDevicePreferences({ filePath })
+      prefs.setActiveSessionId('device-A', 'sess-live')
+
+      // NaN comparisons are always false, so historically this would
+      // have been a silent no-op for the age arm anyway, but documenting
+      // it explicitly keeps the clamp guarantee from regressing.
+      const removed = prefs.prune({
+        sessionExists: () => true,
+        maxAgeMs: NaN,
+      })
+      assert.equal(removed, 0)
+      assert.equal(prefs.getActiveSessionId('device-A'), 'sess-live')
+    })
   })
 
   // #4849: WsServer must invoke prune at construction time so that the
@@ -432,6 +498,41 @@ describe('device-preferences (#4835)', () => {
           devicePreferences,
         })
       })
+    })
+
+    // Pinned per Copilot review on #4863. If sessionManager exists but
+    // doesn't expose getSession (older mock objects, partially-built test
+    // doubles), the previous wiring used optional chaining and silently
+    // marked every session as "stale" — past the grace window the prune
+    // would evict everything. The guard now skips the stale-session arm
+    // when getSession is missing, so prune is reduced to the age cap.
+    it('does not evict fresh entries when sessionManager is missing getSession', () => {
+      // Override the test's default `staleSessionGraceMs = 0` so the
+      // stale-session arm WOULD fire instantly if it were enabled. With
+      // the bug fix the arm is skipped entirely; without the fix the
+      // fresh entry would be evicted on construction.
+      const seed = createDevicePreferences({ filePath })
+      seed.setActiveSessionId('device-A', 'sess-mystery')
+
+      // Stub WITHOUT getSession (partial mock — common in older tests).
+      const sessionManagerWithoutGetSession = { /* deliberately empty */ }
+      const devicePreferences = createDevicePreferences({ filePath })
+
+      server = new WsServer({
+        port: 0,
+        apiToken: 'test',
+        sessionManager: sessionManagerWithoutGetSession,
+        authRequired: false,
+        devicePreferences,
+      })
+
+      // Without the guard, sessionExists would have returned `!!undefined`
+      // → false for every id, and the entry would have been evicted past
+      // the (0 ms) grace. With the guard, the stale-session arm is skipped
+      // and the entry survives — only the age cap (90d default, not
+      // reached) could remove it.
+      assert.equal(devicePreferences.getActiveSessionId('device-A'), 'sess-mystery',
+        'entry must survive when getSession is missing — stale arm is skipped')
     })
   })
 
