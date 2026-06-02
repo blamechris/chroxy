@@ -4744,13 +4744,17 @@ describe('ClaudeTuiSession', () => {
         session.on('error', (e) => errors.push(e))
 
         session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
-        await new Promise((resolve) => setTimeout(resolve, 100))
+        // 200ms wait so the #4867 last-question-single-select settle (150ms)
+        // can fire its trailing Submit before assertions. The 30-option sibling
+        // test below already uses 200ms; this bump matches.
+        await new Promise((resolve) => setTimeout(resolve, 200))
 
         // No too-many error — arrow nav drives the form.
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
         // Q1 → 9× Down + Enter (idx 9 nav), Q2 → '1' (single-digit), Submit → '1',
-        // wrapped in paste-disable/enable.
-        const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '1', '1', '\x1b[?2004h']
+        // then defensive trailing '\r' (#4867 — guards against last-question
+        // single-select forms not auto-committing), wrapped in paste-disable/enable.
+        const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '1', '1', '\r', '\x1b[?2004h']
         assert.deepEqual(writes, expected,
           `expected arrow-nav + digits sequence, got ${JSON.stringify(writes)}`)
 
@@ -4777,7 +4781,8 @@ describe('ClaudeTuiSession', () => {
         await new Promise((resolve) => setTimeout(resolve, 200))
 
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
-        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '2', '1', '\x1b[?2004h']
+        // Trailing '\r' is the #4867 last-question-single-select defensive Enter.
+        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '2', '1', '\r', '\x1b[?2004h']
         assert.deepEqual(writes, expected,
           `expected 29× Down + Enter + Q2 digit + Submit, got ${JSON.stringify(writes)}`)
       })
