@@ -81,7 +81,7 @@ import type {
   SessionInfo,
   SessionState,
 } from './types';
-import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter, formatQuestionAnswerSummary } from './utils';
 import {
   setStore,
   wsSend,
@@ -1197,9 +1197,41 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return result;
   },
 
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => {
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]>,
+    toolUseId?: string,
+  ) => {
     const { socket } = get();
-    const payload: Record<string, string> = { type: 'user_question_response', answer };
+    // #4761 — widened to mirror the dashboard's `sendUserQuestionResponse`
+    // (#4760). Split the wire payload by call shape:
+    // - string `answer`: legacy single-question / free-text path. Wire
+    //   shape stays `{ type, answer, toolUseId? }` so older servers
+    //   keep working without schema migration.
+    // - Record `answer`: multi-question form. Populate the `answers`
+    //   field (`UserQuestionResponseSchema` accepts
+    //   `Record<string, string | string[]>` per #4621 / #4735) AND a
+    //   string `answer` summary so a server running an older build that
+    //   only reads `answer` falls through to its default-to-option-1
+    //   path instead of stalling the form.
+    //
+    //   Multi-select values flow through as native arrays — the summary
+    //   helper flattens them to comma-joined labels so the string-only
+    //   `answer` field stays readable. The helper also detects the
+    //   legacy JSON-stringified array envelope (pre-#4621 wire: a
+    //   single value like `'["App","Tests"]'` for multi-select) so
+    //   mixed-version rehydrated state still renders without leaking
+    //   JSON syntax in the `answer` field.
+    const isMultiAnswer = typeof answer !== 'string';
+    const answerSummary = isMultiAnswer
+      ? formatQuestionAnswerSummary(answer)
+      : answer;
+    const payload: Record<string, unknown> = {
+      type: 'user_question_response',
+      answer: answerSummary,
+    };
+    if (isMultiAnswer) {
+      payload.answers = answer;
+    }
     if (toolUseId) payload.toolUseId = toolUseId;
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
