@@ -2662,15 +2662,16 @@ describe('ClaudeTuiSession', () => {
       session._isBusy = true
       session._currentMessageId = 'msg-summary-1'
       session._sessionId = 'sess-summary-1'
-      session._activeTurn = { startedAt: Date.now() - 10, aborted: false }
+      session._activeTurn = { startedAt: Date.now() - 10, aborted: false, messageId: 'msg-summary-1' }
       session._term = { write: () => {}, kill: () => {} }
       session.on('error', () => {})
       session.on('result', () => {})
 
       const summaryLines = []
-      const logSpy = addLogListener((level, message) => {
-        if (level === 'info' && /sendMessage done/.test(message)) summaryLines.push(message)
-      })
+      const logSpy = (entry) => {
+        if (entry.level === 'info' && /sendMessage done/.test(entry.message)) summaryLines.push(entry.message)
+      }
+      addLogListener(logSpy)
       try {
         session._teardownTurn('stream_stall', {
           duration: 11,
@@ -2693,15 +2694,16 @@ describe('ClaudeTuiSession', () => {
       session._isBusy = true
       session._currentMessageId = 'msg-summary-ht'
       session._sessionId = 'sess-summary-ht'
-      session._activeTurn = { startedAt: Date.now() - 60, aborted: false }
+      session._activeTurn = { startedAt: Date.now() - 60, aborted: false, messageId: 'msg-summary-ht' }
       session._term = { write: () => {}, kill: () => {} }
       session.on('error', () => {})
       session.on('result', () => {})
 
       const summaryLines = []
-      const logSpy = addLogListener((level, message) => {
-        if (level === 'info' && /sendMessage done/.test(message)) summaryLines.push(message)
-      })
+      const logSpy = (entry) => {
+        if (entry.level === 'info' && /sendMessage done/.test(entry.message)) summaryLines.push(entry.message)
+      }
+      addLogListener(logSpy)
       try {
         session._handleHardTimeout()
         assert.equal(summaryLines.length, 1, 'hard-timeout path emits exactly one summary line')
@@ -2719,15 +2721,16 @@ describe('ClaudeTuiSession', () => {
       session._isBusy = true
       session._currentMessageId = 'msg-summary-ss'
       session._sessionId = 'sess-summary-ss'
-      session._activeTurn = { startedAt: Date.now() - 60, aborted: false }
+      session._activeTurn = { startedAt: Date.now() - 60, aborted: false, messageId: 'msg-summary-ss' }
       session._term = { write: () => {}, kill: () => {} }
       session.on('error', () => {})
       session.on('result', () => {})
 
       const summaryLines = []
-      const logSpy = addLogListener((level, message) => {
-        if (level === 'info' && /sendMessage done/.test(message)) summaryLines.push(message)
-      })
+      const logSpy = (entry) => {
+        if (entry.level === 'info' && /sendMessage done/.test(entry.message)) summaryLines.push(entry.message)
+      }
+      addLogListener(logSpy)
       try {
         session._handleStreamStall()
         assert.equal(summaryLines.length, 1, 'stream-stall path emits exactly one summary line')
