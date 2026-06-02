@@ -45,6 +45,18 @@ export function writeFileRestricted(filePath, data, { tmpSuffix = '.tmp' } = {})
     return
   }
   const tmpPath = `${filePath}${tmpSuffix}`
+  // The `mode: 0o600` arg to `writeFileSync` is ONLY honoured on file
+  // CREATION (`O_CREAT`). When `tmpPath` already exists — e.g. a prior
+  // run crashed before the rename and left a stale sidecar at a looser
+  // mode, or another local user pre-created the path under a permissive
+  // umask — `writeFileSync` opens with `O_TRUNC` and preserves the
+  // existing mode bits. The explicit `chmodSync` afterward guarantees
+  // 0o600 even in that case. These files may carry secrets (session
+  // bearer tokens, push subscriptions, BYOK creds), so the
+  // belt-and-braces is intentional. Same defensive pattern is in
+  // `logger.js` (dir mode), `byok-credentials.js`, `byok-mcp-trust.js`,
+  // and `notification-prefs.js`. See #4907 for the cleanup discussion
+  // that ended in "keep with comment + regression test".
   writeFileSync(tmpPath, data, { mode: 0o600 })
   chmodSync(tmpPath, 0o600)
   try {
