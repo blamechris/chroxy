@@ -3506,3 +3506,156 @@ describe('server_error session-scoped routing (#3141)', () => {
     expect(errs[0].message).toContain('pre-session oops');
   });
 });
+
+// #4764 — mobile dispatch for the chroxy multi-question intervention event.
+// Mirrors the dashboard's #4758 handler: append to `interventions`, dedup by
+// toolUseId, push a one-time system ChatMessage on the very first intervention
+// per session so the chat surface narrates what just happened.
+describe('multi_question_intervention handler (#4764)', () => {
+  it('appends to interventions for the targeted session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_a',
+      questionCount: 3,
+      reason: 'multi_question',
+      timestamp: 1_700_000_000_000,
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(1);
+    expect(ss.interventions[0]).toEqual({
+      kind: 'multi_question',
+      toolUseId: 'toolu_a',
+      count: 3,
+      timestamp: 1_700_000_000_000,
+    });
+  });
+
+  it('pushes a one-time system ChatMessage on the first intervention only', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_a',
+      questionCount: 3,
+      reason: 'multi_question',
+      timestamp: 1,
+    });
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_b',
+      questionCount: 4,
+      reason: 'multi_question',
+      timestamp: 2,
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(2);
+    const systemMsgs = ss.messages.filter((m) => m.type === 'system');
+    expect(systemMsgs).toHaveLength(1);
+    expect(systemMsgs[0].content).toContain('chroxy intercepted');
+  });
+
+  it('dedups by toolUseId — stuck-model re-emit must not double-count', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const payload = {
+      type: 'multi_question_intervention' as const,
+      sessionId: 's1',
+      toolUseId: 'toolu_dup',
+      questionCount: 3,
+      reason: 'multi_question' as const,
+      timestamp: 1,
+    };
+    _testMessageHandler.handle(payload);
+    _testMessageHandler.handle(payload);
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(1);
+    // System message must still fire exactly once across the duplicate.
+    expect(ss.messages.filter((m) => m.type === 'system')).toHaveLength(1);
+  });
+
+  it('drops malformed payloads (missing toolUseId or questionCount)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      // toolUseId omitted
+      questionCount: 3,
+      reason: 'multi_question',
+    } as any);
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_x',
+      // questionCount omitted
+      reason: 'multi_question',
+    } as any);
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(0);
+    expect(ss.messages.filter((m) => m.type === 'system')).toHaveLength(0);
+  });
+
+  it('routes to the session named on the message when not active', () => {
+    const store = createMockStore({
+      activeSessionId: 'sA',
+      sessions: [
+        { sessionId: 'sA', name: 'A' } as any,
+        { sessionId: 'sB', name: 'B' } as any,
+      ],
+      sessionStates: {
+        sA: createEmptySessionState(),
+        sB: createEmptySessionState(),
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 'sB',
+      toolUseId: 'toolu_b',
+      questionCount: 3,
+      reason: 'multi_question',
+      timestamp: 1,
+    });
+
+    const sA = store.getState().sessionStates.sA;
+    const sB = store.getState().sessionStates.sB;
+    expect(sA.interventions).toHaveLength(0);
+    expect(sB.interventions).toHaveLength(1);
+    expect(sB.interventions[0].toolUseId).toBe('toolu_b');
+  });
+});
