@@ -112,6 +112,23 @@ jobs:
             exit 1
           fi
 
+      - name: Check session-aware modules use loggerForSession
+        run: |
+          # Issue #4792 — durable follow-up to #4787 / #4793. Session-aware
+          # modules (claude-tui-session.js, handlers/input-handlers.js, ...)
+          # MUST import `loggerForSession` from logger.js so per-session log
+          # lines carry sessionId. Without it the WsServer log fan-out
+          # (#4787 defensive filter) silently drops the entry from bound
+          # dashboard clients — operators lose useful diagnostics.
+          # The lint is ratcheted by file; see scripts/lint-logger-session-scoping.mjs
+          # for the enforced set.
+          if scripts/lint-logger-session-scoping.sh; then
+            echo "OK — enforced modules use loggerForSession"
+          else
+            echo "::error::A session-aware module dropped its loggerForSession import or introduced a bare createLogger. See packages/server/scripts/lint-logger-session-scoping.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     runs-on: ubuntu-24.04

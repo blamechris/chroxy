@@ -285,3 +285,39 @@ export function createLogger(component, context = {}) {
     withSession(sessionId) { return createLogger(component, { ...context, sessionId }) },
   }
 }
+
+/**
+ * Create a session-scoped component logger.
+ *
+ * This is the preferred factory for any code that operates within session
+ * context (`ClaudeTuiSession`, `SdkSession`, `CliSession`, per-session
+ * handlers in `handlers/*`, etc.). It guarantees that every log entry
+ * the returned logger emits is tagged with `sessionId`, which the
+ * WsServer `_logListener` (#4787) uses to route log entries to the
+ * correct bound client. An unscoped `createLogger(component)` in a
+ * session-aware module silently drops to "global only" fan-out, leaking
+ * PTY hex dumps and prompt sizes to operators on other sessions.
+ *
+ * Equivalent to `createLogger(component).withSession(sessionId)` but
+ * explicit at the call site. Throws if either argument is missing — the
+ * whole point of the helper is to prevent unscoped session logs, so a
+ * silent fallback would defeat its purpose.
+ *
+ * @example
+ *   // In a per-session class constructor:
+ *   this._log = loggerForSession('claude-tui-session', this._sessionId)
+ *   this._log.info('sendMessage start')  // entry.sessionId is set
+ *
+ * @param {string} component - Component tag (same as createLogger).
+ * @param {string} sessionId - Session id to bind. Required.
+ * @returns {ReturnType<typeof createLogger>}
+ */
+export function loggerForSession(component, sessionId) {
+  if (typeof component !== 'string' || component.length === 0) {
+    throw new TypeError('loggerForSession: component must be a non-empty string')
+  }
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new TypeError('loggerForSession: sessionId must be a non-empty string')
+  }
+  return createLogger(component, { sessionId })
+}
