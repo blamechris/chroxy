@@ -583,8 +583,15 @@ export function App() {
         // next app. PR #4676 stopped the misleading flash; this surfaces
         // a visible toast so the user knows to retry instead of being
         // left guessing why Cmd+V pasted stale data.
+        // #4870: tag as 'warning' (yellow) rather than the default
+        // 'error' (red). Per the #4148 convention, red is reserved
+        // for destructive failures like STREAM_ERROR / ABORT; a
+        // failed clipboard write is non-destructive — the user just
+        // needs to retry — so warning is the visually honest level.
         useConnectionStore.getState().addServerError(
           'Failed to copy transcript to clipboard. Please try again.',
+          undefined,
+          'warning',
         )
         return
       }
