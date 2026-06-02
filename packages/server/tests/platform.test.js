@@ -313,6 +313,33 @@ try {
         const mode = statSync(filePath).mode & 0o777
         assert.strictEqual(mode, 0o600)
       })
+
+      it('tightens perms when a stale tmp sidecar exists at a looser mode (#4907)', async () => {
+        // Regression for "stale tmp preserves mode unless chmodSync
+        // re-tightens": the `mode: 0o600` arg to `writeFileSync` is
+        // ONLY honoured on file CREATION. If a prior run crashed before
+        // rename and left a `.tmp` sidecar at e.g. 0o644,
+        // `writeFileSync` opens with `O_TRUNC` and silently inherits
+        // the stale mode. The explicit `chmodSync` in
+        // `writeFileRestricted` must restore 0o600 before the rename so
+        // the FINAL file is tight. This test asserts the final mode
+        // bits only — it does NOT cover the transient exposure window
+        // during the write (the bytes are on disk at the stale 0o644
+        // briefly, before chmodSync runs). It would fail if someone
+        // "cleaned up" the chmodSync as redundant.
+        const filePath = join(tmpDir, 'sensitive.json')
+        const tmpPath = `${filePath}.tmp`
+        const { writeFileSync, chmodSync } = await import('fs')
+        // Pre-seed the tmp sidecar at a looser mode.
+        writeFileSync(tmpPath, 'stale', { mode: 0o644 })
+        chmodSync(tmpPath, 0o644)
+        assert.strictEqual(statSync(tmpPath).mode & 0o777, 0o644, 'baseline: tmp seeded at 0o644')
+
+        writeFileRestricted(filePath, 'fresh')
+
+        const finalMode = statSync(filePath).mode & 0o777
+        assert.strictEqual(finalMode, 0o600, 'final file must be 0o600 even when tmp was pre-existing at 0o644')
+      })
     }
   })
 
