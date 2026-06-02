@@ -1109,20 +1109,32 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               <select
                 id="voice-input-mode"
                 aria-label="Voice input mode"
+                aria-describedby="voice-input-mode-hint"
                 value={inputSettings.voiceInputMode}
                 onChange={handleVoiceInputModeChange}
               >
                 <option value="continuous">Keep listening until I click stop</option>
                 <option value="auto-pause">Stop after silence (browser decides)</option>
               </select>
-              <p className="settings-hint" data-testid="voice-input-mode-hint">
+              {/* #4796: hint copy quotes the dropdown labels verbatim
+                  so users can map each sentence back to the option they
+                  selected. Earlier wording used "Continuous mode" /
+                  "Silence mode" shorthand which could read like a third
+                  mode and didn't match the dropdown labels. */}
+              <p
+                id="voice-input-mode-hint"
+                className="settings-hint"
+                data-testid="voice-input-mode-hint"
+              >
                 Click the mic button to start dictation and click again
                 to stop — the button is a toggle, not push-to-hold.
-                Continuous mode keeps the mic on through pauses and
-                restarts recognition automatically. Silence mode lets
-                the browser end recognition after a short pause in
-                speech. Only applies to the browser speech engine — the
-                macOS native speech helper manages its own
+                <strong> &ldquo;Keep listening until I click stop&rdquo;</strong>{' '}
+                holds the mic open through pauses and restarts recognition
+                automatically.{' '}
+                <strong>&ldquo;Stop after silence (browser decides)&rdquo;</strong>{' '}
+                lets the browser end recognition after a short silence
+                in your speech. Only applies to the browser speech
+                engine — the macOS native speech helper manages its own
                 end-of-utterance timing.
               </p>
             </div>

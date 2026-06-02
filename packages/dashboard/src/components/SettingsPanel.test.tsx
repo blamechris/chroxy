@@ -2201,5 +2201,36 @@ describe('SettingsPanel', () => {
       // caveat so users on the macOS native engine know it doesn't apply.
       expect(hint.textContent ?? '').toMatch(/silence/i)
     })
+
+    // #4796 review feedback (Copilot): the hint must be programmatically
+    // linked to the select via aria-describedby so screen readers announce
+    // it on focus. Without this the explanation is accessibility-invisible
+    // even though the dashboard already uses the pattern in
+    // CreateSessionModal.tsx (aria-describedby="permission-mode-hint").
+    it('links the voice input select to the hint via aria-describedby for screen readers', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode') as HTMLSelectElement
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      // The select's aria-describedby must point at the hint's id, and the
+      // hint must actually carry that id — otherwise assistive tech can't
+      // resolve the reference. Both halves of the contract are asserted.
+      const describedBy = select.getAttribute('aria-describedby')
+      expect(describedBy).toBe('voice-input-mode-hint')
+      expect(hint.id).toBe('voice-input-mode-hint')
+    })
+
+    // #4796 review feedback (Copilot): the hint copy must reference the
+    // actual dropdown option labels rather than coining shorthand names
+    // ("Silence mode", "Continuous mode") that could read like a third
+    // mode. Regression guard against re-introducing the bare shorthand.
+    it('hint copy quotes the dropdown option labels verbatim, not shorthand mode names', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      const text = hint.textContent ?? ''
+      // Both option labels must appear verbatim somewhere in the hint so
+      // the user can map each sentence back to the dropdown choice.
+      expect(text).toMatch(/Keep listening until I click stop/)
+      expect(text).toMatch(/Stop after silence \(browser decides\)/)
+    })
   })
 })
