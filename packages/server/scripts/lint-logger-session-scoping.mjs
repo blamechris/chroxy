@@ -39,7 +39,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, resolve, relative } from 'node:path'
+import { dirname, join, resolve, relative, sep as pathSep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -155,7 +155,12 @@ const allEnforced = new Set([
 ])
 
 for (const file of walk(SRC_DIR)) {
-  const rel = relative(SRC_DIR, file)
+  // Normalize to POSIX-style separators so set membership works on Windows
+  // (relative() returns \\-separated paths there). REQUIRES_FACTORY_IMPORT
+  // / FORBIDS_BARE_CREATELOGGER are authored with POSIX-style paths so the
+  // sets stay readable in the source; this normalization is what makes the
+  // lint cross-platform.
+  const rel = pathSep === '/' ? relative(SRC_DIR, file) : relative(SRC_DIR, file).split(pathSep).join('/')
   if (!allEnforced.has(rel)) continue
 
   const src = readFileSync(file, 'utf8')
@@ -169,10 +174,16 @@ for (const file of walk(SRC_DIR)) {
       if (/\bloggerForSession\b/.test(mm[1])) { found = true; break }
     }
     if (!found) {
+      // The import path depends on directory depth: src/foo.js uses
+      // './logger.js' but src/handlers/foo.js uses '../logger.js'.
+      // Compute the correct hint per file so the guidance isn't misleading
+      // for nested modules.
+      const depth = rel.split('/').length - 1
+      const importPath = depth === 0 ? './logger.js' : '../'.repeat(depth) + 'logger.js'
       errors.push({
         file,
         line: 1,
-        msg: 'session-aware module must `import { loggerForSession } from \'./logger.js\'` — see issue #4792',
+        msg: `session-aware module must \`import { loggerForSession } from '${importPath}'\` — see issue #4792`,
       })
     }
   }
