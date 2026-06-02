@@ -367,6 +367,9 @@ export {
   handleCheckpointRestored,
   handleError,
   handleSessionError,
+  // #4879: quiet "user-initiated Stop" confirmation handler — flips
+  // stoppedAt/stoppedCode on the target session for the inline status strip
+  handleSessionStopped,
   handleLogEntry,
   handleClientJoined,
   handleClientLeft,

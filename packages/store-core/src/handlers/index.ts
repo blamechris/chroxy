@@ -226,9 +226,21 @@ export function handleConfirmPermissionMode(
 // claude_ready
 // ---------------------------------------------------------------------------
 
-/** State patch for `claude_ready`. */
-export function handleClaudeReady(): { claudeReady: true } {
-  return { claudeReady: true }
+/**
+ * State patch for `claude_ready`.
+ *
+ * `stoppedAt`/`stoppedCode` are reset to null here so the quiet "Session
+ * stopped." status strip introduced for #4879 clears the moment the
+ * server reports the child is ready again (typically because the user
+ * sent another message after tapping Stop). This is purely additive for
+ * sessions that were never stopped — both fields stay null end-to-end.
+ */
+export function handleClaudeReady(): {
+  claudeReady: true
+  stoppedAt: null
+  stoppedCode: null
+} {
+  return { claudeReady: true, stoppedAt: null, stoppedCode: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,6 +1143,59 @@ export function handleSessionError(
     boundSessionName,
     message,
     sessionPatch: null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// session_stopped (#4879)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a `session_stopped` message into a `SessionPatch` that flips the
+ * target session into the quiet "stopped" UX state.
+ *
+ * The server emits `session_stopped` when `CliSession` exits cleanly after
+ * a user-initiated Stop (wire path wired in #4868 — CliSession `stopped` →
+ * SessionManager → ws-forwarding → ServerSessionStoppedSchema). This is a
+ * positive confirmation distinct from `session_error` (which flips
+ * `health: 'crashed'` and surfaces a loud red banner): the operator
+ * tapped Stop, the child process did indeed stop.
+ *
+ * The patch sets `stoppedAt` to `now()` so renderers can show a calm
+ * informational status strip ("Session stopped." / with optional
+ * "exit N" suffix for non-zero exits). `stoppedCode` carries the child
+ * process exit code when the server reported one — null otherwise. Both
+ * fields are cleared (back to null) by `handleClaudeReady`'s patch when
+ * the server restarts the child after the operator's next input.
+ *
+ * The caller is responsible for applying the patch to its store. No
+ * notification / toast side effects are baked in here; surfaces vary by
+ * platform (dashboard: info toast via `addInfoNotification` per #4878;
+ * mobile app: inline status strip in `SessionScreen` per #4879). The
+ * `now` parameter is injected so tests can pin the timestamp without
+ * touching `Date.now()`.
+ */
+export function handleSessionStopped(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  now: () => number = Date.now,
+): SessionPatch {
+  // `code` is optional on the wire (ServerSessionStoppedSchema declares it
+  // as `z.number().int()`). Mirror that integer constraint here so a
+  // buggy producer can't poison `stoppedCode` with a fractional value
+  // (e.g. rendering "exit 1.5") or with NaN / Infinity. `Number.isInteger`
+  // already excludes all three failure modes; matches the existing
+  // protocol-int validation pattern used elsewhere in this file (see
+  // `protoRaw` around line 798). Preserve 0 explicitly — it's the common
+  // clean-SIGINT-exit case and is a meaningful signal, not a "missing"
+  // value.
+  const code = typeof msg.code === 'number' && Number.isInteger(msg.code) ? msg.code : null
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      stoppedAt: now(),
+      stoppedCode: code,
+    },
   }
 }
 

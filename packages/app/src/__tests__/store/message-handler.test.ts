@@ -163,6 +163,132 @@ describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
   });
 });
 
+// #4879: quiet "user-initiated Stop" confirmation. The wire path (CliSession
+// → SessionManager → ws-forwarding → ServerSessionStoppedSchema) was wired
+// in #4868; this branch surfaces it to the mobile UX as a subtle status
+// strip rather than an Alert.
+describe('session_stopped handler (#4879)', () => {
+  it('sets stoppedAt + stoppedCode on the explicit target session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const before = Date.now();
+    _testMessageHandler.handle({ type: 'session_stopped', sessionId: 's2', code: 143 });
+    const after = Date.now();
+
+    const state = store.getState();
+    // s1 (active) is untouched — the message targeted s2 explicitly.
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+    // s2 carries the marker + the reported exit code.
+    expect(state.sessionStates.s2.stoppedCode).toBe(143);
+    const stoppedAt = state.sessionStates.s2.stoppedAt as number;
+    expect(typeof stoppedAt).toBe('number');
+    expect(stoppedAt).toBeGreaterThanOrEqual(before);
+    expect(stoppedAt).toBeLessThanOrEqual(after);
+  });
+
+  it('falls back to the active session when sessionId is omitted (legacy-cli)', () => {
+    // Legacy-cli broadcasts omit sessionId (ServerSessionStoppedSchema makes
+    // it optional). The handler must still surface the marker on the user's
+    // current session so the inline banner lights up.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped', code: 0 });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedCode).toBe(0);
+    expect(state.sessionStates.s1.stoppedAt).not.toBeNull();
+  });
+
+  it('handles missing code (future in-process providers per #4756 follow-up)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).not.toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+  });
+
+  it('does NOT show an Alert (confirmation is intentionally inline, not modal)', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped', sessionId: 's1', code: 0 });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores messages targeting an unknown sessionId (defensive — server may race a destroy)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped', sessionId: 'unknown-session', code: 0 });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates).not.toHaveProperty('unknown-session');
+  });
+
+  it('claude_ready clears the stopped marker so the inline strip auto-dismisses', () => {
+    // The cleanup path: operator taps Stop, sees the strip, sends another
+    // message, server restarts the child, claude_ready arrives, the strip
+    // disappears. Verifies the handleClaudeReady patch shape — both
+    // fields must collapse to null on the same patch object the case
+    // branch applies, otherwise the strip would linger forever.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), stoppedAt: 123, stoppedCode: 0 } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'claude_ready' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+    expect(state.sessionStates.s1.claudeReady).toBe(true);
+  });
+});
+
 describe('session_timeout handler', () => {
   it('removes timed-out session from sessionStates and sessions list', () => {
     const store = createMockStore({

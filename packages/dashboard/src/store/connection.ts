@@ -761,6 +761,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isIdle: true,
       lastClientActivityAt: null,
       health: 'healthy' as const,
+      // #4879: parity with the BaseSessionState shape; no Stop has been
+      // confirmed in the flat-state fallback (session_stopped only fires
+      // for known sessions once session_list has populated sessionStates).
+      stoppedAt: null,
+      stoppedCode: null,
       terminalRawBuffer: get().terminalRawBuffer,
       activeAgents: EMPTY_AGENTS,
       // #4308: parity with the BaseSessionState shape; no live tool tracking

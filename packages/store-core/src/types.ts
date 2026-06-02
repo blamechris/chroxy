@@ -664,6 +664,34 @@ export interface BaseSessionState {
    */
   lastClientActivityAt: number | null;
   health: SessionHealth;
+  /**
+   * #4879 — quiet "user-initiated Stop" confirmation marker. Set by the
+   * `session_stopped` handler (which receives the server-broadcast wire
+   * message wired in #4868) to `Date.now()` when the child process exits
+   * cleanly after the user tapped Stop. Null at all other times.
+   *
+   * Distinct from `health: 'crashed'` (loud unexpected-exit error UX) and
+   * from `claudeReady: false` (transient between-turns idle). Renderers
+   * use this to surface a calm, informational status strip ("Session
+   * stopped." / "Session stopped. exit N") that the operator can choose
+   * to act on — typically by sending another message (which clears
+   * `stoppedAt` on the next `claude_ready`) or by deleting the session.
+   *
+   * Cleared when a fresh `claude_ready` arrives for the same session
+   * (server restarted the child after the next user input) — the call
+   * sites in app/dashboard message-handler clear it alongside the
+   * `claudeReady: true` patch returned from `handleClaudeReady`.
+   */
+  stoppedAt: number | null;
+  /**
+   * #4879 — child process exit code reported by the server alongside
+   * `session_stopped`. Null when the wire message omitted it (e.g.
+   * future in-process providers per the #4756 follow-up) or when the
+   * session is not currently in the stopped state (`stoppedAt == null`).
+   * Renderers surface a non-zero code as a small "(exit N)" suffix; code
+   * 0 is the common clean-exit case and renders bare.
+   */
+  stoppedCode: number | null;
   activeAgents: AgentInfo[];
   /**
    * #4308 — in-flight tool calls for this session, in arrival order. See

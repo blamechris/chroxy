@@ -79,6 +79,10 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     isIdle: true,
     lastClientActivityAt: null,
     health: 'healthy',
+    // #4879: null = session not in stopped state. Set to Date.now() when
+    // session_stopped wire message arrives; cleared on next claude_ready.
+    stoppedAt: null,
+    stoppedCode: null,
     activeAgents: [],
     activeTools: [],
     // #4307: empty until the first background_work_changed event or

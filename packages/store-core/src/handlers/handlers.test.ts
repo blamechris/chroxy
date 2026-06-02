@@ -33,6 +33,7 @@ import {
   handleCheckpointRestored,
   handleError,
   handleSessionError,
+  handleSessionStopped,
   handleLogEntry,
   handleClientJoined,
   handleClientLeft,
@@ -356,8 +357,17 @@ describe('handleConfirmPermissionMode', () => {
 // handleClaudeReady
 // ---------------------------------------------------------------------------
 describe('handleClaudeReady', () => {
-  it('returns claudeReady: true', () => {
-    expect(handleClaudeReady()).toEqual({ claudeReady: true })
+  it('returns claudeReady: true and clears stoppedAt/stoppedCode (#4879)', () => {
+    // #4879 — clearing the stopped marker on claude_ready is what makes
+    // the quiet "Session stopped." inline strip auto-dismiss when the
+    // server restarts the child after the operator's next input. Both
+    // new fields collapse to null end-to-end for sessions that were
+    // never stopped, so the patch is safe to broadcast unconditionally.
+    expect(handleClaudeReady()).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+    })
   })
 })
 
@@ -953,6 +963,73 @@ describe('handleSessionError', () => {
     )
     expect(result.message).toBe('Not authorized')
     expect(result.boundSessionName).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionStopped (#4879)
+// ---------------------------------------------------------------------------
+describe('handleSessionStopped', () => {
+  const fixedNow = () => 1_700_000_000_000
+
+  it('builds a patch targeting the explicit sessionId with the stopped marker + code', () => {
+    const result = handleSessionStopped(
+      { sessionId: 'sess-1', code: 143 },
+      'active-1',
+      fixedNow,
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: { stoppedAt: 1_700_000_000_000, stoppedCode: 143 },
+    })
+  })
+
+  it('falls back to active session when sessionId is missing', () => {
+    const result = handleSessionStopped({ code: 0 }, 'active-1', fixedNow)
+    expect(result.sessionId).toBe('active-1')
+    expect(result.patch).toEqual({ stoppedAt: 1_700_000_000_000, stoppedCode: 0 })
+  })
+
+  it('preserves code 0 explicitly (clean SIGINT exit is a meaningful signal)', () => {
+    const result = handleSessionStopped({ sessionId: 's', code: 0 }, null, fixedNow)
+    expect(result.patch.stoppedCode).toBe(0)
+  })
+
+  it('returns stoppedCode: null when code is missing on the wire', () => {
+    const result = handleSessionStopped({ sessionId: 's' }, null, fixedNow)
+    expect(result.patch.stoppedCode).toBeNull()
+    expect(result.patch.stoppedAt).toBe(1_700_000_000_000)
+  })
+
+  it('returns stoppedCode: null when code is non-integer (defensive)', () => {
+    // ServerSessionStoppedSchema enforces integer at the protocol layer
+    // (`z.number().int()`), but the handler is also called from
+    // untrusted/test paths — collapse anything non-integer to null
+    // rather than poisoning stoppedCode with a string, NaN, Infinity,
+    // or a fractional value (which would render "exit 1.5" in the UI).
+    expect(handleSessionStopped({ code: 'not a number' }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: null }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: NaN }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: Infinity }, null, fixedNow).patch.stoppedCode).toBeNull()
+    // Fractional values get the same treatment — the schema is `int()`,
+    // not `finite()`, so a buggy producer sending 1.5 must NOT render.
+    expect(handleSessionStopped({ code: 1.5 }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: -0.1 }, null, fixedNow).patch.stoppedCode).toBeNull()
+  })
+
+  it('returns sessionId: null when no sessionId on msg AND no active session (broadcast guard semantics handled by caller)', () => {
+    const result = handleSessionStopped({ code: 0 }, null, fixedNow)
+    expect(result.sessionId).toBeNull()
+  })
+
+  it('defaults `now` to Date.now when not injected', () => {
+    const before = Date.now()
+    const result = handleSessionStopped({ sessionId: 's' }, null)
+    const after = Date.now()
+    const stoppedAt = result.patch.stoppedAt as number
+    expect(typeof stoppedAt).toBe('number')
+    expect(stoppedAt).toBeGreaterThanOrEqual(before)
+    expect(stoppedAt).toBeLessThanOrEqual(after)
   })
 })
 
