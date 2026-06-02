@@ -982,12 +982,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // #4766: full wire-shape decode lives in the shared parser
-      // (handleAuthOk + parseConnectedClients). The shared handler accepts
-      // both 'cli' and 'terminal' as serverMode; the app has no terminal
-      // view so we narrow 'terminal' to null (matches prior inline
-      // `msg.serverMode === 'cli' ? 'cli' : null` behaviour).
+      // (handleAuthOk + parseConnectedClients). The shared handler narrows
+      // serverMode to `'cli' | null` (#4810: the wire protocol only emits
+      // `'cli'`; the `'terminal'` branch was removed).
       const auth = sharedAuthOk(msg);
-      const authServerMode: 'cli' | null = auth.serverMode === 'cli' ? 'cli' : null;
+      const authServerMode: 'cli' | null = auth.serverMode;
       const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
       // If server provided a sessionToken (via pairing), use it for future auth
@@ -1138,11 +1137,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_mode': {
-      // App has no terminal view, so 'terminal' is treated as null (matches
-      // prior inline behaviour `msg.mode === 'cli' ? 'cli' : null`).
+      // #4810: shared handler narrows `mode` to `'cli' | null` (the wire
+      // protocol only ever emits `'cli'`; previously the handler also
+      // accepted `'terminal'` but that branch was unreachable).
       const { mode } = sharedServerMode(msg);
-      const newServerMode: 'cli' | null = mode === 'cli' ? 'cli' : null;
-      useConnectionLifecycleStore.getState().setServerInfo({ serverMode: newServerMode });
+      useConnectionLifecycleStore.getState().setServerInfo({ serverMode: mode });
       // Force chat view in CLI mode (no terminal available)
       if (mode === 'cli' && get().viewMode === 'terminal') {
         set({ viewMode: 'chat' });

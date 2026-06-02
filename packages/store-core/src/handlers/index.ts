@@ -673,16 +673,18 @@ export function handleDevPreviewStopped(
 // ---------------------------------------------------------------------------
 
 /**
- * Server modes the WS protocol can advertise.
+ * Server mode advertised by the WS protocol.
  *
- * Both clients accept `'cli'`; only the dashboard surfaces `'terminal'` (the
- * mobile app currently treats `'terminal'` as null because there is no
- * terminal view). The shared handler returns the validated raw value; the
- * call site decides whether to narrow further.
+ * Historically the server could in principle have run in a `'terminal'`
+ * (PTY/tmux) mode, but the wire protocol only ever emits `'cli'` — the
+ * `ServerAuthOkSchema` is a `z.literal('cli')` and the server hardcodes
+ * `this.serverMode = 'cli'` (see #4810). The shared handler validates the
+ * field and returns null for any non-`'cli'` value so the call site can
+ * surface a hardened "unknown server" branch.
  */
-export type ServerMode = 'cli' | 'terminal'
+export type ServerMode = 'cli'
 
-const VALID_SERVER_MODES: readonly ServerMode[] = ['cli', 'terminal']
+const VALID_SERVER_MODES: readonly ServerMode[] = ['cli']
 
 /**
  * Validated `webFeatures` map advertised by the server. Each flag is a hard
@@ -716,7 +718,7 @@ export interface AuthOkWebFeatures {
  * roster shape doesn't bloat `AuthOkPayload`.
  */
 export interface AuthOkPayload {
-  /** Validated server mode (`'cli'`, `'terminal'`, or null). */
+  /** Validated server mode (`'cli'`, or null when unknown). */
   serverMode: ServerMode | null
   /** Raw `cwd` string (NOT trimmed — empty string preserved). */
   sessionCwd: string | null
@@ -907,9 +909,9 @@ export function handleKeyExchangeOk(msg: Record<string, unknown>): { publicKey: 
  * Extract and validate the mode enum from a `server_mode` message.
  *
  * Returns null for unknown modes; the call site is expected to surface an
- * "Invalid Server Mode" alert (matches dashboard's prior inline behaviour;
- * the app currently ignores `'terminal'` and sets null, which the call site
- * can re-narrow if needed).
+ * "Invalid Server Mode" alert (matches dashboard's prior inline behaviour).
+ * The wire protocol only emits `'cli'` (#4810) — any other value is treated
+ * as null.
  */
 export function handleServerMode(msg: Record<string, unknown>): { mode: ServerMode | null } {
   return { mode: parseEnumField(msg, 'mode', VALID_SERVER_MODES) }

@@ -1215,11 +1215,10 @@ describe('handleAuthOk', () => {
     })
   })
 
-  it('accepts terminal as serverMode', () => {
-    expect(handleAuthOk({ serverMode: 'terminal' }).serverMode).toBe('terminal')
-  })
-
   it('rejects unknown serverMode values', () => {
+    // #4810: 'terminal' was previously accepted but the wire protocol only
+    // emits 'cli'; the unreachable branch is now treated as unknown.
+    expect(handleAuthOk({ serverMode: 'terminal' }).serverMode).toBeNull()
     expect(handleAuthOk({ serverMode: 'bogus' }).serverMode).toBeNull()
     expect(handleAuthOk({ serverMode: 42 }).serverMode).toBeNull()
     expect(handleAuthOk({}).serverMode).toBeNull()
@@ -1583,11 +1582,10 @@ describe('handleServerMode', () => {
     expect(handleServerMode({ mode: 'cli' })).toEqual({ mode: 'cli' })
   })
 
-  it('extracts terminal mode', () => {
-    expect(handleServerMode({ mode: 'terminal' })).toEqual({ mode: 'terminal' })
-  })
-
   it('returns null for unknown mode (caller surfaces an alert)', () => {
+    // #4810: 'terminal' was previously accepted but is now treated as unknown
+    // since the wire protocol only emits 'cli'.
+    expect(handleServerMode({ mode: 'terminal' })).toEqual({ mode: null })
     expect(handleServerMode({ mode: 'bogus' })).toEqual({ mode: null })
     expect(handleServerMode({ mode: 42 })).toEqual({ mode: null })
     expect(handleServerMode({})).toEqual({ mode: null })
