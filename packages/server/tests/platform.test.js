@@ -182,6 +182,109 @@ try {
         assert.strictEqual(observed, `${filePath}.tmp-12345`, 'tmpSuffix must drive the intermediate path')
       })
 
+      it('logs a warn when the cleanup-unlink fails with a non-ENOENT error and still re-throws the rename error (#4906)', () => {
+        // Regression: #4904 hoisted the per-caller cleanup into
+        // writeFileRestricted but dropped the warn that environment-manager.js
+        // and session-state-persistence.js emitted on a non-ENOENT unlink
+        // failure. The orphan `.tmp` was left on disk with no diagnostic
+        // trail. This test pins the warn back in place via a subprocess
+        // shim that fails BOTH rename and unlink — we then assert (a) the
+        // rename error is surfaced to the caller, and (b) the
+        // [platform] warn line for the unlink failure shows up on stderr.
+        const filePath = join(tmpDir, 'observability.json')
+        const shim = join(tmpDir, 'throw-on-rename-and-unlink.mjs')
+        const runner = join(tmpDir, 'runner-cleanup-fail.mjs')
+        const shimSrc = `
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const fs = require('node:fs')
+const origRename = fs.renameSync
+const origUnlink = fs.unlinkSync
+fs.renameSync = (oldPath, newPath) => {
+  if (newPath === ${JSON.stringify(filePath)}) {
+    const err = new Error('simulated mid-write crash')
+    err.code = 'EIO'
+    throw err
+  }
+  return origRename.call(this, oldPath, newPath)
+}
+fs.unlinkSync = (p) => {
+  if (typeof p === 'string' && p === ${JSON.stringify(`${filePath}.tmp`)}) {
+    const err = new Error('simulated cleanup failure')
+    err.code = 'EACCES'
+    throw err
+  }
+  return origUnlink.call(this, p)
+}
+`
+        const runnerSrc = `
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+try {
+  writeFileRestricted(${JSON.stringify(filePath)}, 'payload')
+  process.exit(0)
+} catch (err) {
+  process.stderr.write('RENAME_ERR=' + err.message + '\\n')
+  process.exit(2)
+}
+`
+        writeFileRestricted(shim, shimSrc)
+        writeFileRestricted(runner, runnerSrc)
+        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
+        // (a) Original rename error surfaces to the caller — the
+        //     cleanup-failure log MUST NOT mask it.
+        assert.match(result.stderr, /RENAME_ERR=simulated mid-write crash/)
+        // (b) Warn line for the cleanup unlink is on stderr, scoped to
+        //     the [platform] logger and naming the orphaned tmp path.
+        assert.match(result.stderr, /\[WARN\]\s+\[platform\]\s+Failed to remove orphaned/)
+        assert.match(result.stderr, new RegExp(`${filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.tmp`))
+        assert.match(result.stderr, /simulated cleanup failure/)
+      })
+
+      it('does NOT log on ENOENT cleanup-unlink — the tmp is already gone (#4906)', () => {
+        // The bespoke cleanup wrappers explicitly suppressed ENOENT
+        // because "tmp is already gone" is the desired post-condition,
+        // not a failure worth a warn. Pin that exemption so we don't
+        // start spamming logs when the tmp never made it to disk (e.g.,
+        // writeFileSync threw before rename was attempted, or another
+        // process unlinked it first).
+        const filePath = join(tmpDir, 'enoent-cleanup.json')
+        const shim = join(tmpDir, 'throw-on-rename-enoent-unlink.mjs')
+        const runner = join(tmpDir, 'runner-enoent-cleanup.mjs')
+        const shimSrc = `
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const fs = require('node:fs')
+const origRename = fs.renameSync
+const origUnlink = fs.unlinkSync
+fs.renameSync = (oldPath, newPath) => {
+  if (newPath === ${JSON.stringify(filePath)}) {
+    // Pre-emptively unlink so the cleanup path sees ENOENT.
+    try { origUnlink.call(this, oldPath) } catch {}
+    const err = new Error('simulated mid-write crash')
+    err.code = 'EIO'
+    throw err
+  }
+  return origRename.call(this, oldPath, newPath)
+}
+`
+        const runnerSrc = `
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+try {
+  writeFileRestricted(${JSON.stringify(filePath)}, 'payload')
+  process.exit(0)
+} catch {
+  process.exit(2)
+}
+`
+        writeFileRestricted(shim, shimSrc)
+        writeFileRestricted(runner, runnerSrc)
+        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
+        // ENOENT cleanup must stay silent — no platform warn at all.
+        assert.doesNotMatch(result.stderr, /\[WARN\]\s+\[platform\]\s+Failed to remove orphaned/)
+      })
+
       it('cleans up the .tmp sidecar on successful write (#4850)', () => {
         // Once `rename` succeeds the `.tmp` is gone (it WAS the temp,
         // now renamed onto the target). A leftover `.tmp` would mean we
