@@ -310,6 +310,9 @@ export class SdkSession extends BaseSession {
     // #4828: session-scoped logger, lazily bound on the SDK's first `init`
     // message (where session_id becomes known). Pre-init log lines stay on
     // the module-level `log` — same fallback pattern as ClaudeTuiSession.
+    // No reset on destroy/respawn (unlike CliSession): SdkSession lacks a
+    // _killAndRespawn path so session_id is stable for the instance
+    // lifetime; the binding stays valid until destroy() drops the instance.
     this._log = null
     this._query = null
     this._thinkingLevel = null
@@ -450,7 +453,9 @@ export class SdkSession extends BaseSession {
       const now = Date.now()
       const warnSuppressed = (now - this._lastRefusedWarnTs) < REFUSED_SENDMESSAGE_WARN_INTERVAL_MS
       if (!warnSuppressed) {
-        log.warn(
+        // #4828: session-scoped when init has fired (sendMessage typically
+        // arrives after init; first-message pre-init path falls back to `log`).
+        ;(this._log || log).warn(
           'Refusing sendMessage — stdin forwarding is disabled for this session; ' +
           'restart the session to recover'
         )
@@ -462,7 +467,8 @@ export class SdkSession extends BaseSession {
       // noisy, and pointless because none of them can be sent.
       if (this._pendingInput?.length) {
         if (!warnSuppressed) {
-          log.warn(
+          // #4828: session-scoped when init has fired.
+          ;(this._log || log).warn(
             `Discarding ${this._pendingInput.length} queued follow-up message(s) — ` +
             'stdin forwarding is disabled'
           )
@@ -481,7 +487,9 @@ export class SdkSession extends BaseSession {
       // Queue the message — it will be sent after the current turn completes
       if (!this._pendingInput) this._pendingInput = []
       this._pendingInput.push({ prompt, attachments, sendOptions })
-      log.info(`Queued follow-up message (${this._pendingInput.length} pending)`)
+      // #4828: session-scoped when init has fired (queue path requires an
+      // in-flight turn, so init is normally already in by this point).
+      ;(this._log || log).info(`Queued follow-up message (${this._pendingInput.length} pending)`)
       return
     }
 
@@ -580,9 +588,10 @@ export class SdkSession extends BaseSession {
       const existing = options.maxThinkingTokens ?? 0
       if (detectedKeyword.budget > existing) {
         options.maxThinkingTokens = detectedKeyword.budget
-        log.info(`Thinking keyword "${detectedKeyword.keyword}" detected — escalating maxThinkingTokens to ${detectedKeyword.budget} for this turn`)
+        // #4828: session-scoped when init has fired.
+        ;(this._log || log).info(`Thinking keyword "${detectedKeyword.keyword}" detected — escalating maxThinkingTokens to ${detectedKeyword.budget} for this turn`)
       } else {
-        log.debug(`Thinking keyword "${detectedKeyword.keyword}" detected but session already at higher budget (${existing}) — leaving unchanged`)
+        ;(this._log || log).debug(`Thinking keyword "${detectedKeyword.keyword}" detected but session already at higher budget (${existing}) — leaving unchanged`)
       }
     }
 

@@ -22,7 +22,7 @@
  */
 import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, cpSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -52,13 +52,26 @@ function buildFixtureTree({ requiresFactoryImport, forbidsBareCreateLogger, srcF
 
   let patched = REAL_LINT_SOURCE
   // Swap the REQUIRES_FACTORY_IMPORT Set body for the test-supplied list.
+  // #4828 (Copilot review): if the production Set's surface shape changes
+  // (multi-line keys, trailing comma stylistics, rename) the regex would
+  // silently no-op and every test would become vacuous — the fixture
+  // filenames would not appear in the real sets, lint would skip them, and
+  // assertions on offender lists would still pass. Assert the patch ran.
+  const reqRe = /const REQUIRES_FACTORY_IMPORT = new Set\(\[[\s\S]*?\]\)/
+  const forbidRe = /const FORBIDS_BARE_CREATELOGGER = new Set\(\[[\s\S]*?\]\)/
+  if (!reqRe.test(patched)) {
+    throw new Error('lint script no longer matches REQUIRES_FACTORY_IMPORT regex — fixture builder needs updating')
+  }
+  if (!forbidRe.test(patched)) {
+    throw new Error('lint script no longer matches FORBIDS_BARE_CREATELOGGER regex — fixture builder needs updating')
+  }
   patched = patched.replace(
-    /const REQUIRES_FACTORY_IMPORT = new Set\(\[[\s\S]*?\]\)/,
+    reqRe,
     `const REQUIRES_FACTORY_IMPORT = new Set([${requiresFactoryImport.map((f) => JSON.stringify(f)).join(', ')}])`,
   )
   // Same for FORBIDS_BARE_CREATELOGGER.
   patched = patched.replace(
-    /const FORBIDS_BARE_CREATELOGGER = new Set\(\[[\s\S]*?\]\)/,
+    forbidRe,
     `const FORBIDS_BARE_CREATELOGGER = new Set([${forbidsBareCreateLogger.map((f) => JSON.stringify(f)).join(', ')}])`,
   )
 

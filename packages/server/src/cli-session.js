@@ -323,14 +323,17 @@ export class CliSession extends BaseSession {
     this._stderrRL = stderrRL
     stderrRL.on('line', (line) => {
       if (line.trim()) {
-        log.info(`stderr: ${line}`)
+        // #4828: session-scoped when init has fired (stderr arrives both
+        // pre- and post-init; the fallback covers the pre-init case).
+        ;(this._log || log).info(`stderr: ${line}`)
       }
     })
 
     // Absorb EPIPE and other low-level stdin errors so they don't become
     // unhandled exceptions. Writes are already wrapped in try/catch below.
     child.stdin.on('error', (err) => {
-      log.warn(`stdin error (ignored): ${err.message}`)
+      // #4828: session-scoped when init has fired.
+      ;(this._log || log).warn(`stdin error (ignored): ${err.message}`)
     })
 
     child.on('error', (err) => {
@@ -355,7 +358,9 @@ export class CliSession extends BaseSession {
     // _clearMessageState() after each result.
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
-      log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
+      // #4828: session-scoped when init has fired (dequeue can race with
+      // the very-first init so the fallback is intentional).
+      ;(this._log || log).info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
   }
@@ -404,7 +409,9 @@ export class CliSession extends BaseSession {
         this.emit('error', { message: 'Pending message queue full (max 3) — message discarded' })
         return
       }
-      log.info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
+      // #4828: session-scoped when init has fired (queuing typically happens
+      // pre-init or during respawn — both can race with the binding).
+      ;(this._log || log).info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
       this._pendingQueue.push({ prompt, attachments, options })
       return
     }
@@ -464,11 +471,16 @@ export class CliSession extends BaseSession {
       },
     })
 
-    log.info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
+    // #4828: session-scoped when init has fired. The very first message
+    // sends pre-init (CLI's `init` arrives in the first response), so the
+    // first turn falls back to module-level `log`; all subsequent sends
+    // route through `this._log`.
+    ;(this._log || log).info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
     try {
       this._child.stdin.write(ndjson + '\n')
     } catch (err) {
-      log.error(`stdin.write failed (sendMessage): ${err.message}`)
+      // #4828: session-scoped when init has fired.
+      ;(this._log || log).error(`stdin.write failed (sendMessage): ${err.message}`)
       this._clearMessageState()
       this.emit('error', { message: `Failed to send message: ${err.message}` })
       return
