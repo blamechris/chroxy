@@ -2353,8 +2353,8 @@ export class ClaudeTuiSession extends BaseSession {
           //     even though `_onAskUserQuestionStall`'s _destroying
           //     guard silences the eventual emit
           //   - calls `_writePtyTextThrottled(freeformText)` against
-          //     a `_term` that destroy() set to null (line 2792),
-          //     throwing inside the inner write loop
+          //     a `_term` that destroy() set to null, throwing inside
+          //     the inner write loop
           // Bail out at every await boundary instead.
           const stage1ok = await this._writePtyTextThrottled(otherDigit).catch((err) => {
             log.warn(`respondToQuestion Other-digit PTY write failed: ${err.message} (tool=${tag})`)
@@ -2364,8 +2364,11 @@ export class ClaudeTuiSession extends BaseSession {
           if (!stage1ok) return
           await new Promise((resolve) => setTimeout(resolve, OTHER_FREEFORM_SETTLE_MS))
           if (this._destroying) return
-          // Belt-and-braces: even if destroy() raced past the guard
-          // above, a null _term means there's nothing to write to —
+          // Belt-and-braces: destroy() sets _destroying before nulling
+          // _term in the same synchronous frame, so the guard above
+          // already covers the destroy() race. This null-check is
+          // cheap insurance against a future path that releases _term
+          // without flipping _destroying (e.g. a PTY-exit handler) —
           // skip the re-arm AND the stage-2 write together so the
           // watchdog never fires for a session that no longer has a
           // PTY behind it.
