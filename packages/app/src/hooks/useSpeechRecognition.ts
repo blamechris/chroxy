@@ -48,20 +48,6 @@ export async function setSpeechLang(lang: string): Promise<void> {
   }
 }
 
-/**
- * Voice input behaviour. The union itself lives in `@chroxy/store-core`
- * (#4825) — re-exported here so existing imports of `VoiceInputMode` from
- * this module keep working without churn.
- *
- * - `'continuous'`: when the engine fires `end` due to silence, the hook
- *   restarts recognition automatically. The mic stays lit until the user
- *   explicitly calls `stopListening()`. Bounded by `MAX_CONTINUOUS_RESTARTS`
- *   so a wedged backend cannot spin forever.
- * - `'auto-pause'`: original behaviour — `end` ends the session. Default
- *   to keep behaviour stable for callers that don't pass `mode`.
- */
-export type { VoiceInputMode };
-
 export interface UseSpeechRecognitionOptions {
   mode?: VoiceInputMode;
 }
