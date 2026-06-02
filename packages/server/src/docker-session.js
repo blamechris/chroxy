@@ -98,7 +98,30 @@ export class DockerSession extends CliSession {
   }
 
   /**
-   * Resolve runtime auth state for the dashboard (#4769).
+   * Preflight credentials block — overrides CliSession's host-side spec (#4780).
+   *
+   * Inside a container `claude login` cannot work: there is no ~/.claude OAuth
+   * state and the host Keychain is invisible. The only valid path is the
+   * `ANTHROPIC_API_KEY` env var, which `_startContainer` forwards via
+   * `docker run --env`. CLAUDE_CODE_OAUTH_TOKEN is intentionally NOT in
+   * `envVars` — _startContainer does not forward it, so claiming the OAuth
+   * token satisfies auth would mislead the dashboard into reporting ready
+   * for a container that would still fail to authenticate.
+   */
+  static get preflight() {
+    const parent = CliSession.preflight
+    return {
+      ...parent,
+      credentials: {
+        envVars: ['ANTHROPIC_API_KEY'],
+        hint: 'set ANTHROPIC_API_KEY on the host so it is forwarded into the container (no OAuth fallback inside the container — the container has no ~/.claude state)',
+        optional: true,
+      },
+    }
+  }
+
+  /**
+   * Resolve runtime auth state for the dashboard (#4769, #4780).
    *
    * Docker container providers forward process.env.ANTHROPIC_API_KEY to
    * the container at `docker run` time (see _startContainer). Inside the
@@ -113,20 +136,17 @@ export class DockerSession extends CliSession {
   static resolveAuth(env) {
     const credSpec = this.preflight.credentials
     const envVars = credSpec.envVars
-    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+    const hint = credSpec.hint
 
     const matched = envVars.find(v => env[v])
     if (matched) {
-      const identity = matched === 'CLAUDE_CODE_OAUTH_TOKEN'
-        ? 'Anthropic API (OAuth token forwarded to container)'
-        : 'Anthropic API (forwarded to container)'
       return {
         ready: true,
         source: 'env',
         envVar: matched,
         envVars,
         hint: '',
-        detail: `${identity} (${matched} set)`,
+        detail: `Anthropic API (forwarded to container) (${matched} set)`,
       }
     }
     return {
@@ -134,8 +154,8 @@ export class DockerSession extends CliSession {
       source: 'none',
       envVar: null,
       envVars,
-      hint: hint || 'set ANTHROPIC_API_KEY (forwarded to the container at run time)',
-      detail: 'Not configured — container providers need ANTHROPIC_API_KEY on the host (no OAuth fallback inside the container)',
+      hint,
+      detail: 'Not configured — set ANTHROPIC_API_KEY on the host (forwarded into the container at run time). No OAuth fallback inside the container — the container has no ~/.claude state.',
     }
   }
 
