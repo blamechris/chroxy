@@ -8,7 +8,7 @@ import { scanConversations as defaultScanConversations } from '../conversation-s
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
 import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient } from '../conversation-scope.js'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
 
@@ -163,7 +163,11 @@ async function handleRequestSessionContext(ws, client, msg, ctx) {
       sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     }
   } catch (err) {
-    log.warn(`Failed to read session context: ${err.message}`)
+    // #4828: session-scoped — `targetId` is the active session ID in
+    // scope. Legacy single-session callers may surface an empty value,
+    // so fall back to module-level `log` rather than throwing inside
+    // loggerForSession (same pattern as the settings-handlers sites).
+    ;(targetId ? loggerForSession('ws', targetId) : log).warn(`Failed to read session context: ${err.message}`)
     sendSessionError(ws, ctx, `Failed to read session context: ${err.message}`)
   }
 }

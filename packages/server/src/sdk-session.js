@@ -12,7 +12,7 @@ import {
   parseBashOutputShellId,
 } from './background-shells.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
-import { createLogger } from './logger.js'
+import { createLogger, loggerForSession } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
@@ -307,6 +307,10 @@ export class SdkSession extends BaseSession {
 
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
+    // #4828: session-scoped logger, lazily bound on the SDK's first `init`
+    // message (where session_id becomes known). Pre-init log lines stay on
+    // the module-level `log` — same fallback pattern as ClaudeTuiSession.
+    this._log = null
     this._query = null
     this._thinkingLevel = null
     this._pendingInput = []
@@ -682,6 +686,10 @@ export class SdkSession extends BaseSession {
             if (msg.subtype === 'init') {
               this._sdkSessionId = msg.session_id
               this._sessionId = msg.session_id
+              // #4828: bind the session-scoped logger now that session_id
+              // is known. Subsequent log lines route through the WsServer
+              // log fan-out (#4787) to dashboards bound to this session.
+              this._log = loggerForSession('sdk', msg.session_id)
               // #3687: persist the actual model the SDK booted with so
               // sendSessionInfo (replay on reconnect / tab switch) reports
               // the truth instead of `null` when the user didn't specify a
@@ -689,7 +697,7 @@ export class SdkSession extends BaseSession {
               if (typeof msg.model === 'string' && msg.model) {
                 this.bootedModel = msg.model
               }
-              log.info(`Session initialized: ${msg.session_id} (model: ${msg.model})`)
+              ;(this._log || log).info(`Session initialized: ${msg.session_id} (model: ${msg.model})`)
               this.emit('ready', {
                 sessionId: msg.session_id,
                 model: msg.model,
@@ -698,7 +706,8 @@ export class SdkSession extends BaseSession {
               // Emit MCP server status if present (including empty list to clear stale state)
               if (Array.isArray(msg.mcp_servers)) {
                 if (msg.mcp_servers.length > 0) {
-                  log.info(`MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+                  // #4828: session-scoped (post-init).
+                  ;(this._log || log).info(`MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
                 }
                 this.emit('mcp_servers', { servers: msg.mcp_servers })
               }
@@ -708,7 +717,8 @@ export class SdkSession extends BaseSession {
               // Forward non-init system events (e.g. /usage, /cost, other
               // slash command responses) as system messages to the client
               const text = msg.message || msg.text || msg.subtype || 'System event'
-              log.info(`System event (${msg.subtype || 'unknown'}): ${typeof text === 'string' ? text.slice(0, 120) : text}`)
+              // #4828: session-scoped (non-init system event arrives after init).
+              ;(this._log || log).info(`System event (${msg.subtype || 'unknown'}): ${typeof text === 'string' ? text.slice(0, 120) : text}`)
               this.emit('message', {
                 type: 'system',
                 content: text,
@@ -832,7 +842,8 @@ export class SdkSession extends BaseSession {
               if (missingIds.length > 0) {
                 const sampleId = missingIds[0]
                 const sampleKeys = Object.keys(msg.modelUsage[sampleId] || {})
-                log.debug(
+                // #4828: session-scoped (result handler runs strictly post-init).
+                ;(this._log || log).debug(
                   `modelUsage partial drift: contextWindow missing for modelIds=${JSON.stringify(missingIds)} sampleKeys=${JSON.stringify(sampleKeys)}`
                 )
               }
@@ -866,7 +877,9 @@ export class SdkSession extends BaseSession {
         this.emit('stream_end', { messageId })
       }
       if (!this._destroying) {
-        log.error(`Query error: ${err.message}`)
+        // #4828: session-scoped when init has fired; falls back to module
+        // `log` for pre-init query failures (e.g. spawn refused).
+        ;(this._log || log).error(`Query error: ${err.message}`)
         this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
       }
       this._clearMessageState()
@@ -884,7 +897,8 @@ export class SdkSession extends BaseSession {
         // the entry-gate drain (#3539/PR #3560), log a single warn, and
         // skip the recursion entirely.
         if (this._stdinForwardingDisabled) {
-          log.warn(
+          // #4828: session-scoped (finally block runs strictly post-init).
+          ;(this._log || log).warn(
             `Discarding ${this._pendingInput.length} queued follow-up message(s) after turn finish — ` +
             'stdin forwarding is disabled'
           )
@@ -892,7 +906,8 @@ export class SdkSession extends BaseSession {
           return
         }
         const next = this._pendingInput.shift()
-        log.info(`Dequeuing follow-up message (${this._pendingInput.length} remaining)`)
+        // #4828: session-scoped.
+        ;(this._log || log).info(`Dequeuing follow-up message (${this._pendingInput.length} remaining)`)
         // Use setImmediate/nextTick to avoid stack depth issues
         process.nextTick(() => {
           if (!this._destroying) {
@@ -1007,10 +1022,13 @@ export class SdkSession extends BaseSession {
         `cumulative=${cumulative} bytes (${cumulativeHuman}) over ${dropCount} drops) — ` +
         'turn input was truncated; consumer may need to retry'
 
+      // #4828: session-scoped when init has fired; falls back to module
+      // `log` for stdin drops that occur pre-init (rare — SidecarProcess
+      // listener attach happens after spawn, before init normally arrives).
       if (escalate) {
-        log.error(message)
+        ;(this._log || log).error(message)
       } else {
-        log.warn(message)
+        ;(this._log || log).warn(message)
       }
 
       // #3544: surface the cumulative totals as a session-level event so
@@ -1054,7 +1072,9 @@ export class SdkSession extends BaseSession {
       // that cannot work.
       const message = 'Sidecar stdin forwarding is disabled — further writes will be ' +
         'silently dropped; restart this session to recover'
-      log.warn(message)
+      // #4828: session-scoped when known; falls back to module `log` for
+      // the rare pre-init case (same rationale as the stdin_dropped path).
+      ;(this._log || log).warn(message)
       // #3502: surface the disabled flag to paired clients via the session
       // `error` channel.  SessionManager._wireSessionEvents proxies `error`
       // into the unified `session_event` envelope, so dashboards and the
@@ -1082,7 +1102,8 @@ export class SdkSession extends BaseSession {
     // Guard against oversized tool inputs
     const inputStr = JSON.stringify(block.input || {})
     if (Buffer.byteLength(inputStr, 'utf8') > this._maxToolInput) {
-      log.warn(`Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
+      // #4828: session-scoped (tool_use only arrives after init).
+      ;(this._log || log).warn(`Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
       this.emit('error', {
         message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${block.name} — tool use was skipped`,
       })
@@ -1195,7 +1216,8 @@ export class SdkSession extends BaseSession {
    */
   setModel(model) {
     if (!super.setModel(model)) return
-    log.info(`Model changed to ${this.model || 'default'}`)
+    // #4828: session-scoped when init has fired.
+    ;(this._log || log).info(`Model changed to ${this.model || 'default'}`)
   }
 
   setPermissionMode(mode) {
@@ -1209,7 +1231,8 @@ export class SdkSession extends BaseSession {
     if (mode === 'auto') {
       this._permissions.autoAllowPending()
     }
-    log.info(`Permission mode changed to ${mode}`)
+    // #4828: session-scoped when init has fired.
+    ;(this._log || log).info(`Permission mode changed to ${mode}`)
   }
 
   /**
@@ -1253,9 +1276,11 @@ export class SdkSession extends BaseSession {
     if (this._query && typeof this._query.setMaxThinkingTokens === 'function') {
       try {
         await this._query.setMaxThinkingTokens(budget)
-        log.info(`Thinking level set to ${level} (${budget ?? 'adaptive'} tokens)`)
+        // #4828: session-scoped (setThinkingLevel only takes effect with
+        // an active query — strictly post-init).
+        ;(this._log || log).info(`Thinking level set to ${level} (${budget ?? 'adaptive'} tokens)`)
       } catch (err) {
-        log.warn(`Failed to set thinking level: ${err.message}`)
+        ;(this._log || log).warn(`Failed to set thinking level: ${err.message}`)
       }
     }
 
@@ -1284,12 +1309,13 @@ export class SdkSession extends BaseSession {
       const sdkModels = await this._query.supportedModels()
       const converted = updateModels(sdkModels)
       if (converted && converted.length > 0) {
-        log.info(`Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
+        // #4828: session-scoped (called from init handler so _log is set).
+        ;(this._log || log).info(`Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
         saveModelsCache()
         this.emit('models_updated', { models: converted })
       }
     } catch (err) {
-      log.warn(`Failed to fetch supported models: ${err.message}`)
+      ;(this._log || log).warn(`Failed to fetch supported models: ${err.message}`)
     }
   }
 
@@ -1299,11 +1325,12 @@ export class SdkSession extends BaseSession {
   async interrupt() {
     if (!this._query) return
 
-    log.info('Interrupting query')
+    // #4828: session-scoped (interrupt() only meaningful with an active query).
+    ;(this._log || log).info('Interrupting query')
     try {
       await this._query.interrupt()
     } catch (err) {
-      log.warn(`Interrupt error: ${err.message}`)
+      ;(this._log || log).warn(`Interrupt error: ${err.message}`)
     }
   }
 
@@ -1326,7 +1353,8 @@ export class SdkSession extends BaseSession {
     if (!this._isBusy) return
     const idleMs = this._resultTimeoutMs
     const friendly = formatIdleDuration(idleMs)
-    log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
+    // #4828: session-scoped (inactivity warning fires from active turn).
+    ;(this._log || log).info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
     this.emit('inactivity_warning', {
       messageId,
       idleMs,
@@ -1347,7 +1375,8 @@ export class SdkSession extends BaseSession {
   _handleHardTimeout(messageId, hasStreamStarted) {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._hardTimeoutMs)
-    log.warn(`Hard-cap timeout (${friendly} inactivity) — force-clearing busy state`)
+    // #4828: session-scoped (hard-cap fires from active turn).
+    ;(this._log || log).warn(`Hard-cap timeout (${friendly} inactivity) — force-clearing busy state`)
     if (hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }
@@ -1387,7 +1416,8 @@ export class SdkSession extends BaseSession {
   _handleStreamStall(messageId, hasStreamStarted) {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._streamStallTimeoutMs)
-    log.warn(
+    // #4828: session-scoped (stall fires from active turn).
+    ;(this._log || log).warn(
       `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
     )
     if (hasStreamStarted) {
@@ -1426,13 +1456,15 @@ export class SdkSession extends BaseSession {
       if (typeof q.interrupt === 'function') {
         const p = q.interrupt()
         if (p && typeof p.catch === 'function') {
-          p.catch((err) => log.warn(`Query interrupt (timeout) failed: ${err.message}`))
+          // #4828: session-scoped (abort runs strictly post-init).
+          p.catch((err) => (this._log || log).warn(`Query interrupt (timeout) failed: ${err.message}`))
         }
       } else if (typeof q.return === 'function') {
         q.return()
       }
     } catch (err) {
-      log.warn(`Query abort (timeout) failed: ${err.message}`)
+      // #4828: session-scoped.
+      ;(this._log || log).warn(`Query abort (timeout) failed: ${err.message}`)
     }
   }
 
@@ -1517,7 +1549,8 @@ export class SdkSession extends BaseSession {
     // Interrupt active query
     if (this._query) {
       this._query.interrupt().catch((err) => {
-        log.warn(`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
+        // #4828: session-scoped when init has fired.
+        ;(this._log || log).warn(`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
       })
       this._query = null
     }

@@ -1638,7 +1638,9 @@ export class ClaudeTuiSession extends BaseSession {
         // multi-question wedge condition is greppable. The bug was
         // diagnosed via /tmp/.../pre-*.json spelunking — never again.
         const questionCount = questions.length
-        log.info(`AskUserQuestion pending: tool=${toolUseId} questions=${questionCount} options.q1=${options.length}`)
+        // #4828: session-scoped — runs strictly post-start when `this._log`
+        // is cached. Falls back to module-level `log` only defensively.
+        ;(this._log || log).info(`AskUserQuestion pending: tool=${toolUseId} questions=${questionCount} options.q1=${options.length}`)
         if (questionCount > 1) {
           // #4604 Chunk B note: kept the historical "not yet supported"
           // wording so existing test guards (regex on this string) keep
@@ -1648,7 +1650,8 @@ export class ClaudeTuiSession extends BaseSession {
           // back-compat default-to-option-1 fallback in respondToQuestion
           // means even old dashboards no longer wedge the session, just
           // pick defaults the user can re-prompt past.
-          log.warn(`AskUserQuestion has ${questionCount} questions — multi-question forms are not yet supported (see #4604). Only question 1 will be answered.`)
+          // #4828: session-scoped.
+          ;(this._log || log).warn(`AskUserQuestion has ${questionCount} questions — multi-question forms are not yet supported (see #4604). Only question 1 will be answered.`)
           // #4653: surface the deny to the user. The bash permission-hook
           // returns `permissionDecision: deny` for this exact payload
           // shape (questions.length > 1), so this server-side mirror
@@ -2386,7 +2389,8 @@ export class ClaudeTuiSession extends BaseSession {
       // cleared the Map (watchdog fire, user gave up + the late answer
       // came in). Log + drop rather than write keystrokes into whatever
       // form happens to be currently rendered.
-      log.warn(`respondToQuestion: dashboard sent toolUseId=${toolUseId} but no matching pending entry (Map.size=${this._pendingUserAnswers.size} keys=${[...this._pendingUserAnswers.keys()].join(',')}) — dropping`)
+      // #4828: session-scoped — respondToQuestion runs strictly post-start.
+      ;(this._log || log).warn(`respondToQuestion: dashboard sent toolUseId=${toolUseId} but no matching pending entry (Map.size=${this._pendingUserAnswers.size} keys=${[...this._pendingUserAnswers.keys()].join(',')}) — dropping`)
       return
     } else {
       // Legacy / unidentified path: route to the most-recent entry via
@@ -2399,14 +2403,16 @@ export class ClaudeTuiSession extends BaseSession {
       // most-recent entry by insertion order, which may not be what
       // the user intended. Loud log so the wedge symptom is greppable.
       if (!toolUseId && this._pendingUserAnswers.size > 1) {
-        log.warn(`respondToQuestion: dashboard omitted toolUseId but ${this._pendingUserAnswers.size} pending entries exist (keys=${[...this._pendingUserAnswers.keys()].join(',')}) — falling back to most-recent which may misroute`)
+        // #4828: session-scoped.
+        ;(this._log || log).warn(`respondToQuestion: dashboard omitted toolUseId but ${this._pendingUserAnswers.size} pending entries exist (keys=${[...this._pendingUserAnswers.keys()].join(',')}) — falling back to most-recent which may misroute`)
       }
       entry = this._pendingUserAnswer
     }
     const prevToolUseId = entry?.toolUseId || null
     const pendingQuestions = entry?.questions || []
     const answersMapKeyCount = answersMap && typeof answersMap === 'object' ? Object.keys(answersMap).length : 0
-    log.info(`respondToQuestion: tool=${prevToolUseId || '?'} dashboardToolUseId=${toolUseId || 'none'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${entry?.options?.length || 0} pendingMapSize=${this._pendingUserAnswers.size}`)
+    // #4828: session-scoped.
+    ;(this._log || log).info(`respondToQuestion: tool=${prevToolUseId || '?'} dashboardToolUseId=${toolUseId || 'none'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${entry?.options?.length || 0} pendingMapSize=${this._pendingUserAnswers.size}`)
     if (!entry) return
     // Single-question / free-text path requires a non-empty `text`. The
     // multi-question path is driven from answersMap (text is ignored when
@@ -2492,12 +2498,14 @@ export class ClaudeTuiSession extends BaseSession {
       // AskUserQuestion without an Other option in the first place.
       if (freeformText) {
         if (!Array.isArray(options) || options.length === 0) {
-          log.warn(`respondToQuestion: freeformText supplied for question with no options (tool=${prevToolUseId || '?'}) — dropping`)
+          // #4828: session-scoped.
+          ;(this._log || log).warn(`respondToQuestion: freeformText supplied for question with no options (tool=${prevToolUseId || '?'}) — dropping`)
           return
         }
         const otherIdx = options.findIndex((o) => o && o.label === text)
         if (otherIdx < 0 || otherIdx >= 9) {
-          log.warn(`respondToQuestion: freeformText supplied but chosen option "${text}" not found (or beyond single-digit hotkey range) in pending options for tool=${prevToolUseId || '?'} — dropping`)
+          // #4828: session-scoped.
+          ;(this._log || log).warn(`respondToQuestion: freeformText supplied but chosen option "${text}" not found (or beyond single-digit hotkey range) in pending options for tool=${prevToolUseId || '?'} — dropping`)
           return
         }
         const otherDigit = String(otherIdx + 1)
@@ -2522,7 +2530,8 @@ export class ClaudeTuiSession extends BaseSession {
           //     the inner write loop
           // Bail out at every await boundary instead.
           const stage1ok = await this._writePtyTextThrottled(otherDigit).catch((err) => {
-            log.warn(`respondToQuestion Other-digit PTY write failed: ${err.message} (tool=${tag})`)
+            // #4828: session-scoped.
+            ;(this._log || log).warn(`respondToQuestion Other-digit PTY write failed: ${err.message} (tool=${tag})`)
             return false
           })
           if (this._destroying) return
@@ -2547,7 +2556,8 @@ export class ClaudeTuiSession extends BaseSession {
             this._onAskUserQuestionStall(prevToolUseId)
           }, OTHER_FREEFORM_WATCHDOG_MS)
           await this._writePtyTextThrottled(freeformText).catch((err) => {
-            log.warn(`respondToQuestion Other-freeform PTY write failed: ${err.message} (tool=${tag})`)
+            // #4828: session-scoped.
+            ;(this._log || log).warn(`respondToQuestion Other-freeform PTY write failed: ${err.message} (tool=${tag})`)
           })
         })()
         armWatchdog()
@@ -2591,9 +2601,9 @@ export class ClaudeTuiSession extends BaseSession {
         // path) so the Other / freeform back-compat case is preserved.
         if (matchIdx >= 9) {
           const total = options.length
-          log.info(`AskUserQuestion single-question: question has ${total} options and the user picked option ${matchIdx + 1} ("${(text || '').slice(0, 40)}") — driving via arrow-key navigation (#4848) (tool=${prevToolUseId || '?'})`)
+          ;(this._log || log).info(`AskUserQuestion single-question: question has ${total} options and the user picked option ${matchIdx + 1} ("${(text || '').slice(0, 40)}") — driving via arrow-key navigation (#4848) (tool=${prevToolUseId || '?'})`)
           this._writePtyArrowNavSequence(matchIdx).catch((err) => {
-            log.warn(`respondToQuestion arrow-nav PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+            ;(this._log || log).warn(`respondToQuestion arrow-nav PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
           })
           armWatchdog()
           return
@@ -2606,7 +2616,8 @@ export class ClaudeTuiSession extends BaseSession {
       // but the caller (handleUserQuestionResponse) is sync. Errors here
       // are non-fatal; worst case the user re-sends the answer.
       this._writePtyTextThrottled(writeText).catch((err) => {
-        log.warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+        // #4828: session-scoped.
+        ;(this._log || log).warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
       })
       armWatchdog()
       return
@@ -2619,7 +2630,8 @@ export class ClaudeTuiSession extends BaseSession {
     const map = (answersMap && typeof answersMap === 'object') ? answersMap : {}
     const haveMap = Object.keys(map).length > 0
     if (!haveMap) {
-      log.warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
+      // #4828: session-scoped.
+      ;(this._log || log).warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
     }
 
     // #4625 + #4848 — claude TUI's single-digit hotkey alphabet ('1'..'9')
@@ -2679,7 +2691,7 @@ export class ClaudeTuiSession extends BaseSession {
       }
       if (unrepresentableMultiSelect.length > 0) {
         const first = unrepresentableMultiSelect[0]
-        log.warn(`AskUserQuestion multi-question: multi-select question has ${first.total} options and the user toggled option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet AND beyond the arrow-nav single-select fallback (#4848 deliberately scopes arrow-nav to single-select only) — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS (tool=${prevToolUseId || '?'})`)
+        ;(this._log || log).warn(`AskUserQuestion multi-question: multi-select question has ${first.total} options and the user toggled option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet AND beyond the arrow-nav single-select fallback (#4848 deliberately scopes arrow-nav to single-select only) — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS (tool=${prevToolUseId || '?'})`)
         // Full AskUserQuestion teardown: synth tool_result + Ctrl-C the
         // TUI + clear inactivity timers + stream_end + _emitResult +
         // error (in that order). Without the full teardown the dashboard
@@ -2750,7 +2762,8 @@ export class ClaudeTuiSession extends BaseSession {
           // couldn't match (defaulted handling below).
         }
         if (digits.length === 0 && defaultDigit) {
-          log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (multi-select) — defaulting to option 1`)
+          // #4828: session-scoped (closure runs inside respondToQuestion, post-start).
+          ;(this._log || log).warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (multi-select) — defaulting to option 1`)
           digits.push(defaultDigit)
         }
         return digits
@@ -2784,7 +2797,8 @@ export class ClaudeTuiSession extends BaseSession {
         }
       }
       if (defaultDigit) {
-        if (haveMap) log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (single-select) — defaulting to option 1`)
+        // #4828: session-scoped (closure runs inside respondToQuestion, post-start).
+        if (haveMap) (this._log || log).warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (single-select) — defaulting to option 1`)
         return [defaultDigit]
       }
       return []
@@ -2833,10 +2847,11 @@ export class ClaudeTuiSession extends BaseSession {
     sequence.push('\r')
 
     const keystrokeCount = sequence.filter((x) => typeof x === 'string').length
-    log.info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${keystrokeCount} haveAnswersMap=${haveMap}`)
+    ;(this._log || log).info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${keystrokeCount} haveAnswersMap=${haveMap}`)
 
     this._writePtyMultiQuestionSequence(sequence).catch((err) => {
-      log.warn(`respondToQuestion multi-question PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+      // #4828: session-scoped.
+      ;(this._log || log).warn(`respondToQuestion multi-question PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
     })
     armWatchdog()
   }
@@ -2975,7 +2990,8 @@ export class ClaudeTuiSession extends BaseSession {
     if (!this._pendingUserAnswer && !this._isBusy) return
 
     this._assertBusyHasMessageId('_onAskUserQuestionStall')
-    log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
+    // #4828: session-scoped — stall watchdog fires strictly post-start.
+    ;(this._log || log).warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
 
     this._teardownAskUserQuestion(toolUseId, {
       synthResult: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
