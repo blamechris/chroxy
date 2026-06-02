@@ -4659,6 +4659,144 @@ describe('ClaudeTuiSession', () => {
       )
     })
 
+    // #4883 — tighten lastIsSingleSelect detection. Pre-fix logic was
+    // `!!(lastQuestion && !lastQuestion.multiSelect)`, which treated *any*
+    // non-truthy `multiSelect` (undefined, null, 0, '') as single-select
+    // silently. That's correct for today's TUI shape (single-select omits
+    // the field) but masks any future TUI shape drift. The tightened logic
+    // is `multiSelect !== true`, plus a WARN whenever the field is present
+    // but non-boolean so the drift surfaces in logs.
+
+    // The canonical single-select shape today is `multiSelect` absent. That
+    // path must STILL produce the settle (back-compat) AND must NOT warn,
+    // otherwise every multi-question form spams the log.
+    it('omitted multiSelect on last q: settle fires + NO warn (back-compat #4883)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] }, // multiSelect omitted
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_omit_multiselect', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': ['a', 'b'], 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      // Settle MUST fire — back-compat with the pre-tightening behaviour.
+      const writes = writeEvents.map((e) => e.data)
+      const q1TabIdx = writes.indexOf('\t')
+      const submitIdx = writes.indexOf('1', q1TabIdx + 1)
+      const gapMs = writeEvents[submitIdx].t - writeEvents[q1TabIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `omitted-multiSelect last q is single-select: expected settle gap >= 140ms, got ${gapMs}ms`,
+      )
+
+      // And the WARN must NOT fire on this canonical shape.
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.equal(
+        drift,
+        undefined,
+        `canonical single-select shape (multiSelect omitted) must NOT warn, got warns=${JSON.stringify(warnLines)}`,
+      )
+    })
+
+    // Explicit `multiSelect: false` on the last q: still single-select, no warn.
+    it('explicit multiSelect:false on last q: settle fires + NO warn (#4883)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: false, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_explicit_false', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': ['a', 'b'], 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      const tabIdx = writes.indexOf('\t')
+      const submitIdx = writes.indexOf('1', tabIdx + 1)
+      const gapMs = writeEvents[submitIdx].t - writeEvents[tabIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `explicit multiSelect:false is single-select: expected settle gap >= 140ms, got ${gapMs}ms`,
+      )
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.equal(drift, undefined, `explicit boolean must NOT warn, got warns=${JSON.stringify(warnLines)}`)
+    })
+
+    // Drift: `multiSelect` present but a STRING (e.g. a future TUI ships
+    // `multiSelect: "true"` accidentally). Warn fires + settle assumed.
+    it('non-boolean multiSelect (string) on last q: WARN fires + still settles (#4883)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: 'true', options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_string_drift', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.ok(
+        drift,
+        `expected drift WARN for non-boolean multiSelect, got warns=${JSON.stringify(warnLines)}`,
+      )
+      assert.match(drift, /Q2\?/, 'warn includes the offending question text')
+    })
+
+    // Drift: `multiSelect: null`. Same surfacing requirement as the string case.
+    it('null multiSelect on last q: WARN fires (#4883)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }] },
+        { question: 'Q2?', multiSelect: null, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_null_drift', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.ok(
+        drift,
+        `expected drift WARN for null multiSelect, got warns=${JSON.stringify(warnLines)}`,
+      )
+    })
+
+    // Drift on a NON-last question must NOT trigger the warn — the settle
+    // decision is driven by the LAST question's shape only, so the warn is
+    // scoped to that one. (Keeps log noise bounded for forms that mix shapes
+    // and ensures the warn pinpoints the question that actually drove the
+    // settle branch.)
+    it('non-boolean multiSelect on a non-last q does NOT warn (#4883)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', multiSelect: 'true', options: [{ label: 'a' }, { label: 'b' }] }, // drifty but NOT last
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_drift_not_last', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': ['a'], 'Q2?': ['p'] })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.equal(
+        drift,
+        undefined,
+        `drift on non-last question must NOT warn, got warns=${JSON.stringify(warnLines)}`,
+      )
+    })
+
     // Pre-Chunk-B watchdog still arms for multi-question forms — if claude
     // TUI's actual form differs from the empirical spec (a future TUI
     // version, edge-case shape), the stall watchdog still surfaces the
