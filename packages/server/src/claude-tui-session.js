@@ -464,7 +464,7 @@ export class ClaudeTuiSession extends BaseSession {
    */
   set _pendingUserAnswer(entry) {
     if (entry === null || entry === undefined) {
-      throw new Error('_pendingUserAnswer = null forbidden (#4802) — use _pendingUserAnswers_clearAll() or _clearPendingAnswerByToolUseId(tid) so the destructive intent is visible at the call site')
+      throw new Error('_pendingUserAnswer = null/undefined forbidden (#4802) — use _pendingUserAnswers_clearAll() or _clearPendingAnswerByToolUseId(tid) so the destructive intent is visible at the call site')
     }
     const toolUseId = entry.toolUseId
     if (toolUseId) {
