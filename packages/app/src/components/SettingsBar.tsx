@@ -15,6 +15,26 @@ const QUALITY_COLORS = {
   poor: { bg: COLORS.accentRedSubtle, fg: COLORS.accentRed },
 } as const;
 
+// #4876 — shared `hitSlop` for the tappable header badges so each Pressable
+// hits Apple HIG / CLAUDE.md's 44pt minimum touch target even though the
+// visible badge is kept visually compact (paddingVertical: 2,
+// paddingHorizontal: 6, fontSize: 10 or 11). Numbers chosen so the
+// effective touch area is ≥ 44 × 44pt for even the smallest plausible
+// content (a single-glyph badge), while still leaving small horizontal
+// gaps between adjacent badges so each one's hitbox doesn't fully overlap
+// its neighbour.
+//
+// Effective hitbox = visible bounds + hitSlop. Worst-case intrinsic vertical
+// extent is fontSize (10pt) + 2pt + 2pt padding = ~14pt, plus 14 + 14 slop
+// = 42pt — bumped to 16 to clear 44pt cleanly. Worst-case horizontal is a
+// single glyph ~6pt + 6pt + 6pt padding = ~18pt, plus 14 + 14 slop = 46pt.
+export const HEADER_BADGE_HIT_SLOP = {
+  top: 16,
+  bottom: 16,
+  left: 14,
+  right: 14,
+} as const;
+
 // -- Props --
 
 export interface SettingsBarProps {
@@ -325,6 +345,9 @@ export function SettingsBar({
           <Pressable
             onPress={() => setInterventionsOpen(true)}
             style={({ pressed }) => [styles.interventionBadge, pressed && styles.interventionBadgePressed]}
+            // #4876 — widen the effective touch target to ≥ 44pt without
+            // resizing the visible badge.
+            hitSlop={HEADER_BADGE_HIT_SLOP}
             accessibilityRole="button"
             accessibilityLabel={`${interventionCount} chroxy ${interventionCount === 1 ? 'intervention' : 'interventions'}. Tap for details.`}
             testID="session-interventions-badge"
@@ -371,6 +394,9 @@ export function SettingsBar({
           <Pressable
             onPress={() => setCostBreakdownOpen(true)}
             style={({ pressed }) => [styles.costBadge, pressed && styles.costBadgePressed]}
+            // #4876 — widen the effective touch target to ≥ 44pt without
+            // resizing the visible badge.
+            hitSlop={HEADER_BADGE_HIT_SLOP}
             accessibilityRole="button"
             accessibilityLabel={`Session cost ${formatCostBadge(cumulativeUsage.costUsd)}. Tap for breakdown.`}
             testID="session-cost-badge"
