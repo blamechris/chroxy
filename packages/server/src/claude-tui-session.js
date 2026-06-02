@@ -135,6 +135,18 @@ const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
 // final question in the sequence is single-select; mixed forms keep the
 // pre-#4635 timing-free path (Tab's commit signal makes Submit settle
 // naturally and the existing empirical recording pins the Tab + '1' run).
+//
+// #4882 (open) — this constant + the trailing `\r` below are still
+// "best-effort defensive" rather than empirically confirmed. The recorder
+// script `scripts/tui-form-recorder.mjs` was originally only run against a
+// MIXED multi-question form (#4604 Chunk B). A fresh recorder pass against
+// a pure all-single-select N-question prompt is needed to:
+//   - confirm 150ms is the right magnitude (or tune down/up)
+//   - confirm the Submit screen accepts `'1'` (vs needing `'\r'`, vs auto-
+//     submitting after the last digit with NO Submit screen)
+// Until that happens, the 30s ASK_USER_QUESTION watchdog is the safety net
+// for any remaining wedge. See `tui_multi_question_form_keys.md` memory note
+// for the empirical findings to date.
 const MULTI_QUESTION_SUBMIT_SETTLE_MS = 150
 
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
