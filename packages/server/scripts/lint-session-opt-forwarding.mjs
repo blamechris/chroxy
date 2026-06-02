@@ -5,7 +5,7 @@
  * providers) MUST destructure every constructor opt accepted by
  * `BaseSession` AND forward it via `super({ ... })`. Otherwise the opt
  * is silently dropped on its way down — the middle-layer trap
- * documented in project memory as `feedback_jsonl_subprocess_middle_layer`
+ * documented in project memory as `feedback_jsonl_subprocess_middle_layer.md`
  * and repeated three times historically (#3224, #3231, #4790).
  *
  * Detection strategy (regex, intentionally — same style as

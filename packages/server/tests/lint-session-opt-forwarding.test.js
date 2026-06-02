@@ -14,9 +14,9 @@
  *
  * Issue: #4797. Trap that motivated this lint: #4790 (fixed in #4795).
  */
-import { test, describe, before, after } from 'node:test'
+import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readdirSync, statSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -260,10 +260,11 @@ describe('lint-session-opt-forwarding', () => {
   })
 
   test('per-key allowlist comment suppresses a specific drop', () => {
-    // Class can opt-out a specific key via a marker comment placed above
-    // the constructor. Use case: a future provider deliberately does not
-    // need a particular opt (e.g. a stub session for testing). The
-    // allowlist is per-key so missing a different opt still fails.
+    // Class can opt-out a specific key via a marker comment placed
+    // immediately above the class declaration. Use case: a future
+    // provider deliberately does not need a particular opt (e.g. a stub
+    // session for testing). The allowlist is per-key so missing a
+    // different opt still fails.
     const SUPPRESS_SRC = `
 import { BaseSession } from './base-session.js'
 
