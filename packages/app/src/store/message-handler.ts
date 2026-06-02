@@ -76,7 +76,10 @@ import {
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
   handleWriteFileResult as sharedWriteFileResult,
-  handleSessionList as sharedSessionList,
+  buildSessionListPatches as sharedBuildSessionListPatches,
+  cumulativeUsageEquals as sharedCumulativeUsageEquals,
+  chunkSubscribeSessionIds as sharedChunkSubscribeSessionIds,
+  SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
@@ -540,8 +543,13 @@ export function clearTerminalWriteBatching(): void {
 // ---------------------------------------------------------------------------
 // Client-side heartbeat
 // ---------------------------------------------------------------------------
-/** Max session IDs per subscribe_sessions message (must match server SubscribeSessionsSchema .max(20)) */
-export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = 20;
+/**
+ * Max session IDs per subscribe_sessions message (must match server
+ * SubscribeSessionsSchema .max(20)). Re-exported from
+ * `@chroxy/store-core`'s {@link SESSION_LIST_SUBSCRIBE_CHUNK_SIZE} so the
+ * app and dashboard can't drift apart (#4767).
+ */
+export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
@@ -1145,132 +1153,131 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Multi-session messages ---
 
     case 'session_list': {
-      const sessionList = sharedSessionList(msg);
-      if (sessionList) {
-        // Auto-resume on server restart: if reconnecting and server has no sessions,
-        // restore the last active conversation so user doesn't have to navigate History.
-        if (sessionList.length === 0 && ctx.isReconnect) {
-          void (async () => {
-            const snapSocket = ctx.socket;
-            const lastId = await loadLastConversationId();
-            if (!lastId) return;
-            if (snapSocket && snapSocket.readyState === WebSocket.OPEN) {
-              console.log('[ws] Server restarted with no sessions — auto-resuming last conversation');
-              wsSend(snapSocket, { type: 'resume_conversation', conversationId: lastId });
-            }
-          })();
-          break;
-        }
-        // GC persisted messages for sessions that dropped out of the list
-        const prevSessionIds = Object.keys(get().sessionStates);
-        const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
-        const removedIds = prevSessionIds.filter((id) => !newSessionIdSet.has(id));
-        for (const prevId of removedIds) {
-          void clearPersistedSession(prevId);
-        }
-        // Batch in-memory cleanup into a single state update
-        if (removedIds.length > 0) {
-          const patch: Partial<ConnectionState> = {};
-          const newStates = { ...get().sessionStates };
-          for (const id of removedIds) {
-            delete newStates[id];
+      // #4767: centralised dispatch — store-core precomputes GC + new-session
+      // ids + conversationId / cumulativeUsage / pendingShells patch maps;
+      // the consumer applies them with platform-specific side-effects
+      // (clearPersistedSession, loadLastConversationId auto-resume, etc.).
+      const initialActiveId = get().activeSessionId;
+      const patches = sharedBuildSessionListPatches(
+        msg,
+        Object.keys(get().sessionStates),
+        initialActiveId,
+      );
+      if (!patches) break;
+      const {
+        sessionList,
+        removedIds,
+        newSessionIds,
+        conversationIdPatches,
+        cumulativeUsagePatches,
+        backgroundShellBuilders,
+        subscribeChunks,
+      } = patches;
+      // Auto-resume on server restart: if reconnecting and server has no sessions,
+      // restore the last active conversation so user doesn't have to navigate History.
+      if (sessionList.length === 0 && ctx.isReconnect) {
+        void (async () => {
+          const snapSocket = ctx.socket;
+          const lastId = await loadLastConversationId();
+          if (!lastId) return;
+          if (snapSocket && snapSocket.readyState === WebSocket.OPEN) {
+            console.log('[ws] Server restarted with no sessions — auto-resuming last conversation');
+            wsSend(snapSocket, { type: 'resume_conversation', conversationId: lastId });
           }
-          patch.sessionStates = newStates;
-          // If the active session was removed, switch to next available
-          if (get().activeSessionId && removedIds.includes(get().activeSessionId!)) {
-            const remaining = Object.keys(newStates);
-            const nextId = remaining.length > 0 ? remaining[0] : null;
-            patch.activeSessionId = nextId;
-          }
-          set(patch);
+        })();
+        break;
+      }
+      // GC persisted messages for sessions that dropped out of the list
+      for (const prevId of removedIds) {
+        void clearPersistedSession(prevId);
+      }
+      // Batch in-memory cleanup into a single state update
+      if (removedIds.length > 0) {
+        const patch: Partial<ConnectionState> = {};
+        const newStates = { ...get().sessionStates };
+        for (const id of removedIds) {
+          delete newStates[id];
         }
-        set({ sessions: sessionList });
-        // Initialize session state for any new sessions not yet tracked
+        patch.sessionStates = newStates;
+        // If the active session was removed, switch to next available
+        if (initialActiveId && removedIds.includes(initialActiveId)) {
+          const remaining = Object.keys(newStates);
+          const nextId = remaining.length > 0 ? remaining[0] : null;
+          patch.activeSessionId = nextId;
+        }
+        set(patch);
+      }
+      set({ sessions: sessionList });
+      // Initialize session state for any new sessions not yet tracked
+      if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newStates = { ...currentStates };
-        let statesChanged = false;
-        for (const s of sessionList) {
-          if (!newStates[s.sessionId]) {
-            newStates[s.sessionId] = createEmptySessionState();
-            statesChanged = true;
+        for (const sid of newSessionIds) {
+          if (!newStates[sid]) {
+            newStates[sid] = createEmptySessionState();
           }
         }
-        if (statesChanged) {
-          set({ sessionStates: newStates });
-        }
-        // Sync conversationId from session list into session states
-        for (const s of sessionList) {
-          if (s.conversationId && get().sessionStates[s.sessionId]) {
-            updateSession(s.sessionId, (ss) =>
-              ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
-            );
-          }
-        }
-        // #4074: seed cumulativeUsage from the snapshot so re-opening the
-        // mobile app mid-session shows the running cost in the header
-        // without waiting for the next session_usage event. Same pattern
-        // as the dashboard (#4073).
-        for (const s of sessionList) {
-          if (s.cumulativeUsage && get().sessionStates[s.sessionId]) {
-            const snapshot = s.cumulativeUsage;
-            updateSession(s.sessionId, (ss) => {
-              const current = ss.cumulativeUsage;
-              if (
-                current &&
-                current.inputTokens === snapshot.inputTokens &&
-                current.outputTokens === snapshot.outputTokens &&
-                current.cacheReadTokens === snapshot.cacheReadTokens &&
-                current.cacheCreationTokens === snapshot.cacheCreationTokens &&
-                current.costUsd === snapshot.costUsd &&
-                current.turnsBilled === snapshot.turnsBilled
-              ) {
-                return {};
-              }
-              return { cumulativeUsage: snapshot };
-            });
-          }
-        }
-        // #4307: seed pendingBackgroundShells from the snapshot so the
-        // app catches up on any sessions already waiting on background
-        // work without waiting for the next `background_work_changed`
-        // event. The shared handler's reference-equality short-circuit
-        // suppresses no-op re-renders.
-        for (const s of sessionList) {
-          if (!get().sessionStates[s.sessionId]) continue;
-          const builder = sharedBackgroundWorkChanged(
-            { sessionId: s.sessionId, pending: s.pendingBackgroundShells ?? [] },
-            get().activeSessionId,
-          );
-          updateSession(s.sessionId, (ss) => {
-            const next = builder.applyTo(ss.pendingBackgroundShells);
-            return next === ss.pendingBackgroundShells
-              ? {}
-              : { pendingBackgroundShells: next };
-          });
-        }
-        // Persist the active session's conversationId for auto-resume on server restart.
-        // Use the activeSessionId if set, otherwise fall back to the first session in the list.
-        const resolvedActiveId = get().activeSessionId ?? (sessionList[0]?.sessionId ?? null);
-        const activeSessionEntry = resolvedActiveId
-          ? sessionList.find((s) => s.sessionId === resolvedActiveId)
-          : null;
-        const activeConversationId = activeSessionEntry?.conversationId ?? null;
-        if (activeConversationId) {
-          void persistLastConversationId(activeConversationId);
-        }
-        // Subscribe to all non-active sessions so we receive their events
-        // (permissions, plan approvals, errors) in real-time
-        const activeId = get().activeSessionId;
-        const subscribeIds = sessionList
-          .map((s) => s.sessionId)
-          .filter((id) => id !== activeId);
-        if (subscribeIds.length > 0) {
-          const sock = get().socket;
-          if (sock && sock.readyState === WebSocket.OPEN) {
-            // Server schema enforces max IDs per message — chunk if needed
-            for (let i = 0; i < subscribeIds.length; i += SUBSCRIBE_SESSIONS_CHUNK_SIZE) {
-              wsSend(sock, { type: 'subscribe_sessions', sessionIds: subscribeIds.slice(i, i + SUBSCRIBE_SESSIONS_CHUNK_SIZE) });
-            }
+        set({ sessionStates: newStates });
+      }
+      // Sync conversationId from session list into session states
+      for (const [sid, cid] of conversationIdPatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          ss.conversationId !== cid ? { conversationId: cid } : {}
+        );
+      }
+      // #4074: seed cumulativeUsage from the snapshot so re-opening the
+      // mobile app mid-session shows the running cost in the header
+      // without waiting for the next session_usage event. Same pattern
+      // as the dashboard (#4073). Six-field equality short-circuit lives
+      // in store-core via {@link sharedCumulativeUsageEquals} (#4767).
+      for (const [sid, snapshot] of cumulativeUsagePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          sharedCumulativeUsageEquals(ss.cumulativeUsage, snapshot)
+            ? {}
+            : { cumulativeUsage: snapshot }
+        );
+      }
+      // #4307: seed pendingBackgroundShells from the snapshot so the
+      // app catches up on any sessions already waiting on background
+      // work without waiting for the next `background_work_changed`
+      // event. The shared handler's reference-equality short-circuit
+      // suppresses no-op re-renders.
+      for (const [sid, builder] of backgroundShellBuilders) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) => {
+          const next = builder.applyTo(ss.pendingBackgroundShells);
+          return next === ss.pendingBackgroundShells
+            ? {}
+            : { pendingBackgroundShells: next };
+        });
+      }
+      // Persist the active session's conversationId for auto-resume on server restart.
+      // Use the activeSessionId if set, otherwise fall back to the first session in the list.
+      const resolvedActiveId = get().activeSessionId ?? (sessionList[0]?.sessionId ?? null);
+      const activeSessionEntry = resolvedActiveId
+        ? sessionList.find((s) => s.sessionId === resolvedActiveId)
+        : null;
+      const activeConversationId = activeSessionEntry?.conversationId ?? null;
+      if (activeConversationId) {
+        void persistLastConversationId(activeConversationId);
+      }
+      // Subscribe to all non-active sessions so we receive their events
+      // (permissions, plan approvals, errors) in real-time. Use the
+      // precomputed chunks when the active id didn't change; otherwise
+      // (active was removed and reassigned above) recompute against the
+      // final active id via the shared chunk helper.
+      const finalActiveId = get().activeSessionId;
+      const effectiveChunks =
+        finalActiveId === initialActiveId
+          ? subscribeChunks
+          : sharedChunkSubscribeSessionIds(sessionList, finalActiveId);
+      if (effectiveChunks.length > 0) {
+        const sock = get().socket;
+        if (sock && sock.readyState === WebSocket.OPEN) {
+          for (const chunk of effectiveChunks) {
+            wsSend(sock, { type: 'subscribe_sessions', sessionIds: chunk });
           }
         }
       }
