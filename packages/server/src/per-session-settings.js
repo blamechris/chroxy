@@ -49,7 +49,7 @@
  */
 
 import { createLogger } from './logger.js'
-import { resolveSession } from './handler-utils.js'
+import { resolveSessionOrError, requireSessionMethod, sendSessionError } from './handler-utils.js'
 
 const log = createLogger('per-session-settings')
 
@@ -318,33 +318,26 @@ export function restorePerSessionSettings(saved) {
 export function buildPerSessionSettingHandler(settingDef) {
   return function perSessionSettingHandler(ws, client, msg, ctx) {
     if (!settingDef.acceptFromWire(msg?.value)) {
-      ctx.send(ws, {
-        type: 'session_error',
-        message: settingDef.handlerInvalidValueMessage,
-      })
+      sendSessionError(ws, ctx, settingDef.handlerInvalidValueMessage)
       return
     }
 
     const sessionId = msg?.sessionId || client?.activeSessionId
-    // Use the same resolveSession path every other settings handler uses
-    // — it enforces session-token binding for bound clients and falls
+    // Use the same resolveSessionOrError path every other settings handler
+    // uses — it enforces session-token binding for bound clients and falls
     // back to `client.activeSessionId` otherwise. Calling
     // `ctx.sessionManager.getSession(sessionId)` directly here would
     // bypass that gate.
-    const entry = resolveSession(ctx, msg, client)
-    if (!entry) {
-      ctx.send(ws, { type: 'session_error', message: 'No active session' })
-      return
-    }
+    const entry = resolveSessionOrError(ws, ctx, msg, client)
+    if (!entry) return
 
-    const setter = entry.session?.[settingDef.setterName]
-    if (typeof setter !== 'function') {
-      // Defensive — every shipping provider extends BaseSession which
-      // adds the setter. A custom provider that bypasses BaseSession
-      // would land here; refuse rather than silently dropping the update.
-      ctx.send(ws, { type: 'session_error', message: settingDef.handlerUnsupportedMessage })
+    // Defensive — every shipping provider extends BaseSession which adds
+    // the setter. A custom provider that bypasses BaseSession would land
+    // here; refuse rather than silently dropping the update.
+    if (!requireSessionMethod(ws, ctx, entry, settingDef.setterName, settingDef.handlerUnsupportedMessage)) {
       return
     }
+    const setter = entry.session[settingDef.setterName]
 
     const changed = setter.call(entry.session, msg.value)
     if (!changed) {

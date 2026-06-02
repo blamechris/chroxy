@@ -3,20 +3,21 @@
  *
  * Handles: create_checkpoint, list_checkpoints, restore_checkpoint, delete_checkpoint
  */
+import { sendSessionError } from '../handler-utils.js'
 
 async function handleCreateCheckpoint(ws, client, msg, ctx) {
   const sid = client.activeSessionId
   if (!sid || !ctx.sessionManager) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    sendSessionError(ws, ctx, 'No active session')
     return
   }
   const entry = ctx.sessionManager.getSession(sid)
   if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: `Session not found: ${sid}` })
+    sendSessionError(ws, ctx, `Session not found: ${sid}`)
     return
   }
   if (!entry.session.resumeSessionId) {
-    ctx.send(ws, { type: 'session_error', message: 'Cannot create checkpoint before first message' })
+    sendSessionError(ws, ctx, 'Cannot create checkpoint before first message')
     return
   }
   try {
@@ -41,7 +42,7 @@ async function handleCreateCheckpoint(ws, client, msg, ctx) {
       },
     })
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to create checkpoint: ${err.message}` })
+    sendSessionError(ws, ctx, `Failed to create checkpoint: ${err.message}`)
   }
 }
 
@@ -58,16 +59,16 @@ function handleListCheckpoints(ws, client, msg, ctx) {
 async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   const sid = client.activeSessionId
   if (!sid || !ctx.sessionManager) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    sendSessionError(ws, ctx, 'No active session')
     return
   }
   if (typeof msg.checkpointId !== 'string') {
-    ctx.send(ws, { type: 'session_error', message: 'Missing checkpointId' })
+    sendSessionError(ws, ctx, 'Missing checkpointId')
     return
   }
   const currentEntry = ctx.sessionManager.getSession(sid)
   if (currentEntry?.session?.isRunning) {
-    ctx.send(ws, { type: 'session_error', message: 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.' })
+    sendSessionError(ws, ctx, 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.')
     return
   }
   try {
@@ -87,7 +88,7 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     })
     ctx.broadcastSessionList()
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to restore checkpoint: ${err.message}` })
+    sendSessionError(ws, ctx, `Failed to restore checkpoint: ${err.message}`)
   }
 }
 

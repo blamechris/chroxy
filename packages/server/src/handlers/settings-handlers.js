@@ -5,7 +5,15 @@
  *          query_permission_audit, list_providers, set_permission_rules
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
-import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import {
+  ALLOWED_PERMISSION_MODE_IDS,
+  resolveSession,
+  resolveSessionOrError,
+  requireSessionMethod,
+  sendError,
+  sendSessionError,
+  buildSessionTokenMismatchPayload,
+} from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
 import {
   getAnthropicApiKeyStatus,
@@ -158,7 +166,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       }
 
       if (msg.mode === 'plan' && !entry.session.constructor.capabilities?.planMode) {
-        ctx.send(ws, { type: 'session_error', message: 'This provider does not support plan mode' })
+        sendSessionError(ws, ctx, 'This provider does not support plan mode')
         return
       }
       // Auto permission mode is the ultimate privilege escalation in
@@ -617,17 +625,13 @@ function handleListSkills(ws, client, msg, ctx) {
  */
 function handleSkillActivate(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_activate requires a non-empty `skillName`' })
+    sendSessionError(ws, ctx, 'skill_activate requires a non-empty `skillName`')
     return
   }
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-  if (typeof entry.session.activateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
+  if (!requireSessionMethod(ws, ctx, entry, 'activateSkill', 'This provider does not support skill activation')) {
     return
   }
   // #3246: subprocess providers (CliSession, CodexSession,
@@ -664,17 +668,13 @@ function handleSkillActivate(ws, client, msg, ctx) {
  */
 function handleSkillDeactivate(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_deactivate requires a non-empty `skillName`' })
+    sendSessionError(ws, ctx, 'skill_deactivate requires a non-empty `skillName`')
     return
   }
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-  if (typeof entry.session.deactivateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill toggling' })
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
+  if (!requireSessionMethod(ws, ctx, entry, 'deactivateSkill', 'This provider does not support skill toggling')) {
     return
   }
   // #3246: same capability gate as activate — subprocess providers
@@ -728,15 +728,12 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
  */
 function handleSkillTrustAccept(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_trust_accept requires a non-empty `skillName`' })
+    sendSessionError(ws, ctx, 'skill_trust_accept requires a non-empty `skillName`')
     return
   }
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
   // #3252: getter-with-optional-chaining keeps mock sessions (which
   // don't define the method) compatible while still surfacing TRUST_NOT_ENABLED
@@ -944,11 +941,8 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
   const trustStore = entry?.session?.getTrustStore?.() ?? null
   if (!trustStore || typeof trustStore.grantCommunityTrust !== 'function') {
@@ -1089,19 +1083,15 @@ const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
   const level = typeof msg.level === 'string' ? msg.level.trim() : ''
   if (!VALID_THINKING_LEVELS.has(level)) {
-    ctx.send(ws, { type: 'session_error', message: `Invalid thinking level: ${level}` })
+    sendSessionError(ws, ctx, `Invalid thinking level: ${level}`)
     return
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setThinkingLevel !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support thinking level control' })
+  if (!requireSessionMethod(ws, ctx, entry, 'setThinkingLevel', 'This provider does not support thinking level control')) {
     return
   }
 
@@ -1109,7 +1099,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
     await entry.session.setThinkingLevel(level)
     ctx.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to set thinking level: ${err.message}` })
+    sendSessionError(ws, ctx, `Failed to set thinking level: ${err.message}`)
   }
 }
 
@@ -1133,23 +1123,16 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
 function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // Accept string or null. Anything else is a malformed payload.
   if (msg.value !== null && typeof msg.value !== 'string') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_prompt_evaluator_skip_pattern requires a string `value` (or null/empty to clear)',
-    })
+    sendSessionError(ws, ctx, 'set_prompt_evaluator_skip_pattern requires a string `value` (or null/empty to clear)')
     return
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setPromptEvaluatorSkipPattern !== 'function') {
+  if (!requireSessionMethod(ws, ctx, entry, 'setPromptEvaluatorSkipPattern', 'This provider does not support promptEvaluatorSkipPattern')) {
     // Defensive — mirrors the parallel path in handleSetPromptEvaluator.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluatorSkipPattern' })
     return
   }
 
@@ -1161,10 +1144,7 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
     try {
       new RegExp(msg.value, 'i')
     } catch (err) {
-      ctx.send(ws, {
-        type: 'session_error',
-        message: `Invalid pattern: ${err.message || 'malformed regex'}`,
-      })
+      sendSessionError(ws, ctx, `Invalid pattern: ${err.message || 'malformed regex'}`)
       return
     }
   }
@@ -1200,7 +1180,7 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   // Validate: must be an array
   if (!Array.isArray(rules)) {
     log.warn(`Rejected invalid permission rules from ${client.id}: not an array`)
-    ctx.send(ws, { type: 'session_error', message: 'rules must be an array' })
+    sendSessionError(ws, ctx, 'rules must be an array')
     return
   }
 
@@ -1208,36 +1188,32 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i]
     if (!rule || typeof rule !== 'object') {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: not an object` })
+      sendSessionError(ws, ctx, `rules[${i}]: not an object`)
       return
     }
     if (typeof rule.tool !== 'string' || !rule.tool.trim()) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: missing tool name` })
+      sendSessionError(ws, ctx, `rules[${i}]: missing tool name`)
       return
     }
     if (rule.decision !== 'allow' && rule.decision !== 'deny') {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: decision must be 'allow' or 'deny'` })
+      sendSessionError(ws, ctx, `rules[${i}]: decision must be 'allow' or 'deny'`)
       return
     }
     if (NEVER_AUTO_ALLOW.has(rule.tool)) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' cannot be auto-allowed` })
+      sendSessionError(ws, ctx, `rules[${i}]: tool '${rule.tool}' cannot be auto-allowed`)
       return
     }
     if (!ELIGIBLE_TOOLS.has(rule.tool)) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules` })
+      sendSessionError(ws, ctx, `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules`)
       return
     }
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setPermissionRules !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support permission rules' })
+  if (!requireSessionMethod(ws, ctx, entry, 'setPermissionRules', 'This provider does not support permission rules')) {
     return
   }
 
