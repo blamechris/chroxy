@@ -3078,19 +3078,35 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
-    it('respondToQuestion falls through to label text when matchIdx >= 9 (multi-digit hotkey guard #4292)', async () => {
+    it('respondToQuestion surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS when matchIdx >= 9 (#4746)', async () => {
+      // #4292 originally fell through to writing the label text verbatim
+      // when matchIdx >= 9, which #4288 showed lands on whichever option's
+      // label starts with the same first character (jump-nav footgun).
+      // #4746 replaces the silent label-text fallback with the same
+      // structured ASK_USER_QUESTION_TOO_MANY_OPTIONS error the multi-
+      // question path emits (see #4625) so the dashboard can render a
+      // toast asking the user to re-prompt with fewer options.
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      session._isBusy = true
+      session._currentMessageId = 'msg-toomany'
+      session._activeTurn = { uuid: 'turn-toomany', synthSeq: 0, startedAt: Date.now() }
       const options = Array.from({ length: 12 }, (_, i) => ({ label: `opt-${i}` }))
       session._pendingUserAnswer = { toolUseId: 'toolu-10', options }
-      // opt-9 is index 9 (would be "10" — multi-digit), so we must NOT
-      // write "10\\r" (most single-keystroke menus commit on the first
-      // digit). Fall through to label-text path.
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      // opt-9 is index 9 → unrepresentable in claude TUI's 1..9 hotkey alphabet.
       session.respondToQuestion('opt-9')
       await new Promise((resolve) => setTimeout(resolve, 50))
-      // First write is mode-disable; second is the first char of "opt-9".
-      assert.equal(writes[0], '\x1b[?2004l')
-      assert.equal(writes[1], 'o', 'multi-digit hotkey not used; falls through to label text')
+
+      // No label-text writes — only the teardown Ctrl-C is present.
+      assert.deepEqual(writes, ['\x03'],
+        `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
+      assert.equal(errors.length, 1, 'one error emitted')
+      assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+      assert.equal(errors[0].toolUseId, 'toolu-10')
     })
 
     it('respondToQuestion writes the text when options array is missing or empty (free-text-only AskUserQuestion)', async () => {
@@ -4727,6 +4743,134 @@ describe('ClaudeTuiSession', () => {
         // Q1 → '1', Q2 → '1', Submit → '1'.
         assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '1', '\x1b[?2004h'],
           `expected default-to-1 sequence even with 10+ options, got ${JSON.stringify(writes)}`)
+      })
+
+      // #4746 — single-question parity with the multi-question fix above.
+      // Pre-#4746 the single-question path (questions.length <= 1) had the
+      // SAME limitation but a different failure mode: per the #4292 guard,
+      // a match at index >= 9 fell through to typing the label text
+      // verbatim. claude TUI's single-character jump-nav then landed on
+      // whichever option's label started with the same first character
+      // (#4288) — could be the picked option, could be any other option
+      // with a matching prefix. No error fired. The fix surfaces the same
+      // ASK_USER_QUESTION_TOO_MANY_OPTIONS error the multi-question path
+      // emits, with full teardown so the dashboard's Working banner clears.
+      it('single-question: pick of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS error + no PTY writes', async () => {
+        const writes = []
+        // The teardown writes Ctrl-C ('\x03') to unstick the TUI form,
+        // matching _onAskUserQuestionStall. Assert form bytes are NOT
+        // written (driver bailed before any keystroke) and the Ctrl-C IS
+        // written (recoverable teardown).
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_single_big'
+        session._activeTurn = { uuid: 'turn_single_big', synthSeq: 0, startedAt: Date.now() }
+        // Single question with 12 options; user picked option 11 ('k', index 10).
+        // Index 10 is unrepresentable in claude TUI's 1..9 hotkey alphabet.
+        const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
+          .map((label) => ({ label }))
+        const questions = [{ question: 'Pick one?', options: tenPlusOptions }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_big', questions, options: tenPlusOptions }
+
+        const errors = []
+        const toolResults = []
+        const streamEnds = []
+        const results = []
+        session.on('error', (e) => errors.push(e))
+        session.on('tool_result', (tr) => toolResults.push(tr))
+        session.on('stream_end', (se) => streamEnds.push(se))
+        session.on('result', (r) => results.push(r))
+
+        // Single-question is text-driven (no answersMap) — user picked 'k'.
+        session.respondToQuestion('k')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // No FORM keystrokes written — bailed out before the PTY write
+        // path. The teardown's Ctrl-C ('\x03') IS expected so claude TUI
+        // unsticks from the form screen for the next turn.
+        assert.deepEqual(writes, ['\x03'],
+          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
+
+        // Structured error surfaced so the dashboard can render a toast.
+        assert.equal(errors.length, 1, 'exactly one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+        assert.equal(errors[0].toolUseId, 'toolu_single_big')
+        assert.match(errors[0].message, /option/i,
+          `error message mentions the option-count limitation, got ${errors[0].message}`)
+
+        // Full teardown so the dashboard's Working banner + Stop button +
+        // activeTools entry all clear (mirrors the multi-question case).
+        assert.equal(toolResults.length, 1, 'synthetic tool_result for activeTools clear')
+        assert.equal(toolResults[0].toolUseId, 'toolu_single_big')
+        assert.equal(streamEnds.length, 1, 'stream_end emitted to clear streamingMessageId')
+        assert.equal(streamEnds[0].messageId, 'msg_single_big')
+        assert.equal(results.length, 1, '_emitResult fanned for agent_idle')
+        assert.equal(session._isBusy, false, '_isBusy cleared')
+        assert.equal(session._currentMessageId, null, '_currentMessageId cleared')
+        assert.equal(session._activeTurn, null, '_activeTurn cleared')
+
+        // Pending cleared so a stale answer can't write into a torn-down turn.
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after too-many error')
+
+        // No stall watchdog armed — the error IS the resolution.
+        assert.equal(session._askUserQuestionWatchdog, null, 'watchdog NOT armed (error is the resolution)')
+
+        // WARN in chroxy.log so the wedge is greppable.
+        const warn = warnLines.find((m) => /AskUserQuestion single-question: question has \d+ options/.test(m))
+        assert.ok(warn, `expected too-many-options WARN, got ${JSON.stringify(warnLines)}`)
+      })
+
+      // Boundary: a 10-option single-question where the user picked option 9
+      // (the LAST representable digit). Driver MUST drive normally, not
+      // bail. Pins the exact edge of the supported range for the single-q path.
+      it('single-question: pick of option 9 in a 10-option question still drives normally', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']
+          .map((label) => ({ label }))
+        const questions = [{ question: 'Pick one?', options: tenOptions }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_edge', questions, options: tenOptions }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // 'i' is index 8 → digit '9' (the highest supported digit).
+        session.respondToQuestion('i')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // Driver wrote normally — no too-many error.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // disable + '9' + \r + enable — the legacy single-q byte shape.
+        assert.deepEqual(writes, ['\x1b[?2004l', '9', '\r', '\x1b[?2004h'],
+          `expected '9' + trailing \\r sequence, got ${JSON.stringify(writes)}`)
+      })
+
+      // Negative: single-question 10+ options where the user typed a label
+      // that does NOT match any option (the Other / freeform fallback).
+      // The #4746 guard scopes to MATCHED picks at idx >= 9; an unmatched
+      // label still falls through to typing the literal text (the v0.9.3
+      // / pre-#4292 path). This preserves the existing Other-without-
+      // freeformText back-compat path so old clients still work.
+      it('single-question: 10+ options with no matching label still falls through to label-text (back-compat)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenPlus = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
+          .map((label) => ({ label }))
+        const questions = [{ question: 'Pick one?', options: tenPlus }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_other', questions, options: tenPlus }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Label doesn't match any option — falls through to label-text path.
+        session.respondToQuestion('zzz-not-an-option')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // No error — only matched picks at idx >= 9 surface the too-many error.
+        assert.equal(errors.length, 0, `expected no errors for unmatched-label fallback, got ${JSON.stringify(errors)}`)
+        // First write is the paste-disable; subsequent writes type the label per-char.
+        assert.equal(writes[0], '\x1b[?2004l', 'paste-disable first')
+        assert.equal(writes[1], 'z', 'falls through to per-char label-text write')
       })
     })
   })

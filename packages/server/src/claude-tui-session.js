@@ -2548,13 +2548,36 @@ export class ClaudeTuiSession extends BaseSession {
       let writeText = text
       if (Array.isArray(options) && options.length > 0) {
         const matchIdx = options.findIndex((o) => o && o.label === text)
-        // #4292: single-digit guard (1..9). Multi-digit hotkeys (10+) are
-        // NOT assumed to work on claude TUI's prompt — most single-
-        // keystroke menus commit on the first digit and the second char
-        // would either be a spurious next-prompt input or get dropped.
-        // Falling through to the label-text path for 10+ options
-        // preserves v0.9.3 behavior (broken in the same mode-jump way)
-        // without silently sending a hotkey we can't trust.
+        // #4292 + #4746: single-digit guard (1..9). Multi-digit hotkeys
+        // (10+) are NOT assumed to work on claude TUI's prompt — most
+        // single-keystroke menus commit on the first digit and the second
+        // char would either be a spurious next-prompt input or get
+        // dropped. Pre-#4746 the driver fell through to writing the
+        // label text verbatim when the picked label landed at idx >= 9
+        // (silent-drop path): claude TUI's prompt parser single-
+        // character-jump-navigated through the menu and landed on
+        // whichever option's label started with the same first character
+        // (#4288 jump-nav footgun), NOT necessarily the option the user
+        // picked. No error fired. The multi-question path solved this
+        // in #4625 by surfacing a structured ASK_USER_QUESTION_TOO_MANY_OPTIONS
+        // error before any PTY write; #4746 mirrors that fix for the
+        // single-question path so the same dashboard toast prompts the
+        // user to re-prompt the agent with fewer options. Scoped to
+        // MATCHED picks at idx >= 9 only — an unmatched label still
+        // falls through to the label-text path so the Other / freeform
+        // back-compat case (old clients without `freeformText`) is
+        // preserved.
+        if (matchIdx >= 9) {
+          const total = options.length
+          log.warn(`AskUserQuestion single-question: question has ${total} options and the user picked option ${matchIdx + 1} ("${(text || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS instead of silently falling through to label-text typing (#4288 jump-nav footgun) (tool=${prevToolUseId || '?'})`)
+          this._teardownAskUserQuestion(prevToolUseId, {
+            synthResult: `AskUserQuestion failed: question has ${total} options and you picked option ${matchIdx + 1}, beyond the 9 the claude TUI form can drive (#4746).`,
+            emitResultReason: 'ask_user_question_too_many_options',
+            errorCode: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
+            errorMessage: `Couldn't answer: a question has ${total} options and you picked option ${matchIdx + 1}, which is beyond the 9 the claude TUI form can drive. Re-prompt the agent to ask with 9 or fewer options.`,
+          })
+          return
+        }
         if (matchIdx >= 0 && matchIdx < 9) {
           writeText = String(matchIdx + 1)
         }
