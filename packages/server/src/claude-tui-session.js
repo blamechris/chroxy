@@ -1363,13 +1363,83 @@ export class ClaudeTuiSession extends BaseSession {
       return finish('paste', true)
     }
 
+    // #4805: single-line throttled path used to feed `freeformText`
+    // verbatim into _term.write — no defense against C0 control bytes
+    // or ANSI escape sequences embedded in the input. The newline
+    // bracketed-paste branch above (#4678) already strips embedded
+    // `\x1b[201~` markers and explicitly cites attacker-controlled MCP
+    // tool results as the threat model; the single-line branch has the
+    // same input shape and applies the parallel defense.
+    //
+    // Stripped (in this order, since the first match wins):
+    //   - ANSI CSI: ESC [ <params 0x30-0x3f> <intermediates 0x20-0x2f>
+    //     <final 0x40-0x7e> — the full ECMA-48 grammar including
+    //     DEC-private sequences `?`/`<`/`=`/`>`/`:` (W2 #4805)
+    //   - String controls: ESC ] / P / X / ^ / _ <payload> (BEL | ESC \)
+    //     — covers OSC (title-set), DCS (sixel/ReGIS/termcap),
+    //     SOS / PM / APC (W2 #4805 — original regex covered OSC only)
+    //   - Stray two-byte ESC + final-byte sequences: RIS `\x1b c`,
+    //     DECSC/DECRC `\x1b 7`/`8`, IND/RI/NEL/HTS `\x1b D`/`M`/`E`/`H`,
+    //     keypad-mode `\x1b =`/`>` — `\x1b.?` catch-all (W2 #4805)
+    //   - C0 control bytes \x00-\x08 + \x0b-\x1f + \x7f — the range
+    //     now includes \x1b so any unmatched lone ESC is stripped
+    //     (W2 #4805 closed the 0x1b char-class gap). Excludes \t (a
+    //     normal printable whitespace a user may paste); \r/\n never
+    //     reach this path (the multi-line branch handles them).
+    // Note: the sequence-matching alternations come BEFORE the
+    // C0 class so a full escape is matched as one unit. If the
+    // lone-byte class came first the regex would peel off the \x1b
+    // introducer and leave the [<final> bytes as printable garbage.
+    // Known damage paths covered:
+    //   - \x03 (Ctrl-C) aborts the active TUI form
+    //   - OSC \x1b]0;...\x07 rewrites the window title on some hosts
+    //   - DEC-private CSI (\x1b[?25l hide-cursor, \x1b[?1049h alt-
+    //     screen, \x1b[?1000h / \x1b[?1006h mouse-tracking) desync
+    //     the TUI input state machine — the recurring wedge symptom
+    //     class
+    //   - RIS \x1b c full-terminal-reset clears the scrollback
+    //   - APC payloads (iTerm2 proprietary commands)
+    const stripped = []
+    text = text.replace(
+      // eslint-disable-next-line no-control-regex
+      /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\)|\x1b.?|[\x00-\x08\x0b-\x1f\x7f]/g,
+      (match) => {
+        stripped.push(match)
+        return ''
+      },
+    )
+    if (stripped.length > 0) {
+      // Bounded hex preview (first 32 stripped bytes total) gives an
+      // incident-response footprint without blowing the log on a
+      // malicious flood. Sequences are concatenated then truncated so
+      // each warn line carries the same payload shape regardless of
+      // how many distinct sequences were stripped.
+      const totalBytes = stripped.reduce((n, s) => n + Buffer.byteLength(s, 'utf8'), 0)
+      const sampleHex = Buffer.from(stripped.join(''), 'utf8').slice(0, 32).toString('hex')
+      const truncated = totalBytes > 32 ? ',…' : ''
+      log.warn(`writePtyText (msg=${this._activeTurn?.messageId ?? 'none'}) stripped ${totalBytes} control/escape bytes from single-line input (sample=${sampleHex}${truncated}) (#4805)`)
+    }
+    // After stripping, an all-control-byte prompt can collapse to an
+    // empty body. Mirror the multi-line branch's `body.length === 0`
+    // guard (:1358): abort the turn cleanly rather than write a bare
+    // \r submit to the TUI — the caller sees a finished turn (no
+    // message ever leaves chroxy) instead of chroxy claiming to have
+    // sent and waiting forever for a reply.
+    if (text.length === 0) {
+      onAbort?.()
+      return finish('throttled-empty', false)
+    }
+    // Re-compute counts now that the body may have shrunk so the bulk-
+    // path threshold check + finish() bookkeeping stay accurate.
+    const sanitizedCodePointCount = [...text].length
+
     this._term.write('\x1b[?2004l')
     try {
       // #4276: huge prompts bypass the throttle. Code-point count
       // (counted once at function entry) keeps the threshold
       // consistent with how the loop iterates — an emoji-only 5000-
       // char string [...].length is 5000, not 10000.
-      if (codePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
+      if (sanitizedCodePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
         // Re-check the turn lifecycle exactly once before the bulk
         // write — same shape as the loop's per-iter guards, so a
         // caller that aborted between scheduling and execution doesn't

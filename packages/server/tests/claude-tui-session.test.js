@@ -1344,6 +1344,267 @@ describe('ClaudeTuiSession', () => {
       // sent at a stale PTY.
       assert.equal(writes.includes(huge), false, 'large body never reaches a torn-down PTY')
     })
+
+    // #4805: the single-line throttled path fed each code-point verbatim
+    // into _term.write — no defense against C0 control bytes or ANSI
+    // CSI / OSC sequences embedded in the freeform input. The newline
+    // bracketed-paste branch (#4678) already strips embedded `\x1b[201~`
+    // markers and explicitly cites attacker-controlled MCP tool results
+    // as the threat model; the single-line branch has the same input
+    // shape (freeformText from the dashboard, Zod-bounded only to
+    // string + 100KB length) and so needs parallel defense.
+    //
+    // Known damage paths from the audit:
+    //   - `\x03` (Ctrl-C) aborts the active form
+    //   - OSC `\x1b]0;...\x07` → terminal-title injection on some hosts
+    //   - Long ANSI CSI sequences desync the TUI input state machine
+    //     (the recurring wedge symptom class)
+    //
+    // The fix strips C0 control bytes (excluding \t which is whitespace
+    // the user might paste) and ANSI CSI / OSC sequences before the
+    // per-char loop. Tab is kept because it's a normal printable
+    // whitespace; \r and \n never reach this path (the multi-line branch
+    // handles them).
+    it('_writePtyTextThrottled: strips C0 control bytes (Ctrl-C) from single-line input (#4805)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-c0', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // Ctrl-C embedded mid-prompt. Without the strip the per-char loop
+      // would write \x03 verbatim and abort the TUI form.
+      const completed = await session._writePtyTextThrottled('hello\x03world')
+
+      assert.equal(completed, true)
+      // The combined per-char writes (chars between the disable/enable
+      // bookends and the \r submit) must contain no \x03 byte.
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x03'), false, 'Ctrl-C byte is stripped from the per-char write stream')
+      assert.equal(joined, 'helloworld', 'surrounding printable text passes through with the control byte excised')
+    })
+
+    it('_writePtyTextThrottled: strips ANSI CSI cursor sequences from single-line input (#4805)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-csi', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // ANSI CSI cursor-up sequence embedded in the body — drives the
+      // TUI's input cursor in ways the user never typed.
+      const completed = await session._writePtyTextThrottled('foo\x1b[Abar')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'ESC byte is stripped (no surviving CSI introducer)')
+      assert.equal(joined.includes('[A'), false, 'CSI tail bytes go with the introducer')
+      assert.equal(joined, 'foobar', 'CSI sequence is fully excised, surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: strips OSC title-set sequences from single-line input (#4805)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-osc', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // OSC title-set: ESC ] 0 ; <title> BEL. On terminal hosts that
+      // honour OSC even inside the input box this rewrites the window
+      // title from attacker-controlled bytes.
+      const completed = await session._writePtyTextThrottled('hi\x1b]0;evil\x07there')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'OSC ESC is stripped')
+      assert.equal(joined.includes('\x07'), false, 'BEL terminator is stripped')
+      assert.equal(joined.includes('evil'), false, 'OSC payload between ESC ] and BEL is dropped')
+      assert.equal(joined, 'hithere', 'OSC sequence is fully excised, surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: passes normal printable text through untouched (#4805)', async () => {
+      // Regression guard for the strip — printable ASCII, tabs, and
+      // multi-byte BMP/non-BMP characters must survive byte-for-byte.
+      // (Newlines are handled by the multi-line branch, not this one.)
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-clean', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const clean = 'hello\tworld 你好 🚀 !@#$%^&*()'
+      const completed = await session._writePtyTextThrottled(clean)
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      assert.equal(charWrites.join(''), clean,
+        'printable + tab + multi-byte text is preserved byte-for-byte')
+    })
+
+    // #4805 Wave 2: the original strip regex left three classes of bytes
+    // through (Copilot + agent-review caught these post-merge):
+    //   1. Lone \x1b — char class [\x00-\x08\x0b-\x1a\x1c-\x1f\x7f] has
+    //      a gap at 0x1b (between 0x1a and 0x1c). The comment claimed
+    //      lone ESC was stripped; the code didn't deliver.
+    //   2. CSI parameter bytes 0x30-0x3f — the original `[\d;]*` covers
+    //      only digits + ';', missing DEC-private intro bytes `?`/`<`/
+    //      `=`/`>`/`:`. So `\x1b[?25l`, `\x1b[?1049h`, `\x1b[?1000h`,
+    //      `\x1b[?1006h` all pass through.
+    //   3. String-control introducers other than OSC — DCS `\x1b P`,
+    //      APC `\x1b _`, PM `\x1b ^`, SOS `\x1b X` were not in the
+    //      alternation. Some terminals (iTerm2) execute APC payloads.
+    //
+    // The Wave 2 regex broadens CSI to the full ECMA-48 grammar
+    // (params 0x30-0x3f, intermediates 0x20-0x2f, final 0x40-0x7e),
+    // adds DCS/APC/PM/SOS to the string-control alternation, adds a
+    // `\x1b.?` catch-all for stray two-byte ESC + final-byte sequences
+    // (RIS \x1b c, DECSC/DECRC \x1b 7/8, IND/RI/NEL/HTS \x1b D/M/E/H),
+    // and extends the C0 class to \x1f so a lone ESC is always stripped.
+    it('_writePtyTextThrottled: strips DEC-private CSI sequences (W2 #4805)', async () => {
+      // \x1b[?25l hides the cursor; \x1b[?1049h switches to the alt
+      // screen. Both are CSI sequences with `?` as the first parameter
+      // byte (0x3F, in the 0x30-0x3f param range). The original
+      // `[\d;]*` regex skipped them.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-dec', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const completed = await session._writePtyTextThrottled('a\x1b[?25lb\x1b[?1049hc')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'no ESC bytes survive DEC-private strip')
+      assert.equal(joined.includes('?'), false, 'no DEC-private parameter intro bytes survive')
+      assert.equal(joined.includes('25l'), false, 'no DEC sequence tail leaks as printable garbage')
+      assert.equal(joined.includes('1049h'), false, 'no alt-screen sequence tail leaks')
+      assert.equal(joined, 'abc', 'surrounding text preserved with both DEC sequences fully excised')
+    })
+
+    it('_writePtyTextThrottled: strips stray two-byte ESC + final-byte sequences like RIS (W2 #4805)', async () => {
+      // RIS (ESC + 'c', byte sequence `\x1bc`) is the full terminal-
+      // reset escape — clears scrollback, resets colours/attributes.
+      // The original regex matched CSI/OSC only; `\x1bc` passed
+      // through entirely (ESC in the char-class gap, `c` printable).
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-ris', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const completed = await session._writePtyTextThrottled('keep\x1bcmore')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'ESC byte stripped')
+      // The \x1b.? alternation consumes ESC + one trailing byte, so the
+      // `c` final byte of RIS goes with it; the surrounding "keep" and
+      // "more" land cleanly with no `c` between them.
+      assert.equal(joined, 'keepmore', 'RIS escape sequence fully excised')
+    })
+
+    it('_writePtyTextThrottled: strips APC payloads terminated by ST (W2 #4805)', async () => {
+      // APC (\x1b _ ... \x1b\\) — iTerm2 interprets these for
+      // proprietary commands. Original regex matched OSC only; APC
+      // body passed through as printable text.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-apc', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const completed = await session._writePtyTextThrottled('pre\x1b_evil\x1b\\post')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'no ESC bytes survive')
+      assert.equal(joined.includes('evil'), false, 'APC payload between introducer and ST is dropped')
+      assert.equal(joined, 'prepost', 'APC sequence fully excised with surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: strips a lone ESC byte (W2 #4805 regression guard)', async () => {
+      // The original char class [\x00-\x08\x0b-\x1a\x1c-\x1f\x7f] had a
+      // gap at 0x1b. The block comment claimed ESC was stripped; the
+      // code didn't. The Wave 2 regex either matches ESC via the
+      // \x1b.? catch-all OR via the broadened class [\x00-\x08\x0b-\x1f
+      // \x7f]. Either way a bare ESC must not survive.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-lone-esc', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // Trailing ESC at end-of-string — the \x1b.? alternation matches
+      // ESC + optional next byte, so a trailing bare ESC matches with
+      // an empty optional group and is dropped.
+      const completed = await session._writePtyTextThrottled('hello\x1b')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'lone trailing ESC stripped')
+      assert.equal(joined, 'hello', 'surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: handles all-control-byte input cleanly (W2 #4805 empty-after-strip)', async () => {
+      // Mirror the multi-line branch's `body.length === 0` guard
+      // (:1358): if the post-strip body is empty, abort the turn
+      // cleanly rather than submitting a bare \r to the TUI. Without
+      // the guard the single-line path would still write the bracketed-
+      // paste-disable + zero-iteration loop + \r submit, which is at
+      // best a no-op and at worst an empty prompt the TUI doesn't
+      // expect.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-empty', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      let onAbortCalled = false
+      const completed = await session._writePtyTextThrottled('\x03\x1b[A\x07\x1b]0;t\x07', {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false, 'empty-after-strip returns false (no message left chroxy)')
+      assert.equal(onAbortCalled, true, 'onAbort fires so caller surfaces a finished-but-empty turn')
+      assert.equal(writes.includes('\r'), false, 'no bare \\r submit on empty body')
+      // The disable + finally re-enable bookends are fine to emit
+      // (they're idempotent terminal state) — what matters is no body
+      // and no \r reached the PTY.
+    })
+
+    it('_writePtyTextThrottled: audit log includes hex sample of stripped bytes (W2 #4805)', async () => {
+      // The original warn line said only "stripped N bytes" — useless
+      // for forensics on a real attack. The Wave 2 audit log includes
+      // a bounded hex-encoded sample (first 32 bytes) so an operator
+      // can grep for known-bad signatures and an incident-response
+      // run-book has the bytes themselves.
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'claude-tui-session') {
+          warnLines.push(entry.message)
+        }
+      }
+      addLogListener(logSpy)
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { messageId: 'm-audit', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+        session._term = { write: () => {}, kill: () => {} }
+
+        // \x03 (Ctrl-C) + \x1b[A (CSI cursor-up). Hex-encoded these are
+        // "03" and "1b5b41".
+        await session._writePtyTextThrottled('a\x03b\x1b[Ac')
+
+        const strip = warnLines.find((m) => /stripped \d+ control\/escape bytes/.test(m))
+        assert.ok(strip, `expected strip warn line, got warnLines=${JSON.stringify(warnLines)}`)
+        assert.match(strip, /msg=m-audit/, 'warn carries the active turn messageId')
+        assert.match(strip, /sample=/, 'warn includes a stripped-bytes sample field')
+        // The hex sample must contain the bytes we sent — both \x03
+        // (Ctrl-C) and the full CSI \x1b[A sequence.
+        assert.match(strip, /03/, 'hex sample contains the stripped Ctrl-C byte (0x03)')
+        assert.match(strip, /1b5b41/, 'hex sample contains the stripped CSI cursor-up bytes (\\x1b[A)')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
   })
 
   describe('attachment-cap warn lines (#4216)', () => {
