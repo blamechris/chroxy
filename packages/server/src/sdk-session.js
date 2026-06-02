@@ -1146,12 +1146,18 @@ export class SdkSession extends BaseSession {
     const semantics = extractToolInputSemantics(block.name, block.input)
     if (!semantics) return
     if (semantics.kind === 'task') {
+      // #4778: when block.id is missing, mirror the synthesized fallback
+      // used by buildToolStartData (`${messageId}-tool`) so the
+      // agent_spawned toolUseId + _activeAgents key match the wire-emitted
+      // tool_start id. Without this, _activeAgents.set(undefined, ...)
+      // collides on undefined for any fallback-path Task spawn.
+      const toolUseId = block.id || `${messageId}-tool`
       const agentInfo = {
-        toolUseId: block.id,
+        toolUseId,
         description: semantics.payload.description,
         startedAt: Date.now(),
       }
-      this._activeAgents.set(block.id, agentInfo)
+      this._activeAgents.set(toolUseId, agentInfo)
       this.emit('agent_spawned', agentInfo)
     }
     // EnterPlanMode / ExitPlanMode are not currently surfaced by SdkSession

@@ -474,6 +474,25 @@ describe('SdkSession', () => {
       assert.ok(session._activeAgents.has('tool-1'))
     })
 
+    it('aligns toolUseId with synthesized fallback when block.id is missing (#4778)', () => {
+      const events = []
+      session.on('agent_spawned', (data) => events.push(data))
+
+      // Mirrors the defensive fallback path of buildToolStartData when
+      // upstream stream_event omits content_block.id. agent_spawned +
+      // _activeAgents must key off the synthesized `${messageId}-tool`
+      // id, not `undefined`, so they match the wire-emitted tool_start.
+      session._handleToolUseBlock('msg-99', {
+        name: 'Task',
+        input: { description: 'fallback path' },
+      })
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'msg-99-tool')
+      assert.ok(session._activeAgents.has('msg-99-tool'))
+      assert.ok(!session._activeAgents.has(undefined))
+    })
+
     it('truncates long descriptions to 200 chars', () => {
       const events = []
       session.on('agent_spawned', (data) => events.push(data))
