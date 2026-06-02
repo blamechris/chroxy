@@ -673,7 +673,7 @@ export interface BaseSessionState {
    * Distinct from `health: 'crashed'` (loud unexpected-exit error UX) and
    * from `claudeReady: false` (transient between-turns idle). Renderers
    * use this to surface a calm, informational status strip ("Session
-   * stopped." / "Session stopped. exit N") that the operator can choose
+   * stopped." / "Session stopped. (exit N)") that the operator can choose
    * to act on — typically by sending another message (which clears
    * `stoppedAt` on the next `claude_ready`) or by deleting the session.
    *

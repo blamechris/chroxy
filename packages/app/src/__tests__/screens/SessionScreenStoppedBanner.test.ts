@@ -55,8 +55,13 @@ describe('SessionScreen stopped status strip (#4879)', () => {
     expect(SessionScreenSrc).toMatch(/'Session stopped\.'/);
   });
 
-  it("renders 'Session stopped. exit N' suffix for non-zero codes (e.g. 143 = SIGTERM)", () => {
-    expect(SessionScreenSrc).toMatch(/Session stopped\. exit \$\{activeSessionStoppedCode\}/);
+  it("renders 'Session stopped. (exit N)' suffix for non-zero codes (e.g. 143 = SIGTERM)", () => {
+    // #4910: aligned with the dashboard's parenthesised form ("Session
+    // stopped. (exit N)") so both surfaces speak with one voice. The
+    // protocol doc-comment already uses bare "Session stopped." for the
+    // common case, and parentheses are the conventional wrapper for a
+    // diagnostic suffix.
+    expect(SessionScreenSrc).toMatch(/Session stopped\. \(exit \$\{activeSessionStoppedCode\}\)/);
   });
 
   it('uses informational stoppedBanner style (NOT errorBanner / warningBanner)', () => {
