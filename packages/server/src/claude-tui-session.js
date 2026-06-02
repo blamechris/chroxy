@@ -2415,12 +2415,34 @@ export class ClaudeTuiSession extends BaseSession {
         // and the trailing \r submits.
         const tag = prevToolUseId || '?'
         ;(async () => {
+          // #4808: destroy() can run during ANY of the awaits below
+          // (stage-1 write, settle pause, stage-2 write). Without a
+          // guard after each await the IIFE keeps running and:
+          //   - re-arms `_askUserQuestionWatchdog` past destroy(),
+          //     leaking a 30s timer that pins `this` in its closure
+          //     even though `_onAskUserQuestionStall`'s _destroying
+          //     guard silences the eventual emit
+          //   - calls `_writePtyTextThrottled(freeformText)` against
+          //     a `_term` that destroy() set to null, throwing inside
+          //     the inner write loop
+          // Bail out at every await boundary instead.
           const stage1ok = await this._writePtyTextThrottled(otherDigit).catch((err) => {
             log.warn(`respondToQuestion Other-digit PTY write failed: ${err.message} (tool=${tag})`)
             return false
           })
+          if (this._destroying) return
           if (!stage1ok) return
           await new Promise((resolve) => setTimeout(resolve, OTHER_FREEFORM_SETTLE_MS))
+          if (this._destroying) return
+          // Belt-and-braces: destroy() sets _destroying before nulling
+          // _term in the same synchronous frame, so the guard above
+          // already covers the destroy() race. This null-check is
+          // cheap insurance against a future path that releases _term
+          // without flipping _destroying (e.g. a PTY-exit handler) —
+          // skip the re-arm AND the stage-2 write together so the
+          // watchdog never fires for a session that no longer has a
+          // PTY behind it.
+          if (!this._term) return
           // Re-arm the watchdog so the freeform write phase has a fresh
           // OTHER_FREEFORM_WATCHDOG_MS window — the stage-1 arm already
           // counted the settle delay against the original 30s budget.

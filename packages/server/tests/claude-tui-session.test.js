@@ -3201,6 +3201,129 @@ describe('ClaudeTuiSession', () => {
 
         assert.equal(writes.length, 0, `no PTY writes when freeform requested but no Other option exists, got: ${JSON.stringify(writes)}`)
       })
+
+      // #4808 — the Other/freeform path is driven by an async IIFE that
+      // awaits stage-1 write → settle delay → re-arms the watchdog →
+      // awaits stage-2 write. destroy() can run during any of these
+      // awaits but the IIFE keeps going. Pre-#4808 it would:
+      //   1. Re-arm `_askUserQuestionWatchdog` AFTER destroy() already
+      //      cleared it, leaking a 30s timer that holds `this` in its
+      //      closure (the `_onAskUserQuestionStall` guard prevents the
+      //      emit but doesn't release the closure).
+      //   2. Call `_writePtyTextThrottled(freeformText)` on a null
+      //      `_term`, which throws inside the write loop (or worse —
+      //      revives a write path against a torn-down session).
+      // Fix is `if (this._destroying) return` after each `await` and a
+      // null-check on `this._term` before stage 2.
+      describe('destroy() during the two-stage IIFE (#4808)', () => {
+        it('destroy() between stage-1 and stage-2 does NOT re-arm the watchdog', async () => {
+          const writes = []
+          session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+          session._pendingUserAnswer = {
+            toolUseId: 'toolu_aq_destroy_race',
+            options: [
+              { label: 'Patch' },
+              { label: 'Minor' },
+              { label: 'Other' },
+            ],
+          }
+
+          // Kick off the two-stage IIFE.
+          session.respondToQuestion('Other', undefined, 'toolu_aq_destroy_race', {
+            freeformText: 'race text',
+          })
+
+          // Stage 1 (the digit '3') finishes within ~5ms — give it a
+          // beat to land but tear the session down DURING the
+          // OTHER_FREEFORM_SETTLE_MS (150ms) sleep. Targeting 60ms
+          // hits well inside that window on any reasonable machine.
+          await new Promise((resolve) => setTimeout(resolve, 60))
+          await session.destroy()
+          // Null `session` so the afterEach hook does not double-destroy.
+          const torn = session
+          session = null
+
+          // The watchdog was cleared by destroy(). If the IIFE re-arms
+          // it after `await new Promise(setTimeout(SETTLE_MS))` resolves,
+          // a fresh timer appears on `_askUserQuestionWatchdog` —
+          // detectable by sampling the field repeatedly until well past
+          // the settle delay.
+          const samples = []
+          for (let i = 0; i < 4; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 60))
+            samples.push(torn._askUserQuestionWatchdog)
+          }
+
+          // Pre-#4808: at least one sample is a Timeout (re-armed).
+          // Post-fix: every sample stays null.
+          for (const s of samples) {
+            assert.equal(s, null, `_askUserQuestionWatchdog must stay null past destroy(); saw ${s}. samples=${samples.map((x) => x ? 'TIMER' : 'null').join(',')}`)
+          }
+        })
+
+        it('destroy() between stage-1 and stage-2 does NOT attempt to write on a null _term', async () => {
+          // Capture the "Other-freeform PTY write failed" warning — this
+          // is the symptom of the IIFE blindly calling
+          // `_writePtyTextThrottled(freeformText)` against a `_term` that
+          // destroy() set to null. Pre-#4808 the inner `this._term.write`
+          // throws `Cannot read properties of null (reading 'write')`,
+          // the IIFE's .catch logs that warning, and the session has just
+          // demonstrated that it can still execute write logic past
+          // destroy(). Post-fix the IIFE returns early after the
+          // settle-await and the warning never fires.
+          const warnLines = []
+          const captureWarn = (entry) => {
+            if (entry.level === 'warn' && /Other-freeform PTY write failed/.test(entry.message || '')) {
+              warnLines.push(entry.message)
+            }
+          }
+          addLogListener(captureWarn)
+
+          const stage1Writes = []
+          session._term = {
+            write: (data) => { stage1Writes.push(data) },
+            kill: () => {},
+          }
+          session._pendingUserAnswer = {
+            toolUseId: 'toolu_aq_destroy_term',
+            options: [
+              { label: 'Patch' },
+              { label: 'Minor' },
+              { label: 'Other' },
+            ],
+          }
+
+          try {
+            session.respondToQuestion('Other', undefined, 'toolu_aq_destroy_term', {
+              freeformText: 'after destroy',
+            })
+
+            // Let stage-1 (digit '3') land, then destroy during the
+            // OTHER_FREEFORM_SETTLE_MS (150ms) pause.
+            await new Promise((resolve) => setTimeout(resolve, 60))
+            await session.destroy()
+            const torn = session
+            session = null
+            // Sanity: destroy() nulled `_term`.
+            assert.equal(torn._term, null, 'destroy() nulls _term')
+
+            // Wait past the settle (150ms) + per-char throttle time for
+            // stage-2 to run if it's going to. Post-fix the IIFE returns
+            // after `if (this._destroying) return` and never touches
+            // `_term`.
+            await new Promise((resolve) => setTimeout(resolve, 250))
+
+            assert.equal(
+              warnLines.length, 0,
+              `IIFE must not execute stage-2 write into a null _term post-destroy; saw warns: ${JSON.stringify(warnLines)}`,
+            )
+            // Stage-1 digit DID land (it ran before destroy).
+            assert.ok(stage1Writes.some((w) => w === '3'), `stage-1 digit "3" expected to have written before destroy, got: ${JSON.stringify(stage1Writes)}`)
+          } finally {
+            removeLogListener(captureWarn)
+          }
+        })
+      })
     })
 
     it('PostToolUse for AskUserQuestion clears _pendingUserAnswer if it was still set', () => {
