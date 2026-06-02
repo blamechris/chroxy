@@ -198,6 +198,39 @@ describe('WsBroadcaster', () => {
       assert.equal(sent.length, 1)
       assert.equal(sent[0].ws, ws2)
     })
+
+    it('does not throw when a client is missing subscribedSessionIds (#4799)', () => {
+      // Defensive: a client could lack `subscribedSessionIds` (legacy fixture,
+      // future refactor, code bug). The default filter must not throw —
+      // otherwise the broadcast loop aborts mid-iteration and other clients
+      // miss the message.
+      const wsBroken = createFakeWs()
+      const wsOk = createFakeWs()
+      const brokenClient = createFakeClient({ id: 'broken', activeSessionId: 'other' })
+      brokenClient.subscribedSessionIds = undefined
+      clients.set(wsBroken, brokenClient)
+      clients.set(wsOk, createFakeClient({ id: 'ok', activeSessionId: 'sess-1' }))
+
+      assert.doesNotThrow(() => {
+        broadcaster._broadcastToSession('sess-1', { type: 'data' })
+      })
+
+      // The healthy client on the matching activeSessionId still receives it.
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].ws, wsOk)
+    })
+
+    it('still delivers to a client whose activeSessionId matches even with no subscribedSessionIds (#4799)', () => {
+      const ws = createFakeWs()
+      const client = createFakeClient({ id: 'c1', activeSessionId: 'sess-1' })
+      client.subscribedSessionIds = undefined
+      clients.set(ws, client)
+
+      broadcaster._broadcastToSession('sess-1', { type: 'data' })
+
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].ws, ws)
+    })
   })
 
   describe('_broadcastClientJoined()', () => {
