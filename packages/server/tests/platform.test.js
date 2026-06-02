@@ -59,13 +59,18 @@ describe('platform', () => {
       })
 
       it('writes atomically via <path>.tmp + rename — leaves original intact and cleans up tmp when rename fails (#4850, #4874)', () => {
-        // Simulates the process being killed (SIGKILL / OOM) between the
-        // tmp-write and the rename. The contract is: readers never see a
-        // half-written `filePath` — they see either the previous version
-        // (this test) or the new one. Since #4874 we also clean up the
-        // intermediate `.tmp` on rename failure, so it does not leak on
-        // disk across retries (environment-manager.js and
+        // Simulates `renameSync` failing AFTER the tmp file is fully
+        // written (EIO from the shim below). The contract under test is
+        // two-part: (1) readers of `filePath` never see a half-written
+        // version — they observe either the previous generation (this
+        // test) or the new one once rename succeeds; (2) since #4874 the
+        // intermediate `.tmp` is unlinked in-process when rename fails so
+        // it does not leak across retries (environment-manager.js and
         // session-state-persistence.js used to hand-roll this cleanup).
+        // The previous-generation guarantee is what protected callers
+        // pre-#4874 when the process was killed mid-write (SIGKILL / OOM)
+        // — same crash-safety contract, exercised here via a synthetic
+        // rename failure rather than a real signal.
         //
         // We run the actual write in a subprocess because monkey-patching
         // `fs.renameSync` in-process doesn't propagate to `platform.js`'s
