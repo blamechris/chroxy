@@ -99,11 +99,28 @@ export class WsBroadcaster {
   /**
    * Broadcast a session-scoped message to clients viewing that session.
    * Tags the message with `sessionId` so clients can route it to the correct
-   * session state. By default only delivers to clients whose activeSessionId
-   * matches — prevents cross-session info leakage and bandwidth waste.
+   * session state. By default delivers to clients whose `activeSessionId`
+   * matches OR who have explicitly subscribed via `subscribedSessionIds` —
+   * prevents cross-session info leakage and bandwidth waste while still
+   * supporting multi-session subscribers (e.g. dashboard tabs).
    * Pass a custom filter to override the default recipient selection when needed.
+   *
+   * #4799: Guards against a client missing `subscribedSessionIds`. Clients
+   * should always be initialized with `new Set()` (see ws-server.js client
+   * registration), but a missing field would otherwise throw mid-iteration
+   * and abort the broadcast for every later client in the loop. If we
+   * encounter an authenticated client without the Set, log a one-shot
+   * warning to surface the real bug — the broadcast itself stays alive.
    */
-  _broadcastToSession(sessionId, message, filter = (client) => client.activeSessionId === sessionId || client.subscribedSessionIds.has(sessionId)) {
+  _broadcastToSession(sessionId, message, filter = (client) => {
+    if (client.activeSessionId === sessionId) return true
+    if (client.subscribedSessionIds) return client.subscribedSessionIds.has(sessionId)
+    if (client.authenticated && !client._missingSubscribedSessionIdsWarned) {
+      log.warn(`Client ${client.id} is authenticated but has no subscribedSessionIds Set — falling back to activeSessionId match only (sessionId=${sessionId}, messageType=${message?.type || 'unknown'})`)
+      client._missingSubscribedSessionIdsWarned = true
+    }
+    return false
+  }) {
     const tagged = { ...message, sessionId }
     for (const [ws, client] of this._clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
