@@ -989,13 +989,18 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   }, [updateInputSettings])
 
   const handleVoiceInputModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    // #4825: narrow against the consolidated VoiceInputMode union so adding
-    // a future mode (e.g. 'push-to-talk') to store-core forces this guard
-    // to be updated.
+    // #4825: validate against an exhaustive `Record<VoiceInputMode, true>`
+    // map instead of a hard-coded string-list. Adding a new mode to the
+    // union in store-core makes this object literal a TS error (missing
+    // property), forcing the guard to be updated. The previous `===` chain
+    // would have silently dropped a new mode (#4841 review feedback).
+    const VALID_MODES: Record<VoiceInputMode, true> = {
+      continuous: true,
+      'auto-pause': true,
+    }
     const next = e.target.value
-    if (next === 'continuous' || next === 'auto-pause') {
-      const mode: VoiceInputMode = next
-      updateInputSettings({ voiceInputMode: mode })
+    if (Object.prototype.hasOwnProperty.call(VALID_MODES, next)) {
+      updateInputSettings({ voiceInputMode: next as VoiceInputMode })
     }
   }, [updateInputSettings])
 

@@ -160,8 +160,15 @@ export interface ContextUsage {
  * #4825: consolidated here so the mobile `useSpeechRecognition` hook, the
  * dashboard `useVoiceInput` hook, the dashboard `SettingsPanel` change
  * handler, and the mobile `SettingsScreen` picker all share one declaration.
- * Add a new mode (e.g. `'push-to-talk'`) once here and the type-checker will
- * flag every site that needs to handle it.
+ *
+ * Compile-time enforcement is only as strong as the consuming pattern: sites
+ * that exhaustively key a `Record<VoiceInputMode, …>` (e.g. the dashboard
+ * `SettingsPanel` change handler, the mobile `SettingsScreen` picker tuple
+ * typed as `{ value: VoiceInputMode; … }[]`) will be flagged by TS when the
+ * union widens. Sites that use runtime string guards (e.g. the
+ * localStorage-rehydrate path in `packages/dashboard/src/store/connection.ts`
+ * line ~805) will silently ignore the new mode until updated — grep for
+ * `voiceInputMode ===` before adding a new variant.
  */
 export type VoiceInputMode = 'continuous' | 'auto-pause';
 
