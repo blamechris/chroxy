@@ -16,6 +16,7 @@ import {
   formatPlatform,
   formatRelativeTime,
 } from '@chroxy/store-core'
+import type { VoiceInputMode } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import {
   getTunnelMode,
@@ -988,9 +989,18 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   }, [updateInputSettings])
 
   const handleVoiceInputModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    // #4825: validate against an exhaustive `Record<VoiceInputMode, true>`
+    // map instead of a hard-coded string-list. Adding a new mode to the
+    // union in store-core makes this object literal a TS error (missing
+    // property), forcing the guard to be updated. The previous `===` chain
+    // would have silently dropped a new mode (#4841 review feedback).
+    const VALID_MODES: Record<VoiceInputMode, true> = {
+      continuous: true,
+      'auto-pause': true,
+    }
     const next = e.target.value
-    if (next === 'continuous' || next === 'auto-pause') {
-      updateInputSettings({ voiceInputMode: next })
+    if (Object.prototype.hasOwnProperty.call(VALID_MODES, next)) {
+      updateInputSettings({ voiceInputMode: next as VoiceInputMode })
     }
   }, [updateInputSettings])
 

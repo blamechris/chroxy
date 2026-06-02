@@ -35,6 +35,7 @@ import {
   formatPlatform,
   formatRelativeTime,
 } from '@chroxy/store-core';
+import type { VoiceInputMode } from '@chroxy/store-core';
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
@@ -92,9 +93,10 @@ function isValidHHMM(s: string): boolean {
 /**
  * #4807: voice input mode picker options. Mirrors the dashboard
  * `SettingsPanel` select (`packages/dashboard/src/components/SettingsPanel.tsx`)
- * and the shared `InputSettings.voiceInputMode` field.
+ * and the shared `InputSettings.voiceInputMode` field. The mode union
+ * itself is consolidated in `@chroxy/store-core` (#4825).
  */
-const VOICE_INPUT_MODES: { value: 'continuous' | 'auto-pause'; label: string; hint: string }[] = [
+const VOICE_INPUT_MODES: { value: VoiceInputMode; label: string; hint: string }[] = [
   {
     value: 'continuous',
     label: 'Continuous',

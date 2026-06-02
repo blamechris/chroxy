@@ -26,6 +26,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { getTauriInvoke, getTauriListen } from '../utils/tauri-bridge'
 
+// #4825: consolidated voice-input mode union lives in store-core so both
+// the dashboard and the mobile hook share one declaration.
+import type { VoiceInputMode } from '@chroxy/store-core'
+
 interface TranscriptionPayload {
   text: string
   is_final: boolean
@@ -112,9 +116,12 @@ function permissionMessageForError(error: string): string {
 }
 
 /**
- * Voice input behaviour. See `InputSettings.voiceInputMode` in store-core for
- * the persisted setting; this hook accepts it as a runtime option so the
- * caller (App.tsx) reads the store once and the hook stays store-agnostic.
+ * Voice input behaviour. The union itself lives in `@chroxy/store-core`
+ * (#4825) — re-exported here so existing imports of `VoiceInputMode` from
+ * this module keep working without churn. See `InputSettings.voiceInputMode`
+ * in store-core for the persisted setting; this hook accepts it as a runtime
+ * option so the caller (App.tsx) reads the store once and the hook stays
+ * store-agnostic.
  *
  * - `'continuous'`: when the Web Speech engine fires `onend` due to silence,
  *   the hook restarts recognition automatically. The mic stays lit until the
@@ -127,7 +134,7 @@ function permissionMessageForError(error: string): string {
  * Only the web engine is affected. The native (Tauri) engine has its own
  * end-of-utterance semantics driven by the Swift helper and is out of scope.
  */
-export type VoiceInputMode = 'continuous' | 'auto-pause'
+export type { VoiceInputMode }
 
 export interface UseVoiceInputOptions {
   mode?: VoiceInputMode

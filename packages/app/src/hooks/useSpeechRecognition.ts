@@ -8,6 +8,10 @@ import type {
   ExpoSpeechRecognitionErrorEvent,
 } from 'expo-speech-recognition';
 
+// #4825: consolidated voice-input mode union lives in store-core so the
+// mobile hook, dashboard hook, and both settings UIs share one declaration.
+import type { VoiceInputMode } from '@chroxy/store-core';
+
 // Dynamically resolve the native module — returns null in Expo Go
 let SpeechModule: typeof import('expo-speech-recognition').ExpoSpeechRecognitionModule | null = null;
 let useSpeechEvent: typeof import('expo-speech-recognition').useSpeechRecognitionEvent = (() => {}) as any;
@@ -44,9 +48,9 @@ export async function setSpeechLang(lang: string): Promise<void> {
 }
 
 /**
- * Voice input behaviour. Mirrors the dashboard `VoiceInputMode` from
- * `packages/dashboard/src/hooks/useVoiceInput.ts` and the shared
- * `InputSettings.voiceInputMode` field in `@chroxy/store-core` (#4785, #4786).
+ * Voice input behaviour. The union itself lives in `@chroxy/store-core`
+ * (#4825) — re-exported here so existing imports of `VoiceInputMode` from
+ * this module keep working without churn.
  *
  * - `'continuous'`: when the engine fires `end` due to silence, the hook
  *   restarts recognition automatically. The mic stays lit until the user
@@ -55,7 +59,7 @@ export async function setSpeechLang(lang: string): Promise<void> {
  * - `'auto-pause'`: original behaviour — `end` ends the session. Default
  *   to keep behaviour stable for callers that don't pass `mode`.
  */
-export type VoiceInputMode = 'continuous' | 'auto-pause';
+export type { VoiceInputMode };
 
 export interface UseSpeechRecognitionOptions {
   mode?: VoiceInputMode;
