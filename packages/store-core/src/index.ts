@@ -11,6 +11,11 @@
 
 export { DEFAULT_CONTEXT_WINDOW } from './types'
 
+// #4853: runtime type-guard for `VoiceInputMode` — keyed off an
+// exhaustive `Record<VoiceInputMode, true>` so widening the union is a
+// TS error in the guard, not a silent drop at the call site.
+export { isVoiceInputMode } from './types'
+
 export type {
   MessageAttachment,
   ToolResultImage,
