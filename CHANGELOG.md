@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ## [0.9.35] - 2026-06-02
 
 Bug-fix release driven by a live two-session reproduction: clicking a large-history CLI session tab in the dashboard reliably triggered a "Reconnecting…" loop and bounced the user back to the first session, making the offending session unreachable. Diagnosis traced this to a P0 trap composed of two server bugs (#4833 backpressure-eviction during chunked history replay + #4835 active-session-reset on every reconnect) plus a long-tail of voice-input + question-flow + docker auth polish from prior audits.
@@ -19,6 +21,7 @@ Bug-fix release driven by a live two-session reproduction: clicking a large-hist
 
 - **`VoiceInputMode` consolidated in `@chroxy/store-core` (#4825 → #4841):** single canonical declaration in `packages/store-core/src/types.ts`. Mobile `useSpeechRecognition.ts` + dashboard `useVoiceInput.ts` re-export for back-compat. Exhaustive `Record<VoiceInputMode, true>` guard in `SettingsPanel` so new modes light up a type error instead of silently falling through. Shim removal tracked in #4852; runtime type-guard helper tracked in #4853.
 - **`SpeechModule.start()` options extracted into a single helper (#4827 → #4837):** `buildStartOptions(lang)` in `useSpeechRecognition.ts`. Both fresh-start and continuous-restart paths now route through it — drift between sites is structurally impossible.
+- **Removed fake-coverage ChatMessage markdown overflow tests (#4803, audit P3.3):** the `describe('long markdown content (#4757)')` block in `packages/dashboard/src/components/ChatMessage.test.tsx` was structural-only — every assertion (`code.textContent`, `inlineCodes.length`, "doesn't throw") passed on the pre-PR commit, so removing the CSS fix in `components.css` (`max-width: 100%`, `min-width: 0`, `overflow-wrap: anywhere`) would not fail any test. jsdom doesn't measure layout, so unit tests cannot verify wrapping. The block is deleted with a comment pointing at the CSS rules; #4757 remains manually verified per release. A real visual-regression harness (Playwright screenshot of a narrow viewport with a 220-char fenced line) is tracked as a future enhancement.
 
 ### Fixed
 
@@ -27,15 +30,9 @@ Bug-fix release driven by a live two-session reproduction: clicking a large-hist
 - **Backpressure eviction logged + metric-incremented N times per single close (#4834 → #4843):** `ws.close()` is async, so subsequent sends in the same synchronous chain re-tripped the eviction check. Added sticky `client._evicted` flag in both `ws-client-sender.js` (post-send path) and `ws-broadcaster.js` (`_sendOneWithBackpressure`). Single close = single log + single metric increment.
 - **`useSpeechRecognition.startListening` now tears down a prior session (#4826 → #4838):** mirrors the #4789 stop-path teardown so calling `start()` while a session is mid-flight aborts the prior recogniser before starting fresh. Adds `inFlightRef` to track in-flight state synchronously (avoids the React-state race the old code had). Async-abort end-event race defence-in-depth tracked in #4851.
 - **`isRecognizing` no longer flickers on soft-error restart in continuous mode (#4829 → #4836):** soft errors (`no-speech`, `network`, `speech-timeout`) in continuous mode used to flip `isRecognizing` false then immediately back to true on the auto-restart, causing a brief UI blip. Now gated on continuous-mode + soft-error: leave `isRecognizing` true across the restart, mirroring the dashboard's `useVoiceInput.onerror` behaviour. Hard errors still flip false.
-- **Docker provider auth hint no longer suggests `claude login` on the host (#4780 → #4844):** static `preflight()` override on `DockerSession` + `DockerSdkSession` drops `CLAUDE_CODE_OAUTH_TOKEN` from envVars (not forwarded by `_startContainer` anyway) and surfaces container-aware `ANTHROPIC_API_KEY` guidance instead of inheriting the misleading host-CLI hint.
+- **Docker provider `PROVIDER_CREDENTIAL_MISSING` hint is now container-aware (#4780 → #4844):** previously, when a docker-based provider hit a credential-missing error, it inherited the host-CLI's "run `claude login`" guidance — useless from inside a container. `DockerSession` + `DockerSdkSession` now override `static preflight()` to drop `CLAUDE_CODE_OAUTH_TOKEN` from `envVars` (it isn't forwarded by `_startContainer` anyway) and surface guidance for setting `ANTHROPIC_API_KEY` (or mounting credentials) so the message matches the deployment context. Non-container providers continue to use the host hint unchanged.
 - **Mic toggle in dashboard SettingsPanel — clearer labels + a11y (#4796 → #4840):** `aria-describedby` links the mode picker to its hint row, and the hint copy now quotes the dropdown labels verbatim instead of inventing "Continuous mode" / "Silence mode" shorthand. (The bounce-back-on-click symptom was actually fixed back in #4789; this PR ships the remaining clarity ACs and adds two regression tests.)
 - **Single-question `AskUserQuestion` no longer silently drops with 10+ options (#4746 → #4846):** parity with the #4625 multi-question fix. The single-question path now teardown with `ASK_USER_QUESTION_TOO_MANY_OPTIONS` at `idx >= 9` instead of silently picking the wrong (or no) option. Native >9-option support tracked in #4848.
-
-## [Unreleased]
-
-### Changed
-
-- **Removed fake-coverage ChatMessage markdown overflow tests (#4803, audit P3.3):** the `describe('long markdown content (#4757)')` block in `packages/dashboard/src/components/ChatMessage.test.tsx` was structural-only — every assertion (`code.textContent`, `inlineCodes.length`, "doesn't throw") passed on the pre-PR commit, so removing the CSS fix in `components.css` (`max-width: 100%`, `min-width: 0`, `overflow-wrap: anywhere`) would not fail any test. jsdom doesn't measure layout, so unit tests cannot verify wrapping. The block is deleted with a comment pointing at the CSS rules; #4757 remains manually verified per release. A real visual-regression harness (Playwright screenshot of a narrow viewport with a 220-char fenced line) is tracked as a future enhancement.
 
 ## [0.9.34] - 2026-06-02
 
