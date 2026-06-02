@@ -1194,13 +1194,13 @@ export class WsServer {
     // fan out to bound clients (mobile pairings into a single per-task
     // session) — pre-fix, server-side logs that lacked withSession() context
     // leaked PTY hex dumps, toolUseIds, prompt sizes and attachment names from
-    // every session to every authenticated WS client. Only 1 of 114
-    // createLogger() call sites uses withSession(), so the fall-through
-    // covered almost the entire log stream. Restrict unscoped entries to
-    // unbound clients (operator dashboards have boundSessionId == null and
-    // legitimately want to see everything). The durable fix is a
-    // loggerForSession factory + lint to force per-call-site scoping —
-    // tracked as a follow-up.
+    // every session to every authenticated WS client. Most server logs are
+    // unscoped today (only a handful of call sites use withSession()), so the
+    // fall-through covered almost the entire log stream. Restrict unscoped
+    // entries to unbound clients (operator dashboards have boundSessionId ==
+    // null and legitimately want to see everything). The durable fix — a
+    // loggerForSession factory + lint to force per-call-site scoping — is
+    // tracked as a follow-up (#4792).
     let inLogBroadcast = false
     this._logListener = (entry) => {
       if (inLogBroadcast) return
@@ -1209,9 +1209,12 @@ export class WsServer {
         if (entry.sessionId) {
           this._broadcastToSession(entry.sessionId, { type: 'log_entry', ...entry })
         } else {
+          // Use loose-equality null check so any non-null/undefined
+          // boundSessionId (including the unlikely empty string) is treated
+          // as bound — matches the comment above and the intent of #4787.
           this._broadcast(
             { type: 'log_entry', ...entry },
-            (client) => !client.boundSessionId
+            (client) => client.boundSessionId == null
           )
         }
       } finally {

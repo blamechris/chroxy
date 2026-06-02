@@ -1,6 +1,7 @@
 import { describe, it, before, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { removeLogListener } from '../src/logger.js'
 
 /**
  * Regression test for #4787 — scope log_entry broadcasts to unbound clients.
@@ -66,6 +67,12 @@ describe('WsServer._logListener session scoping (#4787)', () => {
    * Build a server, run start() to register the real _logListener, then
    * stuff fake clients into server.clients. Returns a helper that returns
    * the list of sent messages keyed by client id.
+   *
+   * We unregister the global log listener right after start() so that
+   * background async logs (e.g. Claude Code Web feature detection) cannot
+   * race with the test and inflate `delivered`. The test invokes
+   * `server._logListener(...)` directly anyway — the global path is not
+   * needed for the assertions and only introduces flake.
    */
   async function setup(clients) {
     server = createServer()
@@ -76,6 +83,11 @@ describe('WsServer._logListener session scoping (#4787)', () => {
       server.httpServer.once('listening', resolve)
       server.httpServer.once('error', reject)
     })
+
+    // Detach from the global log bus so unrelated async logs cannot bleed
+    // into the captured deliveries. We still hold the reference on
+    // `server._logListener` and call it directly below.
+    removeLogListener(server._logListener)
 
     // Replace _send so we can capture deliveries by client id without going
     // through the encryption / WS wire path.
