@@ -6,7 +6,7 @@ For the transport-layer story (key exchange, message encryption, nonce handling)
 
 ## 1. Trust Model in One Sentence
 
-> Any holder of the primary API token can do anything the owner of the server can do via Chroxy — read every session's history, send input to any session, switch models, change permission modes, and modify settings. Pairing-bound session tokens are scoped to one session. Per-session hook secrets are scoped to one session **and** to permission responses only.
+> Any holder of the primary API token can do anything the owner of the server can do via Chroxy — read every session's history, send input to any session, switch models, change permission modes, and modify settings. Pairing-bound session tokens are scoped to one session. Per-session hook secrets are scoped to one session **and** to the CLI permission-hook callback endpoint (`POST /permission`) only — they are never accepted for user-facing permission-response handling.
 
 The server is the user's own machine (see [`encryption-threat-model.md` §2](encryption-threat-model.md#2-trust-boundaries)). The primary token is therefore deliberately equivalent to local access on that machine.
 
@@ -14,7 +14,7 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 
 | Token | Issued by | Stored where | Scope | Used on |
 |-------|-----------|--------------|-------|---------|
-| **Primary API token** | `chroxy init` (or rotation via `TokenManager`) | `~/.chroxy/config.json` (server), `expo-secure-store` (app) | Full session authority — no session scoping | WS `auth` message, HTTP `Authorization: Bearer ...`, dashboard cookie/query |
+| **Primary API token** | `chroxy init` (or rotation via `TokenManager`) | OS keychain when available (server auto-migrates out of `~/.chroxy/config.json` on first boot — `server-cli.js` ~line 321); falls back to `~/.chroxy/config.json` on systems without keychain support; `expo-secure-store` on the app | Full session authority — no session scoping | WS `auth` message, HTTP `Authorization: Bearer ...`, dashboard cookie/query |
 | **Pairing-bound session token** | `PairingManager.validatePairing()` on consumption of a one-shot pairing ID | In-memory only (server `_sessionTokens` map, 24h TTL); `expo-secure-store` on the app | Bound to exactly one `sessionId`; rejected by every session-scoped handler if the target session differs | Same wire paths as primary token; server distinguishes via `pairingManager.getSessionIdForToken()` |
 | **Per-session hook secret** | `CliSession` constructor — `randomBytes(32).toString('hex')` | In-process only; passed to the `claude` CLI via `CHROXY_HOOK_SECRET` env var | Single session **and** single endpoint (`POST /permission`) | Permission-hook callbacks from the spawned CLI subprocess only |
 
@@ -39,9 +39,9 @@ This is by design. The token represents the operator of the host machine.
 
 ### Why HTTP `/permission-response` has no `subscribedSessionIds` analog
 
-On the WebSocket, each client tracks `subscribedSessionIds` so a permission broadcast for session A is not delivered to a client only subscribed to session B (see [`ws-server.js`](../../packages/server/src/ws-server.js) — `broadcastToSession`). HTTP requests are stateless and present only a bearer token, so there is no equivalent per-connection subscription set to consult.
+On the WebSocket, each client tracks `subscribedSessionIds` so a permission broadcast for session A is not delivered to a client only subscribed to session B (see [`ws-server.js`](../../packages/server/src/ws-server.js) — `_broadcastToSession`, which delegates to `WsBroadcaster._broadcastToSession`). HTTP requests are stateless and present only a bearer token, so there is no equivalent per-connection subscription set to consult.
 
-For an HTTP caller presenting the **primary** token, this is consistent with the trust model: the primary token already grants full session authority, so cross-session HTTP `permission-response` calls are within the token's authority. For a caller presenting a **pairing-bound** token, the binding check in `_handlePermissionResponse` ([`ws-permissions.js`](../../packages/server/src/ws-permissions.js) ~line 312) explicitly rejects mismatched sessions with a 403 + `SESSION_TOKEN_MISMATCH` payload, so bound tokens cannot cross sessions even on HTTP.
+For an HTTP caller presenting the **primary** token, this is consistent with the trust model: the primary token already grants full session authority, so cross-session HTTP `permission-response` calls are within the token's authority. For a caller presenting a **pairing-bound** token, the binding check in `handlePermissionResponseHttp()` ([`ws-permissions.js`](../../packages/server/src/ws-permissions.js) ~line 312, around the `callerBoundSessionId` branch) explicitly rejects mismatched sessions with a 403 + `SESSION_TOKEN_MISMATCH` payload, so bound tokens cannot cross sessions even on HTTP.
 
 ## 4. Pairing-Bound Session Tokens
 
@@ -65,8 +65,8 @@ Two creation paths differ in how the binding is set:
 When `ws-auth.js` accepts a pair-issued token, it sets `client.boundSessionId` on the WebSocket client. Every session-scoped handler then filters by it:
 
 - History (`ws-history.js`) restricts session lists, fetches, and resumes to `boundSessionId` only
-- Broadcasts (`ws-server.js` — `broadcastToSession`, `_subscribeAllClientsToSession`) skip bound clients whose binding does not match
-- HTTP `/permission-response` ([`ws-permissions.js`](../../packages/server/src/ws-permissions.js)) requires `originSessionId === callerBoundSessionId`; mismatch returns 403 + the unified `SESSION_TOKEN_MISMATCH` payload
+- Broadcasts (`ws-server.js` — `_broadcastToSession`, `_subscribeAllClientsToSession`) skip bound clients whose binding does not match
+- HTTP `/permission-response` (`handlePermissionResponseHttp()` in [`ws-permissions.js`](../../packages/server/src/ws-permissions.js)) requires `originSessionId === callerBoundSessionId`; mismatch returns 403 + the unified `SESSION_TOKEN_MISMATCH` payload
 - The session list returned in `auth_ok` is filtered to the bound session ([`ws-server.js`](../../packages/server/src/ws-server.js) ~line 534)
 
 Bound tokens cannot create, destroy, switch, or list sibling sessions. They can chat into their bound session and answer permissions for it. That's it.
@@ -83,17 +83,17 @@ Hook secrets are in-process only. They are never persisted, never sent over the 
 
 | | Primary | Pairing-bound | Hook secret |
 |---|---|---|---|
-| Generation | `crypto.randomUUID()` at `chroxy init`; can be regenerated via CLI or rotated via `TokenManager` | `randomBytes(32).toString('base64url')` per pairing | `randomBytes(32).toString('hex')` per session |
-| Persistence | `~/.chroxy/config.json` (server), secure storage on app | In-memory only (server `_sessionTokens`) | In-memory only |
+| Generation | `randomBytes(32).toString('base64url')` at `chroxy init` ([`cli/init-cmd.js`](../../packages/server/src/cli/init-cmd.js) ~line 110); can be regenerated by re-running `chroxy init` or rotated via `TokenManager` | `randomBytes(32).toString('base64url')` per pairing | `randomBytes(32).toString('hex')` per session |
+| Persistence | OS keychain when available (preferred); otherwise `~/.chroxy/config.json`; `expo-secure-store` on the app | In-memory only (server `_sessionTokens`) | In-memory only |
 | Default TTL | None (static) | 24h after pairing (`DEFAULT_SESSION_TOKEN_TTL_MS`) | Session lifetime |
-| Rotation | Optional via `--token-expiry` / `TokenManager`; old token honored for a grace period (`DEFAULT_GRACE_MS = 5m`) and a `token_rotated` event is emitted | None (re-pair to refresh) | New secret per session |
+| Rotation | Optional via the `tokenExpiry` config key or `CHROXY_TOKEN_EXPIRY` env var ([`config.js`](../../packages/server/src/config.js)), driven by `TokenManager`; old token honored for a grace period (`DEFAULT_GRACE_MS = 5m`) and a `token_rotated` event is emitted | None (re-pair to refresh) | New secret per session |
 | Revocation | Regenerate (via `chroxy init` or rotation); old token invalid after grace window | Server restart, `PairingManager.destroy()`, or 24h TTL | Session destroyed |
 
 **Implication of static-by-default primary token:** if it leaks, an attacker has full authority until the user manually regenerates and re-pairs. The mitigation surface is:
 
 - Constant-time comparison (`safeTokenCompare`) on every validation path to prevent timing oracles
-- Exponential backoff rate limiting on auth failures (1s, 2s, ..., 60s; `ws-auth.js`)
-- Optional rotation via `--token-expiry` for environments that want bounded blast radius
+- Exponential backoff rate limiting on auth failures (1s, 2s, 4s, ..., capped at 60s; `ws-auth.js`)
+- Optional rotation via the `tokenExpiry` config key or `CHROXY_TOKEN_EXPIRY` env var for environments that want bounded blast radius
 
 ## 7. Audit Chain
 
@@ -117,7 +117,7 @@ Before merging any PR that adds a new HTTP route or WebSocket message handler th
 
 ## 9. Known Risks
 
-- **Static primary token is the default.** If the QR is photographed or the config file is exfiltrated, the attacker has full authority. Rotation is opt-in.
+- **Static primary token is the default.** The QR shown at startup encodes an ephemeral pairing URL (not the primary token), so the leak surface is the OS keychain entry, a fallback `~/.chroxy/config.json` on systems without keychain support, or any environment / launcher that surfaces the token in process listings. If any of those are exfiltrated, the attacker has full authority until the user rotates. Rotation is opt-in.
 - **No certificate pinning or out-of-band key verification.** See [`encryption-threat-model.md` §8 — Trust On First Use](encryption-threat-model.md#trust-on-first-use-tofu).
 - **Pairing tokens are issued without device proof.** A pairing ID, if captured during the 60-second window, can be redeemed by any device. The window is short and the IDs are 12-byte base64url (~96 bits of entropy) precisely because the trust model assumes the QR is a physical-proximity channel.
 - **Pairing-bound tokens last 24h by default.** A stolen bound token grants single-session access for up to a day. Server restart invalidates the entire `_sessionTokens` map.
