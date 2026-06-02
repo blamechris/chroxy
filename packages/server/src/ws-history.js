@@ -29,6 +29,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     protocolVersion, minProtocolVersion, webTaskManager,
     send, broadcast, getConnectedClientList, permissions,
     resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs,
+    // #4835: per-device active-session memory. Consulted below before
+    // falling back to defaultSessionId / firstSessionId so a reconnect
+    // restores whatever session the client was actually viewing instead
+    // of silently snapping them back to "session 1" on every WS drop.
+    // Optional — older callers (and most tests) leave this undefined and
+    // get the legacy default/first behavior.
+    devicePreferences,
   } = ctx
   const client = clients.get(ws)
 
@@ -208,17 +215,47 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       }
     }
 
-    let activeId = defaultSessionId
-    let entry = activeId ? sessionManager.getSession(activeId) : null
+    // #4835: prefer the per-device persisted active session over the server
+    // default. We only consult this for non-bound clients (boundSessionId
+    // remains the security override below). The original snap-to-default
+    // behavior was an infinite trap when combined with #4833's
+    // backpressure eviction: every retry of the user's actually-active
+    // session got bounced back to defaultSessionId.
+    //
+    // Restore order:
+    //   1. devicePreferences[client.deviceInfo.deviceId] — if it still exists
+    //   2. defaultSessionId — config-driven server default
+    //   3. firstSessionId  — last-resort "any session beats no session"
+    //
+    // A stale persisted id (session destroyed between connects) falls
+    // through to step 2 without throwing — see #4835 acceptance criteria.
+    let activeId = null
+    let entry = null
+    const persistedDeviceId = client.deviceInfo?.deviceId
+    if (devicePreferences && persistedDeviceId) {
+      const persistedId = devicePreferences.getActiveSessionId(persistedDeviceId)
+      if (persistedId) {
+        const persistedEntry = sessionManager.getSession(persistedId)
+        if (persistedEntry) {
+          activeId = persistedId
+          entry = persistedEntry
+        }
+      }
+    }
+    if (!entry) {
+      activeId = defaultSessionId
+      entry = activeId ? sessionManager.getSession(activeId) : null
+    }
     if (!entry) {
       activeId = sessionManager.firstSessionId
       entry = activeId ? sessionManager.getSession(activeId) : null
     }
 
     // If the client is bound to a specific session (via session token), enforce
-    // that they can only view that session regardless of the server default.
-    // Fail closed: if the bound session no longer exists, clear the active
-    // session rather than silently falling back to a different session.
+    // that they can only view that session regardless of the server default or
+    // any persisted per-device preference. Fail closed: if the bound session
+    // no longer exists, clear the active session rather than silently falling
+    // back to a different session (or inheriting an unrelated persisted pref).
     if (client.boundSessionId) {
       const boundEntry = sessionManager.getSession(client.boundSessionId)
       if (boundEntry) {

@@ -148,6 +148,77 @@ describe('session-handlers', () => {
       assert.equal(sent.boundSessionId, 'sess-a')
       assert.equal(sent.boundSessionName, 'BoundOne')
     })
+
+    // #4835: persist the chosen sessionId per-deviceId so reconnect can
+    // restore it instead of bouncing the client back to defaultSessionId.
+    describe('persists active session for the client deviceId (#4835)', () => {
+      function inMemoryDevicePrefs() {
+        const store = new Map()
+        return {
+          getActiveSessionId: (deviceId) => store.get(deviceId) || null,
+          setActiveSessionId: createSpy((deviceId, sessionId) => { store.set(deviceId, sessionId) }),
+          clear: (deviceId) => { store.delete(deviceId) },
+          _dump: () => Object.fromEntries(store),
+        }
+      }
+
+      it('writes to devicePreferences after a successful switch', () => {
+        const devicePrefs = inMemoryDevicePrefs()
+        const ctx = makeCtx({ devicePreferences: devicePrefs })
+        ctx._sessions.set('sess-target', { session: createMockSession(), name: 'Target', cwd: '/t' })
+
+        const client = makeClient({
+          deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'darwin' },
+        })
+        sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-target' }, ctx)
+
+        assert.equal(client.activeSessionId, 'sess-target')
+        assert.equal(devicePrefs.setActiveSessionId.callCount, 1)
+        assert.deepEqual(devicePrefs.setActiveSessionId.lastCall, ['laptop', 'sess-target'])
+      })
+
+      it('does NOT write when the client has no deviceInfo.deviceId', () => {
+        const devicePrefs = inMemoryDevicePrefs()
+        const ctx = makeCtx({ devicePreferences: devicePrefs })
+        ctx._sessions.set('sess-target', { session: createMockSession(), name: 'Target', cwd: '/t' })
+
+        const client = makeClient() // no deviceInfo
+        sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-target' }, ctx)
+
+        assert.equal(client.activeSessionId, 'sess-target')
+        assert.equal(devicePrefs.setActiveSessionId.callCount, 0)
+      })
+
+      it('does NOT write when the client is bound (boundSessionId locks them already)', () => {
+        const devicePrefs = inMemoryDevicePrefs()
+        const ctx = makeCtx({ devicePreferences: devicePrefs })
+        ctx._sessions.set('sess-bound', { session: createMockSession(), name: 'Bound', cwd: '/b' })
+
+        const client = makeClient({
+          boundSessionId: 'sess-bound',
+          deviceInfo: { deviceId: 'paired-phone', deviceName: null, deviceType: 'phone', platform: 'ios' },
+        })
+        // Bound clients can only "switch" to their own bound session — that's
+        // the only valid switch, so test that path explicitly.
+        sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-bound' }, ctx)
+
+        assert.equal(client.activeSessionId, 'sess-bound')
+        assert.equal(devicePrefs.setActiveSessionId.callCount, 0,
+          'bound clients must not pollute the per-device store')
+      })
+
+      it('does NOT throw when ctx.devicePreferences is absent (backward compat)', () => {
+        const ctx = makeCtx() // no devicePreferences
+        ctx._sessions.set('sess-target', { session: createMockSession(), name: 'T', cwd: '/t' })
+
+        const client = makeClient({
+          deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'darwin' },
+        })
+        assert.doesNotThrow(() =>
+          sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-target' }, ctx))
+        assert.equal(client.activeSessionId, 'sess-target')
+      })
+    })
   })
 
   describe('create_session', () => {

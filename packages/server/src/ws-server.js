@@ -16,6 +16,7 @@ import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { handleAuthMessage, handlePairMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
+import { createDevicePreferences } from './device-preferences.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -434,7 +435,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -467,6 +468,13 @@ export class WsServer {
     this._clientSend = createClientSender(log)
     this._clientManager = new WsClientManager()
     this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects
+    // #4835: per-device active-session memory. Caller can inject a custom
+    // store (tests do this with a tmp file path); otherwise we construct
+    // the default disk-backed store rooted at $CHROXY_CONFIG_DIR /
+    // ~/.chroxy. The store is consumed by ws-history.sendPostAuthInfo on
+    // reconnect and updated by session-handlers.handleSwitchSession after
+    // every explicit switch.
+    this._devicePreferences = devicePreferences || createDevicePreferences()
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
@@ -569,6 +577,10 @@ export class WsServer {
       // provider registrations are reflected without restarting the server.
       get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
       get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+      // #4835: per-device active-session memory. handleSwitchSession writes
+      // here after every successful switch so the next reconnect can
+      // restore the same session.
+      get devicePreferences() { return self._devicePreferences },
     }
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)
@@ -603,6 +615,11 @@ export class WsServer {
       // the dashboard chip can hide instead of rendering against a
       // disabled timer).
       get streamStallTimeoutMs() { return self.config?.streamStallTimeoutMs ?? null },
+      // #4835: per-device active-session memory consulted during reconnect.
+      // sendPostAuthInfo treats this as optional, but production wiring
+      // always supplies the default disk-backed store from the WsServer
+      // constructor.
+      get devicePreferences() { return self._devicePreferences },
     }
     this._authCtx = {
       get clients() { return self.clients },
