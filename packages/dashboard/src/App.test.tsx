@@ -36,7 +36,16 @@ vi.mock('./hooks/useVoiceInput', () => ({
 // #4673 — control the clipboard helper per-test so we can assert that the
 // "Copied!" check mark only fires when the helper actually wrote. Default
 // to a successful write so the unrelated render-smoke tests stay green.
-const clipboardWriteTextMock = vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true))
+// #4629 — also expose an `addServerErrorMock` so the failure-path test
+// can assert the dashboard surfaces a visible toast when the clipboard
+// write fails (the original bug was a silent no-op + misleading
+// "Copied!" tooltip). Both are declared via `vi.hoisted()` because
+// `vi.mock()` factories are hoisted to the top of the file before any
+// top-level `const`, so a plain const would hit a TDZ ReferenceError.
+const { clipboardWriteTextMock, addServerErrorMock } = vi.hoisted(() => ({
+  clipboardWriteTextMock: vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true)),
+  addServerErrorMock: vi.fn<(message: string, action?: unknown, severity?: unknown) => void>(),
+}))
 vi.mock('./utils/clipboard', () => ({
   writeText: (text: string) => clipboardWriteTextMock(text),
 }))
@@ -135,6 +144,10 @@ vi.mock('./store/connection', () => {
     setModel: vi.fn(),
     setPermissionMode: vi.fn(),
     dismissServerError: vi.fn(),
+    // #4629 — surfaced when the clipboard write fails so the user sees a
+    // visible error instead of a silent no-op. Backed by the top-level
+    // `addServerErrorMock` so tests can assert on the call args directly.
+    addServerError: addServerErrorMock,
     dismissSessionNotification: vi.fn(),
     markPromptAnsweredByRequestId: vi.fn(),
     sessionNotifications: [],
@@ -184,6 +197,9 @@ beforeEach(() => {
   // overrides don't bleed through.
   clipboardWriteTextMock.mockReset()
   clipboardWriteTextMock.mockResolvedValue(true)
+  // #4629 — reset between cases so the failure-path test only sees the
+  // calls it triggered.
+  addServerErrorMock.mockReset()
   // #4432 — reset the shared shortcut registry so per-test rebinds
   // don't bleed between cases. The registry persists overrides to
   // localStorage; clearing the key keeps loadOverrides() returning {}.
@@ -1574,6 +1590,49 @@ describe('App', () => {
       })
       expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       expect(btn.getAttribute('title')).toContain('Copied!')
+    })
+
+    // #4629 — the original bug was that a failed clipboard write would
+    // silently swallow the failure and the "Copied!" tooltip flashed
+    // anyway. PR #4676 (for #4673) fixed the misleading flash but the
+    // user still got zero feedback when the write fell through. The third
+    // acceptance criterion on #4629 explicitly calls this out: "If
+    // clipboard write fails, user sees an error (not a misleading
+    // 'Copied!' tooltip)". Surface a server-error toast so the user knows
+    // the OS clipboard wasn't actually written.
+    it('surfaces a server-error toast when the clipboard helper returns false (#4629)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(false)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const btn = screen.getByTestId('btn-copy-transcript')
+      fireEvent.click(btn)
+
+      await waitFor(() => {
+        expect(addServerErrorMock).toHaveBeenCalledTimes(1)
+      })
+      const firstCall = addServerErrorMock.mock.calls[0]
+      expect(firstCall).toBeDefined()
+      const [message] = firstCall!
+      expect(message).toMatch(/clipboard/i)
+      // Must NOT also flash the success indicator (that was the #4673 bug;
+      // this test pins the negative too so a future regression on either
+      // axis is caught).
+      expect(btn.textContent).not.toContain('✓')
+    })
+
+    it('does NOT surface a server-error toast on a successful copy (#4629)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(true)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const btn = screen.getByTestId('btn-copy-transcript')
+      fireEvent.click(btn)
+
+      await waitFor(() => {
+        expect(btn.textContent).toContain('✓')
+      })
+      expect(addServerErrorMock).not.toHaveBeenCalled()
     })
   })
 

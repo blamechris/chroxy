@@ -527,7 +527,20 @@ export function App() {
     // WKWebView). Only flash the "Copied!" check mark if the helper actually
     // wrote — otherwise the indicator lies about an empty OS clipboard.
     void clipboardWriteText(text).then((ok) => {
-      if (!ok) return
+      if (!ok) {
+        // #4629: when the helper reports failure (Tauri plugin rejected,
+        // navigator.clipboard missing in a non-secure context, etc.) the
+        // OS clipboard was NOT written. The original bug was that the
+        // dashboard swallowed this silently and the "Copied!" tooltip
+        // still flashed, so the user pasted the wrong content into the
+        // next app. PR #4676 stopped the misleading flash; this surfaces
+        // a visible toast so the user knows to retry instead of being
+        // left guessing why Cmd+V pasted stale data.
+        useConnectionStore.getState().addServerError(
+          'Failed to copy transcript to clipboard. Please try again.',
+        )
+        return
+      }
       setTranscriptCopied(true)
       if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
       transcriptResetTimerRef.current = setTimeout(() => setTranscriptCopied(false), 1500)
