@@ -207,15 +207,24 @@ export function useSpeechRecognition(
     // Hard errors must suppress the continuous-mode `end` restart branch.
     // Without flipping `userStoppedRef`, an error event followed by an
     // `end` event (the spec-mandated sequence) would let the restart path
-    // re-arm recognition while the UI shows stopped (`isRecognizing` is
-    // cleared below) — the engine would silently hold the mic with no UI
-    // to release it. Soft errors (no-speech, network, speech-timeout) fall
-    // through so continuous mode can re-arm across normal silence gaps.
-    // Mirrors the dashboard's `onerror` hard-stop branch.
+    // re-arm recognition while the UI shows stopped — the engine would
+    // silently hold the mic with no UI to release it (Copilot finding on
+    // #4813). Mirrors the dashboard's `onerror` hard-stop branch.
     if (HARD_STOP_ERRORS.has(event.error)) {
       userStoppedRef.current = true;
+      inFlightRef.current = false;
+      setIsRecognizing(false);
+      return;
     }
     inFlightRef.current = false;
+    // Soft error in continuous mode (no-speech, network, speech-timeout):
+    // leave `isRecognizing` true and let the subsequent `end` event decide
+    // whether to re-arm. The restart branch in the `end` handler does NOT
+    // touch `isRecognizing` — it relies on the flag already being true — so
+    // flipping false here would briefly clear the mic icon during the
+    // restart blip with nothing to set it back (#4829). Mirrors the
+    // dashboard `useVoiceInput.onerror` behaviour.
+    if (modeRef.current === 'continuous') return;
     setIsRecognizing(false);
   });
 

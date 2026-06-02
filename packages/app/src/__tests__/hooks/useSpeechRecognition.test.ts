@@ -601,8 +601,7 @@ describe('useSpeechRecognition', () => {
       expect(MockModule.start).toHaveBeenCalledTimes(1);
 
       // Soft error fires — `end` should still re-arm so continuous mode
-      // can recover from transient silence/network blips. (The mic flicker
-      // during the restart blip is a separate cosmetic issue — see #4829.)
+      // can recover from transient silence/network blips.
       actSync(() => {
         eventHandlers['error']?.({ error: errCode, message: errCode });
       });
@@ -611,6 +610,100 @@ describe('useSpeechRecognition', () => {
       });
 
       expect(MockModule.start).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ---- #4829: no isRecognizing flicker on soft-error→restart cycle ----
+
+  describe('#4829: isRecognizing stability across soft-error restart', () => {
+    it.each([
+      'no-speech',
+      'network',
+      'speech-timeout',
+    ])('keeps isRecognizing=true after soft error (%s) in continuous mode (no flicker)', async (errCode) => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(result.current.isRecognizing).toBe(true);
+
+      // Soft error should NOT flip the mic off — from the user's perspective
+      // the engine is still "listening" across the restart blip.
+      actSync(() => {
+        eventHandlers['error']?.({ error: errCode, message: errCode });
+      });
+      expect(result.current.isRecognizing).toBe(true);
+
+      // Spec-mandated `end` after error re-arms recognition; mic stays lit.
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+      expect(result.current.isRecognizing).toBe(true);
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      'not-allowed',
+      'service-not-allowed',
+      'audio-capture',
+      'aborted',
+      'interrupted',
+      'language-not-supported',
+    ])('flips isRecognizing=false on hard error (%s) in continuous mode', async (errCode) => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(result.current.isRecognizing).toBe(true);
+
+      actSync(() => {
+        eventHandlers['error']?.({ error: errCode, message: errCode });
+      });
+
+      // Hard errors are terminal — mic must clear immediately.
+      expect(result.current.isRecognizing).toBe(false);
+    });
+
+    it('flips isRecognizing=false on user-initiated stop in continuous mode', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(result.current.isRecognizing).toBe(true);
+
+      actSync(() => {
+        result.current.stopListening();
+      });
+
+      // Engine fires `end` after stop() — user-initiated stop clears the mic.
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+      expect(result.current.isRecognizing).toBe(false);
+    });
+
+    it.each([
+      'no-speech',
+      'network',
+      'speech-timeout',
+    ])('flips isRecognizing=false on soft error (%s) in auto-pause mode', async (errCode) => {
+      // Auto-pause is the single-shot mode — soft errors should still clear
+      // the mic since there is no continuous-restart loop to ride through.
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'auto-pause' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(result.current.isRecognizing).toBe(true);
+
+      actSync(() => {
+        eventHandlers['error']?.({ error: errCode, message: errCode });
+      });
+
+      expect(result.current.isRecognizing).toBe(false);
     });
   });
 });
