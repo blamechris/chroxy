@@ -305,6 +305,40 @@ describe('useSpeechRecognition', () => {
       expect(result.current.isRecognizing).toBe(true);
     });
 
+    // #4827: fresh-start and silence-restart must hand SpeechModule.start the
+    // identical options shape. They previously constructed the literal twice
+    // and drifted; both call sites now route through a single helper.
+    it('fresh start and continuous restart pass identical start() options', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      // First call: fresh user-initiated start.
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+      const freshOpts = MockModule.start.mock.calls[0][0];
+
+      // Trigger silence-restart branch.
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+      const restartOpts = MockModule.start.mock.calls[1][0];
+
+      // Byte-identical option shape — guards against future drift like the
+      // pre-#4827 duplicated object literals.
+      expect(restartOpts).toEqual(freshOpts);
+      // And the expected shape itself, so a regression that strips a field
+      // from both sites is still caught.
+      expect(freshOpts).toEqual({
+        lang: 'en-US',
+        interimResults: true,
+        contextualStrings: ['Claude', 'Chroxy'],
+      });
+    });
+
     it('caps restart attempts at MAX_CONTINUOUS_RESTARTS (5)', async () => {
       const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
 

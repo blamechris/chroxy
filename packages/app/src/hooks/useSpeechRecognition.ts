@@ -6,6 +6,7 @@ import { getLocales } from 'expo-localization';
 import type {
   ExpoSpeechRecognitionResultEvent,
   ExpoSpeechRecognitionErrorEvent,
+  ExpoSpeechRecognitionOptions,
 } from 'expo-speech-recognition';
 
 // #4825: consolidated voice-input mode union lives in store-core so the
@@ -110,6 +111,21 @@ const HARD_STOP_ERRORS: ReadonlySet<string> = new Set([
   'language-not-supported',
 ]);
 
+/**
+ * Single source of truth for the option shape passed to
+ * `SpeechModule.start()`. Both the fresh user-initiated start (`startListening`)
+ * and the continuous-mode silence-restart branch in the `end` handler call
+ * this helper so a future option addition (`continuous`, `sampleRate`, etc.)
+ * can't apply to one site and silently miss the other (#4827).
+ */
+export function buildStartOptions(lang: string): ExpoSpeechRecognitionOptions {
+  return {
+    lang,
+    interimResults: true,
+    contextualStrings: ['Claude', 'Chroxy'],
+  };
+}
+
 export function useSpeechRecognition(
   options: UseSpeechRecognitionOptions = {},
 ): UseSpeechRecognitionReturn {
@@ -182,12 +198,10 @@ export function useSpeechRecognition(
       try {
         // Re-arm the SAME recogniser session — no permission re-prompt, no
         // lang re-read. `startListening()` is reserved for fresh user-initiated
-        // sessions; this path keeps `isRecognizing` true.
-        SpeechModule.start({
-          lang: lastLangRef.current ?? 'en-US',
-          interimResults: true,
-          contextualStrings: ['Claude', 'Chroxy'],
-        });
+        // sessions; this path keeps `isRecognizing` true. Options must match
+        // the fresh-start path byte-for-byte (#4827) — both routes call
+        // `buildStartOptions` so a new option can't drift between sites.
+        SpeechModule.start(buildStartOptions(lastLangRef.current ?? 'en-US'));
         inFlightRef.current = true;
         return;
       } catch {
@@ -286,11 +300,7 @@ export function useSpeechRecognition(
     if (!mountedRef.current || stopRequestedRef.current) return;
 
     lastLangRef.current = lang;
-    SpeechModule.start({
-      lang,
-      interimResults: true,
-      contextualStrings: ['Claude', 'Chroxy'],
-    });
+    SpeechModule.start(buildStartOptions(lang));
     inFlightRef.current = true;
     setIsRecognizing(true);
   }, []);
