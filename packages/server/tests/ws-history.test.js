@@ -1091,6 +1091,282 @@ describe('replayHistory', () => {
   })
 })
 
+// #4833 — replayHistory must pause when ws.bufferedAmount exceeds the
+// backpressure threshold so a session with large tool_result payloads doesn't
+// trip the post-send eviction (1MB) in ws-client-sender.js. Pre-fix, every
+// chunk fires via setImmediate without consulting bufferedAmount; in the
+// reported scenario the per-chunk burst pushes the socket buffer over 1MB
+// and the dashboard sees a 4008 close → "Reconnecting…" loop.
+describe('replayHistory — bufferedAmount backpressure drain (#4833)', () => {
+  /**
+   * Build a fake ws whose `bufferedAmount` mirrors what the real WS would
+   * report between event-loop turns. `send` adds the byte length of the
+   * payload (mimicking the OS-level send queue when the socket is slow),
+   * and tests can call `drain(n)` to subtract bytes as the simulated peer
+   * acknowledges. `readyState` defaults to OPEN.
+   */
+  function makeBackpressuredWs(readyState = 1) {
+    const rawSent = []
+    const ws = {
+      readyState,
+      bufferedAmount: 0,
+      send(data) {
+        // Mirror the real ws.send: bufferedAmount grows by the wire size of
+        // each payload that hasn't yet been flushed to the network.
+        const bytes = Buffer.byteLength(typeof data === 'string' ? data : JSON.stringify(data))
+        ws.bufferedAmount += bytes
+        rawSent.push(data)
+      },
+      close: createSpy(),
+      _rawSent: rawSent,
+      drain(bytes) {
+        ws.bufferedAmount = Math.max(0, ws.bufferedAmount - bytes)
+      },
+      drainAll() {
+        ws.bufferedAmount = 0
+      },
+    }
+    return ws
+  }
+
+  /**
+   * Build a ctx whose `send` writes to the real ws.send so bufferedAmount
+   * tracks the actual byte stream during replay. Mirrors the production
+   * createClientSender path that goes through ws.send, just without the
+   * encryption / post-send eviction logic (those live in ws-client-sender
+   * and are out of scope for the replayHistory loop).
+   */
+  function makeCtxWithRealSend(overrides = {}) {
+    const sends = []
+    const ctx = makeCtx({
+      send: (ws, msg) => {
+        sends.push(msg)
+        if (ws.readyState === 1) ws.send(JSON.stringify(msg))
+      },
+      ...overrides,
+    })
+    // Re-spy nothing: replace the helper sends array with our own tracker.
+    ctx._sends = sends
+    return ctx
+  }
+
+  it('pauses chunk scheduling once bufferedAmount exceeds the 256KB threshold', async () => {
+    // 30 entries × ~200KB payload = 6MB total. Pre-fix, the first
+    // setImmediate-scheduled chunk would push 4MB onto the socket before
+    // yielding, blowing past the 1MB eviction line. Post-fix, we should
+    // stop after the first chunk fills the buffer and wait for drain.
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+
+    // Yield the loop a few times — without the fix, every setImmediate
+    // would drain another 20-entry chunk and push bufferedAmount well past
+    // 1MB. With the fix, the loop must stall on bufferedAmount > 256KB and
+    // wait for drain (we never drain here, so it never advances).
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    // Sanity: at least the history_replay_start and a partial chunk made it.
+    const startMsg = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.ok(startMsg, 'history_replay_start must always be sent first')
+
+    const replayed = ctx._sends.filter(m => m.type === 'tool_result').length
+    assert.ok(replayed < ENTRY_COUNT,
+      `expected replay to stall before sending all ${ENTRY_COUNT} entries when buffer never drains; got ${replayed}`)
+
+    // The end marker must NOT have been sent yet because the loop is stalled.
+    const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+    assert.equal(endMsg, undefined,
+      'history_replay_end should not be sent while bufferedAmount stays above threshold')
+  })
+
+  it('keeps bufferedAmount under the 1MB eviction line during a fat-payload replay', async () => {
+    // Same scenario as above but with a draining peer. The fix should keep
+    // bufferedAmount under 1MB at every observation point throughout the
+    // replay — the 1MB EVICT_THRESHOLD in ws-client-sender.js would 4008
+    // the client otherwise (#4833 reproduction path).
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const EVICT_THRESHOLD = 1024 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    // Background drain: every 5ms, the simulated peer acknowledges 512KB.
+    // That's well under the per-chunk burst the pre-fix code would emit,
+    // so the only way to stay under 1MB is for the replay loop to actually
+    // pause when bufferedAmount climbs.
+    let maxObserved = 0
+    const drainTimer = setInterval(() => {
+      // Snapshot before drain so we measure the peak bufferedAmount, not
+      // the moment-after-drain trough.
+      if (ws.bufferedAmount > maxObserved) maxObserved = ws.bufferedAmount
+      ws.drain(512 * 1024)
+    }, 5)
+
+    try {
+      replayHistory(ctx, ws, 'sess-1')
+
+      // Wait for the replay to finish (history_replay_end) or time out.
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline) {
+        if (ws.bufferedAmount > maxObserved) maxObserved = ws.bufferedAmount
+        if (ctx._sends.some(m => m.type === 'history_replay_end')) break
+        await new Promise(r => setTimeout(r, 10))
+      }
+
+      const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+      assert.ok(endMsg, 'replay must eventually complete when peer drains')
+
+      const replayed = ctx._sends.filter(m => m.type === 'tool_result').length
+      assert.equal(replayed, ENTRY_COUNT, 'every history entry must be replayed')
+
+      assert.ok(maxObserved < EVICT_THRESHOLD,
+        `bufferedAmount peaked at ${maxObserved} bytes; must stay under ${EVICT_THRESHOLD} (1MB) to avoid client eviction`)
+    } finally {
+      clearInterval(drainTimer)
+    }
+  })
+
+  it('bails out gracefully when ws closes while paused on backpressure', async () => {
+    // Edge case: the drain loop must abort if the client disconnects while
+    // we're waiting for bufferedAmount to fall. Otherwise we'd keep polling
+    // and eventually send to a closed socket (or leak a setTimeout).
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+
+    // Let the first chunk go out and the loop stall on bufferedAmount.
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    const sentBeforeClose = ctx._sends.length
+    ws.readyState = 3 // CLOSED
+
+    // Drain the buffer so the polled check would otherwise resume the loop,
+    // and wait long enough for the next poll tick (>20ms).
+    ws.drainAll()
+    await new Promise(r => setTimeout(r, 60))
+
+    // The loop must have bailed; no end marker, no extra sends.
+    const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+    assert.equal(endMsg, undefined, 'replay must not send end marker after ws closes')
+    assert.equal(ctx._sends.length, sentBeforeClose,
+      'no additional messages should be sent after ws closes while paused')
+  })
+})
+
+// #4833 — flushPostAuthQueue has the same chunking shape and must apply the
+// same drain logic so a large queued burst (e.g. encryption-required handshake
+// stacking auth_ok + session_list + session_switched + history) doesn't trip
+// the same 1MB eviction.
+describe('flushPostAuthQueue — bufferedAmount backpressure drain (#4833)', () => {
+  function makeBackpressuredWs(readyState = 1) {
+    const rawSent = []
+    const ws = {
+      readyState,
+      bufferedAmount: 0,
+      send(data) {
+        const bytes = Buffer.byteLength(typeof data === 'string' ? data : JSON.stringify(data))
+        ws.bufferedAmount += bytes
+        rawSent.push(data)
+      },
+      close: createSpy(),
+      _rawSent: rawSent,
+      drain(bytes) {
+        ws.bufferedAmount = Math.max(0, ws.bufferedAmount - bytes)
+      },
+    }
+    return ws
+  }
+
+  function makeCtxWithRealSend(overrides = {}) {
+    const sends = []
+    const ctx = makeCtx({
+      send: (ws, msg) => {
+        sends.push(msg)
+        if (ws.readyState === 1) ws.send(JSON.stringify(msg))
+      },
+      ...overrides,
+    })
+    ctx._sends = sends
+    return ctx
+  }
+
+  it('pauses queue draining once bufferedAmount exceeds the threshold', async () => {
+    const QUEUE_LEN = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const queue = Array.from({ length: QUEUE_LEN }, (_, i) => ({
+      type: 'fat_msg',
+      idx: i,
+      data: bigText,
+    }))
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend()
+    registerClient(ctx, ws)
+
+    flushPostAuthQueue(ctx, ws, queue)
+
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    const sent = ctx._sends.filter(m => m.type === 'fat_msg').length
+    assert.ok(sent < QUEUE_LEN,
+      `expected flush to stall before sending all ${QUEUE_LEN} queued messages; got ${sent}`)
+  })
+})
+
 // ── flushPostAuthQueue ─────────────────────────────────────────────────────
 
 describe('flushPostAuthQueue', () => {

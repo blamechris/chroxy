@@ -13,6 +13,51 @@ import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
+// #4833 — back-pressure pause for chunked replay/flush loops.
+//
+// Both replayHistory and flushPostAuthQueue emit messages in 20-entry chunks
+// separated by setImmediate yields. On sessions with fat tool_result payloads
+// (200KB+ each), a single chunk can push ws.bufferedAmount past the 1MB
+// EVICT_THRESHOLD in ws-client-sender.js, tripping a post-send 4008 close and
+// surfacing as a "Reconnecting…" loop in the dashboard.
+//
+// Before scheduling the next chunk, the loop now polls bufferedAmount and
+// pauses (via setTimeout, every BACKPRESSURE_POLL_INTERVAL_MS) until it falls
+// back below BACKPRESSURE_PAUSE_THRESHOLD. The threshold (256KB) is well
+// below the 1MB eviction line so the next chunk has headroom even on slow
+// links. The poll interval (20ms) is short enough to keep the replay
+// responsive but long enough to give the socket time to actually flush.
+//
+// Both helpers abort the poll if ws.readyState !== 1 (client disconnected
+// while paused) so we never leak a setTimeout or send to a closed socket.
+const BACKPRESSURE_PAUSE_THRESHOLD = 256 * 1024
+const BACKPRESSURE_POLL_INTERVAL_MS = 20
+
+/**
+ * Schedule `fn` once ws.bufferedAmount falls below BACKPRESSURE_PAUSE_THRESHOLD,
+ * or immediately (via setImmediate) if the buffer is already drained. Polls
+ * with setTimeout(BACKPRESSURE_POLL_INTERVAL_MS) while paused. Bails out
+ * silently if ws.readyState transitions away from OPEN — the caller's first
+ * action in `fn` already re-checks readyState so the bailout is safe.
+ */
+function scheduleAfterDrain(ws, fn) {
+  if (ws.readyState !== 1) return
+  const buffered = ws.bufferedAmount || 0
+  if (buffered <= BACKPRESSURE_PAUSE_THRESHOLD) {
+    setImmediate(fn)
+    return
+  }
+  const poll = () => {
+    if (ws.readyState !== 1) return
+    if ((ws.bufferedAmount || 0) <= BACKPRESSURE_PAUSE_THRESHOLD) {
+      setImmediate(fn)
+      return
+    }
+    setTimeout(poll, BACKPRESSURE_POLL_INTERVAL_MS)
+  }
+  setTimeout(poll, BACKPRESSURE_POLL_INTERVAL_MS)
+}
+
 /**
  * Send all post-authentication info to a newly authenticated client.
  * This includes auth_ok, server mode, session list, model/permission state,
@@ -375,6 +420,7 @@ export function replayHistory(ctx, ws, sessionId) {
   const sendChunk = (offset) => {
     if (ws.readyState !== 1) return
     const end = Math.min(offset + CHUNK_SIZE, history.length)
+    let nextOffset = end
     for (let i = offset; i < end; i++) {
       const entry = history[i]
       send(ws, { ...entry, sessionId })
@@ -393,9 +439,25 @@ export function replayHistory(ctx, ws, sessionId) {
       if (entry && entry.type === 'result') {
         send(ws, { type: 'agent_idle', sessionId })
       }
+      // #4833: break out of the chunk early if bufferedAmount already
+      // crossed the pause threshold mid-burst. The CHUNK_SIZE=20 cap was
+      // designed for short messages; a session with fat tool_result
+      // payloads (200KB+) can blow past the 1MB EVICT_THRESHOLD inside
+      // a single chunk, before the post-chunk scheduleAfterDrain ever
+      // gets to inspect bufferedAmount. Pause + resume from the next
+      // unsent entry instead.
+      if (i + 1 < end && (ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+        nextOffset = i + 1
+        break
+      }
     }
-    if (end < history.length) {
-      setImmediate(() => sendChunk(end))
+    if (nextOffset < history.length) {
+      // #4833: pause if the socket is already congested before scheduling
+      // the next chunk. Without this, every setImmediate fires another
+      // burst regardless of buffer pressure, blowing past the 1MB
+      // EVICT_THRESHOLD in ws-client-sender.js on sessions with fat
+      // tool_result payloads.
+      scheduleAfterDrain(ws, () => sendChunk(nextOffset))
     } else {
       send(ws, { type: 'history_replay_end', sessionId })
     }
@@ -422,12 +484,21 @@ export function flushPostAuthQueue(ctx, ws, queue) {
     }
     const end = Math.min(offset + CHUNK_SIZE, queue.length)
     if (client) client._flushing = false
+    let nextOffset = end
     for (let i = offset; i < end; i++) {
       send(ws, queue[i])
+      // #4833: break early if a fat queued message just tipped bufferedAmount
+      // past the pause threshold — same rationale as replayHistory above.
+      if (i + 1 < end && (ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+        nextOffset = i + 1
+        break
+      }
     }
-    if (end < queue.length) {
+    if (nextOffset < queue.length) {
       if (client) client._flushing = true
-      setImmediate(() => drainChunk(end))
+      // #4833: pause if the socket is already congested before scheduling
+      // the next chunk — same rationale as replayHistory above.
+      scheduleAfterDrain(ws, () => drainChunk(nextOffset))
     } else if (client) {
       if (client._flushOverflow?.length) {
         const overflow = client._flushOverflow
