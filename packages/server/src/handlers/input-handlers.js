@@ -153,7 +153,7 @@ async function handleInput(ws, client, msg, ctx) {
   // localized to the dashboard boundary vs the server's PTY write path
   // by correlating against the `writePtyText (msg=… codePoints=… bytes=…)`
   // line in `claude-tui-session.js`. No content is logged — only counts —
-  // so this stays safe to enable in normal user logs.
+  // so this stays safe to enable when the env flag is set.
   //
   // Concretely, the original #4733 repro showed `writePtyText … codePoints=332`
   // for a message the user intended at ~360 chars with ~24 spaces missing.
@@ -161,12 +161,24 @@ async function handleInput(ws, client, msg, ctx) {
   // delta was stripped before the WS arrived, in `trim()` (leading/trailing
   // only, max +2 codepoints), in the evaluator rewrite path (#3635), or by
   // the throttle. The four counts here pin which boundary stripped them.
-  if (typeof text === 'string' && text.length > 0) {
-    const bytes = Buffer.byteLength(text, 'utf8')
-    const codePoints = [...text].length
-    // Interior whitespace = any \s except a SINGLE trailing newline
-    // (Shift+Enter ends multi-line drafts with a trailing \n, which
-    // `_writePtyTextThrottled` strips before the bracketed-paste body).
+  //
+  // Gated behind `CHROXY_LOG_WIRE_FINGERPRINT=1` so it stays off by default
+  // — the input handler is the hot path for every typed/pasted user message
+  // and an unconditional info-level log line per message is too noisy for
+  // production user logs. Flip the env var when actively investigating
+  // #4733 (or any future "text stripped between dashboard and PTY" report).
+  if (process.env.CHROXY_LOG_WIRE_FINGERPRINT === '1' && typeof text === 'string' && text.length > 0) {
+    // Strip a SINGLE trailing newline (CR, LF, or CRLF) before fingerprinting
+    // so counts line up with `_writePtyTextThrottled` in claude-tui-session.js,
+    // which strips one trailing newline before the bracketed-paste body. Shift+
+    // Enter ends multi-line dashboard drafts with a trailing \n; counting it
+    // here would inflate `codePoints`/`wsTotal` by 1 (or 2 for \r\n) and skew
+    // the dashboard-vs-PTY boundary correlation by the same amount.
+    let fp = text
+    if (fp.endsWith('\r\n')) fp = fp.slice(0, -2)
+    else if (fp.endsWith('\n') || fp.endsWith('\r')) fp = fp.slice(0, -1)
+    const bytes = Buffer.byteLength(fp, 'utf8')
+    const codePoints = [...fp].length
     // Counts ALL interior whitespace runs as one-per-run AND total chars
     // separately — the run count survives a "double-space collapsed to
     // single" bug (each run keeps at least one char) while the total
@@ -176,7 +188,7 @@ async function handleInput(ws, client, msg, ctx) {
     let maxWordLen = 0
     let currWordLen = 0
     let inWhitespace = false
-    for (const ch of text) {
+    for (const ch of fp) {
       if (/\s/.test(ch)) {
         whitespaceTotal += 1
         if (!inWhitespace) whitespaceRuns += 1
