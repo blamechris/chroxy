@@ -1446,6 +1446,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
         return Object.keys(patch).length > 0 ? patch : {};
       });
+      // #4909 — `session_stopped` is a transient event NOT recorded into
+      // per-session history (#4868 wire path), so it isn't replayed on
+      // reconnect. But the client-side `stoppedAt`/`stoppedCode` derived
+      // state survives the WebSocket teardown in Zustand store memory and
+      // the strip flashes back into view until activity resumes. Clear
+      // it on history replay (the canonical "reconnect handshake" event)
+      // for the same reason the transient `activeAgents`/`isPlanPending`
+      // are cleared above. Targets `replayTargetId` (per-session) rather
+      // than activeSessionId so a background session reconnecting also
+      // sheds its stale marker.
+      if (replayTargetId && get().sessionStates[replayTargetId]) {
+        updateSession(replayTargetId, (ss) => {
+          if (ss.stoppedAt == null && ss.stoppedCode == null) return {};
+          return { stoppedAt: null, stoppedCode: null };
+        });
+      }
       break;
     }
 
