@@ -769,11 +769,12 @@ export class EnvironmentManager extends EventEmitter {
         environments: Array.from(this._environments.values()),
       }
 
-      // writeFileRestricted is atomic on POSIX (#4850) and cleans up
-      // its intermediate `.tmp` on rename failure (#4874) — no manual
-      // tmp+rename wrapper needed here. On Windows it falls through to
-      // a direct writeFileSync which overwrites the destination, so the
-      // pre-#4874 unlinkSync(EEXIST) workaround is no longer required.
+      // writeFileRestricted is atomic on both POSIX (#4850) and Windows
+      // (#4913) and cleans up its intermediate `.tmp` on rename failure
+      // (#4874) — no manual tmp+rename wrapper needed here. The
+      // pre-#4874 unlinkSync(EEXIST) workaround is no longer required
+      // since Node's renameSync uses MoveFileExW(REPLACE_EXISTING) on
+      // Windows.
       writeFileRestricted(this._statePath, JSON.stringify(data, null, 2))
     } catch (err) {
       log.error(`Failed to persist environment state: ${err.message}`)
