@@ -10,7 +10,7 @@
  * reduce file fragmentation (each file had 1–4 small functions).
  */
 import { createLogger } from '../logger.js'
-import { validateCwdAllowed, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 
@@ -21,11 +21,11 @@ const log = createLogger('ws')
 function handleExtensionMessage(ws, client, msg, ctx) {
   const { provider, subtype, data } = msg
   if (typeof provider !== 'string' || !provider) {
-    ctx.send(ws, { type: 'session_error', message: 'extension_message requires a non-empty provider field' })
+    sendSessionError(ws, ctx, 'extension_message requires a non-empty provider field')
     return
   }
   if (typeof subtype !== 'string' || !subtype) {
-    ctx.send(ws, { type: 'session_error', message: 'extension_message requires a non-empty subtype field' })
+    sendSessionError(ws, ctx, 'extension_message requires a non-empty subtype field')
     return
   }
 
@@ -48,7 +48,7 @@ function handleExtensionMessage(ws, client, msg, ctx) {
     const message = msg.sessionId
       ? `Session not found: ${msg.sessionId}`
       : 'No active session'
-    ctx.send(ws, { type: 'session_error', message })
+    sendSessionError(ws, ctx, message)
     return
   }
 

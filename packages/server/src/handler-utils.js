@@ -399,13 +399,17 @@ export function resolveSession(ctx, msg, client) {
 }
 
 /**
- * Send a `session_error` envelope to a WebSocket client (#4773).
+ * Send a `session_error` envelope to a WebSocket client (#4773, #4809).
  *
- * The 50+ inline `ctx.send(ws, { type: 'session_error', message })` sites
- * across the handler modules all build the same two-field payload by hand.
- * Centralising the shape here means a future schema tweak (adding `code`,
- * `recoverable`, `sessionId`, etc.) lands in one place instead of being
- * scattered across every handler.
+ * All `ctx.send(ws, { type: 'session_error', message })` sites across the
+ * handler modules build the same two-field payload by hand. Centralising the
+ * shape here means a future schema tweak (adding `code`, `recoverable`,
+ * `sessionId`, etc.) lands in one place instead of being scattered across
+ * every handler. As of #4809 only ~11 deliberate-soft-fallback sites remain
+ * in src/handlers/ — every one of them carries an extra field beyond
+ * `message` (the `input_conflict` category, the SESSION_TOKEN_MISMATCH
+ * `buildSessionTokenMismatchPayload` spread, or the create-session `code`
+ * field) so they cannot use this helper without extending its signature.
  *
  * Routed through `ctx.send` rather than `ws.send` so it stays compatible
  * with the existing handler tests (which monkey-patch `ctx.send` and

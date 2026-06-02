@@ -6,7 +6,7 @@
  *          notification_prefs_set (#4541)
  */
 import { randomUUID } from 'node:crypto'
-import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { createLogger } from '../logger.js'
@@ -126,14 +126,14 @@ async function handleInput(ws, client, msg, ctx) {
     const message = msg.sessionId
       ? `Session not found: ${msg.sessionId}`
       : 'No active session'
-    ctx.send(ws, { type: 'session_error', message })
+    sendSessionError(ws, ctx, message)
     return
   }
 
   if (attachments?.length) {
     const err = validateAttachments(attachments)
     if (err) {
-      ctx.send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
+      sendSessionError(ws, ctx, `Invalid attachment: ${err}`)
       return
     }
   }
@@ -149,7 +149,7 @@ async function handleInput(ws, client, msg, ctx) {
   log.debug(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
   if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })
+    sendSessionError(ws, ctx, 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.')
     return
   }
 
@@ -398,7 +398,7 @@ function handleInterrupt(ws, client, msg, ctx) {
 function handleResumeBudget(ws, client, msg, ctx) {
   const budgetSessionId = msg.sessionId || client.activeSessionId
   if (!budgetSessionId || !resolveSession(ctx, msg, client)) {
-    ctx.send(ws, { type: 'session_error', message: 'No valid session for budget resume' })
+    sendSessionError(ws, ctx, 'No valid session for budget resume')
     return
   }
   if (ctx.sessionManager.isBudgetPaused(budgetSessionId)) {

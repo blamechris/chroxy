@@ -4,7 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
 import { createLogger } from '../logger.js'
 
@@ -22,7 +22,7 @@ function handleSwitchSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (!targetId) {
-    ctx.send(ws, { type: 'session_error', message: 'sessionId is required' })
+    sendSessionError(ws, ctx, 'sessionId is required')
     return
   }
 
@@ -43,7 +43,7 @@ function handleSwitchSession(ws, client, msg, ctx) {
 
   const entry = ctx.sessionManager.getSession(targetId)
   if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+    sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
   client.activeSessionId = targetId
@@ -103,14 +103,14 @@ function handleCreateSession(ws, client, msg, ctx) {
   // from the actual session state (provider capabilities, worktree, sandbox).
 
   if (worktree && !cwd) {
-    ctx.send(ws, { type: 'session_error', message: 'Worktree requires an explicit CWD' })
+    sendSessionError(ws, ctx, 'Worktree requires an explicit CWD')
     return
   }
 
   if (cwd) {
     const cwdError = validateCwdAllowed(cwd, ctx.config)
     if (cwdError) {
-      ctx.send(ws, { type: 'session_error', message: cwdError })
+      sendSessionError(ws, ctx, cwdError)
       return
     }
   }
@@ -119,7 +119,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   let envOpts = {}
   if (environmentId) {
     if (!ctx.environmentManager) {
-      ctx.send(ws, { type: 'session_error', message: 'Environment management is not enabled' })
+      sendSessionError(ws, ctx, 'Environment management is not enabled')
       return
     }
     try {
@@ -131,7 +131,7 @@ function handleCreateSession(ws, client, msg, ctx) {
         containerCliPath: info.containerCliPath,
       }
     } catch (err) {
-      ctx.send(ws, { type: 'session_error', message: err.message })
+      sendSessionError(ws, ctx, err.message)
       return
     }
   }
@@ -171,17 +171,17 @@ async function handleDestroySession(ws, client, msg, ctx) {
   }
 
   if (!ctx.sessionManager.getSession(targetId)) {
-    ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+    sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
 
   if (ctx.sessionManager.listSessions().length <= 1) {
-    ctx.send(ws, { type: 'session_error', message: 'Cannot destroy the last session' })
+    sendSessionError(ws, ctx, 'Cannot destroy the last session')
     return
   }
 
   if (ctx.sessionManager.isSessionLocked?.(targetId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Session is being modified by another operation' })
+    sendSessionError(ws, ctx, 'Session is being modified by another operation')
     return
   }
 
@@ -227,11 +227,11 @@ function handleRenameSession(ws, client, msg, ctx) {
 
   const newName = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : null
   if (!newName) {
-    ctx.send(ws, { type: 'session_error', message: 'Name is required' })
+    sendSessionError(ws, ctx, 'Name is required')
     return
   }
   if (ctx.sessionManager.isSessionLocked?.(targetId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Session is being modified by another operation' })
+    sendSessionError(ws, ctx, 'Session is being modified by another operation')
     return
   }
 
@@ -243,10 +243,10 @@ function handleRenameSession(ws, client, msg, ctx) {
     if (success) {
       ctx.broadcastSessionList()
     } else {
-      ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+      sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     }
   }).catch(err => {
-    ctx.send(ws, { type: 'session_error', message: err.message })
+    sendSessionError(ws, ctx, err.message)
   })
 }
 

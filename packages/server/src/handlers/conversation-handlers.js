@@ -6,7 +6,7 @@
  */
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
-import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient } from '../conversation-scope.js'
 import { createLogger } from '../logger.js'
 
@@ -67,23 +67,23 @@ async function handleResumeConversation(ws, client, msg, ctx) {
   // Check resume capability on the active session's provider
   const activeEntry = client.activeSessionId && ctx.sessionManager.getSession(client.activeSessionId)
   if (activeEntry && !activeEntry.session.constructor.capabilities?.resume) {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support conversation resume' })
+    sendSessionError(ws, ctx, 'This provider does not support conversation resume')
     return
   }
   const { conversationId, cwd } = msg
   if (!conversationId || typeof conversationId !== 'string') {
-    ctx.send(ws, { type: 'session_error', message: 'Missing conversationId' })
+    sendSessionError(ws, ctx, 'Missing conversationId')
     return
   }
   // Validate conversationId is a UUID to prevent path traversal
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Invalid conversationId format' })
+    sendSessionError(ws, ctx, 'Invalid conversationId format')
     return
   }
   if (cwd) {
     const cwdError = validateCwdAllowed(cwd, ctx.config)
     if (cwdError) {
-      ctx.send(ws, { type: 'session_error', message: cwdError })
+      sendSessionError(ws, ctx, cwdError)
       return
     }
   }
@@ -104,7 +104,7 @@ async function handleResumeConversation(ws, client, msg, ctx) {
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: err.message })
+    sendSessionError(ws, ctx, err.message)
   }
 }
 
@@ -114,7 +114,7 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
     const message = msg.sessionId
       ? `Session not found: ${msg.sessionId}`
       : 'No active session'
-    ctx.send(ws, { type: 'session_error', message })
+    sendSessionError(ws, ctx, message)
     return
   }
   const fullHistory = await ctx.sessionManager.getFullHistoryAsync(targetId)
@@ -139,7 +139,7 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
 async function handleRequestSessionContext(ws, client, msg, ctx) {
   const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
   if (!targetId) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    sendSessionError(ws, ctx, 'No active session')
     return
   }
 
@@ -160,11 +160,11 @@ async function handleRequestSessionContext(ws, client, msg, ctx) {
     if (sessionCtx) {
       ctx.send(ws, { type: 'session_context', ...sessionCtx })
     } else {
-      ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+      sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     }
   } catch (err) {
     log.warn(`Failed to read session context: ${err.message}`)
-    ctx.send(ws, { type: 'session_error', message: `Failed to read session context: ${err.message}` })
+    sendSessionError(ws, ctx, `Failed to read session context: ${err.message}`)
   }
 }
 
