@@ -22,10 +22,11 @@ describe('useSpeechRecognition typed event handlers (#1912)', () => {
 
   test('imports the event types from expo-speech-recognition', () => {
     // Tolerate additional type imports (e.g. ExpoSpeechRecognitionOptions
-    // added by #4827) as long as both event types are pulled from the
-    // expo-speech-recognition package.
+    // added by #4827) AND any ordering of the imported names — lookaheads
+    // assert both event types appear inside the same import block without
+    // pinning their position relative to each other.
     expect(src).toMatch(
-      /import type \{[^}]*\bExpoSpeechRecognitionResultEvent\b[^}]*\bExpoSpeechRecognitionErrorEvent\b[^}]*\} from 'expo-speech-recognition'/,
+      /import type \{(?=[^}]*\bExpoSpeechRecognitionResultEvent\b)(?=[^}]*\bExpoSpeechRecognitionErrorEvent\b)[^}]*\} from 'expo-speech-recognition'/,
     )
   })
 })
