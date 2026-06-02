@@ -921,6 +921,14 @@ export class SdkSession extends BaseSession {
       this._clearMessageState()
     } finally {
       this._query = null
+      // #4881: safety-net clear of _intentionalStop. The catch block clears
+      // it on the throw path (AbortError after interrupt()), but if
+      // query.interrupt() races a `result` message arriving first, the
+      // for-await loop exits normally, skipping the catch. Without this
+      // clear, the flag would stay armed until the next turn's catch and
+      // mis-trigger a spurious `stopped` emit there. Idempotent — the
+      // catch path already cleared it on the throw path.
+      this._intentionalStop = false
       // Dequeue any follow-up messages that arrived while busy
       if (this._pendingInput?.length && !this._destroying) {
         // #3562: if the SidecarProcess latched stdin_disabled mid-turn (e.g.

@@ -201,3 +201,36 @@ describe('SdkSession destroy() always clears _intentionalStop (#4881)', () => {
       'destroy() must clear the flag — matches CliSession.destroy()')
   })
 })
+
+describe('SdkSession _callQuery finally — source contains safety-net clear for race exit (#4881)', () => {
+  /**
+   * Race condition pinned by source-level assertion: interrupt() arms the
+   * flag and calls query.interrupt(), but a `result` message was already
+   * in flight and lands BEFORE the AbortError can throw. The for-await
+   * loop processes the result, falls through to loop-end normally, and
+   * skips the catch block — leaving `_intentionalStop = true` armed past
+   * the turn unless the `finally` block clears it.
+   *
+   * Pinning this as a source-text assertion (rather than driving _callQuery
+   * end-to-end) avoids brittle test-helper duplication of the production
+   * branch logic while still failing loudly the moment someone removes the
+   * safety-net clear from the finally block.
+   */
+  it('source has `this._intentionalStop = false` inside _callQuery finally', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { fileURLToPath } = await import('node:url')
+    const src = readFileSync(fileURLToPath(new URL('../src/sdk-session.js', import.meta.url)), 'utf8')
+
+    // Pin both: (a) the comment header so future edits understand the
+    // intent, and (b) the actual clear line. Without the clear, the race
+    // where `result` lands before interrupt() throws would leak the flag.
+    assert.match(src, /#4881: safety-net clear of _intentionalStop/,
+      'finally must carry the documented race-safety comment')
+    // Locate the comment then assert the clear line is within 10 lines after.
+    const commentIdx = src.indexOf('#4881: safety-net clear of _intentionalStop')
+    assert.ok(commentIdx >= 0, 'comment present')
+    const tailSlice = src.slice(commentIdx, commentIdx + 800)
+    assert.match(tailSlice, /this\._intentionalStop\s*=\s*false/,
+      'finally must clear the flag so a non-throw exit (result landed before interrupt threw) does not leak it to the next turn')
+  })
+})
