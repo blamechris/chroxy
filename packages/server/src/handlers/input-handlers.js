@@ -148,6 +148,50 @@ async function handleInput(ws, client, msg, ctx) {
   const attCount = attachments?.length || 0
   log.debug(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
+  // #4733 — wire-arrival fingerprint. Logs the byte/codepoint/whitespace
+  // shape of the inbound `data` so a corrupted-text reproduction can be
+  // localized to the dashboard boundary vs the server's PTY write path
+  // by correlating against the `writePtyText (msg=… codePoints=… bytes=…)`
+  // line in `claude-tui-session.js`. No content is logged — only counts —
+  // so this stays safe to enable in normal user logs.
+  //
+  // Concretely, the original #4733 repro showed `writePtyText … codePoints=332`
+  // for a message the user intended at ~360 chars with ~24 spaces missing.
+  // Without an inbound-side counter we cannot tell whether the 28-codepoint
+  // delta was stripped before the WS arrived, in `trim()` (leading/trailing
+  // only, max +2 codepoints), in the evaluator rewrite path (#3635), or by
+  // the throttle. The four counts here pin which boundary stripped them.
+  if (typeof text === 'string' && text.length > 0) {
+    const bytes = Buffer.byteLength(text, 'utf8')
+    const codePoints = [...text].length
+    // Interior whitespace = any \s except a SINGLE trailing newline
+    // (Shift+Enter ends multi-line drafts with a trailing \n, which
+    // `_writePtyTextThrottled` strips before the bracketed-paste body).
+    // Counts ALL interior whitespace runs as one-per-run AND total chars
+    // separately — the run count survives a "double-space collapsed to
+    // single" bug (each run keeps at least one char) while the total
+    // catches "all interior spaces stripped" (run count → 0, total → 0).
+    let whitespaceTotal = 0
+    let whitespaceRuns = 0
+    let maxWordLen = 0
+    let currWordLen = 0
+    let inWhitespace = false
+    for (const ch of text) {
+      if (/\s/.test(ch)) {
+        whitespaceTotal += 1
+        if (!inWhitespace) whitespaceRuns += 1
+        inWhitespace = true
+        if (currWordLen > maxWordLen) maxWordLen = currWordLen
+        currWordLen = 0
+      } else {
+        inWhitespace = false
+        currWordLen += 1
+      }
+    }
+    if (currWordLen > maxWordLen) maxWordLen = currWordLen
+    log.info(`input wire-fingerprint (client=${client.id} session=${targetSessionId} bytes=${bytes} codePoints=${codePoints} wsTotal=${whitespaceTotal} wsRuns=${whitespaceRuns} maxWordLen=${maxWordLen}) (#4733)`)
+  }
+
   if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
     sendSessionError(ws, ctx, 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.')
     return
