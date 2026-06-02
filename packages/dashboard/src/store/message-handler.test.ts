@@ -66,6 +66,10 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
   // an actionable INVALID_AUTHOR toast carries a label + click handler.
   // Existing tests still read `serverErrors` as the message-string list.
   const serverErrorActions: Array<unknown> = []
+  // #4878: capture info-level notifications (addInfoNotification) so the
+  // session_stopped dispatch test can assert the toast text without
+  // having to wire the full Zustand store.
+  const infoNotifications: unknown[] = []
   const grantCalls: Array<{ skillName: string; author: string }> = []
   const terminalWrites: string[] = []
   return {
@@ -85,12 +89,16 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
       serverErrors.push(e)
       serverErrorActions.push(action)
     },
+    addInfoNotification: (e: unknown) => {
+      infoNotifications.push(e)
+    },
     grantCommunitySkillTrust: (skillName: string, author: string) => {
       grantCalls.push({ skillName, author })
     },
     appendTerminalData: (d: string) => { terminalWrites.push(d) },
     _terminalWrites: terminalWrites,
     _serverErrorActions: serverErrorActions,
+    _infoNotifications: infoNotifications,
     _grantCalls: grantCalls,
     serverProtocolVersion: null,
     ...overrides,
@@ -493,6 +501,64 @@ describe('dashboard message-handler dispatch', () => {
       expect(state.serverErrors).toEqual([
         'Not authorized: client is bound to a specific session',
       ])
+    })
+  })
+
+  // #4878 — user-initiated Stop confirmation. The wire path was wired by
+  // PR #4868; this is the dashboard UX follow-up. Renders a quiet info
+  // toast (NOT the red `addServerError` reserved for crashes), so the
+  // operator gets a positive "you clicked Stop and the session did indeed
+  // stop" confirmation. Pairs with `session_error` which fires for
+  // unexpected exits / auto-respawn.
+  describe('session_stopped dispatch (#4878)', () => {
+    it('renders a quiet info-level toast on clean exit (code 0)', () => {
+      handleMessage(
+        { type: 'session_stopped', sessionId: 'sess-1', code: 0 },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      // Info notification, not a server error — the red-toast surface is
+      // reserved for genuine error conditions (STREAM_ERROR / ABORT / crash).
+      expect(state._infoNotifications).toEqual(['Session stopped.'])
+      expect(state.serverErrors).toEqual([])
+    })
+
+    it('omits the exit-code suffix when code is missing (future in-process providers)', () => {
+      // Per the #4756 follow-up, providers that don't have a child process
+      // (e.g. in-process SDK session) may emit session_stopped without a
+      // numeric exit code. The bare "Session stopped." carries the signal.
+      handleMessage(
+        { type: 'session_stopped', sessionId: 'sess-1' },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state._infoNotifications).toEqual(['Session stopped.'])
+    })
+
+    it('surfaces a non-zero exit code as a diagnostic suffix (e.g. SIGTERM → 143)', () => {
+      handleMessage(
+        { type: 'session_stopped', sessionId: 'sess-1', code: 143 },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state._infoNotifications).toEqual(['Session stopped. (exit 143)'])
+      // Still NOT a server error — a non-zero exit code from a
+      // user-initiated Stop (SIGTERM = 143) is not a crash. The crash
+      // path stays on session_error.
+      expect(state.serverErrors).toEqual([])
+    })
+
+    it('handles legacy-cli broadcasts (sessionId omitted) the same way', () => {
+      // ws-forwarding's legacy-cli path forwards session_stopped without
+      // a sessionId field (matches the claude_ready / error pattern).
+      // The dashboard toast doesn't depend on sessionId — it's a global
+      // confirmation either way.
+      handleMessage(
+        { type: 'session_stopped', code: 0 },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state._infoNotifications).toEqual(['Session stopped.'])
     })
   })
 
