@@ -16,7 +16,7 @@ const QUALITY_COLORS = {
 } as const;
 
 // #4876 — shared `hitSlop` for the tappable header badges so each Pressable
-// hits Apple HIG / CLAUDE.md's 44pt minimum touch target even though the
+// hits Apple HIG's 44pt minimum touch target even though the
 // visible badge is kept visually compact (paddingVertical: 2,
 // paddingHorizontal: 6, fontSize: 10 or 11). Numbers chosen so the
 // effective touch area is ≥ 44 × 44pt for even the smallest plausible

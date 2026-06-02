@@ -1,7 +1,7 @@
 /**
  * Touch-target tests for the mobile SessionScreen header badges (#4876).
  *
- * Apple HIG and CLAUDE.md require interactive elements to have an effective
+ * Apple HIG requires interactive elements to have an effective
  * touch target of at least 44 × 44 logical pixels. The visible header badges
  * (cost badge from #4074, intervention badge from #4764) intentionally use a
  * compact look (paddingVertical: 2, paddingHorizontal: 6, fontSize: 10) for
