@@ -15,8 +15,11 @@ import {
   buildQuietHoursTimezoneList,
   formatPlatform,
   formatRelativeTime,
+  // #4853: shared runtime guard for `VoiceInputMode` — replaces the
+  // inline `Record<VoiceInputMode, true>` literal previously rebuilt
+  // on every change-handler call.
+  isVoiceInputMode,
 } from '@chroxy/store-core'
-import type { VoiceInputMode } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import {
   getTunnelMode,
@@ -935,18 +938,15 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   }, [updateInputSettings])
 
   const handleVoiceInputModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    // #4825: validate against an exhaustive `Record<VoiceInputMode, true>`
-    // map instead of a hard-coded string-list. Adding a new mode to the
-    // union in store-core makes this object literal a TS error (missing
-    // property), forcing the guard to be updated. The previous `===` chain
-    // would have silently dropped a new mode (#4841 review feedback).
-    const VALID_MODES: Record<VoiceInputMode, true> = {
-      continuous: true,
-      'auto-pause': true,
-    }
-    const next = e.target.value
-    if (Object.prototype.hasOwnProperty.call(VALID_MODES, next)) {
-      updateInputSettings({ voiceInputMode: next as VoiceInputMode })
+    // #4853: validate against the shared `isVoiceInputMode` guard from
+    // store-core. The guard is keyed off an exhaustive
+    // `Record<VoiceInputMode, true>` map, so adding a new mode to the
+    // union without listing it there is a TS error — neither this site
+    // nor any other rehydrate/wire boundary can silently drop a new
+    // mode the way a hand-written `===` chain would (#4841 review
+    // feedback that landed in #4825 inline, now extracted in #4853).
+    if (isVoiceInputMode(e.target.value)) {
+      updateInputSettings({ voiceInputMode: e.target.value })
     }
   }, [updateInputSettings])
 

@@ -113,6 +113,12 @@ import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
   getHealthCheckErrorMessage,
+  // #4853: runtime type-guard for `VoiceInputMode`. Used in
+  // `loadSavedConnection` below to validate the persisted
+  // localStorage blob — keyed off an exhaustive
+  // `Record<VoiceInputMode, true>` in store-core, so adding a new mode
+  // to the union cannot silently drop here the way a `===` chain would.
+  isVoiceInputMode,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 import {
@@ -802,7 +808,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const next: Partial<InputSettings> = {};
         if (typeof parsed.chatEnterToSend === 'boolean') next.chatEnterToSend = parsed.chatEnterToSend;
         if (typeof parsed.terminalEnterToSend === 'boolean') next.terminalEnterToSend = parsed.terminalEnterToSend;
-        if (parsed.voiceInputMode === 'continuous' || parsed.voiceInputMode === 'auto-pause') {
+        // #4853: runtime guard keyed off the same exhaustive
+        // `Record<VoiceInputMode, true>` map the dashboard `SettingsPanel`
+        // change handler uses (#4825). Replaces the previous hand-written
+        // `===` chain that silently dropped any new mode added to the union.
+        if (isVoiceInputMode(parsed.voiceInputMode)) {
           next.voiceInputMode = parsed.voiceInputMode;
         }
         if (Object.keys(next).length > 0) {
