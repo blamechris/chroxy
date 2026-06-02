@@ -404,6 +404,35 @@ Object.assign(EVENT_MAP, {
     return { messages: [{ msg }] }
   },
 
+  // #4756: user-initiated Stop confirmation. CliSession emits `stopped`
+  // when the child process exits cleanly after `interrupt()` set the
+  // `_intentionalStop` flag (see cli-session.js `_handleChildClose`). This
+  // pairs with `error` — `error` is the louder "crashed unexpectedly,
+  // restarting" toast that the auto-respawn path triggers, while
+  // `session_stopped` is the quiet "you asked, it stopped" confirmation.
+  // Clients should treat it as informational, NOT an error condition.
+  // `code` is the exit status from the child; typically 0 on clean SIGINT
+  // exit but kept on the wire so clients can render the numeric code for
+  // diagnostic purposes if non-zero (e.g. SIGTERM = 143). Gated on
+  // `Number.isInteger` (not bare `typeof === 'number'`) so NaN / Infinity
+  // / floats from a defensive provider can't reach the wire — the schema
+  // is `z.number().int()`, so non-integers would fail client-side parsing.
+  // `sessionId` is OMITTED on the legacy-cli path where ctx.sessionId is
+  // null, matching the `claude_ready` / `error` legacy-cli convention so
+  // receivers treat the message as "applies to the connected legacy CLI"
+  // rather than seeing `sessionId: null`. On the multi-session path the
+  // field is also injected by `_broadcastToSession`, so this guard
+  // additionally protects against accidental `sessionId: null` if the
+  // upstream ctx ever degrades.
+  stopped: (data, ctx) => {
+    const msg = { type: 'session_stopped' }
+    if (typeof ctx.sessionId === 'string' && ctx.sessionId.length > 0) {
+      msg.sessionId = ctx.sessionId
+    }
+    if (Number.isInteger(data?.code)) msg.code = data.code
+    return { messages: [{ msg }] }
+  },
+
   // #3544: surface the cumulative stdin_dropped totals on the wire so
   // dashboards and the mobile app can render a "X bytes lost over N drops"
   // banner / badge for sessions that are silently truncating input at the

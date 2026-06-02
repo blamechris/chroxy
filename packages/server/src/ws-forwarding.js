@@ -146,12 +146,17 @@ function setupCliForwarding(normalizer, ctx) {
   // forwarding loop below — which the schema explicitly allows for this
   // path; #3205's dashboard prompt treats null as "applies to whatever
   // CLI is connected".
+  // #4756: `stopped` mirrors the multi-session forwarding list (see
+  // session-manager.js `_wireSessionEvents` builtinTransient) so the legacy
+  // single-CLI path also surfaces the user-initiated Stop confirmation via
+  // the normalizer's `session_stopped` wire message.
   const FORWARDED_EVENTS = [
     'ready', 'stream_start', 'stream_delta', 'stream_end',
     'message', 'tool_start', 'tool_result', 'result', 'error',
     'user_question', 'agent_spawned', 'agent_completed',
     'plan_started', 'plan_ready', 'mcp_servers',
     'permission_expired', 'skill_changed', 'skill_trust_request', 'skill_trust_granted',
+    'stopped',
   ]
   for (const event of FORWARDED_EVENTS) {
     cliSession.on(event, (data) => {
