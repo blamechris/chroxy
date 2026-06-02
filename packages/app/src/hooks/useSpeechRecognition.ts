@@ -43,6 +43,24 @@ export async function setSpeechLang(lang: string): Promise<void> {
   }
 }
 
+/**
+ * Voice input behaviour. Mirrors the dashboard `VoiceInputMode` from
+ * `packages/dashboard/src/hooks/useVoiceInput.ts` and the shared
+ * `InputSettings.voiceInputMode` field in `@chroxy/store-core` (#4785, #4786).
+ *
+ * - `'continuous'`: when the engine fires `end` due to silence, the hook
+ *   restarts recognition automatically. The mic stays lit until the user
+ *   explicitly calls `stopListening()`. Bounded by `MAX_CONTINUOUS_RESTARTS`
+ *   so a wedged backend cannot spin forever.
+ * - `'auto-pause'`: original behaviour — `end` ends the session. Default
+ *   to keep behaviour stable for callers that don't pass `mode`.
+ */
+export type VoiceInputMode = 'continuous' | 'auto-pause';
+
+export interface UseSpeechRecognitionOptions {
+  mode?: VoiceInputMode;
+}
+
 export interface UseSpeechRecognitionReturn {
   isRecognizing: boolean;
   transcript: string;
@@ -52,11 +70,67 @@ export interface UseSpeechRecognitionReturn {
   stopListening: () => void;
 }
 
-export function useSpeechRecognition(): UseSpeechRecognitionReturn {
+/**
+ * Maximum consecutive restart attempts before continuous mode gives up.
+ * Mirrors `MAX_CONTINUOUS_RESTARTS` in the dashboard's `useVoiceInput`.
+ * Counter resets on each non-empty `result` event or fresh `startListening`.
+ */
+const MAX_CONTINUOUS_RESTARTS = 5;
+
+/**
+ * Errors that hard-stop continuous mode rather than letting the `end`
+ * handler re-arm recognition. Mirrors `HARD_STOP_ERRORS` in the dashboard's
+ * `useVoiceInput`. Without this set, an error event followed by an `end`
+ * event would re-arm recognition while the UI state shows stopped — the
+ * engine keeps the mic open silently with no UI feedback (Copilot finding
+ * on #4813).
+ *
+ * - `'not-allowed'` / `'service-not-allowed'`: permission/availability —
+ *   retrying would re-fail.
+ * - `'audio-capture'`: mic hardware gone.
+ * - `'aborted'`: user/system invoked `abort()`; restarting would race the
+ *   teardown.
+ * - `'interrupted'` (iOS): audio session interrupted by phone call/Siri;
+ *   honour the system event and stop.
+ * - `'language-not-supported'`: locale invalid — retrying re-throws.
+ *
+ * Soft errors (`no-speech`, `network`, `speech-timeout`, etc.) are left for
+ * the `end` handler so continuous mode can re-arm across normal silence gaps.
+ */
+const HARD_STOP_ERRORS: ReadonlySet<string> = new Set([
+  'not-allowed',
+  'service-not-allowed',
+  'audio-capture',
+  'aborted',
+  'interrupted',
+  'language-not-supported',
+]);
+
+export function useSpeechRecognition(
+  options: UseSpeechRecognitionOptions = {},
+): UseSpeechRecognitionReturn {
+  const mode: VoiceInputMode = options.mode ?? 'auto-pause';
+
   const [isRecognizing, setIsRecognizing] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isAvailable, setIsAvailable] = useState(false);
+
+  // Continuous-mode restart bookkeeping. `userStoppedRef` flips true when
+  // `stopListening()` or unmount fires so the `end` handler can distinguish a
+  // user-initiated stop from a silence-triggered one. `restartCountRef` bounds
+  // the retry loop — counter resets on a real (non-empty) transcript or on a
+  // fresh `startListening()` call.
+  const userStoppedRef = useRef<boolean>(false);
+  const restartCountRef = useRef<number>(0);
+  const modeRef = useRef<VoiceInputMode>(mode);
+  modeRef.current = mode;
+
+  // Track whether the component is still mounted
+  const mountedRef = useRef(true);
+
+  // Track whether a stop was requested during async permission flow
+  const stopRequestedRef = useRef(false);
 
   useEffect(() => {
     if (SpeechModule) {
@@ -72,10 +146,42 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     const text = event.results[0]?.transcript;
     if (text) {
       setTranscript(text);
+      // #4789 mirror: only reset the restart counter on real speech so a
+      // wedged engine that emits empty `result` events can't bypass the cap.
+      if (text.trim().length > 0) {
+        restartCountRef.current = 0;
+      }
     }
   });
 
   useSpeechEvent('end', () => {
+    // Continuous mode: silence-triggered end re-arms recognition unless the
+    // user explicitly stopped (or unmounted) and we're still under the
+    // restart cap. The mic stays lit during the restart blip so the UI
+    // doesn't flicker.
+    if (
+      modeRef.current === 'continuous' &&
+      !userStoppedRef.current &&
+      mountedRef.current &&
+      restartCountRef.current < MAX_CONTINUOUS_RESTARTS &&
+      SpeechModule
+    ) {
+      restartCountRef.current += 1;
+      try {
+        // Re-arm the SAME recogniser session — no permission re-prompt, no
+        // lang re-read. `startListening()` is reserved for fresh user-initiated
+        // sessions; this path keeps `isRecognizing` true.
+        SpeechModule.start({
+          lang: lastLangRef.current ?? 'en-US',
+          interimResults: true,
+          contextualStrings: ['Claude', 'Chroxy'],
+        });
+        return;
+      } catch {
+        // Engine may still be in the tail of the previous session; fall
+        // through to clear the mic.
+      }
+    }
     setIsRecognizing(false);
   });
 
@@ -84,23 +190,35 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     if (event.error !== 'aborted') {
       setError(event.message || event.error);
     }
+    // Hard errors must suppress the continuous-mode `end` restart branch.
+    // Without flipping `userStoppedRef`, an error event followed by an
+    // `end` event (the spec-mandated sequence) would let the restart path
+    // re-arm recognition while the UI shows stopped (`isRecognizing` is
+    // cleared below) — the engine would silently hold the mic with no UI
+    // to release it. Soft errors (no-speech, network, speech-timeout) fall
+    // through so continuous mode can re-arm across normal silence gaps.
+    // Mirrors the dashboard's `onerror` hard-stop branch.
+    if (HARD_STOP_ERRORS.has(event.error)) {
+      userStoppedRef.current = true;
+    }
     setIsRecognizing(false);
   });
 
-  // Track whether the component is still mounted
-  const mountedRef = useRef(true);
+  // Cache the last resolved language so the silence-restart path doesn't
+  // re-await SecureStore on every silence gap.
+  const lastLangRef = useRef<string | null>(null);
 
-  // Abort on unmount
+  // Abort on unmount — also detach the continuous-mode restart guard so the
+  // engine's post-abort `end` event can't re-arm against an unmounted owner.
+  // Mirrors the #4789 fix pattern from the dashboard.
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      userStoppedRef.current = true;
       SpeechModule?.abort();
     };
   }, []);
-
-  // Track whether a stop was requested during async permission flow
-  const stopRequestedRef = useRef(false);
 
   const startListening = useCallback(async () => {
     if (!SpeechModule) return;
@@ -108,6 +226,10 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     setError(null);
     setTranscript('');
     stopRequestedRef.current = false;
+    // Fresh user-initiated start: reset continuous bookkeeping so prior
+    // session's user-stop or restart-counter doesn't carry over.
+    userStoppedRef.current = false;
+    restartCountRef.current = 0;
 
     const { granted } = await SpeechModule.requestPermissionsAsync();
 
@@ -127,6 +249,7 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
     // If component unmounted or stop requested while awaiting language, bail out
     if (!mountedRef.current || stopRequestedRef.current) return;
 
+    lastLangRef.current = lang;
     SpeechModule.start({
       lang,
       interimResults: true,
@@ -137,6 +260,10 @@ export function useSpeechRecognition(): UseSpeechRecognitionReturn {
 
   const stopListening = useCallback(() => {
     stopRequestedRef.current = true;
+    // Mark the stop as user-initiated BEFORE invoking engine stop so the
+    // silence-restart path in `end` sees the flag and exits cleanly rather
+    // than re-arming a session the user just cancelled.
+    userStoppedRef.current = true;
     SpeechModule?.stop();
   }, []);
 
