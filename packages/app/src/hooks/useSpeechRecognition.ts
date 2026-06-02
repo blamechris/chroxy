@@ -219,9 +219,11 @@ export function useSpeechRecognition(
     inFlightRef.current = false;
     // Soft error in continuous mode (no-speech, network, speech-timeout):
     // leave `isRecognizing` true and let the subsequent `end` event decide
-    // whether to re-arm. Flipping false here only to have the restart re-set
-    // it true causes a brief mic-icon flicker (#4829). Mirrors the dashboard
-    // `useVoiceInput.onerror` behaviour.
+    // whether to re-arm. The restart branch in the `end` handler does NOT
+    // touch `isRecognizing` — it relies on the flag already being true — so
+    // flipping false here would briefly clear the mic icon during the
+    // restart blip with nothing to set it back (#4829). Mirrors the
+    // dashboard `useVoiceInput.onerror` behaviour.
     if (modeRef.current === 'continuous') return;
     setIsRecognizing(false);
   });
