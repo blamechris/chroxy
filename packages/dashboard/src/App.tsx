@@ -1670,8 +1670,45 @@ export function App() {
       <header id="header">
         <div className="header-left">
           <span className="logo">Chroxy</span>
-          <span className="version-badge">v{serverVersion ?? __APP_VERSION__}</span>
-          <span className={`status-dot ${serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null) ? 'connecting' : connectionPhase}`} />
+          {/* #4630 — version + status-dot were bare spans with no
+              discoverable label, leaving Tauri/WKWebView and SR users with
+              nothing on hover. Pair `title` (browser hover tooltip) with
+              `aria-label` (screen-reader announcement) so both surfaces
+              get a label. The status dot also gets `role="status"` so SR
+              tooling treats it as a live region rather than a decorative
+              span. */}
+          {(() => {
+            const versionLabel = `Chroxy server v${serverVersion ?? __APP_VERSION__}`
+            return (
+              <span
+                className="version-badge"
+                title={versionLabel}
+                aria-label={versionLabel}
+              >
+                v{serverVersion ?? __APP_VERSION__}
+              </span>
+            )
+          })()}
+          {(() => {
+            const warming = serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null)
+            const phase = warming ? 'connecting' : connectionPhase
+            const STATUS_LABELS: Record<string, string> = {
+              connected: 'Connected to Chroxy server',
+              connecting: warming ? 'Tunnel warming up…' : 'Connecting to Chroxy server…',
+              reconnecting: 'Reconnecting to Chroxy server…',
+              server_restarting: 'Server restarting…',
+              disconnected: 'Disconnected from Chroxy server',
+            }
+            const label = STATUS_LABELS[phase] ?? `Connection status: ${phase}`
+            return (
+              <span
+                className={`status-dot ${phase}`}
+                title={label}
+                aria-label={label}
+                role="status"
+              />
+            )
+          })()}
         </div>
         <div className="header-center">
           <ChatSettingsDropdown

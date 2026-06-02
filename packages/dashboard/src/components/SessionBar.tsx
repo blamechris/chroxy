@@ -120,11 +120,17 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
           >
             {(() => {
               const effectiveStatus = session.status ?? (session.isBusy ? 'working' : 'idle')
+              // #4630 — the dot already had `title` for browser hover, but
+              // screen readers ignore `title` on a bare span. `aria-label`
+              // duplicates the same human-readable string so SR users hear
+              // "session working" / "session idle" rather than nothing.
               return (
                 <span
                   className={`tab-status-dot status-${effectiveStatus}`}
                   data-testid="status-dot"
                   title={STATUS_LABELS[effectiveStatus]}
+                  aria-label={STATUS_LABELS[effectiveStatus]}
+                  role="status"
                 />
               )
             })()}
@@ -161,14 +167,26 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               </span>
             )}
 
+            {/* #4630 — cwd/model/provider chips had at most a `title` (and
+                tab-model had nothing). Pair each with `aria-label` so the
+                browser hover tooltip and the screen-reader announcement
+                stay in lockstep. */}
             {session.cwd && (
-              <span className="tab-cwd" title={session.cwd}>
+              <span
+                className="tab-cwd"
+                title={session.cwd}
+                aria-label={`Working directory: ${session.cwd}`}
+              >
                 {abbreviateCwd(session.cwd)}
               </span>
             )}
 
             {session.model && (
-              <span className="tab-model">
+              <span
+                className="tab-model"
+                title={`Model: ${session.model}`}
+                aria-label={`Model: ${session.model}`}
+              >
                 {shortenModel(session.model)}
               </span>
             )}
@@ -178,6 +196,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                 className="tab-provider"
                 data-provider={getProviderInfo(session.provider).type}
                 title={getProviderInfo(session.provider).tooltip}
+                aria-label={getProviderInfo(session.provider).tooltip}
               >
                 {shortenProvider(session.provider)}
               </span>

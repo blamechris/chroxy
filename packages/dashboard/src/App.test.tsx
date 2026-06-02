@@ -1607,4 +1607,57 @@ describe('App', () => {
       expect(modes).toContain('continuous')
     })
   })
+
+  // #4630 — every interactive header element exposes BOTH `title` (browser
+  // hover tooltip) and `aria-label` (screen-reader announcement). Native
+  // `title` tooltips render in Chrome/Safari/Firefox; aria-label is the
+  // baseline accessible name regardless of how the visual tooltip ends up
+  // rendered. The status dot and version badge were originally bare spans
+  // with no discoverable label — hovering produced nothing, and SR users
+  // had no way to know what they meant. Pinning the contract here so a
+  // future refactor can't silently drop either attribute.
+  describe('header tooltips (#4630)', () => {
+    const connectedWithSession = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    it('Skills toggle exposes both title and aria-label', () => {
+      stateOverrides = connectedWithSession
+      render(<App />)
+      const btn = screen.getByTestId('btn-toggle-skills-panel')
+      expect(btn.getAttribute('title')).toBeTruthy()
+      expect(btn.getAttribute('aria-label')).toBeTruthy()
+    })
+
+    it('Settings gear button exposes both title and aria-label', () => {
+      stateOverrides = connectedWithSession
+      render(<App />)
+      const btn = screen.getByLabelText('Settings')
+      expect(btn.getAttribute('title')).toMatch(/Settings/)
+      expect(btn.getAttribute('aria-label')).toBe('Settings')
+    })
+
+    it('header status dot exposes both title and aria-label so it is discoverable', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      // The header's status-dot is rendered inside #header, distinct from
+      // the per-tab status-dot inside SessionBar.
+      const header = container.querySelector('#header')
+      const dot = header!.querySelector('.status-dot')
+      expect(dot, 'header status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('title'), 'status-dot needs title for browser hover').toBeTruthy()
+      expect(dot!.getAttribute('aria-label'), 'status-dot needs aria-label for SR').toBeTruthy()
+    })
+
+    it('version badge exposes both title and aria-label', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      const badge = container.querySelector('.version-badge')
+      expect(badge, 'version-badge must exist').toBeTruthy()
+      expect(badge!.getAttribute('title'), 'version-badge needs title').toBeTruthy()
+      expect(badge!.getAttribute('aria-label'), 'version-badge needs aria-label').toBeTruthy()
+    })
+  })
 })

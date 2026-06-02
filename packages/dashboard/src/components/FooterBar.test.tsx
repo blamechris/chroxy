@@ -224,6 +224,42 @@ describe('FooterBar', () => {
     expect(onShowQr).toHaveBeenCalledOnce()
   })
 
+  // #4630 — every icon/short-label footer control needs a `title` for
+  // browser-native hover tooltips. The QR button only had aria-label;
+  // version + status-dot had neither. Without these, hovering produced
+  // nothing and SR users had no label either.
+  describe('#4630 tooltips on footer chips and buttons', () => {
+    it('QR button exposes both title and aria-label', () => {
+      render(<FooterBar {...baseProps} onShowQr={vi.fn()} />)
+      const btn = screen.getByLabelText('Show QR code')
+      expect(btn.getAttribute('title'), 'QR button needs title').toBeTruthy()
+      expect(btn.getAttribute('aria-label')).toBe('Show QR code')
+    })
+
+    it('Share-session button exposes both title and aria-label', () => {
+      render(<FooterBar {...baseProps} onShareSession={vi.fn()} />)
+      const btn = screen.getByTestId('btn-share-session')
+      expect(btn.getAttribute('title'), 'Share button needs title').toBeTruthy()
+      expect(btn.getAttribute('aria-label')).toBe('Share this session')
+    })
+
+    it('version chip exposes both title and aria-label', () => {
+      const { container } = render(<FooterBar {...baseProps} serverVersion="1.2.3" />)
+      const v = container.querySelector('.footer-version')
+      expect(v, 'footer-version must exist').toBeTruthy()
+      expect(v!.getAttribute('title'), 'version chip needs title').toBeTruthy()
+      expect(v!.getAttribute('aria-label'), 'version chip needs aria-label').toBeTruthy()
+    })
+
+    it('connection status dot exposes both title and aria-label', () => {
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="connected" />)
+      const dot = container.querySelector('.footer-status-dot')
+      expect(dot, 'footer-status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('title'), 'status dot needs title').toBeTruthy()
+      expect(dot!.getAttribute('aria-label'), 'status dot needs aria-label').toBeTruthy()
+    })
+  })
+
   // -----------------------------------------------------------------
   // #3857 — high-utilization compact-suggestion chip
   // -----------------------------------------------------------------

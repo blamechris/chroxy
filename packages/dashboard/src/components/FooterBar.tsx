@@ -158,21 +158,49 @@ export function FooterBar({
   const modelTip = modelTooltip({ model, contextWindow })
   const agentTip = agentCountTooltip(agentCount)
 
+  // #4630 — chips and the QR button were missing one half of the
+  // tooltip pair (browser hover OR screen-reader name). Compute the
+  // labels once so the `title` / `aria-label` mirror pair can't drift.
+  const versionLabel = `Chroxy server v${version}`
+  const statusFullLabel = settingUpTunnel
+    ? statusLabel
+    : (STATUS_LABELS[connectionPhase] ?? `Connection status: ${connectionPhase}`)
   return (
     <footer className="footer-bar" data-testid="footer-bar">
       <div className="footer-left">
-        <span className="footer-version">v{version}</span>
-        <span className={`footer-status-dot ${dotClass}`} />
+        <span
+          className="footer-version"
+          title={versionLabel}
+          aria-label={versionLabel}
+        >
+          v{version}
+        </span>
+        <span
+          className={`footer-status-dot ${dotClass}`}
+          title={statusFullLabel}
+          aria-label={statusFullLabel}
+          role="status"
+        />
         <span className="footer-status-label">{statusLabel}</span>
         {cwd && (
-          <span className="footer-cwd" title={cwd}>
+          <span
+            className="footer-cwd"
+            title={cwd}
+            aria-label={`Working directory: ${cwd}`}
+          >
             {abbreviateCwd(cwd)}
           </span>
         )}
       </div>
       <div className="footer-right">
         {onShowQr && (
-          <button className="footer-qr-btn" onClick={onShowQr} type="button" aria-label="Show QR code">
+          <button
+            className="footer-qr-btn"
+            onClick={onShowQr}
+            type="button"
+            aria-label="Show QR code"
+            title="Show QR code — scan with the Chroxy mobile app to pair"
+          >
             QR
           </button>
         )}
