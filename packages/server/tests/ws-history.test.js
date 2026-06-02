@@ -1701,3 +1701,261 @@ describe('sendPostAuthInfo — provider-scoped available_models (#2956)', () => 
     }
   })
 })
+
+// #4835: per-deviceId active-session restore on reconnect.
+//
+// Before this fix, every reconnect snapped the client back to
+// `defaultSessionId || firstSessionId` — meaning a tunnel hiccup, eviction,
+// or restart silently lost the user's currently-viewed session. Combined
+// with #4833 (backpressure eviction on large-history sessions) it created
+// an unbreakable trap: every attempt to view the big session got bounced
+// back to the small session, with no way out short of restarting chroxy.
+//
+// The fix wires an injectable `devicePreferences` store through ctx that
+// `sendPostAuthInfo` consults BEFORE falling back to defaultSessionId.
+// `boundSessionId` clients (paired with a specific session) continue to
+// fail-closed — the preference is ignored when the client is bound.
+describe('sendPostAuthInfo — per-device active session restore (#4835)', () => {
+  function inMemoryDevicePrefs(initial = {}) {
+    // Test-double: same shape as the production createDevicePreferences()
+    // store but no disk I/O. Real disk-backed version is exercised in
+    // tests/device-preferences.test.js.
+    const store = new Map(Object.entries(initial))
+    return {
+      getActiveSessionId: (deviceId) => store.get(deviceId) || null,
+      setActiveSessionId: (deviceId, sessionId) => { store.set(deviceId, sessionId) },
+      clear: (deviceId) => { store.delete(deviceId) },
+      _dump: () => Object.fromEntries(store),
+    }
+  }
+
+  it('restores the persisted active session over defaultSessionId / firstSessionId', () => {
+    // Three sessions; defaultSessionId points at sess-default. Device "laptop"
+    // previously switched to sess-big and we want that restored on reconnect.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-default', name: 'Default', cwd: '/d' },
+      { id: 'sess-big', name: 'Ltl', cwd: '/big' },
+      { id: 'sess-other', name: 'Other', cwd: '/o' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'laptop': 'sess-big' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: 'Laptop', deviceType: 'desktop', platform: 'darwin' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    assert.equal(client.activeSessionId, 'sess-big',
+      'persisted preference must win over defaultSessionId')
+    const switchMsg = ctx._sends.find(m => m.type === 'session_switched')
+    assert.ok(switchMsg, 'session_switched not sent')
+    assert.equal(switchMsg.sessionId, 'sess-big')
+    assert.equal(switchMsg.name, 'Ltl')
+  })
+
+  it('falls back to firstSessionId when the deviceId has no recorded preference', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-first', name: 'First', cwd: '/first' },
+      { id: 'sess-other', name: 'Other', cwd: '/other' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs() // empty
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null, // exercise the firstSessionId fallback
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'unknown-device', deviceName: null, deviceType: 'unknown', platform: 'unknown' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-first',
+      'unknown device must fall back to firstSessionId, not null')
+  })
+
+  it('falls back to firstSessionId when the persisted session no longer exists', () => {
+    // Persisted preference points at sess-deleted, which is not in the
+    // manager (session was destroyed between connects). Must NOT throw,
+    // must fall back cleanly to firstSessionId.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-alive', name: 'Alive', cwd: '/alive' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'laptop': 'sess-deleted' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'linux' },
+    })
+
+    assert.doesNotThrow(() => sendPostAuthInfo(ctx, ws))
+    assert.equal(client.activeSessionId, 'sess-alive',
+      'stale preference must fall back to firstSessionId without throwing')
+  })
+
+  it('falls back to defaultSessionId when the persisted session no longer exists', () => {
+    // Same as above but with a defaultSessionId set — the defaultSessionId
+    // should win over firstSessionId when the stale persisted pref is
+    // discarded.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-first', name: 'First', cwd: '/first' },
+      { id: 'sess-default', name: 'Default', cwd: '/default' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'laptop': 'sess-gone' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'linux' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-default',
+      'stale persisted pref must yield to defaultSessionId')
+  })
+
+  it('bound clients ignore the persisted preference (fail-closed wins)', () => {
+    // boundSessionId clients must only ever see their bound session, even
+    // if a stale per-device preference exists. This is the security
+    // invariant from the original ws-history.js bound-session branch.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-bound', name: 'Bound', cwd: '/bound' },
+      { id: 'sess-other', name: 'Other', cwd: '/other' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'paired-phone': 'sess-other' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      boundSessionId: 'sess-bound',
+      deviceInfo: { deviceId: 'paired-phone', deviceName: null, deviceType: 'phone', platform: 'ios' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-bound',
+      'bound clients must ignore the per-device preference')
+  })
+
+  it('bound clients fail closed when bound session is gone (preference is ignored)', () => {
+    // Even more pointed: bound session no longer exists, but a valid
+    // per-device pref points at a still-existing session. The bound
+    // client must NOT inherit that preference — it must clear active
+    // session to null (existing fail-closed behavior).
+    const { manager } = createMockSessionManager([
+      { id: 'sess-still-there', name: 'Still', cwd: '/s' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'paired-phone': 'sess-still-there' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-still-there',
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      boundSessionId: 'sess-bound-but-gone',
+      deviceInfo: { deviceId: 'paired-phone', deviceName: null, deviceType: 'phone', platform: 'ios' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, null,
+      'missing bound session must clear active session even when a valid preference exists')
+  })
+
+  it('two deviceIds maintain independent active sessions (laptop + phone do not share)', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-A', name: 'Alpha', cwd: '/a' },
+      { id: 'sess-B', name: 'Beta', cwd: '/b' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({
+      'laptop': 'sess-A',
+      'phone': 'sess-B',
+    })
+
+    // Connect laptop
+    const laptopWs = makeFakeWs()
+    const laptopCtx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const laptop = registerClient(laptopCtx, laptopWs, {
+      id: 'laptop-client',
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'darwin' },
+    })
+    sendPostAuthInfo(laptopCtx, laptopWs)
+    assert.equal(laptop.activeSessionId, 'sess-A')
+
+    // Connect phone (same in-memory devicePrefs store)
+    const phoneWs = makeFakeWs()
+    const phoneCtx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const phone = registerClient(phoneCtx, phoneWs, {
+      id: 'phone-client',
+      deviceInfo: { deviceId: 'phone', deviceName: null, deviceType: 'phone', platform: 'ios' },
+    })
+    sendPostAuthInfo(phoneCtx, phoneWs)
+    assert.equal(phone.activeSessionId, 'sess-B')
+  })
+
+  it('clients with no deviceInfo (older clients) keep the legacy defaultSessionId behavior', () => {
+    // Backward compat: pre-deviceId clients shouldn't crash or stall — they
+    // should land on defaultSessionId / firstSessionId, exactly as today.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-default', name: 'Default', cwd: '/d' },
+      { id: 'sess-other', name: 'Other', cwd: '/o' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'some-device': 'sess-other' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      devicePreferences: devicePrefs,
+    })
+    // No deviceInfo on the client
+    const client = registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-default',
+      'a deviceId-less client must not inherit anyone else\'s preference')
+  })
+
+  it('works without devicePreferences on ctx (backward compat with older callers)', () => {
+    // ctx.devicePreferences is optional — older wirings (e.g. in-progress
+    // refactors, test harnesses) that don't supply it must keep the
+    // existing default/first behavior, not crash.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-default', name: 'Default', cwd: '/d' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      // devicePreferences deliberately absent
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'darwin' },
+    })
+
+    assert.doesNotThrow(() => sendPostAuthInfo(ctx, ws))
+    assert.equal(client.activeSessionId, 'sess-default')
+  })
+})
+

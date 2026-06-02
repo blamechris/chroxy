@@ -48,6 +48,16 @@ function handleSwitchSession(ws, client, msg, ctx) {
   }
   client.activeSessionId = targetId
   client.subscribedSessionIds.add(targetId)
+  // #4835: persist the chosen session for this device so the next reconnect
+  // restores it instead of snapping back to defaultSessionId. Bound
+  // clients are excluded — their activeSessionId is locked to
+  // boundSessionId, so writing it would just churn the file without
+  // affecting behaviour. devicePreferences is optional on ctx so tests
+  // that don't wire it through (and pre-#4835 callers in general)
+  // continue to work.
+  if (ctx.devicePreferences && !client.boundSessionId && client.deviceInfo?.deviceId) {
+    ctx.devicePreferences.setActiveSessionId(client.deviceInfo.deviceId, targetId)
+  }
   log.info(`Client ${client.id} switched to session ${targetId}`)
   ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
   ctx.sendSessionInfo(ws, targetId)
