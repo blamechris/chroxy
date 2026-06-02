@@ -473,15 +473,14 @@ export function createModelsRegistry(hooks = {}) {
 
     try {
       mkdirSync(dirname(path), { recursive: true })
-      // Pass a per-pid `tmpSuffix` so two concurrent POSIX processes
+      // Pass a per-pid `tmpSuffix` so two concurrent processes
       // (test runner + main daemon, or two test workers) writing the
       // same cache do not race on the same intermediate `.tmp` file
-      // (#4874). The suffix is a POSIX-only contract — on Windows
-      // `writeFileRestricted` ignores `tmpSuffix` and writes directly to
-      // the target path (see `platform.js`), so the per-pid hint has no
-      // effect there. writeFileRestricted handles atomic rename +
-      // cleanup internally on POSIX since #4874; no manual rename/unlink
-      // wrapper is needed here.
+      // (#4874). The suffix is honoured on both POSIX and Windows since
+      // #4913 — writeFileRestricted now uses the same temp+rename
+      // pattern on both platforms, so the per-pid hint protects every
+      // host. writeFileRestricted handles atomic rename + cleanup
+      // internally; no manual rename/unlink wrapper is needed here.
       writeFileRestricted(path, JSON.stringify({
         models: activeModels,
         defaultModelId,

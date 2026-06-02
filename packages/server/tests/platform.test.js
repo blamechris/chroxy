@@ -341,6 +341,156 @@ try {
         assert.strictEqual(finalMode, 0o600, 'final file must be 0o600 even when tmp was pre-existing at 0o644')
       })
     }
+
+    describe('Windows branch (cross-platform via _isWindowsOverride) — #4913', () => {
+      // Before #4913 the Windows path of writeFileRestricted was a
+      // direct `writeFileSync` to the destination, which meant a
+      // mid-write SIGKILL / OOM could leave the file truncated and
+      // unparseable. That regression was introduced when #4874 collapsed
+      // the manual tmp+rename wrappers in `environment-manager.js` and
+      // `models.js` onto this helper. The fix is to use the same
+      // temp+rename pattern on Windows as on POSIX (only the chmod step
+      // is skipped — Windows uses ACL inheritance from the parent
+      // directory, not POSIX mode bits).
+      //
+      // We exercise the Windows branch on every host via the
+      // `_isWindowsOverride` option (same hook pattern as
+      // SessionStatePersistence's `isWindowsOverride`). A real Windows
+      // CI runner is not currently available; if Windows-specific
+      // atomicity edge cases (cross-volume rename, AV-held handles,
+      // ACL inheritance) need verification, file a follow-up issue —
+      // these tests cover the core temp+rename contract that the issue
+      // was raised to restore.
+
+      it('writes via <path>.tmp + rename — destination updates atomically (#4913)', () => {
+        // Round-trip: a clean write through the forced-Windows branch
+        // must leave the destination with the new content and clean up
+        // the `.tmp` sidecar. This is the happy-path mirror of the
+        // POSIX "atomic via .tmp + rename" test above.
+        const filePath = join(tmpDir, 'env-state.json')
+        writeFileRestricted(filePath, JSON.stringify({ generation: 1 }), { _isWindowsOverride: true })
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), JSON.stringify({ generation: 1 }))
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false, '.tmp sidecar must be cleaned up after rename')
+
+        writeFileRestricted(filePath, JSON.stringify({ generation: 2 }), { _isWindowsOverride: true })
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), JSON.stringify({ generation: 2 }))
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false)
+      })
+
+      it('honours a custom tmpSuffix on the Windows branch (#4913)', () => {
+        // The per-pid `tmpSuffix` contract used by models.js to avoid
+        // intermediate-file collisions between concurrent writers must
+        // also apply on Windows. Before #4913 the Windows branch
+        // ignored `tmpSuffix` entirely.
+        const filePath = join(tmpDir, 'models-cache.json')
+        writeFileRestricted(filePath, 'payload', {
+          tmpSuffix: '.tmp-12345',
+          _isWindowsOverride: true,
+        })
+        assert.strictEqual(readFileSync(filePath, 'utf-8'), 'payload')
+        assert.strictEqual(existsSync(`${filePath}.tmp-12345`), false, 'custom-suffix sidecar must be cleaned up after rename')
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false, 'default-suffix sidecar must not exist when a custom suffix is used')
+      })
+
+      it('leaves the original destination intact when rename fails mid-write (#4913)', () => {
+        // The crash-safety contract: a `renameSync` failure (or a real
+        // mid-write SIGKILL/OOM, which manifests as the rename never
+        // happening) must leave the previous-generation destination
+        // untouched and parseable. This is the Windows analogue of the
+        // POSIX "atomic via .tmp + rename" test above; on any runner we
+        // force the Windows branch via `_isWindowsOverride` and shim
+        // `fs.renameSync` to throw EIO, replicating the post-crash
+        // filesystem state we would see on Windows.
+        //
+        // Like the POSIX test, this runs in a subprocess because
+        // monkey-patching `fs.renameSync` in-process does not propagate
+        // to `platform.js`'s already-snapshotted ESM-from-CJS import
+        // binding.
+        const filePath = join(tmpDir, 'env-state.json')
+        writeFileRestricted(filePath, JSON.stringify({ generation: 1 }), { _isWindowsOverride: true })
+
+        const shim = join(tmpDir, 'win-throw-on-rename.mjs')
+        const runner = join(tmpDir, 'win-runner.mjs')
+        const shimSrc = `
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const fs = require('node:fs')
+const orig = fs.renameSync
+fs.renameSync = (oldPath, newPath) => {
+  if (newPath === ${JSON.stringify(filePath)}) {
+    const err = new Error('simulated mid-write crash (windows branch)')
+    err.code = 'EIO'
+    throw err
+  }
+  return orig.call(this, oldPath, newPath)
+}
+`
+        const runnerSrc = `
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+try {
+  writeFileRestricted(${JSON.stringify(filePath)}, ${JSON.stringify(JSON.stringify({ generation: 2 }))}, { _isWindowsOverride: true })
+  process.exit(0)
+} catch (err) {
+  process.stderr.write(err.message)
+  process.exit(2)
+}
+`
+        writeFileRestricted(shim, shimSrc)
+        writeFileRestricted(runner, runnerSrc)
+        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
+        assert.match(result.stderr, /simulated mid-write crash/)
+
+        // The original destination is untouched — still generation 1,
+        // and still parseable JSON. Pre-#4913 the Windows branch wrote
+        // the new payload directly to `filePath`, so a crash mid-write
+        // would have left it truncated and `JSON.parse` would throw.
+        const after = readFileSync(filePath, 'utf-8')
+        assert.strictEqual(after, JSON.stringify({ generation: 1 }))
+        assert.strictEqual(JSON.parse(after).generation, 1)
+
+        // The intermediate `.tmp` is cleaned up on rename failure so it
+        // does not leak across retries — same contract as POSIX.
+        assert.strictEqual(existsSync(`${filePath}.tmp`), false, '.tmp sidecar must be cleaned up on rename failure')
+      })
+
+      it('cleans up the custom-suffix intermediate when rename fails (#4913)', () => {
+        // Without the cleanup, a sequence of failing writes would leak
+        // one sidecar per attempt. This pins the explicit cleanup
+        // contract on the Windows branch — same as POSIX (#4874).
+        const filePath = join(tmpDir, 'env-state.json')
+        const shim = join(tmpDir, 'win-throw-on-rename-cleanup.mjs')
+        const runner = join(tmpDir, 'win-runner-cleanup.mjs')
+        const shimSrc = `
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const fs = require('node:fs')
+const orig = fs.renameSync
+fs.renameSync = (oldPath, newPath) => {
+  if (newPath === ${JSON.stringify(filePath)}) {
+    const err = new Error('simulated mid-write crash')
+    err.code = 'EIO'
+    throw err
+  }
+  return orig.call(this, oldPath, newPath)
+}
+`
+        const runnerSrc = `
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+try {
+  writeFileRestricted(${JSON.stringify(filePath)}, 'payload', { tmpSuffix: '.tmp-99999', _isWindowsOverride: true })
+  process.exit(0)
+} catch {
+  process.exit(2)
+}
+`
+        writeFileRestricted(shim, shimSrc)
+        writeFileRestricted(runner, runnerSrc)
+        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        assert.strictEqual(result.status, 2)
+        assert.strictEqual(existsSync(`${filePath}.tmp-99999`), false, 'custom-suffix sidecar must be cleaned up on rename failure')
+      })
+    })
   })
 
   describe('forceKill()', () => {
