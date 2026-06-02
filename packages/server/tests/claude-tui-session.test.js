@@ -3078,35 +3078,58 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
-    it('respondToQuestion surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS when matchIdx >= 9 (#4746)', async () => {
+    it('respondToQuestion drives matchIdx >= 9 via arrow-key navigation (#4848)', async () => {
       // #4292 originally fell through to writing the label text verbatim
       // when matchIdx >= 9, which #4288 showed lands on whichever option's
       // label starts with the same first character (jump-nav footgun).
-      // #4746 replaces the silent label-text fallback with the same
-      // structured ASK_USER_QUESTION_TOO_MANY_OPTIONS error the multi-
-      // question path emits (see #4625) so the dashboard can render a
-      // toast asking the user to re-prompt with fewer options.
+      // #4746 replaced the silent label-text fallback with a structured
+      // ASK_USER_QUESTION_TOO_MANY_OPTIONS error. #4848 takes the
+      // remaining step: drive the form natively via arrow-key navigation
+      // (Down arrow × matchIdx + Enter) so the user's explicit pick of
+      // option 10/11/12 actually lands on the right option instead of
+      // tearing the turn down.
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
       session._isBusy = true
-      session._currentMessageId = 'msg-toomany'
-      session._activeTurn = { uuid: 'turn-toomany', synthSeq: 0, startedAt: Date.now() }
+      session._currentMessageId = 'msg-arrownav'
+      session._activeTurn = { uuid: 'turn-arrownav', synthSeq: 0, startedAt: Date.now() }
       const options = Array.from({ length: 12 }, (_, i) => ({ label: `opt-${i}` }))
-      session._pendingUserAnswer = { toolUseId: 'toolu-10', options }
+      session._pendingUserAnswer = { toolUseId: 'toolu-arrownav', options }
 
       const errors = []
       session.on('error', (e) => errors.push(e))
 
-      // opt-9 is index 9 → unrepresentable in claude TUI's 1..9 hotkey alphabet.
+      // opt-9 is index 9 → drive via 9 Down arrows + Enter.
       session.respondToQuestion('opt-9')
       await new Promise((resolve) => setTimeout(resolve, 50))
 
-      // No label-text writes — only the teardown Ctrl-C is present.
-      assert.deepEqual(writes, ['\x03'],
-        `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
-      assert.equal(errors.length, 1, 'one error emitted')
-      assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
-      assert.equal(errors[0].toolUseId, 'toolu-10')
+      // No too-many error — arrow-nav drives the form natively.
+      assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+      // disable + 9× Down arrow + Enter + enable.
+      const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected 9× Down + Enter sequence, got ${JSON.stringify(writes)}`)
+    })
+
+    // #4848 boundary: opt-11 (idx 11) in a 12-option question — pin the
+    // larger-N arrow-nav case so the loop count tracks idx exactly.
+    it('respondToQuestion drives matchIdx=11 via 11× Down + Enter (#4848 boundary)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const options = Array.from({ length: 12 }, (_, i) => ({ label: `opt-${i}` }))
+      session._pendingUserAnswer = { toolUseId: 'toolu-arrownav-11', options }
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      // opt-11 is the LAST option (idx 11) → 11 Down arrows + Enter.
+      session.respondToQuestion('opt-11')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+      const expected = ['\x1b[?2004l', ...Array(11).fill('\x1b[B'), '\r', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected 11× Down + Enter sequence, got ${JSON.stringify(writes)}`)
     })
 
     it('respondToQuestion writes the text when options array is missing or empty (free-text-only AskUserQuestion)', async () => {
@@ -4544,22 +4567,16 @@ describe('ClaudeTuiSession', () => {
     // dropped without any UI feedback. The fix surfaces a structured
     // error before any keystroke is written so the dashboard can prompt
     // the user to re-ask with fewer options.
-    describe('10+ option support (#4625)', () => {
-      // The 10-option case: user picked option 10 (index 9). The driver
-      // can't express index 9 in single-digit hotkey land, so it MUST
-      // emit ASK_USER_QUESTION_TOO_MANY_OPTIONS and tear down the turn
-      // instead of writing keystrokes that would silently land on option 1.
-      it('multi-question: pick of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS error + no PTY writes', async () => {
+    describe('10+ option support (#4625 + #4848)', () => {
+      // #4848 — single-select question with a 10+ option pick: drive
+      // natively via arrow-key navigation (Down arrow × idx + Enter)
+      // instead of bailing with the too-many error. Pre-#4848 this
+      // teardown fired (see #4625 history); the user's explicit pick of
+      // option 10+ would never reach claude TUI.
+      it('multi-question: single-select pick of option 10+ drives via arrow-nav (#4848)', async () => {
         const writes = []
-        // The teardown writes Ctrl-C ('\x03') to unstick the TUI form,
-        // matching _onAskUserQuestionStall. Captured so we can assert
-        // the form bytes are NOT written (driver bailed before any digit
-        // keystroke), and the Ctrl-C IS written (recoverable teardown).
         session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
-        session._isBusy = true
-        session._currentMessageId = 'msg_big'
-        session._activeTurn = { uuid: 'turn_big', synthSeq: 0, startedAt: Date.now() }
-        // Q1 has 12 options; user picked option 10 (label 'j').
+        // Q1 has 12 options; user picked option 10 (label 'j', idx 9).
         const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
           .map((label) => ({ label }))
         const questions = [
@@ -4569,51 +4586,45 @@ describe('ClaudeTuiSession', () => {
         session._pendingUserAnswer = { toolUseId: 'toolu_big', questions, options: questions[0].options }
 
         const errors = []
-        const toolResults = []
-        const streamEnds = []
-        const results = []
         session.on('error', (e) => errors.push(e))
-        session.on('tool_result', (tr) => toolResults.push(tr))
-        session.on('stream_end', (se) => streamEnds.push(se))
-        session.on('result', (r) => results.push(r))
 
         session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await new Promise((resolve) => setTimeout(resolve, 100))
 
-        // No FORM keystrokes written — bailed out before the PTY write
-        // path. The teardown's Ctrl-C ('\x03') IS expected so claude TUI
-        // unsticks from the form screen for the next turn.
-        assert.deepEqual(writes, ['\x03'],
-          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
+        // No too-many error — arrow nav drives the form.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // Q1 → 9× Down + Enter (idx 9 nav), Q2 → '1' (single-digit), Submit → '1',
+        // wrapped in paste-disable/enable.
+        const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '1', '1', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected arrow-nav + digits sequence, got ${JSON.stringify(writes)}`)
 
-        // Structured error surfaced so the dashboard can render a toast.
-        assert.equal(errors.length, 1, 'exactly one error emitted')
-        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
-        assert.equal(errors[0].toolUseId, 'toolu_big')
-        assert.match(errors[0].message, /option/i,
-          `error message mentions the option-count limitation, got ${errors[0].message}`)
+        // Pending cleared on the happy path.
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after answer write')
+      })
 
-        // Full teardown so the dashboard's Working banner + Stop button +
-        // activeTools entry all clear (mirrors _onAskUserQuestionStall).
-        assert.equal(toolResults.length, 1, 'synthetic tool_result for activeTools clear')
-        assert.equal(toolResults[0].toolUseId, 'toolu_big')
-        assert.equal(streamEnds.length, 1, 'stream_end emitted to clear streamingMessageId')
-        assert.equal(streamEnds[0].messageId, 'msg_big')
-        assert.equal(results.length, 1, '_emitResult fanned for agent_idle')
-        assert.equal(session._isBusy, false, '_isBusy cleared')
-        assert.equal(session._currentMessageId, null, '_currentMessageId cleared')
-        assert.equal(session._activeTurn, null, '_activeTurn cleared')
+      // #4848 boundary: option 30 in a 30-option single-select question.
+      // Pin the larger-N case to make sure the arrow count tracks idx exactly.
+      it('multi-question: single-select pick of option 30 (idx 29) drives via 29× Down + Enter (#4848)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const thirtyOptions = Array.from({ length: 30 }, (_, i) => ({ label: `o-${i}` }))
+        const questions = [
+          { question: 'Q1?', options: thirtyOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_30', questions, options: questions[0].options }
 
-        // Pending cleared so subsequent answers don't write into a
-        // resolved-but-now-torn-down turn.
-        assert.equal(session._pendingUserAnswer, null, 'pending cleared after too-many error')
+        const errors = []
+        session.on('error', (e) => errors.push(e))
 
-        // No stall watchdog armed — the error is the resolution.
-        assert.equal(session._askUserQuestionWatchdog, null, 'watchdog NOT armed (error is the resolution)')
+        session.respondToQuestion('', { 'Q1?': 'o-29', 'Q2?': 'y' })
+        await new Promise((resolve) => setTimeout(resolve, 200))
 
-        // WARN in chroxy.log so the wedge is greppable.
-        const warn = warnLines.find((m) => /AskUserQuestion multi-question: question has \d+ options/.test(m))
-        assert.ok(warn, `expected too-many-options WARN, got ${JSON.stringify(warnLines)}`)
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '2', '1', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected 29× Down + Enter + Q2 digit + Submit, got ${JSON.stringify(writes)}`)
       })
 
       // Boundary: a 10-option question where the user picked option 9 (the
@@ -4745,79 +4756,59 @@ describe('ClaudeTuiSession', () => {
           `expected default-to-1 sequence even with 10+ options, got ${JSON.stringify(writes)}`)
       })
 
-      // #4746 — single-question parity with the multi-question fix above.
-      // Pre-#4746 the single-question path (questions.length <= 1) had the
-      // SAME limitation but a different failure mode: per the #4292 guard,
-      // a match at index >= 9 fell through to typing the label text
-      // verbatim. claude TUI's single-character jump-nav then landed on
-      // whichever option's label started with the same first character
-      // (#4288) — could be the picked option, could be any other option
-      // with a matching prefix. No error fired. The fix surfaces the same
-      // ASK_USER_QUESTION_TOO_MANY_OPTIONS error the multi-question path
-      // emits, with full teardown so the dashboard's Working banner clears.
-      it('single-question: pick of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS error + no PTY writes', async () => {
+      // #4848 — single-question pick of option 10+: drive natively via
+      // arrow-key navigation instead of the too-many teardown. Pre-#4848
+      // (#4746) this fired ASK_USER_QUESTION_TOO_MANY_OPTIONS with full
+      // turn teardown; #4848 takes the next step and actually drives the
+      // form by sending matchIdx Down arrows + Enter.
+      it('single-question: pick of option 10+ drives via arrow-nav (#4848)', async () => {
         const writes = []
-        // The teardown writes Ctrl-C ('\x03') to unstick the TUI form,
-        // matching _onAskUserQuestionStall. Assert form bytes are NOT
-        // written (driver bailed before any keystroke) and the Ctrl-C IS
-        // written (recoverable teardown).
         session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
-        session._isBusy = true
-        session._currentMessageId = 'msg_single_big'
-        session._activeTurn = { uuid: 'turn_single_big', synthSeq: 0, startedAt: Date.now() }
-        // Single question with 12 options; user picked option 11 ('k', index 10).
-        // Index 10 is unrepresentable in claude TUI's 1..9 hotkey alphabet.
+        // Single question with 12 options; user picked option 11 ('k', idx 10).
         const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
           .map((label) => ({ label }))
         const questions = [{ question: 'Pick one?', options: tenPlusOptions }]
         session._pendingUserAnswer = { toolUseId: 'toolu_single_big', questions, options: tenPlusOptions }
 
         const errors = []
-        const toolResults = []
-        const streamEnds = []
-        const results = []
         session.on('error', (e) => errors.push(e))
-        session.on('tool_result', (tr) => toolResults.push(tr))
-        session.on('stream_end', (se) => streamEnds.push(se))
-        session.on('result', (r) => results.push(r))
 
-        // Single-question is text-driven (no answersMap) — user picked 'k'.
+        // Single-question is text-driven (no answersMap) — user picked 'k' (idx 10).
         session.respondToQuestion('k')
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await new Promise((resolve) => setTimeout(resolve, 100))
 
-        // No FORM keystrokes written — bailed out before the PTY write
-        // path. The teardown's Ctrl-C ('\x03') IS expected so claude TUI
-        // unsticks from the form screen for the next turn.
-        assert.deepEqual(writes, ['\x03'],
-          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
+        // No too-many error — arrow nav drives the form natively.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // 10× Down arrow + Enter (cursor starts at idx 0, lands at idx 10),
+        // wrapped in paste-disable/enable.
+        const expected = ['\x1b[?2004l', ...Array(10).fill('\x1b[B'), '\r', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected 10× Down + Enter sequence, got ${JSON.stringify(writes)}`)
 
-        // Structured error surfaced so the dashboard can render a toast.
-        assert.equal(errors.length, 1, 'exactly one error emitted')
-        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
-        assert.equal(errors[0].toolUseId, 'toolu_single_big')
-        assert.match(errors[0].message, /option/i,
-          `error message mentions the option-count limitation, got ${errors[0].message}`)
+        // Pending cleared on the happy path.
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after answer write')
+      })
 
-        // Full teardown so the dashboard's Working banner + Stop button +
-        // activeTools entry all clear (mirrors the multi-question case).
-        assert.equal(toolResults.length, 1, 'synthetic tool_result for activeTools clear')
-        assert.equal(toolResults[0].toolUseId, 'toolu_single_big')
-        assert.equal(streamEnds.length, 1, 'stream_end emitted to clear streamingMessageId')
-        assert.equal(streamEnds[0].messageId, 'msg_single_big')
-        assert.equal(results.length, 1, '_emitResult fanned for agent_idle')
-        assert.equal(session._isBusy, false, '_isBusy cleared')
-        assert.equal(session._currentMessageId, null, '_currentMessageId cleared')
-        assert.equal(session._activeTurn, null, '_activeTurn cleared')
+      // #4848 — single-question last option (idx N-1) in a 30-option
+      // prompt. Pin the larger-N case to make sure arrow count tracks
+      // idx exactly across larger forms.
+      it('single-question: last option in a 30-option question drives via 29× Down + Enter (#4848)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const thirtyOptions = Array.from({ length: 30 }, (_, i) => ({ label: `s-${i}` }))
+        const questions = [{ question: 'Pick one?', options: thirtyOptions }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_30', questions, options: thirtyOptions }
 
-        // Pending cleared so a stale answer can't write into a torn-down turn.
-        assert.equal(session._pendingUserAnswer, null, 'pending cleared after too-many error')
+        const errors = []
+        session.on('error', (e) => errors.push(e))
 
-        // No stall watchdog armed — the error IS the resolution.
-        assert.equal(session._askUserQuestionWatchdog, null, 'watchdog NOT armed (error is the resolution)')
+        session.respondToQuestion('s-29')
+        await new Promise((resolve) => setTimeout(resolve, 200))
 
-        // WARN in chroxy.log so the wedge is greppable.
-        const warn = warnLines.find((m) => /AskUserQuestion single-question: question has \d+ options/.test(m))
-        assert.ok(warn, `expected too-many-options WARN, got ${JSON.stringify(warnLines)}`)
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected 29× Down + Enter sequence, got ${JSON.stringify(writes)}`)
       })
 
       // Boundary: a 10-option single-question where the user picked option 9

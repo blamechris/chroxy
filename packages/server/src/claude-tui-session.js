@@ -2548,34 +2548,35 @@ export class ClaudeTuiSession extends BaseSession {
       let writeText = text
       if (Array.isArray(options) && options.length > 0) {
         const matchIdx = options.findIndex((o) => o && o.label === text)
-        // #4292 + #4746: single-digit guard (1..9). Multi-digit hotkeys
-        // (10+) are NOT assumed to work on claude TUI's prompt — most
-        // single-keystroke menus commit on the first digit and the second
-        // char would either be a spurious next-prompt input or get
-        // dropped. Pre-#4746 the driver fell through to writing the
-        // label text verbatim when the picked label landed at idx >= 9
-        // (silent-drop path): claude TUI's prompt parser single-
-        // character-jump-navigated through the menu and landed on
-        // whichever option's label started with the same first character
-        // (#4288 jump-nav footgun), NOT necessarily the option the user
-        // picked. No error fired. The multi-question path solved this
-        // in #4625 by surfacing a structured ASK_USER_QUESTION_TOO_MANY_OPTIONS
-        // error before any PTY write; #4746 mirrors that fix for the
-        // single-question path so the same dashboard toast prompts the
-        // user to re-prompt the agent with fewer options. Scoped to
-        // MATCHED picks at idx >= 9 only — an unmatched label still
-        // falls through to the label-text path so the Other / freeform
-        // back-compat case (old clients without `freeformText`) is
-        // preserved.
+        // #4292 + #4746 + #4848: single-digit hotkey covers indices 0..8.
+        // For matched picks at idx >= 9 we drive the form via arrow-key
+        // navigation instead of the hotkey alphabet — Down arrow (`\x1b[B`)
+        // N times moves the cursor from the top option (idx 0) to the
+        // target idx, and Enter (`\r`) commits the highlighted option
+        // (#4848). Pre-#4848 this path tore the turn down with a
+        // structured ASK_USER_QUESTION_TOO_MANY_OPTIONS error (#4746)
+        // because the empirical multi-digit keystroke for option 10+
+        // was unrecorded; arrow-key navigation was always one of the two
+        // candidate paths the recorder script (scripts/tui-form-recorder.mjs)
+        // called out and is the more conservative bet (single-keystroke
+        // menus that auto-commit on the first digit can't be driven via
+        // multi-digit chord like '1','0'; arrow keys are the standard
+        // claude TUI navigation primitive used elsewhere in its form
+        // pickers). The recorder script's authoritative note is preserved
+        // as the open assumption — re-run the recorder pass against a
+        // 10+ option AskUserQuestion to confirm arrow nav is the right
+        // path; if not, switch to whichever empirical sequence pins.
+        //
+        // Scoped to MATCHED picks at idx >= 9. An unmatched label still
+        // falls through to typing the literal text (the v0.9.3 / pre-#4292
+        // path) so the Other / freeform back-compat case is preserved.
         if (matchIdx >= 9) {
           const total = options.length
-          log.warn(`AskUserQuestion single-question: question has ${total} options and the user picked option ${matchIdx + 1} ("${(text || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS instead of silently falling through to label-text typing (#4288 jump-nav footgun) (tool=${prevToolUseId || '?'})`)
-          this._teardownAskUserQuestion(prevToolUseId, {
-            synthResult: `AskUserQuestion failed: question has ${total} options and you picked option ${matchIdx + 1}, beyond the 9 the claude TUI form can drive (#4746).`,
-            emitResultReason: 'ask_user_question_too_many_options',
-            errorCode: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
-            errorMessage: `Couldn't answer: a question has ${total} options and you picked option ${matchIdx + 1}, which is beyond the 9 the claude TUI form can drive. Re-prompt the agent to ask with 9 or fewer options.`,
+          log.info(`AskUserQuestion single-question: question has ${total} options and the user picked option ${matchIdx + 1} ("${(text || '').slice(0, 40)}") — driving via arrow-key navigation (#4848) (tool=${prevToolUseId || '?'})`)
+          this._writePtyArrowNavSequence(matchIdx).catch((err) => {
+            log.warn(`respondToQuestion arrow-nav PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
           })
+          armWatchdog()
           return
         }
         if (matchIdx >= 0 && matchIdx < 9) {
@@ -2602,60 +2603,64 @@ export class ClaudeTuiSession extends BaseSession {
       log.warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
     }
 
-    // #4625 — claude TUI's hotkey alphabet is single-digit '1'..'9' only,
-    // which covers options at indices 0..8. When a question has 10+ options
+    // #4625 + #4848 — claude TUI's single-digit hotkey alphabet ('1'..'9')
+    // covers options at indices 0..8 only. When a question has 10+ options
     // AND the user explicitly picked one at index ≥ 9, we have no
-    // representable keystroke. Pre-#4625 the driver silently defaulted
-    // such picks to option 1 (with only a buried WARN in chroxy.log),
-    // dropping the user's explicit pick without UI feedback. Detect the
-    // condition up-front and surface a structured
-    // ASK_USER_QUESTION_TOO_MANY_OPTIONS error so the dashboard can
-    // render a toast prompting the user to re-prompt the agent for fewer
-    // options. Bails BEFORE any PTY write so the form stays in its
-    // initial state — claude TUI's watchdog or the user's Ctrl-C unsticks
-    // it. We deliberately scope the check to explicit user picks: a
-    // 10+ option question with no per-question answer still falls back
-    // to option 1 (back-compat for old clients), which is acceptable
-    // because nothing was silently dropped.
+    // representable digit keystroke. Pre-#4625 the driver silently
+    // defaulted such picks to option 1; #4625 surfaced a structured
+    // ASK_USER_QUESTION_TOO_MANY_OPTIONS error before any PTY write so
+    // the dashboard could prompt for a re-ask. #4848 splits this by
+    // question kind:
+    //   - single-select questions with an explicit pick at idx >= 9:
+    //     driven natively via arrow-key navigation in the assembled
+    //     sequence below (each Down arrow lands the cursor on the next
+    //     option, Enter commits + advances to the next question — same
+    //     mechanism the single-question path now uses).
+    //   - multi-select questions with a toggle at idx >= 9: KEEP the
+    //     structured ASK_USER_QUESTION_TOO_MANY_OPTIONS error. multi-
+    //     select form navigation (arrow + Space to toggle + return-to-
+    //     start) is empirically unrecorded; mixing arrow nav with the
+    //     digit hotkeys for in-range toggles in the same question would
+    //     leave the cursor in an unknown state without a tested return-
+    //     to-anchor primitive. Reserve the too-many error for this case.
+    //
+    // Bail BEFORE any PTY write so the form stays in its initial state
+    // when the error fires (claude TUI's watchdog or the user's Ctrl-C
+    // unsticks it). 10+ option questions with no per-question answer
+    // still fall back to option 1 (back-compat for old clients).
     if (haveMap) {
-      const unrepresentable = []
+      const unrepresentableMultiSelect = []
       for (const q of questions) {
         const opts = Array.isArray(q.options) ? q.options : []
         if (opts.length <= 9) continue
+        if (!q.multiSelect) continue // single-select 10+ now driven via arrow nav
         const raw = map[q.question]
-        // Gather every label the user picked for this question (single- or
-        // multi-select). MUST mirror resolveQuestionDigits' multi-select
-        // parsing — array → JSON-encoded array → comma-joined list — so
-        // an unrepresentable pick sent via the comma-joined fallback
+        // Gather every label the user toggled for this multi-select.
+        // MUST mirror resolveQuestionDigits' multi-select parsing —
+        // array → JSON-encoded array → comma-joined list — so an
+        // unrepresentable toggle sent via the comma-joined fallback
         // (e.g. "a,k") isn't accidentally treated as a single 3-char
-        // label and missed (Copilot review feedback). For single-select
-        // we don't split on comma because option labels may legitimately
-        // contain commas; the multi-select code path is the only one
-        // that defined comma-joining as a wire encoding.
+        // label and missed (Copilot review feedback on #4625).
         let labels = []
         if (Array.isArray(raw)) {
           labels = raw.filter((s) => typeof s === 'string')
         } else if (typeof raw === 'string' && raw.length > 0) {
-          if (q.multiSelect) {
-            let parsed = null
-            try { parsed = JSON.parse(raw) } catch { parsed = null }
-            if (Array.isArray(parsed)) {
-              labels = parsed.filter((s) => typeof s === 'string')
-            } else {
-              labels = raw.split(',').map((s) => s.trim()).filter(Boolean)
-            }
+          let parsed = null
+          try { parsed = JSON.parse(raw) } catch { parsed = null }
+          if (Array.isArray(parsed)) {
+            labels = parsed.filter((s) => typeof s === 'string')
           } else {
-            labels = [raw]
+            labels = raw.split(',').map((s) => s.trim()).filter(Boolean)
           }
         }
         for (const label of labels) {
           const idx = opts.findIndex((o) => o && o.label === label)
-          if (idx >= 9) unrepresentable.push({ question: q.question, label, index: idx, total: opts.length })
+          if (idx >= 9) unrepresentableMultiSelect.push({ question: q.question, label, index: idx, total: opts.length })
         }
       }
-      if (unrepresentable.length > 0) {
-        const first = unrepresentable[0]
-        log.warn(`AskUserQuestion multi-question: question has ${first.total} options and the user picked option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS instead of silently defaulting to option 1 (tool=${prevToolUseId || '?'})`)
+      if (unrepresentableMultiSelect.length > 0) {
+        const first = unrepresentableMultiSelect[0]
+        log.warn(`AskUserQuestion multi-question: multi-select question has ${first.total} options and the user toggled option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet AND beyond the arrow-nav single-select fallback (#4848 deliberately scopes arrow-nav to single-select only) — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS (tool=${prevToolUseId || '?'})`)
         // Full AskUserQuestion teardown: synth tool_result + Ctrl-C the
         // TUI + clear inactivity timers + stream_end + _emitResult +
         // error (in that order). Without the full teardown the dashboard
@@ -2664,10 +2669,10 @@ export class ClaudeTuiSession extends BaseSession {
         // chroxy gave up before writing any keystrokes (#4625 hands the
         // form's resolution back to the user via the error toast).
         this._teardownAskUserQuestion(prevToolUseId, {
-          synthResult: `AskUserQuestion failed: question has ${first.total} options and you picked option ${first.index + 1}, beyond the 9 the claude TUI form can drive (#4625).`,
+          synthResult: `AskUserQuestion failed: multi-select question has ${first.total} options and you toggled option ${first.index + 1}, beyond the 9 the claude TUI multi-select form can drive (#4848).`,
           emitResultReason: 'ask_user_question_too_many_options',
           errorCode: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
-          errorMessage: `Couldn't answer: a question has ${first.total} options and you picked option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive. Re-prompt the agent to ask with 9 or fewer options.`,
+          errorMessage: `Couldn't answer: a multi-select question has ${first.total} options and you toggled option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive for multi-select. Re-prompt the agent to ask with 9 or fewer options for that question.`,
         })
         return
       }
@@ -2681,8 +2686,16 @@ export class ClaudeTuiSession extends BaseSession {
       return null
     }
 
-    /** Resolve a single question's answer entry to an array of digits to write. */
-    const resolveQuestionDigits = (q, rawAnswer) => {
+    /**
+     * Resolve a single question's answer entry to an array of keystroke
+     * tokens to write. Tokens are arbitrary-length strings — usually a
+     * single digit ('1'..'9') or Tab/Enter, but for #4848 a single-select
+     * answer at idx >= 9 expands to a multi-token arrow-nav sequence
+     * (`'\x1b[B'` × idx + `'\r'`). The writer (`_writePtyMultiQuestionSequence`)
+     * doesn't care about token length — it writes each entry as one
+     * `term.write` call with a throttle pause after.
+     */
+    const resolveQuestionKeystrokes = (q, rawAnswer) => {
       const opts = Array.isArray(q.options) ? q.options : []
       const defaultDigit = opts.length > 0 ? '1' : null
 
@@ -2712,6 +2725,10 @@ export class ClaudeTuiSession extends BaseSession {
         for (const label of labels) {
           const d = labelToDigit(q, label)
           if (d) digits.push(d)
+          // Multi-select 10+ toggles already pre-screened above and
+          // surfaced as ASK_USER_QUESTION_TOO_MANY_OPTIONS — anything
+          // unrepresentable here means the dashboard sent something we
+          // couldn't match (defaulted handling below).
         }
         if (digits.length === 0 && defaultDigit) {
           log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (multi-select) — defaulting to option 1`)
@@ -2720,13 +2737,32 @@ export class ClaudeTuiSession extends BaseSession {
         return digits
       }
 
-      // single-select — exactly one digit
+      // single-select — exactly one keystroke token.
+      let pickedLabel = null
       if (typeof rawAnswer === 'string' && rawAnswer.length > 0) {
-        const d = labelToDigit(q, rawAnswer)
-        if (d) return [d]
+        pickedLabel = rawAnswer
       } else if (Array.isArray(rawAnswer) && typeof rawAnswer[0] === 'string') {
-        const d = labelToDigit(q, rawAnswer[0])
-        if (d) return [d]
+        pickedLabel = rawAnswer[0]
+      }
+      if (pickedLabel !== null) {
+        const idx = opts.findIndex((o) => o && o.label === pickedLabel)
+        if (idx >= 0 && idx < 9) return [String(idx + 1)]
+        if (idx >= 9) {
+          // #4848 — option at idx >= 9 in a single-select question.
+          // Drive via arrow-key navigation: idx Down arrows from the
+          // top option (cursor starts at idx 0) followed by Enter to
+          // commit + advance to the next question. The arrow sequence
+          // and the Enter are emitted as two distinct keystroke tokens
+          // so the throttle pauses BETWEEN them (claude TUI's paste
+          // detector treats a single 11-byte burst as a paste). Each
+          // arrow is 3 bytes ('\x1b[B'); 10 arrows = 30 bytes is still
+          // well under any reasonable paste threshold, but stay safe.
+          log.info(`AskUserQuestion multi-question: single-select pick at idx=${idx} (option ${idx + 1}) in q="${(q.question || '').slice(0, 40)}" → arrow-nav (#4848)`)
+          const tokens = []
+          for (let i = 0; i < idx; i++) tokens.push('\x1b[B')
+          tokens.push('\r')
+          return tokens
+        }
       }
       if (defaultDigit) {
         if (haveMap) log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (single-select) — defaulting to option 1`)
@@ -2740,11 +2776,12 @@ export class ClaudeTuiSession extends BaseSession {
     const sequence = []
     for (const q of questions) {
       const rawAnswer = map[q.question]
-      const digits = resolveQuestionDigits(q, rawAnswer)
-      for (const d of digits) sequence.push(d)
+      const keystrokes = resolveQuestionKeystrokes(q, rawAnswer)
+      for (const k of keystrokes) sequence.push(k)
       if (q.multiSelect) {
         // Multi-select needs an explicit advance keystroke; single-select
-        // auto-advances on digit (verified empirically).
+        // auto-advances on digit OR on Enter after arrow-nav (verified
+        // empirically for digit; arrow-nav variant pinned by #4848).
         sequence.push('\t')
       }
     }
@@ -2785,6 +2822,54 @@ export class ClaudeTuiSession extends BaseSession {
           await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
         }
       }
+      return true
+    } finally {
+      try { this._term.write('\x1b[?2004h') } catch {}
+    }
+  }
+
+  /**
+   * Write an arrow-key navigation sequence for the single-question
+   * AskUserQuestion form when the user picked an option beyond the
+   * single-digit hotkey range (idx >= 9). Emits `targetIdx` Down arrow
+   * keystrokes (`\x1b[B`, 3 bytes each) — claude TUI's form cursor
+   * starts at idx 0, so `targetIdx` downs land on the picked option —
+   * followed by Enter (`\r`) to commit (#4848).
+   *
+   * Wrapped in bracketed-paste-disable / re-enable exactly once (same
+   * defense as _writePtyTextThrottled and _writePtyMultiQuestionSequence)
+   * and each keystroke is throttled by PROMPT_CHAR_DELAY_MS so claude TUI's
+   * paste detector doesn't reject the burst. Each arrow is one
+   * `_term.write` call (3 bytes); the throttle pauses BETWEEN tokens so
+   * the cumulative arrival rate stays well under any reasonable paste
+   * threshold.
+   *
+   * **Open assumption (#4848):** the empirical recorder pass against a
+   * 10+ option AskUserQuestion was not run before this PR — arrow-key
+   * navigation is the conservative bet (recorder script
+   * scripts/tui-form-recorder.mjs called it out as the most likely
+   * working path; multi-digit chord '1','0' was ruled out because the
+   * digit hotkey auto-commits on the first keystroke). Re-run the
+   * recorder against a 12-option AskUserQuestion and pick option 11 to
+   * confirm; if the working sequence differs, replace this writer.
+   *
+   * @param {number} targetIdx — 0-indexed option to land on
+   * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
+   */
+  async _writePtyArrowNavSequence(targetIdx) {
+    if (!this._term) return false
+    if (typeof targetIdx !== 'number' || targetIdx < 0) return false
+    this._term.write('\x1b[?2004l')
+    try {
+      for (let i = 0; i < targetIdx; i++) {
+        if (this._activeTurn?.aborted || this._ptyExited) return false
+        this._term.write('\x1b[B')
+        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
+          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
+        }
+      }
+      if (this._activeTurn?.aborted || this._ptyExited) return false
+      this._term.write('\r')
       return true
     } finally {
       try { this._term.write('\x1b[?2004h') } catch {}
