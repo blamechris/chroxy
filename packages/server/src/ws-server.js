@@ -79,6 +79,28 @@ export function resolveDiagnosticsRateLimit(overrideOpts) {
   }
   return { windowMs: 60_000, maxMessages: 12, burst: 4 }
 }
+
+/**
+ * Parse a duration value coming from a `CHROXY_DEVICE_PREFS_*_MS` env var.
+ * Accepts:
+ *   - a non-negative integer string → that many milliseconds
+ *   - "0" → 0 (effectively disables the cap by making everything "older")
+ *   - empty / null / non-numeric → fall back to `defaultMs`
+ *
+ * Negative numbers are silently coerced to the default so a typo can't
+ * disable the prune by making `now - updatedAt > -1` always true.
+ *
+ * @param {string|undefined|null} raw
+ * @param {number} defaultMs
+ * @returns {number}
+ */
+export function parseDevicePrefsDuration(raw, defaultMs) {
+  if (raw == null || raw === '') return defaultMs
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0) return defaultMs
+  return Math.floor(n)
+}
+
 const SERVER_VERSION = packageJson.version
 const log = createLogger('ws')
 
@@ -475,6 +497,40 @@ export class WsServer {
     // reconnect and updated by session-handlers.handleSwitchSession after
     // every explicit switch.
     this._devicePreferences = devicePreferences || createDevicePreferences()
+    // #4849: lazy startup prune. server-cli calls sessionManager.restoreState()
+    // before constructing the WsServer, so any device-pref entry whose
+    // activeSessionId is missing here is genuinely orphaned (a session
+    // destroyed in a previous run, or one rotated out by the user). The
+    // grace window guards against the rare path where restoreState
+    // intentionally skipped a session (e.g. corrupted state). prune is a
+    // no-op when the device list is empty, so the disk-I/O cost is zero
+    // for first-run installs and for users who never connected from
+    // ephemeral devices. Threshold env vars:
+    //   - CHROXY_DEVICE_PREFS_MAX_AGE_MS — hard age cap (default 90d)
+    //   - CHROXY_DEVICE_PREFS_STALE_GRACE_MS — stale-session grace (default 30d)
+    // Both can be set to 0 to disable. See #4849.
+    if (sessionManager && typeof this._devicePreferences.prune === 'function') {
+      try {
+        const maxAgeMs = parseDevicePrefsDuration(
+          process.env.CHROXY_DEVICE_PREFS_MAX_AGE_MS,
+          90 * 24 * 60 * 60 * 1000,
+        )
+        const staleGraceMs = parseDevicePrefsDuration(
+          process.env.CHROXY_DEVICE_PREFS_STALE_GRACE_MS,
+          30 * 24 * 60 * 60 * 1000,
+        )
+        this._devicePreferences.prune({
+          sessionExists: (id) => !!sessionManager.getSession?.(id),
+          maxAgeMs,
+          staleSessionGraceMs: staleGraceMs,
+        })
+      } catch (err) {
+        // A prune failure must never block server startup — the next mutation
+        // will reload the file anyway, and the worst case is a slightly
+        // larger preferences file.
+        log.warn(`device-preferences startup prune failed: ${err.message}`)
+      }
+    }
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
