@@ -1313,7 +1313,13 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
 }
 
 function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  let deltaId = msg.messageId as string;
+  // Capture the ORIGINAL incoming messageId before any remap resolution.
+  // The post-tool continuation split (#4889) writes its remap entry against
+  // this id (not against the resolved `deltaId`) so successive splits
+  // overwrite a single map entry instead of forming a chain — keeps
+  // `_deltaIdRemaps` bounded and eliminates the need for chained lookup.
+  const originalMessageId = msg.messageId as string;
+  let deltaId = originalMessageId;
   const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
 
   // Forward delta text to terminal view (synthesize raw output in CLI mode)
@@ -1398,14 +1404,6 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     deltaId = newId;
   } else if (_deltaIdRemaps.has(deltaId)) {
     deltaId = _deltaIdRemaps.get(deltaId)!;
-    // Allow chained remaps: when the post-tool continuation split (#4889)
-    // later remaps `deltaId` → `deltaId-cont-...`, the original incoming
-    // id needs to resolve through both hops on subsequent deltas.
-    while (_deltaIdRemaps.has(deltaId)) {
-      const next = _deltaIdRemaps.get(deltaId)!;
-      if (next === deltaId) break;
-      deltaId = next;
-    }
   } else {
     // Defensive: server reuses messageId for tool_start and the post-tool
     // stream_start. If stream_start was dropped or hasn't registered the
@@ -1464,11 +1462,13 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   //
   // Detect the boundary by checking whether a tool_use was appended AFTER the
   // currently-resolved response slot. If so, materialize a fresh continuation
-  // slot at the end (`<deltaId>-cont-<ts>`) and chain a remap so subsequent
-  // deltas for the same incoming messageId route to the new slot. The split
-  // mirrors the `-post-` permission-boundary pattern already in this file.
-  // Skipped while the session is replaying — replayed history is reassembled
-  // server-side and must not be re-split on the client.
+  // slot at the end (`<deltaId>-cont-<ts>`) and remap the ORIGINAL incoming
+  // messageId directly to the new slot (single-hop, never chained — successive
+  // splits overwrite the existing entry so `_deltaIdRemaps` stays bounded and
+  // `handleStreamEnd`'s `_deltaIdRemaps.delete(out.messageId)` cleans up
+  // completely). The split mirrors the `-post-` permission-boundary pattern
+  // already in this file. Skipped while the session is replaying — replayed
+  // history is reassembled server-side and must not be re-split on the client.
   {
     const splitTargetId = capturedSessionId;
     const splitEffectiveId = (splitTargetId && get().sessionStates[splitTargetId])
@@ -1488,13 +1488,28 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
         const bufferedContent = pendingDeltas.get(deltaId)?.delta || '';
         const hasContent = slot.type === 'response'
           && (slot.content.length > 0 || bufferedContent.length > 0);
-        const toolAfter = hasContent
-          && splitMessages.slice(slotIdx + 1).some((m) => m.type === 'tool_use');
+        // Index-based scan instead of slice().some() — avoids allocating a
+        // tail array on every delta. handleStreamDelta is called many times
+        // per turn and sessions can carry long histories, so this stays on
+        // the hot path lean.
+        let toolAfter = false;
+        if (hasContent) {
+          for (let i = slotIdx + 1; i < splitMessages.length; i++) {
+            if (splitMessages[i]!.type === 'tool_use') {
+              toolAfter = true;
+              break;
+            }
+          }
+        }
         if (toolAfter) {
           const contId = `${deltaId}-cont-${Date.now()}`;
-          // Chain the remap: the next delta for the original incoming id will
-          // resolve through both hops (handled by the while-loop above).
-          _deltaIdRemaps.set(deltaId, contId);
+          // Single-hop remap: write against the ORIGINAL incoming messageId
+          // so successive continuation splits overwrite this entry rather
+          // than building a chain. Keeps `_deltaIdRemaps` size bounded by
+          // the count of distinct in-flight turn ids, and lets
+          // `handleStreamEnd`'s `_deltaIdRemaps.delete(out.messageId)` clean
+          // up completely.
+          _deltaIdRemaps.set(originalMessageId, contId);
           const contMsg: ChatMessage = {
             id: contId,
             type: 'response',
