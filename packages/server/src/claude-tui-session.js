@@ -2833,8 +2833,15 @@ export class ClaudeTuiSession extends BaseSession {
     // to `true` on multi-select; any other shape (string, null, number, a
     // hypothetical future field rename) is treated as "assume single-select
     // for settle purposes" — but we log a WARN so the shape drift is visible.
+    //
+    // The "drift" check uses `'multiSelect' in lastQuestion` rather than
+    // `!== undefined` so it also catches the in-code pathological case
+    // `{ multiSelect: undefined }` (Copilot review on #4902): the key is
+    // present but the value isn't boolean — that's still drift worth
+    // surfacing, since wire-deserialized shapes can't produce that pattern
+    // (JSON.stringify drops undefined-valued keys) but in-code shapes can.
     const lastQuestion = questions.length > 0 ? questions[questions.length - 1] : null
-    if (lastQuestion && lastQuestion.multiSelect !== undefined && typeof lastQuestion.multiSelect !== 'boolean') {
+    if (lastQuestion && 'multiSelect' in lastQuestion && typeof lastQuestion.multiSelect !== 'boolean') {
       ;(this._log || log).warn(`AskUserQuestion multi-question: last question has non-boolean multiSelect=${JSON.stringify(lastQuestion.multiSelect)} (q="${(lastQuestion.question || '').slice(0, 40)}") — assuming single-select for settle (#4883)`)
     }
     const lastIsSingleSelect = !!(lastQuestion && lastQuestion.multiSelect !== true)

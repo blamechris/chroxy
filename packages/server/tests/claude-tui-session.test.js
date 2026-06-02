@@ -4686,13 +4686,20 @@ describe('ClaudeTuiSession', () => {
       await new Promise((resolve) => setTimeout(resolve, 300))
 
       // Settle MUST fire — back-compat with the pre-tightening behaviour.
+      // Measure the gap from the LAST QUESTION's digit (Q2's '2') to the
+      // Submit '1', not from Q1's '\t'. The settle is inserted at that
+      // specific boundary; measuring across Q1's Tab would mask a
+      // regression where the last-q keystroke changes (Copilot #4902).
       const writes = writeEvents.map((e) => e.data)
-      const q1TabIdx = writes.indexOf('\t')
-      const submitIdx = writes.indexOf('1', q1TabIdx + 1)
-      const gapMs = writeEvents[submitIdx].t - writeEvents[q1TabIdx].t
+      // Bytes: paste-disable, Q1 '1' '2' '\t', Q2 '2', [settle], Submit '1', '\r', paste-enable.
+      const tabIdx = writes.indexOf('\t')
+      const lastDigitIdx = writes.indexOf('2', tabIdx + 1) // Q2's '2' after the Tab
+      const submitIdx = writes.indexOf('1', lastDigitIdx + 1)
+      assert.ok(lastDigitIdx > tabIdx && submitIdx > lastDigitIdx, 'found Q2 digit + submit')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[lastDigitIdx].t
       assert.ok(
         gapMs >= 140,
-        `omitted-multiSelect last q is single-select: expected settle gap >= 140ms, got ${gapMs}ms`,
+        `omitted-multiSelect last q is single-select: expected settle gap >= 140ms between last digit and Submit, got ${gapMs}ms`,
       )
 
       // And the WARN must NOT fire on this canonical shape.
@@ -4720,13 +4727,19 @@ describe('ClaudeTuiSession', () => {
       session.respondToQuestion('', { 'Q1?': ['a', 'b'], 'Q2?': 'q' })
       await new Promise((resolve) => setTimeout(resolve, 300))
 
+      // Measure the gap at the actual settle boundary: Q2's digit ('2')
+      // → Submit '1'. Measuring across Q1's '\t' would mask a regression
+      // where the last-q keystroke changes (Copilot #4902).
       const writes = writeEvents.map((e) => e.data)
+      // Bytes: paste-disable, Q1 '1' '2' '\t', Q2 '2', [settle], Submit '1', '\r', paste-enable.
       const tabIdx = writes.indexOf('\t')
-      const submitIdx = writes.indexOf('1', tabIdx + 1)
-      const gapMs = writeEvents[submitIdx].t - writeEvents[tabIdx].t
+      const lastDigitIdx = writes.indexOf('2', tabIdx + 1) // Q2's '2' after the Tab
+      const submitIdx = writes.indexOf('1', lastDigitIdx + 1)
+      assert.ok(lastDigitIdx > tabIdx && submitIdx > lastDigitIdx, 'found Q2 digit + submit')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[lastDigitIdx].t
       assert.ok(
         gapMs >= 140,
-        `explicit multiSelect:false is single-select: expected settle gap >= 140ms, got ${gapMs}ms`,
+        `explicit multiSelect:false is single-select: expected settle gap >= 140ms between last digit and Submit, got ${gapMs}ms`,
       )
 
       const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
@@ -4752,6 +4765,32 @@ describe('ClaudeTuiSession', () => {
         `expected drift WARN for non-boolean multiSelect, got warns=${JSON.stringify(warnLines)}`,
       )
       assert.match(drift, /Q2\?/, 'warn includes the offending question text')
+    })
+
+    // Drift: pathological in-code `{ multiSelect: undefined }`. JSON.stringify
+    // drops undefined-valued keys, so wire-deserialized shapes can't produce
+    // this — but in-code construction can. The tightened check uses
+    // `'multiSelect' in lastQuestion` precisely to catch this case
+    // (Copilot review on #4902): key present, value not boolean = drift.
+    it('explicit multiSelect:undefined on last q: WARN fires (Copilot #4902)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }] },
+        { question: 'Q2?', multiSelect: undefined, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      // Sanity: the key IS present (otherwise this test would be checking the
+      // omitted-multiSelect path, which has its own test above).
+      assert.ok('multiSelect' in questions[1], 'multiSelect key present on Q2')
+      session._pendingUserAnswer = { toolUseId: 'toolu_undef_drift', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.ok(
+        drift,
+        `expected drift WARN for explicit undefined multiSelect, got warns=${JSON.stringify(warnLines)}`,
+      )
     })
 
     // Drift: `multiSelect: null`. Same surfacing requirement as the string case.
