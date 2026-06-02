@@ -19,6 +19,7 @@ Orchestrate long-running autonomous dev sessions — work through GitHub issues 
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
+# Branch prefix for autonomous session branches
 BRANCH_PREFIX="feat/"
 ```
 
@@ -249,7 +250,7 @@ Refs #${ISSUE_NUM}
 EOF
 )"
 
-# Commit scopes: server, app, desktop, tunnel, ws, cli, ci, docs, dashboard
+# Commit scope conventions: server, app, desktop, tunnel, ws, cli, ci, docs, dashboard
 
 git push -u origin ${BRANCH}
 ```
@@ -295,7 +296,7 @@ PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
 If the PR modified **dashboard or UI files**, run the project's smoke test to catch visual regressions before review. This prevents wasting review cycles on PRs that break the UI.
 
 ```bash
-# Check if PR touches dashboard source files, React components, CSS, or theme files
+# Condition for when to run smoke test
 CHANGED_FILES=$(git diff --name-only main...HEAD)
 if echo "$CHANGED_FILES" | grep -qE 'dashboard-next|\.tsx$|\.css$|\.html$|components\.css|theme'; then
   NEEDS_SMOKE_TEST=true
@@ -305,10 +306,10 @@ fi
 If `NEEDS_SMOKE_TEST` is true:
 
 1. **Rebuild dashboard** if needed:
-```bash
-cd packages/server
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
-```
+   ```bash
+   cd packages/server
+   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
+   ```
 2. **Run `/smoke-test`** — this launches the app, opens a headless browser, and verifies key UI elements
 3. **Check results:**
    - **All pass:** Continue to Phase 5 (review)
@@ -440,4 +441,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why. The user sees the reason.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running /full-review to prevent context drift.
 15. **Sync before branching** — Always `git checkout main && git pull` before starting each issue. Check for merged PRs first.
-<!-- skill-templates: autonomous-dev-flow 57ceacc 2026-05-27 -->
+<!-- skill-templates: autonomous-dev-flow ebdb14e 2026-06-02 -->

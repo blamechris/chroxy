@@ -184,11 +184,11 @@ Output a concise summary:
 | 2/5 | Concerning. Significant issues that may cause failures. |
 | 1/5 | Fundamentally broken. Needs rethinking, not patching. |
 
-### Chroxy-Specific Grading Criteria
+### Grading Criteria for Chroxy
 
-- **Operator** should weight mobile UX: touch targets (min 44pt), offline behavior, reconnect experience
+- **Operator** should weight mobile UX: touch targets, offline behavior, reconnect experience
 - **Guardian** should weight WebSocket edge cases: stale sockets, tunnel drops, concurrent writes
-- **Expert agents** (Expo Expert, Tunneler) should verify claims against actual Cloudflare and Expo documentation
+- **Expert agents** should verify claims against actual Cloudflare/Expo documentation
 
 ### Agent Behavior Rules
 
@@ -202,8 +202,8 @@ Output a concise summary:
 
 ```
 /swarm-audit docs/architecture/proposal.md 8
-/swarm-audit "the WebSocket protocol in packages/server/ws-server.js" 4
+/swarm-audit "the WebSocket protocol in server/ws-server.js" 4
 /swarm-audit docs/rfc-push-notifications.md
 /swarm-audit "session management across server restart" 6
 ```
-<!-- skill-templates: swarm-audit 57ceacc 2026-05-27 -->
+<!-- skill-templates: swarm-audit ebdb14e 2026-06-02 -->

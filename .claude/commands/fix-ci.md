@@ -20,7 +20,7 @@ echo "PR: #${PR_NUM} | Branch: ${BRANCH} | HEAD: ${HEAD_SHA}"
 
 # Get the latest CI run(s) for this branch
 # Chroxy uses Copilot review + CodeQL ruleset
-gh run list --branch ${BRANCH} --workflow "CI" --limit 5 --json databaseId,status,conclusion,headSha,event,createdAt
+gh run list --branch ${BRANCH} --workflow "Copilot review" --limit 5 --json databaseId,status,conclusion,headSha,event,createdAt
 ```
 
 ### 1. Get Job-Level Status
@@ -49,7 +49,7 @@ Apply these rules **in order** (first match wins):
 #### 2a. IN_PROGRESS — Poll for Completion
 
 ```bash
-# Chroxy CI typically completes within 5 minutes on GitHub-hosted runners
+# Chroxy CI typically completes within 5 minutes
 MAX_WAIT=300  # seconds
 INTERVAL=30
 ELAPSED=0
@@ -71,7 +71,7 @@ Cancellation often happens due to concurrency groups (a newer push cancels the o
 
 ```bash
 # Check all runs for this SHA
-gh run list --branch ${BRANCH} --workflow "CI" --limit 5 --json databaseId,status,conclusion,headSha,event \
+gh run list --branch ${BRANCH} --workflow "Copilot review" --limit 5 --json databaseId,status,conclusion,headSha,event \
   | jq --arg sha "$HEAD_SHA" '[.[] | select(.headSha == $sha)]'
 ```
 
@@ -98,10 +98,10 @@ gh api repos/${REPO}/actions/runs/${RUN_ID}/jobs --jq '.jobs[] | select(.conclus
 
 Chroxy-specific patterns:
 - `npm test` failures in server tests → check for missing test fixtures or mock setup issues
-- `npx jest` failures in app tests → verify TypeScript strict mode compliance, check for platform-specific test assumptions
-- `npm run dashboard:build` failures → verify Node 22 is in use, check for Vite config issues
-- `npx tsc --noEmit` failures → check for `any` types or missing type definitions in app code
-- CodeQL violations → review security findings in PR comments
+- `npx tsc --noEmit` failures in app → TypeScript strict mode violations (check for `any` types, platform-specific issues)
+- `npm run dashboard:build` failures → Vite build errors, missing CSS, or theme issues
+- `npx jest` failures in dashboard tests → component rendering or mock issues
+- WebSocket protocol test failures → check WS message format or auth flow issues
 
 Generic patterns (apply to all repos):
 - `rate limit` / `API rate limit exceeded` → RETRIGGER (transient)
@@ -128,8 +128,8 @@ Classify each job into exactly ONE outcome:
 gh run rerun ${RUN_ID} --failed
 
 # Fallback: close and reopen PR to trigger full CI suite
-# gh pr close ${PR_NUM}
-# gh pr reopen ${PR_NUM}
+gh pr close ${PR_NUM}
+gh pr reopen ${PR_NUM}
 ```
 
 **One retrigger attempt only.** If the re-run also fails, escalate instead of retrying.
@@ -174,14 +174,14 @@ Do NOT take automated action. Report the diagnosis to the user:
 After RETRIGGER or FIX, wait for the new run to complete:
 
 ```bash
-# Chroxy CI typically completes within 5 minutes on GitHub-hosted runners
+# Chroxy CI typically completes within 5 minutes
 MAX_WAIT=300
 INTERVAL=30
 ELAPSED=0
 
 # Get the new run ID
 sleep 10  # brief delay for run to appear
-NEW_RUN_ID=$(gh run list --branch ${BRANCH} --workflow "CI" --limit 1 --json databaseId -q '.[0].databaseId')
+NEW_RUN_ID=$(gh run list --branch ${BRANCH} --workflow "Copilot review" --limit 1 --json databaseId -q '.[0].databaseId')
 
 while [ $ELAPSED -lt $MAX_WAIT ]; do
   STATUS=$(gh run view ${NEW_RUN_ID} --json status -q .status)
@@ -271,4 +271,4 @@ Start
 6. **Composable** — Works standalone (`/fix-ci 42`) or from `/full-review` (Phase 2.5).
 7. **Idempotent** — Safe to re-run. If CI is already green, reports success and exits.
 8. **No attribution** — Follow project attribution policy in all commits.
-<!-- skill-templates: fix-ci 57ceacc 2026-05-27 -->
+<!-- skill-templates: fix-ci ebdb14e 2026-06-02 -->

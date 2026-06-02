@@ -260,4 +260,4 @@ After all PRs processed:
 8. **Handle stale reviews** — Pushing fixes invalidates reviews. Wait for fresh cycle.
 9. **Compose with `/fix-ci`** — Don't reinvent CI diagnosis.
 10. **No attribution** — Follow project's attribution policy in any fix commits.
-<!-- skill-templates: batch-merge 57ceacc 2026-05-27 -->
+<!-- skill-templates: batch-merge ebdb14e 2026-06-02 -->
