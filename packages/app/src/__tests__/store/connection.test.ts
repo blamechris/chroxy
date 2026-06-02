@@ -507,6 +507,115 @@ describe('message queue internals', () => {
   });
 });
 
+// -- sendUserQuestionResponse: widened payload shapes (#4761) --
+
+describe('sendUserQuestionResponse wire payload (#4761)', () => {
+  beforeEach(() => {
+    useConnectionStore.setState({
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+  });
+
+  it('emits the legacy single-question wire shape for a string answer (back-compat)', () => {
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const result = useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu_single');
+
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu_single',
+    });
+    // No `answers` field on the single-question path — that's reserved
+    // for multi-question forms so older servers ignore it cleanly.
+    expect(sent[0]).not.toHaveProperty('answers');
+  });
+
+  it('forwards multi-question Record<string, string | string[]> verbatim and flattens arrays in the answer summary', () => {
+    // #4761 — mirror the dashboard's `sendUserQuestionResponse` widening
+    // (#4760). The widened wire (`UserQuestionResponseSchema`) accepts
+    // `string | string[]` per question. The mobile store should:
+    //   1. Populate `answers` with the map shape unchanged (arrays stay
+    //      arrays — the server normalizes downstream).
+    //   2. Populate the string-only `answer` field with a flattened
+    //      comma-joined summary so older servers reading only `answer`
+    //      still see a human-readable line (no leaked JSON syntax).
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const answersMap = {
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    };
+    const result = useConnectionStore.getState().sendUserQuestionResponse(answersMap, 'toolu_multi');
+
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu_multi');
+    // `answers` passes the map through unchanged — arrays stay arrays.
+    expect(payload.answers).toEqual({
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    });
+    expect(Array.isArray(payload.answers['Which targets?'])).toBe(true);
+    // Summary flattens arrays as comma-joined labels.
+    expect(payload.answer).toBe(
+      'Which release strategy?: Patch | Which targets?: App, Tests | Confirm?: Yes',
+    );
+  });
+
+  it('flattens legacy JSON-stringified array envelopes in the answer summary (back-compat)', () => {
+    // Pre-#4621 dashboards JSON-stringified multi-select arrays into a
+    // single string. If mixed-version rehydrated state replays such a
+    // payload through the widened store, the `answers` field should
+    // pass through unchanged BUT the `answer` summary should still
+    // flatten the JSON envelope so the terminal echo / older-server
+    // `answer` read stays readable.
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const legacyAnswersMap = {
+      'Which targets?': JSON.stringify(['App', 'Tests']),
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(legacyAnswersMap, 'toolu_legacy');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.answers).toEqual(legacyAnswersMap);
+    expect(payload.answer).toBe('Which targets?: App, Tests | Confirm?: Yes');
+    expect(payload.answer).not.toContain('["App"');
+  });
+
+  it('queues the multi-question payload when socket is not connected', () => {
+    useConnectionStore.setState({ socket: null });
+    const result = useConnectionStore
+      .getState()
+      .sendUserQuestionResponse({ 'Q?': ['A', 'B'] }, 'toolu_q');
+    expect(result).toBe('queued');
+  });
+});
+
 // -- Connected clients state --
 
 describe('connectedClients state', () => {

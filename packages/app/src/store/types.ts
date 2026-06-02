@@ -419,7 +419,28 @@ export interface MessageInputActions {
   sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
+  /**
+   * Send a `user_question_response` answer to the server.
+   *
+   * Accepts two answer shapes:
+   * - `string` — legacy single-question / free-text path. Wire shape stays
+   *   `{ type, answer, toolUseId? }` so older servers keep working.
+   * - `Record<string, string | string[]>` — multi-question form path
+   *   (#4604 / #4621 / #4735). Populates the `answers` field per
+   *   `UserQuestionResponseSchema` (which accepts `string | string[]` per
+   *   question) AND a flattened string `answer` summary so older servers
+   *   reading only `answer` still see a readable line.
+   *
+   * Mirrors the `string` and `Record<string, string | string[]>` branches of
+   * `sendUserQuestionResponse` on the dashboard (#4760). The dashboard
+   * additionally accepts a `{ otherLabel, freeformText }` shape for the
+   * single-question Other / freeform path (#4651); mobile parity for that
+   * shape is tracked separately in #4755 and is out of scope here.
+   */
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]>,
+    toolUseId?: string,
+  ) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
 }
