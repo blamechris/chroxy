@@ -111,6 +111,28 @@ function permissionMessageForError(error: string): string {
   return `Speech recognition error: ${error}`
 }
 
+/**
+ * Voice input behaviour. See `InputSettings.voiceInputMode` in store-core for
+ * the persisted setting; this hook accepts it as a runtime option so the
+ * caller (App.tsx) reads the store once and the hook stays store-agnostic.
+ *
+ * - `'continuous'`: when the Web Speech engine fires `onend` due to silence,
+ *   the hook restarts recognition automatically. The mic stays lit until the
+ *   user explicitly calls `stop()`. This is the click-to-start / click-to-stop
+ *   experience #4785 was filed for.
+ *
+ * - `'auto-pause'`: original behaviour — `onend` ends the session. Kept for
+ *   users who prefer the browser's silence-stop semantics.
+ *
+ * Only the web engine is affected. The native (Tauri) engine has its own
+ * end-of-utterance semantics driven by the Swift helper and is out of scope.
+ */
+export type VoiceInputMode = 'continuous' | 'auto-pause'
+
+export interface UseVoiceInputOptions {
+  mode?: VoiceInputMode
+}
+
 export interface UseVoiceInputReturn {
   isRecording: boolean
   transcript: string
@@ -121,7 +143,26 @@ export interface UseVoiceInputReturn {
   stop: () => void
 }
 
-export function useVoiceInput(): UseVoiceInputReturn {
+/**
+ * Errors that should NOT trigger a continuous-mode restart loop. `no-speech`
+ * is technically the most common loop-trigger (silence followed by silence)
+ * but Web Speech raises it benignly during normal pauses — we treat it as a
+ * soft end and let the restart proceed. The hard-stop set below is for
+ * conditions where retrying would mask a real problem (permission denied,
+ * mic hardware gone, user aborted).
+ */
+const HARD_STOP_ERRORS = new Set([
+  'not-allowed',
+  'service-not-allowed',
+  'audio-capture',
+  'aborted',
+])
+
+/** Maximum consecutive restart attempts before continuous mode gives up. */
+const MAX_CONTINUOUS_RESTARTS = 5
+
+export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInputReturn {
+  const mode: VoiceInputMode = options.mode ?? 'continuous'
   const [isRecording, setIsRecording] = useState(false)
   const [transcript, setTranscript] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -133,6 +174,16 @@ export function useVoiceInput(): UseVoiceInputReturn {
   const recognitionRef = useRef<WebSpeechRecognition | null>(null)
   const finalTranscriptRef = useRef<string>('')
   const unlistenRefs = useRef<UnlistenFn[]>([])
+
+  // Continuous-mode restart bookkeeping. `userStoppedRef` flips true when
+  // `stop()` is called so the `onend` handler can distinguish a user-initiated
+  // stop from a silence-triggered one. `restartCountRef` bounds the retry
+  // loop so a wedged backend doesn't spin forever — counter resets on each
+  // successful `onresult` or explicit `start()`.
+  const userStoppedRef = useRef<boolean>(false)
+  const restartCountRef = useRef<number>(0)
+  const modeRef = useRef<VoiceInputMode>(mode)
+  modeRef.current = mode
 
   // ---- Engine selection (runs once on mount) ----
   useEffect(() => {
@@ -229,6 +280,10 @@ export function useVoiceInput(): UseVoiceInputReturn {
 
   const start = useCallback(() => {
     setError(null)
+    // Fresh user-initiated start: clear the continuous-mode bookkeeping so
+    // a prior session's user-stop or restart-counter doesn't carry over.
+    userStoppedRef.current = false
+    restartCountRef.current = 0
 
     if (engine === 'native') {
       const invoke = getTauriInvoke()
@@ -280,14 +335,44 @@ export function useVoiceInput(): UseVoiceInputReturn {
           }
         }
         setTranscript(finalTranscriptRef.current + interim)
+        // Any successful transcript resets the restart counter — proves
+        // recognition is healthy, so a silence-stop after this point should
+        // not count against the budget.
+        restartCountRef.current = 0
       }
 
       recognition.onerror = (event) => {
-        setError(permissionMessageForError(event.error))
-        setIsRecording(false)
+        // Hard errors (permission denied, mic gone, user aborted) always
+        // surface to the user and stop the session even in continuous mode.
+        // Soft errors (no-speech, network) get the silent restart treatment
+        // via onend below — that's the whole point of continuous mode.
+        if (HARD_STOP_ERRORS.has(event.error)) {
+          setError(permissionMessageForError(event.error))
+          userStoppedRef.current = true
+          setIsRecording(false)
+        }
       }
 
       recognition.onend = () => {
+        // Continuous mode: if the user hasn't pressed stop, the silence-stop
+        // is what we're correcting for. Re-issue start() on the same recogniser
+        // — bounded by MAX_CONTINUOUS_RESTARTS so a wedged backend can't spin.
+        if (
+          modeRef.current === 'continuous' &&
+          !userStoppedRef.current &&
+          restartCountRef.current < MAX_CONTINUOUS_RESTARTS
+        ) {
+          restartCountRef.current += 1
+          try {
+            recognition.start()
+            // isRecording stays true — the UI doesn't flicker the mic icon
+            // during the restart blip.
+            return
+          } catch {
+            // start() can throw InvalidStateError if the engine is still in
+            // the tail of the previous session; fall through to stop.
+          }
+        }
         setIsRecording(false)
       }
 
@@ -308,6 +393,11 @@ export function useVoiceInput(): UseVoiceInputReturn {
   }, [engine])
 
   const stop = useCallback(() => {
+    // Mark the stop as user-initiated BEFORE invoking the engine stop, so
+    // the silence-restart path in `onend` (web) sees the flag and exits
+    // cleanly rather than re-arming a session the user just cancelled.
+    userStoppedRef.current = true
+
     if (engine === 'native') {
       const invoke = getTauriInvoke()
       if (!invoke) return
