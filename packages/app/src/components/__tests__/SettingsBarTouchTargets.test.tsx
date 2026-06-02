@@ -159,3 +159,62 @@ describe('SettingsBar header tappable badges hit a 44pt touch target (#4876)', (
     expect(ivSlop).toBe(HEADER_BADGE_HIT_SLOP);
   });
 });
+
+/**
+ * #4893 — the same SettingsBar exposes a `conversationIdRow` in the expanded
+ * panel that copies the conversation ID to the clipboard on tap. It is the
+ * sibling of the header-badge fix above and was originally under-sized at
+ * `minHeight: 32` (below Apple HIG's 44pt minimum). The expanded panel has
+ * plenty of horizontal whitespace, so the chosen fix grows the visible row to
+ * 44pt (Option 1 from the issue) rather than adding `hitSlop`.
+ *
+ * This test asserts the row's effective tap target is at least 44 × 44pt,
+ * computed as `style.minHeight + 2 * paddingVertical + hitSlop`. The row's
+ * width spans the parent's flex space, so we only assert on the height
+ * dimension that the original bug was about.
+ */
+describe('SettingsBar conversationIdRow hits a 44pt touch target (#4893)', () => {
+  it('row is rendered (expanded, with a conversationId)', () => {
+    let tree: renderer.ReactTestRenderer | null = null;
+    act(() => {
+      tree = renderer.create(
+        <SettingsBar
+          {...makeProps()}
+          expanded
+          conversationId="abc12345-deadbeef-0000-1111-222233334444"
+        />,
+      );
+    });
+    const row = tree!.root.findByProps({ testID: 'conversation-id-row' });
+    expect(row).toBeDefined();
+  });
+
+  it('row style has minHeight ≥ 44 so the visible target clears Apple HIG', () => {
+    let tree: renderer.ReactTestRenderer | null = null;
+    act(() => {
+      tree = renderer.create(
+        <SettingsBar
+          {...makeProps()}
+          expanded
+          conversationId="abc12345-deadbeef-0000-1111-222233334444"
+        />,
+      );
+    });
+    const row = tree!.root.findByProps({ testID: 'conversation-id-row' });
+    // RN TouchableOpacity merges style arrays/objects; flatten by reading
+    // the style prop and pulling minHeight off the resolved object.
+    const style = Array.isArray(row.props.style)
+      ? Object.assign({}, ...row.props.style)
+      : row.props.style;
+    const hitSlop: HitSlop = (row.props.hitSlop as HitSlop) ?? {};
+    const paddingVertical = style.paddingVertical ?? 0;
+    const minHeight = style.minHeight ?? 0;
+    // Effective tap-target height is the larger of minHeight or (paddingVertical*2 + content)
+    // — minHeight wins here because it is set explicitly. Add hitSlop top/bottom in case a
+    // future change keeps minHeight low but compensates with slop.
+    const effectiveHeight = Math.max(minHeight, paddingVertical * 2)
+      + (hitSlop.top ?? 0)
+      + (hitSlop.bottom ?? 0);
+    expect(effectiveHeight).toBeGreaterThanOrEqual(44);
+  });
+});
