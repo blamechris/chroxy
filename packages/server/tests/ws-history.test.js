@@ -1196,6 +1196,11 @@ describe('replayHistory — bufferedAmount backpressure drain (#4833)', () => {
     const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
     assert.equal(endMsg, undefined,
       'history_replay_end should not be sent while bufferedAmount stays above threshold')
+
+    // Mark the ws CLOSED so scheduleAfterDrain's pending 20ms poll exits on
+    // its next tick instead of leaking a setTimeout into later tests in this
+    // file (#4845 review feedback).
+    ws.readyState = 3
   })
 
   it('keeps bufferedAmount under the 1MB eviction line during a fat-payload replay', async () => {
@@ -1257,6 +1262,64 @@ describe('replayHistory — bufferedAmount backpressure drain (#4833)', () => {
     } finally {
       clearInterval(drainTimer)
     }
+  })
+
+  it('pauses on chunk entry when bufferedAmount is already over the threshold', async () => {
+    // #4845 review feedback: even with the mid-chunk break + post-chunk
+    // scheduleAfterDrain, the very first sendChunk(0) call previously sent
+    // its first entry unconditionally — so if the socket was already
+    // congested from the preceding sendPostAuthInfo / session_switched
+    // burst, one fat tool_result still landed on top of a near-eviction
+    // buffer and could tip past 1MB. The chunk-entry gate must defer the
+    // chunk if bufferedAmount > threshold at entry, without sending any
+    // history payload first.
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    // Pre-seed the socket buffer well past the 256KB pause threshold to
+    // simulate carry-over from an earlier burst (e.g. post-auth payloads,
+    // session_switched info).
+    ws.bufferedAmount = 512 * 1024
+
+    replayHistory(ctx, ws, 'sess-1')
+
+    // Let the loop turn a few times — without the chunk-entry gate, the
+    // first sendChunk(0) call would still emit at least one history entry
+    // before any drain logic ran. With the gate, only the
+    // history_replay_start (which is sent *before* sendChunk(0)) should
+    // have been emitted.
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    const startMsg = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.ok(startMsg, 'history_replay_start is always sent before the gate')
+
+    const replayed = ctx._sends.filter(m => m.type === 'tool_result').length
+    assert.equal(replayed, 0,
+      `chunk-entry gate must defer all history sends while bufferedAmount > threshold; got ${replayed} sent`)
+
+    const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+    assert.equal(endMsg, undefined, 'replay must not complete while gated')
+
+    // Cleanup: close ws so the polled scheduleAfterDrain exits.
+    ws.readyState = 3
   })
 
   it('bails out gracefully when ws closes while paused on backpressure', async () => {
@@ -1364,6 +1427,51 @@ describe('flushPostAuthQueue — bufferedAmount backpressure drain (#4833)', () 
     const sent = ctx._sends.filter(m => m.type === 'fat_msg').length
     assert.ok(sent < QUEUE_LEN,
       `expected flush to stall before sending all ${QUEUE_LEN} queued messages; got ${sent}`)
+
+    // Mark the ws CLOSED so scheduleAfterDrain's pending 20ms poll exits on
+    // its next tick instead of leaking a setTimeout into later tests in this
+    // file (#4845 review feedback).
+    ws.readyState = 3
+  })
+
+  it('defers chunk entry when bufferedAmount is already over the threshold', async () => {
+    // #4845 review feedback: drainChunk(0) previously sent its first message
+    // unconditionally — so a fat queued message landing on an already-
+    // congested socket could still push past the 1MB eviction line before
+    // the mid-chunk break ran. The chunk-entry gate must defer the chunk
+    // (and keep _flushing = true so ws-client-sender's _flushOverflow keeps
+    // buffering) until bufferedAmount falls below the pause threshold.
+    const QUEUE_LEN = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const queue = Array.from({ length: QUEUE_LEN }, (_, i) => ({
+      type: 'fat_msg',
+      idx: i,
+      data: bigText,
+    }))
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend()
+    registerClient(ctx, ws)
+
+    // Pre-seed the socket buffer past the pause threshold.
+    ws.bufferedAmount = 512 * 1024
+
+    flushPostAuthQueue(ctx, ws, queue)
+
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    const sent = ctx._sends.filter(m => m.type === 'fat_msg').length
+    assert.equal(sent, 0,
+      `chunk-entry gate must defer all queued sends while bufferedAmount > threshold; got ${sent} sent`)
+
+    const client = ctx.clients.get(ws)
+    assert.equal(client?._flushing, true,
+      'chunk-entry gate must keep _flushing = true so ws-client-sender buffers overflow')
+
+    ws.readyState = 3
   })
 })
 

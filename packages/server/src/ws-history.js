@@ -28,8 +28,13 @@ const log = createLogger('ws')
 // links. The poll interval (20ms) is short enough to keep the replay
 // responsive but long enough to give the socket time to actually flush.
 //
-// Both helpers abort the poll if ws.readyState !== 1 (client disconnected
-// while paused) so we never leak a setTimeout or send to a closed socket.
+// Both helpers abort the poll once ws.readyState leaves OPEN (client
+// disconnected while paused), so the poll chain terminates on socket close
+// without sending to a closed socket. Note that this is a narrower guarantee
+// than "we never leak a setTimeout" — a dead TCP connection that never moves
+// out of OPEN and never drains would keep polling indefinitely. That is the
+// same liveness window as the existing ws keep-alive ping; if we ever want a
+// hard cap, add a max-wait/backoff here.
 const BACKPRESSURE_PAUSE_THRESHOLD = 256 * 1024
 const BACKPRESSURE_POLL_INTERVAL_MS = 20
 
@@ -419,6 +424,19 @@ export function replayHistory(ctx, ws, sessionId) {
   const CHUNK_SIZE = 20
   const sendChunk = (offset) => {
     if (ws.readyState !== 1) return
+    // #4833 follow-up: gate chunk *entry* on bufferedAmount too, not just
+    // chunk *scheduling*. The recursive setImmediate-via-scheduleAfterDrain
+    // path is already gated, but the very first sendChunk(0) call can land
+    // on a socket that's already congested from the preceding
+    // sendPostAuthInfo / session_switched burst. Without this check, the
+    // first history entry would be sent unconditionally and the mid-chunk
+    // break (which only fires *after* a send) wouldn't trip until i=1 —
+    // meaning we still push one fat tool_result onto an already-congested
+    // socket and can trip the 1MB EVICT_THRESHOLD.
+    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+      scheduleAfterDrain(ws, () => sendChunk(offset))
+      return
+    }
     const end = Math.min(offset + CHUNK_SIZE, history.length)
     let nextOffset = end
     for (let i = offset; i < end; i++) {
@@ -480,6 +498,19 @@ export function flushPostAuthQueue(ctx, ws, queue) {
         client._flushing = false
         client._flushOverflow = null
       }
+      return
+    }
+    // #4833 follow-up: gate chunk *entry* on bufferedAmount too — same
+    // rationale as replayHistory.sendChunk above. drainChunk(0) is invoked
+    // synchronously from flushPostAuthQueue, so the very first queued
+    // message can land on an already-congested socket (e.g. fat post-auth
+    // payloads that were queued during the encryption handshake) before the
+    // mid-chunk break (which only fires after a send) gets a chance to
+    // pause. Keep _flushing = true so any callers using ws-client-sender's
+    // _flushing buffer still queue overflow instead of blasting past us.
+    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+      if (client) client._flushing = true
+      scheduleAfterDrain(ws, () => drainChunk(offset))
       return
     }
     const end = Math.min(offset + CHUNK_SIZE, queue.length)
