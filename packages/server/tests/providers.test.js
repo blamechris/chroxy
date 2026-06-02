@@ -65,7 +65,10 @@ describe('Provider Registry', () => {
     assert.ok(cliEntry)
     assert.equal(cliEntry.capabilities.permissions, true)
     assert.equal(cliEntry.capabilities.inProcessPermissions, false)
-    assert.equal(cliEntry.capabilities.resume, false)
+    // #4887 — claude CLI supports `--resume <id>`; CliSession now wires
+    // `_sessionId` into the spawn argv on respawn / restore so the model
+    // retains conversation context. Persistence layer round-trips the id.
+    assert.equal(cliEntry.capabilities.resume, true)
 
     const sdkEntry = list.find(p => p.name === 'claude-sdk')
     assert.ok(sdkEntry)
@@ -861,7 +864,10 @@ describe('Provider Capabilities', () => {
     assert.equal(caps.modelSwitch, true)
     assert.equal(caps.permissionModeSwitch, true)
     assert.equal(caps.planMode, true)
-    assert.equal(caps.resume, false)
+    // #4887 — CliSession wires `_sessionId` into the spawn argv as
+    // `--resume <id>` on respawn / restore so the model retains
+    // conversation context. Capability flag flipped from false → true.
+    assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
   })
 

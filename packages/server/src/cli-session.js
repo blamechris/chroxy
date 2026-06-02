@@ -33,6 +33,69 @@ const CLAUDE = resolveBinary('claude', [
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
 
 /**
+ * Build the argv passed to `claude -p --input-format stream-json …`.
+ *
+ * Extracted so #4887 has a single, pure place to assert the resume contract.
+ * Mirrors the historical inline build in `start()` exactly — same arg order,
+ * same flag spellings — plus an optional `--resume <id>` segment when a prior
+ * `_sessionId` is known.
+ *
+ * Resume invariants (#4887):
+ *   - A fresh session (no `_sessionId` yet) omits `--resume`. claude CLI
+ *     allocates a brand-new conversation on first init.
+ *   - A respawn (model switch, perm-mode flip, crash) or a server-restart
+ *     restore call MUST include `--resume <id>`. Without it, the new
+ *     subprocess inherits the chroxy-side history ring buffer (replayed to
+ *     the dashboard) but the model itself starts cold mid-conversation —
+ *     the failure mode reported in #4887.
+ *
+ * @param {object} opts
+ * @param {string|null} opts.model
+ * @param {string} opts.permissionMode
+ * @param {string[]} opts.allowedTools
+ * @param {string} opts.skillsText
+ * @param {string|null} opts.resumeSessionId
+ * @returns {string[]}
+ */
+export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId } = {}) {
+  const args = [
+    '-p',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+  ]
+
+  if (model) {
+    args.push('--model', model)
+  }
+
+  if (permissionMode === 'auto') {
+    args.push('--permission-mode', 'bypassPermissions')
+  } else if (permissionMode === 'plan') {
+    args.push('--permission-mode', 'plan')
+  }
+
+  if (Array.isArray(allowedTools) && allowedTools.length > 0) {
+    args.push('--allowedTools', allowedTools.join(','))
+  }
+
+  if (skillsText) {
+    args.push('--append-system-prompt', skillsText)
+  }
+
+  // #4887 — wire the prior claude session_id back onto the new subprocess so
+  // the model retains the full prior transcript. Only emitted when a non-empty
+  // string is known; a brand-new session (first start()) leaves this off so
+  // claude CLI mints a fresh conversation id on its `system.init` line.
+  if (typeof resumeSessionId === 'string' && resumeSessionId.length > 0) {
+    args.push('--resume', resumeSessionId)
+  }
+
+  return args
+}
+
+/**
  * Manages a persistent Claude Code CLI session using headless mode.
  *
  * A single `claude -p --input-format stream-json --output-format stream-json`
@@ -85,7 +148,11 @@ export class CliSession extends BaseSession {
       modelSwitch: true,
       permissionModeSwitch: true,
       planMode: true,
-      resume: false,
+      // #4887 — claude CLI supports `--resume <id>`; CliSession now wires
+      // `_sessionId` into the spawn argv on respawn / restore so the model
+      // retains the prior transcript instead of starting cold mid-conversation.
+      // Persistence + UI gating both branch on this flag.
+      resume: true,
       terminal: false,
       thinkingLevel: false,
       // #3932: declared explicitly so the capability matrix matches across
@@ -184,7 +251,7 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } = {}) {
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, resumeSessionId } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
     this.allowedTools = allowedTools || []
     this._port = port || null
@@ -193,7 +260,14 @@ export class CliSession extends BaseSession {
     this._hookSecret = randomBytes(32).toString('hex')
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
-    this._sessionId = null
+    // #4887 — seed `_sessionId` from the persisted resume id so the very-first
+    // start() (post-restore) passes `--resume <id>` and the new claude
+    // subprocess re-hydrates the prior conversation. Falsy / non-string values
+    // (older state files, missing opt) leave `_sessionId` null exactly as
+    // before, so brand-new sessions still mint a fresh claude conversation.
+    this._sessionId = (typeof resumeSessionId === 'string' && resumeSessionId.length > 0)
+      ? resumeSessionId
+      : null
     // #4828: session-scoped logger, lazily bound when the CLI emits its
     // `init` message (where session_id becomes known). Pre-init log lines
     // stay on the module-level `log` — same fallback pattern as SdkSession
@@ -235,6 +309,23 @@ export class CliSession extends BaseSession {
   }
 
   /**
+   * Public accessor for the claude CLI session id used to resume conversations
+   * via `claude -p --resume <id>` (#4887). SessionManager.serializeState reads
+   * this to persist `sdkSessionId` (the cross-provider name for the resume
+   * token); restoreState forwards it back into the constructor as
+   * `resumeSessionId` so the new chroxy boot re-attaches to the prior
+   * conversation instead of starting cold.
+   *
+   * Returns `null` until the CLI emits its first `system.init` event (or until
+   * the constructor seeds the value from a persisted state file).
+   *
+   * @returns {string|null}
+   */
+  get resumeSessionId() {
+    return this._sessionId || null
+  }
+
+  /**
    * Start the persistent Claude process. Call once after construction.
    */
   start() {
@@ -243,35 +334,25 @@ export class CliSession extends BaseSession {
       this._hookManager.register()
     }
 
-    const args = [
-      '-p',
-      '--input-format', 'stream-json',
-      '--output-format', 'stream-json',
-      '--verbose',
-      '--include-partial-messages',
-    ]
-
-    if (this.model) {
-      args.push('--model', this.model)
-    }
-
-    if (this.permissionMode === 'auto') {
-      args.push('--permission-mode', 'bypassPermissions')
-    } else if (this.permissionMode === 'plan') {
-      args.push('--permission-mode', 'plan')
-    }
-
-    if (this.allowedTools.length > 0) {
-      args.push('--allowedTools', this.allowedTools.join(','))
-    }
-
     // Skills MVP (#2957) — append shared skills to the Claude CLI system prompt.
     const skillsText = this._buildSystemPrompt()
-    if (skillsText) {
-      args.push('--append-system-prompt', skillsText)
-    }
 
-    log.info(`Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})`)
+    // #4887 — pass `_sessionId` as `--resume` whenever it's known. This is the
+    // load-bearing flag for the bug: on respawn (crash / model switch / perm-
+    // mode flip) and on server-restart restore, the new claude subprocess
+    // would otherwise lose every prior turn in the model's context window and
+    // the user would see the dashboard transcript replay correctly while the
+    // model itself starts cold mid-conversation.
+    const args = buildClaudeCliArgs({
+      model: this.model,
+      permissionMode: this.permissionMode,
+      allowedTools: this.allowedTools,
+      skillsText,
+      resumeSessionId: this._sessionId,
+    })
+
+    const resumeNote = this._sessionId ? ` (resume ${this._sessionId})` : ''
+    log.info(`Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})${resumeNote}`)
     this._spawnPersistentProcess(args)
   }
 
@@ -1057,17 +1138,25 @@ export class CliSession extends BaseSession {
 
     this._respawning = true
     this._processReady = false
-    this._sessionId = null
+    // #4887 — DO NOT null `_sessionId` here. `start()` reads it as the
+    // `--resume` argument; clearing it would force the respawned subprocess
+    // to mint a brand-new conversation and the model would see the new user
+    // message with no prior turns — exactly the cold-start failure in #4887.
+    // The session id is re-confirmed by the next `system.init` (claude CLI
+    // echoes the resumed id back), so the in-process value stays accurate
+    // even on the rare fork case.
     // #4828: drop the session-scoped logger so the next init re-binds it
-    // to the fresh session_id rather than leaking the stale one.
+    // (the underlying session_id is unchanged on a normal resume, but the
+    // logger context is re-created on every init for symmetry with first-
+    // boot — cheap and avoids any stale closure).
     this._log = null
 
-    // The new child process has no conversation state — and on Claude CLI
-    // the append/system bucket rides on `--append-system-prompt` at spawn,
-    // so it's already part of the new argv. The prepend bucket, however,
-    // is concatenated onto the FIRST user message; a respawn means the
-    // next sendMessage() is once again that first message. Reset the
-    // flag so the prepend bucket flows through on the next turn (#3225).
+    // #4887 — the respawned child re-attaches to the prior conversation via
+    // `--resume <_sessionId>`. The append/system bucket still rides on
+    // `--append-system-prompt` at spawn (already in the new argv). The
+    // prepend bucket is concatenated onto the FIRST user message; a respawn
+    // means the next sendMessage() is once again that first message. Reset
+    // the flag so the prepend bucket flows through on the next turn (#3225).
     this._skillsPrepended = false
 
     if (this._interruptTimer) {
