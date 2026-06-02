@@ -432,6 +432,129 @@ describe('useSpeechRecognition', () => {
 
   // ---- #4813 Copilot finding: error→end must not re-arm in continuous mode ----
 
+  // ---- #4826: startListening must tear down prior in-flight session ----
+  // Mirrors the #4789 dashboard fix's start-path prior-cleanup. Today the
+  // expo-speech-recognition module-level singleton likely masks this, but the
+  // contract is: a fresh `startListening` cannot land on top of a session that
+  // the engine still considers active. Without this guarantee, a double-tap
+  // (or gesture + voice-command race) could let the prior session's queued
+  // `onend` re-arm in continuous mode against the new session's bookkeeping
+  // refs — the exact dual-mic window #4789 closed on the dashboard.
+
+  describe('startListening prior-session teardown (#4826)', () => {
+    it('aborts prior session when startListening called while already recognizing', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition());
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+      expect(MockModule.abort).not.toHaveBeenCalled();
+      expect(result.current.isRecognizing).toBe(true);
+
+      // Second start while the first is still in-flight.
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      // Must abort the prior session and start a new one.
+      expect(MockModule.abort).toHaveBeenCalledTimes(1);
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+    });
+
+    it('aborts prior session BEFORE starting the new one', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition());
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      // Track call order across abort/start to assert teardown precedes restart.
+      const callOrder: string[] = [];
+      MockModule.abort.mockImplementation(() => callOrder.push('abort'));
+      const priorStart = MockModule.start.getMockImplementation();
+      MockModule.start.mockImplementation((opts: unknown) => {
+        callOrder.push('start');
+        return priorStart?.(opts);
+      });
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      const abortIdx = callOrder.indexOf('abort');
+      const startIdx = callOrder.indexOf('start');
+      expect(abortIdx).toBeGreaterThanOrEqual(0);
+      expect(startIdx).toBeGreaterThanOrEqual(0);
+      expect(abortIdx).toBeLessThan(startIdx);
+    });
+
+    it('prior-teardown suppresses continuous-mode end re-arm against new bookkeeping', async () => {
+      // Reproduces the #4789 dual-mic window in the start-path:
+      // - first startListening → in-flight continuous session
+      // - second startListening → fresh user-initiated session, must NOT
+      //   leave a queued onend able to re-arm using the new session's
+      //   userStoppedRef (which has just been reset to false)
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      // Second startListening before the first session has ended. The
+      // start-path teardown must flip userStoppedRef=true BEFORE abort,
+      // then the post-permission fresh-session bookkeeping flips it back
+      // to false — but by then any queued onend from the prior abort has
+      // already been observed and discarded.
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.abort).toHaveBeenCalledTimes(1);
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+
+      // Now the new session is mounted. A fresh silence-triggered end
+      // belongs to the NEW session and should re-arm normally.
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(3);
+    });
+
+    it('does NOT abort when no prior session is in-flight', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition());
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      expect(MockModule.abort).not.toHaveBeenCalled();
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('does NOT abort when prior session has already ended', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition());
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      // Prior session ends naturally (auto-pause mode).
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+      expect(result.current.isRecognizing).toBe(false);
+
+      // Fresh start — nothing to tear down.
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.abort).not.toHaveBeenCalled();
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('voiceInputMode: continuous error→end restart suppression', () => {
     it.each([
       'not-allowed',

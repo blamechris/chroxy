@@ -132,6 +132,14 @@ export function useSpeechRecognition(
   // Track whether a stop was requested during async permission flow
   const stopRequestedRef = useRef(false);
 
+  // Track whether a recogniser session is currently in-flight. Mirrors
+  // `isRecognizing` state but stays synchronous so the `startListening`
+  // prior-teardown branch (#4826) and the `end` handler don't race against a
+  // pending React state update. Set true when `start()` is called (fresh
+  // start or continuous-mode re-arm), cleared when the session ends or is
+  // explicitly torn down.
+  const inFlightRef = useRef<boolean>(false);
+
   useEffect(() => {
     if (SpeechModule) {
       try {
@@ -176,12 +184,14 @@ export function useSpeechRecognition(
           interimResults: true,
           contextualStrings: ['Claude', 'Chroxy'],
         });
+        inFlightRef.current = true;
         return;
       } catch {
         // Engine may still be in the tail of the previous session; fall
         // through to clear the mic.
       }
     }
+    inFlightRef.current = false;
     setIsRecognizing(false);
   });
 
@@ -201,6 +211,7 @@ export function useSpeechRecognition(
     if (HARD_STOP_ERRORS.has(event.error)) {
       userStoppedRef.current = true;
     }
+    inFlightRef.current = false;
     setIsRecognizing(false);
   });
 
@@ -216,6 +227,7 @@ export function useSpeechRecognition(
     return () => {
       mountedRef.current = false;
       userStoppedRef.current = true;
+      inFlightRef.current = false;
       SpeechModule?.abort();
     };
   }, []);
@@ -226,6 +238,26 @@ export function useSpeechRecognition(
     setError(null);
     setTranscript('');
     stopRequestedRef.current = false;
+
+    // #4826 / #4789 parity: tear down any prior in-flight recogniser BEFORE
+    // resetting the fresh-session bookkeeping. A double-tap on the mic (or
+    // gesture + voice-command racing) can land a second `startListening` on
+    // top of an active session. Without this guard, the prior session's
+    // queued `onend` would arrive after we reset `userStoppedRef = false` /
+    // `restartCountRef = 0` below and re-arm continuous mode against the new
+    // session's bookkeeping — the dual-mic window the dashboard #4789 fix
+    // closed in its start path. `userStoppedRef = true` BEFORE `abort()` so
+    // the prior session's `end` handler sees the stop flag and exits cleanly.
+    if (inFlightRef.current) {
+      userStoppedRef.current = true;
+      try {
+        SpeechModule.abort();
+      } catch {
+        // Engine may already be tearing down; safe to ignore.
+      }
+      inFlightRef.current = false;
+    }
+
     // Fresh user-initiated start: reset continuous bookkeeping so prior
     // session's user-stop or restart-counter doesn't carry over.
     userStoppedRef.current = false;
@@ -255,6 +287,7 @@ export function useSpeechRecognition(
       interimResults: true,
       contextualStrings: ['Claude', 'Chroxy'],
     });
+    inFlightRef.current = true;
     setIsRecognizing(true);
   }, []);
 
@@ -264,6 +297,7 @@ export function useSpeechRecognition(
     // silence-restart path in `end` sees the flag and exits cleanly rather
     // than re-arming a session the user just cancelled.
     userStoppedRef.current = true;
+    inFlightRef.current = false;
     SpeechModule?.stop();
   }, []);
 
