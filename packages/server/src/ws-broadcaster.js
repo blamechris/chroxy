@@ -71,11 +71,21 @@ export class WsBroadcaster {
    * `backpressure.drops` / `backpressure.disconnects` metrics.
    */
   _sendOneWithBackpressure(ws, client, message) {
+    // #4834: short-circuit if this client has already been evicted. ws.close()
+    // is async, so callers iterating the client map in the same tick (e.g.
+    // multiple broadcasts) would otherwise keep re-tripping the close path
+    // and re-incrementing backpressure.disconnects for a single real close.
+    if (client._evicted) {
+      return false
+    }
     if (ws.bufferedAmount > this._backpressureThreshold) {
       client._backpressureDrops = (client._backpressureDrops || 0) + 1
       metrics.inc('backpressure.drops')
       log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
       if (client._backpressureDrops >= this._backpressureMaxDrops) {
+        // #4834: sticky _evicted flag prevents log spam + metric over-counting
+        // while ws.close() is in flight.
+        client._evicted = true
         log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
         metrics.inc('backpressure.disconnects')
         ws.close(4008, 'Backpressure: too many dropped messages')

@@ -37,6 +37,13 @@ export function createClientSender(log, opts = {}) {
   const warnThrottleMs = opts.warnThrottleMs ?? WARN_THROTTLE_MS
 
   return function send(ws, client, message) {
+    // #4834: short-circuit if this client has already been evicted. ws.close()
+    // is async (CLOSING → CLOSED), so subsequent synchronous sends in the same
+    // chain (e.g. replayHistory / flushPostAuthQueue) would otherwise keep
+    // serializing + encrypting messages that will never leave the buffer.
+    if (client?._evicted) {
+      return
+    }
     // Queue messages while key exchange is pending
     if (client?.encryptionPending && client.postAuthQueue) {
       client.postAuthQueue.push(message)
@@ -65,7 +72,11 @@ export function createClientSender(log, opts = {}) {
 
       // Post-send backpressure monitoring
       const buffered = ws.bufferedAmount
-      if (buffered > evictThreshold && client) {
+      if (buffered > evictThreshold && client && !client._evicted) {
+        // #4834: sticky _evicted flag prevents log spam + metric over-counting
+        // while ws.close() is in flight. Without this, 10+ sends after the
+        // first eviction can each re-log and re-increment for a single close.
+        client._evicted = true
         log.warn(`Backpressure: evicting client ${client.id} — bufferedAmount ${buffered} exceeds ${evictThreshold} bytes`)
         // #4804: unify observability with WsBroadcaster._sendOneWithBackpressure
         // so both backpressure systems feed the same metric. Without this the

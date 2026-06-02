@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createClientSender } from '../src/ws-client-sender.js'
+import { metrics } from '../src/metrics.js'
 import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 
 describe('createClientSender', () => {
@@ -256,6 +257,122 @@ describe('createClientSender', () => {
 
       send(ws, client, { type: 'test' })
       assert.equal(client._seq, 1)
+    })
+  })
+
+  describe('backpressure eviction dedupe (#4834)', () => {
+    /**
+     * Build a fake ws whose bufferedAmount is set per-call (simulating a
+     * client that's already past the evict threshold and stays that way
+     * because ws.close() is async and CLOSED hasn't taken effect yet).
+     */
+    function createBackpressureWs({ bufferedAmount }) {
+      const ws = {
+        bufferedAmount,
+        closed: false,
+        closeCount: 0,
+        closeCode: null,
+        closeReason: null,
+        sentCount: 0,
+        send() {
+          ws.sentCount++
+          // bufferedAmount stays high — ws.close() hasn't drained yet
+        },
+        close(code, reason) {
+          ws.closed = true
+          ws.closeCount++
+          ws.closeCode = code
+          ws.closeReason = reason
+        },
+      }
+      return ws
+    }
+
+    beforeEach(() => {
+      metrics.reset()
+    })
+
+    it('logs eviction EXACTLY ONCE across N synchronous sends past the evict threshold', () => {
+      const warns = []
+      log.warn = (msg) => warns.push(msg)
+      // Use small thresholds for the test
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 1000 })
+
+      const ws = createBackpressureWs({ bufferedAmount: 2000 })
+      const client = { id: 'c1', _seq: 0 }
+
+      // Fire 10 sends in rapid succession on the same client; bufferedAmount
+      // stays above evictThreshold across all of them.
+      for (let i = 0; i < 10; i++) {
+        send(ws, client, { type: 'msg', i })
+      }
+
+      const evictionWarns = warns.filter((w) => /evicting client/.test(w))
+      assert.equal(evictionWarns.length, 1, 'eviction warn logged exactly once')
+    })
+
+    it('increments backpressure.disconnects EXACTLY ONCE across N synchronous sends past the evict threshold', () => {
+      log.warn = () => {}
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 1000 })
+
+      const ws = createBackpressureWs({ bufferedAmount: 2000 })
+      const client = { id: 'c1', _seq: 0 }
+
+      for (let i = 0; i < 10; i++) {
+        send(ws, client, { type: 'msg', i })
+      }
+
+      assert.equal(metrics.get('backpressure.disconnects'), 1, 'metric incremented exactly once')
+    })
+
+    it('calls ws.close(4008, ...) EXACTLY ONCE across N synchronous sends past the evict threshold', () => {
+      log.warn = () => {}
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 1000 })
+
+      const ws = createBackpressureWs({ bufferedAmount: 2000 })
+      const client = { id: 'c1', _seq: 0 }
+
+      for (let i = 0; i < 10; i++) {
+        send(ws, client, { type: 'msg', i })
+      }
+
+      assert.equal(ws.closeCount, 1, 'ws.close called exactly once')
+      assert.equal(ws.closeCode, 4008)
+    })
+
+    it('sets sticky client._evicted flag on first eviction', () => {
+      log.warn = () => {}
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 1000 })
+
+      const ws = createBackpressureWs({ bufferedAmount: 2000 })
+      const client = { id: 'c1', _seq: 0 }
+
+      send(ws, client, { type: 'test' })
+      assert.equal(client._evicted, true, 'client marked evicted')
+    })
+
+    it('eviction dedupe is per-client (a different client object still evicts)', () => {
+      const warns = []
+      log.warn = (msg) => warns.push(msg)
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 1000 })
+
+      // Client A — evicts
+      const wsA = createBackpressureWs({ bufferedAmount: 2000 })
+      const clientA = { id: 'cA', _seq: 0 }
+      for (let i = 0; i < 5; i++) send(wsA, clientA, { type: 'a', i })
+
+      // Client B — a brand new object, different ws, also past threshold
+      const wsB = createBackpressureWs({ bufferedAmount: 2000 })
+      const clientB = { id: 'cB', _seq: 0 }
+      for (let i = 0; i < 5; i++) send(wsB, clientB, { type: 'b', i })
+
+      const evictionWarnsA = warns.filter((w) => /evicting client cA/.test(w))
+      const evictionWarnsB = warns.filter((w) => /evicting client cB/.test(w))
+      assert.equal(evictionWarnsA.length, 1, 'client A evicted exactly once')
+      assert.equal(evictionWarnsB.length, 1, 'client B evicted exactly once')
+      assert.equal(metrics.get('backpressure.disconnects'), 2, 'one disconnect per client')
+      assert.equal(wsA.closeCount, 1)
+      assert.equal(wsB.closeCount, 1)
     })
   })
 })
