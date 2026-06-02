@@ -4640,7 +4640,7 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 200))
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
       const writes = writeEvents.map((e) => e.data)
       assert.deepEqual(
@@ -4744,10 +4744,11 @@ describe('ClaudeTuiSession', () => {
         session.on('error', (e) => errors.push(e))
 
         session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
-        // 200ms wait so the #4867 last-question-single-select settle (150ms)
-        // can fire its trailing Submit before assertions. The 30-option sibling
-        // test below already uses 200ms; this bump matches.
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        // 300ms wait: the #4867 last-question-single-select settle is 150ms;
+        // 300ms leaves comfortable margin under CI load (Copilot review on
+        // #4886 flagged 200ms as too tight). Sibling settle-path tests in
+        // this file use 300ms for the same reason.
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         // No too-many error — arrow nav drives the form.
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
@@ -4778,7 +4779,7 @@ describe('ClaudeTuiSession', () => {
         session.on('error', (e) => errors.push(e))
 
         session.respondToQuestion('', { 'Q1?': 'o-29', 'Q2?': 'y' })
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
         // Trailing '\r' is the #4867 last-question-single-select defensive Enter.
@@ -4965,7 +4966,7 @@ describe('ClaudeTuiSession', () => {
         session.on('error', (e) => errors.push(e))
 
         session.respondToQuestion('s-29')
-        await new Promise((resolve) => setTimeout(resolve, 200))
+        await new Promise((resolve) => setTimeout(resolve, 300))
 
         assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
         const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '\x1b[?2004h']
