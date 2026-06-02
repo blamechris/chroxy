@@ -349,32 +349,47 @@ export function App() {
   )
 
   // #4685 — track resolved permissions from the store so the QuestionPrompt
-  // gate can flip off the moment the user clicks Allow / Deny on a pending
+  // gate can flip off the moment the user clicks Allow on a pending
   // AskUserQuestion permission_request. The store keeps a per-requestId
-  // map keyed by decision; presence in the map = resolved (either
-  // direction). Combined with the per-message `answered` flag this gives
-  // us the full "is there an unresolved AskUserQuestion permission?" view.
+  // map keyed by decision (`allow` | `deny` | `allowSession`); combined
+  // with the per-message `answered` flag this gives us the full
+  // "is there an unresolved-or-denied AskUserQuestion permission?" view.
+  //
+  // #4685 Copilot review: ONLY `allow` / `allowSession` un-gate the
+  // content. `deny` keeps the gate ON — issue #4685's expected behavior
+  // says "and shows the redacted/denied state if user clicks Deny". A
+  // permission denial means the user explicitly refused to see the
+  // question; revealing the model-supplied text and options post-deny
+  // defeats the whole point of the gate.
   const resolvedPermissions = useConnectionStore(s => s.resolvedPermissions)
 
-  // #4685 — boolean: is there an unresolved AskUserQuestion permission
-  // prompt in the active session's chat? When true, the QuestionPrompt
-  // for any `user_question`-derived `prompt` message MUST gate its
-  // content behind a placeholder so the model-supplied question text and
-  // options stay hidden until the user clicks Allow. A permission prompt
-  // counts as "unresolved" when (a) it has not been answered on this
-  // client (no per-message `answered`) AND (b) no other client has
-  // resolved it (no entry in `resolvedPermissions[requestId]`). Multiple
-  // pending AskUserQuestion permissions in the same session are rare but
-  // any single one is enough to gate every question render in that
-  // session — the bug is content leak before consent, not which specific
-  // question got which specific permission decision.
+  // #4685 — boolean: is there an unresolved-or-denied AskUserQuestion
+  // permission prompt in the active session's chat? When true, the
+  // QuestionPrompt for any `user_question`-derived `prompt` message MUST
+  // gate its content behind a placeholder so the model-supplied question
+  // text and options stay hidden. A permission prompt counts as
+  // "unresolved-or-denied" when EITHER (a) it has not been answered on
+  // this client (no `m.answered === 'allow' | 'allowSession'`) AND (b)
+  // no other client has allowed it (`resolvedPermissions[requestId]`
+  // not in {`allow`, `allowSession`}). `deny` on either signal keeps the
+  // gate ON — Copilot review (#4685) caught the pre-fix bug where deny
+  // un-gated the content, contradicting issue #4685's expected behavior.
+  // Multiple pending AskUserQuestion permissions in the same session are
+  // rare but any single un-allowed one is enough to gate every question
+  // render in that session — the bug is content leak before consent, not
+  // which specific question got which specific permission decision.
   const hasPendingAskUserQuestionPermission = useMemo(() => {
     for (const m of storeMessages) {
       if (m.type !== 'prompt') continue
       if (!m.requestId) continue
       if (m.tool !== 'AskUserQuestion') continue
-      if (m.answered) continue
-      if (resolvedPermissions?.[m.requestId]) continue
+      // Per-message `answered` is set by `handlePermissionResolved` on
+      // BOTH allow and deny — gate only flips off for allow variants.
+      if (m.answered === 'allow' || m.answered === 'allowSession') continue
+      // Cross-client decision via `resolvedPermissions[requestId]` —
+      // same allow-only rule.
+      const decision = resolvedPermissions?.[m.requestId]
+      if (decision === 'allow' || decision === 'allowSession') continue
       return true
     }
     return false
