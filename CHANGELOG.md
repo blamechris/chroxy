@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.37] - 2026-06-02
+
+Second daytime sweep: 13 from-review follow-ups from v0.9.36 landed alongside two stale prior-cycle PRs (#4655, #4682). Mostly polish + observability with two real surface additions (`session_stopped` UX on both dashboard + mobile, provider-parity `stopped` emit for SDK / Codex / Gemini).
+
+### Added
+
+- **Dashboard `session_stopped` toast (#4878 → #4895):** dashboard now renders a quiet `"Session stopped."` info toast on `session_stopped`, with optional `(exit N)` suffix for non-zero exit codes. Closes the dashboard half of the #4756 epic begun in v0.9.36.
+- **Mobile `session_stopped` status strip (#4879 → #4905):** mobile `SessionScreen` renders an inline quiet status strip on `session_stopped` (with `exit N` for non-zero codes). Closes the mobile half of the #4756 epic. Cross-PR copy alignment with the dashboard ("(exit N)" vs "exit N") tracked in #4910.
+- **Provider-parity `stopped` emit (#4881 → #4912):** SDK, Codex, and Gemini sessions now emit the `stopped` event on natural session-end paths, matching what `cli-session.js` and `claude-tui-session.js` shipped in v0.9.36 (#4868). All five providers now emit the same wire event end-to-end.
+- **`isFreeformAnswer` shared typed predicate (#4875 → #4900):** extracted into `@chroxy/store-core/freeform-answer` as a typed predicate replacing the inline 5-condition shape check that diverged between mobile callsites. Hardened against prototype-pollution via `Object.prototype.hasOwnProperty.call`. Dashboard convergence to the same predicate tracked in #4901.
+
+### Changed
+
+- **`unknown tool_input` shapes now render as compact key:value summaries (#4655 → #4725):** the generic tool-input fallback in `tool-summary.ts` no longer leaks raw JSON for tools whose shape has none of the hardcoded PRIORITY_FIELDS (ToolSearch, MCP tools, custom user tools). The canonical bug fixture was `ToolSearch` rendering `ToolSearch {"matches":[...],"query":"select:..."` during the v0.9.24 dogfood — now renders `ToolSearch query: "select:AskUserQuestion", max_results: 5`. String values JSON-escape; key-count degradation respects the budget; JSDoc + `array` handling tightened.
+- **Per-turn `sendMessage done` summary log on teardown paths (#4682 → #4723):** `_teardownTurn` and the end-to-end hard-timeout / stream-stall handlers all emit the same grep-able `sendMessage done` line with `reason=` tag and per-stage timings (`waitForPromptMs`, `writePath`, `writeMs`, etc.), so every turn ends with a uniform shape regardless of outcome — feeds the #4678 wedge instrumentation.
+- **Clipboard-failure toast uses `warning` severity (#4870 → #4894):** copy-transcript toast no longer trips the red error styling for a recoverable clipboard failure. Aligns with #4148 severity convention.
+- **Sidebar copy-conversation-id surfaces warning toast on failure (#4871 → #4897):** the sidebar's copy-conversation-id callsite no longer silently no-ops on Tauri/WKWebView clipboard write failure — same warning toast as the transcript path.
+- **Status dots drop `role="status"` + add debounced live region (#4873 → #4899):** reconnect / session-state churn no longer floods screen readers. New `ConnectionAnnouncer` with a 1.5s debounce announces the settled phase after the storm; first-paint announcement is delayed (not skipped). Tunnel-warming banner retains `role="status"` intentionally.
+- **Tightened `lastIsSingleSelect` detection (#4883 → #4902):** TUI multi-question driver now surfaces unexpected question shapes (mixed, multi-select, freeform-only, unknown) rather than treating them as single-select by accident. Drift checks promoted to a defensive `'in'` operator; settle-gap measurement now boundary-aware; one new undefined-key drift test.
+- **Mobile `voiceInputMode` rehydrate gated by `isVoiceInputMode` (#4872 → #4903):** mobile `loadSavedConnection` no longer accepts stale or tampered `voiceInputMode` blobs (`'push-to-talk'`, `null`, `42`) — same guard the dashboard adopted in v0.9.36 (#4858). Per-field validation also closed a latent bug where one valid boolean key spread the entire blob into store state.
+- **Collapse manual `.tmp+rename` onto `writeFileRestricted` (#4874 → #4904):** `env-manager` + `models` callers no longer reinvent the temp-write-rename pattern manually now that `writeFileRestricted` is atomic (v0.9.36, #4865). `session-state-persistence` deferred (depends on `.bak` rotation rework — #4908). Three follow-ups filed: #4906 observability, #4907 redundant chmod, #4913 Windows write-atomicity.
+- **Mobile session-header badges widened to 44pt touch targets (#4876 → #4892):** badges now meet Apple HIG minimum tappable area via `hitSlop`. Sibling `conversationIdRow` tap target tracked in #4893.
+
+### Tests / Internal
+
+- **Pin all-single-select 2-question form byte sequence (#4882 → #4898):** test coverage for the multi-question driver's all-single-select shape (Q1 → Q2 → Submit) using distinct keystrokes to disambiguate digit-1 (option) from digit-1 (Submit). Empirical recorder pass on real TUI still outstanding — #4882 stays open.
+- **Pin trailing `\r` on mixed multi-question forms (#4884 → #4911):** 7 new fixtures cover S+M, M+S+M, S+M+S shape variants + forensic Submit→PostToolUse timing log keyed by toolUseId. Extends the #4866/#4886 single-select coverage.
+
+### Process notes
+
+- Two PRs (#4903, #4905) required manual rebase + conflict resolution: #4903 collided with #4900's `isFreeformAnswer` import; #4905 collided with #4895's PLATFORM_SPECIFIC entry for `session_stopped` (the entry got dropped entirely since both handlers now cover it natively). Both rebases hand-resolved + force-pushed; CI green on retry.
+- Two stale PRs (#4725, #4723) needed dedicated triage: #4725 had a brace mismatch in `ToolBubble.test.tsx` from a prior rebase that broke typecheck (fixed in-line); #4723 was 87 commits behind main and its summary-log tests broke after the v0.9.36 logger sweep (wrong listener signature + missing `messageId` on `_activeTurn` stub).
+
+### Follow-up issues filed during this sweep
+
+- #4893 — Mobile `conversationIdRow` tap target below 44pt (sibling to #4876).
+- #4901 — Dashboard `isFreeformAnswer` convergence onto the shared store-core predicate.
+- #4906 — Re-add cleanup-failure observability in `writeFileRestricted` (was lost in the env-manager hoist).
+- #4907 — Drop redundant `chmodSync` after `writeFileSync({ mode: 0o600 })`.
+- #4908 — Re-audit `session-state-persistence.js` for safe simplification once `.bak` rotation is reworked.
+- #4909 — Reconnect-time stale `stoppedAt` in mobile session-stopped strip.
+- #4910 — Align mobile + dashboard `session_stopped` copy (`(exit N)` vs `exit N`).
+- #4913 — Make `writeFileRestricted` atomic on Windows too (the `isWindows` branch in `platform.js` short-circuits to a direct `writeFileSync` with no temp+rename).
+
 ## [0.9.36] - 2026-06-02
 
 Backlog-sweep release: 16 from-review issues landed in a single overnight marathon, plus one cross-PR fix-CI commit (#4886) when #4867's settle delay broke #4866's freshly-merged arrow-nav tests. All sourced from prior agent-review deferrals (#4823 / v0.9.34 / v0.9.35 follow-ups).
