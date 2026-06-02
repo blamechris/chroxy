@@ -406,3 +406,15 @@ export {
   formatPlatform,
   formatRelativeTime,
 } from './device-format'
+
+// #4771: shared WS close-code + HTTP health-check error message
+// helpers. Previously the app had a well-tested mapping while the
+// dashboard reimplemented only the health-check path inline (with a
+// less-detailed split) and ignored `event.code` on socket.onclose
+// entirely — a 4008 backpressure eviction surfaced as a generic
+// "Connection lost" rather than the "server was overwhelmed,
+// reconnecting" copy. Centralised here so both surfaces stay in sync.
+export {
+  getWsCloseMessage,
+  getHealthCheckErrorMessage,
+} from './ws-errors'
