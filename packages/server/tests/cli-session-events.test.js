@@ -273,6 +273,47 @@ describe('CliSession stream-event handling', () => {
       assert.equal(events[0].messageId, 'msg-1-tool')
       assert.equal(events[0].toolUseId, 'msg-1-tool')
     })
+
+    it('aligns ctx.currentToolUseId with synthesized fallback when content_block.id is missing (#4778)', () => {
+      const session = createSession()
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'Task' },
+        },
+      })
+
+      // Without #4778, ctx.currentToolUseId stays undefined on the fallback
+      // path and downstream emits (user_question / agent_spawned /
+      // _activeAgents.set) propagate toolUseId=undefined while the
+      // tool_start wire event already carries `${messageId}-tool`.
+      assert.equal(session._currentCtx.currentToolUseId, 'msg-1-tool')
+    })
+
+    it('propagates synthesized toolUseId to agent_spawned on Task fallback (#4778)', () => {
+      const session = createSession()
+      const spawned = []
+      session.on('agent_spawned', (info) => spawned.push(info))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'Task' },
+        },
+      })
+      session._handleEvent(inputJsonDelta('{"description":"do thing","prompt":"x"}'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(spawned.length, 1)
+      assert.equal(spawned[0].toolUseId, 'msg-1-tool')
+      // _activeAgents key must match the wire-emitted toolUseId so later
+      // lookups (agent_completed, etc.) resolve instead of writing to
+      // _activeAgents.set(undefined, ...).
+      assert.ok(session._activeAgents.has('msg-1-tool'))
+      assert.ok(!session._activeAgents.has(undefined))
+    })
   })
 
   describe('text streaming', () => {
