@@ -311,8 +311,12 @@ export function SessionScreen() {
   const searchInputRef = useRef<TextInput>(null);
   const searchFocusTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Speech recognition
-  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
+  // Speech recognition — wire mode from inputSettings.voiceInputMode (#4807).
+  // Mobile defaults to `'continuous'` in the store so users get click-to-stop
+  // semantics matching the dashboard.
+  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition({
+    mode: inputSettings.voiceInputMode,
+  });
   const dictationStartRef = useRef(inputText.length);
   const usedVoiceRef = useRef(false);
 

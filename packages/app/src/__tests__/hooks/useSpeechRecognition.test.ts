@@ -282,4 +282,151 @@ describe('useSpeechRecognition', () => {
 
     expect(MockModule.start).not.toHaveBeenCalled();
   });
+
+  // ---- #4807: voiceInputMode wiring ----
+
+  describe('voiceInputMode: continuous', () => {
+    it('restarts recognition on end event when mode=continuous', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      // Silence-triggered end should re-arm recognition
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+
+      expect(MockModule.start).toHaveBeenCalledTimes(2);
+      // Mic stays lit during the restart blip
+      expect(result.current.isRecognizing).toBe(true);
+    });
+
+    it('caps restart attempts at MAX_CONTINUOUS_RESTARTS (5)', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      // Initial start = 1 call. Fire `end` repeatedly; each one within the cap
+      // should add a start() call.
+      for (let i = 0; i < 10; i++) {
+        actSync(() => {
+          eventHandlers['end']?.({});
+        });
+      }
+
+      // 1 initial + 5 restart attempts before the cap kicks in = 6 total
+      expect(MockModule.start).toHaveBeenCalledTimes(6);
+      // After the cap, end clears the mic
+      expect(result.current.isRecognizing).toBe(false);
+    });
+
+    it('does NOT restart on end when user explicitly stopped', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      actSync(() => {
+        result.current.stopListening();
+      });
+
+      // Engine fires onend after stop() — should NOT re-arm
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+      expect(result.current.isRecognizing).toBe(false);
+    });
+
+    it('resets restart counter on a non-empty transcript', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+
+      // Exhaust 3 of 5 restarts
+      for (let i = 0; i < 3; i++) {
+        actSync(() => { eventHandlers['end']?.({}); });
+      }
+      expect(MockModule.start).toHaveBeenCalledTimes(4);
+
+      // Real transcript should reset the counter
+      actSync(() => {
+        eventHandlers['result']?.({ results: [{ transcript: 'hi there' }] });
+      });
+
+      // Now 5 more `end`s should each restart
+      for (let i = 0; i < 5; i++) {
+        actSync(() => { eventHandlers['end']?.({}); });
+      }
+      // 4 (prior) + 5 (post-reset) = 9 total starts
+      expect(MockModule.start).toHaveBeenCalledTimes(9);
+    });
+  });
+
+  describe('voiceInputMode: auto-pause', () => {
+    it('does NOT restart on end when mode=auto-pause', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition({ mode: 'auto-pause' }));
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+
+      // No restart, mic clears — pre-#4785 behaviour
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+      expect(result.current.isRecognizing).toBe(false);
+    });
+
+    it('defaults to auto-pause when no mode option supplied', async () => {
+      const { result } = renderHookSimple(() => useSpeechRecognition());
+
+      await actAsync(async () => {
+        await result.current.startListening();
+      });
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+      actSync(() => {
+        eventHandlers['end']?.({});
+      });
+
+      // Backward-compatible default = single-shot behaviour
+      expect(MockModule.start).toHaveBeenCalledTimes(1);
+      expect(result.current.isRecognizing).toBe(false);
+    });
+  });
+
+  it('continuous restart does not fire after unmount (#4789 mirror)', async () => {
+    const { result, unmount } = renderHookSimple(() => useSpeechRecognition({ mode: 'continuous' }));
+
+    await actAsync(async () => {
+      await result.current.startListening();
+    });
+    expect(MockModule.start).toHaveBeenCalledTimes(1);
+
+    unmount();
+    expect(MockModule.abort).toHaveBeenCalled();
+
+    // Capture call count after unmount; any subsequent `end` from the engine
+    // (e.g. fired by abort()) must NOT trigger restart.
+    const startsAfterUnmount = MockModule.start.mock.calls.length;
+    actSync(() => {
+      eventHandlers['end']?.({});
+    });
+    expect(MockModule.start).toHaveBeenCalledTimes(startsAfterUnmount);
+  });
 });
