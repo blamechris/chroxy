@@ -1674,7 +1674,16 @@ export class SessionManager extends EventEmitter {
     // without the event being replayed on every reconnect (the loader re-checks
     // the hash every time skills are scanned, so the latest state is always
     // canonical).
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed']
+    // #4756: `stopped` is a transient signal — CliSession emits it when the
+    // child process exits cleanly after a user-initiated Stop (see
+    // cli-session.js `_handleChildClose`, gated on `_intentionalStop`). It
+    // pairs with `error` (which fires for unexpected crashes that trigger
+    // auto-respawn) so a paired dashboard / mobile client can render a quiet
+    // "Session stopped." confirmation distinct from the louder crash toast.
+    // Transient so it isn't replayed on reconnect — by the time a client
+    // reconnects, either the session was destroyed or the user already saw
+    // the confirmation.
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {

@@ -3540,3 +3540,90 @@ describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)',
     })
   }
 })
+
+// #4756 — `stopped` event proxying.
+//
+// CliSession emits `stopped` after `_handleChildClose` confirms a clean
+// SIGINT exit (gated on `_intentionalStop`). PR #4750 added the emit but
+// neither the SessionManager event proxy nor the ws-forwarding broadcaster
+// included it, so no consumer ever saw the confirmation. This block locks
+// in the session-event proxy half of the wiring — the ws-forwarding +
+// normalizer half is covered in ws-forwarding.test.js and
+// event-normalizer.test.js's "stopped event (#4756)" describes.
+describe('_wireSessionEvents — stopped event proxy (#4756)', () => {
+  it('proxies session.emit("stopped") to mgr session_event with event="stopped"', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    const events = []
+    mgr.on('session_event', (evt) => events.push(evt))
+
+    session.emit('stopped', { code: 0 })
+
+    const stoppedEvents = events.filter(e => e.event === 'stopped')
+    assert.equal(stoppedEvents.length, 1, 'expected exactly one stopped session_event')
+    assert.equal(stoppedEvents[0].sessionId, 's1')
+    assert.deepEqual(stoppedEvents[0].data, { code: 0 })
+  })
+
+  it('forwards the numeric exit code on the data payload (e.g. 143 = SIGTERM)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    const events = []
+    mgr.on('session_event', (evt) => { if (evt.event === 'stopped') events.push(evt) })
+
+    session.emit('stopped', { code: 143 })
+
+    assert.equal(events.length, 1)
+    assert.equal(events[0].data.code, 143, 'code field must reach the wire layer for diagnostic UX')
+  })
+
+  it('treats stopped as transient — not recorded into history (no replay on reconnect)', () => {
+    // History replay re-fires PROXIED_EVENTS to a reconnecting client.
+    // `stopped` is informational (the user just clicked Stop a moment
+    // ago) — replaying it would surface a misleading "Session stopped."
+    // toast minutes later when the user reconnects. Keep it transient,
+    // mirroring the `permission_request` / `inactivity_warning` policy.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+
+    session.emit('stopped', { code: 0 })
+
+    const history = mgr.getHistory('s1') || []
+    const recordedStopped = history.filter(h => h.event === 'stopped')
+    assert.equal(recordedStopped.length, 0, 'stopped must not be persisted to history')
+  })
+
+  it('does not touchActivity for stopped (lifecycle signal, not user input)', () => {
+    // The idle-timeout machinery ticks on `message` / `stream_start` /
+    // `tool_start` / `result` / `user_question` only. A `stopped` event
+    // is the OPPOSITE of activity — the user just ended the turn — so
+    // resetting the idle timer would defer destruction of an already-
+    // stopped session, opposite of the intent.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    // Pin lastActivity to a known past timestamp and assert it doesn't move.
+    const beforeTs = Date.now() - 60_000
+    mgr._sessionLastActivityAt.set('s1', beforeTs)
+
+    session.emit('stopped', { code: 0 })
+
+    const after = mgr._sessionLastActivityAt.get('s1')
+    assert.equal(after, beforeTs, 'stopped must not reset lastActivity')
+  })
+})

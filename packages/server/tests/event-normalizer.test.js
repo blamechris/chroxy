@@ -588,6 +588,61 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: stopped (#4756) ----
+  //
+  // CliSession emits `stopped` after a clean user-initiated SIGINT exit
+  // (cli-session.js `_handleChildClose` gated on `_intentionalStop`). The
+  // normalizer translates it into `session_stopped` so paired clients can
+  // render a quiet confirmation distinct from the louder `session_error`
+  // crash toast.
+
+  describe('stopped event (#4756)', () => {
+    it('maps to a session_stopped wire message in multi mode', () => {
+      const result = normalizer.normalize('stopped', { code: 0 }, makeCtx())
+      assert.equal(result.messages.length, 1)
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'session_stopped')
+      assert.equal(msg.sessionId, 'sess-1')
+      assert.equal(msg.code, 0)
+    })
+
+    it('forwards the numeric exit code on the wire', () => {
+      // SIGTERM = 143; clients should see the raw code for non-zero exits
+      // so they can render a diagnostic detail line.
+      const result = normalizer.normalize('stopped', { code: 143 }, makeCtx())
+      assert.equal(result.messages[0].msg.code, 143)
+    })
+
+    it('omits sessionId in legacy-cli mode (ctx.sessionId is null)', () => {
+      const ctx = makeCtx({ sessionId: null, mode: 'legacy-cli' })
+      const result = normalizer.normalize('stopped', { code: 0 }, ctx)
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'session_stopped')
+      // Do not emit `sessionId: null` — let the receiver treat absence as
+      // "applies to the connected legacy CLI". Matches the `error` /
+      // `claude_ready` legacy-cli convention.
+      assert.ok(!('sessionId' in msg), 'sessionId should be absent in legacy-cli mode')
+      assert.equal(msg.code, 0)
+    })
+
+    it('omits code when data is missing or non-numeric', () => {
+      // Defensive: future providers that adopt `stopped` for parity may
+      // not carry an exit code (e.g. in-process SDK session). Schema
+      // marks `code` optional.
+      const result = normalizer.normalize('stopped', {}, makeCtx())
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'session_stopped')
+      assert.equal(msg.sessionId, 'sess-1')
+      assert.ok(!('code' in msg), 'code should be omitted when not numeric')
+    })
+
+    it('emits no side effects or registrations (informational only)', () => {
+      const result = normalizer.normalize('stopped', { code: 0 }, makeCtx())
+      assert.equal(result.sideEffects, undefined)
+      assert.equal(result.registrations, undefined)
+    })
+  })
+
   // ---- Delta buffering ----
 
   describe('delta buffering', () => {

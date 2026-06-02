@@ -407,6 +407,52 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(result.success, 'Should accept reason=crash (emitted on uncaughtException)')
   })
 
+  // #4756 — `session_stopped` is the user-initiated Stop confirmation
+  // broadcast. Both the multi-session shape (sessionId + numeric code) and
+  // the legacy-cli shape (no sessionId) must parse. Future provider
+  // adoption (per the issue's #4 follow-up) may also omit `code` when the
+  // provider doesn't have a child-process exit status to report.
+  it('validates session_stopped with multi-session shape (#4756)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+      code: 0,
+    })
+    assert.ok(result.success, 'Should accept session_stopped with sessionId + code')
+    assert.equal(result.data.sessionId, 'sess-abc')
+    assert.equal(result.data.code, 0)
+  })
+
+  it('accepts session_stopped without sessionId (legacy-cli path)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      code: 143,
+    })
+    assert.ok(result.success, 'legacy-cli session_stopped omits sessionId')
+    assert.equal(result.data.code, 143)
+  })
+
+  it('accepts session_stopped without code (future provider parity)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+    })
+    assert.ok(result.success, 'code is optional for providers without an exit status')
+  })
+
+  it('rejects session_stopped with non-integer code', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+      code: 'not-a-number',
+    })
+    assert.equal(result.success, false, 'code must be a number when present')
+  })
+
   it('validates encrypted envelope', async () => {
     const { EncryptedEnvelopeSchema } = await import('../src/schemas/client.ts')
     const result = EncryptedEnvelopeSchema.safeParse({

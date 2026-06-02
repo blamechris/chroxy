@@ -404,6 +404,27 @@ Object.assign(EVENT_MAP, {
     return { messages: [{ msg }] }
   },
 
+  // #4756: user-initiated Stop confirmation. CliSession emits `stopped`
+  // when the child process exits cleanly after `interrupt()` set the
+  // `_intentionalStop` flag (see cli-session.js `_handleChildClose`). This
+  // pairs with `error` — `error` is the louder "crashed unexpectedly,
+  // restarting" toast that the auto-respawn path triggers, while
+  // `session_stopped` is the quiet "you asked, it stopped" confirmation.
+  // Clients should treat it as informational, NOT an error condition.
+  // `code` is the exit status from the child; typically 0 on clean SIGINT
+  // exit but kept on the wire so clients can render the numeric code for
+  // diagnostic purposes if non-zero (e.g. SIGTERM = 143). `sessionId` is
+  // included for the legacy-cli path where ctx.sessionId is null (per the
+  // `Server -> Client` contract on the multi-session path the field is
+  // injected by `_broadcastToSession`, so omit when ctx.sessionId is null
+  // rather than emitting `sessionId: null`).
+  stopped: (data, ctx) => {
+    const msg = { type: 'session_stopped' }
+    if (ctx.sessionId) msg.sessionId = ctx.sessionId
+    if (typeof data?.code === 'number') msg.code = data.code
+    return { messages: [{ msg }] }
+  },
+
   // #3544: surface the cumulative stdin_dropped totals on the wire so
   // dashboards and the mobile app can render a "X bytes lost over N drops"
   // banner / badge for sessions that are silently truncating input at the

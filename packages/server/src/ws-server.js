@@ -298,6 +298,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_switched', sessionId, name, cwd, conversationId? } — switched active session
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
+ *   { type: 'session_stopped', sessionId?, code? } — user-initiated Stop confirmation (#4756); CliSession emitted `stopped` after a clean SIGINT exit; pairs with the louder `session_error` crash toast
  *   { type: 'session_restore_failed', sessionId, name, provider, cwd?, model?, permissionMode?, errorCode, errorMessage, originalHistoryPreserved, historyLength? }
  *     — session in persisted state could not be restored (e.g. missing env var); history kept on disk for retry
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
