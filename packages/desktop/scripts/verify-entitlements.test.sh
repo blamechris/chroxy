@@ -104,6 +104,18 @@ write_plist "$COLLIDE_PLIST" \
     "com.apple.security.device.audio-input-foo"
 assert_exit "rejects look-alike audio-input-foo key" 1 "$(run_verifier "$COLLIDE_PLIST")"
 
+# Regex-metachar guard — dots in the entitlement name must be treated as
+# literal dots, not regex "any char". A malformed plist where dots are
+# replaced with other characters must fail (would falsely pass under
+# `grep -E` because the dots in the pattern would match any character).
+REGEX_COLLIDE_PLIST="$TMP_DIR/regex-collide.plist"
+write_plist "$REGEX_COLLIDE_PLIST" \
+    "com.apple.security.cs.allow-jit" \
+    "com.apple.security.cs.allow-unsigned-executable-memory" \
+    "com.apple.security.cs.disable-library-validation" \
+    "comXappleXsecurityXdeviceXaudio-input"
+assert_exit "treats dots in key as literal, not regex any-char" 1 "$(run_verifier "$REGEX_COLLIDE_PLIST")"
+
 echo ""
 echo "verify-entitlements tests: $PASS passed, $FAIL failed"
 

@@ -69,10 +69,13 @@ fi
 
 MISSING=()
 for key in "${REQUIRED_ENTITLEMENTS[@]}"; do
-    # Match the `<key>NAME</key>` line exactly to avoid false positives on
-    # substring matches (e.g. `audio-input` would otherwise match
-    # `audio-input-foo`).
-    if ! printf '%s\n' "$ENTITLEMENTS_BLOB" | grep -qE "<key>${key}</key>"; then
+    # Match the `<key>NAME</key>` line as a fixed string (grep -F) so dots in
+    # the entitlement name (`com.apple.security.device.audio-input`) are not
+    # treated as regex "any char" — a regex match would false-positive on
+    # malformed `<key>comXappleXsecurityXdeviceXaudio-input</key>`. The
+    # surrounding `<key>...</key>` anchors also guard against substring
+    # collisions (e.g. `audio-input` vs `audio-input-foo`).
+    if ! printf '%s\n' "$ENTITLEMENTS_BLOB" | grep -qF "<key>${key}</key>"; then
         MISSING+=("$key")
     fi
 done
