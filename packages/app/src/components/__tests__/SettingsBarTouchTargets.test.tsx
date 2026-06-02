@@ -168,10 +168,13 @@ describe('SettingsBar header tappable badges hit a 44pt touch target (#4876)', (
  * plenty of horizontal whitespace, so the chosen fix grows the visible row to
  * 44pt (Option 1 from the issue) rather than adding `hitSlop`.
  *
- * This test asserts the row's effective tap target is at least 44 × 44pt,
- * computed as `style.minHeight + 2 * paddingVertical + hitSlop`. The row's
- * width spans the parent's flex space, so we only assert on the height
- * dimension that the original bug was about.
+ * This test asserts the row's effective tap target is at least 44pt tall,
+ * computed as `max(style.minHeight, style.paddingVertical * 2)` plus the
+ * top + bottom `hitSlop` (defaulting to 0 when unset). `minHeight` in RN
+ * already accounts for padding + content, so we take the larger of the two
+ * lower bounds rather than summing them. The row's width spans the parent's
+ * flex space, so we only assert on the height dimension that the original
+ * bug was about.
  */
 describe('SettingsBar conversationIdRow hits a 44pt touch target (#4893)', () => {
   it('row is rendered (expanded, with a conversationId)', () => {
@@ -209,9 +212,11 @@ describe('SettingsBar conversationIdRow hits a 44pt touch target (#4893)', () =>
     const hitSlop: HitSlop = (row.props.hitSlop as HitSlop) ?? {};
     const paddingVertical = style.paddingVertical ?? 0;
     const minHeight = style.minHeight ?? 0;
-    // Effective tap-target height is the larger of minHeight or (paddingVertical*2 + content)
-    // — minHeight wins here because it is set explicitly. Add hitSlop top/bottom in case a
-    // future change keeps minHeight low but compensates with slop.
+    // Effective tap-target height is the larger of minHeight or paddingVertical*2
+    // (a conservative lower bound — actual content height is not measured here),
+    // plus any top/bottom hitSlop. minHeight wins for this row because it is set
+    // explicitly to 44; the paddingVertical fallback only matters if a future
+    // change drops minHeight and relies on padding alone.
     const effectiveHeight = Math.max(minHeight, paddingVertical * 2)
       + (hitSlop.top ?? 0)
       + (hitSlop.bottom ?? 0);
