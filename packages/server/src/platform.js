@@ -1,4 +1,7 @@
 import { writeFileSync, chmodSync, renameSync, unlinkSync } from 'fs'
+import { createLogger } from './logger.js'
+
+const log = createLogger('platform')
 
 export const isWindows = process.platform === 'win32'
 export const isMac = process.platform === 'darwin'
@@ -34,10 +37,11 @@ export function defaultShell() {
  *
  * On rename failure, the intermediate `<filePath><tmpSuffix>` file is
  * unlinked before the error is rethrown so it does not leak across
- * retries. Cleanup errors are suppressed — the original rename error is
- * what the caller needs to surface. See #4874 — environment-manager.js
- * and session-state-persistence.js had identical bespoke cleanup
- * wrappers before this was hoisted into the shared helper.
+ * retries. The rename error is what the caller needs to surface, so it
+ * is always re-thrown; a non-ENOENT cleanup-unlink failure is logged via
+ * `log.warn` so the orphan `.tmp` is not invisible (#4906 — the bespoke
+ * cleanup wrappers in environment-manager.js / session-state-persistence.js
+ * had this warn before the hoist in #4874).
  */
 export function writeFileRestricted(filePath, data, { tmpSuffix = '.tmp' } = {}) {
   if (isWindows) {
@@ -50,7 +54,13 @@ export function writeFileRestricted(filePath, data, { tmpSuffix = '.tmp' } = {})
   try {
     renameSync(tmpPath, filePath)
   } catch (err) {
-    try { unlinkSync(tmpPath) } catch {}
+    try {
+      unlinkSync(tmpPath)
+    } catch (cleanupErr) {
+      if (cleanupErr && cleanupErr.code !== 'ENOENT') {
+        log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
+      }
+    }
     throw err
   }
 }
