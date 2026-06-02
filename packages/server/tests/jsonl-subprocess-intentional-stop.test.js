@@ -43,13 +43,21 @@ import { waitFor } from './test-helpers.js'
 
 const shimPath = join(tmpdir(), `jsonl-stop-shim-${process.pid}-${Date.now()}.mjs`)
 
-function writeShim(lines, { exitCode = 0, stderr = '' } = {}) {
+function writeShim(lines, { exitCode = 0, stderr = '', exitDelayMs = 0 } = {}) {
   const payload = lines.map((l) => JSON.stringify(l)).join('\n')
+  // exitDelayMs: defer process.exit so the parent test can arm flags
+  // (_intentionalStop, _destroying) AFTER `await s.sendMessage(...)` resolves
+  // but BEFORE the shim closes. Without the delay the shim exits synchronously
+  // after spawn, racing the post-await flag assignments and intermittently
+  // firing the close handler with stale (unset) flags.
+  const exitCall = exitDelayMs > 0
+    ? `setTimeout(() => process.exit(${exitCode}), ${exitDelayMs})`
+    : `process.exit(${exitCode})`
   const body = [
     '#!/usr/bin/env node',
     `process.stdout.write(${JSON.stringify(payload + (payload ? '\n' : ''))})`,
     stderr ? `process.stderr.write(${JSON.stringify(stderr)})` : '',
-    `process.exit(${exitCode})`,
+    exitCall,
   ].filter(Boolean).join('\n')
   writeFileSync(shimPath, body)
   chmodSync(shimPath, 0o755)
@@ -208,7 +216,12 @@ describe('JsonlSubprocessSession proc.on(close) — intentional stop emits `stop
   })
 
   it('clears the flag even when _destroying short-circuits (no leak)', async () => {
-    writeShim([], { exitCode: 0 })
+    // exitDelayMs=50: shim defers process.exit so the close handler can NOT
+    // fire before the post-await flag assignments below land. Without the
+    // delay, the immediate-exit shim races the test's `_intentionalStop = true`
+    // / `_destroying = true` lines and the close handler observes the unset
+    // flags, intermittently masking the leak this test is meant to catch.
+    writeShim([], { exitCode: 0, exitDelayMs: 50 })
     const P = makeTestProviderClass()
     const s = new P({ cwd: '/tmp' })
     s._processReady = true
@@ -220,6 +233,7 @@ describe('JsonlSubprocessSession proc.on(close) — intentional stop emits `stop
 
     // Send message THEN both arm the flag and flip _destroying. The close
     // handler must clear the flag even though _destroying skips the emits.
+    // The shim's exitDelayMs guarantees this assignment lands before close.
     await s.sendMessage('hi')
     s._intentionalStop = true
     s._destroying = true
