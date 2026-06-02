@@ -166,11 +166,13 @@ export interface ContextUsage {
  * `SettingsPanel` change handler, the mobile `SettingsScreen` picker tuple
  * typed as `{ value: VoiceInputMode; … }[]`) will be flagged by TS when the
  * union widens. Sites that validate untrusted runtime input (localStorage
- * rehydrate, wire payloads) MUST use the {@link isVoiceInputMode} guard
- * below — it is keyed off the same exhaustive `Record<VoiceInputMode, true>`
- * map, so widening the union to a new mode without updating that map is a
- * TS error (missing property). See `packages/dashboard/src/store/connection.ts`
- * `loadSavedConnection` for the canonical rehydrate-path consumer (#4853).
+ * rehydrate, SecureStore rehydrate, wire payloads) MUST use the
+ * {@link isVoiceInputMode} guard below — it is keyed off the same exhaustive
+ * `Record<VoiceInputMode, true>` map, so widening the union to a new mode
+ * without updating that map is a TS error (missing property). Canonical
+ * rehydrate-path consumers:
+ * - `packages/dashboard/src/store/connection.ts` — localStorage (#4853)
+ * - `packages/app/src/store/connection.ts` — SecureStore (#4872)
  */
 export type VoiceInputMode = 'continuous' | 'auto-pause';
 

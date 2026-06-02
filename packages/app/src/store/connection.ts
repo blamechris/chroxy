@@ -129,7 +129,16 @@ import {
   // the looser SessionScreen variant; both call sites now narrow off the
   // same guard.
   isFreeformAnswer,
+  // #4872: shared runtime type-guard for `VoiceInputMode`. The mobile
+  // rehydrate path below (`loadSavedConnection`) used to spread the
+  // SecureStore blob in unchecked, gated only on `chatEnterToSend` /
+  // `terminalEnterToSend` being booleans, so a stale or tampered
+  // `voiceInputMode` (`'push-to-talk'`, `null`, `42`) flowed through
+  // to `useSpeechRecognition({ mode })`. Now gated by the same guard
+  // the dashboard uses (#4853).
+  isVoiceInputMode,
 } from '@chroxy/store-core';
+import type { InputSettings } from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -585,8 +594,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const raw = await SecureStore.getItemAsync(STORAGE_KEY_INPUT_SETTINGS);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed.chatEnterToSend === 'boolean' || typeof parsed.terminalEnterToSend === 'boolean') {
-          set((state) => ({ inputSettings: { ...state.inputSettings, ...parsed } }));
+        // #4872: validated, narrowed merge — mirrors the dashboard
+        // rehydrate path (#4853). A stray key in SecureStore (stale blob
+        // from an older mode-name, tampered storage, future variant) can
+        // no longer shoehorn arbitrary state into `inputSettings`. Each
+        // field is checked independently because the persisted blob may
+        // pre-date `voiceInputMode` (#4785) and contain only the boolean
+        // toggles.
+        const next: Partial<InputSettings> = {};
+        if (typeof parsed.chatEnterToSend === 'boolean') next.chatEnterToSend = parsed.chatEnterToSend;
+        if (typeof parsed.terminalEnterToSend === 'boolean') next.terminalEnterToSend = parsed.terminalEnterToSend;
+        // #4872: runtime guard keyed off the same exhaustive
+        // `Record<VoiceInputMode, true>` map the dashboard uses. Adding a
+        // new variant to the `VoiceInputMode` union without listing it
+        // there is a TS error, so the guard cannot silently drop a new
+        // mode the way a hand-written `===` chain would.
+        if (isVoiceInputMode(parsed.voiceInputMode)) {
+          next.voiceInputMode = parsed.voiceInputMode;
+        }
+        if (Object.keys(next).length > 0) {
+          set((state) => ({ inputSettings: { ...state.inputSettings, ...next } }));
         }
       }
     } catch {
