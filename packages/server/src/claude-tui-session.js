@@ -118,6 +118,25 @@ const OTHER_FREEFORM_SETTLE_MS = 150
 // emoji-heavy text) and tear down a turn that's actively progressing.
 const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
 
+// #4635 — settle delay between the final single-select question's auto-
+// advance digit and the Submit `'1'` keystroke. Mixed multi-question
+// forms (with at least one multi-select) work fine because the explicit
+// `'\t'` after each multi-select gives claude TUI a settled commit signal
+// that fully renders the next screen before our next keystroke. But on a
+// pure all-single-select form the LAST digit auto-advances to the Submit
+// screen, and the 1ms per-char throttle writes the Submit `'1'` faster
+// than claude TUI can render the Submit screen — so the `'1'` lands on
+// the still-rendering last-question screen, gets swallowed, and the form
+// never submits. The 30s ASK_USER_QUESTION watchdog then fires.
+//
+// 150 ms mirrors the empirically-validated OTHER_FREEFORM_SETTLE_MS used
+// for the option-menu → text-input prompt swap (#4651) — same render-
+// settling motivation, same observed magnitude. Only inserted when the
+// final question in the sequence is single-select; mixed forms keep the
+// pre-#4635 timing-free path (Tab's commit signal makes Submit settle
+// naturally and the existing empirical recording pins the Tab + '1' run).
+const MULTI_QUESTION_SUBMIT_SETTLE_MS = 150
+
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
 // block headless spawn. The dialog is interactive-only — without this, the
 // PTY would render "Is this a project you trust?" and wait for Enter.
@@ -2736,7 +2755,9 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     // Assemble the inner keystroke sequence (no paste-mode toggles —
-    // _writePtyMultiQuestionSequence wraps the whole thing).
+    // _writePtyMultiQuestionSequence wraps the whole thing). The sequence
+    // is a mixed array of strings (chars to write) and numbers (ms to
+    // sleep) — the writer dispatches on type.
     const sequence = []
     for (const q of questions) {
       const rawAnswer = map[q.question]
@@ -2748,11 +2769,34 @@ export class ClaudeTuiSession extends BaseSession {
         sequence.push('\t')
       }
     }
+    // #4635 — when the LAST question is single-select, insert a settling
+    // delay before the Submit keystroke. The last digit auto-advances to
+    // the Submit screen, but the 1ms per-char throttle races claude TUI's
+    // render of that screen so the trailing '1' lands on the still-
+    // rendering last-question screen and gets swallowed (the wedge the
+    // issue documents). Mixed forms ending in multi-select don't need
+    // this — the explicit '\t' already settles the form.
+    const lastQuestion = questions.length > 0 ? questions[questions.length - 1] : null
+    const lastIsSingleSelect = !!(lastQuestion && !lastQuestion.multiSelect)
+    if (lastIsSingleSelect) {
+      sequence.push(MULTI_QUESTION_SUBMIT_SETTLE_MS)
+    }
     // Focus lands on `❯ 1. Submit answers / 2. Cancel` after the last
     // question — press 1 to confirm submission.
     sequence.push('1')
+    // #4635 — defensive trailing Enter. The empirical mixed-form recording
+    // pinned `'1'` as immediate-submit (no Enter needed); on the mixed
+    // path the trailing `\r` is harmless (same reasoning as the single-q
+    // path's redundant Enter pinned in #4290). On the all-single-select
+    // path it's a belt-and-braces defense in case claude TUI's Submit
+    // screen for that shape requires an explicit commit keystroke — which
+    // is one of the live-debugged hypotheses for the wedge (Option B in
+    // the issue). Costs nothing on the path that already works; potentially
+    // saves the path that doesn't.
+    sequence.push('\r')
 
-    log.info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${sequence.length} haveAnswersMap=${haveMap}`)
+    const keystrokeCount = sequence.filter((x) => typeof x === 'string').length
+    log.info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${keystrokeCount} haveAnswersMap=${haveMap}`)
 
     this._writePtyMultiQuestionSequence(sequence).catch((err) => {
       log.warn(`respondToQuestion multi-question PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
@@ -2771,16 +2815,26 @@ export class ClaudeTuiSession extends BaseSession {
    * driver supplies its own navigation keys (Tab between multi-select
    * questions, '1' at Submit).
    *
-   * @param {string[]} sequence — array of one-char strings to write in order
+   * #4635 — sequence entries may be either strings (chars to write) or
+   * numbers (ms to sleep). Numeric entries let the driver insert a
+   * render-settling pause between keystrokes (e.g. the Submit screen
+   * needs a beat after the last single-select auto-advance — see
+   * MULTI_QUESTION_SUBMIT_SETTLE_MS).
+   *
+   * @param {Array<string|number>} sequence — strings to write, numbers to sleep
    * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
    */
   async _writePtyMultiQuestionSequence(sequence) {
     if (!this._term) return false
     this._term.write('\x1b[?2004l')
     try {
-      for (const ch of sequence) {
+      for (const item of sequence) {
         if (this._activeTurn?.aborted || this._ptyExited) return false
-        this._term.write(ch)
+        if (typeof item === 'number') {
+          if (item > 0) await new Promise((resolve) => setTimeout(resolve, item))
+          continue
+        }
+        this._term.write(item)
         if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
           await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
         }
