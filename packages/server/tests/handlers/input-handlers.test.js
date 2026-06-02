@@ -459,7 +459,7 @@ describe('input-handlers', () => {
         assert.equal(sessionA.respondToQuestion.lastCall[0], 'approve')
       })
 
-      it('leaves the bound-client guard at line 541 unchanged (different code path)', () => {
+      it('leaves the bound-client guard unchanged (different code path)', () => {
         // The existing bound-client guard already early-returns when the
         // bound session doesn't match the questionSessionId. This test pins
         // that the new subscription guard doesn't accidentally relax it.
@@ -484,6 +484,56 @@ describe('input-handlers', () => {
           'bound-client guard takes precedence — boundSessionId mismatch always wins')
         assert.equal(ctx.questionSessionMap.get('tool-x'), 's1',
           'mapping preserved when the bound-elsewhere client is rejected')
+      })
+
+      // #4788 Wave 2 regression: mirrors the ws-server-permissions integration
+      // test for the legitimate "view A → get question for A → switch to B →
+      // answer" flow. In production, the WsServer-side _registerQuestionRoute
+      // helper auto-subscribes the originating viewer to the question's
+      // session at dispatch time, so the unbound subscription guard above
+      // still passes after the client switches activeSessionId away. This
+      // pins the input-handler half of that contract: given the production-
+      // shaped client state (subscribedSessionIds carries the question's
+      // session because dispatch auto-subscribed), the answer routes to the
+      // originating session even though the client's active session is now
+      // somewhere else. Without this the Wave 1 guard would silently drop a
+      // legitimate after-switch answer (caught CI on ws-server-permissions
+      // test "routes user_question_response to the originating session,
+      // not activeSessionId").
+      it('routes the answer after switch_session when dispatch auto-subscribed the client to the originating session (#4788 Wave 2)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // Production: when the question for s1 dispatched, the WsServer-side
+        // helper called questionSessionMap.set('tool-after-switch', 's1')
+        // AND subscribedSessionIds.add('s1') for this client.
+        ctx.questionSessionMap.set('tool-after-switch', 's1')
+        // The user then tapped "switch to session B" — session-handlers.js
+        // adds 's2' to subscribedSessionIds and sets activeSessionId='s2',
+        // but leaves the prior 's1' subscription intact (only unsubscribe
+        // explicitly removes).
+        const client = makeClient({
+          id: 'viewer-after-switch',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'approve-after-switch',
+          toolUseId: 'tool-after-switch',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 1,
+          'after-switch answer must route to the originating session A')
+        assert.equal(sessionA.respondToQuestion.lastCall[0], 'approve-after-switch')
+        assert.equal(sessionB.respondToQuestion.callCount, 0,
+          'must not bleed onto the now-active session B')
+        assert.equal(ctx.questionSessionMap.has('tool-after-switch'), false,
+          'mapping consumed on successful route')
       })
 
       it('tolerates a missing subscribedSessionIds set (defensive — old client shapes)', () => {
