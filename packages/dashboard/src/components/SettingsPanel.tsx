@@ -183,22 +183,36 @@ function QuietHoursEditor(props: {
   }, [])
 
   // Manual mode — `setDraft` updates local state only; Save explicitly
-  // calls onWindowChange. `flush()` is unused here because the toggle
-  // and Save handlers have side-effects (enable toggle can send null,
-  // first-time enable seeds the draft) that don't fit a generic flush.
-  // The hook still owns dirty, conflict, accept/discard, and
-  // unmount-cancel semantics.
+  // calls `flush()` so the dirty flag + parked-snapshot banner clear
+  // optimistically (rather than waiting for the server echo to arrive,
+  // which would leave the banner stuck if the WS write fails). The hook
+  // owns dirty, conflict, accept/discard, flush, and unmount-cancel
+  // semantics.
+  //
+  // `onFlush` translates the composite draft into the wire shape used by
+  // `onWindowChange`: when `enabled` is true we send the window; when
+  // false we send `null` (the server's "wipe quiet hours" sentinel). The
+  // toggle and first-time enable paths still call `onWindowChange`
+  // directly because they need to fire independent of the user's
+  // typed-but-not-yet-saved fields.
   const {
     draft,
     setDraft,
     conflict: pendingDraft,
     acceptDraft: handleAcceptDraft,
     discardDraft: handleDiscardDraftFromHook,
+    flush: flushDraft,
   } = useDebouncedSetter<Draft>({
     serverValue: serverDraft,
     scopeKey: 'quiet-hours',
     debounceMs: 0,
-    onFlush: () => { /* manual mode — Save fires onWindowChange directly */ },
+    onFlush: (next) => {
+      if (next.enabled) {
+        onWindowChange({ start: next.start, end: next.end, timezone: next.timezone })
+      } else {
+        onWindowChange(null)
+      }
+    },
     equals: draftEquals,
   })
 
@@ -239,14 +253,17 @@ function QuietHoursEditor(props: {
   }, [win, start, end, timezone, onWindowChange, setDraft])
 
   const handleSaveWindow = useCallback(() => {
-    onWindowChange({ start, end, timezone })
-    // Mirror the original behaviour: Save clears dirty / pending — the
-    // server echo will hit the hook's hydration effect as a clean apply
-    // because the values now match. Calling setDraft with the same
-    // values re-syncs dirty=false (the hook clears it on flush; manual
-    // mode never auto-flushes so we replay the post-save state by
-    // letting the server echo round-trip).
-  }, [start, end, timezone, onWindowChange])
+    // `flushDraft` fires the hook's `onFlush` with the current draft
+    // (which delegates to `onWindowChange` for the enabled-true case)
+    // AND clears `dirty` + dismisses the parked-snapshot banner
+    // optimistically. Mirrors the pre-#4739 behaviour where Save
+    // explicitly called `setDirty(false)` + `setPendingSnapshot(undefined)`
+    // before dispatching the WS write, so a conflict banner that's
+    // visible at click-time disappears immediately rather than hanging
+    // around until the server echo arrives (or staying stuck forever if
+    // the WS write fails).
+    flushDraft()
+  }, [flushDraft])
 
   const handleDiscardDraft = useCallback(() => {
     handleDiscardDraftFromHook()

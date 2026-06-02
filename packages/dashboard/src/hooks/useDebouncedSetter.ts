@@ -153,12 +153,18 @@ export function useDebouncedSetter<T>(
     }
   }, [])
 
-  // Hydration effect. Two distinct cases:
+  // Hydration effect. Three distinct cases inside same-scope:
   //   1. Scope changed — always re-hydrate AND cancel pending debounce.
   //      The leaked draft would otherwise fire against the new scope.
-  //   2. Same scope, new snapshot — if dirty AND divergent, park it
-  //      for the conflict banner. If matching draft (own echo), clear
-  //      dirty silently. If clean, apply.
+  //   2. Same scope, dirty + divergent snapshot — park it for the
+  //      conflict banner; preserve the draft.
+  //   3. Same scope, matches-draft (own echo) — clear dirty silently;
+  //      DO NOT overwrite the draft. The draft is already consistent
+  //      with the server from the caller's equality semantics, and
+  //      callers that pass an asymmetric `equals` (e.g. server `null`
+  //      matches draft `enabled=false` regardless of fields) rely on
+  //      this to keep "hidden" draft fields intact across an own-echo.
+  //   4. Same scope, clean editor, snapshot diverges — apply it.
   useEffect(() => {
     const sameScope = scopeRef.current === scopeKey
     if (!sameScope) {
@@ -176,7 +182,17 @@ export function useDebouncedSetter<T>(
       setConflict(serverValue)
       return
     }
-    // Clean apply (or own echo).
+    if (matchesDraft) {
+      // Own echo (or clean editor already in sync). Clear dirty +
+      // conflict silently but preserve the draft so any extra fields
+      // the caller's `equals` deems irrelevant (e.g. QuietHoursEditor's
+      // `start/end/timezone` when server is disabled) survive the
+      // round-trip and aren't reset to the server's defaults.
+      setDirty(false)
+      setConflict(undefined)
+      return
+    }
+    // Clean editor, snapshot diverges — apply.
     setDraftState(serverValue)
     setDirty(false)
     setConflict(undefined)

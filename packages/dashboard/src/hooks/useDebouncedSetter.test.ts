@@ -267,6 +267,38 @@ describe('useDebouncedSetter', () => {
       expect(result.current.conflict).toBeUndefined()
     })
 
+    it('preserves draft on own-echo when asymmetric equals deems server matches (fields ignored)', () => {
+      // Mirrors QuietHoursEditor's `draftEquals`: a server snapshot with
+      // `enabled=false` matches a draft with `enabled=false` regardless
+      // of the start/end/timezone fields. Those draft fields must
+      // survive the own-echo so re-enabling doesn't blank them.
+      type Draft = { enabled: boolean; start: string; end: string }
+      const equals = (server: Draft, draft: Draft) => {
+        if (!server.enabled) return !draft.enabled
+        return draft.enabled && server.start === draft.start && server.end === draft.end
+      }
+      const { result, rerender } = renderHook(
+        ({ serverValue }) =>
+          useDebouncedSetter<Draft>({
+            serverValue,
+            scopeKey: 'sess-1',
+            debounceMs: 0,
+            onFlush: vi.fn(),
+            equals,
+          }),
+        { initialProps: { serverValue: { enabled: true, start: '22:00', end: '07:00' } } }
+      )
+      // User customises the fields then disables.
+      act(() => result.current.setDraft({ enabled: true, start: '23:30', end: '08:00' }))
+      act(() => result.current.setDraft({ enabled: false, start: '23:30', end: '08:00' }))
+      // Server echoes back the disabled state (default seed fields).
+      rerender({ serverValue: { enabled: false, start: '22:00', end: '07:00' } })
+      // Draft fields preserved — NOT clobbered to the server defaults.
+      expect(result.current.draft).toEqual({ enabled: false, start: '23:30', end: '08:00' })
+      expect(result.current.dirty).toBe(false)
+      expect(result.current.conflict).toBeUndefined()
+    })
+
     it('custom equals controls own-echo detection for object payloads', () => {
       type Window = { start: string; end: string }
       const equals = (a: Window, b: Window) => a.start === b.start && a.end === b.end
