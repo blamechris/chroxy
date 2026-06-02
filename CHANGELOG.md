@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.36] - 2026-06-02
+
+Backlog-sweep release: 16 from-review issues landed in a single overnight marathon, plus one cross-PR fix-CI commit (#4886) when #4867's settle delay broke #4866's freshly-merged arrow-nav tests. All sourced from prior agent-review deferrals (#4823 / v0.9.34 / v0.9.35 follow-ups).
+
+### Added
+
+- **>9-option AskUserQuestion native drive (#4848 → #4866):** single-question and multi-question paths with `idx >= 9` now navigate via arrow-key sequence (`\x1b[?2004l` + N× `\x1b[B` + `\r`) instead of teardown-with-error. Multi-select still bails with `ASK_USER_QUESTION_TOO_MANY_OPTIONS` (deliberate scope per #4848). Arrow-nav byte sequence is conservative — empirical recorder verification deferred per the PR body; revisit if user reports misfires.
+- **Wire `stopped` event end-to-end (#4756 → #4868):** `CliSession.emit('stopped')` (added in #4750) now propagates through `SessionManager._wireSessionEvents` → `ws-forwarding` → `event-normalizer` → `ServerSessionStoppedSchema` → wire `{type: 'session_stopped', sessionId?, code?}`. Client UX surfacing deferred to per-platform follow-ups (#4878 dashboard, #4879 mobile).
+- **Prune stale device-preferences entries on startup (#4849 → #4863):** `~/.chroxy/device-preferences.json` now drops entries whose `activeSessionId` no longer exists (after `restoreState` lands), so the file doesn't accumulate stale device→session refs.
+- **`isVoiceInputMode` runtime type-guard helper (#4853 → #4858):** new exported guard in `@chroxy/store-core/types`. Migrated dashboard `connection.ts:805` rehydrate path + `SettingsPanel` inline literal. Mobile rehydrate has the same latent bug — tracked in #4872.
+- **Mobile single-question Other/freeform parity (#4755 → #4864):** mobile `useUserQuestion` now supports the `{otherLabel, freeformText}` answer shape, matching dashboard #4651. Wire payload: `{answer: <otherLabel>, freeformText: <typed text>}`.
+- **Mobile multi-question intervention counter (#4764 → #4862):** new tappable header badge in `SettingsBar` showing intervention count, opens a newest-first sheet. Touch target sweep across all header badges deferred (#4876).
+- **Mobile `sendUserQuestionResponse` per-question Record support (#4761 → #4859):** widened to accept `string | Record<string, string | string[]> | { otherLabel: string; freeformText: string }`. Three shapes covered: legacy single-answer, multi-question form, Other/freeform.
+- **`end`-handler `inFlightRef` gate (#4851 → #4855):** defence-in-depth for the #4826 abort-end async race. End-handler continuous re-arm now requires `inFlightRef.current` true, so a queued `end` event after `abort()` can't re-arm a torn-down session.
+
+### Changed
+
+- **Multi-question all-single-select form submit (#4635 → #4867):** added 150ms settle + defensive trailing `\r` after the last-question single-select auto-advance so the Submit screen reliably commits. Empirical recorder verification of the all-single-select shape deferred (#4882, #4883, #4884).
+- **Second-wave `loggerForSession` migration sweep (#4828 → #4869):** 50+ post-session-init log call sites in `claude-tui-session.js` / `sdk-session.js` / `cli-session.js` / 4 handler files migrated to session-scoped loggers. Cached `this._log` in sdk/cli sessions for early-path safety. Added 5 lint fixture tests + tightened the lint script.
+- **Removed `VoiceInputMode` re-export shims (#4852 → #4856):** all callers now import directly from `@chroxy/store-core` (no migration needed — confirmed via caller audit). Hooks `useSpeechRecognition.ts` + `useVoiceInput.ts` drop their `export type { VoiceInputMode }` lines.
+
+### Fixed
+
+- **🚨 Hide AskUserQuestion content until permission granted (#4685 → #4860):** dashboard rendered question prompt + options before user clicked Allow. Now `QuestionPrompt` accepts `pendingPermission` prop and shows a placeholder; `App.tsx` derives the gate from `resolvedPermissions + messages`. Deny correctly keeps the gate up.
+- **`writeFileRestricted` is now atomic (#4850 → #4865):** `connection.json` + `device-preferences.json` writes go through write-temp + rename so a killed writer can't leave a half-written file. 0o600 mode preserved by rename. Subprocess-based test exercises the simulated-crash invariant.
+- **Header buttons in desktop dashboard now expose both `title` and `aria-label` (#4630 → #4861):** audited App header + FooterBar + SessionBar; paired both attributes on 9 controls that were missing one half. 13 new tests pin the contract.
+- **Copy-transcript clipboard failure now surfaces a toast in Tauri (#4629 → #4857):** the underlying clipboard helper was already Tauri-aware (#4676); this PR ships the remaining AC — an `addServerError` toast when the helper reports failure instead of silently no-op. Sibling sidebar callsite has the same gap, tracked in #4871.
+- **`ctx.currentToolUseId` aligned with synthesized fallback `toolId` (#4778 → #4885):** when upstream events omit `content_block.id`, the synthesized id (`msg-N-tool`) now also writes to `ctx.currentToolUseId` (cli path) and `_activeAgents` key (sdk path), so downstream `tool_result` events correlate.
+
+### Internal (CI hotfix)
+
+- **#4886 (no issue) — cross-PR test breakage:** #4867's 150ms settle + trailing `\r` broke #4866's arrow-nav tests (12-option waited 100ms, both expected arrays omitted the `\r`). Fix bumps waits to 300ms and adds the trailer to expected. Caught after merge; main was red for ~20 minutes.
+
+### Follow-up issues filed during this marathon
+
+- #4870 — Clipboard-failure toast should use `'warning'` severity per #4148 convention.
+- #4871 — Sidebar `copyToClipboard` callsite still silently no-ops on Tauri/WKWebView failure.
+- #4872 — Mobile app rehydrate has the same latent `VoiceInputMode` validation gap #4853 closed on dashboard.
+- #4873 — Header status-dot `role="status"` live-region polish (cosmetic).
+- #4874 — Audit three `writeFileRestricted` callers (models / env-mgr / session-state-persistence) for now-redundant double `.tmp+rename`.
+- #4875 — Factor `isFreeformAnswer` into a shared typed predicate.
+- #4876 — Mobile session-header badges below 44pt touch target.
+- #4877 — Maestro flow for Other → freeform answer (third AC of #4755).
+- #4878 — Dashboard quiet "Session stopped." toast on `session_stopped` event.
+- #4879 — Mobile app quiet status confirmation on `session_stopped` event.
+- #4881 — Provider parity: SDK / Codex / Gemini sessions should also emit `stopped`.
+- #4882 — Empirically re-record all-single-select multi-question form bytes.
+- #4883 — Tighten `lastIsSingleSelect` detection to surface unexpected question shapes.
+- #4884 — Live-verify trailing `\r` on mixed multi-question forms.
+
 ## [0.9.35] - 2026-06-02
 
 Bug-fix release driven by a live two-session reproduction: clicking a large-history CLI session tab in the dashboard reliably triggered a "Reconnecting…" loop and bounced the user back to the first session, making the offending session unreachable. Diagnosis traced this to a P0 trap composed of two server bugs (#4833 backpressure-eviction during chunked history replay + #4835 active-session-reset on every reconnect) plus a long-tail of voice-input + question-flow + docker auth polish from prior audits.
