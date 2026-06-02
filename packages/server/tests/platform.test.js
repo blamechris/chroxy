@@ -212,14 +212,18 @@ try {
       })
 
       it('tightens perms when a stale tmp sidecar exists at a looser mode (#4907)', async () => {
-        // The `mode: 0o600` arg to `writeFileSync` is ONLY honoured on
-        // file CREATION. If a prior run crashed before rename and left
-        // a `.tmp` sidecar at e.g. 0o644 (an attacker pre-empting the
-        // path with looser perms is the threat model), `writeFileSync`
-        // opens with `O_TRUNC` and silently inherits the stale mode.
-        // The explicit `chmodSync` in `writeFileRestricted` must
-        // restore 0o600 before the rename. This test would fail if
-        // someone "cleaned up" the chmodSync as redundant.
+        // Regression for "stale tmp preserves mode unless chmodSync
+        // re-tightens": the `mode: 0o600` arg to `writeFileSync` is
+        // ONLY honoured on file CREATION. If a prior run crashed before
+        // rename and left a `.tmp` sidecar at e.g. 0o644,
+        // `writeFileSync` opens with `O_TRUNC` and silently inherits
+        // the stale mode. The explicit `chmodSync` in
+        // `writeFileRestricted` must restore 0o600 before the rename so
+        // the FINAL file is tight. This test asserts the final mode
+        // bits only — it does NOT cover the transient exposure window
+        // during the write (the bytes are on disk at the stale 0o644
+        // briefly, before chmodSync runs). It would fail if someone
+        // "cleaned up" the chmodSync as redundant.
         const filePath = join(tmpDir, 'sensitive.json')
         const tmpPath = `${filePath}.tmp`
         const { writeFileSync, chmodSync } = await import('fs')

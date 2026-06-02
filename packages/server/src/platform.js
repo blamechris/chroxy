@@ -51,12 +51,18 @@ export function writeFileRestricted(filePath, data, { tmpSuffix = '.tmp' } = {})
   // mode, or another local user pre-created the path under a permissive
   // umask — `writeFileSync` opens with `O_TRUNC` and preserves the
   // existing mode bits. The explicit `chmodSync` afterward guarantees
-  // 0o600 even in that case. These files may carry secrets (session
-  // bearer tokens, push subscriptions, BYOK creds), so the
-  // belt-and-braces is intentional. Same defensive pattern is in
-  // `logger.js` (dir mode), `byok-credentials.js`, `byok-mcp-trust.js`,
-  // and `notification-prefs.js`. See #4907 for the cleanup discussion
-  // that ended in "keep with comment + regression test".
+  // the FINAL file is 0o600, but does NOT eliminate the transient
+  // exposure window between the write and the chmod — during that
+  // window, a pre-existing looser mode means another local user could
+  // read the freshly-written bytes. Full mitigation would require
+  // openSync(O_CREAT|O_EXCL) + fchmodSync before write; the current
+  // belt-and-braces is intentional but only covers the at-rest final
+  // perms, not the in-flight window. These files may carry secrets
+  // (session bearer tokens, push subscriptions, BYOK creds). Same
+  // defensive pattern is in `logger.js` (dir mode),
+  // `byok-credentials.js`, `byok-mcp-trust.js`, and
+  // `notification-prefs.js`. See #4907 for the cleanup discussion that
+  // ended in "keep with comment + regression test".
   writeFileSync(tmpPath, data, { mode: 0o600 })
   chmodSync(tmpPath, 0o600)
   try {
