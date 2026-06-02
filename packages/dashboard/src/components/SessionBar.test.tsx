@@ -372,4 +372,70 @@ describe('SessionBar', () => {
       expect(screen.queryByTestId('tab-stdin-disabled-badge')).not.toBeInTheDocument()
     })
   })
+
+  // #4630 — every tab-internal chip/icon needs BOTH `title` (browser
+  // hover tooltip) and `aria-label` (SR announcement). Several chips
+  // had only `title`, leaving SR users with no spoken label. Pinning
+  // the contract so the New-session button + per-tab status dot, cwd,
+  // model, and provider chips all stay discoverable.
+  describe('#4630 tab chips have both title and aria-label', () => {
+    function renderRichTab() {
+      const sessions: SessionTabData[] = [
+        {
+          sessionId: 's1', name: 'Rich', isBusy: false, isActive: true,
+          cwd: '/home/user/projects/api', model: 'claude-opus-4-6', provider: 'claude-sdk',
+        },
+      ]
+      return render(
+        <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
+      )
+    }
+
+    it('per-tab status dot has both title and aria-label', () => {
+      renderRichTab()
+      const tab = screen.getByTestId('session-tab-s1')
+      const dot = within(tab).getByTestId('status-dot')
+      expect(dot.getAttribute('title'), 'status-dot needs title').toBeTruthy()
+      expect(dot.getAttribute('aria-label'), 'status-dot needs aria-label').toBeTruthy()
+    })
+
+    it('tab cwd chip has both title and aria-label', () => {
+      const { container } = renderRichTab()
+      const cwd = container.querySelector('.tab-cwd')
+      expect(cwd, 'tab-cwd must exist').toBeTruthy()
+      expect(cwd!.getAttribute('title'), 'cwd needs title').toBeTruthy()
+      expect(cwd!.getAttribute('aria-label'), 'cwd needs aria-label').toBeTruthy()
+    })
+
+    it('tab model chip has both title and aria-label', () => {
+      const { container } = renderRichTab()
+      const m = container.querySelector('.tab-model')
+      expect(m, 'tab-model must exist').toBeTruthy()
+      expect(m!.getAttribute('title'), 'model needs title').toBeTruthy()
+      expect(m!.getAttribute('aria-label'), 'model needs aria-label').toBeTruthy()
+    })
+
+    it('tab provider chip has both title and aria-label', () => {
+      const { container } = renderRichTab()
+      const p = container.querySelector('.tab-provider')
+      expect(p, 'tab-provider must exist').toBeTruthy()
+      expect(p!.getAttribute('title'), 'provider needs title').toBeTruthy()
+      expect(p!.getAttribute('aria-label'), 'provider needs aria-label').toBeTruthy()
+    })
+
+    it('new-session button exposes both title and aria-label', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+        />
+      )
+      const btn = screen.getByTestId('new-session-btn')
+      expect(btn.getAttribute('title'), 'new-session needs title').toBeTruthy()
+      expect(btn.getAttribute('aria-label'), 'new-session needs aria-label').toBeTruthy()
+    })
+  })
 })
