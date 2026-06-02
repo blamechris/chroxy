@@ -431,7 +431,11 @@ export interface MessageInputActions {
    *   question) AND a flattened string `answer` summary so older servers
    *   reading only `answer` still see a readable line.
    *
-   * Mirrors `sendUserQuestionResponse` on the dashboard (#4760).
+   * Mirrors the `string` and `Record<string, string | string[]>` branches of
+   * `sendUserQuestionResponse` on the dashboard (#4760). The dashboard
+   * additionally accepts a `{ otherLabel, freeformText }` shape for the
+   * single-question Other / freeform path (#4651); mobile parity for that
+   * shape is tracked separately in #4755 and is out of scope here.
    */
   sendUserQuestionResponse: (
     answer: string | Record<string, string | string[]>,

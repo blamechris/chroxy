@@ -31,10 +31,13 @@ export function createEmptySessionState(): SessionState {
  *  - `'[...]'`    → parsed as JSON; if it's an array, joined; else returned as-is.
  *  - anything else → returned unchanged.
  *
- * Mirrors the dashboard's helper in
- * `packages/dashboard/src/utils/questionAnswerSummary.ts` (#4622 / #4735)
- * so multi-question answers render consistently across clients in the
- * server-side terminal echo.
+ * Mirrors only the array + legacy JSON-array envelope flattening from the
+ * dashboard's helper in `packages/dashboard/src/utils/questionAnswerSummary.ts`
+ * (#4622 / #4735) so multi-question answers render consistently across
+ * clients in the server-side terminal echo. The dashboard helper additionally
+ * handles the single-question `{ otherLabel, freeformText }` shape (#4651);
+ * mobile parity for that path is tracked separately in #4755 and is out of
+ * scope here.
  */
 function formatAnswerValue(value: string | string[]): string {
   if (Array.isArray(value)) return value.map((item) => String(item)).join(', ');
@@ -52,8 +55,12 @@ function formatAnswerValue(value: string | string[]): string {
 
 /**
  * #4761 — turn a multi-question answers map into a single human-readable
- * line for the wire `answer` summary field. Mirrors the dashboard helper
- * (#4622 / #4735); see `packages/dashboard/src/utils/questionAnswerSummary.ts`.
+ * line for the wire `answer` summary field. Mirrors the multi-question
+ * branch of the dashboard helper (#4622 / #4735); see
+ * `packages/dashboard/src/utils/questionAnswerSummary.ts`. The dashboard
+ * helper additionally handles the single-question `{ otherLabel,
+ * freeformText }` shape (#4651); mobile parity for that path is tracked
+ * separately in #4755 and is out of scope here.
  *
  * Output format: `Q1: A1 | Q2: A2, A3 | Q3: A4`.
  *
