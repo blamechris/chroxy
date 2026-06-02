@@ -413,15 +413,23 @@ Object.assign(EVENT_MAP, {
   // Clients should treat it as informational, NOT an error condition.
   // `code` is the exit status from the child; typically 0 on clean SIGINT
   // exit but kept on the wire so clients can render the numeric code for
-  // diagnostic purposes if non-zero (e.g. SIGTERM = 143). `sessionId` is
-  // included for the legacy-cli path where ctx.sessionId is null (per the
-  // `Server -> Client` contract on the multi-session path the field is
-  // injected by `_broadcastToSession`, so omit when ctx.sessionId is null
-  // rather than emitting `sessionId: null`).
+  // diagnostic purposes if non-zero (e.g. SIGTERM = 143). Gated on
+  // `Number.isInteger` (not bare `typeof === 'number'`) so NaN / Infinity
+  // / floats from a defensive provider can't reach the wire — the schema
+  // is `z.number().int()`, so non-integers would fail client-side parsing.
+  // `sessionId` is OMITTED on the legacy-cli path where ctx.sessionId is
+  // null, matching the `claude_ready` / `error` legacy-cli convention so
+  // receivers treat the message as "applies to the connected legacy CLI"
+  // rather than seeing `sessionId: null`. On the multi-session path the
+  // field is also injected by `_broadcastToSession`, so this guard
+  // additionally protects against accidental `sessionId: null` if the
+  // upstream ctx ever degrades.
   stopped: (data, ctx) => {
     const msg = { type: 'session_stopped' }
-    if (ctx.sessionId) msg.sessionId = ctx.sessionId
-    if (typeof data?.code === 'number') msg.code = data.code
+    if (typeof ctx.sessionId === 'string' && ctx.sessionId.length > 0) {
+      msg.sessionId = ctx.sessionId
+    }
+    if (Number.isInteger(data?.code)) msg.code = data.code
     return { messages: [{ msg }] }
   },
 

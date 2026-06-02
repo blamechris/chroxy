@@ -443,7 +443,7 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(result.success, 'code is optional for providers without an exit status')
   })
 
-  it('rejects session_stopped with non-integer code', async () => {
+  it('rejects session_stopped with non-numeric code', async () => {
     const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
     const result = ServerSessionStoppedSchema.safeParse({
       type: 'session_stopped',
@@ -451,6 +451,20 @@ describe('@chroxy/protocol schemas', () => {
       code: 'not-a-number',
     })
     assert.equal(result.success, false, 'code must be a number when present')
+  })
+
+  // Distinct from the non-numeric case above: this asserts the `.int()`
+  // constraint specifically. A float (1.5) is a number but not an integer,
+  // so it should fail the integer-only schema and the normalizer's
+  // `Number.isInteger` guard.
+  it('rejects session_stopped with non-integer code (float)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+      code: 1.5,
+    })
+    assert.equal(result.success, false, 'code must be an integer when present (z.number().int())')
   })
 
   it('validates encrypted envelope', async () => {

@@ -641,6 +641,18 @@ describe('EventNormalizer', () => {
       assert.equal(result.sideEffects, undefined)
       assert.equal(result.registrations, undefined)
     })
+
+    // Per Copilot review on #4868: the protocol schema is z.number().int(),
+    // so the normalizer must reject non-integer numbers (floats, NaN,
+    // Infinity) to prevent client-side schema-validation failures. Bare
+    // `typeof === 'number'` would let any of these through.
+    it('omits code when data.code is a float, NaN, or Infinity', () => {
+      for (const badCode of [1.5, NaN, Infinity, -Infinity]) {
+        const result = normalizer.normalize('stopped', { code: badCode }, makeCtx())
+        const msg = result.messages[0].msg
+        assert.ok(!('code' in msg), `code=${badCode} should be dropped (not a finite integer)`)
+      }
+    })
   })
 
   // ---- Delta buffering ----
