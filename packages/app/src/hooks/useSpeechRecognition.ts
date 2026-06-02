@@ -187,10 +187,26 @@ export function useSpeechRecognition(
     // user explicitly stopped (or unmounted) and we're still under the
     // restart cap. The mic stays lit during the restart blip so the UI
     // doesn't flicker.
+    //
+    // #4851 defence-in-depth: also gate on `inFlightRef.current`. The
+    // start-path prior-teardown branch (#4826) calls `SpeechModule.abort()`
+    // synchronously, but native engines queue the resulting `onend`
+    // asynchronously. The sync block then resets
+    // `userStoppedRef = false` for the fresh session BEFORE the queued
+    // `onend` fires, so the prior session's late `end` event would
+    // otherwise satisfy every re-arm condition (continuous + !userStopped +
+    // mounted + counter<cap) and start a stale recogniser on top of the
+    // new one — the same dual-mic window the dashboard #4789 fix closed via
+    // handler nulling. The teardown branch clears `inFlightRef.current`
+    // before the new session calls `start()`, so this gate causes the
+    // queued stale `end` to exit cleanly. The fresh session re-arms
+    // `inFlightRef.current = true` after its own `start()`, so subsequent
+    // legitimate silence-triggered ends still re-arm normally.
     if (
       modeRef.current === 'continuous' &&
       !userStoppedRef.current &&
       mountedRef.current &&
+      inFlightRef.current &&
       restartCountRef.current < MAX_CONTINUOUS_RESTARTS &&
       SpeechModule
     ) {
@@ -230,7 +246,6 @@ export function useSpeechRecognition(
       setIsRecognizing(false);
       return;
     }
-    inFlightRef.current = false;
     // Soft error in continuous mode (no-speech, network, speech-timeout):
     // leave `isRecognizing` true and let the subsequent `end` event decide
     // whether to re-arm. The restart branch in the `end` handler does NOT
@@ -238,7 +253,14 @@ export function useSpeechRecognition(
     // flipping false here would briefly clear the mic icon during the
     // restart blip with nothing to set it back (#4829). Mirrors the
     // dashboard `useVoiceInput.onerror` behaviour.
+    //
+    // #4851: also leave `inFlightRef.current = true` in continuous mode so
+    // the subsequent `end` event's new `inFlightRef` gate doesn't suppress
+    // the legitimate soft-error→restart cycle. The session is logically
+    // still in-flight pending the re-arm; only auto-pause / hard-error
+    // paths clear it.
     if (modeRef.current === 'continuous') return;
+    inFlightRef.current = false;
     setIsRecognizing(false);
   });
 
