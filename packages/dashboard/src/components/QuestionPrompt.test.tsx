@@ -810,4 +810,147 @@ describe('QuestionPrompt', () => {
       })
     })
   })
+
+  // #4685 — when an AskUserQuestion permission_request is still
+  // unresolved (user hasn't clicked Allow yet), the dashboard MUST NOT
+  // render the question content (text, options, free-text input,
+  // multi-question form, deferred notice). Pre-#4685 the question card
+  // rendered the moment `user_question` arrived, racing the permission
+  // prompt and leaking the model-supplied content before consent. The
+  // gate flips off as soon as the matching permission_request is
+  // resolved (allow/deny), at which point the normal content renders.
+  describe('pendingPermission gate (#4685)', () => {
+    const opts = [
+      { label: 'Option A', value: 'a' },
+      { label: 'Option B', value: 'b' },
+    ]
+
+    it('hides the question text and options when pendingPermission is true', () => {
+      render(
+        <QuestionPrompt
+          question="What is your password?"
+          options={opts}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // Neutral placeholder renders…
+      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(screen.getByText(/Pending permission to view question/i)).toBeInTheDocument()
+      // …and the actual question payload is NOT in the DOM. The model-
+      // supplied question text and every option label must stay hidden
+      // until permission is granted.
+      expect(screen.queryByText('What is your password?')).not.toBeInTheDocument()
+      expect(screen.queryByText('Option A')).not.toBeInTheDocument()
+      expect(screen.queryByText('Option B')).not.toBeInTheDocument()
+      // The normal question-prompt container is suppressed too.
+      expect(screen.queryByTestId('question-prompt')).not.toBeInTheDocument()
+    })
+
+    it('renders no interactive controls when pendingPermission is true', () => {
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={opts}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // No option buttons, no Send/Submit buttons, no inputs of any kind.
+      expect(screen.queryAllByRole('button')).toHaveLength(0)
+      expect(screen.queryByPlaceholderText('Type your response…')).not.toBeInTheDocument()
+    })
+
+    it('hides multi-question content (form and deferred notice) when pendingPermission is true', () => {
+      const multiQs = [
+        { question: 'Q1?', options: [{ label: 'a', value: 'a' }] },
+        { question: 'Q2?', options: [{ label: 'b', value: 'b' }] },
+      ]
+      render(
+        <QuestionPrompt
+          question="Q1?"
+          options={[{ label: 'a', value: 'a' }]}
+          questions={multiQs}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // Neither variant renders while permission is pending.
+      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      // The placeholder takes over.
+      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // No question text from any of the questions is visible.
+      expect(screen.queryByText('Q1?')).not.toBeInTheDocument()
+      expect(screen.queryByText('Q2?')).not.toBeInTheDocument()
+    })
+
+    it('reveals the question content after pendingPermission flips to false', () => {
+      const { rerender } = render(
+        <QuestionPrompt
+          question="What is your password?"
+          options={opts}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // While pending: placeholder only.
+      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(screen.queryByText('What is your password?')).not.toBeInTheDocument()
+
+      // User clicks Allow → store flips pendingPermission to false →
+      // component re-renders with the real content.
+      rerender(
+        <QuestionPrompt
+          question="What is your password?"
+          options={opts}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(screen.getByText('What is your password?')).toBeInTheDocument()
+      expect(screen.getByText('Option A')).toBeInTheDocument()
+      expect(screen.getByText('Option B')).toBeInTheDocument()
+    })
+
+    it('renders the question content normally when pendingPermission is false (legacy default)', () => {
+      // Defensive: explicit `false` must behave exactly like the prop
+      // being omitted so pre-#4685 callers stay green.
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={opts}
+          pendingPermission={false}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(screen.getByText('Pick one')).toBeInTheDocument()
+      expect(screen.getByText('Option A')).toBeInTheDocument()
+    })
+
+    it('placeholder copy is neutral — does not leak any question or option text', () => {
+      // The leaked content is the bug; the placeholder must NOT
+      // accidentally echo the question or options through some shared
+      // prop. Verify the placeholder carries only the generic "Pending
+      // permission" copy and nothing else.
+      render(
+        <QuestionPrompt
+          question="LEAK_ME_QUESTION"
+          options={[
+            { label: 'LEAK_ME_OPTION_A', value: 'a' },
+            { label: 'LEAK_ME_OPTION_B', value: 'b' },
+          ]}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      const placeholder = screen.getByTestId('question-prompt-pending-permission')
+      expect(placeholder.textContent).not.toContain('LEAK_ME_QUESTION')
+      expect(placeholder.textContent).not.toContain('LEAK_ME_OPTION_A')
+      expect(placeholder.textContent).not.toContain('LEAK_ME_OPTION_B')
+      // And nothing leaks elsewhere in the rendered tree either.
+      expect(screen.queryByText(/LEAK_ME/)).not.toBeInTheDocument()
+    })
+  })
 })
