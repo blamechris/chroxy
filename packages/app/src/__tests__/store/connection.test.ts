@@ -1919,3 +1919,99 @@ describe('inactivityWarning cleanup (#3899)', () => {
     expect(sessionsRefAfter).toBe(sessionsRefBefore);
   });
 });
+
+// -- sendUserQuestionResponse Other / freeform shape (#4755) --
+//
+// Pins the wire-payload serialization for the single-question Other path,
+// mirroring the dashboard's #4651 store test. When `answer` is the
+// `{otherLabel, freeformText}` object shape, the wire payload must be
+// `{type:'user_question_response', answer:<otherLabel>, freeformText:<typed>,
+// toolUseId?}` so the server can drive the two-stage TUI write (Other digit
+// → text-input prompt → freeform text + Enter). String answers must keep
+// the legacy `{type, answer, toolUseId?}` shape unchanged.
+
+describe('sendUserQuestionResponse Other / freeform shape (#4755)', () => {
+  function makeMockSocket(): { socket: WebSocket; sent: string[] } {
+    const sent: string[] = [];
+    const socket = {
+      readyState: 1,
+      send: (data: string) => sent.push(data),
+      close: () => {},
+      onclose: null,
+    } as unknown as WebSocket;
+    return { socket, sent };
+  }
+
+  afterEach(() => {
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('emits {answer:<otherLabel>, freeformText, toolUseId} for the freeform object shape', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'my custom answer' },
+      'toolu_other_freeform',
+    );
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'my custom answer',
+      toolUseId: 'toolu_other_freeform',
+    });
+  });
+
+  it('preserves a model-supplied custom Other label on the wire', () => {
+    // Defends against a future regression where we forget to thread
+    // `otherLabel` through and instead hard-code the literal "Other"
+    // string — the server's digit-lookup would then resolve to the wrong
+    // hotkey for any custom-label Other option.
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Something else', freeformText: 'typed' },
+      'toolu-x',
+    );
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Something else',
+      freeformText: 'typed',
+      toolUseId: 'toolu-x',
+    });
+  });
+
+  it('keeps the legacy {answer:<string>, toolUseId} shape for plain string answers', () => {
+    // Regular option taps + zero-options free-text answers (#1245) must
+    // keep flowing through the legacy string serializer — older servers
+    // that ignore `freeformText` must continue to receive a payload they
+    // understand verbatim.
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu-string');
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu-string',
+    });
+    // Critically, `freeformText` MUST be absent in the legacy shape so
+    // server-side schema validators / handlers don't misclassify a plain
+    // option tap as an Other / freeform send.
+    expect(JSON.parse(sent[0])).not.toHaveProperty('freeformText');
+  });
+
+  it('omits toolUseId from the wire payload when not provided', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'no-tooluse case' },
+    );
+    const payload = JSON.parse(sent[0]);
+    expect(payload).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'no-tooluse case',
+    });
+    expect(payload).not.toHaveProperty('toolUseId');
+  });
+});

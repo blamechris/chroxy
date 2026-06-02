@@ -1198,38 +1198,43 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendUserQuestionResponse: (
-    answer: string | Record<string, string | string[]>,
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
     toolUseId?: string,
   ) => {
     const { socket } = get();
-    // #4761 — widened to mirror the dashboard's `sendUserQuestionResponse`
-    // (#4760). Split the wire payload by call shape:
-    // - string `answer`: legacy single-question / free-text path. Wire
-    //   shape stays `{ type, answer, toolUseId? }` so older servers
-    //   keep working without schema migration.
-    // - Record `answer`: multi-question form. Populate the `answers`
-    //   field (`UserQuestionResponseSchema` accepts
-    //   `Record<string, string | string[]>` per #4621 / #4735) AND a
-    //   string `answer` summary so a server running an older build that
-    //   only reads `answer` falls through to its default-to-option-1
-    //   path instead of stalling the form.
+    // Three shapes (#4761 multi-question + #4755 Other/freeform parity):
+    // - string: legacy single-question / free-text. Wire shape stays
+    //   `{ type, answer, toolUseId? }` so older servers keep working.
+    // - { otherLabel, freeformText }: single-question Other freeform
+    //   path (#4755, mirrors dashboard #4651). Wire `{answer: otherLabel,
+    //   freeformText: typedText}` so the server can drive the two-stage
+    //   TUI write (Other digit → text-input prompt → freeform text + Enter).
+    // - Record<string, string | string[]>: multi-question form (#4761,
+    //   mirrors dashboard #4760). Populate `answers` per
+    //   UserQuestionResponseSchema AND a string `answer` summary so older
+    //   servers reading only `answer` fall through readably.
     //
-    //   Multi-select values flow through as native arrays — the summary
-    //   helper flattens them to comma-joined labels so the string-only
-    //   `answer` field stays readable. The helper also detects the
-    //   legacy JSON-stringified array envelope (pre-#4621 wire: a
-    //   single value like `'["App","Tests"]'` for multi-select) so
-    //   mixed-version rehydrated state still renders without leaking
-    //   JSON syntax in the `answer` field.
-    const isMultiAnswer = typeof answer !== 'string';
-    const answerSummary = isMultiAnswer
-      ? formatQuestionAnswerSummary(answer)
-      : answer;
+    // Freeform shape detection is tight (exactly the two named keys, both
+    // strings) so a multi-question Record whose keys happen to be those
+    // names doesn't get misrouted into the freeform branch.
+    const isFreeformAnswer = typeof answer === 'object' && answer !== null
+      && !Array.isArray(answer)
+      && Object.keys(answer).length === 2
+      && 'freeformText' in answer && 'otherLabel' in answer
+      && typeof (answer as Record<string, unknown>).freeformText === 'string'
+      && typeof (answer as Record<string, unknown>).otherLabel === 'string';
+    const isMultiAnswer = !isFreeformAnswer && typeof answer !== 'string';
     const payload: Record<string, unknown> = {
       type: 'user_question_response',
-      answer: answerSummary,
+      answer: isFreeformAnswer
+        ? (answer as { otherLabel: string }).otherLabel
+        : isMultiAnswer
+          ? formatQuestionAnswerSummary(answer as Record<string, string | string[]>)
+          : (answer as string),
     };
-    if (isMultiAnswer) {
+    if (isFreeformAnswer) {
+      payload.freeformText = (answer as { freeformText: string }).freeformText;
+    } else if (isMultiAnswer) {
       payload.answers = answer;
     }
     if (toolUseId) payload.toolUseId = toolUseId;
