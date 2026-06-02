@@ -367,6 +367,151 @@ describe('input-handlers', () => {
       assert.equal(session.respondToQuestion.callCount, 1)
       assert.deepStrictEqual(session.respondToQuestion.lastCall, ['Patch', undefined, 'tool-2', undefined])
     })
+
+    // #4788 (audit P0.2): UNBOUND clients (boundSessionId === null) must be
+    // subscribed to or actively viewing the session that owns the toolUseId
+    // before the handler routes their answer. Without this guard, any unbound
+    // dashboard tab can hijack another session's pending AskUserQuestion by
+    // replaying a leaked toolUseId — combined with the related toolUseId log
+    // leak (#4787), an attacker (or just a typo'd cross-tab click) can land
+    // an answer on a session they never opened. Mirrors the default filter
+    // in _broadcastToSession (ws-broadcaster.js:106).
+    describe('subscription guard for unbound clients (#4788)', () => {
+      it('drops an unbound client\'s answer when the questionSessionId is neither active nor subscribed', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // The leaked toolUseId belongs to session s1.
+        ctx.questionSessionMap.set('tool-leak', 's1')
+        // Attacker tab: unbound, actively viewing s2, NOT subscribed to s1.
+        const attacker = makeClient({
+          id: 'attacker',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s2']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), attacker, {
+          answer: 'malicious',
+          toolUseId: 'tool-leak',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'unbound client without subscription/active match must NOT route the answer')
+        assert.equal(sessionB.respondToQuestion.callCount, 0,
+          'and must not bleed onto the attacker\'s own session either')
+        assert.equal(ctx.questionSessionMap.get('tool-leak'), 's1',
+          'mapping must stay intact so the legitimate client can still respond')
+      })
+
+      it('routes the answer when the unbound client\'s activeSessionId matches the questionSessionId', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-ok-active', 's1')
+        const client = makeClient({
+          id: 'legit-active',
+          boundSessionId: null,
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(),
+        })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'yes',
+          toolUseId: 'tool-ok-active',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 1,
+          'unbound client with matching activeSessionId must route normally')
+        assert.equal(sessionA.respondToQuestion.lastCall[0], 'yes')
+        assert.equal(ctx.questionSessionMap.has('tool-ok-active'), false,
+          'mapping must be consumed when the answer is routed')
+      })
+
+      it('routes the answer when the unbound client is subscribed to the questionSessionId (even if active session differs)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-ok-subscribed', 's1')
+        // Multi-session dashboard pattern: active tab is s2, but s1 is
+        // subscribed (sidebar / background tab keeping the wire open).
+        const client = makeClient({
+          id: 'legit-subscribed',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'approve',
+          toolUseId: 'tool-ok-subscribed',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 1,
+          'subscribed unbound client must route normally — matches _broadcastToSession filter')
+        assert.equal(sessionA.respondToQuestion.lastCall[0], 'approve')
+      })
+
+      it('leaves the bound-client guard at line 541 unchanged (different code path)', () => {
+        // The existing bound-client guard already early-returns when the
+        // bound session doesn't match the questionSessionId. This test pins
+        // that the new subscription guard doesn't accidentally relax it.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-x', 's1')
+        const boundElsewhere = makeClient({
+          id: 'bound-other',
+          boundSessionId: 's2',
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(['s1']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), boundElsewhere, {
+          answer: 'sneaky',
+          toolUseId: 'tool-x',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'bound-client guard takes precedence — boundSessionId mismatch always wins')
+        assert.equal(ctx.questionSessionMap.get('tool-x'), 's1',
+          'mapping preserved when the bound-elsewhere client is rejected')
+      })
+
+      it('tolerates a missing subscribedSessionIds set (defensive — old client shapes)', () => {
+        // The handler must not throw if subscribedSessionIds is undefined
+        // (e.g. a test fixture or legacy client struct). It should simply
+        // fall through to the activeSessionId check.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-y', 's1')
+        const client = makeClient({
+          id: 'no-subscribed-set',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          // subscribedSessionIds intentionally omitted
+        })
+
+        // Should not throw, and should drop the answer (no match).
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'x',
+          toolUseId: 'tool-y',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'undefined subscribedSessionIds + non-matching active must drop')
+      })
+    })
   })
 
   // #3186: auto-evaluation hook on user_input. When session.promptEvaluator
