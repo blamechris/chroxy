@@ -57,23 +57,41 @@ export class WsBroadcaster {
     this._broadcast(message, (client) => (client.protocolVersion ?? 0) >= minProtocolVersion)
   }
 
+  /**
+   * Deliver `message` to a single client respecting backpressure.
+   *
+   * Returns true if the message was sent, false if it was dropped (or the
+   * connection was closed). Callers must have already filtered by
+   * `authenticated` / `readyState` / custom filters — this helper only owns
+   * the backpressure decision + drop-counter + metrics + close-on-maxDrops.
+   *
+   * Centralizing this here (#4772) fixes a latent observability bug:
+   * `_broadcastToSession` and `_broadcastClientJoined` previously had
+   * copy-pasted backpressure loops that silently bypassed
+   * `backpressure.drops` / `backpressure.disconnects` metrics.
+   */
+  _sendOneWithBackpressure(ws, client, message) {
+    if (ws.bufferedAmount > this._backpressureThreshold) {
+      client._backpressureDrops = (client._backpressureDrops || 0) + 1
+      metrics.inc('backpressure.drops')
+      log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
+      if (client._backpressureDrops >= this._backpressureMaxDrops) {
+        log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
+        metrics.inc('backpressure.disconnects')
+        ws.close(4008, 'Backpressure: too many dropped messages')
+      }
+      return false
+    }
+    client._backpressureDrops = 0
+    this._sendFn(ws, message)
+    return true
+  }
+
   /** Broadcast a message to all authenticated clients matching a filter */
   _broadcast(message, filter = () => true) {
     for (const [ws, client] of this._clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
-        if (ws.bufferedAmount > this._backpressureThreshold) {
-          client._backpressureDrops = (client._backpressureDrops || 0) + 1
-          metrics.inc('backpressure.drops')
-          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
-          if (client._backpressureDrops >= this._backpressureMaxDrops) {
-            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
-            metrics.inc('backpressure.disconnects')
-            ws.close(4008, 'Backpressure: too many dropped messages')
-          }
-          continue
-        }
-        client._backpressureDrops = 0
-        this._sendFn(ws, message)
+        this._sendOneWithBackpressure(ws, client, message)
       }
     }
   }
@@ -89,17 +107,7 @@ export class WsBroadcaster {
     const tagged = { ...message, sessionId }
     for (const [ws, client] of this._clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
-        if (ws.bufferedAmount > this._backpressureThreshold) {
-          client._backpressureDrops = (client._backpressureDrops || 0) + 1
-          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
-          if (client._backpressureDrops >= this._backpressureMaxDrops) {
-            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
-            ws.close(4008, 'Backpressure: too many dropped messages')
-          }
-          continue
-        }
-        client._backpressureDrops = 0
-        this._sendFn(ws, tagged)
+        this._sendOneWithBackpressure(ws, client, tagged)
       }
     }
   }
@@ -118,7 +126,7 @@ export class WsBroadcaster {
     }
     for (const [ws, client] of this._clients) {
       if (ws !== excludeWs && client.authenticated && ws.readyState === 1) {
-        this._sendFn(ws, message)
+        this._sendOneWithBackpressure(ws, client, message)
       }
     }
   }
