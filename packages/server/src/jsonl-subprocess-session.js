@@ -118,6 +118,12 @@ export class JsonlSubprocessSession extends BaseSession {
     // BaseSession option, plumb it through here too or Codex / Gemini
     // silently fall back to the default.
     hardTimeoutMs,
+    // #4790: per-provider stream-stall recovery timeout. PR #4745 wired
+    // SessionManager → providerOpts.streamStallTimeoutMs but this
+    // destructure dropped it, so Codex / Gemini sessions silently fell
+    // back to BaseSession's 5min default — exactly the trap documented
+    // in [[feedback_jsonl_subprocess_middle_layer]] landing again.
+    streamStallTimeoutMs,
     resumeSessionId,
   } = {}) {
     super({
@@ -139,6 +145,7 @@ export class JsonlSubprocessSession extends BaseSession {
       sessionPreamble,
       resultTimeoutMs,
       hardTimeoutMs,
+      streamStallTimeoutMs,
     })
     // #3865: accept resumeSessionId from constructor so SessionManager's
     // serializeState/restoreState path carries a captured Codex thread_id
