@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.33] - 2026-06-01
+
+Major drain on the `from-review` backlog plus a DRY/SOLID sweep. Two marathon rounds landed 27 PRs across the multi-question / AskUserQuestion surface (server form-driver, dashboard chips, store-core dispatch), per-session settings hardening, and a structural refactor pass that shrunk providers.js from 808→334 LOC and lifted shared store-core dispatch out of duplicated mobile/dashboard handlers. Two latent bugs were caught inside the refactor work: the mobile auth_ok parser was silently dropping `streamStallTimeoutMs`, and the WS broadcaster's session/client_joined paths were bypassing backpressure metrics.
+
+### Added
+
+- **SDK / BYOK end-to-end multi-question AskUserQuestion support (#4731 / #4763):** schema accepts `string | string[]` values; PermissionManager normalizes both shapes (plus legacy JSON-stringified arrays) to the SDK's canonical comma-separated format; dashboard renders MultiQuestionForm for non-TUI providers. 4 wedge shapes (mixed-type, all-single, all-multi, with-Other) pinned by 8 new server tests.
+- **Per-question array answer wire format (#4735 / #4760):** widens `UserQuestionResponseSchema.answers` to `Record<string, string | string[]>`; dashboard MultiQuestionForm emits native arrays for multi-select instead of JSON-stringifying; provider gating via `allowMultiQuestion` opt-in (TUI / CLI still go through permission-hook).
+- **Single-question "Other" / freeform answer support (#4651 / #4753):** two-stage server PTY write (Other digit → 150ms settle → freeform text + Enter); dashboard emits `{otherLabel, freeformText}` payload.
+- **Surface multi-question AskUserQuestion denials end-to-end (#4653 / #4758):** server emits `multi_question_intervention`; store-core normalises into a deduped `SessionIntervention[]` ring; dashboard renders FooterBar counter chip + InterventionsPanel + one-time system message.
+- **Pre-first-output silence watchdog for claude TUI sessions (#4732 / #4749):** arms a separate `FIRST_OUTPUT_TIMEOUT_MS` at `writePtyText` completion. Fixes the live failure where a claude TUI subprocess hung 3+ minutes after spawn with `consumed=0 stopFound=no` and no STREAM_STALL ever firing.
+- **Dedicated dashboard chip for `ASK_USER_QUESTION_STALL` errors (#4615 / #4744):** one-tap Retry affordance + pending-prompt suppression, mirroring the StreamStallChip pattern.
+- **Per-provider StreamStallChip copy + view-logs affordance (#4603 / #4740):** headline prefix per provider.
+- **Surface `ASK_USER_QUESTION_TOO_MANY_OPTIONS` for picks at index >=9 (#4625 / #4741):** previously silently defaulted to option 1; now fires full turn teardown via a shared `_teardownAskUserQuestion` helper.
+- **Per-provider `streamStallTimeoutMs` config (#4601 / #4745):** operators can override recovery window per provider id; default behavior unchanged when omitted.
+- **Multi-client broadcast coverage for per-session settings (#4663 / #4743):** handler-level (server) + receive-side store-mutation (dashboard) for prompt_evaluator, chroxy_context_hint, session_preamble; 24 new tests.
+- **Tauri updater latest.json now merges per-platform fragments (#3809 / #4736):** `scripts/merge-updater-feeds.mjs` + release.yml step combines macOS and Windows feed entries into one cross-platform auto-updater feed.
+
+### Changed
+
+- **providers.js shrunk 808→334 LOC via per-provider `static resolveAuth()` dispatch (#4769 / #4777, OCP):** OAuth probes and credential-file cache extracted to `auth-probes.js`; byte-identical behaviour across 83 provider/auth tests.
+- **Extracted `ClaudeStreamParser` (#4768 / #4774, DRY):** wire-format parsing now shared between `CliSession` and `SdkSession`; 19 new boundary tests + 1 regression test on top of 294 existing tests.
+- **Unified `auth_ok` wire parser in @chroxy/store-core (#4766 / #4781, DRY):** `handleAuthOk` + `parseConnectedClients` migrated app + dashboard onto shared dispatch. **Fixed latent mobile bug:** `streamStallTimeoutMs` was being silently dropped on the mobile side.
+- **Centralized `session_list` dispatch in store-core (#4767 / #4782, DRY):** extracted `buildSessionListPatches` + `cumulativeUsageEquals` + `chunkSubscribeSessionIds`; migrated both consumers.
+- **Moved `getWsCloseMessage` + `getHealthCheckErrorMessage` to @chroxy/store-core (#4771 / #4779, DRY):** dashboard now surfaces close-code-specific copy on socket.onclose and uses the richer health-check error split.
+- **Extracted `useShortcutDispatch` + `useChatMessages` from App.tsx (#4770 / #4776, SRP):** App.tsx 2454→2231 LOC. Stale `useGlobalShortcuts` deleted. 36 new boundary tests.
+- **Extracted `_sendOneWithBackpressure` helper on WsBroadcaster (#4772 / #4775, DRY):** unified 3 copy-pasted backpressure loops. **Fixed latent observability bug:** session/client_joined broadcasts silently bypassed backpressure metrics.
+- **Extracted `sendSessionError` / `resolveSessionOrError` / `requireSessionMethod` helpers from handlers (#4773 / #4783, DRY):** 8 resolve sites + 6 capability gates + ~24 inline envelopes collapsed.
+- **Extracted per-session-setting registry (#4664 / #4751, DRY):** collapsed the 5-site boilerplate that promptEvaluator → chroxyContextHint → sessionPreamble had each hand-written; migrated three existing knobs onto it.
+- **Surgical AskUserQuestion watchdog teardown (#4691 / #4752):** `_onAskUserQuestionStall` now calls `_clearPendingAnswerByToolUseId` so the watchdog only drops the timed-out tool's entry, not every sibling. Other teardown sites keep all-or-nothing semantics.
+
+### Fixed
+
+- **Chat markdown overflows window — code blocks + inline code break wrapping (#4757 / #4759):** `pre` blocks now `max-width: 100%` + `overflow-x: auto`; inline `code` gets `overflow-wrap: anywhere`; chat message bubble gets `min-width: 0` to allow flex shrink.
+- **Dashboard scroll respects user-initiated scroll-up when AskUserQuestion visible (#4652 / #4737):** add `overscroll-behavior: contain` + 60vh cap on multi-question form so chat history scrolls past the form.
+- **Working banner sync to server `isBusy` across tab swaps (#4639 / #4742):** session_list seed/resync + new `session_activity` handler + switchSession seed.
+- **Distinguish intentional SIGINT from child crash in `cli-session.js` (#4602 / #4750):** `_intentionalStop` flag suppresses respawn + emits quiet `stopped` event for user-triggered Stop.
+- **Preamble debounce cancel on session switch + multi-client conflict banner (#4662 / #4738):** mirrors QuietHoursEditor #4570 pattern.
+- **`scripts/tui-form-recorder` flushes JSONL before `process.exit` (#4729 / #4747):** extracted `flushAndExit` helper waits for stream finish before exiting; added `recordingClosed` guard against ERR_STREAM_WRITE_AFTER_END.
+- **Widen `user_question_response.answers` to `Record<string, string | string[]>` (#4621 / #4748):** MultiQuestionForm ships native arrays instead of JSON-stringifying; legacy shape still accepted for back-compat.
+- **CI: Expo Doctor allowlist extended (#4730):** RN directory metadata + Metro config + duplicate-deps categories now skipped (Expo published patch updates mid-marathon broke every post-merge CI rerun).
+
+### Investigated
+
+- **MCP elicitation shim spike (#4734 / #4754):** research doc + spike for Approach 3 (bypass TUI AskUserQuestion via MCP elicitation). Recommendation: **DEFER** until either Anthropic ships a preferred-tool override or claude TUI form-widget drift makes the keystroke driver materially worse than steering risk.
+
 ## [0.9.32] - 2026-06-01
 
 Test-coverage push closing the gaps identified in the 2026-05-31 testing audit. The v0.9.x prompt-delivery wedge fixes (#4668/#4679/#4687/#4648/#4669) were already pinned server-side; this release locks in the surfaces that still had no regression coverage — mobile-side approval flows, the desktop Tauri command surface, the CLI command layer, and the SDK/CLI session persistence roundtrip.
