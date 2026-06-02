@@ -268,6 +268,18 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     return () => {
       const rec = recognitionRef.current
       if (rec) {
+        // #4789: per the Web Speech spec, abort() fires `onend`. The
+        // continuous-mode restart branch in onend would otherwise call
+        // recognition.start() on a recogniser whose React owner has already
+        // unmounted — either throwing InvalidStateError or leaving runaway
+        // recognition holding the mic with no UI to stop it. Two defences:
+        //   1. Set userStoppedRef so any fire-before-detach onend exits early.
+        //   2. Null the handlers so the abort()-triggered onend is a no-op.
+        userStoppedRef.current = true
+        rec.onresult = null
+        rec.onerror = null
+        rec.onend = null
+        rec.onstart = null
         try {
           rec.abort()
         } catch {
@@ -282,6 +294,14 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
     setError(null)
     // Fresh user-initiated start: clear the continuous-mode bookkeeping so
     // a prior session's user-stop or restart-counter doesn't carry over.
+    // NOTE: any in-flight web recognition is torn down inside the `web` branch
+    // below — and that teardown nulls the OLD recogniser's event handlers
+    // BEFORE calling abort(), so the spec-mandated `abort()`-triggered onend
+    // becomes a no-op and cannot re-arm against the NEW recogniser even
+    // though both refs (userStoppedRef, restartCountRef) have just been
+    // reset to their "fresh session" values here. Handler nulling is the
+    // sole defence on this path; the unmount path adds a second defence
+    // (userStoppedRef = true) for symmetry with onerror's hard-stop branch.
     userStoppedRef.current = false
     restartCountRef.current = 0
 
@@ -302,9 +322,21 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
       if (!Ctor) return
 
       // Tear down any prior recognition before starting a fresh one.
+      // #4789: detach the OLD recogniser's handlers BEFORE calling abort().
+      // abort() fires onend, and the continuous-mode branch in onend reads
+      // the shared userStoppedRef/restartCountRef — by the time the old
+      // onend fires the new start() will have already reset both refs to
+      // their "fresh session" values, so the old onend would re-arm itself
+      // and race the new recogniser (dual-mic window). Nulling the handlers
+      // is the only way to guarantee the old session can't re-arm.
       if (recognitionRef.current) {
+        const prior = recognitionRef.current
+        prior.onresult = null
+        prior.onerror = null
+        prior.onend = null
+        prior.onstart = null
         try {
-          recognitionRef.current.abort()
+          prior.abort()
         } catch {
           // ignore
         }
@@ -324,21 +356,27 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
         // interim results is appended live so the UI sees mid-utterance
         // updates.
         let interim = ''
+        let finalDelta = ''
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const r = event.results[i]
           if (!r) continue
           const text = r[0]?.transcript ?? ''
           if (r.isFinal) {
             finalTranscriptRef.current += text
+            finalDelta += text
           } else {
             interim += text
           }
         }
         setTranscript(finalTranscriptRef.current + interim)
-        // Any successful transcript resets the restart counter — proves
-        // recognition is healthy, so a silence-stop after this point should
-        // not count against the budget.
-        restartCountRef.current = 0
+        // #4789: only reset the restart counter when the event actually
+        // delivers non-empty transcript text. A wedged backend can emit
+        // empty/whitespace `onresult` events that would otherwise bypass
+        // MAX_CONTINUOUS_RESTARTS and spin forever. Reset only on real
+        // speech (final or interim).
+        if ((finalDelta + interim).trim().length > 0) {
+          restartCountRef.current = 0
+        }
       }
 
       recognition.onerror = (event) => {

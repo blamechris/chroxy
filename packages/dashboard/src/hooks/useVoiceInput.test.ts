@@ -485,6 +485,136 @@ describe('useVoiceInput', () => {
         // Initial + 3 (pre-result) + 5 (post-result) = 9
         expect(recognition.start).toHaveBeenCalledTimes(9)
       })
+
+      // #4789 audit P0.3 regression — three races introduced by #4786:
+      //
+      //   Bug 1: Unmount effect calls rec.abort() without first flipping
+      //          userStoppedRef. abort() fires onend, which sees continuous
+      //          mode + !userStopped + counter<5 and calls recognition.start()
+      //          on a recogniser whose React owner has already unmounted.
+      //   Bug 2: start() aborts the prior recognition AFTER clearing
+      //          userStoppedRef, so the OLD onend re-arms while the new
+      //          recogniser already owns recognitionRef → dual-mic window.
+      //   Bug 3: onresult unconditionally resets restartCountRef even when
+      //          the result carries no transcript text, letting a wedged
+      //          backend bypass MAX_CONTINUOUS_RESTARTS.
+      describe('regression #4789 (audit P0.3)', () => {
+        it('unmount does NOT re-arm recognition via the onend restart path (bug 1)', async () => {
+          const { result, unmount } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+          await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+          act(() => {
+            result.current.start()
+          })
+          const recognition = lastRecognition!
+          expect(recognition.start).toHaveBeenCalledTimes(1)
+
+          // Simulate the W3C Web Speech spec behaviour: abort() (called by the
+          // unmount effect) fires onend synchronously or microtask-later. The
+          // recogniser is detached; if onend re-arms via start() we've leaked.
+          unmount()
+          act(() => {
+            recognition.onend?.()
+          })
+
+          // start() must NOT have been called again — userStoppedRef should
+          // have been set before abort() in the unmount cleanup.
+          expect(recognition.start).toHaveBeenCalledTimes(1)
+        })
+
+        it('start() while a prior recognition is in-flight does not let the old onend re-arm (bug 2)', async () => {
+          const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+          await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+          act(() => {
+            result.current.start()
+          })
+          const firstRecognition = lastRecognition!
+          expect(firstRecognition.start).toHaveBeenCalledTimes(1)
+
+          // Begin a fresh recognition. The hook should abort the prior one
+          // AND mark it as user-stopped so its onend exits cleanly without
+          // racing the new recogniser.
+          act(() => {
+            result.current.start()
+          })
+          const secondRecognition = lastRecognition!
+          expect(secondRecognition).not.toBe(firstRecognition)
+          expect(secondRecognition.start).toHaveBeenCalledTimes(1)
+
+          // Now fire the OLD recognition's onend (the abort-triggered one).
+          // It must NOT call start() on itself — that would create two
+          // concurrent recognitions holding the mic.
+          act(() => {
+            firstRecognition.onend?.()
+          })
+
+          // First recogniser stayed at 1 call (no re-arm); second stayed at 1.
+          expect(firstRecognition.start).toHaveBeenCalledTimes(1)
+          expect(secondRecognition.start).toHaveBeenCalledTimes(1)
+        })
+
+        it('empty onresult does NOT reset the restart counter (bug 3 — wedge guard)', async () => {
+          const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+          await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+          act(() => {
+            result.current.start()
+          })
+          const recognition = lastRecognition!
+
+          // Burn 3 restarts with no transcript.
+          for (let i = 0; i < 3; i++) {
+            act(() => { recognition.onend?.() })
+          }
+          // A wedged backend fires onresult with empty transcript text. This
+          // must NOT reset the counter — otherwise the cap is bypassed.
+          act(() => {
+            recognition.onresult?.({
+              resultIndex: 0,
+              results: [{ isFinal: false, 0: { transcript: '' } }],
+            })
+          })
+          // Only 2 more restarts should be allowed (counter at 3, cap at 5).
+          for (let i = 0; i < 10; i++) {
+            act(() => { recognition.onend?.() })
+          }
+
+          // Initial + 3 (pre-empty) + 2 (post-empty, until cap) = 6
+          expect(recognition.start).toHaveBeenCalledTimes(6)
+          expect(result.current.isRecording).toBe(false)
+        })
+
+        it('whitespace-only onresult does NOT reset the restart counter', async () => {
+          const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+          await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+          act(() => {
+            result.current.start()
+          })
+          const recognition = lastRecognition!
+
+          for (let i = 0; i < 3; i++) {
+            act(() => { recognition.onend?.() })
+          }
+          act(() => {
+            recognition.onresult?.({
+              resultIndex: 0,
+              results: [{ isFinal: false, 0: { transcript: '   \t  ' } }],
+            })
+          })
+          for (let i = 0; i < 10; i++) {
+            act(() => { recognition.onend?.() })
+          }
+
+          // Initial + 3 + 2 = 6 — whitespace counts as empty.
+          expect(recognition.start).toHaveBeenCalledTimes(6)
+        })
+      })
     })
 
     it('stop() calls recognition.stop()', async () => {
