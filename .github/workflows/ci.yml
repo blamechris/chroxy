@@ -96,6 +96,22 @@ jobs:
             exit 1
           fi
 
+      - name: Check session subclasses forward every BaseSession opt
+        run: |
+          # Issue #4797 — every provider session class that extends
+          # BaseSession (or JsonlSubprocessSession) must destructure AND
+          # forward every BaseSession constructor opt via super({ ... }).
+          # The "middle-layer trap" documented in project memory as
+          # feedback_jsonl_subprocess_middle_layer.md has bitten three times
+          # (#3224, #3231, #4790). This lint blocks the next recurrence at
+          # PR time instead of catching it in production.
+          if scripts/lint-session-opt-forwarding.sh; then
+            echo "OK — every session subclass forwards every BaseSession opt"
+          else
+            echo "::error::A provider session class drops a BaseSession opt on its way to super(). See packages/server/scripts/lint-session-opt-forwarding.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     runs-on: ubuntu-24.04

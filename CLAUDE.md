@@ -187,6 +187,14 @@ Two layers of defence are wired up:
 
 If you need to write to the real home for a legitimate reason (no current test does), set `process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'` scoped to the test and restore it after. The sandbox guard MUST stay enabled in `package.json`.
 
+### Provider session constructors must forward every BaseSession opt (#4797)
+
+Every class that extends `BaseSession` (or `JsonlSubprocessSession`, the middle layer above the subprocess providers) **must** destructure every opt accepted by `BaseSession`'s constructor AND forward it via `super({ ... })`. Otherwise the opt is silently dropped on its way down — the "middle-layer trap" that has bitten three times (#3224, #3231, #4790) and is documented in project memory as `feedback_jsonl_subprocess_middle_layer.md`.
+
+The CI lint (`packages/server/scripts/lint-session-opt-forwarding.sh`) parses `base-session.js` for the canonical opt set and diffs it against every subclass's destructure + `super()` block, failing the build with a `file:line` pointer if any opt is missing. Run locally with `cd packages/server && ./scripts/lint-session-opt-forwarding.sh`.
+
+When adding a new BaseSession opt: update every subclass constructor (`cli-session.js`, `sdk-session.js`, `claude-tui-session.js`, `jsonl-subprocess-session.js`, `codex-session.js`, `gemini-session.js`) in the same PR. If an opt deliberately should not propagate to a particular subclass (rare), add `// lint-ignore-opt-forwarding: <key>` immediately above the class declaration and explain why.
+
 ## Architecture
 
 Server streams through `ws-server.js` → Cloudflare tunnel → mobile app / desktop dashboard:
