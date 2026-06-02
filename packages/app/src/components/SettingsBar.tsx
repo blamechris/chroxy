@@ -553,6 +553,7 @@ export function SettingsBar({
               }}
               accessibilityRole="button"
               accessibilityLabel="Copy conversation ID"
+              testID="conversation-id-row"
             >
               <Text style={styles.conversationIdLabel}>Conversation ID</Text>
               <Text style={styles.conversationIdValue} numberOfLines={1}>
@@ -1032,12 +1033,17 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     overflow: 'hidden',
   },
+  // #4893 — bump minHeight from 32 → 44 so the copy-to-clipboard row clears
+  // the Apple HIG / CLAUDE.md 44pt minimum tappable target. Sibling fix to
+  // #4892 (which used hitSlop for the compact header badges); here the row
+  // already has horizontal whitespace in the expanded panel, so growing the
+  // visible row by 12pt is preferable to a hitSlop hack.
   conversationIdRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 4,
-    minHeight: 32,
+    minHeight: 44,
   },
   conversationIdLabel: {
     color: COLORS.textMuted,
