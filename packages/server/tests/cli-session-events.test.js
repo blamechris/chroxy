@@ -349,6 +349,28 @@ describe('CliSession stream-event handling', () => {
       assert.equal(events.length, 0)
       assert.equal(session._waitingForAnswer, false)
     })
+
+    it('still emits when JSON.parse legally returns a falsy value (#4774)', () => {
+      // Regression for Copilot review on #4774: gating the
+      // post-extraction emit on `if (!parsed)` would silently swallow
+      // legal falsy JSON like `0` / `false` / `null`, drifting from the
+      // pre-extraction behavior which only short-circuited on parse
+      // *failure*, not on falsy parsed values. AskUserQuestion in
+      // particular would emit `user_question` with `questions: undefined`
+      // pre-extraction; the refactor must preserve that.
+      const session = createSession()
+      const events = []
+      session.on('user_question', (data) => events.push(data))
+
+      session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_falsy'))
+      session._handleEvent(inputJsonDelta('0'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'toolu_falsy')
+      assert.equal(events[0].questions, undefined)
+      assert.equal(session._waitingForAnswer, true)
+    })
   })
 
   describe('tool_result events', () => {
