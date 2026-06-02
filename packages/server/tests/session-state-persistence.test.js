@@ -413,13 +413,15 @@ describe('SessionStatePersistence backup rotation (regression: #2906)', () => {
   })
 
   // #4908 crash-safety pin: serializeState was collapsed onto the shared
-  // writeFileRestricted helper, which requires rotation to happen BEFORE the
-  // new write — otherwise a mid-write crash could replace the main file with
-  // partial bytes and the AFTER-rotation step would then move that partial
-  // copy into .bak, destroying the prior-generation recovery copy. Spy on the
-  // instance's `_rotateToBak` method (instance binding, not an imported one,
-  // so we can replace it directly) and capture filesystem state at the moment
-  // rotation is invoked.
+  // writeFileRestricted helper. The key invariant pinned here is that rotation
+  // must happen BEFORE the main-path write so `.bak` always captures the prior
+  // generation — without reintroducing a bespoke tmp+rename layer on top of
+  // the shared helper. Reversing the order (write-then-rotate) would mean a
+  // successful write followed by rotation would copy the NEW generation into
+  // `.bak`, overwriting the recoverable prior generation. Spy on the instance's
+  // `_rotateToBak` method (instance binding, not an imported one, so we can
+  // replace it directly) and capture filesystem state at the moment rotation
+  // is invoked.
   it('rotates BEFORE writing the new generation (crash-safety pin for #4908)', () => {
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
     p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'gen1', name: 'Gen1', cwd: '/tmp' }] })

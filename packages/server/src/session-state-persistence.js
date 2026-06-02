@@ -45,7 +45,9 @@ export class SessionStatePersistence {
    * #4874 collapsed elsewhere — this file was deferred per the #4874 issue
    * body and audited separately in #4908):
    *   - If we crash AFTER rotate but BEFORE the write completes, `restoreState`
-   *     falls back to `.bak` (line 144) which still holds the prior generation.
+   *     falls back to `.bak` (see {@link restoreState} — when the main file is
+   *     missing or unparseable it reads from `.bak`) which still holds the
+   *     prior generation.
    *   - `writeFileRestricted` is atomic on POSIX (internal rename replaces the
    *     destination), so a partial write of the new generation cannot leave
    *     half-written bytes at `mainPath`.
