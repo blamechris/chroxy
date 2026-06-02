@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.38] - 2026-06-02
+
+Third daytime sweep: 11 issues landed — 3 real bug fixes (CLI cold-start resume, dashboard text concatenation, TUI wire fingerprint) plus 8 polish/observability follow-ups from v0.9.37. The Windows `writeFileRestricted` atomicity gap closes here, completing the three-PR arc (#4865 atomic POSIX → #4904 caller collapse → #4925 Windows parity).
+
+### Added
+
+- **Wire fingerprint instrumentation for TUI submits (#4733 → #4926):** `claude-tui-session.js` emits an INFO log fingerprinting the bytes sent on each TUI submit (counts of `\s`, control chars, etc., with trailing-newline stripping to match `_writePtyTextThrottled`'s strip-then-throttle path). Gated behind `CHROXY_LOG_WIRE_FINGERPRINT=1` so it stays off in normal operation. Lays the forensic groundwork for diagnosing the "spaces stripped + composer wedge" root cause without paying log-noise overhead on every run. Regression tests pin the interior-whitespace preservation contract that was previously implicit.
+- **`writeFileRestricted` Windows atomicity (#4913 → #4925):** the `isWindows` branch of `writeFileRestricted` no longer short-circuits to a direct `writeFileSync` — it now uses the same temp+rename pattern as POSIX (without the chmod 0o600 step, since Windows ACLs handle permissions differently). Completes the three-PR atomicity arc (#4865 → #4904 → #4925). Tests use a platform-mock to validate cross-platform behavior; real Windows CI coverage is tracked in #4927.
+
+### Changed
+
+- **`session-state-persistence.js` collapsed onto `writeFileRestricted` (#4908 → #4924):** the bespoke `.tmp` + rename layer is gone; the existing `.bak` rotation flow + `restoreState` fallback are unchanged. `_rotateToBak`'s Windows retry+restore path is preserved. A `#2909` regression block + a new `#4908` crash-safety pin keep the rotate-before-write invariant locked.
+- **Mobile + dashboard `session_stopped` copy aligned to `(exit N)` (#4910 → #4915):** mobile inline strip switches from `exit N` to `(exit N)` to match dashboard's parenthetical convention from #4895. Single canonical format across both surfaces.
+- **Dashboard migrated to shared `isFreeformAnswer` (#4901 → #4921):** convergence with mobile #4900. Dashboard now uses `@chroxy/store-core/freeform-answer` instead of its inline detector. Subtle robustness improvement: `Object.prototype.hasOwnProperty.call` (vs original `in`) closes a prototype-pollution edge case.
+- **`writeFileRestricted` logs on cleanup-unlink failure (#4906 → #4920):** restored the observability lost in #4874/#4904 — when the `.tmp` cleanup after a rename failure itself fails (non-ENOENT), `log.warn` surfaces the orphan path. 6-line restoration of the bespoke env-manager warn that was hoisted away.
+- **Pinned `chmodSync`-after-`writeFileSync` as intentional belt-and-braces (#4907 → #4917):** audit found the `chmodSync` is NOT redundant — `writeFileSync`'s `mode` arg is only honoured on file creation; for pre-existing temp paths (stale sidecar from a prior crash, or a path another local user created) `O_TRUNC` preserves looser mode bits. The follow-up landed as a comment block + regression test pinning the defensive pattern, NOT a removal. Security commentary explicitly notes `chmodSync` covers final at-rest perms but does NOT close the transient write→chmod exposure window.
+- **Mobile `conversationIdRow` tap target ≥44pt (#4893 → #4916):** sibling fix to #4892. Bumps `minHeight` from 32 → 44 (preferred over `hitSlop` because the row is a styled visible target — `minHeight` keeps the hitbox aligned with the rendered bounds rather than extending into adjacent UI). Tests assert the measured tappable area.
+- **Mobile `session_stopped` strip clears on reconnect (#4909 → #4918):** follow-up to #4905 — the stale `stoppedAt`/`stoppedCode` no longer persist across a disconnect/reconnect cycle. Store clears them in the `history_replay_start` handler (the reconnect handshake's first message), so the strip drops as soon as the server starts replaying a fresh session history.
+
+### Fixed
+
+- **🚨 CLI session resume no longer cold-starts (#4887 → #4928):** `claude --resume` was running without the prior assistant context, so the model started fresh mid-conversation. Three follow-up issues filed for downstream observability (#4929 resume-failure error surfacing, #4930 auto-checkpoint UX validation, #4931 `resume_conversation` coverage).
+- **🚨 Dashboard text chunks no longer concatenate without separators (#4889 → #4919):** assistant text chunks interleaved with tool calls were running sentences and paragraphs together. Fix is in the `_deltaIdRemaps` continuation handling: single-hop remap (no chained while-loop), index-based scan (no hot-path allocation), cycle-safe by construction. Mobile parity port tracked in #4922. Closed #4923 (chain-leak detection) as superseded.
+
+### Process notes
+
+- One PR (#4925) required manual rebase + conflict resolution: it touched the same `writeFileRestricted` lines as #4920's cleanup-failure log. Rebased onto #4920's landed change, merged both intents (POSIX-vs-Windows branching + rich security commentary), force-pushed, CI re-ran green.
+
+### Follow-up issues filed during this sweep
+
+- #4922 — Port the dashboard #4889 single-hop remap fix to the mobile app handler.
+- #4923 — `_deltaIdRemaps` chain cleanup (closed as superseded by #4919).
+- #4927 — Real Windows CI runner coverage for `writeFileRestricted` atomicity.
+- #4929 — Surface `claude --resume` failures with a distinct error path.
+- #4930 — Validate CLI session auto-checkpoint UX (new side-effect of #4928).
+- #4931 — Cover `resume_conversation` into a CLI session.
+
 ## [0.9.37] - 2026-06-02
 
 Second daytime sweep: 13 from-review follow-ups from v0.9.36 landed alongside two stale prior-cycle PRs (#4655, #4682). Mostly polish + observability with two real surface additions (`session_stopped` UX on both dashboard + mobile, provider-parity `stopped` emit for SDK / Codex / Gemini).
