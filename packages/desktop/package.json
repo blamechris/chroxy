@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/desktop",
-  "version": "0.9.32",
+  "version": "0.9.33",
   "private": true,
   "description": "Chroxy desktop tray app (Tauri)",
   "scripts": {
