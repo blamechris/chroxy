@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
-import type { CumulativeUsage, PendingPermissionConfirm } from '@chroxy/store-core';
+import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
 import type { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
 import { Icon } from './Icon';
@@ -42,6 +42,11 @@ export interface SettingsBarProps {
   serverMode: 'cli' | null;
   isIdle: boolean;
   activeAgents: AgentInfo[];
+  // #4764: chroxy-side intervention ring for the active session. When
+  // non-empty the session-header renders a counter badge; tapping opens
+  // a sheet listing the recent interventions newest-first (mirrors the
+  // dashboard's FooterBar from #4758).
+  interventions?: SessionIntervention[];
   connectedClients: ConnectedClient[];
   customAgents: CustomAgent[];
   mcpServers: McpServer[];
@@ -58,6 +63,44 @@ export interface SettingsBarProps {
 }
 
 // -- Helpers --
+
+/**
+ * #4764 — humanise an intervention's discriminator into a one-line
+ * operator-facing description. Mirrors the dashboard's `describeIntervention`
+ * helper (FooterBar.tsx) so both surfaces narrate the same intervention with
+ * the same copy. Exported for unit-testing.
+ */
+export function describeIntervention(iv: SessionIntervention): string {
+  switch (iv.kind) {
+    case 'multi_question':
+      return `Multi-question form intercepted (${iv.count} questions) — asked agent to ask one at a time`;
+    default: {
+      // Exhaustive fallback for future discriminator additions. Renders the
+      // raw kind so a forgotten case still gives the operator SOMETHING to
+      // grep on rather than an empty row.
+      const _exhaustive: never = iv.kind;
+      return `chroxy intervention: ${String(_exhaustive)}`;
+    }
+  }
+}
+
+/**
+ * #4764 — format a wall-clock timestamp as a short relative string ("3s ago",
+ * "2m ago", "1h ago"). Falls back to ISO date string for entries older than
+ * 24 hours. Mirrors the dashboard's `formatRelativeTimestamp` helper for
+ * intervention rows.
+ */
+export function formatInterventionTimestamp(ts: number, now: number = Date.now()): string {
+  const elapsedMs = now - ts;
+  if (elapsedMs < 0) return 'just now';
+  const seconds = Math.floor(elapsedMs / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(ts).toISOString().slice(0, 10);
+}
 
 export function formatElapsed(startedAt: number, now: number): string {
   const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
@@ -114,6 +157,7 @@ export function SettingsBar({
   serverMode,
   isIdle,
   activeAgents,
+  interventions,
   connectedClients,
   customAgents,
   mcpServers,
@@ -151,6 +195,19 @@ export function SettingsBar({
   // dedicated to the cost details, mirroring the dashboard's hover
   // popover.
   const [costBreakdownOpen, setCostBreakdownOpen] = useState(false);
+  // #4764: tap-to-expand sheet for the chroxy-intervention ring. Distinct
+  // from the SettingsBar's expand/collapse — this is a Modal dedicated to
+  // the recent-interventions list, mirroring the dashboard's
+  // InterventionsPanel from #4758.
+  const [interventionsOpen, setInterventionsOpen] = useState(false);
+  const interventionCount = interventions?.length ?? 0;
+  // Close a stale sheet if the underlying ring drops back to empty (e.g.
+  // session switch / state restore). Same pattern as the cost breakdown
+  // sheet above so the modal can't strand itself on top of a now-hidden
+  // badge.
+  useEffect(() => {
+    if (interventionCount === 0 && interventionsOpen) setInterventionsOpen(false);
+  }, [interventionCount, interventionsOpen]);
   const hasCumulativeCost =
     !!cumulativeUsage && Number.isFinite(cumulativeUsage.costUsd) && cumulativeUsage.costUsd > 0;
   // Close a stale sheet if the cost predicate flips back to false (e.g.
@@ -259,6 +316,23 @@ export function SettingsBar({
               {activeAgents.length} agent{activeAgents.length !== 1 ? 's' : ''}
             </Text>
           </View>
+        )}
+        {/* #4764: chroxy-side intervention counter. Renders only when at
+            least one intervention has fired for the active session. Tap
+            opens a sheet listing the recent interventions newest-first.
+            Mirrors the dashboard's FooterBar counter chip from #4758. */}
+        {interventionCount > 0 && (
+          <Pressable
+            onPress={() => setInterventionsOpen(true)}
+            style={({ pressed }) => [styles.interventionBadge, pressed && styles.interventionBadgePressed]}
+            accessibilityRole="button"
+            accessibilityLabel={`${interventionCount} chroxy ${interventionCount === 1 ? 'intervention' : 'interventions'}. Tap for details.`}
+            testID="session-interventions-badge"
+          >
+            <Text style={styles.interventionBadgeText}>
+              {interventionCount} {interventionCount === 1 ? 'intervention' : 'interventions'}
+            </Text>
+          </Pressable>
         )}
         {connectionQuality && (() => {
           const qc = QUALITY_COLORS[connectionQuality];
@@ -605,6 +679,64 @@ export function SettingsBar({
           </Pressable>
         </Modal>
       )}
+      {/* #4764: interventions sheet — modal listing recent interventions
+          newest-first. Visible only when a tap on the intervention badge
+          has set interventionsOpen. Mirrors the dashboard's
+          InterventionsPanel from #4758 (same six fields, same ordering). */}
+      {interventionCount > 0 && (
+        <Modal
+          visible={interventionsOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setInterventionsOpen(false)}
+        >
+          <Pressable
+            style={styles.costSheetBackdrop}
+            onPress={() => setInterventionsOpen(false)}
+            accessibilityLabel="Dismiss interventions panel"
+            accessibilityRole="button"
+          >
+            <Pressable
+              style={styles.costSheetCard}
+              onPress={() => {}}
+              testID="session-interventions-sheet"
+            >
+              <Text style={styles.costSheetTitle}>Recent chroxy interventions</Text>
+              {/* #4862 (Copilot review): the interventions ring is capped at 50
+                  entries (MAX_SESSION_INTERVENTIONS in store-core). Without a
+                  scroll container, on smaller devices a full ring would push
+                  the Close button off-screen and strand the modal. Constrain
+                  the list area and let it scroll; the title + Close button
+                  stay pinned outside the scroll region. */}
+              <ScrollView
+                style={styles.interventionList}
+                contentContainerStyle={styles.interventionListContent}
+                showsVerticalScrollIndicator
+                testID="session-interventions-scroll"
+              >
+                {[...(interventions ?? [])].reverse().map((iv) => (
+                  <View
+                    key={iv.toolUseId}
+                    style={styles.interventionRow}
+                    testID={`session-intervention-${iv.toolUseId}`}
+                  >
+                    <Text style={styles.interventionReason}>{describeIntervention(iv)}</Text>
+                    <Text style={styles.interventionMeta}>{formatInterventionTimestamp(iv.timestamp)}</Text>
+                  </View>
+                ))}
+              </ScrollView>
+              <TouchableOpacity
+                style={styles.costSheetDismiss}
+                onPress={() => setInterventionsOpen(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close interventions panel"
+              >
+                <Text style={styles.costSheetDismissText}>Close</Text>
+              </TouchableOpacity>
+            </Pressable>
+          </Pressable>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -760,6 +892,51 @@ const styles = StyleSheet.create({
     color: COLORS.accentPurple,
     fontSize: 10,
     fontWeight: '600',
+  },
+  // #4764 — chroxy-intervention header badge. Uses the orange palette to
+  // signal "something the platform intervened on" without veering into
+  // alert-red (the operator may want to acknowledge it, but the deny is
+  // working-as-intended). Tappable target sized comfortably for thumb taps.
+  interventionBadge: {
+    backgroundColor: COLORS.accentOrangeSubtle,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginRight: 8,
+  },
+  interventionBadgePressed: {
+    opacity: 0.7,
+  },
+  interventionBadgeText: {
+    color: COLORS.accentOrange,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  interventionRow: {
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderPrimary,
+  },
+  interventionReason: {
+    color: COLORS.textPrimary,
+    fontSize: 13,
+    marginBottom: 2,
+  },
+  interventionMeta: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+  },
+  // #4862 (Copilot review) — scroll container for the recent-interventions
+  // list. maxHeight keeps the modal card bounded on small devices so the
+  // Close button outside the ScrollView is always reachable, even at the
+  // ring's 50-entry cap. marginVertical separates the list from the title
+  // and the Close button.
+  interventionList: {
+    maxHeight: 280,
+    marginVertical: 8,
+  },
+  interventionListContent: {
+    paddingBottom: 4,
   },
   agentSection: {
     gap: 4,
