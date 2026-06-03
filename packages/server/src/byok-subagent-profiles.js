@@ -33,6 +33,15 @@
  * Anthropic convention used in the official Claude Code subagent UX
  * (`general-purpose`, etc.).
  *
+ * Each `systemPrompt` MUST stay under `SESSION_PREAMBLE_MAX_LENGTH` (4000
+ * chars). The byok Task tool applies the profile to a child via direct
+ * `child.sessionPreamble = profile.systemPrompt` assignment, bypassing the
+ * `setSessionPreamble` setter's trim + cap — so an over-long prompt would
+ * sail past silently and push the combined system prompt
+ * (`_buildSystemPrompt` joins preamble + context hint + skills text) past
+ * Anthropic's token budget. The bound is pinned by a unit test in
+ * `tests/byok-subagent-profiles.test.js` (#5073).
+ *
  * @type {Readonly<Record<string, Readonly<{systemPrompt: string, toolSet: 'all' | readonly string[]}>>>}
  */
 export const SUBAGENT_PROFILES = Object.freeze({

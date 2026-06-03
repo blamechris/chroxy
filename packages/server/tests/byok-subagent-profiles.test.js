@@ -5,6 +5,7 @@ import {
   SUBAGENT_PROFILE_NAMES,
   getSubagentProfile,
 } from '../src/byok-subagent-profiles.js'
+import { SESSION_PREAMBLE_MAX_LENGTH } from '../src/base-session.js'
 
 /**
  * #5018: subagent profile registry. The byok Task tool looks up profiles
@@ -62,6 +63,30 @@ describe('SUBAGENT_PROFILES (#5018)', () => {
 
   it('SUBAGENT_PROFILE_NAMES is frozen', () => {
     assert.ok(Object.isFrozen(SUBAGENT_PROFILE_NAMES))
+  })
+
+  it('every profile systemPrompt fits under SESSION_PREAMBLE_MAX_LENGTH (#5073)', () => {
+    // #5073: the byok Task tool applies a profile to a child session via
+    // direct field assignment (`child.sessionPreamble = profile.systemPrompt`)
+    // rather than the `setSessionPreamble` setter, intentionally bypassing
+    // the 4000-char user-preamble cap for in-source profiles we control.
+    // That's fine for today's seed (~200-400 chars each), but a future
+    // contributor could add a profile with a multi-kilobyte systemPrompt
+    // and the implicit "fits in the system-prompt slot" invariant would
+    // break silently — `_buildSystemPrompt` joins the preamble with the
+    // chroxy context hint + skills text, and an over-long preamble could
+    // push the combined prompt past Anthropic's token budget.
+    //
+    // Pinning every profile under SESSION_PREAMBLE_MAX_LENGTH here makes
+    // that invariant explicit so a future profile addition fails at CI
+    // rather than at runtime.
+    for (const [id, profile] of Object.entries(SUBAGENT_PROFILES)) {
+      assert.ok(
+        profile.systemPrompt.length <= SESSION_PREAMBLE_MAX_LENGTH,
+        `profile ${id} systemPrompt (${profile.systemPrompt.length} chars) `
+        + `exceeds SESSION_PREAMBLE_MAX_LENGTH (${SESSION_PREAMBLE_MAX_LENGTH})`,
+      )
+    }
   })
 })
 
