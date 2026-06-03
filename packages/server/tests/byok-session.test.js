@@ -3938,12 +3938,15 @@ describe('ClaudeByokSession', () => {
     })
 
     /**
-     * #5018: subagent_type profile registry. The Task tool dispatches
-     * profile lookup BEFORE spawning the child so an unknown id is
-     * rejected without leaving a phantom agent_spawned. When the id is
-     * known, the profile's systemPrompt is applied to the child's
-     * sessionPreamble and the profile's toolSet (when restricted) limits
-     * which BUILTIN_TOOLS the child sees in its `_buildTools()` output.
+     * #5018: subagent_type profile registry. When the id is known, the
+     * profile's systemPrompt is applied to the child's sessionPreamble
+     * (via setSessionPreamble so the same cap as user-authored preambles
+     * applies) and the profile's toolSet (when restricted) limits which
+     * BUILTIN_TOOLS the child sees in its `_buildTools()` output. When
+     * the id is unknown or malformed, the runner warns and falls back to
+     * the v1 default (no profile applied) per the issue's acceptance
+     * criteria — the spawn still succeeds so a future model that requests
+     * a profile this server doesn't know about stays forward-compatible.
      *
      * Helper shape mirrors runTaskWithPermissionOverride above: stub
      * the parent's gate to always-allow so the tests focus on the
@@ -4052,39 +4055,50 @@ describe('ClaudeByokSession', () => {
       assert.equal(taskResult.payload.isError, false)
     })
 
-    it('Task `subagent_type` unknown value rejected with is_error (#5018)', async () => {
+    it('Task `subagent_type` unknown value falls back to v1 default with no profile (#5018)', async () => {
       const { childSnapshot, taskResult, spawned } = await runTaskWithSubagentType({
         subagentType: 'totally-not-a-real-profile',
       })
-      // Unknown subagent_type must reject BEFORE spawning a child so no
-      // agent_spawned fires and the active-agents badge doesn't tick.
-      assert.equal(childSnapshot, null,
-        'no child must be spawned when subagent_type is unknown')
-      assert.equal(spawned, undefined,
-        'agent_spawned must NOT fire for an unknown subagent_type')
+      // Per #5018 acceptance criteria: unknown subagent_type falls back to
+      // v1 behaviour (no profile applied) and warns. The child IS spawned,
+      // the tool_result is success, and the child has no profile-driven
+      // preamble or tool filter.
+      assert.ok(childSnapshot,
+        'child must spawn even when subagent_type is unknown (warn + fall back)')
+      assert.ok(spawned,
+        'agent_spawned must fire for the spawn (only profile application is skipped)')
+      assert.equal(childSnapshot.sessionPreamble, '',
+        'unknown profile id must NOT apply any preamble (v1 default)')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null,
+        'unknown profile id must NOT install a tool filter (v1 default)')
       assert.ok(taskResult)
-      assert.equal(taskResult.payload.isError, true)
-      assert.match(taskResult.payload.result, /subagent_type/i,
-        'rejection message must name the offending field')
+      assert.equal(taskResult.payload.isError, false,
+        'unknown subagent_type must NOT fail the tool call (forward-compat)')
     })
 
-    it('Task `subagent_type` non-string value rejected (#5018)', async () => {
+    it('Task `subagent_type` non-string value falls back to v1 default (#5018)', async () => {
       const { childSnapshot, taskResult } = await runTaskWithSubagentType({
         subagentType: 7,
       })
-      assert.equal(childSnapshot, null)
-      assert.equal(taskResult.payload.isError, true)
-      assert.match(taskResult.payload.result, /subagent_type/i)
+      // Non-string ids are treated as unknown: warn + fall back, do not
+      // fail the tool call (the schema enum is the model-facing guardrail;
+      // the runtime stays forgiving).
+      assert.ok(childSnapshot)
+      assert.equal(childSnapshot.sessionPreamble, '')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null)
+      assert.equal(taskResult.payload.isError, false)
     })
 
-    it('Task `subagent_type` empty string treated as unknown (#5018)', async () => {
+    it('Task `subagent_type` empty string falls back to v1 default (#5018)', async () => {
       const { childSnapshot, taskResult } = await runTaskWithSubagentType({
         subagentType: '',
       })
-      // Empty string is not a valid profile id. Reject so the model gets
-      // a crisp signal instead of silently coercing to "no profile".
-      assert.equal(childSnapshot, null)
-      assert.equal(taskResult.payload.isError, true)
+      // Empty string is not a valid profile id but is treated as the
+      // unknown path — warn + fall back, do not fail the tool call.
+      assert.ok(childSnapshot)
+      assert.equal(childSnapshot.sessionPreamble, '')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null)
+      assert.equal(taskResult.payload.isError, false)
     })
   })
 

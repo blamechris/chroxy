@@ -1254,11 +1254,12 @@ export class ClaudeByokSession extends BaseSession {
     // #5018: subagent_type profile lookup. When the model passes a
     // `subagent_type`, look it up in the registry and apply the profile
     // (systemPrompt + toolSet) to the child before its first sendMessage.
-    // Unknown values reject BEFORE the agent_spawned emit / _activeAgents
-    // populate so a misspelled id can't leave a phantom entry in the
-    // dashboard's active-agents badge — mirrors the permission_mode
-    // validation placement above. When omitted, no profile is applied and
-    // the v1 default behaviour stands.
+    // Unknown values fall back to v1 behaviour (no profile applied) and
+    // emit a warn log per the issue's acceptance criteria — keeps the
+    // delegation forward-compatible with a future model that requests a
+    // profile id this server doesn't yet know about, rather than failing
+    // the entire tool call. When omitted, no profile is applied and the
+    // v1 default behaviour stands.
     let subagentProfile = null
     if (input?.subagent_type !== undefined) {
       subagentProfile = getSubagentProfile(input.subagent_type)
@@ -1266,10 +1267,10 @@ export class ClaudeByokSession extends BaseSession {
         const got = typeof input.subagent_type === 'string'
           ? `"${input.subagent_type}"`
           : String(input.subagent_type)
-        return {
-          content: `Task tool: unknown \`subagent_type\` ${got}. Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}.`,
-          isError: true,
-        }
+        log.warn(
+          `Task tool: unknown subagent_type ${got}; falling back to v1 default (no profile applied). `
+          + `Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}.`,
+        )
       }
     }
     if (signal?.aborted) {
@@ -1349,19 +1350,19 @@ export class ClaudeByokSession extends BaseSession {
       // setPermissionMode) is safe here: the child is fresh, not busy,
       // and has no pending permissions to flush.
       child.permissionMode = childPermissionMode
-      // #5018: apply the subagent profile (validated above). Direct
-      // field assignment (vs setSessionPreamble) is deliberate — the
-      // setter trims + caps at SESSION_PREAMBLE_MAX_LENGTH which is fine
-      // for user-authored preambles but unnecessarily restrictive for
-      // an in-source profile we control. The profile's systemPrompt
-      // rides in the same slot _buildSystemPrompt() reads, so the
-      // existing skills/chroxy-hint ordering still composes. When the
-      // toolSet is restricted to a name list, install the filter on the
-      // child so its `_buildTools()` only emits the allowed built-ins;
-      // `toolSet: 'all'` leaves the filter unset so the child sees the
-      // full BUILTIN_TOOLS array.
+      // #5018: apply the subagent profile (validated above). Route the
+      // systemPrompt through setSessionPreamble so the profile follows
+      // the same trim + SESSION_PREAMBLE_MAX_LENGTH cap as user-authored
+      // preambles — keeps the system-prompt size bounded and predictable
+      // even if a future profile prompt grows. The profile's systemPrompt
+      // rides in the same slot _buildSystemPrompt() reads, so the existing
+      // skills/chroxy-hint ordering still composes. When the toolSet is
+      // restricted to a name list, install the filter on the child so its
+      // `_buildTools()` only emits the allowed built-ins; `toolSet: 'all'`
+      // leaves the filter unset so the child sees the full BUILTIN_TOOLS
+      // array.
       if (subagentProfile) {
-        child.sessionPreamble = subagentProfile.systemPrompt
+        child.setSessionPreamble(subagentProfile.systemPrompt)
         if (subagentProfile.toolSet !== 'all') {
           child._allowedBuiltinToolNames = new Set(subagentProfile.toolSet)
         }

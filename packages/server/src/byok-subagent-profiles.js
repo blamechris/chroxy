@@ -77,8 +77,9 @@ export const SUBAGENT_PROFILE_NAMES = Object.freeze(Object.keys(SUBAGENT_PROFILE
 /**
  * Look up a profile by id. Returns the frozen profile bundle or `null`
  * when the id is unknown. Caller decides how to handle unknowns — the
- * Task tool currently returns an is_error tool_result so the model gets
- * a crisp signal rather than silently dropping the requested profile.
+ * Task tool falls back to the v1 default (no profile applied) and emits
+ * a warn log per #5018's acceptance criteria, so a model that requests a
+ * profile id this server doesn't yet know stays forward-compatible.
  *
  * @param {unknown} id
  * @returns {Readonly<{systemPrompt: string, toolSet: 'all' | readonly string[]}>|null}

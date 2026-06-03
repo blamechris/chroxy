@@ -208,8 +208,8 @@ export const BUILTIN_TOOLS = [
       'Subagent profiles (#5018): pass `subagent_type` to bias the child toward a focused role. ' +
       `Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}. Each profile carries a tailored ` +
       'system prompt and may restrict the child\'s tool set (e.g. code-reviewer is read-only). ' +
-      'Unknown subagent_type values are rejected with an is_error tool_result so a misspelled ' +
-      'profile id fails loudly rather than silently dropping the requested behaviour.',
+      'Unknown subagent_type values fall back to the v1 default (no profile applied) and emit ' +
+      'a warn log on the server so the delegation stays forward-compatible.',
     input_schema: {
       type: 'object',
       properties: {
@@ -227,7 +227,7 @@ export const BUILTIN_TOOLS = [
           description:
             'Optional subagent profile id. When set, the runner applies the profile\'s system prompt '
             + `and tool-set restriction to the child. Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}. `
-            + 'Unknown values are rejected with an is_error tool_result.',
+            + 'Unknown values fall back to v1 default (no profile applied) with a server-side warn log.',
         },
         permission_mode: {
           type: 'string',
