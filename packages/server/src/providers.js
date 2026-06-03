@@ -327,8 +327,17 @@ export async function registerDockerProvider(config) {
   const { DockerSdkSession } = await import('./docker-sdk-session.js')
   registerProvider('docker-sdk', DockerSdkSession)
 
+  // #4053: docker-byok — runs the BYOK agent loop on the host, tool
+  // execution inside the container. Same gating story as the other
+  // docker-* providers: only registered when environments are enabled
+  // AND `docker info` succeeded above. The provider's own start()
+  // does a second `docker info` preflight per session because the
+  // daemon can go down between server boot and session create.
+  const { DockerByokSession } = await import('./docker-byok-session.js')
+  registerProvider('docker-byok', DockerByokSession)
+
   // Backward compatibility: 'docker' maps to 'docker-cli' (hidden from listProviders)
   registerProvider('docker', DockerSession, { alias: true })
 
-  log.info('Docker providers registered (docker-cli, docker-sdk)')
+  log.info('Docker providers registered (docker-cli, docker-sdk, docker-byok)')
 }

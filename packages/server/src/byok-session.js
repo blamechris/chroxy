@@ -1082,8 +1082,11 @@ export class ClaudeByokSession extends BaseSession {
     //      parent's turn totals.
     //   2. MCP tools (mcp__<server>__<tool>) — route through the fleet
     //      to the right child process via stdio JSON-RPC.
-    //   3. Built-in tools (Read/Write/Bash/etc) — run in-process via
-    //      executeBuiltinTool.
+    //   3. Built-in tools (Read/Write/Bash/etc) — route through
+    //      `_dispatchBuiltinTool` which by default runs in-process.
+    //      Subclasses (e.g. DockerByokSession, #4053) override
+    //      `_dispatchBuiltinTool` to redirect execution into an isolated
+    //      environment without touching this loop.
     const effectiveInput = resolvedDecision.updatedInput || input
     let dispatchResult
     if (toolName === 'Task') {
@@ -1096,14 +1099,10 @@ export class ClaudeByokSession extends BaseSession {
     } else if (toolName.startsWith(MCP_TOOL_PREFIX)) {
       dispatchResult = await this._dispatchMcpTool(toolName, effectiveInput)
     } else {
-      dispatchResult = await executeBuiltinTool({
+      dispatchResult = await this._dispatchBuiltinTool({
         toolName,
         input: effectiveInput,
-        cwd: this.cwd,
-        cwdRealCache: this._cwdRealCache,
-        cwdCacheTtl: CWD_CACHE_TTL_MS,
         signal,
-        todoStore: this._todos,
       })
     }
     const { content, isError } = dispatchResult
@@ -1333,6 +1332,36 @@ export class ClaudeByokSession extends BaseSession {
       }
     }
     return { content: summary, isError: false }
+  }
+
+  /**
+   * Dispatch one built-in tool (Read/Write/Edit/Bash/Glob/Grep/WebFetch/
+   * TodoWrite) to the local executor. Returns `{ content, isError }` —
+   * the shape `_executeToolBlock` threads into the next round's
+   * tool_result content block.
+   *
+   * Subclass seam (#4053): `DockerByokSession` overrides this to
+   * redirect tool execution into an isolated Docker container while the
+   * outer agent loop — model streaming, permission gating, MCP dispatch,
+   * cost accounting — stays unchanged. The base implementation runs the
+   * tool in-process on the host, which is what the host-side
+   * `claude-byok` provider has always done.
+   *
+   * @param {object} args
+   * @param {string} args.toolName  Tool name from the model's tool_use block
+   * @param {object} args.input     Already-parsed JSON input from the model
+   * @param {AbortSignal} [args.signal]  Per-turn abort signal
+   */
+  async _dispatchBuiltinTool({ toolName, input, signal }) {
+    return executeBuiltinTool({
+      toolName,
+      input,
+      cwd: this.cwd,
+      cwdRealCache: this._cwdRealCache,
+      cwdCacheTtl: CWD_CACHE_TTL_MS,
+      signal,
+      todoStore: this._todos,
+    })
   }
 
   /**
