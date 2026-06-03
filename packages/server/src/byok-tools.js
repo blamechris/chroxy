@@ -199,7 +199,10 @@ export const BUILTIN_TOOLS = [
       'Optional `permission_mode` overrides the inherited mode for this single launch, but ' +
       'is constrained to be at-most-as-permissive as the parent (ranking: plan < approve < ' +
       'acceptEdits < auto). Requesting a stricter mode is allowed; requesting a more ' +
-      'permissive mode is rejected with an is_error tool_result.',
+      'permissive mode is rejected with an is_error tool_result. ' +
+      'MCP tools: by default the sub-agent inherits the parent\'s MCP fleet (same ' +
+      '`mcp__<server>__<tool>` set as this turn), at zero extra spawn cost. Pass ' +
+      '`inherit_mcp: false` to launch a sub-agent with built-in tools only (no MCP).',
     input_schema: {
       type: 'object',
       properties: {
@@ -219,6 +222,10 @@ export const BUILTIN_TOOLS = [
           type: 'string',
           enum: [...TASK_PERMISSION_MODE_LIST],
           description: 'Optional per-launch permission mode for the subagent. Must be at-most-as-permissive as the parent (plan < approve < acceptEdits < auto). When omitted, the subagent inherits the parent\'s mode.',
+        },
+        inherit_mcp: {
+          type: 'boolean',
+          description: 'When true (the default), the sub-agent inherits the parent\'s MCP fleet so nested tool use can call the same mcp__<server>__<tool> tools the parent sees — at zero extra spawn cost. Pass false to run the sub-agent with built-in tools only (no MCP).',
         },
       },
       required: ['description', 'prompt'],

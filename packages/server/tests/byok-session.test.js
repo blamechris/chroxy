@@ -6,6 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { BUILTIN_TOOLS } from '../src/byok-tools.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
 
@@ -3716,6 +3717,214 @@ describe('ClaudeByokSession', () => {
           }
         }
       }
+    })
+
+    /**
+     * #5019: subagent MCP inheritance helpers.
+     *
+     * The Task subagent should — by default — borrow the parent's
+     * already-running MCP fleet so nested tool use can call the same
+     * `mcp__<server>__<tool>` set the parent sees, at zero extra
+     * spawn cost. The child must NOT own the fleet (destroy() on the
+     * child must leave the parent's MCP children alive). An explicit
+     * `inherit_mcp: false` on the Task input reverts to the pre-#5019
+     * behaviour of running the subagent with built-in tools only.
+     */
+    function captureChildFromTaskCall(session, taskInput, opts = {}) {
+      // Snapshot the child the moment _executeTaskTool registers it.
+      // Tests inspect _mcpFleet / _ownsMcpFleet on this reference, and
+      // we ALSO snapshot the field values at registration time because
+      // the Task tool's finally block calls child.destroy() before
+      // sendMessage resolves — destroy() nulls _mcpFleet, so reading
+      // these fields off the captured child after-the-fact always sees
+      // the post-destroy state. The snapshot lets tests assert what the
+      // child looked like while it was actually running, AND we expose
+      // a tools snapshot so _buildTools() can be exercised pre-destroy.
+      let capturedChild = null
+      let snapshot = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        capturedChild = v
+        snapshot = {
+          mcpFleet: v._mcpFleet,
+          ownsMcpFleet: v._ownsMcpFleet,
+          tools: v._buildTools(),
+        }
+        // Force-allow the child's permission gate — Task subagents
+        // run their own permission flow on tool_use blocks, but the
+        // dummy child stream below never emits one. This matches the
+        // pattern used by runTaskWithPermissionOverride.
+        v._gateToolBlock = async () => ({ behavior: 'allow' })
+        // #5019 leak test: optional hook so a test can intercept the
+        // child's destroy() and observe whether fleet.destroy() ran.
+        if (opts.onChildRegistered) opts.onChildRegistered(v)
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput,
+        childStreamImpl: () => fakeStream(
+          [
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          ],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      return () => ({ child: capturedChild, snapshot })
+    }
+
+    it('Task subagent inherits parent MCP fleet by default (#5019)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      // Simulate a running parent MCP fleet. The exact shape doesn't
+      // matter for inheritance — the child should just point at the
+      // same object reference.
+      const parentFleet = {
+        anthropicTools: [{ name: 'mcp__stub__echo' }],
+        async destroy() { /* noop */ },
+      }
+      session._mcpFleet = parentFleet
+      const getChild = captureChildFromTaskCall(session, { description: 'd', prompt: 'p' })
+      await session.start()
+      await session.sendMessage('go')
+      const { child, snapshot } = getChild()
+      assert.ok(child, 'subagent must be registered')
+      // Snapshot taken at registration time — child.destroy() in the
+      // Task tool's finally block nulls _mcpFleet by the time
+      // sendMessage resolves, but the registration-time snapshot
+      // captures what the child looked like while it was running.
+      assert.strictEqual(snapshot.mcpFleet, parentFleet,
+        'child must share the parent fleet reference (no per-spawn child-process cost)')
+      assert.equal(snapshot.ownsMcpFleet, false,
+        'child must NOT own the borrowed fleet — destroy() will leave it alive')
+      // _buildTools() output captured pre-destroy proves the child
+      // surfaces the parent's MCP tools to the model on its next turn.
+      const mcpToolNames = snapshot.tools.filter((t) => t.name.startsWith('mcp__')).map((t) => t.name)
+      assert.deepEqual(mcpToolNames, ['mcp__stub__echo'],
+        'child must expose the parent fleet\'s mcp__ tools to its model')
+      await session.destroy()
+    })
+
+    it('Task subagent destroy() does NOT tear down the parent MCP fleet (#5019)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let fleetDestroyed = false
+      const parentFleet = {
+        anthropicTools: [],
+        async destroy() { fleetDestroyed = true },
+      }
+      session._mcpFleet = parentFleet
+      // The Task tool's finally block calls child.destroy() after the
+      // child's result event fires. If we incorrectly let the child
+      // own the fleet, this destroy would invoke parentFleet.destroy()
+      // mid-parent-turn — killing every MCP child for any sibling Task
+      // still in flight.
+      const getChild = captureChildFromTaskCall(session, { description: 'd', prompt: 'p' })
+      await session.start()
+      await session.sendMessage('go')
+      const { child } = getChild()
+      assert.ok(child)
+      // child.destroy() has already run inside _executeTaskTool's
+      // finally block by the time sendMessage resolves. Assert the
+      // fleet survived.
+      assert.equal(fleetDestroyed, false,
+        'child.destroy() MUST NOT call parentFleet.destroy() — parent owns the fleet')
+      // Now destroy the parent explicitly — fleet must run exactly
+      // once, from the owning session's teardown.
+      await session.destroy()
+      assert.equal(fleetDestroyed, true,
+        'parent destroy must tear down its own fleet')
+    })
+
+    it('Task `inherit_mcp: false` runs the subagent without MCP (#5019)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      const parentFleet = {
+        anthropicTools: [{ name: 'mcp__stub__echo' }],
+        async destroy() { /* noop */ },
+      }
+      session._mcpFleet = parentFleet
+      const getChild = captureChildFromTaskCall(session, {
+        description: 'd',
+        prompt: 'p',
+        inherit_mcp: false,
+      })
+      await session.start()
+      await session.sendMessage('go')
+      const { child, snapshot } = getChild()
+      assert.ok(child, 'subagent must still be registered when inherit_mcp:false')
+      assert.equal(snapshot.mcpFleet, null,
+        'inherit_mcp:false must skip fleet inheritance — child runs without MCP')
+      assert.equal(snapshot.ownsMcpFleet, true,
+        'an MCP-less child keeps the default ownership flag (no borrowing happened)')
+      const mcpToolNames = snapshot.tools.filter((t) => t.name.startsWith('mcp__'))
+      assert.equal(mcpToolNames.length, 0,
+        'inherit_mcp:false child must not expose any mcp__ tools')
+      await session.destroy()
+    })
+
+    it('Task subagent skips inheritance when the parent has no fleet (#5019)', async () => {
+      // No MCP config → no parent fleet → child gets nothing to
+      // borrow. Should not throw, should not flip _ownsMcpFleet, and
+      // _buildTools() should fall through to BUILTIN_TOOLS only.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      assert.equal(session._mcpFleet, null, 'precondition: parent has no fleet')
+      const getChild = captureChildFromTaskCall(session, { description: 'd', prompt: 'p' })
+      await session.start()
+      await session.sendMessage('go')
+      const { child, snapshot } = getChild()
+      assert.ok(child)
+      assert.equal(snapshot.mcpFleet, null, 'no fleet to inherit')
+      assert.equal(snapshot.ownsMcpFleet, true, 'ownership flag stays at default when no borrow happens')
+      await session.destroy()
+    })
+
+    it('Task `inherit_mcp` non-boolean value rejected (#5019)', async () => {
+      // Strings, numbers, null — anything non-boolean must be rejected
+      // with an is_error tool_result rather than silently coerced.
+      // The model needs a crisp signal so it can fix its tool_use.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = captureEvents(session)
+      let childSpawned = false
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        childSpawned = true
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput: { description: 'd', prompt: 'p', inherit_mcp: 'yes' },
+        childStreamImpl: () => fakeStream(
+          [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: '' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('go')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_task_1')
+      assert.ok(taskResult, 'a tool_result must be emitted even on rejection')
+      assert.equal(taskResult.payload.isError, true,
+        'non-boolean inherit_mcp must produce is_error tool_result')
+      assert.match(taskResult.payload.result, /inherit_mcp/i,
+        'rejection message must name the offending field')
+      assert.equal(childSpawned, false,
+        'no subagent must be spawned when inherit_mcp is invalid')
+      await session.destroy()
+    })
+
+    it('Task input_schema declares inherit_mcp as a boolean (#5019)', () => {
+      // Protocol-surface assertion: the Task tool advertises its
+      // inherit_mcp affordance so the model can discover it. This
+      // guards against accidental schema regressions.
+      const taskTool = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+      assert.ok(taskTool, 'BUILTIN_TOOLS must include the Task tool')
+      const prop = taskTool.input_schema.properties.inherit_mcp
+      assert.ok(prop, 'Task input_schema must expose inherit_mcp')
+      assert.equal(prop.type, 'boolean', 'inherit_mcp must be typed as boolean')
+      assert.match(prop.description, /default|MCP/i,
+        'description must mention the default behaviour')
     })
   })
 
