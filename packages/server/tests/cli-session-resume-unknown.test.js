@@ -1,7 +1,5 @@
 import { describe, it, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
-import { Readable, Writable } from 'node:stream'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -63,20 +61,7 @@ afterEach(() => {
 
 function createSession(opts = {}) {
   const stateFilePath = opts.stateFilePath || tmpStateFile()
-  const session = new CliSession({ cwd: '/tmp', stateFilePath, ...opts })
-  session._testStateFilePath = stateFilePath
-  return session
-}
-
-function createMockChild() {
-  const child = new EventEmitter()
-  child.stdin = new Writable({ write(chunk, enc, cb) { cb() } })
-  child.stdout = new Readable({ read() {} })
-  child.stderr = new Readable({ read() {} })
-  child.pid = 12345
-  child.kill = mock.fn(() => true)
-  child.killed = false
-  return child
+  return new CliSession({ cwd: '/tmp', stateFilePath, ...opts })
 }
 
 describe('CliSession resume-unknown — stderr matcher (#4929)', () => {
