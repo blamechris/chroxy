@@ -36,12 +36,28 @@
  *
  * Deferred (follow-up issues)
  * ---------------------------
- *   - Per-session container reuse / pooling
- *   - Snapshot/restore (Docker commit-based snapshots already exist for
- *     docker-cli / docker-sdk — wiring them up for docker-byok belongs
- *     in a follow-up so docker-byok ships small)
+ *   - Per-session container reuse / pooling (#5022 — landed)
  *   - DevContainer / Compose-driven environments
  *   - postCreateCommand hook
+ *
+ * Snapshot / restore (#5023, this revision)
+ * -----------------------------------------
+ *   - `snapshot({ name? })` runs `docker commit <containerId>
+ *     chroxy-byok-snap:<rand>-<ts>` via the backend, marks the live
+ *     container "soiled" so the pool evicts it on release (#5043), and
+ *     writes a small metadata JSON to `snapshotsDir` (defaults to
+ *     `~/.chroxy/snapshots/`, override via `CHROXY_CONFIG_DIR`) so ops
+ *     can list snapshot names without parsing `docker image ls`.
+ *   - To restore, pass `snapshotImage: <tag>` to the constructor. The
+ *     session uses that tag as the image at `docker run` time and skips
+ *     the `useradd` + `chown` setup (the snapshot already has those
+ *     baked in). The restored container is auto-soiled — restoring
+ *     previous state into a live container couples it to the snapshot's
+ *     original conversation history.
+ *   - Pool interaction: a snapshotted or restored container goes
+ *     through `release()` as normal, but the pool sees the soil marker
+ *     and evicts inline instead of pooling. UI / multi-snapshot listing
+ *     is deferred to a follow-up.
  *
  * Per `project_worktree_before_docker.md` in project memory: worktree
  * isolation happens BEFORE Docker. This class does not own worktree
@@ -51,12 +67,15 @@
  */
 
 import { execFile } from 'child_process'
+import { mkdirSync, writeFileSync } from 'fs'
+import { randomBytes } from 'crypto'
+import { homedir } from 'os'
+import { isAbsolute, join, posix } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
 import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { createLogger } from './logger.js'
-import { isAbsolute, posix } from 'path'
 
 const log = createLogger('docker-byok')
 
@@ -198,6 +217,19 @@ export class DockerByokSession extends ClaudeByokSession {
    * @param {string} [opts.containerId]              Attach to an existing container
    *   instead of launching one (env-manager managed). When omitted, the
    *   session owns the container and tears it down on destroy().
+   * @param {string} [opts.snapshotImage]            Restore from a snapshot tag
+   *   produced by a previous `snapshot()` call (#5023). When set, the
+   *   container is launched from this image instead of `opts.image`, the
+   *   `useradd` setup is skipped (the snapshot has the user baked in),
+   *   and the live container is auto-soiled so it does NOT return to the
+   *   pool (a restored container's FS is coupled to the snapshot's
+   *   original conversation).
+   * @param {string} [opts.snapshotsDir]             Override the directory
+   *   snapshot metadata JSONs are written to. Defaults to
+   *   `${CHROXY_CONFIG_DIR ?? ~/.chroxy}/snapshots`. Tests inject a tmp dir.
+   * @param {string} [opts.sourceSessionId]          Optional session id to
+   *   embed in snapshot metadata. The session itself has no sessionId
+   *   field; the SessionManager owns the id and can pass it through.
    * @param {object} [opts._dockerBackend]           Test seam — pre-built backend
    * @param {Function} [opts._execFile]              Test seam — used by preflight
    *   (defaults to child_process.execFile)
@@ -234,6 +266,16 @@ export class DockerByokSession extends ClaudeByokSession {
     this._dockerBackend = opts._dockerBackend || new DockerBackend()
     this._execFile = opts._execFile || execFile
     this._containerReady = false
+    // #5023 snapshot / restore opts.
+    this._snapshotImage = typeof opts.snapshotImage === 'string' && opts.snapshotImage.trim().length > 0
+      ? opts.snapshotImage.trim()
+      : null
+    this._snapshotsDir = typeof opts.snapshotsDir === 'string' && opts.snapshotsDir.length > 0
+      ? opts.snapshotsDir
+      : join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'snapshots')
+    this._sourceSessionId = typeof opts.sourceSessionId === 'string' && opts.sourceSessionId.length > 0
+      ? opts.sourceSessionId
+      : null
     // #5022: across-session idle pool. Off by default — opted in via env
     // or by passing an explicit `_pool` instance. Per-session reuse of
     // the same container across multiple turns is unconditional and
@@ -348,6 +390,14 @@ export class DockerByokSession extends ClaudeByokSession {
       return
     }
     this._containerReady = true
+
+    // #5023: a container restored from a snapshot inherits the
+    // snapshot's writable layer — auth files, history, scratch state.
+    // Mark it soiled so it does NOT return to the pool for an unrelated
+    // session to acquire. No-ops cleanly when pooling is disabled.
+    if (this._snapshotImage && this._containerOwned) {
+      this.markActiveContainerSoiled()
+    }
   }
 
   /**
@@ -393,6 +443,107 @@ export class DockerByokSession extends ClaudeByokSession {
   }
 
   /**
+   * Snapshot the live container's writable layer into a Docker image
+   * tag via `docker commit`, then mark the container "soiled" so the
+   * pool evicts it on release. Writes a small metadata JSON to
+   * `snapshotsDir` so ops can list snapshot names without parsing
+   * `docker image ls` — see class docstring's snapshot/restore section.
+   *
+   * Returns a `{ tag, name, createdAt, sourceCwd, sourceImage,
+   * sourceSessionId }` shape. The `tag` is what a future session passes
+   * to the constructor as `snapshotImage` to restore.
+   *
+   * Throws when the container is not ready (no `start()`, or
+   * `destroy()` already ran). Surfaces backend errors (out-of-disk,
+   * daemon dead) as a plain Error — callers decide whether to retry.
+   *
+   * #5023.
+   *
+   * @param {object} [opts]
+   * @param {string} [opts.name] Human-readable name for the snapshot
+   * @returns {Promise<{tag:string, name:string, createdAt:string,
+   *   sourceCwd:string, sourceImage:string, sourceSessionId:string|null}>}
+   */
+  async snapshot({ name } = {}) {
+    if (!this._containerReady || !this._containerId) {
+      const err = new Error('docker-byok snapshot(): container is not ready')
+      err.code = 'docker_byok_not_ready'
+      throw err
+    }
+    const tag = this._generateSnapshotTag()
+    const sourceCwd = this.cwd || process.cwd()
+    const sourceImage = this._snapshotImage || this._image
+    const snapName = (typeof name === 'string' && name.trim().length > 0)
+      ? name.trim()
+      : tag.split(':').pop()
+    const createdAt = new Date().toISOString()
+
+    log.info(`snapshot: committing ${this._containerId.slice(0, 12)} → ${tag}`)
+    await this._dockerBackend.commitEnvironment(this._containerId, tag)
+
+    // Mark soiled BEFORE writing metadata. If metadata persistence
+    // fails (disk full, permission denied) we still want the soil
+    // marker stuck on — the snapshot tag exists in the daemon and the
+    // container's writable layer has leaked into it.
+    this.markActiveContainerSoiled()
+
+    const metadata = {
+      tag,
+      name: snapName,
+      createdAt,
+      sourceCwd,
+      sourceImage,
+      sourceSessionId: this._sourceSessionId,
+    }
+    try {
+      this._persistSnapshotMetadata(tag, metadata)
+    } catch (err) {
+      // Persistence is best-effort — the snapshot tag in the daemon is
+      // the source of truth. Log and continue so the caller still gets
+      // the tag.
+      log.warn(`snapshot: failed to persist metadata for ${tag}: ${err.message}`)
+    }
+    log.info(`snapshot: ${tag} (name="${snapName}") committed`)
+    return metadata
+  }
+
+  /**
+   * Build a snapshot tag of the form `chroxy-byok-snap:<16-hex>-<ts>`.
+   * 8 bytes of randomness + a millisecond timestamp keep tags unique
+   * within a single host. Image tags must be lowercase ASCII;
+   * `randomBytes` hex satisfies the Docker tag rules.
+   */
+  _generateSnapshotTag() {
+    const rand = randomBytes(8).toString('hex')
+    const ts = Date.now()
+    return `chroxy-byok-snap:${rand}-${ts}`
+  }
+
+  /**
+   * Write the snapshot metadata JSON next to its siblings in
+   * `_snapshotsDir`. The filename uses the tag's identifier portion so
+   * a future ops listing reads back deterministically.
+   *
+   * Best-effort, sync I/O: we hold a docker tag whether or not the
+   * sidecar JSON lands. The mkdir is recursive so a brand-new
+   * `~/.chroxy/snapshots/` is created on demand.
+   *
+   * The file is created with restrictive perms (0600 — owner read/
+   * write only, dir 0700) because the metadata embeds host paths and
+   * optionally `sourceSessionId`. This matches the posture other
+   * `$CHROXY_CONFIG_DIR` state files use (session-state, credentials).
+   */
+  _persistSnapshotMetadata(tag, metadata) {
+    mkdirSync(this._snapshotsDir, { recursive: true, mode: 0o700 })
+    // Tag is `chroxy-byok-snap:<rand>-<ts>` — split on ':' to get the
+    // filename-safe slug. Defensive replace in case a custom tag ever
+    // surfaces here.
+    const slug = tag.split(':').pop().replace(/[^a-zA-Z0-9_.-]/g, '_')
+    const filePath = join(this._snapshotsDir, `${slug}.json`)
+    writeFileSync(filePath, JSON.stringify(metadata, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 })
+  }
+
+  /**
    * If pooling is enabled, try to claim a warm container for this
    * session's resource shape. On a hit, verify the container still
    * responds to `docker exec` — if so, skip `_startContainer()`
@@ -402,9 +553,18 @@ export class DockerByokSession extends ClaudeByokSession {
    * #5022 — across-session idle pool. Per-session reuse of the same
    * container across turns is handled in `_dispatchBuiltinTool` and
    * does not depend on the pool.
+   *
+   * #5023 — when `_snapshotImage` is set the pool is BYPASSED. The
+   * pool key derives from `_image`, not `_snapshotImage`, so a hit
+   * would hand back a stock container and `_startContainer()` would
+   * never run — the snapshot tag would be silently ignored. Worse,
+   * the recycled container's writable layer (auth, scratch state) is
+   * unrelated to the snapshot the caller asked to restore. Restored
+   * containers are auto-soiled anyway so they can't return to the
+   * pool — skipping the acquire path is the consistent move.
    */
   async _acquireOrStartContainer() {
-    if (this._pool) {
+    if (this._pool && !this._snapshotImage) {
       const key = this._poolKey()
       const reused = this._pool.acquire(key)
       if (reused) {
@@ -445,6 +605,13 @@ export class DockerByokSession extends ClaudeByokSession {
    * limit, no-new-privileges, non-root user). Mirrors the runArgs
    * shape used by docker-sdk-session.js so the security posture is
    * identical across the two providers.
+   *
+   * When `_snapshotImage` is set (#5023), the container is launched
+   * from that image instead of `_image` and the `useradd` + `chown`
+   * setup is SKIPPED — the snapshot already has the non-root user
+   * baked in. Re-running useradd would fail with "user already exists"
+   * and abort start. The restored container is auto-soiled by
+   * `start()` after this resolves so the pool evicts on release.
    */
   _startContainer() {
     return new Promise((resolve, reject) => {
@@ -472,10 +639,13 @@ export class DockerByokSession extends ClaudeByokSession {
         runArgs.push('--add-host', 'host.docker.internal:host-gateway')
       }
 
-      runArgs.push(this._image, 'sleep', 'infinity')
+      const imageToRun = this._snapshotImage || this._image
+      runArgs.push(imageToRun, 'sleep', 'infinity')
 
       log.info(
-        `starting container (image=${this._image} memory=${this._memoryLimit} cpus=${this._cpuLimit})`,
+        this._snapshotImage
+          ? `restoring container from snapshot ${this._snapshotImage} (memory=${this._memoryLimit} cpus=${this._cpuLimit})`
+          : `starting container (image=${imageToRun} memory=${this._memoryLimit} cpus=${this._cpuLimit})`,
       )
 
       this._execFile('docker', runArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
@@ -488,6 +658,14 @@ export class DockerByokSession extends ClaudeByokSession {
         }
         this._containerId = stdout.trim()
         log.info(`container started: ${this._containerId.slice(0, 12)}`)
+
+        // Restore path: the snapshot has useradd + chown baked in, so
+        // skip the setup step. Re-running useradd would fail
+        // ("user already exists") and abort start.
+        if (this._snapshotImage) {
+          resolve()
+          return
+        }
 
         // Set up non-root user + chown workspace so the model isn't
         // running as root inside the container. Same script
