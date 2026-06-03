@@ -2,12 +2,20 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, statSync, existsSync } from 'fs'
-import { join, resolve } from 'path'
+import { join } from 'path'
 import { tmpdir } from 'os'
-import { fileURLToPath } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { defaultShell, writeFileRestricted, forceKill, isWindows } from '../src/platform.js'
 
-const PLATFORM_JS = resolve(fileURLToPath(import.meta.url), '../../src/platform.js')
+// Production code in `platform.js` imports from `'fs'` etc. via ESM — the
+// subprocess shims below need to use `file:` URLs for both the `--import`
+// argument and the `import` specifier inside the generated runner, otherwise
+// Node's ESM loader on Windows rejects bare `C:\...` paths with
+// `ERR_UNSUPPORTED_ESM_URL_SCHEME` (`Received protocol 'c:'`). On POSIX a
+// bare absolute path happens to parse as a valid specifier, but `file:` URLs
+// are the cross-platform contract and what the loader actually expects.
+const PLATFORM_JS_URL = new URL('../src/platform.js', import.meta.url).href
+const toFileUrl = (p) => pathToFileURL(p).href
 
 describe('platform', () => {
   describe('isWindows', () => {
@@ -101,7 +109,7 @@ fs.renameSync = (oldPath, newPath) => {
 }
 `
         const runnerSrc = `
-import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS_URL)}
 try {
   writeFileRestricted(${JSON.stringify(filePath)}, ${JSON.stringify(JSON.stringify({ generation: 2 }))})
   process.exit(0)
@@ -116,7 +124,7 @@ try {
         writeFileRestricted(shim, shimSrc)
         writeFileRestricted(runner, runnerSrc)
 
-        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        const result = spawnSync(process.execPath, ['--import', toFileUrl(shim), runner], { encoding: 'utf-8' })
         assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
         assert.match(result.stderr, /simulated mid-write crash/)
 
@@ -165,7 +173,7 @@ fs.unlinkSync = (p) => {
 }
 `
         const runnerSrc = `
-import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS_URL)}
 try {
   writeFileRestricted(${JSON.stringify(filePath)}, 'payload', { tmpSuffix: '.tmp-12345' })
   process.exit(0)
@@ -175,7 +183,7 @@ try {
 `
         writeFileRestricted(shim, shimSrc)
         writeFileRestricted(runner, runnerSrc)
-        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        const result = spawnSync(process.execPath, ['--import', toFileUrl(shim), runner], { encoding: 'utf-8' })
         assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
 
         const observed = readFileSync(sentinelPath, 'utf-8')
@@ -218,7 +226,7 @@ fs.unlinkSync = (p) => {
 }
 `
         const runnerSrc = `
-import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS_URL)}
 try {
   writeFileRestricted(${JSON.stringify(filePath)}, 'payload')
   process.exit(0)
@@ -229,7 +237,7 @@ try {
 `
         writeFileRestricted(shim, shimSrc)
         writeFileRestricted(runner, runnerSrc)
-        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        const result = spawnSync(process.execPath, ['--import', toFileUrl(shim), runner], { encoding: 'utf-8' })
         assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
         // (a) Original rename error surfaces to the caller — the
         //     cleanup-failure log MUST NOT mask it.
@@ -269,7 +277,7 @@ fs.renameSync = (oldPath, newPath) => {
 }
 `
         const runnerSrc = `
-import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS_URL)}
 try {
   writeFileRestricted(${JSON.stringify(filePath)}, 'payload')
   process.exit(0)
@@ -279,7 +287,7 @@ try {
 `
         writeFileRestricted(shim, shimSrc)
         writeFileRestricted(runner, runnerSrc)
-        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        const result = spawnSync(process.execPath, ['--import', toFileUrl(shim), runner], { encoding: 'utf-8' })
         assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
         // ENOENT cleanup must stay silent — no platform warn at all.
         assert.doesNotMatch(result.stderr, /\[WARN\]\s+\[platform\]\s+Failed to remove orphaned/)
@@ -426,7 +434,7 @@ fs.renameSync = (oldPath, newPath) => {
 }
 `
         const runnerSrc = `
-import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS_URL)}
 try {
   writeFileRestricted(${JSON.stringify(filePath)}, ${JSON.stringify(JSON.stringify({ generation: 2 }))}, { _isWindowsOverride: true })
   process.exit(0)
@@ -437,7 +445,7 @@ try {
 `
         writeFileRestricted(shim, shimSrc)
         writeFileRestricted(runner, runnerSrc)
-        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        const result = spawnSync(process.execPath, ['--import', toFileUrl(shim), runner], { encoding: 'utf-8' })
         assert.strictEqual(result.status, 2, `expected non-zero exit; stderr=${result.stderr}`)
         assert.match(result.stderr, /simulated mid-write crash/)
 
@@ -476,7 +484,7 @@ fs.renameSync = (oldPath, newPath) => {
 }
 `
         const runnerSrc = `
-import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS)}
+import { writeFileRestricted } from ${JSON.stringify(PLATFORM_JS_URL)}
 try {
   writeFileRestricted(${JSON.stringify(filePath)}, 'payload', { tmpSuffix: '.tmp-99999', _isWindowsOverride: true })
   process.exit(0)
@@ -486,7 +494,7 @@ try {
 `
         writeFileRestricted(shim, shimSrc)
         writeFileRestricted(runner, runnerSrc)
-        const result = spawnSync(process.execPath, ['--import', shim, runner], { encoding: 'utf-8' })
+        const result = spawnSync(process.execPath, ['--import', toFileUrl(shim), runner], { encoding: 'utf-8' })
         assert.strictEqual(result.status, 2)
         assert.strictEqual(existsSync(`${filePath}.tmp-99999`), false, 'custom-suffix sidecar must be cleaned up on rename failure')
       })
