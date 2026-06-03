@@ -1038,6 +1038,422 @@ describe('DockerByokSession — snapshot soiling integration (#5043)', () => {
   })
 })
 
+describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
+  /**
+   * Acceptance: a `postCreateCommand: string | string[]` opt that runs
+   * once after the container is started (or first reused) and before
+   * the session is marked ready.
+   *
+   *   - Success → marker file written inside the container; subsequent
+   *     reuses with the same command skip the run.
+   *   - Failure (non-zero exit, timeout, or any throw from the backend)
+   *     → 'error' event with code 'post_create_command_failed', session
+   *     not marked ready, owned container torn down.
+   *   - Configurable timeout (default 5 min).
+   *   - Externally-managed containerId → caller owns lifecycle, so we
+   *     do NOT run the post-create hook.
+   */
+
+  /**
+   * "Fresh container" backend stub: the marker probe (`test -f
+   * /tmp/.chroxy-post-create-<hash>`) throws on first contact because
+   * the marker file does NOT yet exist. After the impl runs the
+   * postCreateCommand and writes the marker via `touch`, subsequent
+   * probes resolve clean — modelling the real container's filesystem.
+   *
+   * Extra `execResponses` (string-include-keyed) override the default
+   * `{ stdout: '', stderr: '' }` for the command itself, mirroring the
+   * non-post-create `backendStub` helper.
+   */
+  function freshContainerBackend({ execResponses = {} } = {}) {
+    let markerPresent = false
+    const calls = []
+    return {
+      calls,
+      async execInEnvironment(containerId, opts) {
+        calls.push({ containerId, ...opts })
+        const cmd = opts.cmd || ''
+        if (cmd.includes('.chroxy-post-create')) {
+          if (cmd.startsWith('test -f ')) {
+            if (markerPresent) return { stdout: '', stderr: '' }
+            const err = new Error('exit 1')
+            err.code = 'exec_failed'
+            err.exitCode = 1
+            throw err
+          }
+          if (cmd.startsWith('touch ')) {
+            markerPresent = true
+            return { stdout: '', stderr: '' }
+          }
+        }
+        const matcher = Object.keys(execResponses).find((needle) => cmd.includes(needle))
+        if (matcher) {
+          const resp = execResponses[matcher]
+          if (resp.throw) throw resp.throw
+          return { stdout: resp.stdout || '', stderr: resp.stderr || '' }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+  }
+
+  it('runs the postCreateCommand inside the container as the non-root user', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend({
+      execResponses: {
+        'npm install': { stdout: 'added 42 packages\n', stderr: '' },
+      },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    const installCalls = backend.calls.filter(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.equal(installCalls.length, 1, 'expected one npm install invocation')
+    assert.equal(installCalls[0].user, 'chroxy', 'post-create must run as the non-root user')
+
+    await session.destroy()
+  })
+
+  it('joins an array postCreateCommand with && so all steps run', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_ARR\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: ['npm install', 'npm run build'],
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const combined = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && c.cmd.includes('npm run build'),
+    )
+    assert.ok(combined, 'expected the combined && command to run')
+    assert.match(combined.cmd, /npm install.*&&.*npm run build/)
+
+    await session.destroy()
+  })
+
+  it('fails session start with a clear error event when post-create exits non-zero', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_FAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const installErr = Object.assign(new Error('exit 1: npm install failed'), {
+      code: 'exec_failed',
+      exitCode: 1,
+      stderr: 'npm ERR! missing package.json',
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'npm install': { throw: installErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, false, 'failed post-create must not mark session ready')
+    const postCreateErr = events.find((e) => /postCreateCommand/.test(e.message))
+    assert.ok(postCreateErr, 'expected a postCreateCommand error event')
+    assert.equal(postCreateErr.code, 'post_create_command_failed')
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_POSTCREATE_FAIL')),
+      'failed start must tear down the owned container')
+  })
+
+  it('forwards a configurable postCreateTimeoutMs to the backend exec', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_TO\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      postCreateTimeoutMs: 60_000,
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const installCall = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.ok(installCall, 'expected install invocation')
+    assert.equal(installCall.timeout, 60_000)
+
+    await session.destroy()
+  })
+
+  it('defaults the post-create timeout to 5 minutes', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_DEFTO\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const installCall = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.ok(installCall, 'expected install invocation')
+    assert.equal(installCall.timeout, 300_000)
+
+    await session.destroy()
+  })
+
+  it('surfaces a post-create timeout as a clear error event', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_HANG\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const timeoutErr = Object.assign(new Error('exec timed out after 100ms'), { code: 'ETIMEDOUT' })
+    const backend = freshContainerBackend({
+      execResponses: { 'sleep 999': { throw: timeoutErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'sleep 999',
+      postCreateTimeoutMs: 100,
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, false)
+    const event = events.find((e) => /postCreateCommand/.test(e.message))
+    assert.ok(event, 'expected post-create timeout error event')
+    assert.equal(event.code, 'post_create_command_failed')
+    assert.match(event.message, /timed out|ETIMEDOUT/)
+  })
+
+  it('writes a cache marker after a successful run', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_MARKER\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // After the command runs, the impl touches a marker file under
+    // /tmp/.chroxy-post-create-<hash> so a future reuse can skip the run.
+    const markerWrite = backend.calls.find(
+      (c) => c.cmd
+        && c.cmd.includes('.chroxy-post-create')
+        && (c.cmd.includes('touch ') || c.cmd.includes('> ')),
+    )
+    assert.ok(markerWrite, 'expected a marker-write call after successful post-create')
+
+    await session.destroy()
+  })
+
+  it('skips re-running postCreateCommand on pool reuse when the cache marker is present', async () => {
+    // Pool hit + marker present → command MUST NOT run again.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    let postCreateInvocations = 0
+    const backend = {
+      calls: [],
+      async execInEnvironment(containerId, opts) {
+        backend.calls.push({ containerId, ...opts })
+        // Marker probe: empty stdout/stderr signals "present" — the impl
+        // uses `test -f <marker>` which resolves clean on a hit.
+        if (opts.cmd && opts.cmd.includes('.chroxy-post-create') && !opts.cmd.includes('touch')) {
+          return { stdout: '', stderr: '' }
+        }
+        if (opts.cmd && opts.cmd.includes('npm install')) {
+          postCreateInvocations++
+          return { stdout: '', stderr: '' }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const pool = {
+      acquire() { return 'CONTAINER_WARM' },
+      async release() { return true },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._acquiredFromPool, true)
+    assert.equal(session._containerId, 'CONTAINER_WARM')
+    assert.equal(postCreateInvocations, 0,
+      'cache hit: postCreateCommand must not re-execute when marker is present')
+    const probeCalls = backend.calls.filter(
+      (c) => c.cmd && c.cmd.includes('.chroxy-post-create') && !c.cmd.includes('touch'),
+    )
+    assert.ok(probeCalls.length >= 1, 'expected at least one marker probe on pool reuse')
+
+    await session.destroy()
+  })
+
+  it('re-runs postCreateCommand on pool reuse if the marker is missing', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    let postCreateInvocations = 0
+    const backend = {
+      calls: [],
+      async execInEnvironment(containerId, opts) {
+        backend.calls.push({ containerId, ...opts })
+        // Marker probe: throw with exit 1 → "missing".
+        if (opts.cmd && opts.cmd.includes('.chroxy-post-create') && !opts.cmd.includes('touch')) {
+          const err = new Error('exit 1')
+          err.code = 'exec_failed'
+          err.exitCode = 1
+          err.stderr = ''
+          throw err
+        }
+        if (opts.cmd && opts.cmd.includes('npm ci')) {
+          postCreateInvocations++
+          return { stdout: '', stderr: '' }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const pool = {
+      acquire() { return 'CONTAINER_WARM_NEW_CMD' },
+      async release() { return true },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm ci',
+      _execFile,
+      _dockerBackend: backend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._acquiredFromPool, true)
+    assert.equal(postCreateInvocations, 1,
+      'cache miss on warm container: postCreateCommand must run')
+
+    await session.destroy()
+  })
+
+  it('does NOT run postCreateCommand when the session attaches to an external container', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+    })
+    let postCreateInvocations = 0
+    const backend = {
+      calls: [],
+      async execInEnvironment(containerId, opts) {
+        backend.calls.push({ containerId, ...opts })
+        if (opts.cmd && opts.cmd.includes('npm install')) {
+          postCreateInvocations++
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      containerId: 'EXTERNAL_MANAGED',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(postCreateInvocations, 0,
+      'external container: postCreateCommand must NOT run (caller-owned)')
+
+    await session.destroy()
+  })
+
+  it('default: postCreateCommand is null and no extra backend calls happen at start', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_NOPC\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = backendStub({ defaultResponse: { stdout: '', stderr: '' } })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    assert.equal(backend.calls.length, 0,
+      'with no postCreateCommand, the session must not probe / write any markers')
+
+    await session.destroy()
+  })
+})
+
 describe('docker-byok provider registration', () => {
   it('registerDockerProvider() wires docker-byok when environments are enabled and docker is available', async () => {
     // Spy on console.warn so accidental log noise during the test
