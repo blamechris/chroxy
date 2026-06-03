@@ -474,6 +474,154 @@ describe('DockerContainerPool — max age (#5045)', () => {
   })
 })
 
+describe('DockerContainerPool — structured events (#5044)', () => {
+  /**
+   * The pool exposes an EventEmitter surface so ops/dashboards can
+   * count hits, misses, releases and evictions without scraping log
+   * lines. Every event carries a `{ key, containerId, timestamp, ... }`
+   * payload; evictions additionally tag a `reason` so the caller can
+   * break the count down by cause (idle / over_cap / shutdown).
+   *
+   * The pool is opt-in (CHROXY_DOCKER_BYOK_POOL=1) so the emitter only
+   * needs to behave sanely when actually in use — but it must always
+   * be present (no listener-side null checks).
+   */
+
+  function collect(pool, events) {
+    const seen = []
+    for (const name of events) {
+      pool.on(name, (payload) => seen.push({ name, payload }))
+    }
+    return seen
+  }
+
+  it('emits pool:miss on acquire miss and pool:hit on acquire hit', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    const seen = collect(pool, ['pool:hit', 'pool:miss', 'pool:released'])
+
+    // First acquire — bucket is empty → miss.
+    assert.equal(pool.acquire('shape-a'), null)
+    // Release fills the bucket.
+    await pool.release('shape-a', 'CONTAINER_A')
+    // Second acquire — hit.
+    assert.equal(pool.acquire('shape-a'), 'CONTAINER_A')
+
+    const miss = seen.find((e) => e.name === 'pool:miss')
+    const hit = seen.find((e) => e.name === 'pool:hit')
+    const released = seen.find((e) => e.name === 'pool:released')
+
+    assert.ok(miss, 'pool:miss must fire on empty acquire')
+    assert.equal(miss.payload.key, 'shape-a')
+    assert.equal(miss.payload.containerId, null)
+    assert.equal(typeof miss.payload.timestamp, 'number')
+
+    assert.ok(released, 'pool:released must fire when a container is handed back')
+    assert.equal(released.payload.key, 'shape-a')
+    assert.equal(released.payload.containerId, 'CONTAINER_A')
+    assert.equal(typeof released.payload.timestamp, 'number')
+
+    assert.ok(hit, 'pool:hit must fire on successful acquire')
+    assert.equal(hit.payload.key, 'shape-a')
+    assert.equal(hit.payload.containerId, 'CONTAINER_A')
+    assert.equal(typeof hit.payload.timestamp, 'number')
+  })
+
+  it('tags eviction reason as over_cap when release exceeds the per-key cap', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      maxPerKey: 1,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    const seen = collect(pool, ['pool:evicted'])
+    await pool.release('k', 'C1')
+    await pool.release('k', 'C2')
+
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].payload.key, 'k')
+    assert.equal(seen[0].payload.containerId, 'C2')
+    assert.equal(seen[0].payload.reason, 'over_cap')
+    assert.equal(typeof seen[0].payload.timestamp, 'number')
+  })
+
+  it('tags eviction reason as idle when the idle timer fires', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    const seen = collect(pool, ['pool:evicted'])
+    await pool.release('k', 'C_IDLE')
+    const pending = timers.pending()
+    timers.runTimer(pending[0])
+    await new Promise((r) => setImmediate(r))
+
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].payload.reason, 'idle')
+    assert.equal(seen[0].payload.containerId, 'C_IDLE')
+    assert.equal(seen[0].payload.key, 'k')
+  })
+
+  it('shutdown emits pool:evicted{reason:shutdown} per container then a final pool:shutdown', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    const seen = collect(pool, ['pool:evicted', 'pool:shutdown'])
+    await pool.release('k1', 'C1')
+    await pool.release('k2', 'C2')
+    await pool.shutdown()
+
+    const evictions = seen.filter((e) => e.name === 'pool:evicted')
+    assert.equal(evictions.length, 2)
+    for (const ev of evictions) {
+      assert.equal(ev.payload.reason, 'shutdown')
+      assert.ok(['C1', 'C2'].includes(ev.payload.containerId))
+    }
+    const shutdownEvents = seen.filter((e) => e.name === 'pool:shutdown')
+    assert.equal(shutdownEvents.length, 1)
+    assert.equal(typeof shutdownEvents[0].payload.timestamp, 'number')
+    assert.equal(shutdownEvents[0].payload.drained, 2)
+    // Ordering: every per-container eviction must precede the final
+    // pool:shutdown so a listener that aggregates can drain its
+    // counters before the "done" signal.
+    const lastIdx = seen.length - 1
+    assert.equal(seen[lastIdx].name, 'pool:shutdown')
+  })
+
+  it('release after shutdown emits pool:evicted{reason:shutdown}', async () => {
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({ _execFile: execFile })
+    await pool.shutdown()
+    const seen = collect(pool, ['pool:evicted'])
+    await pool.release('k', 'C_LATE')
+    assert.equal(seen.length, 1)
+    assert.equal(seen[0].payload.reason, 'shutdown')
+    assert.equal(seen[0].payload.containerId, 'C_LATE')
+  })
+
+  it('is an EventEmitter — .on / .off / .removeAllListeners work', () => {
+    const pool = new DockerContainerPool({ _execFile: execFileStub() })
+    assert.equal(typeof pool.on, 'function')
+    assert.equal(typeof pool.off, 'function')
+    assert.equal(typeof pool.emit, 'function')
+    assert.equal(typeof pool.removeAllListeners, 'function')
+  })
+})
+
 describe('getSharedPool() — singleton + env wiring', () => {
   beforeEach(() => _resetSharedPool())
   afterEach(() => _resetSharedPool())
