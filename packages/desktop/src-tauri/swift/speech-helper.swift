@@ -61,19 +61,35 @@ func requestAuthorization(completion: @escaping (Bool) -> Void) {
     }
 }
 
-func startRecognition() {
-    let semaphore = DispatchSemaphore(value: 0)
+// Set to true by teardown() to break out of the main RunLoop.
+var done = false
+let doneLock = NSLock()
 
+func setDone() {
+    doneLock.lock()
+    done = true
+    doneLock.unlock()
+    // Wake the main RunLoop so its current `run(mode:before:)` returns promptly.
+    CFRunLoopStop(CFRunLoopGetMain())
+}
+
+func isDone() -> Bool {
+    doneLock.lock()
+    defer { doneLock.unlock() }
+    return done
+}
+
+func startRecognition() {
     requestAuthorization { granted in
         guard granted else {
             printJSON(["error": "Speech recognition permission denied"])
-            semaphore.signal()
+            setDone()
             return
         }
 
         guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
             printJSON(["error": "Speech recognizer not available"])
-            semaphore.signal()
+            setDone()
             return
         }
 
@@ -81,10 +97,11 @@ func startRecognition() {
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
 
-        // Prefer on-device recognition for privacy
-        if recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
+        // Note: do NOT set requiresOnDeviceRecognition = true unconditionally.
+        // When on-device assets are not downloaded for the user's locale, the
+        // recognition task hangs silently (no result, no error). Letting Speech
+        // pick its source — on-device if assets are ready, network otherwise —
+        // is reliably responsive across configurations.
 
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
@@ -98,20 +115,20 @@ func startRecognition() {
             try audioEngine.start()
         } catch {
             printJSON(["error": "Failed to start audio engine: \(error.localizedDescription)"])
-            semaphore.signal()
+            setDone()
             return
         }
 
         // Guard against concurrent teardown from recognition callback and stdin reader.
-        // Only the first caller to acquire the lock with done == false performs teardown.
-        let doneLock = NSLock()
-        var done = false
+        // Only the first caller to acquire the lock with `tornDown == false` performs teardown.
+        let teardownLock = NSLock()
+        var tornDown = false
 
         func teardown(stopEngine: Bool) {
-            doneLock.lock()
-            let alreadyDone = done
-            if !alreadyDone { done = true }
-            doneLock.unlock()
+            teardownLock.lock()
+            let alreadyDone = tornDown
+            if !alreadyDone { tornDown = true }
+            teardownLock.unlock()
 
             guard !alreadyDone else { return }
 
@@ -119,7 +136,7 @@ func startRecognition() {
                 audioEngine.stop()
                 inputNode.removeTap(onBus: 0)
             }
-            semaphore.signal()
+            setDone()
         }
 
         let task = recognizer.recognitionTask(with: request) { result, error in
@@ -160,8 +177,19 @@ func startRecognition() {
                 }
             }
         }
+    }
 
-        semaphore.wait()
+    // Apple's SFSpeechRecognizer.recognitionTask(with:resultHandler:) invokes
+    // its result handler on the MAIN THREAD. If we block the main thread on a
+    // semaphore (or anything else that doesn't service the runloop), the
+    // handler never fires and recognition is silent forever.
+    //
+    // Run the main RunLoop instead — it processes both dispatch queue work
+    // (the async authorization completion above) AND Apple framework callbacks
+    // (the recognition result handler). teardown() calls CFRunLoopStop, which
+    // returns control here so the function (and process) can exit cleanly.
+    while !isDone() {
+        RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0))
     }
 }
 
