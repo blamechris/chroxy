@@ -273,6 +273,278 @@ describe('NotificationsWidget — panel content + interactions', () => {
   })
 })
 
+// #5009 — a11y + theme polish follow-up to #5005. Pins the WAI-ARIA
+// Authoring Practices menu pattern (matching HeaderOverflowMenu #4980):
+// role="menu" + role="menuitem" rows, roving tabindex, ArrowDown/Up
+// wrap-around, Home/End jumps, focus-on-open, focus-restore on every
+// dismiss path, and aria-controls wiring.
+describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
+  it('trigger advertises aria-haspopup="menu" so AT announces the relationship', () => {
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1' })]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    const trigger = screen.getByTestId('notifications-widget-trigger')
+    expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('panel is role="menu" with menuitem rows once open', () => {
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1' }),
+          makeNotification({ id: 'n-2', requestId: 'req-other' }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const panel = screen.getByTestId('notifications-widget-panel')
+    expect(panel.getAttribute('role')).toBe('menu')
+    expect(
+      screen.getByTestId('notifications-widget-item-body-n-1').getAttribute('role'),
+    ).toBe('menuitem')
+    expect(
+      screen.getByTestId('notifications-widget-item-body-n-2').getAttribute('role'),
+    ).toBe('menuitem')
+    // aria-expanded flips when the panel opens.
+    expect(
+      screen.getByTestId('notifications-widget-trigger').getAttribute('aria-expanded'),
+    ).toBe('true')
+  })
+
+  it('wires aria-controls between trigger and panel', () => {
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1' })]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    const trigger = screen.getByTestId('notifications-widget-trigger')
+    const ariaControls = trigger.getAttribute('aria-controls')
+    expect(ariaControls).toBeTruthy()
+    fireEvent.click(trigger)
+    const panel = screen.getByTestId('notifications-widget-panel')
+    expect(panel.getAttribute('id')).toBe(ariaControls)
+  })
+
+  it('moves initial focus into the first row when the panel opens', () => {
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1', timestamp: 2000 }),
+          makeNotification({ id: 'n-2', requestId: 'req-2', timestamp: 1000 }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    // Sorted newest-first → n-1 (timestamp 2000) is first.
+    expect(document.activeElement).toBe(
+      screen.getByTestId('notifications-widget-item-body-n-1'),
+    )
+  })
+
+  it('uses roving tabindex — only the focused row is tabIndex=0', () => {
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1', timestamp: 3000 }),
+          makeNotification({ id: 'n-2', requestId: 'req-2', timestamp: 2000 }),
+          makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    expect(screen.getByTestId('notifications-widget-item-body-n-1').tabIndex).toBe(0)
+    expect(screen.getByTestId('notifications-widget-item-body-n-2').tabIndex).toBe(-1)
+    expect(screen.getByTestId('notifications-widget-item-body-n-3').tabIndex).toBe(-1)
+  })
+
+  it('ArrowDown moves focus to the next row with wrap-around', () => {
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1', timestamp: 3000 }),
+          makeNotification({ id: 'n-2', requestId: 'req-2', timestamp: 2000 }),
+          makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const first = screen.getByTestId('notifications-widget-item-body-n-1')
+    const second = screen.getByTestId('notifications-widget-item-body-n-2')
+    const third = screen.getByTestId('notifications-widget-item-body-n-3')
+    fireEvent.keyDown(first, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(second)
+    fireEvent.keyDown(second, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(third)
+    // Wrap from last → first
+    fireEvent.keyDown(third, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(first)
+  })
+
+  it('ArrowUp moves focus to the previous row with wrap-around', () => {
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1', timestamp: 3000 }),
+          makeNotification({ id: 'n-2', requestId: 'req-2', timestamp: 2000 }),
+          makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const first = screen.getByTestId('notifications-widget-item-body-n-1')
+    const third = screen.getByTestId('notifications-widget-item-body-n-3')
+    // Wrap from first → last
+    fireEvent.keyDown(first, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(third)
+  })
+
+  it('Home jumps focus to the first row', () => {
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1', timestamp: 3000 }),
+          makeNotification({ id: 'n-2', requestId: 'req-2', timestamp: 2000 }),
+          makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const first = screen.getByTestId('notifications-widget-item-body-n-1')
+    const third = screen.getByTestId('notifications-widget-item-body-n-3')
+    fireEvent.keyDown(first, { key: 'End' })
+    expect(document.activeElement).toBe(third)
+    fireEvent.keyDown(third, { key: 'Home' })
+    expect(document.activeElement).toBe(first)
+  })
+
+  it('End jumps focus to the last row', () => {
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1', timestamp: 3000 }),
+          makeNotification({ id: 'n-2', requestId: 'req-2', timestamp: 2000 }),
+          makeNotification({ id: 'n-3', requestId: 'req-3', timestamp: 1000 }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const first = screen.getByTestId('notifications-widget-item-body-n-1')
+    const third = screen.getByTestId('notifications-widget-item-body-n-3')
+    fireEvent.keyDown(first, { key: 'End' })
+    expect(document.activeElement).toBe(third)
+  })
+
+  it('Escape returns focus to the trigger', () => {
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1' })]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    const trigger = screen.getByTestId('notifications-widget-trigger')
+    fireEvent.click(trigger)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('returns focus to the trigger after row activation (so Tab continues into the next header control)', () => {
+    const onMarkRead = vi.fn()
+    const onSwitchSession = vi.fn()
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1', sessionId: 'sess-target' })]}
+        onSwitchSession={onSwitchSession}
+        onMarkRead={onMarkRead}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    const trigger = screen.getByTestId('notifications-widget-trigger')
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByTestId('notifications-widget-item-body-n-1'))
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('returns focus to the trigger after outside-click dismissal', () => {
+    render(
+      <div>
+        <button data-testid="outside-btn">outside</button>
+        <NotificationsWidget
+          notifications={[makeNotification({ id: 'n-1' })]}
+          onSwitchSession={vi.fn()}
+          onMarkRead={vi.fn()}
+          onMarkAllRead={vi.fn()}
+          onDismiss={vi.fn()}
+        />
+      </div>,
+    )
+    const trigger = screen.getByTestId('notifications-widget-trigger')
+    fireEvent.click(trigger)
+    fireEvent.mouseDown(screen.getByTestId('outside-btn'))
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('returns focus to the trigger when the panel is dismissed via window blur', () => {
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1' })]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    const trigger = screen.getByTestId('notifications-widget-trigger')
+    fireEvent.click(trigger)
+    expect(screen.getByTestId('notifications-widget-panel')).toBeInTheDocument()
+    fireEvent.blur(window)
+    expect(screen.queryByTestId('notifications-widget-panel')).not.toBeInTheDocument()
+    expect(document.activeElement).toBe(trigger)
+  })
+})
+
 describe('NotificationsWidget — end-to-end: viewing decrements unread', () => {
   it('clicking an item marks it read so the badge decrements on next render', () => {
     // Simulate the App-side wiring: the widget receives notifications + the

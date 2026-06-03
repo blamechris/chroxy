@@ -26,13 +26,23 @@
  * follow-up issue.
  *
  * Dismiss pattern mirrors HeaderOverflowMenu (#4974/#4980): capturing
- * mousedown for outside click, Escape, window blur. Focus is NOT trapped
- * inside the panel because the list can be long and operators may want
- * to Tab into the surrounding header — assistive tech still gets the
- * `role="dialog"` + `aria-label` wire-up, and the trigger's
- * `aria-expanded` advertises the open state.
+ * mousedown for outside click, Escape, window blur.
+ *
+ * #5009 — a11y + theme polish (follow-up to #5005):
+ *   - Full WAI-ARIA Authoring Practices menu pattern (matches
+ *     HeaderOverflowMenu #4980): role="menu", role="menuitem" rows,
+ *     roving tabindex, ArrowDown/Up wrap-around, Home/End jumps, Enter
+ *     activates focused row.
+ *   - Focus moves into the first item when the panel opens and returns
+ *     to the trigger on every dismiss path (Escape, outside-click,
+ *     window blur, item activation).
+ *   - `aria-controls` wires the trigger to the panel id via `useId()`.
+ *   - Bell + eye glyphs are inline SVG (consistent with other header
+ *     icons that render via CSS / plain unicode, not platform color
+ *     emoji fonts — important inside stripped-down Tauri webviews).
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { SessionNotification } from '../store/types'
 
 const EVENT_LABELS: Record<SessionNotification['eventType'], string> = {
@@ -70,6 +80,55 @@ function formatRelative(ts: number, now: number): string {
   return `${day}d ago`
 }
 
+/**
+ * Inline bell glyph (#5009). Replaces the U+1F514 emoji code-point so
+ * the trigger renders consistently in webviews without color-emoji
+ * fonts (e.g. stripped-down Tauri WKWebView profiles) — matches the
+ * approach taken by the surrounding header icons (`+`, `⋯`).
+ */
+function BellIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+    </svg>
+  )
+}
+
+/** Inline eye glyph (#5009). Same rationale as BellIcon. */
+function EyeIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
 export function NotificationsWidget({
   notifications,
   onSwitchSession,
@@ -78,8 +137,18 @@ export function NotificationsWidget({
   onDismiss,
 }: NotificationsWidgetProps) {
   const [open, setOpen] = useState(false)
+  // #5009 — roving tabindex: tracks which row is currently in the Tab
+  // order. Reset to 0 on open so re-opens always land on the first row.
+  const [focusedIndex, setFocusedIndex] = useState(0)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
+  // #5009 — item refs for imperative focus on arrow-key nav. A ref array
+  // keeps the API independent of the data-testid contract and avoids
+  // DOM lookups on every focus shift. Mirrors HeaderOverflowMenu.
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  // #5009 — stable id for `aria-controls` wire-up between trigger and
+  // panel. `useId` is React 18+ SSR-safe; matches HeaderOverflowMenu.
+  const panelId = useId()
 
   // Newest first — sorted by timestamp descending. Memoised so the array
   // reference is stable across re-renders for downstream useEffect deps.
@@ -103,13 +172,15 @@ export function NotificationsWidget({
       const target = e.target as Node
       if (panelRef.current && panelRef.current.contains(target)) return
       if (triggerRef.current && triggerRef.current.contains(target)) return
+      // #5009 — focus restoration is handled centrally by the cleanup
+      // effect below; just flip `open` and let every dismiss path
+      // converge through the same restore branch.
       setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
         setOpen(false)
-        triggerRef.current?.focus()
       }
     }
     const onBlur = () => setOpen(false)
@@ -122,6 +193,56 @@ export function NotificationsWidget({
       window.removeEventListener('blur', onBlur)
     }
   }, [open])
+
+  // #5009 — on open, reset focused index AND imperatively move focus to
+  // the first row. Mirrors HeaderOverflowMenu's open-focus effect. The
+  // tabIndex={0} alone only governs Tab traversal; programmatic focus is
+  // required to land the cursor inside the panel for keyboard users.
+  useEffect(() => {
+    if (!open) return
+    setFocusedIndex(0)
+    const first = itemRefs.current[0]
+    if (first) first.focus()
+  }, [open])
+
+  // #5009 — single focus-restore cleanup runs on every open → close
+  // transition so every dismiss path (Escape, outside-click, window
+  // blur, item activation) reliably returns focus to the trigger.
+  // Matches the pattern landed for HeaderOverflowMenu in #4996.
+  useEffect(() => {
+    if (!open) return
+    const active = document.activeElement as HTMLElement | null
+    const previouslyFocused =
+      active && active !== document.body && !panelRef.current?.contains(active)
+        ? active
+        : triggerRef.current
+    return () => {
+      if (previouslyFocused && previouslyFocused.isConnected) {
+        previouslyFocused.focus()
+      }
+    }
+  }, [open])
+
+  // #5009 — when focusedIndex changes (via arrow keys / Home / End),
+  // imperatively move focus to the matching row.
+  useEffect(() => {
+    if (!open) return
+    const target = itemRefs.current[focusedIndex]
+    if (target && document.activeElement !== target) {
+      target.focus()
+    }
+  }, [focusedIndex, open])
+
+  // #5009 — clamp focusedIndex when the visible row set shrinks while
+  // the panel is open (e.g. an alert is dismissed mid-interaction). If
+  // we don't clamp, no row holds tabIndex={0} and the focus-sync effect
+  // reads a null ref — arrow nav silently stops working.
+  useEffect(() => {
+    if (!open) return
+    if (focusedIndex >= sorted.length && sorted.length > 0) {
+      setFocusedIndex(sorted.length - 1)
+    }
+  }, [sorted.length, focusedIndex, open])
 
   const badgeText =
     unreadCount === 0
@@ -144,13 +265,16 @@ export function NotificationsWidget({
         data-testid="notifications-widget-trigger"
         onClick={() => setOpen((prev) => !prev)}
         aria-label={triggerLabel}
-        aria-haspopup="dialog"
+        aria-haspopup="menu"
         aria-expanded={open}
+        // #5009 — aria-controls links the trigger to the panel's id so
+        // assistive tech announces the relationship. Per WAI-ARIA the
+        // attribute is allowed regardless of open state.
+        aria-controls={panelId}
         title={triggerLabel}
       >
-        {/* Inline bell glyph — avoids pulling an icon font for one symbol. */}
-        <span className="notifications-widget-icon" aria-hidden="true">
-          {'\u{1F514}'}
+        <span className="notifications-widget-icon">
+          <BellIcon />
         </span>
         {badgeText !== null && (
           <span
@@ -165,10 +289,12 @@ export function NotificationsWidget({
       {open && (
         <div
           ref={panelRef}
+          id={panelId}
           className="notifications-widget-panel"
           data-testid="notifications-widget-panel"
-          role="dialog"
+          role="menu"
           aria-label="Intervention notifications"
+          aria-orientation="vertical"
         >
           <div className="notifications-widget-header">
             <span className="notifications-widget-title">Notifications</span>
@@ -195,7 +321,7 @@ export function NotificationsWidget({
               className="notifications-widget-list"
               data-testid="notifications-widget-list"
             >
-              {sorted.map((n) => {
+              {sorted.map((n, index) => {
                 const isUnread = n.readAt === undefined
                 const rowClass = [
                   'notifications-widget-item',
@@ -204,6 +330,41 @@ export function NotificationsWidget({
                     : 'notifications-widget-item--read',
                   `notifications-widget-item--${n.eventType}`,
                 ].join(' ')
+                const isFocused = focusedIndex === index
+                const handleKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+                  switch (e.key) {
+                    case 'ArrowDown': {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setFocusedIndex((i) => (i + 1) % sorted.length)
+                      break
+                    }
+                    case 'ArrowUp': {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setFocusedIndex((i) => (i - 1 + sorted.length) % sorted.length)
+                      break
+                    }
+                    case 'Home': {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setFocusedIndex(0)
+                      break
+                    }
+                    case 'End': {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setFocusedIndex(sorted.length - 1)
+                      break
+                    }
+                    // Escape is handled at the document level so it
+                    // still fires when focus has drifted away from the
+                    // panel. Enter/Space activate the body button's
+                    // default click handler — no extra wire-up needed.
+                    default:
+                      break
+                  }
+                }
                 return (
                   <li
                     key={n.id}
@@ -212,7 +373,17 @@ export function NotificationsWidget({
                     data-read={isUnread ? 'false' : 'true'}
                   >
                     <button
+                      ref={(node) => {
+                        itemRefs.current[index] = node
+                      }}
                       type="button"
+                      role="menuitem"
+                      // #5009 — roving tabindex: only the focused row
+                      // is in the Tab order. The rest stay
+                      // programmatically focusable (arrow-key handler
+                      // calls .focus()) without polluting the outer
+                      // header's Tab order.
+                      tabIndex={isFocused ? 0 : -1}
                       className="notifications-widget-item-body"
                       data-testid={`notifications-widget-item-body-${n.id}`}
                       onClick={() => {
@@ -220,6 +391,7 @@ export function NotificationsWidget({
                         onSwitchSession(n.sessionId)
                         setOpen(false)
                       }}
+                      onKeyDown={handleKeyDown}
                     >
                       <span className="notifications-widget-item-type">
                         {EVENT_LABELS[n.eventType]}
@@ -247,8 +419,7 @@ export function NotificationsWidget({
                             onMarkRead(n.id)
                           }}
                         >
-                          {/* eye glyph */}
-                          {'\u{1F441}'}
+                          <EyeIcon />
                         </button>
                       )}
                       <button
