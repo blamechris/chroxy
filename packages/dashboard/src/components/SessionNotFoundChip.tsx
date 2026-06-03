@@ -25,8 +25,10 @@ import type { CSSProperties } from 'react'
 
 export interface SessionNotFoundChipProps {
   /**
-   * Server-provided error text — preserved verbatim in the title attribute
-   * for operator triage and as the chip's secondary line.
+   * Raw server error text. Preserved verbatim in the `title` attribute
+   * for operator triage (long-press / hover reveal); not rendered in the
+   * primary chip body. Treat as the source-of-truth string when reporting
+   * a SESSION_NOT_FOUND from this UI.
    */
   message: string
   /**

@@ -1123,8 +1123,8 @@ export function handleSessionError(
       ? msg.boundSessionName
       : null
   // #4982 — only forward when present + a non-empty string. Defense in
-  // depth against malformed wire payloads (matches the resume_unknown
-  // approach in handleError's attemptedResumeId branch).
+  // depth against malformed wire payloads (matches the attemptedResumeId
+  // trimming/guard branch in handleMessage).
   const attemptedSessionId =
     typeof msg.attemptedSessionId === 'string' && msg.attemptedSessionId.trim().length > 0
       ? msg.attemptedSessionId.trim()
