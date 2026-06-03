@@ -1393,6 +1393,195 @@ describe('DockerByokSession — snapshot / restore (#5023)', () => {
   })
 })
 
+describe('DockerByokSession — snapshot name validation (#5076)', () => {
+  /**
+   * The `name` arg is currently only persisted into the metadata
+   * sidecar (the tag is auto-generated), but it is validated up front
+   * against Docker tag rules so a future revision can surface it into
+   * the tag without breaking callers.
+   *
+   * Rules enforced by `_resolveSnapshotName`:
+   *   - undefined / null   → fall back to tag slug (the omitted case)
+   *   - whitespace-only    → EINVAL (per #5076 AC)
+   *   - non-string         → EINVAL
+   *   - > 64 chars         → EINVAL
+   *   - uppercase or       → EINVAL
+   *     chars outside
+   *     [a-z0-9._-], or
+   *     leading . / -
+   *
+   * The validation runs BEFORE docker commit so a bad name does not
+   * leave a stranded tag in the daemon.
+   */
+  function backendStubCounting() {
+    const calls = { commit: [] }
+    return {
+      calls,
+      async execInEnvironment() {
+        return { stdout: '', stderr: '' }
+      },
+      async commitEnvironment(containerId, imageTag) {
+        calls.commit.push({ containerId, imageTag })
+        return `sha256:${imageTag.replace(/[^a-z0-9]/gi, '').slice(0, 64)}`
+      },
+    }
+  }
+
+  async function startedSession({ backend, snapshotsDir } = {}) {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_NV\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend || backendStubCounting(),
+      snapshotsDir: snapshotsDir || join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    return session
+  }
+
+  it('accepts a valid lowercase name and propagates it through to metadata', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap = await session.snapshot({ name: 'after-deps.v1_2' })
+    assert.equal(snap.name, 'after-deps.v1_2')
+    // Commit still ran (validation passed; docker side fired).
+    assert.equal(backend.calls.commit.length, 1)
+    await session.destroy()
+  })
+
+  it('omitted name falls back to the tag slug (auto-generated)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap = await session.snapshot()
+    // Tag slug shape: `<16-hex>-<13+ digit ts>`
+    assert.match(snap.name, /^[a-f0-9]{16}-\d{13,}$/)
+    assert.equal(snap.tag.split(':').pop(), snap.name)
+    await session.destroy()
+  })
+
+  it('null and undefined name both fall back to the tag slug', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap1 = await session.snapshot({ name: undefined })
+    assert.equal(snap1.tag.split(':').pop(), snap1.name)
+    const snap2 = await session.snapshot({ name: null })
+    assert.equal(snap2.tag.split(':').pop(), snap2.name)
+    await session.destroy()
+  })
+
+  it('rejects whitespace-only name with EINVAL BEFORE docker commit fires', async () => {
+    // #5076 AC: a string that trims to nothing is not "omitted" — the
+    // caller passed something and it carries no usable identifier, so
+    // reject at the API boundary rather than silently substituting the
+    // slug. `undefined`/`null` remain the "name is optional" sentinel.
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    for (const bad of ['', '   ', '\t', '\n', ' \t \n ']) {
+      await assert.rejects(
+        () => session.snapshot({ name: bad }),
+        (err) => err.code === 'EINVAL' && /empty|whitespace/i.test(err.message),
+        `expected EINVAL for ${JSON.stringify(bad)}`,
+      )
+    }
+    assert.equal(backend.calls.commit.length, 0, 'commit must not run on whitespace-only name')
+    await session.destroy()
+  })
+
+  it('rejects non-string name with EINVAL BEFORE docker commit fires', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    for (const bad of [123, true, {}, [], Symbol('x')]) {
+      await assert.rejects(
+        () => session.snapshot({ name: bad }),
+        (err) => err.code === 'EINVAL' && /must be a string/i.test(err.message),
+      )
+    }
+    assert.equal(backend.calls.commit.length, 0, 'commit must not run on invalid name')
+    await session.destroy()
+  })
+
+  it('rejects name with uppercase characters', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    await assert.rejects(
+      () => session.snapshot({ name: 'After-Deps' }),
+      (err) => err.code === 'EINVAL' && /lowercase/i.test(err.message),
+    )
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('rejects name with invalid characters (space, slash, colon, etc.)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    for (const bad of ['has space', 'has/slash', 'has:colon', 'has@at', 'has!bang', 'has,comma']) {
+      await assert.rejects(
+        () => session.snapshot({ name: bad }),
+        (err) => err.code === 'EINVAL' && /lowercase|\[a-z0-9/i.test(err.message),
+        `expected EINVAL for ${JSON.stringify(bad)}`,
+      )
+    }
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('rejects name with a leading dot or dash (not a valid Docker tag start)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    await assert.rejects(
+      () => session.snapshot({ name: '.hidden' }),
+      (err) => err.code === 'EINVAL',
+    )
+    await assert.rejects(
+      () => session.snapshot({ name: '-leading-dash' }),
+      (err) => err.code === 'EINVAL',
+    )
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('accepts a name with a leading underscore (Docker tag grammar permits it)', async () => {
+    // Docker's tag grammar is `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}` — a
+    // leading `_` is explicitly valid. We mirror that minus the
+    // uppercase half. Pins the difference vs. leading `.` / `-`, which
+    // ARE rejected.
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap = await session.snapshot({ name: '_internal' })
+    assert.equal(snap.name, '_internal')
+    assert.equal(backend.calls.commit.length, 1)
+    await session.destroy()
+  })
+
+  it('rejects name longer than 64 characters', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const tooLong = 'a'.repeat(65)
+    await assert.rejects(
+      () => session.snapshot({ name: tooLong }),
+      (err) => err.code === 'EINVAL' && /65 chars.*max is 64/i.test(err.message),
+    )
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('accepts a name of exactly 64 characters (boundary)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const max = 'a'.repeat(64)
+    const snap = await session.snapshot({ name: max })
+    assert.equal(snap.name, max)
+    assert.equal(backend.calls.commit.length, 1)
+    await session.destroy()
+  })
+})
+
 describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
   /**
    * Acceptance: a `postCreateCommand: string | string[]` opt that runs
