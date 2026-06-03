@@ -449,26 +449,40 @@ describe('conversation-handlers', () => {
         // Until #4929 wires a structured error code, the contract is that the
         // user sees an actionable session_error rather than a crash or silent
         // success.
+        //
+        // IMPORTANT: do NOT pass a `cwd` here. validateCwdAllowed runs BEFORE
+        // createSession (conversation-handlers.js:83-89) and a bogus cwd would
+        // short-circuit on the path-hygiene check, never reaching the spy.
+        // That makes the test pass vacuously (Copilot caught this on PR #4936).
+        // With no cwd in the message, the handler skips the cwd guard and the
+        // createSession spy is the next thing on the path — its throw is the
+        // ONLY way ctx._sent ends up with a session_error.
         const sessions = new Map()
         const activeSession = createMockSession()
         Object.setPrototypeOf(activeSession, CliSession.prototype)
         sessions.set('active-cli', { session: activeSession, name: 'Active', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
+        const createSessionErr = new Error('Stale conversation: no transcript found for 00000000-0000-0000-0000-0000000dead0')
         ctx.sessionManager.createSession = createSpy(() => {
-          throw new Error('Directory does not exist: /nonexistent')
+          throw createSessionErr
         })
         const client = makeClient({ activeSessionId: 'active-cli' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
           conversationId: '00000000-0000-0000-0000-0000000dead0',
-          cwd: '/nonexistent',
         }, ctx)
 
+        // Pin that createSession actually ran — without this assertion a
+        // future regression that re-introduces an early-return above
+        // createSession (e.g. a new gate) would silently make this test
+        // vacuous again.
+        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+          'createSession must have been called so the catch-block path is exercised')
         const sessionErrors = ctx._sent.filter(m => m.type === 'session_error')
         assert.equal(sessionErrors.length, 1,
           'a single session_error must be sent when createSession throws')
-        assert.match(sessionErrors[0].message, /Directory does not exist/,
+        assert.match(sessionErrors[0].message, /Stale conversation/,
           'the underlying createSession error message must reach the client (#4929 will replace this with a structured error code)')
       })
 
