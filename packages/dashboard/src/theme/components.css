@@ -5027,6 +5027,45 @@
   outline-offset: 2px;
 }
 
+/* #4695 — prominent "New Session" chrome button. Lives in header-right
+   ahead of the icon-only buttons (Skills / Copy / Settings) so it is
+   the first affordance a new user spots. Uses the accent color filled
+   in (rather than outlined) to read as the primary chrome action. */
+.chrome-new-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent-blue);
+  color: #fff;
+  border: 1px solid var(--accent-blue);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+
+.chrome-new-session-btn:hover {
+  opacity: 0.88;
+}
+
+.chrome-new-session-btn:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+.chrome-new-session-icon {
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 600;
+}
+
+.chrome-new-session-label {
+  white-space: nowrap;
+}
+
 /* --- Settings panel --- */
 
 .settings-backdrop {

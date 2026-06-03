@@ -85,6 +85,17 @@ vi.mock('./components/PermissionPrompt', () => ({
   ),
 }))
 
+// #4695 — CreateSessionModal pulls multiple store-callback selectors
+// (setDirectoryListingCallback / requestDirectoryListing / …) that the
+// App-test store mock doesn't enumerate. Stubbing the modal lets the
+// chrome-new-session click assertion verify the `open` prop transition
+// without dragging in directory-browser store wiring. Production
+// behaviour is exercised by the CreateSessionModal*.test.tsx suites.
+vi.mock('./components/CreateSessionModal', () => ({
+  CreateSessionModal: (props: { open: boolean }) =>
+    props.open ? <div data-testid="create-session-modal-mock" /> : null,
+}))
+
 vi.mock('./components/StdinDisabledBanner', () => ({
   StdinDisabledBanner: (props: {
     visible: boolean
@@ -2062,6 +2073,57 @@ describe('App', () => {
       expect(badge, 'version-badge must exist').toBeTruthy()
       expect(badge!.getAttribute('title'), 'version-badge needs title').toBeTruthy()
       expect(badge!.getAttribute('aria-label'), 'version-badge needs aria-label').toBeTruthy()
+    })
+  })
+
+  // #4695 — prominent chrome-level "New Session" entry point.
+  //
+  // The per-project sidebar button (`sidebar-new-session-<path>`) and the
+  // command palette (`new-session` id) were the only two entry points
+  // before this change — neither discoverable to a first-time user
+  // scanning the dashboard chrome. The chrome button lives in
+  // `header-right` and reuses the existing handleNewSession path
+  // (setShowCreateSession → CreateSessionModal), so the test pins:
+  //   1. The button renders inside #header (always-visible chrome).
+  //   2. It has accessible title + aria-label (matches the #4630
+  //      header-button convention checked above).
+  //   3. Clicking it opens the Create Session modal (the modal renders
+  //      its overlay only when open=true, mirrored on Modal.tsx's
+  //      `if (!open) return null` guard).
+  describe('chrome-new-session button (#4695)', () => {
+    const baseHeaderState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    it('renders inside the dashboard #header chrome', () => {
+      stateOverrides = baseHeaderState
+      const { container } = render(<App />)
+      const header = container.querySelector('#header')
+      expect(header, '#header must render').toBeTruthy()
+      const btn = within(header as HTMLElement).getByTestId('chrome-new-session')
+      expect(btn).toBeInTheDocument()
+    })
+
+    it('exposes accessible title + aria-label + visible "New Session" label', () => {
+      stateOverrides = baseHeaderState
+      render(<App />)
+      const btn = screen.getByTestId('chrome-new-session')
+      expect(btn.getAttribute('aria-label'), 'chrome-new-session needs aria-label').toBe('New session')
+      expect(btn.getAttribute('title'), 'chrome-new-session needs title with shortcut hint').toMatch(/New session/)
+      // The visible label is part of the muscle-memory affordance —
+      // without it the button reads as just another icon glyph.
+      expect(btn.textContent).toMatch(/New Session/)
+    })
+
+    it('opens the Create Session modal on click', () => {
+      stateOverrides = baseHeaderState
+      render(<App />)
+      // Modal mock renders the testID node only when `open=true`.
+      expect(screen.queryByTestId('create-session-modal-mock')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('chrome-new-session'))
+      expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
     })
   })
 })

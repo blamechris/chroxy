@@ -64,6 +64,7 @@ import { formatBindingForDisplay, parseBinding } from './shortcuts/registry'
 import { writeText as clipboardWriteText } from './utils/clipboard'
 import { formatQuestionAnswerSummary } from './utils/questionAnswerSummary'
 import { useTauriEvents } from './hooks/useTauriEvents'
+import { useTauriMenuEvents } from './hooks/useTauriMenuEvents'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
@@ -1225,6 +1226,14 @@ export function App() {
     setShowCreateSession(true)
   }, [])
 
+  // #4695 — bridge the macOS menu bar "File > New Session" item to
+  // `handleNewSession` (the same callback the chrome "New Session"
+  // button uses). The sidebar's per-project "+" row and the command
+  // palette's `new-session` entry currently open the create-session
+  // dialog through their own inline handlers, so they are NOT routed
+  // through this hook. Hook is a no-op outside Tauri (web dashboard).
+  useTauriMenuEvents({ onNewSession: handleNewSession })
+
   const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean; skipPermissions?: boolean }) => {
     setSessionCreateError(null)
     setIsCreatingSession(true)
@@ -1829,6 +1838,30 @@ export function App() {
           />
         </div>
         <div className="header-right">
+          {/* #4695 — prominent always-visible New Session entry point.
+              Previously the affordance lived only on the per-project
+              sidebar row (`sidebar-new-session-<path>`) and inside the
+              command palette, neither of which a first-time user finds
+              by scanning the chrome. This button and the macOS menu-bar
+              "File > New Session" item both invoke `handleNewSession`,
+              which clears `pendingCwd` and opens the create-session
+              dialog without a preselected project. The sidebar's "+"
+              row and the palette's `new-session` command each have
+              their own inline handlers (the sidebar passes a cwd; the
+              palette opens the dialog directly), so they share the end
+              state (`setShowCreateSession(true)`) but not this
+              callback. */}
+          <button
+            type="button"
+            className="chrome-new-session-btn"
+            data-testid="chrome-new-session"
+            onClick={handleNewSession}
+            aria-label="New session"
+            title={`New session (${formatShortcutKeys('Cmd+N')})`}
+          >
+            <span className="chrome-new-session-icon" aria-hidden="true">+</span>
+            <span className="chrome-new-session-label">New Session</span>
+          </button>
           {/* #3209: Skills toggle, moved to header-right as an icon
               button. Was previously a text button in header-center
               where it competed for space with the model dropdown. */}
