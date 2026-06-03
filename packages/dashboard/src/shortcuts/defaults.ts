@@ -194,6 +194,13 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   // id, which would break Shift+Space everywhere outside text inputs.
   // The `sessionbar` scope is only consumed by the registry's
   // list()/cheat-sheet path, never by matchEvent.
+  //
+  // #4970 — for the same reason (SessionBar.tsx hardcodes the keys),
+  // this entry is intentionally non-rebindable in Settings today.
+  // ShortcutsSection inspects `scope === 'sessionbar'` and disables the
+  // Edit/Reset buttons so a user-issued rebind cannot silently fail.
+  // When the SessionBar keydown handler is migrated to consult
+  // `registry.matchEvent(e, 'sessionbar')`, drop the read-only guard.
   {
     id: 'session.reorder.lift',
     defaultBinding: 'shift+space',
