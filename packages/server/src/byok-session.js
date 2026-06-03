@@ -35,6 +35,7 @@ import { BUILTIN_TOOLS, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } f
 import { executeBuiltinTool } from './byok-tool-executor.js'
 import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
 import { MCPFleet, MCP_TOOL_PREFIX } from './byok-mcp-fleet.js'
+import { getSubagentProfile, SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
 
 const log = createLogger('byok-session')
 
@@ -321,6 +322,13 @@ export class ClaudeByokSession extends BaseSession {
     // leak into a future turn.
     this._subagentUsageThisTurn = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     this._subagentCostThisTurn = 0
+
+    // #5018: per-session built-in tool allowlist. Set by _executeTaskTool
+    // ONLY on child sessions spawned with a `subagent_type` profile that
+    // carries a restricted `toolSet`. When null (the default / unrestricted
+    // case), `_buildTools()` short-circuits the filter so non-subagent
+    // sessions and general-purpose subagents pay no observable cost.
+    this._allowedBuiltinToolNames = null
 
     // #4076: MCP config discovery. Parses ~/.claude.json (or an
     // override) for the `mcpServers` block. Parse-only at this stage —
@@ -1253,6 +1261,28 @@ export class ClaudeByokSession extends BaseSession {
       }
       inheritMcp = input.inherit_mcp
     }
+    // #5018: subagent_type profile lookup. When the model passes a
+    // `subagent_type`, look it up in the registry and apply the profile
+    // (systemPrompt + toolSet) to the child before its first sendMessage.
+    // Unknown values fall back to v1 behaviour (no profile applied) and
+    // emit a warn log per the issue's acceptance criteria — keeps the
+    // delegation forward-compatible with a future model that requests a
+    // profile id this server doesn't yet know about, rather than failing
+    // the entire tool call. When omitted, no profile is applied and the
+    // v1 default behaviour stands.
+    let subagentProfile = null
+    if (input?.subagent_type !== undefined) {
+      subagentProfile = getSubagentProfile(input.subagent_type)
+      if (!subagentProfile) {
+        const got = typeof input.subagent_type === 'string'
+          ? `"${input.subagent_type}"`
+          : String(input.subagent_type)
+        log.warn(
+          `Task tool: unknown subagent_type ${got}; falling back to v1 default (no profile applied). `
+          + `Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}.`,
+        )
+      }
+    }
     if (signal?.aborted) {
       return { content: 'Interrupted by user before subagent spawned', isError: true }
     }
@@ -1330,6 +1360,23 @@ export class ClaudeByokSession extends BaseSession {
       // setPermissionMode) is safe here: the child is fresh, not busy,
       // and has no pending permissions to flush.
       child.permissionMode = childPermissionMode
+      // #5018: apply the subagent profile (validated above). Route the
+      // systemPrompt through setSessionPreamble so the profile follows
+      // the same trim + SESSION_PREAMBLE_MAX_LENGTH cap as user-authored
+      // preambles — keeps the system-prompt size bounded and predictable
+      // even if a future profile prompt grows. The profile's systemPrompt
+      // rides in the same slot _buildSystemPrompt() reads, so the existing
+      // skills/chroxy-hint ordering still composes. When the toolSet is
+      // restricted to a name list, install the filter on the child so its
+      // `_buildTools()` only emits the allowed built-ins; `toolSet: 'all'`
+      // leaves the filter unset so the child sees the full BUILTIN_TOOLS
+      // array.
+      if (subagentProfile) {
+        child.setSessionPreamble(subagentProfile.systemPrompt)
+        if (subagentProfile.toolSet !== 'all') {
+          child._allowedBuiltinToolNames = new Set(subagentProfile.toolSet)
+        }
+      }
       this._subagentSessions.set(toolUseId, child)
     } catch (ctorErr) {
       // Balance the agent_spawned emit + _activeAgents.set above so the
@@ -1711,10 +1758,23 @@ export class ClaudeByokSession extends BaseSession {
   // turn rather than cached because the cost is trivial and the fleet's
   // READY-state filter is the source of truth for which servers are
   // contributing right now.
+  //
+  // #5018: when this session is a subagent that was spawned with a
+  // restricted profile, `_allowedBuiltinToolNames` is a Set of the
+  // allowed built-in tool names. Filter BUILTIN_TOOLS down to just
+  // those — MCP tools pass through unchanged in v1 (gating MCP per
+  // profile is a follow-up; the immediate value of a restricted
+  // profile like code-reviewer is preventing accidental Write/Edit/Bash,
+  // and MCP tools are off by default in subagents anyway). Unrestricted
+  // (or non-subagent) sessions skip the filter entirely so this stays
+  // a zero-cost path for the common case.
   _buildTools() {
-    if (!this._mcpFleet) return BUILTIN_TOOLS
+    const builtins = this._allowedBuiltinToolNames
+      ? BUILTIN_TOOLS.filter((t) => this._allowedBuiltinToolNames.has(t.name))
+      : BUILTIN_TOOLS
+    if (!this._mcpFleet) return builtins
     const mcp = this._mcpFleet.anthropicTools
-    return mcp.length === 0 ? BUILTIN_TOOLS : [...BUILTIN_TOOLS, ...mcp]
+    return mcp.length === 0 ? builtins : [...builtins, ...mcp]
   }
 
   async destroy() {

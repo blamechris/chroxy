@@ -3936,6 +3936,170 @@ describe('ClaudeByokSession', () => {
       assert.match(prop.description, /default|MCP/i,
         'description must mention the default behaviour')
     })
+
+    /**
+     * #5018: subagent_type profile registry. When the id is known, the
+     * profile's systemPrompt is applied to the child's sessionPreamble
+     * (via setSessionPreamble so the same cap as user-authored preambles
+     * applies) and the profile's toolSet (when restricted) limits which
+     * BUILTIN_TOOLS the child sees in its `_buildTools()` output. When
+     * the id is unknown or malformed, the runner warns and falls back to
+     * the v1 default (no profile applied) per the issue's acceptance
+     * criteria — the spawn still succeeds so a future model that requests
+     * a profile this server doesn't know about stays forward-compatible.
+     *
+     * Helper shape mirrors runTaskWithPermissionOverride above: stub
+     * the parent's gate to always-allow so the tests focus on the
+     * subagent_type semantics inside _executeTaskTool.
+     */
+    async function runTaskWithSubagentType({ subagentType }) {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = captureEvents(session)
+      const taskInput = { description: 'd', prompt: 'p' }
+      if (subagentType !== undefined) taskInput.subagent_type = subagentType
+      let childSnapshot = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        // Snapshot the child's state at registration time — this is AFTER
+        // _executeTaskTool applies the profile and BEFORE any further
+        // setup. We capture sessionPreamble (where the profile's
+        // systemPrompt rides) and the result of _buildTools() so the
+        // assertions can verify both wirings.
+        childSnapshot = {
+          sessionPreamble: v.sessionPreamble,
+          tools: v._buildTools().map((t) => t.name),
+          allowedBuiltinToolNames: v._allowedBuiltinToolNames
+            ? [...v._allowedBuiltinToolNames]
+            : null,
+        }
+        v._gateToolBlock = async () => ({ behavior: 'allow' })
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput,
+        childStreamImpl: () => fakeStream(
+          [
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'child ok' } },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          ],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'child ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('delegate')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_task_1')
+      const spawned = captured.find((e) => e.name === 'agent_spawned')
+      await session.destroy()
+      return { childSnapshot, taskResult, spawned, captured }
+    }
+
+    it('Task `subagent_type` omitted: no profile applied (default v1 behaviour) (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({})
+      assert.ok(childSnapshot, 'child must spawn')
+      assert.equal(childSnapshot.sessionPreamble, '',
+        'no profile applied → child sessionPreamble stays empty (no override)')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null,
+        'no profile applied → no tool filter registered on the child')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type: "general-purpose"` applies the profile systemPrompt (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: 'general-purpose',
+      })
+      assert.ok(childSnapshot, 'child must spawn')
+      assert.ok(childSnapshot.sessionPreamble.length > 0,
+        'profile systemPrompt must be applied to the child as sessionPreamble')
+      assert.match(childSnapshot.sessionPreamble, /sub-?agent/i,
+        'general-purpose systemPrompt should reference subagent role')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type: "general-purpose"` keeps the full toolSet (no filter) (#5018)', async () => {
+      const { childSnapshot } = await runTaskWithSubagentType({
+        subagentType: 'general-purpose',
+      })
+      assert.ok(childSnapshot)
+      // general-purpose has toolSet: 'all' → no filter installed, and the
+      // tool list includes every built-in (BUILTIN_TOOLS).
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null,
+        'toolSet === "all" must NOT install a filter on the child')
+      assert.ok(childSnapshot.tools.includes('Read'))
+      assert.ok(childSnapshot.tools.includes('Write'))
+      assert.ok(childSnapshot.tools.includes('Bash'))
+      assert.ok(childSnapshot.tools.includes('Task'),
+        'general-purpose child can recursively spawn Task subagents')
+    })
+
+    it('Task `subagent_type: "code-reviewer"` restricts the child toolSet to Read/Grep/Glob (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: 'code-reviewer',
+      })
+      assert.ok(childSnapshot)
+      // code-reviewer profile carries toolSet: ['Read', 'Grep', 'Glob'] —
+      // the child must NOT see Write/Edit/Bash so the reviewer can't
+      // accidentally mutate the workspace.
+      assert.ok(Array.isArray(childSnapshot.allowedBuiltinToolNames))
+      assert.ok(childSnapshot.tools.includes('Read'))
+      assert.ok(childSnapshot.tools.includes('Grep'))
+      assert.ok(childSnapshot.tools.includes('Glob'))
+      assert.ok(!childSnapshot.tools.includes('Write'),
+        'code-reviewer must NOT see Write (read-only role)')
+      assert.ok(!childSnapshot.tools.includes('Edit'),
+        'code-reviewer must NOT see Edit (read-only role)')
+      assert.ok(!childSnapshot.tools.includes('Bash'),
+        'code-reviewer must NOT see Bash (read-only role)')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type` unknown value falls back to v1 default with no profile (#5018)', async () => {
+      const { childSnapshot, taskResult, spawned } = await runTaskWithSubagentType({
+        subagentType: 'totally-not-a-real-profile',
+      })
+      // Per #5018 acceptance criteria: unknown subagent_type falls back to
+      // v1 behaviour (no profile applied) and warns. The child IS spawned,
+      // the tool_result is success, and the child has no profile-driven
+      // preamble or tool filter.
+      assert.ok(childSnapshot,
+        'child must spawn even when subagent_type is unknown (warn + fall back)')
+      assert.ok(spawned,
+        'agent_spawned must fire for the spawn (only profile application is skipped)')
+      assert.equal(childSnapshot.sessionPreamble, '',
+        'unknown profile id must NOT apply any preamble (v1 default)')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null,
+        'unknown profile id must NOT install a tool filter (v1 default)')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false,
+        'unknown subagent_type must NOT fail the tool call (forward-compat)')
+    })
+
+    it('Task `subagent_type` non-string value falls back to v1 default (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: 7,
+      })
+      // Non-string ids are treated as unknown: warn + fall back, do not
+      // fail the tool call (the schema enum is the model-facing guardrail;
+      // the runtime stays forgiving).
+      assert.ok(childSnapshot)
+      assert.equal(childSnapshot.sessionPreamble, '')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null)
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type` empty string falls back to v1 default (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: '',
+      })
+      // Empty string is not a valid profile id but is treated as the
+      // unknown path — warn + fall back, do not fail the tool call.
+      assert.ok(childSnapshot)
+      assert.equal(childSnapshot.sessionPreamble, '')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null)
+      assert.equal(taskResult.payload.isError, false)
+    })
   })
 
   describe('Task subagent nested progress events (#5016)', () => {
