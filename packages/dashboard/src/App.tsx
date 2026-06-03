@@ -71,7 +71,7 @@ import { usePermissionNotification, type PermissionPromptInfo } from './hooks/us
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder, persistSessionTabOrder, loadPersistedSessionTabOrder } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
@@ -916,10 +916,51 @@ export function App() {
     })
   }, [sessionStates, sessionActivityNow])
 
+  // #4831 — user-defined SessionBar tab order (overlay on the server's
+  // `sessions[]` membership). Loaded lazily from localStorage on mount and
+  // re-persisted whenever the user drags / keyboard-reorders a tab. The
+  // server is still authoritative for which sessions EXIST; this slice
+  // controls only the visual order in the top tab strip (issue #4831).
+  const [tabOrder, setTabOrder] = useState<string[]>(() => loadPersistedSessionTabOrder())
+  // #4831 — `loadPersistedSessionTabOrder` reads under the *current*
+  // server scope (set by `setServerScope` on server-switch). The initial
+  // `useState` only fires once on mount, so without this effect a server
+  // switch in the same browser tab would leave SessionBar showing the
+  // previous server's tabOrder until a full page refresh. Re-load whenever
+  // the active server changes so each server gets its own persisted order.
+  const activeServerId = useConnectionStore(s => s.activeServerId)
+  useEffect(() => {
+    setTabOrder(loadPersistedSessionTabOrder())
+  }, [activeServerId])
+  const handleReorderTabs = useCallback((nextOrder: string[]) => {
+    setTabOrder(nextOrder)
+    persistSessionTabOrder(nextOrder)
+  }, [])
+
   // Map sessions to SessionTabData[] with unified status indicators.
+  //
+  // #4831: apply the persisted `tabOrder` overlay. Sessions present in
+  // `tabOrder` render in that order; sessions added by the server since
+  // the last reorder (new tabs, restored conversations) fall through to
+  // the server's natural order at the end. Stale ids in `tabOrder` (server
+  // removed the session) are harmlessly ignored because we filter against
+  // the live `sessions` list.
   const sessionTabs: SessionTabData[] = useMemo(
-    () => sessions.map(s => {
-      return {
+    () => {
+      const byId = new Map(sessions.map(s => [s.sessionId, s]))
+      const ordered: SessionInfo[] = []
+      const seen = new Set<string>()
+      for (const id of tabOrder) {
+        const s = byId.get(id)
+        if (s && !seen.has(id)) {
+          ordered.push(s)
+          seen.add(id)
+        }
+      }
+      for (const s of sessions) {
+        if (!seen.has(s.sessionId)) ordered.push(s)
+      }
+      return ordered.map(s => ({
         sessionId: s.sessionId,
         name: s.name,
         isBusy: s.isBusy,
@@ -930,9 +971,9 @@ export function App() {
         status: getSessionVisualStatus(s),
         // #3567: surface latched stdin-disabled flag from session_list.
         stdinForwardingDisabled: s.stdinForwardingDisabled,
-      }
-    }),
-    [sessions, activeSessionId, getSessionVisualStatus],
+      }))
+    },
+    [sessions, activeSessionId, getSessionVisualStatus, tabOrder],
   )
 
   // Derive sidebar repo tree from sessions
@@ -1999,6 +2040,7 @@ export function App() {
             onClose={handleCloseSession}
             onRename={renameSession}
             onNewSession={handleNewSession}
+            onReorder={handleReorderTabs}
           />
         )}
 

@@ -1090,6 +1090,32 @@
   outline-offset: -2px;
 }
 
+/* #4831 — drag affordances for the SessionBar tab strip.
+ * `cursor: grab` only when the drag handler is wired (parent passes
+ * `[draggable="true"]`). Lifted state (keyboard reorder) and drag-over
+ * state visually telegraph what's happening without animating layout. */
+.session-tab[draggable="true"] {
+  cursor: grab;
+}
+.session-tab[draggable="true"]:active {
+  cursor: grabbing;
+}
+.session-tab.dragging {
+  opacity: 0.55;
+  /* Slight scale to lift the tab visually — purely cosmetic, GPU-cheap. */
+  transform: scale(0.97);
+}
+.session-tab.drag-over {
+  /* A left-edge accent indicates the drop slot. Insert-before semantics:
+   * a drop on this tab pushes it right and the dragged tab takes its place. */
+  box-shadow: inset 2px 0 0 0 var(--accent-blue);
+}
+.session-tab.lifted {
+  /* Mirror the dragging affordance for the keyboard reorder path. */
+  outline: 2px dashed var(--accent-blue);
+  outline-offset: -2px;
+}
+
 .tab-name {
   pointer-events: none;
 }
