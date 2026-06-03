@@ -197,10 +197,19 @@ try {
       const restrictedDir = join(tmpDir, 'restricted')
       mkdirSync(restrictedDir)
 
-      // Parse the current user's SID from `whoami /user`. The SID format
-      // (`S-1-<authority>-<rid>...`) is invariant across locales, so the
-      // regex match holds regardless of the column headers' language.
-      const whoami = spawnSync('whoami', ['/user'], { encoding: 'utf-8' })
+      // Parse the current user's SID from Windows' `whoami /user`. The SID
+      // format (`S-1-<authority>-<rid>...`) is invariant across locales, so
+      // the regex match holds regardless of the column headers' language.
+      //
+      // We invoke `whoami.exe` by absolute path under %SystemRoot%\System32
+      // because the Windows CI job runs under Git Bash (`shell: bash` in
+      // .github/workflows/ci.yml), and Git Bash ships its own Unix-style
+      // `whoami` earlier on PATH which does not accept `/user` — see #5003.
+      // `whoami /user` outputs exactly one SID-shaped token (the current
+      // user's), so first-match semantics are intentional.
+      const systemRoot = process.env.SystemRoot || 'C:\\Windows'
+      const whoamiExe = `${systemRoot}\\System32\\whoami.exe`
+      const whoami = spawnSync(whoamiExe, ['/user'], { encoding: 'utf-8' })
       assert.strictEqual(whoami.status, 0, `whoami /user failed: ${whoami.stderr}`)
       const userSid = (whoami.stdout.match(/\bS-1-[\d-]+/) || [])[0]
       assert.ok(userSid, `failed to extract current user SID from whoami /user output:\n${whoami.stdout}`)
@@ -225,39 +234,71 @@ try {
       assert.strictEqual(grant.status, 0, `icacls /grant failed: ${grant.stderr}`)
 
       // Write the file via the helper and read back its ACL via
-      // `icacls /save`, which emits the ACL in SDDL form. SDDL is a
-      // locale-independent serialisation that references principals by
-      // SID string (e.g. `(A;;FA;;;S-1-5-32-545)` for an Allow ACE on
-      // BUILTIN\Users) — the plain `icacls <file>` output resolves SIDs
-      // back to display names, which would be locale-dependent and undo
-      // the point of using SIDs above. `/save` expects a relative
-      // filename and writes it under the targeted file's directory.
+      // PowerShell's `(Get-Acl <path>).Sddl`, which returns a single line
+      // of canonical SDDL with principals serialised as raw `S-1-...`
+      // strings (no two-letter abbreviations like `WD`/`AU`/`BU`, no
+      // locale-dependent display names). This is the documented
+      // contract for the .NET FileSecurity / DirectorySecurity SDDL
+      // property the cmdlet wraps.
+      //
+      // Why not `icacls /save`: its output file is not specified to be
+      // SDDL (the docs only call it "an ACL file for later use with
+      // /restore"), is UTF-16 LE with BOM (so a utf-8 readFileSync
+      // returns nul-interleaved garbage), and even when it does emit
+      // SDDL fragments, well-known principals get two-letter
+      // abbreviations rather than raw SID strings — all three failure
+      // modes make the absence assertions vacuously true.
+      // Why not `icacls <file>`: it resolves SIDs back to display names,
+      // which would be locale-dependent and undo the entire point of
+      // pinning to SIDs above.
       const filePath = join(restrictedDir, 'secret.json')
       writeFileRestricted(filePath, JSON.stringify({ token: 'sensitive' }))
       assert.ok(existsSync(filePath), 'file must exist after writeFileRestricted')
 
-      const sddlFile = 'secret.json.sddl'
-      const save = spawnSync(
-        'icacls',
-        ['secret.json', '/save', sddlFile, '/Q'],
-        { cwd: restrictedDir, encoding: 'utf-8' }
+      // PowerShell on `windows-latest` is `powershell.exe` (Windows
+      // PowerShell 5.1). `-NoProfile` skips any user profile that could
+      // perturb the output; the `;` after the assignment keeps the
+      // emitted line to just the SDDL string.
+      const getAcl = spawnSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-Acl -LiteralPath '${filePath.replace(/'/g, "''")}').Sddl`,
+        ],
+        { encoding: 'utf-8' }
       )
-      assert.strictEqual(save.status, 0, `icacls /save failed: ${save.stderr}`)
-      const sddl = readFileSync(join(restrictedDir, sddlFile), 'utf-8')
+      assert.strictEqual(getAcl.status, 0, `Get-Acl failed: ${getAcl.stderr}`)
+      const sddl = getAcl.stdout.trim()
+      assert.ok(sddl.length > 0, `Get-Acl returned empty SDDL`)
 
-      // Assert the SDDL does not contain ACEs for the group/world SIDs.
-      // An ACE for a SID embeds it in `(A;...;<sid>)`; if the ACE is
-      // absent the SID simply isn't anywhere in the SDDL text.
+      // Tripwire: confirm the read-back path can actually detect a SID
+      // before we run absence assertions. We assert the current user's
+      // SID IS present (the explicit grant added above must round-trip
+      // into the file's inherited ACL), which means a future regression
+      // that breaks the read-back (encoding, format, parsing) would
+      // fire this assertion before silently green-lighting a real ACL
+      // regression downstream. See #5032.
       assert.ok(
-        !sddl.includes('S-1-5-32-545'),
+        sddl.includes(userSid),
+        `tripwire: SDDL must contain the current user's SID (${userSid}) — read-back path is broken if absent:\n${sddl}`
+      )
+
+      // Assert the SDDL does not contain the group/world SIDs. ACEs in
+      // SDDL are written as `(A;...;<sid>)` — we anchor on the closing
+      // `)` so a prefix collision (e.g. `S-1-5-11` vs `S-1-5-113`,
+      // `S-1-5-114`) cannot cause a false positive. See #5031.
+      assert.ok(
+        !/;S-1-5-32-545\)/.test(sddl),
         `SDDL must not contain BUILTIN\\Users (*S-1-5-32-545):\n${sddl}`
       )
       assert.ok(
-        !sddl.includes('S-1-1-0'),
+        !/;S-1-1-0\)/.test(sddl),
         `SDDL must not contain Everyone (*S-1-1-0):\n${sddl}`
       )
       assert.ok(
-        !sddl.includes('S-1-5-11'),
+        !/;S-1-5-11\)/.test(sddl),
         `SDDL must not contain Authenticated Users (*S-1-5-11):\n${sddl}`
       )
     })
