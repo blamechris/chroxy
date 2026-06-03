@@ -2139,14 +2139,17 @@ describe('App', () => {
     })
   })
 
-  // #4695 — prominent chrome-level "New Session" entry point.
+  // #4695 / #5062 — discoverable chrome-level "New Session" entry point.
   //
   // The per-project sidebar button (`sidebar-new-session-<path>`) and the
   // command palette (`new-session` id) were the only two entry points
-  // before this change — neither discoverable to a first-time user
-  // scanning the dashboard chrome. The chrome button lives in
-  // `header-right` and reuses the existing handleNewSession path
-  // (setShowCreateSession → CreateSessionModal), so the test pins:
+  // before #4695 — neither discoverable to a first-time user scanning
+  // the dashboard chrome. #4695 added a standalone button in the
+  // `header-right` zone; #5062 then folded that button INTO the header
+  // overflow (⋯) menu so the right zone stops crowding the model
+  // selector. The discoverable entry now lives as the first row of the
+  // overflow menu, reusing the existing `handleNewSession` path
+  // (setShowCreateSession → CreateSessionModal). The tests pin:
   //   1. The entry renders inside #header (always-visible chrome),
   //      reached by opening the overflow (⋯) menu.
   //   2. It has a visible "New Session" label and a title with the
@@ -2188,8 +2191,12 @@ describe('App', () => {
       const item = screen.getByTestId('header-overflow-item-new-session')
       // The HeaderOverflowMenu copies `item.title` straight onto the
       // <li>'s `title` attribute — assert the shortcut hint survives.
+      // formatShortcutKeys() emits `Cmd+N` on macOS and `Ctrl+N`
+      // elsewhere, so match either modifier joined to `N` by a `+`. The
+      // earlier `/N/` was too loose — it would still pass if the
+      // modifier disappeared and the title read just "New session (N)".
       expect(item.getAttribute('title')).toMatch(/New session/)
-      expect(item.getAttribute('title')).toMatch(/N/)
+      expect(item.getAttribute('title')).toMatch(/(Cmd|Ctrl)\+N/)
     })
 
     it('opens the Create Session modal on click', () => {
