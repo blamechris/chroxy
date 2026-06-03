@@ -74,6 +74,18 @@ export const DEFAULT_MAX_PER_KEY = 2
 export const DEFAULT_MAX_TOTAL = 8
 
 /**
+ * Default hard cap on total container lifetime (#5045). Idle TTL alone
+ * cannot evict a container that's continuously reused — every release
+ * resets the idle timer. Without a max age, a hot container can survive
+ * for days, accumulating state (file growth, package caches, drifting
+ * cgroup accounting) that never gets reset. Max age is checked on both
+ * `acquire()` (so a stale pooled entry isn't handed out) and `release()`
+ * (so a session that held a container across the threshold doesn't put
+ * it back into the pool).
+ */
+export const DEFAULT_MAX_AGE_MS = 30 * 60 * 1000
+
+/**
  * Build the canonical cache key for a session's resource shape. Same
  * shape used by `DockerContainerPool#acquire` / `#release` so the
  * session and the pool can compute keys independently.
@@ -109,9 +121,14 @@ export class DockerContainerPool {
    * @param {number} [opts.idleTimeoutMs=300000] — TTL per idle entry
    * @param {number} [opts.maxPerKey=2]          — cap per resource shape
    * @param {number} [opts.maxTotal=8]           — cap across all shapes
+   * @param {number} [opts.maxAgeMs=1800000]     — hard cap on total
+   *   container lifetime regardless of activity (#5045). Checked on both
+   *   acquire and release. Pass `Infinity` to opt out (matches the
+   *   pre-#5045 behaviour of idle-only eviction).
    * @param {Function} [opts._execFile]          — test seam (execFile)
    * @param {Function} [opts._setTimeout]        — test seam (setTimeout)
    * @param {Function} [opts._clearTimeout]      — test seam (clearTimeout)
+   * @param {Function} [opts._now]               — test seam (Date.now)
    */
   constructor(opts = {}) {
     this._idleTimeoutMs = Number.isFinite(opts.idleTimeoutMs)
@@ -123,10 +140,25 @@ export class DockerContainerPool {
     this._maxTotal = Number.isFinite(opts.maxTotal)
       ? opts.maxTotal
       : DEFAULT_MAX_TOTAL
+    // Accept Infinity (not "finite") as a valid opt-out — Number.isFinite
+    // rejects it, which is exactly what we don't want here.
+    this._maxAgeMs = typeof opts.maxAgeMs === 'number' && opts.maxAgeMs > 0
+      ? opts.maxAgeMs
+      : DEFAULT_MAX_AGE_MS
     this._execFile = opts._execFile || defaultExecFile
     this._setTimeout = opts._setTimeout || setTimeout
     this._clearTimeout = opts._clearTimeout || clearTimeout
-    /** @type {Map<string, Array<{ containerId: string, timer: any }>>} */
+    this._now = opts._now || (() => Date.now())
+    /**
+     * Each entry tracks the wall-clock time the container was FIRST
+     * released to the pool (`createdAt`). That is the closest proxy we
+     * have to "container birth" — we don't know when `docker run` fired,
+     * only when the session was done with it. The createdAt persists
+     * across acquire/release cycles for the same container id so the
+     * max-age cap measures total in-pool lifetime, not idle-time-since-
+     * last-release.
+     * @type {Map<string, Array<{ containerId: string, timer: any, createdAt: number }>>}
+     */
     this._entries = new Map()
     /**
      * Container ids marked soiled by `markSoiled()`. A soiled id at
@@ -135,6 +167,12 @@ export class DockerContainerPool {
      * @type {Set<string>}
      */
     this._soiledIds = new Set()
+    /**
+     * createdAt by container id, kept separate from `_entries` so it
+     * survives across acquire/release cycles. Cleared on eviction.
+     * @type {Map<string, number>}
+     */
+    this._createdAt = new Map()
     this._shuttingDown = false
   }
 
@@ -154,6 +192,30 @@ export class DockerContainerPool {
     if (this._shuttingDown) return null
     const bucket = this._entries.get(key)
     if (!bucket || bucket.length === 0) return null
+    // Lazily skip + evict any over-age entries at the head of the bucket
+    // (#5045). The bucket is FIFO so the oldest entry is at the front;
+    // once we hit an in-age entry the rest are guaranteed to be in-age
+    // as well (createdAt is monotonic with insertion order for a fresh
+    // container, but a re-released container can be older than a younger
+    // sibling — we still walk the whole bucket to be safe).
+    const now = this._now()
+    while (bucket.length > 0) {
+      const entry = bucket[0]
+      const age = now - entry.createdAt
+      if (age <= this._maxAgeMs) break
+      bucket.shift()
+      this._clearTimeout(entry.timer)
+      this._createdAt.delete(entry.containerId)
+      log.info(`pool over-age on acquire (${age}ms > ${this._maxAgeMs}ms): evicting ${entry.containerId.slice(0, 12)}`)
+      // Fire-and-forget — caller's acquire path stays sync.
+      this._evict(entry.containerId).catch((err) => {
+        log.warn(`over-age eviction of ${entry.containerId.slice(0, 12)} failed: ${err.message}`)
+      })
+    }
+    if (bucket.length === 0) {
+      this._entries.delete(key)
+      return null
+    }
     const entry = bucket.shift()
     if (bucket.length === 0) this._entries.delete(key)
     this._clearTimeout(entry.timer)
@@ -177,6 +239,7 @@ export class DockerContainerPool {
     if (!containerId) return false
     if (this._shuttingDown) {
       this._soiledIds.delete(containerId)
+      this._createdAt.delete(containerId)
       await this._evict(containerId)
       return false
     }
@@ -187,7 +250,23 @@ export class DockerContainerPool {
     // the soiled set doesn't grow unbounded.
     if (this._soiledIds.has(containerId)) {
       this._soiledIds.delete(containerId)
+      this._createdAt.delete(containerId)
       log.info(`pool release: ${containerId.slice(0, 12)} marked soiled; evicting instead of pooling`)
+      await this._evict(containerId)
+      return false
+    }
+    // Resolve / record createdAt before any other check so an over-age
+    // container that's never been pooled before still gets its real birth
+    // time (now) — only re-released containers carry an older createdAt.
+    const now = this._now()
+    const createdAt = this._createdAt.get(containerId) ?? now
+    // Hard max-age cap (#5045): even if the bucket has room, refuse to
+    // pool a container that's exceeded total lifetime. Without this, a
+    // hot container can survive forever via repeated acquire/release.
+    const age = now - createdAt
+    if (age > this._maxAgeMs) {
+      log.info(`pool over-age on release (${age}ms > ${this._maxAgeMs}ms): evicting ${containerId.slice(0, 12)}`)
+      this._createdAt.delete(containerId)
       await this._evict(containerId)
       return false
     }
@@ -195,11 +274,14 @@ export class DockerContainerPool {
     const bucket = this._entries.get(key) || []
     if (bucket.length >= this._maxPerKey || total >= this._maxTotal) {
       log.info(`pool over cap (key=${bucket.length}/${this._maxPerKey} total=${total}/${this._maxTotal}); evicting ${containerId.slice(0, 12)}`)
+      this._createdAt.delete(containerId)
       await this._evict(containerId)
       return false
     }
+    this._createdAt.set(containerId, createdAt)
     const timer = this._setTimeout(() => {
       this._removeEntry(key, containerId, /*alreadyTimedOut*/ true)
+      this._createdAt.delete(containerId)
       this._evict(containerId).catch((err) => {
         log.warn(`idle eviction of ${containerId.slice(0, 12)} failed: ${err.message}`)
       })
@@ -207,9 +289,9 @@ export class DockerContainerPool {
     // setTimeout returns a Timer object on Node; unref so a pooled
     // container doesn't keep the event loop alive on shutdown.
     if (timer && typeof timer.unref === 'function') timer.unref()
-    bucket.push({ containerId, timer })
+    bucket.push({ containerId, timer, createdAt })
     this._entries.set(key, bucket)
-    log.info(`pool release: ${containerId.slice(0, 12)} → ${key} (idle ${this._idleTimeoutMs}ms)`)
+    log.info(`pool release: ${containerId.slice(0, 12)} → ${key} (idle ${this._idleTimeoutMs}ms, age ${age}ms/${this._maxAgeMs}ms)`)
     return true
   }
 
@@ -286,6 +368,7 @@ export class DockerContainerPool {
     // Clear the soiled-id tracking — a future pool instance (lazy
     // singleton, test reset) starts from a clean slate.
     this._soiledIds.clear()
+    this._createdAt.clear()
     log.info(`shutdown: evicting ${toRemove.length} pooled container(s)`)
     await Promise.all(toRemove.map((id) => this._evict(id).catch((err) => {
       log.warn(`shutdown eviction of ${id.slice(0, 12)} failed: ${err.message}`)
@@ -354,6 +437,7 @@ let _sharedPool = null
  *   - CHROXY_DOCKER_BYOK_POOL_IDLE_MS — override idle TTL (ms)
  *   - CHROXY_DOCKER_BYOK_POOL_MAX_PER_KEY — override per-key cap
  *   - CHROXY_DOCKER_BYOK_POOL_MAX_TOTAL — override total cap
+ *   - CHROXY_DOCKER_BYOK_POOL_MAX_AGE_MS — override max container age (#5045)
  *
  * @param {Record<string,string|undefined>} [env=process.env]
  * @returns {DockerContainerPool|null}
@@ -364,13 +448,16 @@ export function getSharedPool(env = process.env) {
   const idleRaw = env.CHROXY_DOCKER_BYOK_POOL_IDLE_MS
   const perKeyRaw = env.CHROXY_DOCKER_BYOK_POOL_MAX_PER_KEY
   const totalRaw = env.CHROXY_DOCKER_BYOK_POOL_MAX_TOTAL
+  const maxAgeRaw = env.CHROXY_DOCKER_BYOK_POOL_MAX_AGE_MS
   const idleTimeoutMs = Number(idleRaw)
   const maxPerKey = Number(perKeyRaw)
   const maxTotal = Number(totalRaw)
+  const maxAgeMs = Number(maxAgeRaw)
   _sharedPool = new DockerContainerPool({
     idleTimeoutMs: Number.isFinite(idleTimeoutMs) && idleTimeoutMs > 0 ? idleTimeoutMs : undefined,
     maxPerKey: Number.isFinite(maxPerKey) && maxPerKey > 0 ? maxPerKey : undefined,
     maxTotal: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : undefined,
+    maxAgeMs: Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : undefined,
   })
   return _sharedPool
 }

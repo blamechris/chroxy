@@ -10,6 +10,7 @@ import {
   DEFAULT_IDLE_TIMEOUT_MS,
   DEFAULT_MAX_PER_KEY,
   DEFAULT_MAX_TOTAL,
+  DEFAULT_MAX_AGE_MS,
 } from '../src/docker-byok-pool.js'
 
 /**
@@ -120,6 +121,7 @@ describe('DockerContainerPool — defaults', () => {
     assert.equal(DEFAULT_IDLE_TIMEOUT_MS, 5 * 60 * 1000)
     assert.equal(DEFAULT_MAX_PER_KEY, 2)
     assert.equal(DEFAULT_MAX_TOTAL, 8)
+    assert.equal(DEFAULT_MAX_AGE_MS, 30 * 60 * 1000)
   })
 
   it('starts empty', () => {
@@ -369,6 +371,109 @@ describe('DockerContainerPool — markSoiled() (#5043)', () => {
   })
 })
 
+describe('DockerContainerPool — max age (#5045)', () => {
+  it('acquire evicts and reports miss when the head entry is over max age', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    let now = 1_000_000
+    const pool = new DockerContainerPool({
+      maxAgeMs: 1000,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+      _now: () => now,
+    })
+    await pool.release('k', 'OLD_CONTAINER')
+    assert.equal(pool.size(), 1)
+    // Advance past the max-age threshold.
+    now += 1500
+    const got = pool.acquire('k')
+    assert.equal(got, null, 'over-age entry must NOT be returned to caller')
+    assert.equal(pool.size(), 0, 'over-age entry must be removed from the pool')
+    // Drain microtasks so the async _evict() runs.
+    await new Promise((r) => setImmediate(r))
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1, 'over-age entry must be docker rm -f')
+    assert.ok(rmCalls[0].args.includes('OLD_CONTAINER'))
+  })
+
+  it('acquire skips over-age entries and returns the next valid one in the bucket', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    let now = 1_000_000
+    const pool = new DockerContainerPool({
+      maxAgeMs: 1000,
+      maxPerKey: 5,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+      _now: () => now,
+    })
+    await pool.release('k', 'OLD_1')
+    await pool.release('k', 'OLD_2')
+    // Both entries are now over age.
+    now += 2000
+    await pool.release('k', 'FRESH')
+    const got = pool.acquire('k')
+    assert.equal(got, 'FRESH', 'must skip past over-age entries to reach a fresh one')
+    await new Promise((r) => setImmediate(r))
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    const evicted = rmCalls.map((c) => c.args[c.args.length - 1]).sort()
+    assert.deepEqual(evicted, ['OLD_1', 'OLD_2'])
+  })
+
+  it('release rejects an over-age container and evicts inline', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    let now = 1_000_000
+    const pool = new DockerContainerPool({
+      maxAgeMs: 1000,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+      _now: () => now,
+    })
+    // First release happens at t=0; second-acquire/release simulates a
+    // session that held the container for longer than maxAgeMs.
+    await pool.release('k', 'C1')
+    assert.equal(pool.acquire('k'), 'C1')
+    now += 2000
+    const kept = await pool.release('k', 'C1')
+    assert.equal(kept, false, 'release of over-age container must NOT pool it')
+    assert.equal(pool.size(), 0)
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1)
+    assert.ok(rmCalls[0].args.includes('C1'))
+  })
+
+  it('release tracks createdAt from the FIRST release, not the most recent', async () => {
+    // A container that's been bounced through the pool many times is
+    // still "old" for max-age purposes — we cap total lifetime, not
+    // time-since-last-release.
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    let now = 1_000_000
+    const pool = new DockerContainerPool({
+      maxAgeMs: 1000,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+      _now: () => now,
+    })
+    await pool.release('k', 'C1') // createdAt recorded here at t=1_000_000
+    assert.equal(pool.acquire('k'), 'C1')
+    now += 500 // still under max age
+    await pool.release('k', 'C1')
+    assert.equal(pool.acquire('k'), 'C1')
+    now += 600 // now total age > 1000ms
+    const kept = await pool.release('k', 'C1')
+    assert.equal(kept, false, 'lifetime exceeds cap even though the latest hold was short')
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1)
+    assert.ok(rmCalls[0].args.includes('C1'))
+  })
+})
+
 describe('getSharedPool() — singleton + env wiring', () => {
   beforeEach(() => _resetSharedPool())
   afterEach(() => _resetSharedPool())
@@ -391,9 +496,16 @@ describe('getSharedPool() — singleton + env wiring', () => {
       CHROXY_DOCKER_BYOK_POOL_IDLE_MS: '15000',
       CHROXY_DOCKER_BYOK_POOL_MAX_PER_KEY: '5',
       CHROXY_DOCKER_BYOK_POOL_MAX_TOTAL: '20',
+      CHROXY_DOCKER_BYOK_POOL_MAX_AGE_MS: '120000',
     })
     assert.equal(pool._idleTimeoutMs, 15000)
     assert.equal(pool._maxPerKey, 5)
     assert.equal(pool._maxTotal, 20)
+    assert.equal(pool._maxAgeMs, 120000)
+  })
+
+  it('defaults max-age when env var is unset', () => {
+    const pool = getSharedPool({ CHROXY_DOCKER_BYOK_POOL: '1' })
+    assert.equal(pool._maxAgeMs, DEFAULT_MAX_AGE_MS)
   })
 })
