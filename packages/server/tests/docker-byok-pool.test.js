@@ -508,4 +508,69 @@ describe('getSharedPool() — singleton + env wiring', () => {
     const pool = getSharedPool({ CHROXY_DOCKER_BYOK_POOL: '1' })
     assert.equal(pool._maxAgeMs, DEFAULT_MAX_AGE_MS)
   })
+
+  it('honors CHROXY_DOCKER_BYOK_POOL_MAX_AGE_MS=Infinity as an opt-out', () => {
+    // Documented opt-out path: pass `Infinity` to disable the cap.
+    // Constructor accepts `Infinity` directly; env wiring has to parse
+    // the string `'Infinity'` because `isFinite(Infinity) === false`
+    // and would otherwise silently fall back to the 30-min default.
+    const pool = getSharedPool({
+      CHROXY_DOCKER_BYOK_POOL: '1',
+      CHROXY_DOCKER_BYOK_POOL_MAX_AGE_MS: 'Infinity',
+    })
+    assert.equal(pool._maxAgeMs, Infinity)
+  })
+
+  it('honors lowercase `infinity` env value as an opt-out', () => {
+    const pool = getSharedPool({
+      CHROXY_DOCKER_BYOK_POOL: '1',
+      CHROXY_DOCKER_BYOK_POOL_MAX_AGE_MS: 'infinity',
+    })
+    assert.equal(pool._maxAgeMs, Infinity)
+  })
+})
+
+describe('DockerContainerPool — forget() (#5045 review)', () => {
+  it('clears _createdAt and docker rm -f s the container', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    await pool.release('k', 'C1')
+    // After release, _createdAt has the entry.
+    assert.equal(pool._createdAt.has('C1'), true)
+    assert.equal(pool.acquire('k'), 'C1')
+    // After acquire, _createdAt STILL has the entry (preserved across
+    // hold so a follow-up release keeps lifetime). forget() is the path
+    // the caller uses when they decide NOT to release.
+    assert.equal(pool._createdAt.has('C1'), true)
+    await pool.forget('C1')
+    assert.equal(pool._createdAt.has('C1'), false)
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1)
+    assert.ok(rmCalls[0].args.includes('C1'))
+  })
+
+  it('is idempotent on an unknown container id', async () => {
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({ _execFile: execFile })
+    await pool.forget('NEVER_SEEN')
+    // Still runs docker rm -f — that's the contract; the pool can't
+    // tell whether the id is real or stale, and the caller is asserting
+    // it is. rm -f's "no such container" path is already swallowed in
+    // _evict.
+    assert.equal(execFile.calls.filter((c) => c.args[0] === 'rm').length, 1)
+  })
+
+  it('silently ignores null/empty container id', async () => {
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({ _execFile: execFile })
+    await pool.forget('')
+    await pool.forget(null)
+    await pool.forget(undefined)
+    assert.equal(execFile.calls.length, 0, 'must not call docker rm -f with an empty id')
+  })
 })

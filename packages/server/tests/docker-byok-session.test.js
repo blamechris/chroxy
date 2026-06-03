@@ -679,7 +679,7 @@ describe('DockerByokSession — across-session pool (#5022)', () => {
    * without spinning up a real DockerContainerPool.
    */
   function poolStub({ acquireReturn = null } = {}) {
-    const calls = { acquire: [], release: [] }
+    const calls = { acquire: [], release: [], forget: [] }
     let nextAcquire = acquireReturn
     return {
       calls,
@@ -692,6 +692,13 @@ describe('DockerByokSession — across-session pool (#5022)', () => {
       async release(key, containerId) {
         calls.release.push({ key, containerId })
         return true
+      },
+      async forget(containerId) {
+        // Mirrors the real pool's contract: drop tracking + best-effort
+        // docker rm -f. The stub just records the call; tests inspect
+        // `pool.calls.forget` instead of asserting on `execFile` rm
+        // invocations, because the real pool owns its own _execFile.
+        calls.forget.push(containerId)
       },
       setNextAcquire(id) {
         nextAcquire = id
@@ -809,9 +816,11 @@ describe('DockerByokSession — across-session pool (#5022)', () => {
     assert.equal(session._acquiredFromPool, false)
     const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
     assert.equal(runCalls.length, 1)
-    // The dead pooled id was best-effort docker-rm-f'd.
-    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
-    assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_DEAD')))
+    // The dead pooled id was routed through `pool.forget()` so the
+    // pool's `_createdAt` map gets cleared alongside the `docker rm -f`.
+    // The actual `docker rm -f` runs through the pool's own _execFile
+    // (not the session's), so we assert on `pool.calls.forget` here.
+    assert.deepEqual(pool.calls.forget, ['CONTAINER_DEAD'])
 
     await session.destroy()
   })

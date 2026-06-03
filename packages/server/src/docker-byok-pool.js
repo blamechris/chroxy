@@ -193,11 +193,12 @@ export class DockerContainerPool {
     const bucket = this._entries.get(key)
     if (!bucket || bucket.length === 0) return null
     // Lazily skip + evict any over-age entries at the head of the bucket
-    // (#5045). The bucket is FIFO so the oldest entry is at the front;
-    // once we hit an in-age entry the rest are guaranteed to be in-age
-    // as well (createdAt is monotonic with insertion order for a fresh
-    // container, but a re-released container can be older than a younger
-    // sibling — we still walk the whole bucket to be safe).
+    // (#5045). The bucket is FIFO so we only sweep the head — we stop at
+    // the first in-age entry and hand it to the caller. If a re-released
+    // container ends up trailing a younger sibling, the older one keeps
+    // its idle timer; when it bubbles to the head on a future acquire
+    // it gets caught here. We deliberately don't filter the whole bucket
+    // every acquire (would be O(n) on the hot path).
     const now = this._now()
     while (bucket.length > 0) {
       const entry = bucket[0]
@@ -293,6 +294,31 @@ export class DockerContainerPool {
     this._entries.set(key, bucket)
     log.info(`pool release: ${containerId.slice(0, 12)} → ${key} (idle ${this._idleTimeoutMs}ms, age ${age}ms/${this._maxAgeMs}ms)`)
     return true
+  }
+
+  /**
+   * Forget a container the pool was tracking and `docker rm -f` it. Use
+   * this from a caller that has ALREADY acquired the container and now
+   * knows the container is unhealthy / soiled / otherwise not poolable
+   * (e.g. `_verifyContainer()` failed after `acquire()` returned a hit).
+   * Without this, `_createdAt` would retain the id forever — `acquire()`
+   * removes the entry from `_entries` on hit, but leaves `_createdAt`
+   * intact so a follow-up `release()` of the same id preserves total
+   * lifetime. If the caller chooses NOT to release (because the
+   * container is already dead), they must call `forget()` so the map
+   * doesn't slowly leak across long-running servers.
+   *
+   * Idempotent: safe to call on an id that's not tracked. Returns a
+   * promise that resolves after `docker rm -f` completes (or fails —
+   * errors are logged, not rethrown).
+   *
+   * @param {string} containerId
+   * @returns {Promise<void>}
+   */
+  async forget(containerId) {
+    if (!containerId) return
+    this._createdAt.delete(containerId)
+    await this._evict(containerId)
   }
 
   /**
@@ -452,12 +478,21 @@ export function getSharedPool(env = process.env) {
   const idleTimeoutMs = Number(idleRaw)
   const maxPerKey = Number(perKeyRaw)
   const maxTotal = Number(totalRaw)
+  // Special-case `Infinity` / `infinity` so the documented opt-out path
+  // (constructor accepts `Infinity`) works through the env knob too. A
+  // bare `Number('Infinity')` evaluates to `Infinity` but `isFinite()`
+  // rejects it; users wanting the pre-#5045 idle-only behaviour need a
+  // way to say so via env, not just by constructing the pool by hand.
+  const maxAgeOptOut = typeof maxAgeRaw === 'string'
+    && maxAgeRaw.trim().toLowerCase() === 'infinity'
   const maxAgeMs = Number(maxAgeRaw)
   _sharedPool = new DockerContainerPool({
     idleTimeoutMs: Number.isFinite(idleTimeoutMs) && idleTimeoutMs > 0 ? idleTimeoutMs : undefined,
     maxPerKey: Number.isFinite(maxPerKey) && maxPerKey > 0 ? maxPerKey : undefined,
     maxTotal: Number.isFinite(maxTotal) && maxTotal > 0 ? maxTotal : undefined,
-    maxAgeMs: Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : undefined,
+    maxAgeMs: maxAgeOptOut
+      ? Infinity
+      : (Number.isFinite(maxAgeMs) && maxAgeMs > 0 ? maxAgeMs : undefined),
   })
   return _sharedPool
 }

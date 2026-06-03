@@ -424,15 +424,14 @@ export class DockerByokSession extends ClaudeByokSession {
           return
         } catch (err) {
           // The pooled container died while idle (daemon restart, OOM
-          // kill). Forget it and fall through to a fresh launch.
+          // kill). Forget it and fall through to a fresh launch. Use
+          // the pool's `forget()` helper so `_createdAt` gets cleared
+          // alongside the `docker rm -f` — otherwise the map slowly
+          // leaks across long-running servers (#5045 review). Fire-and-
+          // forget; we don't block start on cleanup of a dead id.
           log.warn(`pooled container ${reused.slice(0, 12)} failed verify: ${err.message} — launching fresh`)
           this._containerId = null
-          // Best-effort cleanup of the stale id — fire-and-forget. We
-          // don't await this because the pool has already untracked the
-          // id; the rm is just hygiene. `execFile` ignores `stdio`, so
-          // cap `maxBuffer` instead to keep a misbehaving docker(8)
-          // bounded.
-          this._execFile('docker', ['rm', '-f', reused], { maxBuffer: 64 * 1024 }, () => {})
+          this._pool.forget(reused).catch(() => {})
         }
       }
     }
