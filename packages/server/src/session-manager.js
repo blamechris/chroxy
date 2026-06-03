@@ -1680,11 +1680,22 @@ export class SessionManager extends EventEmitter {
           })
         }
 
-        // Track cumulative cost and check budget on result events.
+        // Track cumulative cost and check budget on priced turn-terminal
+        // events. Both `result` (success path) AND `error` (failure path,
+        // partial spend surfaced by #5037) fold into the same cumulative
+        // tracker — otherwise the user-billed tokens on a failed turn
+        // would silently drop out of cumulativeUsage / sessionCost /
+        // budget gates (#5038).
+        //
+        // Turn-terminal: both events fire exactly once per turn (success
+        // OR error, never both — see byok-session._emitTurnError + the
+        // success-path result emit), so accounting an `error` here can't
+        // double-count with a later `result` for the same turn.
+        //
         // Use Number.isFinite so NaN / Infinity (provider bugs) don't
         // poison cumulative totals or trigger spurious budget events
         // (#4088 review).
-        if (event === 'result' && Number.isFinite(data?.cost)) {
+        if ((event === 'result' || event === 'error') && Number.isFinite(data?.cost)) {
           const sessionEntry = this._sessions.get(sessionId)
           const model = session.currentModel || sessionEntry?.model || null
           this._trackCost(sessionId, data.cost, model)
@@ -1692,6 +1703,10 @@ export class SessionManager extends EventEmitter {
           // Gated on the same `Number.isFinite(data.cost)` predicate so
           // subscription-only providers (cost: null) stay zero (no badge
           // in UI) and NaN/Infinity can't poison the accumulator.
+          //
+          // #5038: an errored turn DOES count as a billed turn — the user
+          // was charged for the partial work — so `turnsBilled` ticks
+          // exactly as it would on the success path.
           this._trackUsage(sessionId, data)
         }
       })
