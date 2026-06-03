@@ -406,6 +406,82 @@ describe('Sidebar keyboard reorder (#4832)', () => {
   })
 })
 
+describe('Sidebar resumable rows do not hijack parent repo drag (#4939)', () => {
+  /**
+   * Regression for #4939: resumable conversation rows sit inside the
+   * outer .sidebar-repo treeitem which becomes draggable=true once
+   * onReorderRepos is wired. HTML5 drag-and-drop bubbles, so without an
+   * explicit guard a click-and-drag on a resumable row would start the
+   * PARENT repo's drag (wrong visual feedback, stray reorder side
+   * effects).
+   *
+   * Active session rows are already covered (handleSessionDragStart
+   * calls stopPropagation); these tests pin the same behaviour for
+   * resumable rows.
+   */
+  function makeReposWithResumable(): RepoNode[] {
+    return [
+      {
+        path: '/home/user/projects/api',
+        name: 'api',
+        source: 'auto',
+        exists: true,
+        activeSessions: [],
+        resumableSessions: [
+          { conversationId: 'conv-1', preview: 'Fix login bug', modifiedAt: '2026-06-02T00:00:00Z' },
+          { conversationId: 'conv-2', preview: 'Add dark mode', modifiedAt: '2026-06-02T00:00:00Z' },
+        ],
+      },
+      {
+        path: '/home/user/projects/web',
+        name: 'web',
+        source: 'auto',
+        exists: true,
+        activeSessions: [],
+        resumableSessions: [],
+      },
+    ]
+  }
+
+  it('marks resumable rows as draggable=false', () => {
+    renderSidebar({ repos: makeReposWithResumable(), onReorderRepos: vi.fn() })
+    const resumable = screen.getByTestId('resumable-item-conv-1')
+    expect(resumable.getAttribute('draggable')).toBe('false')
+  })
+
+  it('does not fire onReorderRepos when a resumable row is dragged onto another repo', () => {
+    const onReorderRepos = vi.fn()
+    renderSidebar({ repos: makeReposWithResumable(), onReorderRepos })
+
+    const resumable = screen.getByTestId('resumable-item-conv-1')
+    const webRepo = screen.getByTestId('sidebar-repo-/home/user/projects/web')
+    stubRect(resumable, 0, 20)
+    stubRect(webRepo, 80, 24)
+
+    const dt = mockDataTransfer()
+    dispatchDrag(resumable, 'dragstart', { dataTransfer: dt })
+    dispatchDrag(webRepo, 'dragover', { dataTransfer: dt, clientY: 100 })
+    dispatchDrag(webRepo, 'drop', { dataTransfer: dt, clientY: 100 })
+
+    expect(onReorderRepos).not.toHaveBeenCalled()
+  })
+
+  it('does not mark the parent repo row with the .dragging class when a resumable child starts a drag', () => {
+    // The parent repo only enters the dragging visual state when its
+    // own handleRepoDragStart fires (setDragRepo). If the resumable
+    // child's dragstart correctly stops propagation, the parent never
+    // sees the event and never gains the .dragging class.
+    renderSidebar({ repos: makeReposWithResumable(), onReorderRepos: vi.fn() })
+
+    const resumable = screen.getByTestId('resumable-item-conv-1')
+    const apiRepo = screen.getByTestId('sidebar-repo-/home/user/projects/api')
+    const dt = mockDataTransfer()
+    dispatchDrag(resumable, 'dragstart', { dataTransfer: dt })
+
+    expect(apiRepo.className).not.toMatch(/\bdragging\b/)
+  })
+})
+
 describe('Sidebar reorder persistence (#4832)', () => {
   it('round-trips the repo order through localStorage', () => {
     const order = [
