@@ -316,6 +316,36 @@ export const ServerAgentCompletedSchema = z.object({
 })
 
 /**
+ * #5016 — Task subagent intermediate progress event.
+ *
+ * Carries a re-emit of a Task subagent's intermediate wire event
+ * (`tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`)
+ * tagged with the parent Task tool_use id so the dashboard can render
+ * the child's progress as nested sub-bubbles inside the parent's Task
+ * tool_call bubble.
+ *
+ * `parentToolUseId` — the id of the parent's `Task` tool_use block
+ *   (same id used for `agent_spawned` / `agent_completed`). Consumers
+ *   key the nested sub-bubble container off this id.
+ * `eventType` — the child's original event name (e.g. `'tool_start'`).
+ *   Consumers switch on this to render the wire event in the same
+ *   shape they would for a top-level event.
+ * `payload` — the verbatim child event payload. Fields are best-effort;
+ *   renderers MUST treat absence as a no-op.
+ *
+ * Nested Task: when a Task subagent itself dispatches a Task, the
+ * grand-child's events are forwarded up the chain re-tagged with the
+ * IMMEDIATE parent's `toolUseId`. The dashboard sees a flat stream
+ * — nested-nested rendering is intentionally not in v2.
+ */
+export const ServerAgentEventSchema = z.object({
+  type: z.literal('agent_event'),
+  parentToolUseId: z.string(),
+  eventType: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+})
+
+/**
  * #4307 — one entry per backgrounded `Bash` shell the session is still
  * waiting on. Pushed when the agent dispatches a `Bash` tool call with
  * `run_in_background: true` (the matching tool_result carries the

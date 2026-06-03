@@ -79,6 +79,10 @@ import {
   handleGitStatusResult as sharedGitStatusResult,
   handleAgentSpawned as sharedAgentSpawned,
   handleAgentCompleted as sharedAgentCompleted,
+  // #5016 — Task subagent nested progress (one wire event per child
+  // `tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`,
+  // attached to the parent Task tool_use bubble's `childAgentEvents[]`).
+  handleAgentEvent as sharedAgentEvent,
   handleBackgroundWorkChanged as sharedBackgroundWorkChanged,
   handleEnvironmentList as sharedEnvironmentList,
   handleEnvironmentError as sharedEnvironmentError,
@@ -2793,6 +2797,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(builder.sessionId, (ss) => {
           const next = builder.applyTo(ss.activeAgents);
           return next === ss.activeAgents ? {} : { activeAgents: next };
+        });
+      }
+      break;
+    }
+
+    case 'agent_event': {
+      // #5016 — Task subagent intermediate progress. Builder appends one
+      // entry to the parent Task tool_use bubble's `childAgentEvents[]`.
+      // Same-reference no-op when the parent bubble isn't found (event
+      // arrived before tool_start, which should not happen given the
+      // server's ordering guarantee but is defended).
+      const builder = sharedAgentEvent(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.messages);
+          return next === ss.messages ? {} : { messages: next };
         });
       }
       break;

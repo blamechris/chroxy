@@ -1712,7 +1712,11 @@ export class SessionManager extends EventEmitter {
     // Transient so it isn't replayed on reconnect — by the time a client
     // reconnects, either the session was destroyed or the user already saw
     // the confirmation.
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped']
+    // #5016: `agent_event` carries a Task subagent's intermediate wire
+    // events (tool_start / tool_result / tool_input_delta / stream_delta)
+    // tagged with the parent's toolUseId. Transient (not replayed on
+    // reconnect — the canonical Task tool_result fold lands in history).
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
