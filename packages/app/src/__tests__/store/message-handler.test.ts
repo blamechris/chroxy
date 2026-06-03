@@ -2007,6 +2007,227 @@ describe('stream_delta handler', () => {
   });
 });
 
+// #4922 — mirror of dashboard PR #4919 (#4889) for the mobile message handler.
+// When an assistant turn streams text -> tool -> text -> tool -> text, the
+// server reuses ONE messageId for the entire response. The defensive remap
+// above only fires when the slot is non-response; post-tool text chunks still
+// concatenate into the same response.content with no separator -- producing
+// `...before filing.Filing now.Filed:` and losing paragraph breaks.
+//
+// Fix: when a delta arrives for a non-empty response that already has a
+// tool_use appended after it, materialize a fresh continuation slot at the
+// end of the messages array (suffixed id `-cont-<ts>`). The remap is written
+// against the ORIGINAL incoming messageId (single-hop) so successive splits
+// overwrite the entry instead of building a chain -- `_deltaIdRemaps` stays
+// bounded and `handleStreamEnd`'s `_deltaIdRemaps.delete(originalId)` cleans
+// up completely.
+describe('post-tool text chunks split into continuation slots (#4922 / #4889)', () => {
+  beforeEach(() => {
+    clearDeltaBuffers();
+    clearPermissionSplits();
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('creates a new response slot when delta arrives for a response with tool_use appended after it', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // text-A -> tool -> text-B -> tool -> text-C, all sharing messageId 'resp-1'
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'Let me check chroxy before filing.',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_a',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_a',
+      input: { command: 'gh issue list' },
+    });
+    _testMessageHandler.handle({
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'toolu_a',
+      result: 'ok',
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'Filing now.',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_b',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_b',
+      input: { command: 'gh issue create' },
+    });
+    _testMessageHandler.handle({
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'toolu_b',
+      result: 'https://...',
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'Filed: https://github.com/...',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const responses = ss.messages.filter((m) => m.type === 'response');
+    const tools = ss.messages.filter((m) => m.type === 'tool_use');
+    expect(responses).toHaveLength(3);
+    expect(tools).toHaveLength(2);
+    expect(responses[0].content).toBe('Let me check chroxy before filing.');
+    expect(responses[1].content).toBe('Filing now.');
+    expect(responses[2].content).toBe('Filed: https://github.com/...');
+    // No `.X` (period followed by capital with no space) across boundaries --
+    // the join in formatTranscript inserts `\n\n` so the concatenation is safe.
+    const joined = responses.map((r) => r.content).join('\n\n');
+    expect(joined).not.toMatch(/\.[A-Z]/);
+  });
+
+  it('places each continuation slot AFTER the preceding tool_use (#4297 ordering preserved)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'preamble',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_a',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_a',
+      input: { command: 'ls' },
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'summary',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    // [response('preamble'), tool, response('summary')]
+    expect(ss.messages).toHaveLength(3);
+    expect(ss.messages[0].type).toBe('response');
+    expect(ss.messages[0].content).toBe('preamble');
+    expect(ss.messages[1].type).toBe('tool_use');
+    expect(ss.messages[1].id).toBe('toolu_a');
+    expect(ss.messages[2].type).toBe('response');
+    expect(ss.messages[2].content).toBe('summary');
+  });
+
+  it('does not split when consecutive deltas arrive without an intervening tool', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'hello ',
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'world',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    // No tool ran -- single response slot with concatenated deltas
+    expect(ss.messages).toHaveLength(1);
+    expect(ss.messages[0].type).toBe('response');
+    expect(ss.messages[0].content).toBe('hello world');
+  });
+
+  it('handles three or more post-tool continuation chunks via single-hop remap (no chain)', () => {
+    // Successive continuation splits must overwrite the remap entry against
+    // the ORIGINAL incoming messageId so the map stays bounded. If the remap
+    // were instead chained (A -> A-cont-1 -> A-cont-2 -> A-cont-3), this
+    // case would either drop deltas or require a transitive lookup.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'A',
+    });
+    jest.runAllTimers();
+    for (let i = 0; i < 3; i++) {
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: `toolu_${i}`,
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: `toolu_${i}`,
+        input: { command: `cmd-${i}` },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: `cont-${i}`,
+      });
+      jest.runAllTimers();
+    }
+
+    const ss = store.getState().sessionStates.s1;
+    const responses = ss.messages.filter((m) => m.type === 'response');
+    expect(responses).toHaveLength(4);
+    expect(responses.map((r) => r.content)).toEqual(['A', 'cont-0', 'cont-1', 'cont-2']);
+  });
+});
+
 describe('stream_end handler', () => {
   beforeEach(() => {
     clearDeltaBuffers();
