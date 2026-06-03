@@ -204,6 +204,61 @@ describe('buildChatViewMessages', () => {
     })
   })
 
+  // #4975 — when the LLM interrupts a text content block to call a tool,
+  // the store records [response(pre), tool_use, response(post)]. The
+  // post-#4889 handler peels any mid-word trailing fragment off the prior
+  // slot and seeds the continuation so the word reassembles. The renderer
+  // pipeline must surface the resulting shape as a clean
+  // response → tool → response triad with no mid-word artifacts.
+  describe('post-tool continuation shape after mid-word peel (#4975)', () => {
+    it('renders coalesced response → tool → response with the word reassembled in the post-tool bubble', () => {
+      // Simulates the store shape AFTER handleStreamDelta's mid-word peel:
+      // the trailing "Del" has been moved from the pre-tool bubble into
+      // the continuation, so "Delegating" lives entirely in the post-tool
+      // response.
+      const messages: ChatMessage[] = [
+        msg({
+          id: 'resp-1',
+          type: 'response',
+          content: 'Starting Phase 1 — agent-review on PR #3.',
+          timestamp: 1,
+        }),
+        msg({
+          id: 'toolu_a',
+          type: 'tool_use',
+          content: '',
+          tool: 'Task',
+          timestamp: 2,
+        }),
+        msg({
+          id: 'resp-1-cont-3',
+          type: 'response',
+          content: 'Delegating the deep review to an independent reviewer agent.',
+          timestamp: 3,
+        }),
+      ]
+      const out = buildChatViewMessages(messages, null)
+      const types = out.chatMessages.map(m => m.type)
+      // Singleton tool_use stays as `tool_use` (no `tool_group` collapse
+      // for one-tool runs), so the visual order matches the store order.
+      expect(types).toEqual(['response', 'tool_use', 'response'])
+      const contents = out.chatMessages.map(m => m.content)
+      expect(contents[0]).toBe('Starting Phase 1 — agent-review on PR #3.')
+      expect(contents[2]).toBe('Delegating the deep review to an independent reviewer agent.')
+      // The word "Delegating" is intact in the continuation bubble — no
+      // mid-word "Del" orphan on the pre-tool side.
+      expect(contents[0]).not.toMatch(/Del$/)
+      expect(contents[2]).toMatch(/^Delegating/)
+      // No orphan fragments — the prior bubble ends at a clean sentence
+      // boundary (period), the continuation starts at the reassembled
+      // word.
+      const joined = contents.filter((_, i) => types[i] === 'response').join('\n\n')
+      expect(joined).toContain('Delegating')
+      expect(joined).not.toContain('Del\n\nDel')
+      expect(joined).not.toMatch(/Del\negating/)
+    })
+  })
+
   describe('toChatViewMessage', () => {
     it('maps `prompt` → `response` (legacy ChatViewMessage discriminator)', () => {
       const m = msg({ id: 'p1', type: 'prompt', content: 'pick one' })
