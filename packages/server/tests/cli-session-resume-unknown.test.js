@@ -74,7 +74,15 @@ describe('CliSession resume-unknown — stderr matcher (#4929)', () => {
       'no such conversation: abc',
       'unknown session abc-123',
       'Could not find session abc-123',
+      // #4950 — these all carry both the resume verb AND a session/conversation/id
+      // keyword nearby; the tightened patterns must still classify them.
       'resume failed: conversation gone',
+      'Resume failed for session abc-123',
+      'Failed to resume conversation abc',
+      'Could not resume session abc-123',
+      'Unable to resume conversation: missing id',
+      'Cannot resume conversation: deleted',
+      'Resume of session abc-123 failed',
     ]
     for (const line of samples) {
       assert.equal(stderrIndicatesUnknownResume([line]), true,
@@ -98,6 +106,27 @@ describe('CliSession resume-unknown — stderr matcher (#4929)', () => {
     }
   })
 
+  it('#4950 — does NOT match loose "resume…failed" stderr without session/conversation/id context', () => {
+    // The dropped `/resume.*failed/i` pattern matched all of these. Each one is
+    // a realistic stderr/log line that has nothing to do with the --resume-id
+    // failure mode but contains both "resume" and "failed". Wiping `_sessionId`
+    // on any of them would silently discard the live conversation mid-flight.
+    const looseSamples = [
+      'tool resume failed',
+      'resume hook failed',
+      'user wanted to resume after the failed sync',
+      'failed to write log file during resume',
+      'failed during resume hook',
+      'tool execution failed during the resume window',
+      'background resume task failed: out of memory',
+      'resume timer failed to start',
+    ]
+    for (const line of looseSamples) {
+      assert.equal(stderrIndicatesUnknownResume([line]), false,
+        `#4950 — "${line}" matched the old /resume.*failed/i regex; the tightened patterns must require session/conversation/id nearby so a tool-side failure during a resume window does not trigger a phantom _sessionId wipe`)
+    }
+  })
+
   it('returns false for empty / non-array input', () => {
     assert.equal(stderrIndicatesUnknownResume([]), false)
     assert.equal(stderrIndicatesUnknownResume(null), false)
@@ -112,6 +141,16 @@ describe('CliSession resume-unknown — stderr matcher (#4929)', () => {
     for (const p of RESUME_UNKNOWN_STDERR_PATTERNS) {
       assert.ok(p instanceof RegExp, 'patterns must be RegExp')
     }
+  })
+
+  it('#4950 — does NOT export the dropped loose `/resume.*failed/i` pattern', () => {
+    // The loose pattern was overbroad and matched unrelated "resume…failed"
+    // stderr. If a refactor reintroduces it, the negative-case test above will
+    // start failing — this assertion catches a reintroduction immediately at
+    // the source-of-truth level so the diagnostic is unambiguous.
+    const sources = RESUME_UNKNOWN_STDERR_PATTERNS.map((p) => p.source)
+    assert.ok(!sources.includes('resume.*failed'),
+      '#4950 — the loose `/resume.*failed/i` pattern must stay dropped; reintroducing it re-enables the phantom _sessionId wipe that #4950 fixed')
   })
 })
 
