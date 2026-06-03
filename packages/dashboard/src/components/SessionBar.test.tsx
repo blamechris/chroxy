@@ -770,6 +770,36 @@ describe('SessionBar', () => {
       expect(region.textContent).toMatch(/2 of 3/)
     })
 
+    // #4963 follow-up — Space is the documented "drop" key alongside
+    // Enter. The original implementation set a bare "Dropped X." here
+    // which clobbered the more informative "Dropped X at position N
+    // of M" narration that `stepKeyboard` had just pushed. Guard the
+    // regression: after a Space-commit the position narration must
+    // still be the visible announcement.
+    it('preserves "position N of M" narration when committing with Space', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      // Lift "a", step right (announces "Dropped Alpha at position 2 of 3."),
+      // then commit with Space — the position narration must survive.
+      fireEvent.keyDown(tabA, { key: ' ' })
+      fireEvent.keyDown(tabA, { key: 'ArrowRight' })
+      fireEvent.keyDown(tabA, { key: ' ' })
+      const region = screen.getByTestId('session-bar-reorder-announcer')
+      expect(region.textContent).toMatch(/dropped/i)
+      expect(region.textContent).toMatch(/alpha/i)
+      expect(region.textContent).toMatch(/2 of 3/)
+    })
+
     it('announces "Cancelled" when Escape ends the lift', () => {
       render(
         <SessionBar

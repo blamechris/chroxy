@@ -205,13 +205,17 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
     }
   }, [sessions, onReorder])
 
-  // #4831 — keyboard step. `dir` is +1 (right) / -1 (left). Mutates via
-  // `emitReorder` (insert-before semantics: stepping right swaps with the
-  // next neighbor by inserting after it).
+  // #4831 — keyboard step. `dir` is +1 (right) / -1 (left). Calls
+  // `onReorder` directly with the result of `reorderTabs` (insert-before
+  // semantics: stepping right swaps with the next neighbor by inserting
+  // after it). We don't go through `emitReorder` here because the
+  // sessionId → sessionId lookup of that helper is built for the pointer
+  // drop path; the keyboard step already knows the moved tab's index.
   //
-  // #4951 — the live-region "Dropped …" announcement is emitted by
-  // `emitReorder` itself, so each keyboard step also produces a polite
-  // narration of the new position.
+  // #4951 — also pushes a "Dropped … at position N of M" announcement
+  // into the live region inline (each keyboard step is a settled state
+  // worth narrating, so SR users hear the new position after every
+  // ArrowLeft / ArrowRight).
   const stepKeyboard = useCallback((sessionId: string, dir: 1 | -1) => {
     if (!onReorder) return
     const ids = sessions.map(s => s.sessionId)
@@ -324,10 +328,15 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                 // #4951 — announce the lift / commit transitions in the
                 // live region. Plain Space toggles the lift state, so the
                 // narration depends on whether we're entering or leaving
-                // reorder mode for THIS tab.
+                // reorder mode for THIS tab. On commit (toggling lift off)
+                // we deliberately do NOT overwrite the live region — each
+                // prior ArrowLeft / ArrowRight already pushed a precise
+                // "Dropped X at position N of M" via `stepKeyboard`, and
+                // that's the settled narration we want SR users to hear
+                // (#4963 follow-up: a bare "Dropped X." here would clobber
+                // the position information).
                 setKeyboardLiftId(prev => {
                   if (prev === session.sessionId) {
-                    setReorderAnnouncement(`Dropped ${session.name}.`)
                     return null
                   }
                   setReorderAnnouncement(
@@ -349,14 +358,15 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                   e.preventDefault()
                   setKeyboardLiftId(null)
                   // #4951 — Enter is the "commit" alias. Each prior
-                  // ArrowLeft / ArrowRight already announced the
-                  // new position via `stepKeyboard` → `emitReorder`,
-                  // so we don't re-narrate the resting state here
-                  // (that would risk reading a stale position if
-                  // the parent has not yet propagated the new order
-                  // back through the `sessions` prop). Leaving the
-                  // last "Dropped X at position N of M" announcement
-                  // in the live region is the settled narration.
+                  // ArrowLeft / ArrowRight already announced the new
+                  // position via `stepKeyboard`'s inline
+                  // `setReorderAnnouncement`, so we don't re-narrate
+                  // the resting state here (that would risk reading a
+                  // stale position if the parent has not yet
+                  // propagated the new order back through the
+                  // `sessions` prop). Leaving the last
+                  // "Dropped X at position N of M" announcement in
+                  // the live region is the settled narration.
                   return
                 }
                 if (e.key === 'ArrowRight') {
