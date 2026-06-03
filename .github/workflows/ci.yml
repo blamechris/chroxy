@@ -55,6 +55,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
+    # `dorny/paths-filter` calls the GitHub REST API (`listFiles`) to read the
+    # PR's changed-file list on `pull_request` events. The workflow-level
+    # `permissions: contents: read` block at the top of this file zeros out
+    # every other scope, so we have to re-grant `pull-requests: read` at the
+    # job level — without it, the API call fails with "Resource not accessible
+    # by integration" on fork PRs and (potentially) any future GitHub change
+    # that tightens the implicit same-repo grant. Same-repo PRs happen to work
+    # today via the implicit token grant, but the explicit permission is what
+    # the action documents and what survives a fork PR.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       platform: ${{ steps.filter.outputs.platform }}
     steps:
