@@ -409,8 +409,14 @@ Object.assign(EVENT_MAP, {
     // correlate against `~/.chroxy/session-state.json.resumeConversationId`
     // without grepping logs.
     //
+    // #4948: also forward on `resume_unknown_exhausted` — the terminal
+    // escalation code emitted when the post-fallback retry ALSO matches the
+    // unknown-resume pattern. Same operator-correlation rationale; the
+    // dashboard renders a distinct "auto-recovery exhausted" affordance but
+    // still wants to surface the attempted id as subtext.
+    //
     // Hardening (from PR #4967 Copilot review):
-    //   1. Gate strictly on `code === 'resume_unknown'` so a buggy producer
+    //   1. Gate strictly on the two resume-failure codes so a buggy producer
     //      can't sneak the field onto unrelated error envelopes.
     //   2. Trim whitespace and treat whitespace-only as missing — same UX
     //      guard the chip's render-time check already applies, but enforced
@@ -425,7 +431,7 @@ Object.assign(EVENT_MAP, {
     //      but trips Zod-validating consumers. Silently truncate rather
     //      than drop — the truncated id still helps operator triage.
     if (
-      data.code === 'resume_unknown' &&
+      (data.code === 'resume_unknown' || data.code === 'resume_unknown_exhausted') &&
       typeof data.attemptedResumeId === 'string'
     ) {
       const trimmed = data.attemptedResumeId.trim()
