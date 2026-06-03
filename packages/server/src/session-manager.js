@@ -1694,11 +1694,13 @@ export class SessionManager extends EventEmitter {
         //   - byok-session error path: a single `error` (with finite cost
         //     for the partial spend, see #5037).
         //   - Stream-stall path (sdk-session._handleStreamStall and
-        //     cli-session._emitInterruptedTurnResult): emits BOTH a
-        //     synthetic `result` AND `error` for the same turn — but the
-        //     synthetic `result` carries `cost: null`, so the
-        //     Number.isFinite gate filters it. The `error` half is
-        //     plain stream-stall metadata (no cost field), also filtered.
+        //     cli-session._handleStreamStall — the latter calls
+        //     _emitInterruptedTurnResult for the synthetic `result` and
+        //     then emits the `error` itself): emits BOTH a synthetic
+        //     `result` AND `error` for the same turn — but the synthetic
+        //     `result` carries `cost: null`, so the Number.isFinite gate
+        //     filters it. The `error` half is plain stream-stall metadata
+        //     (no cost field), also filtered.
         // No emit topology change is needed to add new failure paths as
         // long as they keep this invariant (priced terminal ⇒ exactly one
         // event with a finite cost per turn).
