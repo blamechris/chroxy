@@ -123,4 +123,115 @@ describe('HeaderOverflowMenu (#4974)', () => {
     fireEvent.keyDown(row2, { key: ' ' })
     expect(onSkills).toHaveBeenCalledTimes(2)
   })
+
+  // #4980 — full WAI-ARIA Authoring Practices menu keyboard pattern. The
+  // same acceptance set already pinned for SessionContextMenu (#4248) now
+  // applies here too.
+  describe('WAI-ARIA keyboard navigation (#4980)', () => {
+    it('moves initial focus into the first menu item when the menu opens', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const firstItem = screen.getByTestId('header-overflow-item-skills')
+      expect(document.activeElement).toBe(firstItem)
+    })
+
+    it('uses roving tabindex — only the focused item is tabIndex=0', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const first = screen.getByTestId('header-overflow-item-skills')
+      const second = screen.getByTestId('header-overflow-item-copy')
+      const third = screen.getByTestId('header-overflow-item-settings')
+      expect(first.tabIndex).toBe(0)
+      expect(second.tabIndex).toBe(-1)
+      expect(third.tabIndex).toBe(-1)
+    })
+
+    it('ArrowDown moves focus to the next item with wrap-around', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const first = screen.getByTestId('header-overflow-item-skills')
+      const second = screen.getByTestId('header-overflow-item-copy')
+      const third = screen.getByTestId('header-overflow-item-settings')
+      fireEvent.keyDown(first, { key: 'ArrowDown' })
+      expect(document.activeElement).toBe(second)
+      expect(second.tabIndex).toBe(0)
+      fireEvent.keyDown(second, { key: 'ArrowDown' })
+      expect(document.activeElement).toBe(third)
+      // Wrap from last → first
+      fireEvent.keyDown(third, { key: 'ArrowDown' })
+      expect(document.activeElement).toBe(first)
+    })
+
+    it('ArrowUp moves focus to the previous item with wrap-around', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const first = screen.getByTestId('header-overflow-item-skills')
+      const third = screen.getByTestId('header-overflow-item-settings')
+      // Wrap from first → last
+      fireEvent.keyDown(first, { key: 'ArrowUp' })
+      expect(document.activeElement).toBe(third)
+    })
+
+    it('Home jumps focus to the first item', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const first = screen.getByTestId('header-overflow-item-skills')
+      const third = screen.getByTestId('header-overflow-item-settings')
+      fireEvent.keyDown(first, { key: 'End' })
+      expect(document.activeElement).toBe(third)
+      fireEvent.keyDown(third, { key: 'Home' })
+      expect(document.activeElement).toBe(first)
+    })
+
+    it('End jumps focus to the last item', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const first = screen.getByTestId('header-overflow-item-skills')
+      const third = screen.getByTestId('header-overflow-item-settings')
+      fireEvent.keyDown(first, { key: 'End' })
+      expect(document.activeElement).toBe(third)
+    })
+
+    it('Escape returns focus to the trigger', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      const trigger = screen.getByTestId('header-overflow-trigger')
+      fireEvent.click(trigger)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(document.activeElement).toBe(trigger)
+    })
+
+    it('returns focus to the trigger after item activation (so Tab continues into the next header control)', () => {
+      const onSkills = vi.fn()
+      const items = [{ id: 'skills', label: 'Skills', onClick: onSkills }]
+      render(<HeaderOverflowMenu items={items} />)
+      const trigger = screen.getByTestId('header-overflow-trigger')
+      fireEvent.click(trigger)
+      const row = screen.getByTestId('header-overflow-item-skills')
+      fireEvent.keyDown(row, { key: 'Enter' })
+      expect(document.activeElement).toBe(trigger)
+    })
+
+    it('returns focus to the trigger after outside-click dismissal', () => {
+      render(
+        <div>
+          <button data-testid="outside-btn">outside</button>
+          <HeaderOverflowMenu items={baseItems} />
+        </div>,
+      )
+      const trigger = screen.getByTestId('header-overflow-trigger')
+      fireEvent.click(trigger)
+      fireEvent.mouseDown(screen.getByTestId('outside-btn'))
+      expect(document.activeElement).toBe(trigger)
+    })
+
+    it('wires aria-controls between trigger and menu', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      const trigger = screen.getByTestId('header-overflow-trigger')
+      const ariaControls = trigger.getAttribute('aria-controls')
+      expect(ariaControls).toBeTruthy()
+      fireEvent.click(trigger)
+      const menu = screen.getByTestId('header-overflow-menu')
+      expect(menu.getAttribute('id')).toBe(ariaControls)
+    })
+  })
 })
