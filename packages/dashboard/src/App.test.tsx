@@ -85,10 +85,10 @@ vi.mock('./components/PermissionPrompt', () => ({
   ),
 }))
 
-// #4695 — CreateSessionModal pulls multiple store-callback selectors
+// #4695 / #5062 — CreateSessionModal pulls multiple store-callback selectors
 // (setDirectoryListingCallback / requestDirectoryListing / …) that the
 // App-test store mock doesn't enumerate. Stubbing the modal lets the
-// chrome-new-session click assertion verify the `open` prop transition
+// New Session overflow-menu click assertion verify the `open` prop transition
 // without dragging in directory-browser store wiring. Production
 // behaviour is exercised by the CreateSessionModal*.test.tsx suites.
 vi.mock('./components/CreateSessionModal', () => ({
@@ -2147,37 +2147,49 @@ describe('App', () => {
   // scanning the dashboard chrome. The chrome button lives in
   // `header-right` and reuses the existing handleNewSession path
   // (setShowCreateSession → CreateSessionModal), so the test pins:
-  //   1. The button renders inside #header (always-visible chrome).
-  //   2. It has accessible title + aria-label (matches the #4630
-  //      header-button convention checked above).
+  //   1. The entry renders inside #header (always-visible chrome),
+  //      reached by opening the overflow (⋯) menu.
+  //   2. It has a visible "New Session" label and a title with the
+  //      Cmd+N shortcut hint.
   //   3. Clicking it opens the Create Session modal (the modal renders
   //      its overlay only when open=true, mirrored on Modal.tsx's
   //      `if (!open) return null` guard).
-  describe('chrome-new-session button (#4695)', () => {
+  //   4. The standalone `chrome-new-session` button no longer renders —
+  //      the affordance lives only inside the overflow menu now.
+  describe('New Session in header overflow menu (#5062)', () => {
     const baseHeaderState = {
       connectionPhase: 'connected' as const,
       sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
       activeSessionId: 's1',
     }
 
-    it('renders inside the dashboard #header chrome', () => {
+    it('no longer renders the standalone chrome-new-session button (#5062)', () => {
+      stateOverrides = baseHeaderState
+      render(<App />)
+      expect(screen.queryByTestId('chrome-new-session')).not.toBeInTheDocument()
+    })
+
+    it('renders the New Session entry inside the header overflow menu', () => {
       stateOverrides = baseHeaderState
       const { container } = render(<App />)
       const header = container.querySelector('#header')
       expect(header, '#header must render').toBeTruthy()
-      const btn = within(header as HTMLElement).getByTestId('chrome-new-session')
-      expect(btn).toBeInTheDocument()
+      const trigger = within(header as HTMLElement).getByTestId('header-overflow-trigger')
+      fireEvent.click(trigger)
+      const item = screen.getByTestId('header-overflow-item-new-session')
+      expect(item).toBeInTheDocument()
+      expect(item.textContent).toMatch(/New Session/)
     })
 
-    it('exposes accessible title + aria-label + visible "New Session" label', () => {
+    it('exposes a title attribute containing the Cmd+N shortcut hint', () => {
       stateOverrides = baseHeaderState
       render(<App />)
-      const btn = screen.getByTestId('chrome-new-session')
-      expect(btn.getAttribute('aria-label'), 'chrome-new-session needs aria-label').toBe('New session')
-      expect(btn.getAttribute('title'), 'chrome-new-session needs title with shortcut hint').toMatch(/New session/)
-      // The visible label is part of the muscle-memory affordance —
-      // without it the button reads as just another icon glyph.
-      expect(btn.textContent).toMatch(/New Session/)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const item = screen.getByTestId('header-overflow-item-new-session')
+      // The HeaderOverflowMenu copies `item.title` straight onto the
+      // <li>'s `title` attribute — assert the shortcut hint survives.
+      expect(item.getAttribute('title')).toMatch(/New session/)
+      expect(item.getAttribute('title')).toMatch(/N/)
     })
 
     it('opens the Create Session modal on click', () => {
@@ -2185,7 +2197,8 @@ describe('App', () => {
       render(<App />)
       // Modal mock renders the testID node only when `open=true`.
       expect(screen.queryByTestId('create-session-modal-mock')).not.toBeInTheDocument()
-      fireEvent.click(screen.getByTestId('chrome-new-session'))
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      fireEvent.click(screen.getByTestId('header-overflow-item-new-session'))
       expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
     })
   })
