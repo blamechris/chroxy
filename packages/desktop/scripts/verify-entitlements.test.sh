@@ -139,10 +139,10 @@ assert_exit "treats dots in key as literal, not regex any-char" 1 "$(run_verifie
 # directory; all prior cases use `.plist` files which take the plist-mode
 # short-circuit and never run the new branch. Without codesign on the test
 # runner — and without a real codesigned helper binary — the parent
-# `extract_entitlements` step short-circuits at line 119 on any unsigned
-# `.app`, so we stub `codesign` to return a valid parent plist and an empty
-# helper plist. This lets the parent check pass and the helper check fail,
-# matching the regression we want to catch.
+# `extract_entitlements` step short-circuits on any unsigned `.app`, so we
+# stub `codesign` to return a valid parent plist and an empty helper plist.
+# This lets the parent check pass and the helper check fail, matching the
+# regression we want to catch.
 #
 # This guards against:
 #   - The `[ -d "$TARGET" ] && [[ "$TARGET" == *.app ]]` guard inverted
@@ -183,17 +183,19 @@ EOF
 STUB
 chmod +x "$STUB_DIR/codesign"
 
+STUB_ERR_FILE="$TMP_DIR/case7.err"
+STUB_OUT_FILE="$TMP_DIR/case7.out"
 set +e
-STUB_OUT="$(PATH="$STUB_DIR:$PATH" "$VERIFIER" "$FAKE_APP" 2>&1)"
+PATH="$STUB_DIR:$PATH" "$VERIFIER" "$FAKE_APP" >"$STUB_OUT_FILE" 2>"$STUB_ERR_FILE"
 STUB_RC=$?
 set -e
 assert_exit "#4955 — synthetic .app with empty-entitlements helper → exit 1" 1 "$STUB_RC"
 
-if printf '%s' "$STUB_OUT" | grep -qF "speech-helper has no embedded entitlements"; then
+if grep -qF "speech-helper has no embedded entitlements" "$STUB_ERR_FILE"; then
     echo "ok   - #4955 — helper-in-app FAIL message present in stderr"
     PASS=$((PASS + 1))
 else
-    echo "FAIL - #4955 — helper-in-app FAIL message missing (output: $STUB_OUT)" >&2
+    echo "FAIL - #4955 — helper-in-app FAIL message missing from stderr (stderr: $(cat "$STUB_ERR_FILE"); stdout: $(cat "$STUB_OUT_FILE"))" >&2
     FAIL=$((FAIL + 1))
 fi
 
@@ -204,17 +206,19 @@ FAKE_APP_NO_HELPER="$TMP_DIR/NoHelper.app"
 mkdir -p "$FAKE_APP_NO_HELPER/Contents/Resources"
 # Note: speech-helper deliberately NOT created.
 
+STUB_ERR_FILE2="$TMP_DIR/case8.err"
+STUB_OUT_FILE2="$TMP_DIR/case8.out"
 set +e
-STUB_OUT2="$(PATH="$STUB_DIR:$PATH" "$VERIFIER" "$FAKE_APP_NO_HELPER" 2>&1)"
+PATH="$STUB_DIR:$PATH" "$VERIFIER" "$FAKE_APP_NO_HELPER" >"$STUB_OUT_FILE2" 2>"$STUB_ERR_FILE2"
 STUB_RC2=$?
 set -e
 assert_exit "#4955 — synthetic .app with no helper file → exit 0 (WARN only)" 0 "$STUB_RC2"
 
-if printf '%s' "$STUB_OUT2" | grep -qF "speech-helper not present"; then
+if grep -qF "speech-helper not present" "$STUB_ERR_FILE2"; then
     echo "ok   - #4955 — missing-helper WARN message present in stderr"
     PASS=$((PASS + 1))
 else
-    echo "FAIL - #4955 — missing-helper WARN message missing (output: $STUB_OUT2)" >&2
+    echo "FAIL - #4955 — missing-helper WARN message missing from stderr (stderr: $(cat "$STUB_ERR_FILE2"); stdout: $(cat "$STUB_OUT_FILE2"))" >&2
     FAIL=$((FAIL + 1))
 fi
 
