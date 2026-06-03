@@ -1075,6 +1075,23 @@ export class CliSession extends BaseSession {
         const messageId = this._currentMessageId
         const ctx = this._currentCtx
 
+        // #5064 — Fallback for turns that complete without ever emitting
+        // streamed assistant text. The canonical case is `/compact`: the
+        // CLI returns the compaction summary in `data.result` but emits
+        // either no `assistant` event at all, or one with empty/no-growth
+        // text content, so the dashboard sees nothing. Mirror the SDK
+        // fallback (sdk-session.js:801) and surface `data.result` as a
+        // `message` of type `response` before the `result` event fires.
+        // Guard on !hasStreamStarted so normal streamed turns aren't
+        // double-emitted.
+        if (!ctx?.hasStreamStarted && typeof data.result === 'string' && data.result.length > 0) {
+          this.emit('message', {
+            type: 'response',
+            content: data.result,
+            timestamp: Date.now(),
+          })
+        }
+
         // Close any open stream before emitting result
         if (ctx?.hasStreamStarted) {
           this.emit('stream_end', { messageId })

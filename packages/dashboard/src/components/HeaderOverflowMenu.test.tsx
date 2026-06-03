@@ -295,4 +295,38 @@ describe('HeaderOverflowMenu (#4974)', () => {
       expect(menu.getAttribute('id')).toBe(ariaControls)
     })
   })
+
+  // #5062 — New Session is now a regular overflow-menu item (was a
+  // standalone `chrome-new-session-btn` in the header-right zone). The
+  // component itself is generic — these tests pin the contract that the
+  // App.tsx integration relies on: an item with id `new-session` fires
+  // its handler when clicked and closes the menu, just like every other
+  // row.
+  describe('New Session menu item (#5062)', () => {
+    it('renders a new-session row when supplied and fires its handler on click', () => {
+      const onNewSession = vi.fn()
+      const items: HeaderOverflowItem[] = [
+        {
+          id: 'new-session',
+          label: 'New Session',
+          icon: '+',
+          title: 'New session (Cmd+N)',
+          onClick: onNewSession,
+        },
+        { id: 'settings', label: 'Settings', onClick: vi.fn() },
+      ]
+      render(<HeaderOverflowMenu items={items} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const row = screen.getByTestId('header-overflow-item-new-session')
+      expect(row).toBeInTheDocument()
+      // Title attribute survives onto the <li> so the shortcut hint is
+      // discoverable on hover.
+      expect(row.getAttribute('title')).toMatch(/New session/)
+      expect(row.textContent).toMatch(/New Session/)
+      fireEvent.click(row)
+      expect(onNewSession).toHaveBeenCalledTimes(1)
+      // Activation dismisses the menu (same contract as every other row).
+      expect(screen.queryByTestId('header-overflow-menu')).not.toBeInTheDocument()
+    })
+  })
 })

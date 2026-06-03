@@ -174,6 +174,9 @@ export {
   // #5039: error-path partial-cost helper shared by dashboard toast
   // sub-line and mobile Alert.alert body.
   formatPartialCostLine,
+  // #5065: compact `used / total` token label for the header
+  // context-window meter.
+  formatTokensCompact,
 } from './cost-format'
 export type { ErrorPartialCost } from './cost-format'
 

@@ -3860,6 +3860,62 @@
   min-width: 50px;
 }
 
+/*
+ * #5065: header context-window meter — `used / total tokens` label +
+ * fill bar. Sized smaller than the footer's variant (50px bar vs 60px)
+ * so the header status line stays compact; shares the same colour
+ * thresholds + over-budget pulse so the two surfaces flip from green →
+ * yellow → red in lockstep.
+ */
+.status-context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.status-context-bar {
+  display: inline-block;
+  width: 50px;
+  height: 6px;
+  background: var(--bg-tertiary, #1a1a2e);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.status-context-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-green, #48bb78);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.status-context-bar.medium .status-context-fill {
+  background: var(--accent-yellow, #ecc94b);
+}
+
+.status-context-bar.high .status-context-fill {
+  background: var(--accent-red, #e53e3e);
+}
+
+.status-context-bar.over-budget .status-context-fill {
+  background: var(--accent-red-dark, #c53030);
+  animation: statusContextOverBudgetPulse 2s ease-in-out infinite;
+}
+
+@keyframes statusContextOverBudgetPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+.status-context-label {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .busy-indicator {
   width: 8px;
   height: 8px;
@@ -5379,53 +5435,22 @@
   outline-offset: 2px;
 }
 
-/* #4695 — prominent "New Session" chrome button. Lives in header-right
-   ahead of the icon-only buttons (Skills / Copy / Settings) so it is
-   the first affordance a new user spots. Uses the accent color filled
-   in (rather than outlined) to read as the primary chrome action. */
-.chrome-new-session-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--accent-blue);
-  color: #fff;
-  border: 1px solid var(--accent-blue);
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
-}
+/* #4695 / #5062 — the prominent "New Session" chrome button used to
+   live here as `.chrome-new-session-btn`. It has been folded into the
+   header overflow (⋯) menu as a regular menu item so the header-right
+   zone no longer crowds the permissions/model dropdowns. Cmd+N and
+   the macOS "File > New Session" menu item continue to fire
+   `handleNewSession`; the discoverable chrome entry is now inside the
+   overflow menu. */
 
-.chrome-new-session-btn:hover {
-  opacity: 0.88;
-}
-
-.chrome-new-session-btn:focus-visible {
-  outline: 2px solid var(--accent-blue);
-  outline-offset: 2px;
-}
-
-.chrome-new-session-icon {
-  font-size: 16px;
-  line-height: 1;
-  font-weight: 600;
-}
-
-.chrome-new-session-label {
-  white-space: nowrap;
-}
-
-/* --- Header overflow menu (#4974) ---
-   Skills / Copy / Settings collapsed behind a single "⋯" trigger so
-   the right zone has room for the prominent + New Session button and
-   the cost/token StatusBar without overlapping the model selector in
-   the center column. The trigger reuses `.header-icon-btn` for chrome
-   parity (hover bg, focus ring, no shrink), and the popover mirrors
-   the existing `.session-context-menu` look — same surface, border,
-   shadow — so the dashboard reads as one component family. */
+/* --- Header overflow menu (#4974, #5062) ---
+   Skills / Copy / Settings + New Session collapsed behind a single
+   "⋯" trigger so the right zone stays clean and doesn't overlap the
+   model selector in the center column. The trigger reuses
+   `.header-icon-btn` for chrome parity (hover bg, focus ring, no
+   shrink), and the popover mirrors the existing `.session-context-menu`
+   look — same surface, border, shadow — so the dashboard reads as one
+   component family. */
 .header-overflow {
   position: relative;
   flex-shrink: 0;
