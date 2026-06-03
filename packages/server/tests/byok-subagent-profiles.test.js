@@ -67,24 +67,21 @@ describe('SUBAGENT_PROFILES (#5018)', () => {
 
   it('every profile systemPrompt fits under SESSION_PREAMBLE_MAX_LENGTH (#5073)', () => {
     // #5073: the byok Task tool applies a profile to a child session via
-    // direct field assignment (`child.sessionPreamble = profile.systemPrompt`)
-    // rather than the `setSessionPreamble` setter, intentionally bypassing
-    // the 4000-char user-preamble cap for in-source profiles we control.
-    // That's fine for today's seed (~200-400 chars each), but a future
-    // contributor could add a profile with a multi-kilobyte systemPrompt
-    // and the implicit "fits in the system-prompt slot" invariant would
-    // break silently — `_buildSystemPrompt` joins the preamble with the
-    // chroxy context hint + skills text, and an over-long preamble could
-    // push the combined prompt past Anthropic's token budget.
+    // `child.setSessionPreamble(profile.systemPrompt)` (see
+    // `byok-session.js:_executeTaskTool`), which silently trims and caps
+    // at SESSION_PREAMBLE_MAX_LENGTH. Today's seed (~200-400 chars each)
+    // is well under the cap, but a future contributor could add a profile
+    // with a multi-kilobyte systemPrompt — that wouldn't crash, but the
+    // cap would silently truncate the tail, and the child would see a
+    // half-instruction. The model behaviour silently degrades.
     //
     // Pinning every profile under SESSION_PREAMBLE_MAX_LENGTH here makes
-    // that invariant explicit so a future profile addition fails at CI
-    // rather than at runtime.
+    // the invariant explicit so a future profile addition that would rely
+    // on silent truncation fails at CI rather than at runtime.
     for (const [id, profile] of Object.entries(SUBAGENT_PROFILES)) {
       assert.ok(
         profile.systemPrompt.length <= SESSION_PREAMBLE_MAX_LENGTH,
-        `profile ${id} systemPrompt (${profile.systemPrompt.length} chars) `
-        + `exceeds SESSION_PREAMBLE_MAX_LENGTH (${SESSION_PREAMBLE_MAX_LENGTH})`,
+        `profile ${id} systemPrompt (${profile.systemPrompt.length} chars) exceeds SESSION_PREAMBLE_MAX_LENGTH (${SESSION_PREAMBLE_MAX_LENGTH})`,
       )
     }
   })

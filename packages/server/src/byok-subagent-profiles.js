@@ -34,13 +34,15 @@
  * (`general-purpose`, etc.).
  *
  * Each `systemPrompt` MUST stay under `SESSION_PREAMBLE_MAX_LENGTH` (4000
- * chars). The byok Task tool applies the profile to a child via direct
- * `child.sessionPreamble = profile.systemPrompt` assignment, bypassing the
- * `setSessionPreamble` setter's trim + cap — so an over-long prompt would
- * sail past silently and push the combined system prompt
- * (`_buildSystemPrompt` joins preamble + context hint + skills text) past
- * Anthropic's token budget. The bound is pinned by a unit test in
- * `tests/byok-subagent-profiles.test.js` (#5073).
+ * chars). The byok Task tool applies the profile via
+ * `child.setSessionPreamble(profile.systemPrompt)` (see
+ * `byok-session.js:_executeTaskTool`), which silently trims and caps at
+ * `SESSION_PREAMBLE_MAX_LENGTH`. An over-long profile wouldn't crash, but
+ * its tail would be truncated and the child would see only a half-
+ * instruction — the model behaviour silently degrades. The bound is
+ * pinned by a unit test in `tests/byok-subagent-profiles.test.js`
+ * (#5073) so a profile addition that would rely on silent truncation
+ * fails at CI rather than at runtime.
  *
  * @type {Readonly<Record<string, Readonly<{systemPrompt: string, toolSet: 'all' | readonly string[]}>>>}
  */
