@@ -933,6 +933,17 @@ export function App() {
   useEffect(() => {
     setTabOrder(loadPersistedSessionTabOrder())
   }, [activeServerId])
+  // #4940 — same server-switch refresh for the sidebar repo / per-repo
+  // session orders declared above (see lines around the `sidebarRepoOrder`
+  // useState). The persistence layer is already server-scoped via
+  // `scopedKey` / `scopedRead`, but the App-level state was initialised
+  // once and never re-read. Without this effect, switching servers via
+  // the ServerPicker left server A's drag-ordering applied to server B's
+  // sidebar until a full page reload, silently bypassing the scoping.
+  useEffect(() => {
+    setSidebarRepoOrder(loadPersistedSidebarRepoOrder())
+    setSidebarSessionOrder(loadPersistedSidebarSessionOrder())
+  }, [activeServerId])
   const handleReorderTabs = useCallback((nextOrder: string[]) => {
     setTabOrder(nextOrder)
     persistSessionTabOrder(nextOrder)

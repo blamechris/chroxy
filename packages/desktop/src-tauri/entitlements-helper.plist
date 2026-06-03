@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS TCC evaluates microphone access against the entitlements of the
+         binary that opens the audio device. The Swift speech-helper is a
+         separately codesigned Mach-O process — the parent app's
+         com.apple.security.device.audio-input does NOT propagate to it.
+         Without this entitlement on the helper itself, AVAudioEngine and
+         SFSpeechRecognizer authorization calls return denied even when the
+         user has granted Microphone permission in System Settings (#4953,
+         missed by #4801 / #4812 which only patched the parent bundle). -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>
