@@ -157,6 +157,32 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   },
   // Cmd+1 .. Cmd+9 tab-switch entries — one per digit.
   ...tabSwitchShortcuts,
+  // -- #4941: sidebar reorder discoverability ----------------------
+  // These two entries describe the existing Alt+ArrowUp / Alt+ArrowDown
+  // keyboard reorder shortcut on draggable sidebar rows (#4832). They
+  // are intentionally informational-only: the actual keydown handler
+  // lives in Sidebar.tsx and matches `event.altKey && event.key ===
+  // 'ArrowUp'|'ArrowDown'` directly rather than via the registry, so a
+  // user rebind here does NOT change runtime behaviour today. The
+  // entries exist so the `?` cheat sheet and Settings rebind list both
+  // surface the shortcut — the previous gap left users with no path
+  // to discover keyboard reorder short of reading the PR or the source.
+  // When the row-level handler is migrated to `registry.matchEvent`,
+  // these entries become functional without further migration.
+  {
+    id: 'sidebar.reorder.up',
+    defaultBinding: 'alt+arrowup',
+    description: 'Move sidebar row up (when focused)',
+    category: 'sidebar',
+    scope: 'global',
+  },
+  {
+    id: 'sidebar.reorder.down',
+    defaultBinding: 'alt+arrowdown',
+    description: 'Move sidebar row down (when focused)',
+    category: 'sidebar',
+    scope: 'global',
+  },
   // #4949 — SessionBar keyboard reorder ladder. Shipped in #4945 but
   // was undiscoverable: no cheat-sheet entry, no tooltip. The ladder
   // is owned by SessionBar.tsx itself (focused-tab keydown handler),

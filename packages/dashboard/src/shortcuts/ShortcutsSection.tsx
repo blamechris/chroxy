@@ -24,10 +24,11 @@ const CATEGORY_LABELS: Record<ShortcutCategory, string> = {
   composer: 'Composer',
   session: 'Session',
   view: 'View',
+  sidebar: 'Sidebar',
   other: 'Other',
 }
 
-const CATEGORY_ORDER: ShortcutCategory[] = ['navigation', 'view', 'session', 'composer', 'other']
+const CATEGORY_ORDER: ShortcutCategory[] = ['navigation', 'view', 'session', 'sidebar', 'composer', 'other']
 
 export function ShortcutsSection() {
   const registry = useShortcutRegistry()

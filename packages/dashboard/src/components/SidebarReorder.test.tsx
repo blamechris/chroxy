@@ -406,6 +406,50 @@ describe('Sidebar keyboard reorder (#4832)', () => {
   })
 })
 
+// #4941 — discoverability follow-up: the Alt+ArrowUp/Down reorder
+// shortcut is invisible without `aria-keyshortcuts`, so assistive tech
+// can't announce it and sighted users have no surfacing either. The
+// attribute must be set when (and ONLY when) reorder is functionally
+// wired on a row, so the announced shortcut doesn't mislead users on
+// rows where the keypress is a no-op.
+describe('Sidebar aria-keyshortcuts (#4941)', () => {
+  it('exposes Alt+ArrowUp Alt+ArrowDown on session rows when reorder is wired', () => {
+    renderSidebar({ onReorderSessions: vi.fn() })
+    const s1 = screen.getByTestId('session-item-s1')
+    expect(s1.getAttribute('aria-keyshortcuts')).toBe('Alt+ArrowUp Alt+ArrowDown')
+  })
+
+  it('exposes Alt+ArrowUp Alt+ArrowDown on repo rows when reorder is wired', () => {
+    renderSidebar({ onReorderRepos: vi.fn() })
+    const apiRepo = screen.getByTestId('sidebar-repo-/home/user/projects/api')
+    expect(apiRepo.getAttribute('aria-keyshortcuts')).toBe('Alt+ArrowUp Alt+ArrowDown')
+  })
+
+  it('omits aria-keyshortcuts on session rows when no reorder callback is wired', () => {
+    renderSidebar({})
+    const s1 = screen.getByTestId('session-item-s1')
+    expect(s1.hasAttribute('aria-keyshortcuts')).toBe(false)
+  })
+
+  it('omits aria-keyshortcuts on repo rows when no reorder callback is wired', () => {
+    renderSidebar({})
+    const apiRepo = screen.getByTestId('sidebar-repo-/home/user/projects/api')
+    expect(apiRepo.hasAttribute('aria-keyshortcuts')).toBe(false)
+  })
+
+  it('omits aria-keyshortcuts while a filter is active (matches functional gate)', () => {
+    // Reorder is disabled while filtering (see handleSessionReorderKey /
+    // handleRepoReorderKey guards). The aria attribute must agree so
+    // screen readers don't announce a shortcut that the row will
+    // refuse to act on.
+    renderSidebar({ filter: 'api', onReorderSessions: vi.fn(), onReorderRepos: vi.fn() })
+    const apiRepo = screen.getByTestId('sidebar-repo-/home/user/projects/api')
+    const s1 = screen.getByTestId('session-item-s1')
+    expect(apiRepo.hasAttribute('aria-keyshortcuts')).toBe(false)
+    expect(s1.hasAttribute('aria-keyshortcuts')).toBe(false)
+  })
+})
+
 describe('Sidebar resumable rows do not hijack parent repo drag (#4939)', () => {
   /**
    * Regression for #4939: resumable conversation rows sit inside the
