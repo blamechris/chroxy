@@ -81,4 +81,64 @@ describe('EventNormalizer error mapping — #4947', () => {
     const msg = result.messages[0].msg
     assert.equal(msg.attemptedResumeId, undefined)
   })
+
+  // PR #4967 Copilot review hardening: gate-on-code + trim + 256-char cap.
+  it('omits attemptedResumeId when code is not resume_unknown (out-of-contract gating)', () => {
+    // The field is documented as set only on resume_unknown errors. A
+    // buggy producer attaching it to other error codes should NOT reach
+    // the wire — keeps the contract clean and prevents downstream
+    // consumers from special-casing junk.
+    const normalizer = new EventNormalizer()
+    const result = normalizer.normalize('error', {
+      code: 'stream_stall',
+      message: 'x',
+      attemptedResumeId: 'abc123',
+    }, ctx)
+    const msg = result.messages[0].msg
+    assert.equal(msg.attemptedResumeId, undefined,
+      'attemptedResumeId must not flow through on non-resume_unknown errors')
+  })
+
+  it('trims whitespace from attemptedResumeId before emitting', () => {
+    // Defensive normalisation at the wire boundary — same UX guard the
+    // dashboard chip applies at render time, but enforced upstream so
+    // every downstream consumer sees the same shape.
+    const normalizer = new EventNormalizer()
+    const result = normalizer.normalize('error', {
+      code: 'resume_unknown',
+      message: 'x',
+      attemptedResumeId: '  abc123  ',
+    }, ctx)
+    const msg = result.messages[0].msg
+    assert.equal(msg.attemptedResumeId, 'abc123')
+  })
+
+  it('omits attemptedResumeId on the wire when only whitespace', () => {
+    const normalizer = new EventNormalizer()
+    const result = normalizer.normalize('error', {
+      code: 'resume_unknown',
+      message: 'x',
+      attemptedResumeId: '   \t  ',
+    }, ctx)
+    const msg = result.messages[0].msg
+    assert.equal(msg.attemptedResumeId, undefined)
+  })
+
+  it('truncates attemptedResumeId to 256 chars (matches wire schema cap)', () => {
+    // The wire schema rejects > 256 chars, but the server doesn't
+    // self-validate outgoing messages against ServerMessageSchema. Enforce
+    // the cap here so a misbehaving producer can't ship a megabyte id
+    // that the dashboard accepts (lax client parse) but trips Zod-
+    // validating consumers. Silently truncate rather than drop — the
+    // truncated id still helps operator triage.
+    const oversized = 'a'.repeat(500)
+    const normalizer = new EventNormalizer()
+    const result = normalizer.normalize('error', {
+      code: 'resume_unknown',
+      message: 'x',
+      attemptedResumeId: oversized,
+    }, ctx)
+    const msg = result.messages[0].msg
+    assert.equal(msg.attemptedResumeId, 'a'.repeat(256))
+  })
 })

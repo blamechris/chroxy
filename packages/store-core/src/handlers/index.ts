@@ -3919,13 +3919,31 @@ export function handleMessage(
     // #4947: preserve `attemptedResumeId` for `error{code:'resume_unknown'}`
     // bubbles (server PR #4944). The dashboard ResumeUnknownChip surfaces
     // it as subtext for operator correlation against the persisted state
-    // file. Same defensive type-check pattern as `code`: a non-string or
-    // empty-string payload is dropped rather than stored, so a malformed
-    // producer can't render "Attempted id: " with no value (which looks
-    // like a UI bug). Pre-#4944 servers omit the field entirely and the
-    // ChatMessage simply stays `attemptedResumeId: undefined`.
-    ...(typeof msg.attemptedResumeId === 'string' && msg.attemptedResumeId.length > 0
-      ? { attemptedResumeId: msg.attemptedResumeId }
+    // file. Pre-#4944 servers omit the field entirely and the ChatMessage
+    // simply stays `attemptedResumeId: undefined`.
+    //
+    // Hardening (from PR #4967 Copilot review):
+    //   1. Gate strictly on `msgType === 'error' && msg.code === 'resume_unknown'`
+    //      — the field is documented as only valid on that envelope, so a
+    //      buggy producer attaching it to other types shouldn't pollute the
+    //      store with out-of-contract data.
+    //   2. Trim whitespace and treat whitespace-only as missing — matches
+    //      the chip's render-time guard so the store and the renderer
+    //      agree.
+    //   3. Enforce the same 256-char cap the wire schema declares
+    //      (`ServerMessageSchema.attemptedResumeId`). Defense in depth
+    //      against a malformed wire-bypassing path (e.g. localStorage
+    //      replay of a corrupted message) — silently truncate rather than
+    //      drop so the truncated id still helps operator triage.
+    ...(msgType === 'error' &&
+    typeof msg.code === 'string' &&
+    msg.code === 'resume_unknown' &&
+    typeof msg.attemptedResumeId === 'string'
+      ? (() => {
+          const trimmed = msg.attemptedResumeId.trim()
+          if (trimmed.length === 0) return {}
+          return { attemptedResumeId: trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed }
+        })()
       : {}),
   }
 

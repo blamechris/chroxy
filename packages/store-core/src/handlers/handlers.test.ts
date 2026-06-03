@@ -5735,6 +5735,109 @@ describe('handleMessage', () => {
         expect(out.chatMessage.attemptedResumeId).toBeUndefined()
       }
     })
+
+    // PR #4967 Copilot review hardening: gating + trim + 256-char cap.
+    it('drops attemptedResumeId when messageType is not error (out-of-contract gating)', () => {
+      // Documented as set only on `type === 'error'`; a buggy producer
+      // attaching it to e.g. a `response` envelope must not pollute the
+      // store with out-of-contract data.
+      const out = handleMessage(
+        {
+          messageType: 'response',
+          content: 'hello',
+          code: 'resume_unknown',
+          attemptedResumeId: 'abc123',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('drops attemptedResumeId when code is not resume_unknown (out-of-contract gating)', () => {
+      // Only the resume-unknown error path documents this field; other
+      // error codes attaching it (drift or producer bug) shouldn't make
+      // it into the store.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'stream_stall',
+          attemptedResumeId: 'abc123',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('trims whitespace from attemptedResumeId before storing', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '  abc123  ',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123')
+      }
+    })
+
+    it('drops attemptedResumeId when only whitespace', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '   \t  ',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('truncates attemptedResumeId to 256 chars (matches wire schema cap)', () => {
+      const oversized = 'a'.repeat(500)
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: oversized,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('a'.repeat(256))
+      }
+    })
   })
 
   it('skips user_input outside replay (live echo handled elsewhere)', () => {
