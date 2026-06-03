@@ -117,6 +117,28 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/white-space:\s*nowrap/)
   })
 
+  // #4974 — Skills / Copy / Settings collapsed behind a single "⋯"
+  // overflow trigger so the right zone no longer overlaps the model
+  // selector at narrow widths. The trigger reuses `.header-icon-btn`
+  // (so the flex-shrink: 0 protection above still applies) but the
+  // popover gets its own surface so positioning + dismiss don't
+  // collide with the existing CSS for native selects.
+  it('.header-overflow wrapper does not shrink (#4974)', () => {
+    const block = css.match(/\.header-overflow\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/position:\s*relative/)
+    expect(block![0]).toMatch(/flex-shrink:\s*0/)
+  })
+
+  it('.header-overflow-menu is an absolutely-positioned popover anchored to the trigger (#4974)', () => {
+    const block = css.match(/\.header-overflow-menu\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/position:\s*absolute/)
+    // Right-aligned so the menu hangs off the trigger toward the
+    // center of the header (instead of clipping past the right edge).
+    expect(block![0]).toMatch(/right:\s*0/)
+  })
+
   it('responsive breakpoint relaxes the dropdown min-width per-kind (#3705 + #3720)', () => {
     // Narrow viewports get smaller floors for each kind. Anchored to
     // the per-kind selectors introduced in #3720 — the previous shared
