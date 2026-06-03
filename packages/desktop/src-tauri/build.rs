@@ -155,6 +155,10 @@ fn main() {
                     None
                 })
                 .unwrap_or_else(|| "unknown".to_string());
+            // BUMP THE v<N> PREFIX whenever the key schema (fields/format) changes
+            // — otherwise warm on-disk caches with the old schema match the new
+            // key by coincidence and ship a stale binary. Add a field → bump.
+            // Reorder fields → bump. Change the separator → bump.
             let cache_key = format!(
                 "v4\nsrc_mtime={}\nidentity={}\nkeychain={}\nswiftc={}\nhelper_ent_mtime={}\n",
                 src_mtime_secs, identity_for_cache, keychain_for_cache, swiftc_version,
