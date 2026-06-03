@@ -5136,6 +5136,64 @@
   white-space: nowrap;
 }
 
+/* --- Header overflow menu (#4974) ---
+   Skills / Copy / Settings collapsed behind a single "⋯" trigger so
+   the right zone has room for the prominent + New Session button and
+   the cost/token StatusBar without overlapping the model selector in
+   the center column. The trigger reuses `.header-icon-btn` for chrome
+   parity (hover bg, focus ring, no shrink), and the popover mirrors
+   the existing `.session-context-menu` look — same surface, border,
+   shadow — so the dashboard reads as one component family. */
+.header-overflow {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.header-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1000;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  background: var(--bg-secondary, var(--bg-card));
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 200px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.header-overflow-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.header-overflow-menu-item:hover,
+.header-overflow-menu-item:focus-visible {
+  background: var(--bg-tertiary);
+  outline: none;
+}
+
+.header-overflow-menu-icon {
+  display: inline-block;
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.header-overflow-menu-label {
+  flex: 1;
+}
+
 /* --- Settings panel --- */
 
 .settings-backdrop {

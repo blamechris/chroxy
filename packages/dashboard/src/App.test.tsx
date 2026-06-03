@@ -1600,23 +1600,35 @@ describe('App', () => {
       }),
     }
 
+    // #4974 — Copy transcript moved into the header overflow menu. The
+    // helper opens the menu and returns the "Copy transcript" item so
+    // each test reads as: open → click → assert. We re-query the item
+    // after the click because the App rerenders the menu when
+    // `transcriptCopied` flips, which can rebind the DOM node.
+    const openOverflowAndGetCopyItem = () => {
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      return screen.getByTestId('header-overflow-item-copy-transcript')
+    }
+
     it('does NOT flash the check mark when the clipboard helper returns false', async () => {
       clipboardWriteTextMock.mockResolvedValue(false)
       stateOverrides = connectedWithMessages
       render(<App />)
 
-      const btn = screen.getByTestId('btn-copy-transcript')
+      const item = openOverflowAndGetCopyItem()
       // Title before click reflects the not-copied state (no "Copied!").
-      expect(btn.getAttribute('title')).not.toContain('Copied!')
+      expect(item.getAttribute('title')).not.toContain('Copied!')
 
-      fireEvent.click(btn)
+      fireEvent.click(item)
       await waitFor(() => {
         expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       })
 
       // Indicator must NOT flip — the OS clipboard was never written.
-      expect(btn.textContent).not.toContain('✓')
-      expect(btn.getAttribute('title')).not.toContain('Copied!')
+      // The menu closes after a click; re-open and re-read the item.
+      const after = openOverflowAndGetCopyItem()
+      expect(after.textContent).not.toContain('✓')
+      expect(after.getAttribute('title')).not.toContain('Copied!')
     })
 
     it('DOES flash the check mark when the clipboard helper returns true', async () => {
@@ -1624,14 +1636,19 @@ describe('App', () => {
       stateOverrides = connectedWithMessages
       render(<App />)
 
-      const btn = screen.getByTestId('btn-copy-transcript')
-      fireEvent.click(btn)
+      const item = openOverflowAndGetCopyItem()
+      fireEvent.click(item)
 
       await waitFor(() => {
-        expect(btn.textContent).toContain('✓')
+        expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       })
-      expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
-      expect(btn.getAttribute('title')).toContain('Copied!')
+      // Re-open the menu — `transcriptCopied` flipped to true so the
+      // item now renders the check glyph + "Copied!" title.
+      const after = openOverflowAndGetCopyItem()
+      await waitFor(() => {
+        expect(after.textContent).toContain('✓')
+      })
+      expect(after.getAttribute('title')).toContain('Copied!')
     })
 
     // #4629 — the original bug was that a failed clipboard write would
@@ -1647,8 +1664,8 @@ describe('App', () => {
       stateOverrides = connectedWithMessages
       render(<App />)
 
-      const btn = screen.getByTestId('btn-copy-transcript')
-      fireEvent.click(btn)
+      const item = openOverflowAndGetCopyItem()
+      fireEvent.click(item)
 
       await waitFor(() => {
         expect(addServerErrorMock).toHaveBeenCalledTimes(1)
@@ -1667,8 +1684,9 @@ describe('App', () => {
       expect(severity).toBe('warning')
       // Must NOT also flash the success indicator (that was the #4673 bug;
       // this test pins the negative too so a future regression on either
-      // axis is caught).
-      expect(btn.textContent).not.toContain('✓')
+      // axis is caught). Re-open the menu to read the current row state.
+      const after = openOverflowAndGetCopyItem()
+      expect(after.textContent).not.toContain('✓')
     })
 
     it('does NOT surface a server-error toast on a successful copy (#4629)', async () => {
@@ -1676,12 +1694,20 @@ describe('App', () => {
       stateOverrides = connectedWithMessages
       render(<App />)
 
-      const btn = screen.getByTestId('btn-copy-transcript')
-      fireEvent.click(btn)
+      const item = openOverflowAndGetCopyItem()
+      fireEvent.click(item)
 
+      // Wait for the clipboard write to resolve (state-only assertion —
+      // keeps the waitFor callback side-effect-free per RTL guidance;
+      // re-opening the menu inside the retry loop would toggle it open
+      // and closed on each tick and make the test non-deterministic).
       await waitFor(() => {
-        expect(btn.textContent).toContain('✓')
+        expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       })
+      // `transcriptCopied` flipped to true — re-open the menu and read
+      // the row's current glyph.
+      const after = openOverflowAndGetCopyItem()
+      expect(after.textContent).toContain('✓')
       expect(addServerErrorMock).not.toHaveBeenCalled()
     })
   })
@@ -2030,20 +2056,34 @@ describe('App', () => {
       activeSessionId: 's1',
     }
 
-    it('Skills toggle exposes both title and aria-label', () => {
+    // #4974 — Skills + Settings moved into the header overflow menu.
+    // The trigger itself stays in the chrome with title + aria-label;
+    // the underlying actions sit one click away inside the popover.
+    it('Skills row inside the overflow menu carries a title', () => {
       stateOverrides = connectedWithSession
       render(<App />)
-      const btn = screen.getByTestId('btn-toggle-skills-panel')
-      expect(btn.getAttribute('title')).toBeTruthy()
-      expect(btn.getAttribute('aria-label')).toBeTruthy()
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const item = screen.getByTestId('header-overflow-item-skills')
+      expect(item.getAttribute('title')).toBe('Skills')
+      expect(item.textContent).toMatch(/Skills/)
     })
 
-    it('Settings gear button exposes both title and aria-label', () => {
+    it('Settings row inside the overflow menu carries a Settings title', () => {
       stateOverrides = connectedWithSession
       render(<App />)
-      const btn = screen.getByLabelText('Settings')
-      expect(btn.getAttribute('title')).toMatch(/Settings/)
-      expect(btn.getAttribute('aria-label')).toBe('Settings')
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const item = screen.getByTestId('header-overflow-item-settings')
+      expect(item.getAttribute('title')).toMatch(/Settings/)
+      expect(item.textContent).toMatch(/Settings/)
+    })
+
+    it('header overflow trigger itself exposes title + aria-label (chrome affordance)', () => {
+      stateOverrides = connectedWithSession
+      render(<App />)
+      const trigger = screen.getByTestId('header-overflow-trigger')
+      expect(trigger.getAttribute('title')).toBeTruthy()
+      expect(trigger.getAttribute('aria-label')).toBeTruthy()
+      expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
     })
 
     it('header status dot exposes both title and aria-label so it is discoverable', () => {

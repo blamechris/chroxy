@@ -1502,6 +1502,59 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
           }
         }
         if (toolAfter) {
+          // #4975 — mid-word peel. The LLM sometimes interrupts a text
+          // content block to call a tool, splitting a word across the
+          // boundary (e.g. `"...PR #3.Del"` → tool → `"egating..."`).
+          // The post-#4889 split would otherwise show "Del" in one bubble
+          // and "egating..." in another with the tool between. Detect the
+          // mid-word case (last char of the prior slot's full content is
+          // a word char AND the FIRST char of the incoming post-tool delta
+          // is also a word char — both sides of the boundary must be in
+          // a word, else the LLM emitted a normal word boundary and the
+          // peel would wrongly move a complete trailing word across the
+          // tool bubble) and peel the trailing partial word off the prior
+          // slot, seeding the continuation buffer with it. Result: the
+          // word reassembles in the continuation bubble.
+          const priorFull = slot.type === 'response' ? slot.content + bufferedContent : '';
+          const incomingDelta = msg.delta as string;
+          const incomingStartsMidWord = /^[A-Za-z0-9_]/.test(incomingDelta);
+          const midWordMatch = incomingStartsMidWord ? priorFull.match(/[A-Za-z0-9_]+$/) : null;
+          let priorTail = '';
+          if (midWordMatch && midWordMatch[0].length > 0) {
+            priorTail = midWordMatch[0];
+            // Peel the partial word off the prior slot. It may live in
+            // already-flushed `slot.content` and/or in the still-buffered
+            // `pendingDeltas[deltaId].delta` — strip from buffered first
+            // (it lives at the tail), then from flushed content if needed.
+            let remaining = priorTail.length;
+            if (bufferedContent.length > 0) {
+              const peelFromBuf = Math.min(remaining, bufferedContent.length);
+              const newBuf = bufferedContent.slice(0, bufferedContent.length - peelFromBuf);
+              if (newBuf.length > 0) {
+                pendingDeltas.set(deltaId, {
+                  sessionId: capturedSessionId,
+                  delta: newBuf,
+                });
+              } else {
+                pendingDeltas.delete(deltaId);
+              }
+              remaining -= peelFromBuf;
+            }
+            if (remaining > 0 && slot.type === 'response' && slot.content.length > 0) {
+              const updater = (ss: { messages: ChatMessage[] }) => ({
+                messages: ss.messages.map((m) =>
+                  m.id === deltaId && m.type === 'response'
+                    ? { ...m, content: m.content.slice(0, m.content.length - remaining) }
+                    : m
+                ),
+              });
+              if (splitEffectiveId && get().sessionStates[splitEffectiveId]) {
+                updateSession(splitEffectiveId, updater);
+              } else {
+                set((s) => ({ messages: updater({ messages: s.messages }).messages }));
+              }
+            }
+          }
           const contId = `${deltaId}-cont-${Date.now()}`;
           // Single-hop remap: write against the ORIGINAL incoming messageId
           // so successive continuation splits overwrite this entry rather
@@ -1528,6 +1581,16 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
             }));
           }
           deltaId = contId;
+          // Seed the new continuation buffer with the peeled word so the
+          // first delta on `contId` carries the partial word as its prefix.
+          // The normal append below (`pendingDeltas.set(deltaId, ...)`)
+          // sees the existing buffer and concatenates correctly.
+          if (priorTail.length > 0) {
+            pendingDeltas.set(contId, {
+              sessionId: capturedSessionId,
+              delta: priorTail,
+            });
+          }
         }
       }
     }
