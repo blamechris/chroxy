@@ -518,8 +518,11 @@ wss.on('connection', (ws) => {
         // in a single payload:
         //   - Q[0]: single-select with model-supplied 'Other' label —
         //     normalizeQuestion's `modelSuppliedOther` path (see
-        //     packages/store-core/src/handlers/index.ts:3670) maps it
-        //     to OTHER_OPTION_VALUE without synthesizing a sentinel.
+        //     packages/store-core/src/handlers/index.ts:3670) preserves
+        //     it with `value === label` ("Other") rather than appending
+        //     the synthetic OTHER_OPTION_VALUE sentinel — so the testID
+        //     resolves to `approval-button-Other`, not
+        //     `approval-button-__chroxy_other__`.
         //   - Q[1]: multi-select (`multiSelect: true`) — Other
         //     sentinel is intentionally NOT appended (see
         //     normalizeQuestion's `isMultiSelect` branch); a regression
