@@ -3470,6 +3470,166 @@ describe('ClaudeByokSession', () => {
       assert.equal(toolResult.content, 'routed ok')
       await session.destroy()
     })
+
+    /**
+     * Helper for the #5017 override tests: wires the parent to emit a
+     * single Task tool_use carrying `taskInput`, intercepts the child
+     * registration to capture its permissionMode, and returns
+     * { childMode, taskResult } after the parent turn completes.
+     *
+     * The parent's permission gate is stubbed to always allow regardless
+     * of parentMode — these tests focus on the per-launch override
+     * semantics inside _executeTaskTool, not on whether the parent gates
+     * Task in approve/acceptEdits/plan modes. Without this stub, parent
+     * modes other than 'auto' block on the permission_request emit
+     * waiting for a UI response that never arrives in unit tests.
+     */
+    async function runTaskWithPermissionOverride({ parentMode, permissionMode }) {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode(parentMode)
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = captureEvents(session)
+      const taskInput = { description: 'd', prompt: 'p' }
+      if (permissionMode !== undefined) taskInput.permission_mode = permissionMode
+      let childMode = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        // Snapshot the child's permission mode at the moment it gets
+        // registered — this is AFTER _executeTaskTool assigns
+        // child.permissionMode and BEFORE any further setup.
+        childMode = v.permissionMode
+        // Force-allow the child's permission gate too — defensive,
+        // since the child stream in this helper never emits tool_use,
+        // but if a future change adds child tool_use deltas they
+        // shouldn't block.
+        v._gateToolBlock = async () => ({ behavior: 'allow' })
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput,
+        childStreamImpl: () => fakeStream(
+          [
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'child ok' } },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          ],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'child ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('delegate')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_task_1')
+      await session.destroy()
+      return { childMode, taskResult, captured }
+    }
+
+    it('Task `permission_mode` omitted: child inherits parent mode (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        // omitted
+      })
+      assert.equal(childMode, 'auto', 'child must inherit parent permissionMode when override omitted')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false,
+        `expected tool_result not to be is_error, got: ${taskResult.payload.result}`)
+    })
+
+    it('Task `permission_mode` downgrade allowed (parent auto → child approve) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        permissionMode: 'approve',
+      })
+      assert.equal(childMode, 'approve', 'child must take the override when downgrading')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `permission_mode` downgrade to plan allowed (parent acceptEdits → child plan) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'acceptEdits',
+        permissionMode: 'plan',
+      })
+      assert.equal(childMode, 'plan')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `permission_mode` equal-to-parent allowed (parent approve → child approve) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'approve',
+        permissionMode: 'approve',
+      })
+      assert.equal(childMode, 'approve')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `permission_mode` upgrade rejected (parent approve → child auto) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'approve',
+        permissionMode: 'auto',
+      })
+      assert.equal(childMode, null, 'no child must be spawned when override is rejected')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /permissive/i,
+        'rejection message must explain the at-most-as-permissive rule')
+    })
+
+    it('Task `permission_mode` upgrade rejected (parent plan → child approve) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'plan',
+        permissionMode: 'approve',
+      })
+      assert.equal(childMode, null)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /permissive/i)
+    })
+
+    it('Task `permission_mode` invalid value rejected (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        permissionMode: 'sudo',
+      })
+      assert.equal(childMode, null, 'no child spawned for invalid mode')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /invalid.*permission_mode|allowed values/i)
+    })
+
+    it('Task `permission_mode` non-string value rejected (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        permissionMode: 7,
+      })
+      assert.equal(childMode, null)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /invalid.*permission_mode|allowed values/i)
+    })
+
+    it('Task `permission_mode` downgrade-allowed / upgrade-rejected matrix is exhaustive (#5017)', async () => {
+      // Verify every (parent, child) pair against the ranking
+      // plan < approve < acceptEdits < auto.
+      const modes = ['plan', 'approve', 'acceptEdits', 'auto']
+      const rank = { plan: 0, approve: 1, acceptEdits: 2, auto: 3 }
+      for (const parent of modes) {
+        for (const requested of modes) {
+          const expectedAllowed = rank[requested] <= rank[parent]
+          const { childMode, taskResult } = await runTaskWithPermissionOverride({
+            parentMode: parent,
+            permissionMode: requested,
+          })
+          if (expectedAllowed) {
+            assert.equal(childMode, requested,
+              `parent=${parent} requested=${requested}: child should be ${requested} but was ${childMode}`)
+            assert.equal(taskResult.payload.isError, false,
+              `parent=${parent} requested=${requested}: should be allowed`)
+          } else {
+            assert.equal(childMode, null,
+              `parent=${parent} requested=${requested}: must reject (no child spawned)`)
+            assert.equal(taskResult.payload.isError, true,
+              `parent=${parent} requested=${requested}: must be is_error`)
+          }
+        }
+      }
+    })
   })
 
   describe('lifecycle', () => {
