@@ -46,6 +46,7 @@ import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/Eva
 import { StreamStallChip } from './components/StreamStallChip'
 import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
 import { ResumeUnknownChip } from './components/ResumeUnknownChip'
+import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
@@ -485,6 +486,12 @@ export function App() {
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
   const sendPermissionResponse = useConnectionStore(s => s.sendPermissionResponse)
   const switchSession = useConnectionStore(s => s.switchSession)
+  // #4982 — banner rendered when the server rejects a stale sessionId.
+  // The message-handler clears activeSessionId on SESSION_NOT_FOUND so
+  // the next user send doesn't loop the same toast; this banner gives
+  // the operator a calm explanation while pointing at the sidebar.
+  const sessionNotFoundError = useConnectionStore(s => s.sessionNotFoundError)
+  const dismissSessionNotFoundError = useConnectionStore(s => s.dismissSessionNotFoundError)
   const destroySession = useConnectionStore(s => s.destroySession)
   const renameSession = useConnectionStore(s => s.renameSession)
   const createSession = useConnectionStore(s => s.createSession)
@@ -2178,6 +2185,19 @@ export function App() {
             {/* Main content */}
             <div className={`main-content${checkpointsOpen ? ' with-checkpoint-panel' : ''}`}>
               <div className="main-content-primary">
+                {/* #4982 — banner for session_error{code:'SESSION_NOT_FOUND'}.
+                    Sits above whatever pane is showing (loading skeleton,
+                    chat view, empty state) so the operator sees it on the
+                    first frame after the lost-id rejection. Cleared by
+                    Dismiss OR by switchSession (the operator picked a new
+                    live id). */}
+                {sessionNotFoundError && (
+                  <SessionNotFoundChip
+                    message={sessionNotFoundError.message}
+                    attemptedSessionId={sessionNotFoundError.attemptedSessionId}
+                    onDismiss={dismissSessionNotFoundError}
+                  />
+                )}
                 {connectionPhase === 'connecting' ? (
                   <SessionLoadingSkeleton label="Connecting..." />
                 ) : isSwitchingSession ? (

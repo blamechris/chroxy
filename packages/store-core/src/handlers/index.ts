@@ -1106,12 +1106,28 @@ export function handleSessionError(
   boundSessionName: string | null
   message: string | null
   sessionPatch: SessionPatch | null
+  /**
+   * #4982 — server-supplied id of the session the client addressed before
+   * the server rejected it as stale (most commonly `SESSION_NOT_FOUND`
+   * after `session-manager.restoreState()` regenerated all ids on a
+   * daemon restart). Surfaced so the dashboard SessionNotFoundChip can
+   * confirm to the operator which id was lost. Only forwarded when the
+   * wire payload carries it as a non-empty string; otherwise null.
+   */
+  attemptedSessionId: string | null
 } {
   const category = typeof msg.category === 'string' ? msg.category : null
   const code = typeof msg.code === 'string' ? msg.code : null
   const boundSessionName =
     typeof msg.boundSessionName === 'string' && msg.boundSessionName.length > 0
       ? msg.boundSessionName
+      : null
+  // #4982 — only forward when present + a non-empty string. Defense in
+  // depth against malformed wire payloads (matches the resume_unknown
+  // approach in handleError's attemptedResumeId branch).
+  const attemptedSessionId =
+    typeof msg.attemptedSessionId === 'string' && msg.attemptedSessionId.trim().length > 0
+      ? msg.attemptedSessionId.trim()
       : null
 
   if (category === 'crash') {
@@ -1124,6 +1140,7 @@ export function handleSessionError(
         sessionId: resolveSessionId(msg, activeSessionId),
         patch: { health: 'crashed' },
       },
+      attemptedSessionId,
     }
   }
 
@@ -1143,6 +1160,7 @@ export function handleSessionError(
     boundSessionName,
     message,
     sessionPatch: null,
+    attemptedSessionId,
   }
 }
 

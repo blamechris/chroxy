@@ -2454,6 +2454,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(crashedId, () => ({ health: 'crashed' as const }));
           pushSessionNotification(crashedId, 'error', 'Session crashed');
         }
+      } else if (parsed.code === 'SESSION_NOT_FOUND') {
+        // #4982 — dashboard's persisted `activeSessionId` points at a
+        // pre-restart session id that no longer exists after
+        // `session-manager.restoreState()` regenerated ids on the daemon
+        // side (#4979). Without clearing the stale id, the next user send
+        // trips the same error in a loop and the operator stays wedged.
+        //
+        // The SessionNotFoundChip reads `sessionNotFoundError` from the
+        // store and renders an actionable banner over the empty-state
+        // pane. The toast still fires so the operator sees the immediate
+        // signal too, but the loop stops because activeSessionId is gone
+        // and the next send addresses a different (operator-picked) id.
+        get().setSessionNotFoundError({
+          attemptedSessionId: parsed.attemptedSessionId ?? null,
+          message: parsed.message ?? 'Session not found.',
+        });
+        set({ activeSessionId: null });
+        if (parsed.message) {
+          _adapters.alert.alert('Session Restarted', parsed.message);
+          get().addServerError(parsed.message);
+        }
       } else if (parsed.message) {
         _adapters.alert.alert('Session Error', parsed.message);
         get().addServerError(parsed.message);
