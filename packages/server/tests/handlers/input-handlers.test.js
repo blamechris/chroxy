@@ -310,6 +310,277 @@ describe('input-handlers', () => {
           'trim removes leading/trailing only; interior runs intact')
       })
     })
+
+    // #4930 — pin the auto-checkpoint UX contract that became a load-bearing
+    // side-effect of #4928. Before #4928 (PR that wired claude CLI --resume),
+    // `CliSession.resumeSessionId` was always undefined, so the
+    //
+    //   if (entry.session.resumeSessionId) { ctx.checkpointManager.createCheckpoint(...) }
+    //
+    // branch at input-handlers.js:244 was a permanent no-op for the
+    // claude-cli provider — only SDK sessions ever auto-checkpointed.
+    //
+    // After #4928, CliSession exposes a real `resumeSessionId` once the CLI
+    // emits `system.init` (or once `restoreState` re-seeds it from disk).
+    // That flipped the auto-checkpoint branch live for every CLI session,
+    // every user message, with no test pinning the surface contract. This
+    // suite documents and pins:
+    //
+    //   1. Gate on `resumeSessionId` — first-ever message (no init yet) MUST
+    //      skip the checkpoint, otherwise we'd try to snapshot before the
+    //      session even has a conversation id (would crash or persist a
+    //      checkpoint pointing at `undefined`).
+    //   2. Once `resumeSessionId` is set, EVERY subsequent user message
+    //      fires `createCheckpoint` with the correct shape (sessionId, the
+    //      resume id, cwd, a description sliced from the user's text, and
+    //      the current history count for the messageCount field).
+    //   3. CLI sessions and SDK sessions go through the SAME branch — the
+    //      checkpoint manager is provider-agnostic, and #4928 doesn't add
+    //      a provider-specific guard. This test pins that no implicit
+    //      provider filter was sneaked in alongside #4928.
+    //   4. The auto-checkpoint is FIRE-AND-FORGET: a `createCheckpoint`
+    //      rejection MUST NOT block, throw, or surface to the user. The
+    //      handler swallows the error with `.catch(log.warn)`; without
+    //      this contract a transient git failure inside the snapshot
+    //      subsystem would also block the typed message from reaching
+    //      the model.
+    //   5. Rejection paths in the handler (empty input, budget paused,
+    //      cross-client input_conflict) MUST NOT trigger the checkpoint —
+    //      otherwise a session that's busy or paused would still churn
+    //      git snapshots on every keystroke.
+    //   6. Checkpoint MUST fire BEFORE the message reaches the session
+    //      (`sendMessage`). The whole point of auto-checkpoint is to
+    //      snapshot pre-turn state so the user can rewind to before
+    //      they sent THIS message. If a future refactor moves the
+    //      checkpoint after the forward, rewinding would land on the
+    //      wrong side of the turn boundary.
+    describe('auto-checkpoint side-effect (#4930 / pinned from #4928)', () => {
+      it('does NOT call createCheckpoint when resumeSessionId is undefined (pre-init / first-ever message)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        // CliSession before its first system.init: resumeSessionId is
+        // undefined (not yet seeded). Mirrors the pre-#4928 baseline AND
+        // the brand-new-session shape post-#4928.
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'first message ever on this session' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'no resume id yet → MUST skip checkpoint (would otherwise snapshot with undefined conversation id)')
+        assert.equal(session.sendMessage.callCount, 1,
+          'message still forwards — checkpoint gate is independent of message delivery')
+      })
+
+      it('calls createCheckpoint with the expected payload on every subsequent message (post-init)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        // Simulate post-init state: claude CLI has emitted system.init and
+        // CliSession has stamped the id. Auto-checkpoint should now fire
+        // on every user message.
+        session.resumeSessionId = 'cli-init-abc-123'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.getHistoryCount = createSpy(() => 4)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'second message after init' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1,
+          'post-init message MUST auto-checkpoint — this is the #4930 side-effect')
+        const [args] = ctx.checkpointManager.createCheckpoint.lastCall
+        assert.equal(args.sessionId, 's1', 'sessionId must be the chroxy session id (not the resume id)')
+        assert.equal(args.resumeSessionId, 'cli-init-abc-123',
+          'resumeSessionId must be threaded into the checkpoint so rewind can re-attach to this conversation')
+        assert.equal(args.cwd, '/work', 'cwd must come from the session entry — git snapshot needs the worktree root')
+        assert.equal(args.description, 'second message after init',
+          'description must be sliced from the user text (≤100 chars) for the rewind UI label')
+        assert.equal(args.messageCount, 4,
+          'messageCount comes from sessionManager.getHistoryCount — rewind UI surfaces "at message N"')
+      })
+
+      it('truncates the description to the first 100 chars of the user text', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-xyz'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const longText = 'A'.repeat(250)
+        inputHandlers.input(makeWs(), client, { data: longText }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1)
+        const [args] = ctx.checkpointManager.createCheckpoint.lastCall
+        assert.equal(args.description.length, 100,
+          'description MUST be capped at 100 chars — the rewind UI label has a fixed width')
+        assert.equal(args.description, 'A'.repeat(100))
+      })
+
+      it('fires auto-checkpoint for every user message after init (the #4930 frequency concern)', () => {
+        // This is the test that PINS what the issue asks about: "Is the
+        // per-message checkpoint frequency acceptable?" — at the contract
+        // level the answer is "yes, every message after init triggers one
+        // checkpoint". If a future PR introduces throttling, this test
+        // MUST be updated explicitly (so the throttle decision is visible
+        // in the diff), not silently passed by.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-multi-msg'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        for (let i = 0; i < 5; i++) {
+          inputHandlers.input(makeWs(), client, { data: `message #${i + 1}` }, ctx)
+        }
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 5,
+          'exactly one checkpoint per user message — change this only if throttling is intentionally added')
+        // Each call uses the same resume id (the conversation id is stable
+        // across the session's lifetime) — the cumulative message count is
+        // what advances.
+        for (let i = 0; i < 5; i++) {
+          assert.equal(ctx.checkpointManager.createCheckpoint.calls[i][0].resumeSessionId, 'cli-init-multi-msg',
+            `call #${i + 1} must carry the same resume id — branching only happens on rewind`)
+        }
+      })
+
+      it('fires for CLI-shaped sessions the same way it fires for SDK-shaped sessions (#4928 made CLI symmetric)', () => {
+        // Verify there is no implicit provider filter — the handler treats
+        // any session with a truthy resumeSessionId the same. This is the
+        // exact symmetry #4928 introduced and the #4930 issue asks us to
+        // confirm is sane.
+        const sessions = new Map()
+        const cliSession = createMockSession()
+        cliSession.resumeSessionId = 'cli-conv-uuid'
+        const sdkSession = createMockSession()
+        sdkSession.resumeSessionId = 'sdk-conv-uuid'
+        sessions.set('s-cli', { session: cliSession, name: 'CLI', cwd: '/work/cli' })
+        sessions.set('s-sdk', { session: sdkSession, name: 'SDK', cwd: '/work/sdk' })
+        const ctx = makeCtx(sessions)
+
+        const cliClient = makeClient({ id: 'c-cli', activeSessionId: 's-cli' })
+        const sdkClient = makeClient({ id: 'c-sdk', activeSessionId: 's-sdk' })
+
+        inputHandlers.input(makeWs(), cliClient, { data: 'hi from cli' }, ctx)
+        inputHandlers.input(makeWs(), sdkClient, { data: 'hi from sdk' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 2,
+          'both providers must take the same auto-checkpoint branch')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[0][0].resumeSessionId, 'cli-conv-uuid')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[0][0].cwd, '/work/cli',
+          'CLI session checkpoint carries its own cwd')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[1][0].resumeSessionId, 'sdk-conv-uuid')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[1][0].cwd, '/work/sdk',
+          'SDK session checkpoint carries its own cwd')
+      })
+
+      it('swallows createCheckpoint rejection without blocking message delivery or surfacing an error', async () => {
+        // Auto-checkpoint is best-effort: a git/IO failure on the snapshot
+        // path MUST NOT block the user's message from reaching the model
+        // and MUST NOT raise to the dashboard. The handler attaches a
+        // `.catch(log.warn)` to the promise — verify the user-visible
+        // surface stays clean even when the checkpoint manager rejects.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-failing-cp'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.checkpointManager.createCheckpoint = createSpy(async () => {
+          throw new Error('simulated git snapshot failure')
+        })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'message with failing checkpoint' }, ctx)
+
+        // Let the .catch() handler run.
+        await new Promise((r) => setImmediate(r))
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1,
+          'checkpoint MUST be attempted even though it will reject')
+        assert.equal(session.sendMessage.callCount, 1,
+          'message MUST still reach the session — checkpoint failure is non-blocking')
+        const errors = ctx._sent.filter((m) => m.type === 'session_error')
+        assert.equal(errors.length, 0,
+          'checkpoint failure MUST NOT surface as a session_error to the user (best-effort contract)')
+      })
+
+      it('does NOT fire auto-checkpoint when input is empty / whitespace-only', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-empty-input'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: '   ' }, ctx)
+        inputHandlers.input(makeWs(), client, { data: '' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'empty/whitespace-only input returns early — must not churn a checkpoint per stray keystroke')
+        assert.equal(session.sendMessage.callCount, 0,
+          'sanity: message itself did not forward')
+      })
+
+      it('does NOT fire auto-checkpoint when the session is budget-paused (rejection path)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-budget-paused'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.isBudgetPaused = createSpy(() => true)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'message hits budget pause' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'budget-paused session must skip checkpoint — the message will not reach the model so no snapshot point is meaningful')
+        const errors = ctx._sent.filter((m) => m.type === 'session_error')
+        assert.equal(errors.length, 1, 'sanity: budget-exceeded error still surfaced')
+      })
+
+      it('does NOT fire auto-checkpoint when input_conflict rejects the message (busy with another client)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-busy'
+        session.isRunning = true
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.primaryClients.set('s1', 'other-client')
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'cross-client conflict draft' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'rejected-by-input-conflict message must NOT churn a checkpoint — the message never reaches the session')
+        const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
+        assert.equal(conflicts.length, 1, 'sanity: the input_conflict error path fired')
+      })
+
+      it('fires the checkpoint BEFORE the message is forwarded to the session (pre-turn snapshot)', () => {
+        // The whole point of auto-checkpoint is "snapshot the state JUST
+        // before this turn". If a future refactor moves the checkpoint
+        // after sendMessage, rewinding to this checkpoint would land on
+        // the wrong side of the turn boundary (post-response state, not
+        // pre-prompt). Pin the ordering.
+        const sessions = new Map()
+        const order = []
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-order'
+        session.sendMessage = createSpy(() => { order.push('sendMessage') })
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.checkpointManager.createCheckpoint = createSpy(async () => { order.push('createCheckpoint') })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'turn boundary test' }, ctx)
+
+        assert.deepEqual(order, ['createCheckpoint', 'sendMessage'],
+          'createCheckpoint MUST be invoked before sendMessage — checkpoint captures pre-turn state')
+      })
+    })
   })
 
   describe('interrupt', () => {
