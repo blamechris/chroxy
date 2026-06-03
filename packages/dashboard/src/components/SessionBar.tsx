@@ -202,9 +202,14 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             // reorder is not wired (consumers that don't pass
             // onReorder shouldn't see a tooltip pointing at a no-op).
             // Each token in aria-keyshortcuts is space-separated per
-            // the WAI-ARIA 1.2 spec.
-            title={reorderDisabled ? undefined : 'Shift+Space to reorder (Arrow Left/Right to move, Enter/Escape to commit/cancel)'}
-            aria-keyshortcuts={reorderDisabled ? undefined : 'Shift+Space ArrowLeft ArrowRight'}
+            // the WAI-ARIA 1.2 spec; we list every key the keydown
+            // ladder below actually consumes (Space + Shift+Space to
+            // lift, Arrow keys to step, Enter/Escape to commit/cancel)
+            // so the SR announcement matches the implementation. The
+            // tooltip stays in lockstep so mouse + SR users see the
+            // same ladder.
+            title={reorderDisabled ? undefined : 'Space (or Shift+Space) to reorder (Arrow Left/Right to move, Enter/Escape to commit/cancel)'}
+            aria-keyshortcuts={reorderDisabled ? undefined : 'Space Shift+Space ArrowLeft ArrowRight Enter Escape'}
             // #4831 — native HTML5 DnD attributes. `draggable` is only enabled
             // when a reorder callback is wired (so consumers that don't opt
             // in don't get an unexpected interaction). Rename mode suppresses

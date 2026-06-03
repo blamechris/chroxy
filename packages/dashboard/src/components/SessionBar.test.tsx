@@ -668,7 +668,7 @@ describe('SessionBar', () => {
     // Tabs without `onReorder` wired must NOT advertise a shortcut
     // that does nothing.
     describe('#4949 reorder shortcut discoverability', () => {
-      it('surfaces Shift+Space in the tab tooltip when onReorder is wired', () => {
+      it('surfaces the full reorder ladder in the tab tooltip when onReorder is wired', () => {
         render(
           <SessionBar
             sessions={makeThree()}
@@ -680,11 +680,18 @@ describe('SessionBar', () => {
           />
         )
         const tab = screen.getByTestId('session-tab-a')
-        expect(tab.getAttribute('title')).toMatch(/Shift\+Space/i)
-        expect(tab.getAttribute('title')).toMatch(/reorder/i)
+        const title = tab.getAttribute('title') || ''
+        // The tooltip must call out every key the keydown handler
+        // below actually consumes — otherwise users learn only part
+        // of the ladder and miss commit/cancel. Pin all four arms.
+        expect(title).toMatch(/reorder/i)
+        expect(title).toMatch(/Shift\+Space/i)
+        expect(title).toMatch(/Arrow/i)
+        expect(title).toMatch(/Enter/i)
+        expect(title).toMatch(/Escape/i)
       })
 
-      it('sets aria-keyshortcuts when onReorder is wired', () => {
+      it('sets aria-keyshortcuts covering the full ladder when onReorder is wired', () => {
         render(
           <SessionBar
             sessions={makeThree()}
@@ -698,10 +705,17 @@ describe('SessionBar', () => {
         const tab = screen.getByTestId('session-tab-a')
         // Per the issue: aria-keyshortcuts is the canonical a11y
         // attribute for keyboard shortcuts attached to a control.
-        // Both Shift+Space (lift) and Arrow keys (step) should be
-        // present so SRs announce the full ladder.
+        // Every key the keydown handler consumes belongs in the
+        // attribute — otherwise the SR announcement drifts from
+        // the actual implementation and regressions (e.g. dropping
+        // ArrowLeft) sail through review.
         const ks = tab.getAttribute('aria-keyshortcuts') || ''
+        expect(ks).toMatch(/(^|\s)Space(\s|$)/)
         expect(ks).toMatch(/Shift\+Space/i)
+        expect(ks).toMatch(/ArrowLeft/)
+        expect(ks).toMatch(/ArrowRight/)
+        expect(ks).toMatch(/Enter/)
+        expect(ks).toMatch(/Escape/)
       })
 
       it('does NOT advertise a reorder shortcut when onReorder is absent', () => {
