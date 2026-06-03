@@ -2999,6 +2999,9 @@
   justify-content: center;
   font-size: var(--text-base);
   line-height: 1;
+  /* #5009 — bell glyph is inline SVG; inherit currentColor from the
+     header button so light/dark themes both render correctly. */
+  color: currentColor;
 }
 
 .notifications-widget-badge {
@@ -3125,8 +3128,22 @@
   overflow: hidden;
 }
 
-.notifications-widget-item-body:hover {
-  background: var(--bg-quaternary, rgba(255, 255, 255, 0.04));
+.notifications-widget-item-body:hover,
+.notifications-widget-item-body:focus-visible {
+  /* #5009 — `--bg-quaternary` wasn't defined in any theme; the previous
+     `rgba(255,255,255,0.04)` fallback was a dark-theme-only white tint
+     that washed out in light themes. `--bg-tertiary` is an existing
+     theme token so the hover swatch tracks both light and dark.
+     :focus-visible is paired so keyboard-only nav surfaces the same
+     emphasis as mouse hover. */
+  background: var(--bg-tertiary);
+}
+
+.notifications-widget-item-body:focus-visible {
+  /* Explicit focus ring on top of the hover swatch so keyboard users
+     can see exactly which row holds the cursor as they arrow through. */
+  outline: 2px solid var(--accent-blue);
+  outline-offset: -2px;
 }
 
 .notifications-widget-item-type {
@@ -3185,6 +3202,12 @@
   border-radius: 4px;
   font-size: var(--text-sm);
   line-height: 1;
+  /* #5009 — center the inline SVG glyph in the action button so the
+     mark-read and dismiss affordances align on the baseline regardless
+     of glyph height. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .notifications-widget-item-mark-read:hover,
