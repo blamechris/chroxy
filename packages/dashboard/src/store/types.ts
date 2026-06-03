@@ -642,7 +642,7 @@ export interface ConnectionState {
   pairingRefreshedCount: number;
 
   // View mode
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots';
 
   // Input settings
   inputSettings: InputSettings;
@@ -661,7 +661,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
   appendTerminalData: (data: string) => void;

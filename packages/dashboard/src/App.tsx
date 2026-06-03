@@ -83,6 +83,7 @@ import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
 import { StartupErrorScreen } from './components/StartupErrorScreen'
 import { ConsolePage } from './components/ConsolePage'
 import { EnvironmentPanel } from './components/EnvironmentPanel'
+import { SnapshotsPanel } from './components/SnapshotsPanel'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -123,7 +124,7 @@ function formatContext(usage: { inputTokens: number; outputTokens: number } | nu
   return Number.isInteger(k) ? `${k}k tokens` : `${k.toFixed(1)}k tokens`
 }
 
-type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments'
+type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots'
 
 /** Scrollable tab bar with arrow buttons when overflowing */
 function ViewSwitcher({
@@ -231,6 +232,7 @@ function ViewSwitcher({
           <button className={`view-tab${viewMode === 'console' ? ' active' : ''}`} onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }} type="button">Console</button>
         )}
         <button className={`view-tab${viewMode === 'environments' ? ' active' : ''}`} onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }} type="button">Envs</button>
+        <button className={`view-tab${viewMode === 'snapshots' ? ' active' : ''}`} onClick={() => { setViewMode('snapshots'); setSplitMode(null); persistSplitMode(null) }} type="button">Snapshots</button>
         <div className="view-switch-spacer" />
         <button className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`} onClick={() => setCheckpointsOpen(prev => !prev)} type="button" title="Toggle checkpoint timeline">Checkpoints</button>
         <button className={`view-tab${viewMode === 'diff' ? ' active' : ''}`} onClick={() => setViewMode('diff')} type="button">Diff</button>
@@ -2404,6 +2406,9 @@ export function App() {
                 )}
                 {viewMode === 'environments' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <EnvironmentPanel />
+                )}
+                {viewMode === 'snapshots' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <SnapshotsPanel />
                 )}
               </div>
               {checkpointsOpen && (

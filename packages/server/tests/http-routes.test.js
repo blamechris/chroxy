@@ -1,10 +1,10 @@
-import { describe, it, afterEach, before, after } from 'node:test'
+import { describe, it, afterEach, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { existsSync, renameSync } from 'node:fs'
+import { existsSync, renameSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { createHttpHandler } from '../src/http-routes.js'
 
 // The QR endpoint falls back to reading ~/.chroxy/connection.json from disk.
@@ -262,6 +262,144 @@ describe('http-routes', () => {
       await startWith(mock)
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/nonexistent`)
       assert.equal(res.status, 404)
+    })
+  })
+
+  // #5074 — snapshot listing + delete routes back the dashboard
+  // SnapshotsPanel. Uses CHROXY_CONFIG_DIR scoped to a tmp dir so the
+  // tests never touch the real ~/.chroxy/snapshots tree.
+  describe('snapshot endpoints', () => {
+    let workDir
+    let prevConfigDir
+
+    beforeEach(() => {
+      workDir = mkdtempSync(join(tmpdir(), 'chroxy-snap-http-'))
+      prevConfigDir = process.env.CHROXY_CONFIG_DIR
+      process.env.CHROXY_CONFIG_DIR = workDir
+    })
+
+    afterEach(() => {
+      if (prevConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+      else process.env.CHROXY_CONFIG_DIR = prevConfigDir
+      if (workDir && existsSync(workDir)) rmSync(workDir, { recursive: true, force: true })
+    })
+
+    function writeSidecar(slug, payload) {
+      const dir = join(workDir, 'snapshots')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, `${slug}.json`), JSON.stringify(payload), 'utf-8')
+    }
+
+    it('GET /api/snapshots returns [] when no snapshots have been taken', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/snapshots`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.deepEqual(body, { snapshots: [] })
+    })
+
+    it('GET /api/snapshots returns parsed sidecars sorted newest-first', async () => {
+      writeSidecar('snap-older', {
+        tag: 'chroxy-byok-snap:older',
+        name: 'first-pass',
+        createdAt: '2024-01-01T00:00:00Z',
+        sourceCwd: '/repo/one',
+        sourceImage: 'node:22-slim',
+        sourceSessionId: 'sess-1',
+      })
+      writeSidecar('snap-newer', {
+        tag: 'chroxy-byok-snap:newer',
+        name: 'second-pass',
+        createdAt: '2024-06-01T00:00:00Z',
+        sourceCwd: '/repo/two',
+        sourceImage: 'node:22-slim',
+        sourceSessionId: 'sess-2',
+      })
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/snapshots`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.equal(body.snapshots.length, 2)
+      assert.equal(body.snapshots[0].slug, 'snap-newer')
+      assert.equal(body.snapshots[0].name, 'second-pass')
+      assert.equal(body.snapshots[1].slug, 'snap-older')
+    })
+
+    it('GET /api/snapshots rejects without bearer auth', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/snapshots`)
+      assert.equal(res.status, 403)
+    })
+
+    it('DELETE /api/snapshots/:slug removes the image and unlinks the sidecar', async () => {
+      writeSidecar('snap-target', {
+        tag: 'chroxy-byok-snap:target',
+        createdAt: '2024-01-01T00:00:00Z',
+      })
+      const removed = []
+      const mock = createMockServer({
+        _snapshotRemoveImage: async (tag) => { removed.push(tag) },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/snapshots/snap-target`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.equal(body.ok, true)
+      assert.equal(body.tag, 'chroxy-byok-snap:target')
+      assert.equal(body.imageRemoved, true)
+      assert.deepEqual(removed, ['chroxy-byok-snap:target'])
+      assert.equal(existsSync(join(workDir, 'snapshots', 'snap-target.json')), false)
+    })
+
+    it('DELETE /api/snapshots/:slug returns 404 for missing slug', async () => {
+      const mock = createMockServer({
+        _snapshotRemoveImage: async () => {},
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/snapshots/nope`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 404)
+    })
+
+    it('DELETE /api/snapshots/:slug rejects path-traversal slugs', async () => {
+      const mock = createMockServer({
+        _snapshotRemoveImage: async () => {},
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(
+        `http://127.0.0.1:${port}/api/snapshots/${encodeURIComponent('../etc/passwd')}`,
+        {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer test-token' },
+        },
+      )
+      assert.equal(res.status, 400)
+    })
+
+    it('DELETE /api/snapshots/:slug rejects without bearer auth', async () => {
+      writeSidecar('snap-protected', { tag: 'chroxy-byok-snap:protected' })
+      const mock = createMockServer({
+        _snapshotRemoveImage: async () => {},
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/snapshots/snap-protected`, {
+        method: 'DELETE',
+      })
+      assert.equal(res.status, 403)
+      // Unauthenticated delete must not touch disk.
+      assert.equal(existsSync(join(workDir, 'snapshots', 'snap-protected.json')), true)
     })
   })
 })

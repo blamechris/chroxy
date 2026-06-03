@@ -90,7 +90,7 @@ const MAX_MESSAGES = 100;
 const MAX_TERMINAL_SIZE = 50_000;
 
 /** Valid view modes — used to validate persisted values */
-const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'system', 'console', 'environments'] as const;
+const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'system', 'console', 'environments', 'snapshots'] as const;
 type ViewMode = (typeof VALID_VIEW_MODES)[number];
 
 function sessionMessagesKey(sessionId: string): string {

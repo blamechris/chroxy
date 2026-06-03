@@ -7,6 +7,7 @@ import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { buildDiagnosticsSnapshot } from './diagnostics.js'
 import { getRateLimitKey } from './rate-limiter.js'
+import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
 
 const log = createLogger('ws')
 
@@ -98,6 +99,32 @@ function parseLogTailBytes(url) {
   const int = Math.trunc(n)
   if (int <= 0) return null
   return Math.min(int, LOG_TAIL_BYTES_MAX)
+}
+
+/**
+ * Resolve the `removeImage(tag)` callback for the snapshot DELETE route (#5074).
+ *
+ * Preference order:
+ *   1. `server._snapshotRemoveImage` — test injection seam.
+ *   2. `server.environmentManager._backend.removeImage` — already
+ *      constructed for env-management. Reuses the same `_execFile`
+ *      injection path the env tests rely on.
+ *   3. A lazily-loaded fresh `DockerBackend()` — env management is
+ *      disabled but a snapshot DELETE still needs to call `docker rmi`.
+ *      Imported dynamically so tunnel-only installs that never trigger
+ *      this code path don't pay the module load.
+ */
+async function resolveRemoveImage(server) {
+  if (typeof server._snapshotRemoveImage === 'function') {
+    return server._snapshotRemoveImage
+  }
+  const fromEnvMgr = server.environmentManager?._backend?.removeImage
+  if (typeof fromEnvMgr === 'function') {
+    return (tag) => server.environmentManager._backend.removeImage(tag)
+  }
+  const { DockerBackend } = await import('./environments/backends/docker.js')
+  const backend = new DockerBackend()
+  return (tag) => backend.removeImage(tag)
 }
 
 /**
@@ -206,6 +233,63 @@ export function createHttpHandler(server) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(payload))
+      return
+    }
+
+    // Snapshot listing endpoint (#5074). Reads docker-byok snapshot
+    // metadata sidecars from `${CHROXY_CONFIG_DIR ?? ~/.chroxy}/snapshots/`
+    // and returns them as a newest-first array. The dashboard polls this
+    // on its SnapshotsPanel.
+    const snapPath = (req.url ?? '').split('?')[0]
+    if (req.method === 'GET' && snapPath === '/api/snapshots') {
+      if (!server._validateBearerAuth(req, res)) return
+      try {
+        const snapshots = listSnapshots()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ snapshots }))
+      } catch (err) {
+        log.warn(`GET /api/snapshots failed: ${err.message}`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Failed to list snapshots' }))
+      }
+      return
+    }
+
+    // Snapshot delete endpoint (#5074). Two-step: docker rmi → unlink sidecar.
+    // The slug is the sidecar filename without `.json`, exactly what
+    // /api/snapshots returns, so the server never has to re-derive it
+    // from the tag. Defence-in-depth: snapshots-store re-validates the
+    // slug against the filename-safe charset before joining it to a path.
+    if (req.method === 'DELETE' && snapPath.startsWith('/api/snapshots/')) {
+      if (!server._validateBearerAuth(req, res)) return
+      const rawSlug = snapPath.slice('/api/snapshots/'.length)
+      let slug
+      try {
+        slug = decodeURIComponent(rawSlug)
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid slug encoding' }))
+        return
+      }
+      try {
+        const removeImage = await resolveRemoveImage(server)
+        const result = await deleteSnapshot(slug, { removeImage })
+        if (!result.ok) {
+          res.writeHead(result.status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: result.error }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          ok: true,
+          tag: result.tag,
+          imageRemoved: result.imageRemoved,
+        }))
+      } catch (err) {
+        log.warn(`DELETE /api/snapshots/${slug} failed: ${err.message}`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Failed to delete snapshot' }))
+      }
       return
     }
 
