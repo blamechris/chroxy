@@ -1225,6 +1225,170 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
       'failed start must tear down the owned container')
   })
 
+  // ─────────────────────────────────────────────────────────────────────
+  // #5067 — capture stdout/stderr from a failed postCreateCommand so the
+  // operator can debug without re-running the broken setup
+  // ─────────────────────────────────────────────────────────────────────
+
+  it('#5067: includes captured stderr in the failure event when stderr is the diagnostic stream', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_STDERR\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const stderrText = 'npm ERR! code ENOENT\nnpm ERR! syscall open\nnpm ERR! missing package.json'
+    const installErr = Object.assign(new Error(stderrText), {
+      code: 'exec_failed',
+      exitCode: 1,
+      stdout: '',
+      stderr: stderrText,
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'npm install': { throw: installErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    assert.equal(typeof errEvent.stdout, 'string', 'event must include a stdout field')
+    assert.equal(typeof errEvent.stderr, 'string', 'event must include a stderr field')
+    assert.equal(errEvent.stdout, '', 'stderr-only failure: stdout field is empty string')
+    assert.match(errEvent.stderr, /npm ERR! missing package\.json/,
+      'stderr capture must include the diagnostic tail')
+  })
+
+  it('#5067: includes captured stdout in the failure event when stdout is the diagnostic stream', async () => {
+    // Repository bootstrap scripts often `echo "ERROR: ..."` to stdout
+    // before exiting non-zero — the issue's motivating case. Pre-#5067,
+    // the operator saw only the (empty) stderr and had to re-run.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_STDOUT\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const stdoutText = 'Bootstrapping...\nERROR: missing required env var ACME_TOKEN\nAborting.\n'
+    const bootstrapErr = Object.assign(new Error(''), {
+      code: 'exec_failed',
+      exitCode: 2,
+      stdout: stdoutText,
+      stderr: '',
+    })
+    const backend = freshContainerBackend({
+      execResponses: { './scripts/setup.sh': { throw: bootstrapErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: './scripts/setup.sh',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    assert.match(errEvent.stdout, /ERROR: missing required env var ACME_TOKEN/,
+      'stdout-only failure: the bootstrap diagnostic must be captured')
+    assert.equal(errEvent.stderr, '', 'stdout-only failure: stderr field is empty string')
+  })
+
+  it('#5067: includes both streams in the failure event when both have output', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_BOTH\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const stdoutText = 'Reading package lists...\nBuilding dependency tree...\nE: Unable to locate package gibberish-xyz\n'
+    const stderrText = 'W: apt-get is being run by an unprivileged user\n'
+    const aptErr = Object.assign(new Error(stderrText.trim()), {
+      code: 'exec_failed',
+      exitCode: 100,
+      stdout: stdoutText,
+      stderr: stderrText,
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'apt-get install': { throw: aptErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'apt-get install gibberish-xyz',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    assert.match(errEvent.stdout, /Unable to locate package gibberish-xyz/,
+      'both-streams failure: stdout must be captured')
+    assert.match(errEvent.stderr, /apt-get is being run by an unprivileged user/,
+      'both-streams failure: stderr must be captured')
+  })
+
+  it('#5067: tail-caps a runaway postCreateCommand output stream so the error payload stays bounded', async () => {
+    // A misbehaving setup script (`yes "spam" | head -c 100000`) must
+    // not produce an unbounded error event — the WS frame would explode
+    // past the encryption ceiling. We keep the TAIL because the actual
+    // diagnostic (the throw, the ENOENT, the exit code) almost always
+    // lands in the final lines.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_HUGE\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const noise = 'spam line that gets repeated forever\n'.repeat(5000)
+    const tailMarker = '\nFATAL: final-line-diagnostic-marker-XYZ\n'
+    const hugeStdout = noise + tailMarker
+    const hugeErr = Object.assign(new Error(''), {
+      code: 'exec_failed',
+      exitCode: 1,
+      stdout: hugeStdout,
+      stderr: '',
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'huge-setup.sh': { throw: hugeErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'huge-setup.sh',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    // Cap is 4 KiB per stream; allow the truncation-marker line (~50 B)
+    // on top.
+    assert.ok(errEvent.stdout.length < 5000,
+      `stdout must be tail-capped (got ${errEvent.stdout.length} bytes)`)
+    assert.match(errEvent.stdout, /FATAL: final-line-diagnostic-marker-XYZ/,
+      'tail must preserve the trailing diagnostic — that is where the actual error lives')
+    assert.match(errEvent.stdout, /\[truncated — first \d+ bytes omitted\]/,
+      'truncation must be surfaced inline so the operator knows the prefix was dropped')
+  })
+
   it('forwards a configurable postCreateTimeoutMs to the backend exec', async () => {
     const _execFile = execFileStub({
       info: { stdout: 'ok' },

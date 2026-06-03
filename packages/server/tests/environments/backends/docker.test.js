@@ -846,6 +846,59 @@ describe('DockerBackend.execInEnvironment()', () => {
     )
   })
 
+  it('#5067: attaches captured stdout AND stderr to the rejected Error', async () => {
+    // postCreateCommand failures often print the actually-useful
+    // diagnostic on stdout (npm install per-package errors, repo
+    // bootstrap script `echo "FATAL: ..."` lines, apt-get summary).
+    // Pre-#5067 the backend dropped stdout on the floor and the caller
+    // had to re-run by hand to see what went wrong.
+    const backend = new DockerBackend({
+      _execFile(_cmd, _args, _opts, cb) {
+        const err = new Error('exit 1')
+        err.code = 1
+        cb(err, 'OUT: setup printed this on stdout\n', 'ERR: setup printed this on stderr\n')
+      },
+    })
+
+    let caught
+    try {
+      await backend.execInEnvironment('ctr-abc', { cmd: 'broken-setup.sh' })
+      assert.fail('expected execInEnvironment to reject')
+    } catch (err) {
+      caught = err
+    }
+
+    assert.equal(typeof caught.stdout, 'string', 'rejected error must carry stdout')
+    assert.equal(typeof caught.stderr, 'string', 'rejected error must carry stderr')
+    assert.match(caught.stdout, /OUT: setup printed this on stdout/)
+    assert.match(caught.stderr, /ERR: setup printed this on stderr/)
+    // The message stays stderr-first for log-line continuity with the
+    // pre-#5067 behaviour; stdout lives on the attached property.
+    assert.match(caught.message, /ERR: setup printed this on stderr/)
+  })
+
+  it('#5067: rejected Error has empty-string stdout/stderr fields when the streams are silent', async () => {
+    const backend = new DockerBackend({
+      _execFile(_cmd, _args, _opts, cb) {
+        cb(new Error('ETIMEDOUT'), '', '')
+      },
+    })
+
+    let caught
+    try {
+      await backend.execInEnvironment('ctr-abc', { cmd: 'hangs-forever' })
+      assert.fail('expected execInEnvironment to reject')
+    } catch (err) {
+      caught = err
+    }
+
+    assert.equal(caught.stdout, '', 'silent stdout normalised to empty string')
+    assert.equal(caught.stderr, '', 'silent stderr normalised to empty string')
+    // With no stderr to surface, the message falls back to err.message
+    // — matches the pre-#5067 shape used by log scrapers.
+    assert.equal(caught.message, 'ETIMEDOUT')
+  })
+
   it('filters out entries whose value is null', async () => {
     const mockExec = createMockExecFile({ results: { exec: '' } })
     const backend = new DockerBackend({ _execFile: mockExec })
