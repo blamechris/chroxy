@@ -64,9 +64,18 @@ export const RESUME_UNKNOWN_STDERR_PATTERNS = [
   // #4950 — tightened replacements for the dropped `/resume.*failed/i`. Each
   // requires the resume verb to co-occur with session/conversation/id so the
   // matcher stays scoped to the --resume-id failure mode it was designed for.
-  /resume.*(fail|error).*(session|conversation|id)/i,
-  /resume.*(session|conversation|id).*(fail|error)/i,
-  /(fail|could not|unable to|cannot).*resume.*(session|conversation|id)/i,
+  //
+  // #4968 — `id` is anchored with \b so it doesn't bleed into substrings of
+  // unrelated words (invalid, considered, avoided, widget, mid, kid, …). The
+  // long tokens `session` and `conversation` don't need anchoring.
+  //
+  // #4969 — `resum(e|ing)` covers the gerund form claude CLI may emit
+  // ("Error resuming session abc-123"). Original `resume.*` patterns missed
+  // the gerund and silently fell through to the generic "exited unexpectedly"
+  // respawn loop reported in #4929.
+  /resum(e|ing).*(fail|error).*(session|conversation|\bid\b)/i,
+  /resum(e|ing).*(session|conversation|\bid\b).*(fail|error)/i,
+  /(fail|error|could not|unable to|cannot).*resum(e|ing).*(session|conversation|\bid\b)/i,
 ]
 
 /**
