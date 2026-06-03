@@ -33,6 +33,49 @@ const CLAUDE = resolveBinary('claude', [
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
 
 /**
+ * Patterns the claude CLI emits on stderr when `--resume <id>` fails because
+ * the conversation id is unknown locally (e.g. the operator wiped
+ * `~/.claude/projects/` between chroxy boots, or restored a state file from a
+ * different machine). Matched case-insensitively against each buffered stderr
+ * line; one match is enough to classify the failure as `resume_unknown` and
+ * trigger the one-shot fresh-conversation fallback in #4929.
+ *
+ * Kept as an exported constant so the regression test can pin both the
+ * detection contract AND the exact strings without re-implementing the matcher.
+ * If claude CLI ever changes its wording, the test will fail loudly here
+ * rather than silently regressing back into the "exited unexpectedly" respawn
+ * loop reported in #4929.
+ */
+export const RESUME_UNKNOWN_STDERR_PATTERNS = [
+  /no conversation found/i,
+  /conversation.*not.*found/i,
+  /session.*not.*found/i,
+  /no such conversation/i,
+  /unknown session/i,
+  /could not find session/i,
+  /resume.*failed/i,
+]
+
+/**
+ * Inspect a buffered stderr line set and return true if any line matches a
+ * known "unknown resume id" pattern. Pure helper — exported so the test suite
+ * can pin the matcher behavior without spawning a child process.
+ *
+ * @param {string[]} stderrLines
+ * @returns {boolean}
+ */
+export function stderrIndicatesUnknownResume(stderrLines) {
+  if (!Array.isArray(stderrLines) || stderrLines.length === 0) return false
+  for (const line of stderrLines) {
+    if (typeof line !== 'string' || !line) continue
+    for (const pattern of RESUME_UNKNOWN_STDERR_PATTERNS) {
+      if (pattern.test(line)) return true
+    }
+  }
+  return false
+}
+
+/**
  * Build the argv passed to `claude -p --input-format stream-json …`.
  *
  * Extracted so #4887 has a single, pure place to assert the resume contract.
@@ -288,6 +331,19 @@ export class CliSession extends BaseSession {
     this._respawnScheduled = false
     this._respawning = false
     this._interruptTimer = null
+    // #4929: track in-flight `--resume <id>` attempts so we can detect when
+    // claude CLI rejects an unknown id and avoid the spin-retry loop reported
+    // in the issue. Set in `_spawnPersistentProcess` whenever we passed
+    // `--resume`, cleared by `system.init` (resume confirmed) and inspected
+    // by `_handleChildClose` if the child exits before init fires.
+    this._attemptedResumeId = null
+    this._recentStderrLines = []
+    // One-shot fallback latch: if we detect `resume_unknown`, drop `_sessionId`
+    // and respawn a fresh conversation exactly once. If THAT also fails the
+    // child exits for a different reason and the normal respawn path runs.
+    // Prevents an infinite "clear → respawn → resume → clear" oscillation if
+    // some future bug ever re-introduces a phantom resume id.
+    this._didFallbackFromUnknownResume = false
     // #4602: distinguishes "user clicked Stop" (interrupt → child exits)
     // from "child crashed" so _handleChildClose skips the misleading
     // "exited unexpectedly" toast + auto-respawn on the stop path.
@@ -383,6 +439,18 @@ export class CliSession extends BaseSession {
     this._cleanupReadlines()
     this._processReady = false
 
+    // #4929: capture which `--resume <id>` (if any) this spawn attempted.
+    // Read off the argv we're about to pass instead of `_sessionId` so the
+    // detection is robust to future refactors that build args differently —
+    // we're asking "what did we actually tell claude to resume?" not "what's
+    // our in-memory id?". `_handleChildClose` inspects this on exit to decide
+    // whether to classify a quick failure as `resume_unknown` (#4929).
+    const resumeIdx = args.indexOf('--resume')
+    this._attemptedResumeId = (resumeIdx >= 0 && typeof args[resumeIdx + 1] === 'string')
+      ? args[resumeIdx + 1]
+      : null
+    this._recentStderrLines = []
+
     const child = spawn(CLAUDE, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -407,6 +475,19 @@ export class CliSession extends BaseSession {
         // #4828: session-scoped when init has fired (stderr arrives both
         // pre- and post-init; the fallback covers the pre-init case).
         ;(this._log || log).info(`stderr: ${line}`)
+        // #4929: buffer the most recent stderr lines while a `--resume` is
+        // outstanding so `_handleChildClose` can classify the failure. Bounded
+        // to 50 lines so a chatty subprocess can't grow this unbounded — the
+        // unknown-resume error fits in the first handful of lines so 50 is
+        // generous. Only buffer until `system.init` clears `_attemptedResumeId`
+        // (a successful resume confirms via init); after that we drop lines on
+        // the floor and let the normal stderr->log path do its job.
+        if (this._attemptedResumeId) {
+          this._recentStderrLines.push(line)
+          if (this._recentStderrLines.length > 50) {
+            this._recentStderrLines.shift()
+          }
+        }
       }
     })
 
@@ -783,6 +864,16 @@ export class CliSession extends BaseSession {
         if (data.subtype === 'init') {
           this._sessionId = data.session_id
           this._respawnCount = 0
+          // #4929: resume confirmed — claude CLI fired its first system.init,
+          // so the `--resume` (if any) succeeded. Clear the attempt tracker so
+          // a later unrelated exit doesn't get misclassified as resume failure,
+          // drop the stderr buffer (was only useful for failure diagnostics),
+          // and release the one-shot fallback latch so a FUTURE unknown-resume
+          // (e.g. user wipes ~/.claude/projects/ while chroxy keeps running and
+          // then crashes) can fall back again.
+          this._attemptedResumeId = null
+          this._recentStderrLines = []
+          this._didFallbackFromUnknownResume = false
           // #4828: bind the session-scoped logger now that session_id is
           // known. Subsequent log lines route through the WsServer log
           // fan-out (#4787) to dashboards bound to this session.
@@ -1322,6 +1413,17 @@ export class CliSession extends BaseSession {
     const wasIntentionalStop = this._intentionalStop
     this._intentionalStop = false
 
+    // #4929: capture the resume-attempt state for this child BEFORE the
+    // destroy/respawn short-circuits return. A `--resume <id>` that the CLI
+    // rejected ("No conversation found …") exits the child quickly without
+    // ever emitting system.init, so `_attemptedResumeId` is still set when we
+    // get here. We mirror the wasIntentionalStop capture-and-clear pattern so
+    // the flag never leaks past a close.
+    const attemptedResumeId = this._attemptedResumeId
+    const stderrLines = this._recentStderrLines
+    this._attemptedResumeId = null
+    this._recentStderrLines = []
+
     if (this._destroying) return
     if (this._respawning) return
 
@@ -1334,6 +1436,71 @@ export class CliSession extends BaseSession {
       // #4828: session-scoped if init had fired before the stop.
       ;(this._log || log).info(`Process exited (code ${code}) after user stop`)
       this.emit('stopped', { code })
+      return
+    }
+
+    // #4929: classify as resume-unknown when a `--resume <id>` spawn exited
+    // before claude CLI fired its first system.init AND the buffered stderr
+    // matches a known "no conversation found" pattern. Without this branch the
+    // generic "exited unexpectedly" toast + auto-respawn loop would re-pass
+    // the same broken resume id forever (the bug reported in #4929).
+    //
+    // Detection requires BOTH conditions:
+    //   - attemptedResumeId is set (the spawn passed `--resume`)
+    //   - stderrIndicatesUnknownResume(stderrLines) matched a known pattern
+    //
+    // We deliberately require the pattern match instead of treating "any exit
+    // before init while resuming" as resume-unknown — a genuine CLI crash
+    // mid-resume (network blip, OAuth refresh, OS OOM kill) would otherwise
+    // get misclassified and we'd silently wipe the user's `_sessionId`. The
+    // pattern matcher is the load-bearing safety net.
+    if (attemptedResumeId && stderrIndicatesUnknownResume(stderrLines)) {
+      // One-shot fallback latch (#4929 — see constructor). If we already
+      // fell back from an unknown resume earlier this lifecycle and the
+      // fresh spawn ALSO died with the same pattern, escalate to the
+      // generic crash path so we don't spin clearing `_sessionId` forever.
+      if (this._didFallbackFromUnknownResume) {
+        ;(this._log || log).error(
+          `Resume fallback also failed (code ${code}, attemptedResumeId=${attemptedResumeId}) — giving up auto-recovery`,
+        )
+        this.emit('error', {
+          code: 'resume_unknown',
+          message:
+            'Claude CLI rejected the resumed conversation id and a fresh-start retry also failed. ' +
+            'Check the chroxy logs for the stderr from the claude subprocess.',
+          attemptedResumeId,
+        })
+        this._scheduleRespawn()
+        return
+      }
+
+      ;(this._log || log).warn(
+        `Resume rejected by claude CLI (code ${code}, attemptedResumeId=${attemptedResumeId}) — ` +
+        'falling back to a fresh conversation. Prior transcript is preserved in the chroxy ring buffer ' +
+        'but the model will not see the earlier turns (claude CLI does not know that conversation id).',
+      )
+      // Clear the broken id so the next spawn omits `--resume` and mints a
+      // brand-new claude conversation. SessionManager will pick up the new
+      // session_id from the next system.init via the existing
+      // `resumeSessionId` getter → persistence chain (#4887).
+      this._sessionId = null
+      this._didFallbackFromUnknownResume = true
+      // Reset _skillsPrepended so the prepend bucket flows onto the FIRST
+      // user message of the fresh conversation (#3225) — mirrors the
+      // _killAndRespawn handling, just for the resume-fallback path.
+      this._skillsPrepended = false
+      // Emit a distinct error event so the dashboard can render a one-shot
+      // "Conversation no longer exists on this machine — starting fresh"
+      // affordance instead of the generic "exited unexpectedly" toast.
+      this.emit('error', {
+        code: 'resume_unknown',
+        message:
+          'Previous Claude conversation could not be resumed (the id is unknown to the local claude CLI — ' +
+          'it may have been wiped from ~/.claude/projects/). Starting a fresh conversation; the model will ' +
+          'not see the earlier transcript.',
+        attemptedResumeId,
+      })
+      this._scheduleRespawn()
       return
     }
 
