@@ -35,6 +35,54 @@ export function formatCostBadge(costUsd: number): string {
 }
 
 /**
+ * #5039: error-path partial-cost snapshot folded onto a server `error`
+ * event when the failed turn ran any parent rounds + Task subagent
+ * calls before the error fired. Shape returned by `handleError` and
+ * consumed by `formatPartialCostLine` below — see PR #5037 wire side
+ * and #5038 cumulative-tracker fold.
+ */
+export interface ErrorPartialCost {
+  costUsd: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+}
+
+/**
+ * #5039: human-readable one-liner for the error-path partial cost.
+ *
+ *   `"This turn cost $0.087 (1.2K in · 3.4K out)"`
+ *
+ * Used as a sub-line under the main error message on the dashboard
+ * toast (`<span data-testid="toast-partial-cost-*">`) and appended to
+ * the mobile `Alert.alert` body. Single source of truth so the two
+ * surfaces can't drift apart in copy/format.
+ *
+ * Falls back to a cost-only string when the usage object was empty (a
+ * subscription-billed provider that only produced a cost). Token counts
+ * use the same K/M abbreviation as `SidebarTokenView.formatTokenCount`
+ * — kept inline here to keep cost-format dependency-free.
+ */
+export function formatPartialCostLine(partial: ErrorPartialCost): string {
+  const cost = formatCostBadge(partial.costUsd)
+  const inTokens = partial.inputTokens
+  const outTokens = partial.outputTokens
+  if (inTokens <= 0 && outTokens <= 0) {
+    return `This turn cost ${cost}`
+  }
+  return `This turn cost ${cost} (${formatTokens(inTokens)} in · ${formatTokens(outTokens)} out)`
+}
+
+/** Token-count abbreviation mirroring `SidebarTokenView.formatTokenCount`. */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n < 1000) return String(n)
+  if (n < 999_500) return `${(n / 1000).toFixed(1)}K`
+  return `${(n / 1_000_000).toFixed(2)}M`
+}
+
+/**
  * Build the multi-line breakdown shown in the dashboard's native browser
  * tooltip (the cost-badge hover popover) — one string, six rows separated
  * by newlines, suitable for a `<span title={...}>` attribute.

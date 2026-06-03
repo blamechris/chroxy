@@ -98,6 +98,9 @@ import {
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
+  // #5039: pre-formatted partial-cost sub-line used by the `case 'error'`
+  // branch so the toast and the mobile Alert share copy.
+  formatPartialCostLine,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -3486,7 +3489,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // + app share a single normalised shape (no `msg.fatal` reach-in,
       // no per-client type guard, and a typo'd value can't silently
       // degrade severity).
-      const { code: errCode, message: errMsg, fatal: errFatal } = sharedError(msg);
+      // #5039: `partialCost` carries the optional PR #5037 fold of
+      // parent + Task subagent rounds completed before the error fired.
+      // Pre-formatted with the shared helper so the dashboard toast and
+      // mobile alert show identical wording.
+      const { code: errCode, message: errMsg, fatal: errFatal, partialCost } = sharedError(msg);
+      const partialCostLine = partialCost ? formatPartialCostLine(partialCost) : undefined;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
       // #3588: clear any in-flight skill_trust_grant whose requestId
       // matches this error envelope so the SkillsPanel "Pending review"
@@ -3562,7 +3570,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // the loud red toast instead of silently degrading.
       const isNonFatal = errFatal === false || NON_FATAL_ERROR_CODES.has(errCode);
       const severity: 'error' | 'warning' = isNonFatal ? 'warning' : 'error';
-      get().addServerError(surfaced, action, severity);
+      // #5039: thread the optional partial-cost sub-line through to the
+      // store. addServerError keeps it undefined for every pre-#5037
+      // error path so the existing toast layout is unchanged.
+      get().addServerError(surfaced, action, severity, partialCostLine);
       break;
     }
 

@@ -37,6 +37,10 @@ import { MAX_SESSION_INTERVENTIONS, nextMessageId, stripAnsi } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
 import { isReplayDuplicate } from '../replay-dedup'
 import { resolveStreamId } from '../stream-id'
+// #5039: ErrorPartialCost surfaced on the optional `partialCost` slot of
+// `handleError`'s return shape so dashboard + app can render the
+// PR #5037 partial-cost sub-line under the error toast.
+import type { ErrorPartialCost } from '../cost-format'
 // Centralised client-side error-category detection (#3151).
 import { isRateLimitMessage } from '@chroxy/protocol'
 // Established Zod-handler pattern (#3138).
@@ -1044,6 +1048,19 @@ export function handleError(msg: Record<string, unknown>): {
    * surface loudly instead of silently degrading).
    */
   fatal: boolean | undefined
+  /**
+   * #5039: optional partial-cost snapshot from PR #5037. When the
+   * error fired AFTER any parent rounds + subagent Task calls had
+   * already billed, byok-session folds those totals onto the error
+   * envelope (`usage` / `cost`) so the user can see what the failed
+   * turn cost. Only populated when `cost` is a finite non-negative
+   * number — undefined / NaN / Infinity / negative / non-number all
+   * resolve to null, matching the strict-finite gate that
+   * `_trackUsage` applies on the success path (#5038). Tokens default
+   * to 0 when missing/non-finite so a subscription-billed provider
+   * (cost present, usage absent) still surfaces a cost-only line.
+   */
+  partialCost: ErrorPartialCost | null
 } {
   const code = typeof msg.code === 'string' ? msg.code : 'UNKNOWN'
   const rawMessage =
@@ -1053,6 +1070,24 @@ export function handleError(msg: Record<string, unknown>): {
   // Strict boolean check — a typo (e.g. fatal: 'false' string) must NOT
   // degrade to a warning toast. Treat anything non-boolean as undefined.
   const fatal = typeof msg.fatal === 'boolean' ? msg.fatal : undefined
+  // #5039: parse optional partial usage + cost (PR #5037 wire shape).
+  // `cost` is the gate — null/undefined/NaN/Infinity/non-number/negative
+  // all mean "no usable partial info", matching the strict-finite check
+  // on the success-path `_trackUsage` fold (#5038). Tokens are
+  // best-effort: any field that isn't a finite non-negative number
+  // falls to 0 so a single bogus counter can't poison the rest of the
+  // display.
+  const rawCost = msg.cost
+  const partialCost: ErrorPartialCost | null =
+    typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0
+      ? {
+          costUsd: rawCost,
+          inputTokens: pickFiniteTokenCount(msg.usage, 'input_tokens'),
+          outputTokens: pickFiniteTokenCount(msg.usage, 'output_tokens'),
+          cacheReadTokens: pickFiniteTokenCount(msg.usage, 'cache_read_input_tokens'),
+          cacheCreationTokens: pickFiniteTokenCount(msg.usage, 'cache_creation_input_tokens'),
+        }
+      : null
   // `systemMessage` was dropped from the return shape (#3112) — neither
   // call site (`dashboard:store/message-handler.ts:case 'error'`,
   // `app:store/message-handler.ts:case 'error'`) consumed it.
@@ -1061,7 +1096,20 @@ export function handleError(msg: Record<string, unknown>): {
     message,
     requestId,
     fatal,
+    partialCost,
   }
+}
+
+/**
+ * #5039: best-effort extract of a single token-count field from the
+ * untyped server `error.usage` payload. Non-object/null usage and any
+ * non-finite / negative numeric falls to 0 — see `handleError` JSDoc
+ * for the contract.
+ */
+function pickFiniteTokenCount(rawUsage: unknown, key: string): number {
+  if (rawUsage == null || typeof rawUsage !== 'object') return 0
+  const v = (rawUsage as Record<string, unknown>)[key]
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0
 }
 
 // ---------------------------------------------------------------------------

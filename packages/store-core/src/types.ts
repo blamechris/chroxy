@@ -473,6 +473,16 @@ export interface ServerError {
    * existing callers continue to render as red error toasts.
    */
   severity?: 'error' | 'warning';
+  /**
+   * #5039: optional partial-cost sub-line surfaced when PR #5037 folded
+   * any parent + Task subagent rounds onto an error envelope before the
+   * error fired. Rendered as a small secondary text under the main
+   * toast message; absent for every error path that didn't carry a
+   * usable partial snapshot. Pre-formatted (via
+   * `formatPartialCostLine`) so the dashboard and mobile surfaces can
+   * share copy without re-implementing the cost/token formatting.
+   */
+  partialCostLine?: string;
 }
 
 export interface DevPreview {

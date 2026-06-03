@@ -629,4 +629,61 @@ describe('Toast', () => {
       expect(onDismiss).toHaveBeenCalledWith('fh1')
     })
   })
+
+  // #5039 — secondary sub-line under the main toast message, surfaced
+  // for the PR #5037 error-path partial-cost ("This turn cost $X").
+  // Rendered as a small `<span data-testid="toast-partial-cost-{id}">`
+  // inside the existing `.toast-msg` flex column so the action + close
+  // buttons stay aligned; absent for every error path that didn't carry
+  // partials so the single-line layout is preserved.
+  describe('subMessage sub-line (#5039)', () => {
+    it('renders the sub-line with a testID when subMessage is set', () => {
+      const items: ToastItem[] = [
+        { id: 'pc1', message: 'Stream error', subMessage: 'This turn cost $0.087 (1.2K in · 3.4K out)' },
+      ]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      const sub = screen.getByTestId('toast-partial-cost-pc1')
+      expect(sub).toBeInTheDocument()
+      expect(sub.textContent).toBe('This turn cost $0.087 (1.2K in · 3.4K out)')
+    })
+
+    it('does NOT render the sub-line element when subMessage is absent', () => {
+      // Preserve the pre-#5039 single-line layout for every error path
+      // that doesn't carry partials — no empty `<span class="toast-submsg">`
+      // wrapper should leak into the DOM.
+      const items: ToastItem[] = [{ id: 'pc2', message: 'Plain error' }]
+      const { container } = render(<Toast items={items} onDismiss={vi.fn()} />)
+      expect(screen.queryByTestId('toast-partial-cost-pc2')).toBeNull()
+      expect(container.querySelector('.toast-submsg')).toBeNull()
+    })
+
+    it('keeps the main message text rendered alongside the sub-line', () => {
+      // Belt-and-braces: the sub-line must NOT replace the main
+      // message — both must surface so the user sees the error context
+      // AND the failed-turn cost.
+      const items: ToastItem[] = [
+        { id: 'pc3', message: 'Stream error', subMessage: 'This turn cost $0.050' },
+      ]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      expect(screen.getByText('Stream error')).toBeInTheDocument()
+      expect(screen.getByTestId('toast-partial-cost-pc3')).toBeInTheDocument()
+    })
+
+    it('does not interfere with action button rendering when both are present', () => {
+      // The sub-line lives inside `.toast-msg`, the action button is a
+      // sibling of `.toast-msg` — both must surface without one
+      // hiding the other.
+      const items: ToastItem[] = [
+        {
+          id: 'pc4',
+          message: 'Stream error',
+          subMessage: 'This turn cost $0.050',
+          action: { label: 'Retry', onClick: vi.fn() },
+        },
+      ]
+      render(<Toast items={items} onDismiss={vi.fn()} />)
+      expect(screen.getByTestId('toast-partial-cost-pc4')).toBeInTheDocument()
+      expect(screen.getByTestId('toast-action-pc4')).toBeInTheDocument()
+    })
+  })
 })

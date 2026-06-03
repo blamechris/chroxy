@@ -3215,6 +3215,94 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #5039 — PR #5037 added optional `usage` + `cost` to the error envelope so
+  // a Task subagent error path can surface "this turn cost $X" in the
+  // dashboard toast. The dispatch must pass the pre-formatted sub-line into
+  // addServerError as the 4th positional arg; without it, the partial-cost
+  // information reaches the wire but never makes it onto the toast.
+  describe('error dispatch — partial-cost sub-line (#5039)', () => {
+    it('threads the partial-cost line into addServerError when cost+usage present', () => {
+      const calls: Array<{ message: unknown; partialCostLine: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        message: unknown,
+        _action: unknown,
+        _severity: unknown,
+        partialCostLine?: string,
+      ) => {
+        calls.push({ message, partialCostLine })
+      }
+      handleMessage(
+        {
+          type: 'error',
+          code: 'STREAM_ERROR',
+          message: 'stream failed',
+          cost: 0.0875,
+          usage: {
+            input_tokens: 1234,
+            output_tokens: 3400,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.message).toBe('stream failed')
+      // Pre-formatted via the shared `formatPartialCostLine` helper so
+      // the dashboard + mobile alerts can't drift on copy/format.
+      expect(calls[0]?.partialCostLine).toBe('This turn cost $0.087 (1.2K in · 3.4K out)')
+    })
+
+    it('passes undefined when the wire shape has no partials (pre-#5037 servers)', () => {
+      // Default error envelope without cost — the dispatch must NOT
+      // synthesize an empty/zero sub-line. Asserting `undefined` (not
+      // empty string) pins the addServerError 4th-arg contract: the
+      // store's spread-on-truthy guard skips the field entirely.
+      const calls: Array<{ partialCostLine: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown,
+        _action: unknown,
+        _severity: unknown,
+        partialCostLine?: string,
+      ) => {
+        calls.push({ partialCostLine })
+      }
+      handleMessage(
+        { type: 'error', code: 'STREAM_ERROR', message: 'no partials here' } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.partialCostLine).toBeUndefined()
+    })
+
+    it('renders cost-only line when usage is missing (subscription provider)', () => {
+      // Subscription-billed providers can produce a cost without a
+      // token breakdown — the sub-line must still surface so the user
+      // sees the failed-turn spend.
+      const calls: Array<{ partialCostLine: unknown }> = []
+      store = createMockStore(baseState())
+      setStore(store)
+      ;(store.getState() as any).addServerError = (
+        _message: unknown,
+        _action: unknown,
+        _severity: unknown,
+        partialCostLine?: string,
+      ) => {
+        calls.push({ partialCostLine })
+      }
+      handleMessage(
+        { type: 'error', code: 'ABORT', message: 'cancelled', cost: 0.05 } as any,
+        ctx() as any,
+      )
+      expect(calls).toHaveLength(1)
+      expect(calls[0]?.partialCostLine).toBe('This turn cost $0.050')
+    })
+  })
+
   describe('pairing_refreshed dispatch (#2916)', () => {
     it('increments pairingRefreshedCount when pairing_refreshed arrives', () => {
       store = createMockStore(baseState({ pairingRefreshedCount: 0 } as any))

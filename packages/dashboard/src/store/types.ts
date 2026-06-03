@@ -812,7 +812,15 @@ export interface ConnectionState {
   // recovery button to the toast. Existing call sites that pass only
   // `message` keep working — `action` is undefined and the toast renders
   // message-only as before.
-  addServerError: (message: string, action?: ServerErrorAction, severity?: ServerError['severity']) => void;
+  // #5039: optional `partialCostLine` surfaces the PR #5037 partial-cost
+  // sub-line under the main toast message when the failed turn folded
+  // any parent + Task subagent rounds before erroring out.
+  addServerError: (
+    message: string,
+    action?: ServerErrorAction,
+    severity?: ServerError['severity'],
+    partialCostLine?: string,
+  ) => void;
   dismissServerError: (id: string) => void;
 
   // Info notification actions
