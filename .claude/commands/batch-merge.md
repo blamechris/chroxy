@@ -82,7 +82,7 @@ All required checks must be `SUCCESS` or `SKIPPED`. If any are failing or pendin
 COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
   --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] |
     if length == 0 then "NOT_FOUND"
-    elif (.[0].state == "PENDING") then "IN_PROGRESS"
+    elif ((sort_by(.submitted_at) | last | .state) == "PENDING") then "IN_PROGRESS"
     else "COMPLETED" end')
 ```
 
@@ -104,9 +104,12 @@ ALL_COMMENTS=$(gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate)
 # Find Copilot comments without a reply from us
 WORKFLOW_USER=$(gh api user --jq .login)
 
-# Comments that are top-level (not replies) and have no reply from us
+# Copilot-authored top-level comments (not replies) that have no reply from us.
+# Scope to the Copilot bot so this step only processes Copilot threads, as the
+# heading claims — human review comments are out of scope for batch-merge.
 UNREPLIED=$(echo "$ALL_COMMENTS" | jq --arg user "$WORKFLOW_USER" '
-  [.[] | select(.in_reply_to_id == null)] |
+  [.[] | select(.in_reply_to_id == null)
+       | select(.user.login == "copilot-pull-request-reviewer[bot]")] |
   map(select(.id as $id |
     [.. | select(.in_reply_to_id? == $id) | select(.user.login == $user)] | length == 0
   ))
@@ -206,12 +209,37 @@ When `gh pr merge` fails, classify and respond:
 | "not up to date" / "branch is behind" | `update-branch` → wait CI → retry | 1 |
 | "status check" / "required status" | `/fix-ci` → retry | 1 |
 | "review" / "approval" / "dismissed" | Wait for fresh Copilot review → retry | 1 |
+| "conversation" / "unresolved" / "must be resolved" | Resolve open review threads (see below), then retry | 1 |
 | "conflict" / "not mergeable" | Skip immediately, report | 0 |
 | "already merged" | Skip silently, note in table | 0 |
 | Rate limit (403/429) | Back off 60s → retry | 2 |
 | Unknown | Log full error, skip PR | 0 |
 
 After max retries exhausted: mark PR as `Skipped` with reason, continue to next PR.
+
+**Unresolved review conversations.** When branch protection requires conversation
+resolution, `gh pr merge` fails with a message about unresolved conversations rather
+than a status-check or review failure — easy to misclassify as `Unknown` and skip
+opaquely. Detect it explicitly and surface it as the blocker reason. Confirm the cause
+via GraphQL (REST does not expose thread state):
+
+```bash
+UNRESOLVED=$(gh api graphql -f query="
+  query {
+    repository(owner: \"${REPO%/*}\", name: \"${REPO#*/}\") {
+      pullRequest(number: ${PR_NUM}) {
+        reviewThreads(first: 100) { nodes { isResolved } }
+      }
+    }
+  }" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+```
+
+If `UNRESOLVED > 0`, the threads were left open by the earlier review pass (reviews
+should run BEFORE batch-merge — see Critical Rule 2). Resolve them with the same
+GraphQL `resolveReviewThread` mutation `/check-pr` step 6b uses, then retry the merge
+once. If threads cannot be resolved (e.g., a reviewer re-opened one intentionally),
+mark the PR `Blocked` with reason "unresolved review conversations" rather than failing
+silently — the user must weigh in.
 
 ### Phase 4: Session Summary
 
@@ -260,4 +288,4 @@ After all PRs processed:
 8. **Handle stale reviews** — Pushing fixes invalidates reviews. Wait for fresh cycle.
 9. **Compose with `/fix-ci`** — Don't reinvent CI diagnosis.
 10. **No attribution** — Follow project's attribution policy in any fix commits.
-<!-- skill-templates: batch-merge ebdb14e 2026-06-02 -->
+<!-- skill-templates: batch-merge 21fa678 2026-06-03 -->
