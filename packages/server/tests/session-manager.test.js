@@ -1190,6 +1190,86 @@ describe('SessionManager.restoreState', () => {
 
     mgr.destroyAll()
   })
+
+  // #4935 — pin the daemon-restart contract: restored sessions get FRESH
+  // session IDs (createSession() always calls randomBytes(16) at line 555 of
+  // session-manager.js). The dashboard's persisted activeSessionId pointing
+  // at a pre-restart ID is therefore stale on reconnect, which is the root
+  // cause of the post-restart silent wedge investigated in #4935.
+  //
+  // The test simulates the exact scenario from the issue:
+  //   1. Create sessions, persist state, capture their IDs.
+  //   2. Tear down (`destroyAll` + new SessionManager) — daemon restart.
+  //   3. restoreState() — sessions come back with NEW IDs.
+  //   4. getSession(oldId) returns null — input addressed to the pre-restart
+  //      ID would fail the resolveSession() lookup and trip the structured
+  //      SESSION_NOT_FOUND error path (see input-handlers.test.js for the
+  //      handler-side assertion).
+  //
+  // The fix in input-handlers.js can't restore the old ID (that would
+  // require persisting + restoring the random ID itself, a wider change with
+  // broader implications); what it CAN do is make the silent drop visible.
+  // This test pins the precondition that triggers the visibility fix.
+  it('restored sessions get fresh IDs — old IDs are gone, lookups return null (#4935)', () => {
+    // First boot: create two sessions and let the auto-persist write to disk.
+    // Skip preflight + use a mock provider so we don't fork claude binaries
+    // during the test. Real sessions are constructed via createSession but
+    // the provider is mocked out below so we don't actually spawn anything.
+    const stateFile1 = join(tempDir, 'state-v1.json')
+
+    // Write a state file directly (simpler than driving createSession's
+    // full path — we only need to test the restore-side ID regeneration).
+    writeFileSync(stateFile1, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        {
+          // Pre-restart session ID that the dashboard might still hold.
+          id: 'preRestartId-AAAAAAAAAAAAAAAA',
+          name: 'Rah6',
+          cwd: '/tmp',
+          model: null,
+          permissionMode: 'approve',
+          sdkSessionId: null,
+        },
+        {
+          id: 'preRestartId-BBBBBBBBBBBBBBBB',
+          name: 'No-it-all',
+          cwd: '/tmp',
+          model: null,
+          permissionMode: 'auto',
+          sdkSessionId: null,
+        },
+      ],
+    }))
+
+    // Simulate the daemon restart: fresh SessionManager from the same file.
+    const mgr2 = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile1 })
+    const firstNewId = mgr2.restoreState()
+    assert.ok(firstNewId, 'restoreState should return the first restored session ID')
+
+    // The fresh IDs must differ from the persisted IDs — this is what makes
+    // the dashboard's persisted activeSessionId stale post-restart.
+    assert.notEqual(firstNewId, 'preRestartId-AAAAAAAAAAAAAAAA',
+      'restored session ID must differ from the persisted ID (#4935 precondition)')
+    const sessions = mgr2.listSessions()
+    assert.equal(sessions.length, 2, 'both sessions should restore')
+    for (const s of sessions) {
+      assert.notEqual(s.sessionId, 'preRestartId-AAAAAAAAAAAAAAAA')
+      assert.notEqual(s.sessionId, 'preRestartId-BBBBBBBBBBBBBBBB')
+    }
+
+    // Lookup by the OLD ID returns null — this is the moment the daemon
+    // silently dropped the dashboard's input in the original #4935 wedge.
+    // The visibility fix in input-handlers.js converts that null into a
+    // structured `session_error{code:'SESSION_NOT_FOUND', attemptedSessionId}`
+    // so the dashboard can recover. Pin both invariants here.
+    assert.equal(mgr2.getSession('preRestartId-AAAAAAAAAAAAAAAA'), null,
+      'lookup by stale pre-restart ID must return null — handler then trips the SESSION_NOT_FOUND path')
+    assert.equal(mgr2.getSession('preRestartId-BBBBBBBBBBBBBBBB'), null)
+
+    mgr2.destroyAll()
+  })
 })
 
 describe('SessionManager auto-persist', () => {

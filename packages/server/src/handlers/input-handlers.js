@@ -123,10 +123,35 @@ async function handleInput(ws, client, msg, ctx) {
   const targetSessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
   if (!entry) {
-    const message = msg.sessionId
-      ? `Session not found: ${msg.sessionId}`
-      : 'No active session'
-    sendSessionError(ws, ctx, message)
+    // #4935 — visibility fix for the silent post-restart wedge. Before this,
+    // a stale `sessionId` (common when the dashboard's persisted activeSessionId
+    // references a pre-restart session ID that no longer exists after
+    // session-manager regenerates IDs on restoreState) would silently drop
+    // the input on the floor — sendSessionError ran but the operator log only
+    // showed a debug-level `Message from ...` line below, and that line is
+    // never reached on this branch. The dashboard's session_error toast DID
+    // fire, but with a generic "Session not found: <id>" string that gave the
+    // user nothing actionable. Now:
+    //   1. Log at INFO with the attempted ID + client ID so chroxy.log
+    //      shows the mismatch and operators can correlate against the
+    //      session_list / session-state.json after a restart.
+    //   2. Emit a structured `code: 'SESSION_NOT_FOUND'` + `attemptedSessionId`
+    //      on the session_error envelope so the dashboard can surface an
+    //      actionable hint ("session restarted — pick a session below")
+    //      and clear its stale activeSessionId locally. Mirrors the existing
+    //      `code: 'resume_unknown'` affordance (#4947).
+    if (msg.sessionId) {
+      log.info(`input dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
+      ctx.send(ws, {
+        type: 'session_error',
+        code: 'SESSION_NOT_FOUND',
+        message: `Session not found: ${msg.sessionId}`,
+        attemptedSessionId: msg.sessionId,
+      })
+    } else {
+      log.info(`input dropped: no active session client=${client.id}`)
+      sendSessionError(ws, ctx, 'No active session')
+    }
     return
   }
 
@@ -448,6 +473,20 @@ function handleInterrupt(ws, client, msg, ctx) {
   if (entry) {
     log.info(`Interrupt from ${client.id} to session ${interruptSessionId}`)
     entry.session.interrupt()
+    return
+  }
+  // #4935 — same visibility fix as handleInput for the silent post-restart
+  // wedge. An interrupt addressed to a stale session ID used to drop on the
+  // floor with no log line and no client-side error. Surface both so the
+  // dashboard can clear stale state and the operator can grep chroxy.log.
+  if (msg.sessionId) {
+    log.info(`interrupt dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
+    ctx.send(ws, {
+      type: 'session_error',
+      code: 'SESSION_NOT_FOUND',
+      message: `Session not found: ${msg.sessionId}`,
+      attemptedSessionId: msg.sessionId,
+    })
   }
 }
 
