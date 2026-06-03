@@ -2,11 +2,16 @@ import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
 import { existsSync, readFileSync, mkdirSync } from 'fs'
-import { dirname, join, resolve } from 'path'
+import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { DockerBackend } from './environments/backends/docker.js'
+import {
+  parseDevContainer,
+  validateMounts,
+  sanitizeContainerEnv,
+} from './devcontainer-config.js'
 
 const log = createLogger('environment-manager')
 
@@ -17,7 +22,6 @@ const DEFAULT_CPU_LIMIT = '2'
 const DEFAULT_CONTAINER_USER = 'chroxy'
 
 const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
-const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 // Re-export `UNREACHABLE_STATUSES` from the dedicated constants module so
 // existing importers (tests, future consumers) continue to work. The
@@ -120,10 +124,13 @@ export class EnvironmentManager extends EventEmitter {
     if (!name?.trim()) throw new Error('Environment name is required')
     if (!cwd?.trim()) throw new Error('Environment cwd is required')
 
-    // Merge devcontainer.json when requested (explicit opts win)
+    // Merge devcontainer.json when requested (explicit opts win).
+    // Parsing/validation logic lives in `devcontainer-config.js` so the
+    // persistent-environment path here and the per-session DockerByokSession
+    // path share one source of truth (#5077).
     let dcConfig = {}
     if (devcontainer) {
-      dcConfig = this._parseDevContainer(cwd)
+      dcConfig = parseDevContainer(cwd, { logger: log })
     }
 
     const user = containerUser || dcConfig.remoteUser || DEFAULT_CONTAINER_USER
@@ -144,9 +151,10 @@ export class EnvironmentManager extends EventEmitter {
 
     log.info(`Creating environment "${name}" (id: ${id}, image: ${resolvedImage})`)
 
-    // Validate devcontainer mounts and env before passing to Docker
-    const validatedMounts = this._validateMounts(dcConfig.mounts, cwd)
-    const validatedEnv = this._sanitizeContainerEnv(dcConfig.containerEnv)
+    // Validate devcontainer mounts and env before passing to Docker.
+    // Shared helpers from `devcontainer-config.js` (#5077).
+    const validatedMounts = validateMounts(dcConfig.mounts, cwd, { logger: log })
+    const validatedEnv = sanitizeContainerEnv(dcConfig.containerEnv, { logger: log })
 
     // #4556: caller-supplied workspacePVC wins; otherwise fall back to the
     // configured default (when the operator has set `environments.k8s.workspace`
@@ -608,152 +616,13 @@ export class EnvironmentManager extends EventEmitter {
 
   // ──────────────────────────────────────────────────────────────────────────
   // DevContainer support
+  //
+  // Parsing and validation helpers live in `devcontainer-config.js` as pure
+  // functions so the persistent-environment `create()` path here and the
+  // per-session DockerByokSession path share one source of truth (#5077).
+  // Call sites: `parseDevContainer` / `validateMounts` / `sanitizeContainerEnv`
+  // are invoked from `create()` above.
   // ──────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Parse a devcontainer.json from the given cwd.
-   * Looks for `.devcontainer/devcontainer.json` first, then `.devcontainer.json`.
-   * Returns an object with supported fields. Logs warnings for unrecognized fields.
-   */
-  _parseDevContainer(cwd) {
-    const candidates = [
-      join(cwd, '.devcontainer', 'devcontainer.json'),
-      join(cwd, '.devcontainer.json'),
-    ]
-
-    let filePath
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) {
-        filePath = candidate
-        break
-      }
-    }
-
-    if (!filePath) {
-      log.info('No devcontainer.json found, using defaults')
-      return {}
-    }
-
-    let raw
-    try {
-      raw = JSON.parse(readFileSync(filePath, 'utf-8'))
-    } catch (err) {
-      log.warn(`Failed to parse ${filePath}: ${err.message}`)
-      return {}
-    }
-
-    log.info(`Parsed devcontainer.json from ${filePath}`)
-
-    const SUPPORTED_FIELDS = new Set([
-      'image', 'forwardPorts', 'containerEnv', 'mounts',
-      'remoteUser', 'postCreateCommand',
-    ])
-
-    for (const key of Object.keys(raw)) {
-      if (!SUPPORTED_FIELDS.has(key)) {
-        log.warn(`devcontainer.json: unsupported field "${key}" (ignored)`)
-      }
-    }
-
-    const config = {}
-    if (typeof raw.image === 'string' && raw.image.trim()) config.image = raw.image.trim()
-    if (typeof raw.remoteUser === 'string' && raw.remoteUser.trim()) config.remoteUser = raw.remoteUser.trim()
-    if (typeof raw.postCreateCommand === 'string' && raw.postCreateCommand.trim()) config.postCreateCommand = raw.postCreateCommand.trim()
-    if (raw.containerEnv && typeof raw.containerEnv === 'object' && !Array.isArray(raw.containerEnv)) config.containerEnv = raw.containerEnv
-    if (Array.isArray(raw.forwardPorts)) config.forwardPorts = raw.forwardPorts.filter(p => typeof p === 'number' || typeof p === 'string')
-    if (Array.isArray(raw.mounts)) config.mounts = raw.mounts.filter(m => typeof m === 'string')
-
-    return config
-  }
-
-  /**
-   * Validate mount source paths. Only mounts whose source is inside the
-   * project directory (cwd) are allowed. Mounts outside cwd or targeting
-   * sensitive paths (~/.ssh, ~/.aws, /etc, etc.) are rejected and logged.
-   *
-   * Supports both short-form (`source:target`) and long-form
-   * (`source=...,target=...,type=bind`) mount strings.
-   *
-   * @param {string[]|undefined} mounts - Raw mount strings from devcontainer.json
-   * @param {string} cwd - Project directory (allowlist root)
-   * @returns {string[]} Filtered array of safe mounts
-   */
-  _validateMounts(mounts, cwd) {
-    if (!Array.isArray(mounts) || mounts.length === 0) return undefined
-
-    const resolvedCwd = cwd.endsWith('/') ? cwd : cwd + '/'
-    const home = homedir()
-
-    const allowed = []
-    for (const mount of mounts) {
-      const source = this._extractMountSource(mount)
-      if (!source) {
-        log.warn(`devcontainer mount rejected (unparseable): ${mount}`)
-        continue
-      }
-
-      // Expand ~ to home directory for comparison
-      const expandedSource = source.startsWith('~/')
-        ? join(home, source.slice(2))
-        : source.startsWith('~')
-          ? home
-          : source
-
-      // Normalize to resolve any .. segments (path traversal defense)
-      const normalizedSource = resolve(expandedSource)
-
-      // Source must be an absolute path inside the project directory
-      if (!normalizedSource.startsWith(resolvedCwd) && normalizedSource !== cwd) {
-        log.warn(`devcontainer mount rejected (outside project dir): ${source}`)
-        continue
-      }
-
-      allowed.push(mount)
-    }
-
-    return allowed.length > 0 ? allowed : undefined
-  }
-
-  /**
-   * Extract the source path from a mount string.
-   * Handles both `source:target[:opts]` and `source=path,target=path,type=bind`.
-   */
-  _extractMountSource(mount) {
-    // Long-form: source=...,target=...,type=bind
-    const sourceMatch = mount.match(/(?:^|,)source=([^,]+)/)
-    if (sourceMatch) return sourceMatch[1]
-
-    // Short-form: source:target[:opts]
-    const parts = mount.split(':')
-    if (parts.length >= 2) return parts[0]
-
-    return null
-  }
-
-  /**
-   * Sanitize containerEnv keys. Only keys matching [A-Za-z_][A-Za-z0-9_]*
-   * are allowed. Invalid keys are rejected and logged.
-   *
-   * @param {Object|undefined} containerEnv - Raw env vars from devcontainer.json
-   * @returns {Object|undefined} Filtered env object with only valid keys
-   */
-  _sanitizeContainerEnv(containerEnv) {
-    if (!containerEnv || typeof containerEnv !== 'object') return undefined
-
-    const sanitized = Object.create(null)
-    let hasKeys = false
-
-    for (const [key, value] of Object.entries(containerEnv)) {
-      if (!VALID_ENV_KEY_RE.test(key)) {
-        log.warn(`devcontainer env key rejected (invalid characters): ${key}`)
-        continue
-      }
-      sanitized[key] = value
-      hasKeys = true
-    }
-
-    return hasKeys ? sanitized : undefined
-  }
 
   // ──────────────────────────────────────────────────────────────────────────
   // Persistence
