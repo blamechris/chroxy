@@ -124,6 +124,25 @@ describe('EventNormalizer error mapping — #4947', () => {
     assert.equal(msg.attemptedResumeId, undefined)
   })
 
+  it('#4948 — forwards attemptedResumeId for resume_unknown_exhausted code (terminal escalation)', () => {
+    // The escalation path emitted when the post-fallback retry also matches
+    // the unknown-resume pattern (server cli-session.js _handleChildClose,
+    // PR #4948 follow-up to #4944). The normalizer must forward the attempted
+    // id on this code too so the dashboard's "auto-recovery exhausted" chip
+    // can render the same operator-correlation subtext as the recoverable
+    // resume_unknown chip.
+    const normalizer = new EventNormalizer()
+    const result = normalizer.normalize('error', {
+      code: 'resume_unknown_exhausted',
+      message: 'Auto-recovery exhausted: …',
+      attemptedResumeId: 'abc123-def456-7890',
+    }, ctx)
+    const msg = result.messages[0].msg
+    assert.equal(msg.code, 'resume_unknown_exhausted')
+    assert.equal(msg.attemptedResumeId, 'abc123-def456-7890',
+      '#4948 — attemptedResumeId must ride the terminal escalation envelope too so operators can correlate the failed id against the persisted state file')
+  })
+
   it('truncates attemptedResumeId to 256 chars (matches wire schema cap)', () => {
     // The wire schema rejects > 256 chars, but the server doesn't
     // self-validate outgoing messages against ServerMessageSchema. Enforce

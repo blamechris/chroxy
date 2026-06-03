@@ -216,7 +216,17 @@ describe('CliSession resume-unknown — _handleChildClose detection (#4929)', ()
     session.destroy()
   })
 
-  it('escalates to a final error when the post-fallback retry ALSO matches the unknown-resume pattern', () => {
+  it('#4948 — escalates with resume_unknown_exhausted and STOPS auto-respawn when post-fallback retry also fails', () => {
+    // #4948 finalises the escalation UX. The first failure path falls back to
+    // a fresh conversation; if THAT spawn ALSO matches the unknown-resume
+    // pattern, the auto-recovery has clearly failed and continuing to respawn
+    // would just produce the confusing "give up" toast followed by what looks
+    // like normal recovery on the next init (issue #4948 question 2).
+    //
+    // Decision recorded inline in cli-session.js: on escalation we stop the
+    // auto-respawn entirely and surface a distinct `resume_unknown_exhausted`
+    // code so the dashboard / mobile app can render a "start a fresh session
+    // manually" affordance instead of the recoverable amber chip.
     const session = createSession({ resumeSessionId: 'cli-stale-123' })
     session._attemptedResumeId = 'cli-stale-123'
     session._recentStderrLines = ['No conversation found']
@@ -230,14 +240,25 @@ describe('CliSession resume-unknown — _handleChildClose detection (#4929)', ()
     session._handleChildClose(1)
 
     assert.equal(errors.length, 1)
-    assert.equal(errors[0].code, 'resume_unknown',
-      'still surfaces with the distinct code so the dashboard can show a "give up" message')
-    assert.match(errors[0].message, /fresh-start|give up|also failed/i,
-      'escalation message should make it clear we already tried the fallback once')
-    // Even on escalation we still respawn so the user can retry manually —
-    // but we do NOT wipe _sessionId a second time (would lose data needlessly
-    // if some unrelated thing matches the same pattern later).
-    assert.equal(session._scheduleRespawn.mock.calls.length, 1)
+    assert.equal(errors[0].code, 'resume_unknown_exhausted',
+      '#4948 — distinct code so the dashboard surfaces a terminal "auto-recovery exhausted" affordance, not the recoverable resume_unknown chip')
+    assert.equal(errors[0].attemptedResumeId, 'cli-stale-123',
+      'attemptedResumeId still rides the envelope so operators can correlate the failed id against the persisted state file')
+    assert.match(errors[0].message, /auto-recovery|exhausted|fresh session/i,
+      '#4948 — escalation message must make it clear auto-recovery gave up and tell the user what to do next (start a fresh session)')
+    // #4948 ACCEPTANCE: do NOT call _scheduleRespawn on escalation. Continuing
+    // to respawn after surfacing "give up auto-recovery" produces the
+    // confusing UX described in the issue (toast says give up, next init
+    // looks like normal recovery). The session stays down and waits for an
+    // explicit user action.
+    assert.equal(session._scheduleRespawn.mock.calls.length, 0,
+      '#4948 — must NOT schedule a respawn on escalation; the session stays down so the user takes the next step deliberately')
+    // Reset the latch so a future explicit user-driven start can re-arm the
+    // one-shot fallback (otherwise the latch would leak and prevent recovery
+    // on the very next session start). _sessionId stays null so a manual
+    // restart omits --resume and mints a brand-new conversation.
+    assert.equal(session._didFallbackFromUnknownResume, false,
+      '#4948 — latch resets on escalation so a future manual start can re-arm the one-shot fallback')
 
     session.destroy()
   })

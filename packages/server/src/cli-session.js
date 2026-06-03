@@ -1479,20 +1479,50 @@ export class CliSession extends BaseSession {
     if (attemptedResumeId && stderrIndicatesUnknownResume(stderrLines)) {
       // One-shot fallback latch (#4929 — see constructor). If we already
       // fell back from an unknown resume earlier this lifecycle and the
-      // fresh spawn ALSO died with the same pattern, escalate to the
-      // generic crash path so we don't spin clearing `_sessionId` forever.
+      // fresh spawn ALSO died with the same pattern, escalate to a terminal
+      // "auto-recovery exhausted" path: surface a distinct error code and
+      // STOP the auto-respawn so the session sits down until the user takes
+      // a deliberate next step.
+      //
+      // #4948: previously this branch still called `_scheduleRespawn()` —
+      // but the next spawn would re-confirm via `system.init` (clearing the
+      // latch AND re-setting `_sessionId` from the init payload) which made
+      // the "give up" toast immediately precede what looked like a normal
+      // recovery. Two problems with that:
+      //   1. The user sees a confusing "auto-recovery gave up" message and
+      //      then the session appears to be working again, with no signal
+      //      whether the underlying issue is actually resolved.
+      //   2. If the fresh-start spawn ALSO fails the same way, we'd just
+      //      respawn again, ad infinitum until `_respawnCount` hits the cap
+      //      buried inside `_scheduleRespawn`.
+      // Stopping here gives a clean terminal state: `_sessionId` is null,
+      // the latch resets so a future explicit start can re-arm the one-shot
+      // fallback, and the operator/UI gets an unambiguous "the auto-recovery
+      // gave up, you need to act" signal.
       if (this._didFallbackFromUnknownResume) {
         ;(this._log || log).error(
-          `Resume fallback also failed (code ${code}, attemptedResumeId=${attemptedResumeId}) — giving up auto-recovery`,
+          `Resume fallback also failed (code ${code}, attemptedResumeId=${attemptedResumeId}) — ` +
+          'auto-recovery exhausted; will NOT respawn. User must start a fresh session manually.',
         )
+        // Reset the latch so a future explicit user-driven start can re-arm
+        // the one-shot fallback. Without this reset the latch would persist
+        // past the terminal error and prevent recovery on the very next
+        // manual start (which would silently skip the auto-fallback and
+        // fall straight through to the generic-crash respawn loop).
+        this._didFallbackFromUnknownResume = false
+        // Keep `_sessionId = null` (was already cleared by the first
+        // fallback branch below) so a manual restart omits `--resume` and
+        // mints a brand-new conversation rather than re-attempting the
+        // broken id a third time.
+        this._sessionId = null
         this.emit('error', {
-          code: 'resume_unknown',
+          code: 'resume_unknown_exhausted',
           message:
-            'Claude CLI rejected the resumed conversation id and a fresh-start retry also failed. ' +
+            'Auto-recovery exhausted: Claude CLI rejected the resumed conversation id and a fresh-start ' +
+            'retry also failed. Start a new session manually to continue. ' +
             'Check the chroxy logs for the stderr from the claude subprocess.',
           attemptedResumeId,
         })
-        this._scheduleRespawn()
         return
       }
 
