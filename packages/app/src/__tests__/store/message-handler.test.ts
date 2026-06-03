@@ -2025,6 +2025,13 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
   beforeEach(() => {
     clearDeltaBuffers();
     clearPermissionSplits();
+    // The replay-guard test below sets `s1` into _ctx.replayingSessions and
+    // never receives a `history_replay_end` to clear it. Without this reset,
+    // any subsequent test in the block that uses session id `s1` and expects
+    // the post-tool split to fire would silently skip the split (replay
+    // sessions are guarded out). #4975 added such tests after the replay
+    // case; reset here so test order is irrelevant.
+    resetReplayFlags();
     jest.useFakeTimers();
   });
 
@@ -2117,11 +2124,14 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
     _testMessageHandler.setContext(createMockContext() as any);
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    // Sentence-terminated fixtures so #4975 mid-word peel doesn't kick in --
+    // the prior delta ends with `.` (non-word char) and the continuation
+    // starts with a capital, matching a real paragraph break.
     _testMessageHandler.handle({
       type: 'stream_delta',
       messageId: 'resp-1',
       sessionId: 's1',
-      delta: 'preamble',
+      delta: 'preamble.',
     });
     jest.runAllTimers();
     _testMessageHandler.handle({
@@ -2136,19 +2146,19 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       type: 'stream_delta',
       messageId: 'resp-1',
       sessionId: 's1',
-      delta: 'summary',
+      delta: 'Summary.',
     });
     jest.runAllTimers();
 
     const ss = store.getState().sessionStates.s1;
-    // [response('preamble'), tool, response('summary')]
+    // [response('preamble.'), tool, response('Summary.')]
     expect(ss.messages).toHaveLength(3);
     expect(ss.messages[0].type).toBe('response');
-    expect(ss.messages[0].content).toBe('preamble');
+    expect(ss.messages[0].content).toBe('preamble.');
     expect(ss.messages[1].type).toBe('tool_use');
     expect(ss.messages[1].id).toBe('toolu_a');
     expect(ss.messages[2].type).toBe('response');
-    expect(ss.messages[2].content).toBe('summary');
+    expect(ss.messages[2].content).toBe('Summary.');
   });
 
   it('does not split when consecutive deltas arrive without an intervening tool', () => {
@@ -2196,11 +2206,13 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
     _testMessageHandler.setContext(createMockContext() as any);
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    // Sentence-terminated fixtures so #4975 mid-word peel doesn't fire --
+    // each delta ends with `.` so the prior slot terminates cleanly.
     _testMessageHandler.handle({
       type: 'stream_delta',
       messageId: 'resp-1',
       sessionId: 's1',
-      delta: 'A',
+      delta: 'A.',
     });
     jest.runAllTimers();
     for (let i = 0; i < 3; i++) {
@@ -2216,7 +2228,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
         type: 'stream_delta',
         messageId: 'resp-1',
         sessionId: 's1',
-        delta: `cont-${i}`,
+        delta: `Cont-${i}.`,
       });
       jest.runAllTimers();
     }
@@ -2224,7 +2236,7 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
     const ss = store.getState().sessionStates.s1;
     const responses = ss.messages.filter((m) => m.type === 'response');
     expect(responses).toHaveLength(4);
-    expect(responses.map((r) => r.content)).toEqual(['A', 'cont-0', 'cont-1', 'cont-2']);
+    expect(responses.map((r) => r.content)).toEqual(['A.', 'Cont-0.', 'Cont-1.', 'Cont-2.']);
   });
 
   it('does NOT split during replay -- server-reassembled history must stay intact', () => {
@@ -2280,6 +2292,138 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
     expect(responses).toHaveLength(1);
     expect(responses[0].id).toBe('resp-1');
     expect(responses[0].content).toBe('preamblesummary');
+  });
+
+  // #4975 -- mid-word peel. When the LLM interrupts a text content block
+  // to call a tool, the boundary can land inside a word (e.g. "Del"
+  // before the tool, "egating" after). Without intervention the user
+  // sees "Del" in one bubble, the tool bubble, then "egating..." in
+  // another -- visually fragmented mid-word. The handler peels the
+  // trailing partial word off the prior slot and seeds the continuation
+  // buffer with it so the word reassembles in the post-tool bubble.
+  describe('mid-word peel across tool boundary (#4975)', () => {
+    it('peels trailing partial word from prior slot and prepends to continuation when text-tool-text splits mid-word', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Starting Phase 1 — agent-review on PR #3.Del',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Task',
+        toolUseId: 'toolu_a',
+        input: { description: 'agent-review' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'egating the deep review to an independent reviewer agent.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      // Prior slot must end with the period -- "Del" was peeled off.
+      expect(responses[0].content).toBe('Starting Phase 1 — agent-review on PR #3.');
+      // Continuation bubble: "Del" + incoming delta reassembles into
+      // "Delegating the deep review...".
+      expect(responses[1].content).toBe('Delegating the deep review to an independent reviewer agent.');
+    });
+
+    it('peels even when prior content is still buffered (delta not yet flushed)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      // Skip jest.runAllTimers() so "PR #3.Del" stays in pendingDeltas
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'PR #3.Del',
+      });
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Task',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'egating now.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('PR #3.');
+      expect(responses[1].content).toBe('Delegating now.');
+    });
+
+    it('does NOT peel when prior content ends at a sentence boundary (clean break)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Let me check chroxy before filing.',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: { command: 'gh issue list' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Filing now.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('Let me check chroxy before filing.');
+      expect(responses[1].content).toBe('Filing now.');
+    });
   });
 });
 

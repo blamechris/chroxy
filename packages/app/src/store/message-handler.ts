@@ -1666,6 +1666,45 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               }
             }
             if (toolAfter) {
+              // #4975 -- mid-word peel. The LLM sometimes interrupts a
+              // text content block to call a tool, splitting a word across
+              // the boundary (e.g. `"...PR #3.Del"` -> tool -> `"egating..."`).
+              // The post-#4889 split would otherwise show "Del" in one
+              // bubble and "egating..." in another with the tool between.
+              // Detect the mid-word case (last char of the prior slot's
+              // full content is a word char) and peel the trailing partial
+              // word off the prior slot, seeding the continuation buffer
+              // with it. Result: the word reassembles in the continuation
+              // bubble.
+              const priorFull = slot.type === 'response' ? slot.content + bufferedContent : '';
+              const midWordMatch = priorFull.match(/[A-Za-z0-9_]+$/);
+              let priorTail = '';
+              if (midWordMatch && midWordMatch[0].length > 0) {
+                priorTail = midWordMatch[0];
+                let remaining = priorTail.length;
+                if (bufferedContent.length > 0) {
+                  const peelFromBuf = Math.min(remaining, bufferedContent.length);
+                  const newBuf = bufferedContent.slice(0, bufferedContent.length - peelFromBuf);
+                  if (newBuf.length > 0) {
+                    _ctx.pendingDeltas.set(deltaId, {
+                      sessionId: capturedSessionId,
+                      delta: newBuf,
+                    });
+                  } else {
+                    _ctx.pendingDeltas.delete(deltaId);
+                  }
+                  remaining -= peelFromBuf;
+                }
+                if (remaining > 0 && slot.type === 'response' && slot.content.length > 0) {
+                  updateSession(splitEffectiveId, (ss) => ({
+                    messages: ss.messages.map((m) =>
+                      m.id === deltaId && m.type === 'response'
+                        ? { ...m, content: m.content.slice(0, m.content.length - remaining) }
+                        : m
+                    ),
+                  }));
+                }
+              }
               const contId = `${deltaId}-cont-${Date.now()}`;
               // Single-hop remap: write against the ORIGINAL incoming
               // messageId so successive continuation splits overwrite this
@@ -1686,6 +1725,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
                 messages: [...ss.messages, contMsg],
               }));
               deltaId = contId;
+              // Seed the new continuation buffer with the peeled word so
+              // the first delta on `contId` carries the partial word as
+              // its prefix.
+              if (priorTail.length > 0) {
+                _ctx.pendingDeltas.set(contId, {
+                  sessionId: capturedSessionId,
+                  delta: priorTail,
+                });
+              }
             }
           }
         }
