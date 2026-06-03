@@ -44,6 +44,55 @@ jobs:
           path: packages/server/coverage/
           retention-days: 14
 
+  server-tests-windows:
+    name: Server Platform Tests (Windows)
+    # Real Windows runner coverage for `writeFileRestricted`'s Windows
+    # code path (#4927). The cross-platform tests in `platform.test.js`
+    # already exercise the Windows branch on POSIX runners via the
+    # `_isWindowsOverride` option, but a handful of edge cases — ACL
+    # inheritance from the per-user storage directory, native
+    # `MoveFileExW` atomicity, and behaviour under real Windows fs.renameSync
+    # error codes — can ONLY be validated on `windows-latest`. The
+    # additional Windows-specific suite lives in `platform-windows.test.js`.
+    #
+    # Scope is deliberately narrow: we run ONLY the platform suites
+    # (not the full server test set), because (a) GitHub-hosted Windows
+    # runners are slow and cost more, and (b) much of the server suite
+    # depends on node-pty / POSIX signals / shell scripts that don't have
+    # a Windows analogue. The full POSIX suite continues to run on
+    # `ubuntu-24.04` in the `server-tests` job above.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/server
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      - name: Run platform tests (cross-platform + Windows-only)
+        # Invoke node's built-in test runner directly with the two platform
+        # test files. Mirrors the flags from `npm test` (sandbox guard via
+        # `--import ./tests/_setup.mjs`, `--experimental-test-module-mocks`)
+        # but scopes to the platform suite to keep the Windows job fast.
+        # `c8` is intentionally omitted — we don't need coverage from the
+        # Windows runner; the ubuntu job is the source of truth there.
+        run: node --import ./tests/_setup.mjs --experimental-test-module-mocks --test --test-force-exit ./tests/platform.test.js ./tests/platform-windows.test.js
+
   server-lint:
     name: Server Lint
     runs-on: ubuntu-24.04

@@ -66,6 +66,20 @@ export function defaultShell() {
  * `log.warn` so the orphan `.tmp` is not invisible (#4906 — the bespoke
  * cleanup wrappers in environment-manager.js / session-state-persistence.js
  * had this warn before the hoist in #4874).
+ *
+ * AV-held-handle retry decision (#4927). On Windows, an open handle held
+ * by antivirus / Windows Search can cause `renameSync` to fail with
+ * EPERM / EACCES / EBUSY / EEXIST. `session-state-persistence.js._rotateToBak`
+ * handles this with a one-shot retry, but `writeFileRestricted` does NOT
+ * replicate that pattern — every existing caller already has its own
+ * retry / fallback path (session manager debounce loop, models cache TTL
+ * refresh, env manager next-tick re-persist), so an inner retry would
+ * mask the error from the caller without changing the outcome.
+ * `_rotateToBak`'s retry is special because rotation has no caller-level
+ * retry — a missed rotation silently loses the prior-generation `.bak`
+ * until the next write. If a future site without its own retry adopts
+ * `writeFileRestricted`, revisit this decision. See `platform-windows.test.js`
+ * for the full rationale.
  */
 export function writeFileRestricted(
   filePath,
