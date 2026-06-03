@@ -198,7 +198,7 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
 **Reason:** Clear explanation of why this is correct
 
 **Evidence:**
-- per CLAUDE.md: no semicolons, single quotes
+- Per CLAUDE.md: no semicolons, single quotes
 - Used on line 78 in _process()"
 ```
 
@@ -212,6 +212,7 @@ When a suggestion is valid but out of scope for this PR. You MUST create a GitHu
 
 ```bash
 # 1. ALWAYS create the issue — this is NOT optional
+# NEVER write "Created a follow-up issue" without the URL
 ISSUE_URL=$(gh issue create \
   --title "Short descriptive title" \
   --label "enhancement" \
@@ -237,7 +238,6 @@ EOF
 )")
 
 # 2. Reply inline referencing the issue — MUST include the FULL issue URL
-# NEVER write "Created a follow-up issue" without the URL. The URL is the whole point.
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
   --method POST \
   -f body="**FOLLOW-UP ISSUE**
@@ -323,18 +323,18 @@ THREAD_IDS=$(gh api graphql --paginate -f query="
     }
   }" --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .id')
 
-# Resolve each unresolved thread; surface any single-thread failure
-# instead of swallowing it (a 401/403 on one thread shouldn't be silent).
-echo "$THREAD_IDS" | while read -r tid; do
-  [ -z "$tid" ] && continue
-  gh api graphql -f query="
-    mutation {
-      resolveReviewThread(input: {threadId: \"$tid\"}) {
-        thread { isResolved }
-      }
-    }" --jq '.data.resolveReviewThread.thread | "  resolved: \(.isResolved)"' \
-    || echo "  FAILED to resolve: $tid"
-done
+# Resolve each unresolved thread via Python — bash interpolation of the
+# Base64-ish thread IDs (PRRT_*) into the GraphQL mutation string can corrupt
+# them, so the ID never touches the shell (merge.md Critical Rule 4). The
+# THREAD_IDS fetch above stays in bash (it only emits IDs, never interpolates
+# them). Each failure is surfaced per-thread rather than swallowed.
+echo "$THREAD_IDS" | python3 -c "
+import sys, subprocess
+for tid in sys.stdin.read().split():
+    mutation = 'mutation { resolveReviewThread(input: {threadId: \"' + tid + '\"}) { thread { isResolved } } }'
+    r = subprocess.run(['gh', 'api', 'graphql', '-f', 'query=' + mutation], capture_output=True, text=True)
+    print('  resolved: ' + tid if r.returncode == 0 else '  FAILED to resolve: ' + tid)
+"
 
 # Verify zero unresolved threads remain. --paginate emits one length per page,
 # which we sum with awk so the count is correct on PRs with >100 threads. If
@@ -451,4 +451,4 @@ Then below the table, list:
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```
-<!-- skill-templates: check-pr 0a76684 2026-06-03 -->
+<!-- skill-templates: check-pr f7a7edc 2026-06-03 -->
