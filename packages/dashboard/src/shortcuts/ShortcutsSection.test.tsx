@@ -184,11 +184,37 @@ describe('<ShortcutsSection>', () => {
       expect(editBtn).toHaveAttribute('title', expect.stringContaining('Not rebindable'))
     })
 
-    it('disables the Reset button for sessionbar-scoped entries', () => {
+    it('disables the Reset button for sessionbar-scoped entries when nothing is customized', () => {
       installFreshRegistry()
       render(<ShortcutsSection />)
       const resetBtn = screen.getByTestId('shortcut-reset-session.reorder.lift') as HTMLButtonElement
+      // Edit is always disabled (forward-looking trap prevention).
+      // Reset is disabled only because nothing has been customized —
+      // there is no override to revert.
       expect(resetBtn.disabled).toBe(true)
+    })
+
+    it('ENABLES Reset for sessionbar-scoped entries that are customized, and clicking reverts to default (legacy escape hatch)', () => {
+      // Pre-#4970, users could rebind `session.reorder.lift` via Settings;
+      // those persisted overrides became un-resettable once the read-only
+      // guard landed (only "Reset all" or manual localStorage cleanup
+      // could recover). This test pins the escape hatch: customized
+      // sessionbar entries keep Reset enabled so the stale rebind can be
+      // reverted to the working default.
+      const registry = installFreshRegistry()
+      registry.setBinding('session.reorder.lift', 'shift+y')
+      render(<ShortcutsSection />)
+      const row = screen.getByTestId('shortcut-row-session.reorder.lift')
+      expect(within(row).getByTestId('shortcut-binding-session.reorder.lift')).toHaveTextContent('Shift+Y')
+      const resetBtn = within(row).getByTestId('shortcut-reset-session.reorder.lift') as HTMLButtonElement
+      expect(resetBtn.disabled).toBe(false)
+      act(() => { fireEvent.click(resetBtn) })
+      expect(registry.getBinding('session.reorder.lift')).toBe('shift+space')
+      expect(within(row).getByTestId('shortcut-binding-session.reorder.lift')).toHaveTextContent('Shift+Space')
+      // Edit must stay disabled regardless of customization state —
+      // it's the source of the trap going forward.
+      const editBtn = within(row).getByTestId('shortcut-edit-session.reorder.lift') as HTMLButtonElement
+      expect(editBtn.disabled).toBe(true)
     })
 
     it('renders a "(not rebindable)" hint next to the description', () => {

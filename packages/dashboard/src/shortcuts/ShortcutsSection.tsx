@@ -104,8 +104,14 @@ export function ShortcutsSection() {
               // rebind here would silently do nothing — the cheat sheet,
               // tooltip, and SR announcement would all advertise the new
               // combo while the tab still only responds to the original
-              // keys. Disable Edit/Reset for this scope until the handler
-              // is migrated to `registry.matchEvent` (see issue #4970).
+              // keys. Edit is always disabled for this scope (forward-
+              // looking trap-prevention) until the handler is migrated
+              // to `registry.matchEvent` (see issue #4970). Reset stays
+              // available when `entry.isCustomized` so pre-#4970 users
+              // who already rebound a sessionbar entry can revert the
+              // stale override to the working default; if nothing has
+              // been customized, Reset has nothing to do and stays
+              // disabled like any other row.
               const isReadOnly = entry.scope === 'sessionbar'
               const readOnlyTitle = 'Not rebindable yet — this shortcut is fixed in this release.'
               return (
@@ -155,7 +161,7 @@ export function ShortcutsSection() {
                           type="button"
                           className="settings-secondary-button"
                           onClick={() => registry.resetBinding(entry.id)}
-                          disabled={isReadOnly || !entry.isCustomized}
+                          disabled={!entry.isCustomized}
                           title={isReadOnly ? readOnlyTitle : undefined}
                           data-testid={`shortcut-reset-${entry.id}`}
                           aria-label={`Reset shortcut for ${entry.description}`}
