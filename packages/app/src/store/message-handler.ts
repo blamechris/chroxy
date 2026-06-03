@@ -1665,6 +1665,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
                 }
               }
             }
+            // #4999 -- mid-sentence fragmentation gate. The post-#4889 split
+            // only makes sense when the prior bubble's text reached a sentence
+            // boundary (the LLM finished a thought before invoking the tool);
+            // otherwise the tool interrupted mid-sentence and the post-tool
+            // delta is the same sentence continuing. Treat the prior slot as
+            // "sentence-complete" only when its trailing non-whitespace char
+            // is a sentence terminator (`.`, `!`, `?`) or a hard line break
+            // (`\n`). A bubble ending in a word char, open paren, comma,
+            // colon, dash, etc. is mid-sentence -- route the delta back to
+            // the existing slot so the sentence renders as one contiguous
+            // bubble (followed by the tool).
+            if (toolAfter) {
+              const priorFullForGate = slot.type === 'response' ? slot.content + bufferedContent : '';
+              const lastNonWs = priorFullForGate.replace(/\s+$/, '');
+              const lastChar = lastNonWs.charAt(lastNonWs.length - 1);
+              const endsSentence = lastChar === '.' || lastChar === '!' || lastChar === '?';
+              const endsHardBreak = /\n\s*$/.test(priorFullForGate);
+              if (!endsSentence && !endsHardBreak) {
+                toolAfter = false;
+              }
+            }
             if (toolAfter) {
               // #4975 -- mid-word peel. The LLM sometimes interrupts a
               // text content block to call a tool, splitting a word across

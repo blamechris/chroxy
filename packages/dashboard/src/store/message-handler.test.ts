@@ -1295,8 +1295,15 @@ describe('dashboard message-handler dispatch', () => {
     // visually fragmented mid-word. The handler peels the trailing partial
     // word off the prior slot and seeds the continuation buffer with it so
     // the word reassembles in the post-tool bubble.
+    //
+    // #4999 follow-up — the mid-sentence gate added on the post-#4889 split
+    // now coalesces these cases into a single bubble before the peel runs,
+    // so the trailing-word and whitespace-led tests below now assert the
+    // coalesced shape. The peel itself stays as defense-in-depth for the
+    // sentence-boundary path (prior ends in `.` but the next word continues
+    // mid-word, like `PR #3.Del` -> tool -> `egating`).
     describe('mid-word peel across tool boundary (#4975)', () => {
-      it('peels trailing partial word from prior slot and prepends to continuation when text-tool-text splits mid-word', () => {
+      it('coalesces mid-word splits into a single bubble (post-#4999 — peel no longer needed for mid-word inside a sentence)', () => {
         store = createMockStore(
           baseState({
             activeSessionId: 's1',
@@ -1307,6 +1314,9 @@ describe('dashboard message-handler dispatch', () => {
         setStore(store)
 
         // text "Starting Phase 1 — agent-review on PR #3.Del" -> tool -> "egating..."
+        // The pre-tool content ends with `l` (mid-sentence), so the
+        // mid-sentence gate from #4999 routes the post-tool delta to the
+        // existing slot — one bubble, no mid-word artifact possible.
         handleMessage(
           { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
           ctx() as any,
@@ -1345,19 +1355,15 @@ describe('dashboard message-handler dispatch', () => {
 
         const ss = (store.getState() as any).sessionStates.s1
         const responses = ss.messages.filter((m: any) => m.type === 'response')
-        expect(responses).toHaveLength(2)
-        // Prior slot must end with the period — the trailing "Del" was peeled.
-        expect(responses[0].content).toBe('Starting Phase 1 — agent-review on PR #3.')
-        // Continuation bubble starts with the peeled "Del" + the incoming
-        // delta — the word "Delegating" reassembles in this bubble.
-        expect(responses[1].content).toBe('Delegating the deep review to an independent reviewer agent.')
-        // No mid-word artifact anywhere — the joined transcript reads cleanly.
-        const joined = responses.map((r: any) => r.content).join('\n\n')
-        expect(joined).toContain('Delegating')
-        expect(joined).not.toContain('Del\n\nDel')
+        // One coalesced bubble — the word "Delegating" reads cleanly.
+        expect(responses).toHaveLength(1)
+        expect(responses[0].content).toBe(
+          'Starting Phase 1 — agent-review on PR #3.Delegating the deep review to an independent reviewer agent.',
+        )
+        expect(responses[0].content).toContain('Delegating')
       })
 
-      it('peels even when prior content is still buffered (delta not yet flushed)', () => {
+      it('coalesces mid-word splits even when prior content is still buffered (delta not yet flushed)', () => {
         store = createMockStore(
           baseState({
             activeSessionId: 's1',
@@ -1405,9 +1411,10 @@ describe('dashboard message-handler dispatch', () => {
 
         const ss = (store.getState() as any).sessionStates.s1
         const responses = ss.messages.filter((m: any) => m.type === 'response')
-        expect(responses).toHaveLength(2)
-        expect(responses[0].content).toBe('PR #3.')
-        expect(responses[1].content).toBe('Delegating now.')
+        // Mid-sentence gate sees the buffered "PR #3.Del" ending in `l`
+        // and routes the post-tool delta to the same bubble.
+        expect(responses).toHaveLength(1)
+        expect(responses[0].content).toBe('PR #3.Delegating now.')
       })
 
       it('does NOT peel when prior content ends at a sentence boundary (clean break)', () => {
@@ -1467,15 +1474,13 @@ describe('dashboard message-handler dispatch', () => {
         expect(responses[1].content).toBe('Filing now.')
       })
 
-      it('does NOT peel when prior ends in word char BUT incoming delta starts with whitespace (normal word boundary)', () => {
-        // #4975 follow-up — Copilot found that the original heuristic only
-        // inspected the prior tail and would peel a complete trailing word
-        // ("Running") even when the post-tool delta starts with whitespace
-        // (a normal word boundary, no mid-word split to repair). The peel
-        // must require BOTH the prior slot to end in a word char AND the
-        // incoming delta to begin with one. Without this gate the prior
-        // bubble loses its trailing word and the continuation bubble
-        // inherits it, visibly moving text across the tool boundary.
+      it('coalesces when prior ends mid-sentence and incoming delta starts with whitespace (post-#4999)', () => {
+        // Pre-#4999: this case (prior ends in word char `Running`, incoming
+        // starts with whitespace) split into two bubbles to avoid moving
+        // a complete word across the tool boundary. Post-#4999: the
+        // mid-sentence gate sees `Running` is not a sentence terminator
+        // and coalesces into one bubble — the LLM emitted a single
+        // sentence interrupted by a tool.
         store = createMockStore(
           baseState({
             activeSessionId: 's1',
@@ -1511,9 +1516,8 @@ describe('dashboard message-handler dispatch', () => {
           },
           ctx() as any,
         )
-        // Incoming delta starts with a space — a normal word boundary.
-        // The heuristic must NOT peel `"Running"` even though the prior
-        // ends in a word char.
+        // Incoming delta starts with a space — a normal word boundary
+        // but mid-sentence (no terminator before the tool).
         handleMessage(
           {
             type: 'stream_delta',
@@ -1527,17 +1531,19 @@ describe('dashboard message-handler dispatch', () => {
 
         const ss = (store.getState() as any).sessionStates.s1
         const responses = ss.messages.filter((m: any) => m.type === 'response')
-        expect(responses).toHaveLength(2)
-        // `Running` stays on the pre-tool bubble — no peel.
-        expect(responses[0].content).toBe('Starting Phase 1 — agent-review on PR #3 is up. Running')
-        // Post-tool bubble starts with the leading space exactly as the
-        // server sent it; no `Running` prefix.
-        expect(responses[1].content).toBe(' /full-review then /batch-merge.')
+        // One bubble — the sentence "Running /full-review..." reads cleanly.
+        expect(responses).toHaveLength(1)
+        expect(responses[0].content).toBe(
+          'Starting Phase 1 — agent-review on PR #3 is up. Running /full-review then /batch-merge.',
+        )
       })
 
-      it('does NOT peel when prior ends in word char BUT incoming delta starts with punctuation', () => {
-        // Mirror of the whitespace case — `.`, `\n`, `(`, `:` etc. are all
-        // word boundaries the LLM emits. The peel must stay dormant.
+      it('coalesces when prior ends mid-sentence and incoming delta starts with non-terminator punctuation (post-#4999)', () => {
+        // Mirror of the whitespace case — `,`, `(`, `:` etc. are NOT
+        // sentence terminators on the prior side, so the mid-sentence gate
+        // coalesces. Note: a sentence terminator (`.`) on the INCOMING
+        // side does not affect the gate; only the prior bubble's tail
+        // matters.
         store = createMockStore(
           baseState({
             activeSessionId: 's1',
@@ -1572,7 +1578,9 @@ describe('dashboard message-handler dispatch', () => {
           },
           ctx() as any,
         )
-        // Newline + punctuation start — `.` is not a word char, so no peel.
+        // Incoming starts with `.` then a new sentence — but the prior
+        // bubble itself ends mid-sentence (`R` is a word char), so
+        // coalesce.
         handleMessage(
           {
             type: 'stream_delta',
@@ -1586,9 +1594,244 @@ describe('dashboard message-handler dispatch', () => {
 
         const ss = (store.getState() as any).sessionStates.s1
         const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(1)
+        expect(responses[0].content).toBe('Fetched PR. Next step: review.')
+      })
+    })
+
+    // #4999 — Mid-sentence fragmentation. When the LLM emits a single sentence
+    // interrupted mid-stream by a tool call (e.g. "...CSS" → tool → " vars).")
+    // the post-#4889 continuation split produced two visible bubbles around
+    // the tool, breaking the sentence in two. The #4975 mid-word peel only
+    // covered the narrow case where both sides of the boundary were in a word;
+    // a normal word boundary mid-sentence (prior ends in `S`, incoming starts
+    // with whitespace) still fragmented. The split should only fire when the
+    // prior bubble's content ends at a sentence boundary (`.`, `!`, `?`, `\n`)
+    // — otherwise the delta routes back to the existing slot so the text
+    // renders as one contiguous bubble followed by the tool.
+    describe('no split when prior bubble ends mid-sentence (#4999)', () => {
+      it('coalesces text into a single bubble when prior content ends in a word char with whitespace-led continuation', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        // Repro from #4999 — the visible bubbles were:
+        //   A: "Now the keyboard handler + render need updates (overlay + className + CSS"
+        //   tool (Read)
+        //   B: " vars)."
+        // The sentence is broken mid-stream; the user expects ONE bubble.
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'Now the keyboard handler + render need updates (overlay + className + CSS',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Read',
+            toolUseId: 'toolu_a',
+            input: { file_path: '/x' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: ' vars).',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        const tools = ss.messages.filter((m: any) => m.type === 'tool_use')
+        // ONE response bubble carrying the full sentence — no mid-sentence split.
+        expect(responses).toHaveLength(1)
+        expect(tools).toHaveLength(1)
+        expect(responses[0].content).toBe(
+          'Now the keyboard handler + render need updates (overlay + className + CSS vars).',
+        )
+      })
+
+      it('coalesces when prior ends in an open paren and incoming starts mid-sentence', () => {
+        // Defensive: punctuation that isn't a sentence terminator (open paren,
+        // colon, comma) also indicates the sentence continues.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'See the helper (',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Read',
+            toolUseId: 'toolu_a',
+            input: { file_path: '/x' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'utils.ts).',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(1)
+        expect(responses[0].content).toBe('See the helper (utils.ts).')
+      })
+
+      it('STILL splits when prior content ends at a sentence boundary (paragraph break preserved, #4889)', () => {
+        // The #4889 case must keep working: "...filing." → tool → "Filing now."
+        // is two separate sentences, so each gets its own bubble.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'Let me check chroxy before filing.',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: { command: 'gh issue list' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'Filing now.',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
         expect(responses).toHaveLength(2)
-        expect(responses[0].content).toBe('Fetched PR')
-        expect(responses[1].content).toBe('. Next step: review.')
+        expect(responses[0].content).toBe('Let me check chroxy before filing.')
+        expect(responses[1].content).toBe('Filing now.')
+      })
+
+      it('STILL splits when prior ends in a question mark', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'What is the state of the PR?',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: {},
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'It looks open.',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('What is the state of the PR?')
+        expect(responses[1].content).toBe('It looks open.')
       })
     })
   })
