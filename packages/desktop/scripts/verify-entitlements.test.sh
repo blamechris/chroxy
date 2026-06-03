@@ -94,6 +94,23 @@ assert_exit "fails when target missing" 2 "$(run_verifier "$TMP_DIR/does-not-exi
 LIVE_PLIST="$(cd "$SCRIPT_DIR/.." && pwd)/src-tauri/entitlements.plist"
 assert_exit "src-tauri/entitlements.plist contains all required keys" 0 "$(run_verifier "$LIVE_PLIST")"
 
+# Case 6b — live helper entitlements plist must contain audio-input (#4953).
+# Tested via direct file inspection because the verifier's plist-mode runs the
+# full parent required-keys set (which the helper plist intentionally lacks).
+LIVE_HELPER_PLIST="$(cd "$SCRIPT_DIR/.." && pwd)/src-tauri/entitlements-helper.plist"
+if [ -f "$LIVE_HELPER_PLIST" ]; then
+    if grep -qF '<key>com.apple.security.device.audio-input</key>' "$LIVE_HELPER_PLIST"; then
+        echo "ok   - src-tauri/entitlements-helper.plist contains audio-input (#4953)"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL - src-tauri/entitlements-helper.plist missing audio-input (#4953)" >&2
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL - src-tauri/entitlements-helper.plist not found at $LIVE_HELPER_PLIST" >&2
+    FAIL=$((FAIL + 1))
+fi
+
 # Substring-collision guard — ensure the matcher doesn't false-positive on a
 # look-alike key (e.g. `com.apple.security.device.audio-input-foo`).
 COLLIDE_PLIST="$TMP_DIR/collide.plist"
