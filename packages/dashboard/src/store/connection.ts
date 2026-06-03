@@ -2157,10 +2157,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // a stale banner doesn't outlive the resolution.
     if (get().sessionNotFoundError) set({ sessionNotFoundError: null });
 
-    // Optimistically switch to cached state + dismiss notifications for target session
+    // Optimistically switch to cached state + mark notifications for target
+    // session as read. #4890 — pre-widget we filtered the target session's
+    // alerts out entirely, but the new Slack-style widget needs the entries
+    // to persist as acknowledged history; the banners stack filters by
+    // `readAt === undefined` at render time so the visual behaviour
+    // (banners vanish on switch) is unchanged.
     const cached = sessionStates[sessionId];
-    const filteredNotifications = get().sessionNotifications.filter(
-      (n) => n.sessionId !== sessionId,
+    const switchReadStamp = Date.now();
+    const filteredNotifications = get().sessionNotifications.map((n) =>
+      n.sessionId === sessionId && n.readAt === undefined
+        ? { ...n, readAt: switchReadStamp }
+        : n,
     );
     if (cached) {
       set({
@@ -2426,6 +2434,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   dismissSessionNotification: (id: string) => {
     set((state) => ({
       sessionNotifications: state.sessionNotifications.filter((n) => n.id !== id),
+    }));
+  },
+
+  // #4890 — Slack-style intervention notifications widget. `read` (a
+  // timestamp) is distinct from `dismiss` (removal). Reading means the
+  // operator acknowledged the alert (opened the widget, clicked through to
+  // the session, or hit "Mark all read") and it should stop counting toward
+  // the unread badge while remaining in the widget's history list.
+  // Idempotent: a second mark-read keeps the first timestamp so re-opens
+  // don't masquerade as fresh acknowledges.
+  markSessionNotificationRead: (id: string) => {
+    set((state) => ({
+      sessionNotifications: state.sessionNotifications.map((n) =>
+        n.id === id && n.readAt === undefined
+          ? { ...n, readAt: Date.now() }
+          : n,
+      ),
+    }));
+  },
+
+  markAllSessionNotificationsRead: () => {
+    const now = Date.now();
+    set((state) => ({
+      sessionNotifications: state.sessionNotifications.map((n) =>
+        n.readAt === undefined ? { ...n, readAt: now } : n,
+      ),
     }));
   },
 
