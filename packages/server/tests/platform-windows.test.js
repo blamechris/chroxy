@@ -180,56 +180,86 @@ try {
       // _setup.mjs blocks writes to the real %USERPROFILE%\.chroxy\
       // anyway).
       //
-      // icacls steps:
+      // icacls steps (all principal identification via well-known SIDs so
+      // the test stays locale-portable — display-language changes on a
+      // future windows-latest image must not break ACE matching, #5003):
       //   1. /inheritance:d  — break inheritance so we can replace ACEs.
-      //   2. /remove "Users" /remove "Everyone" /remove "Authenticated Users"
-      //      — strip group/world access (these are the SIDs that a
-      //      profile-rooted directory would also lack).
-      //   3. /grant <user>:(OI)(CI)F — grant the current user full
-      //      control with object + container inherit so child files
-      //      inherit user-only access.
+      //   2. /remove *S-1-5-32-545 (BUILTIN\Users), *S-1-1-0 (Everyone),
+      //      *S-1-5-11 (Authenticated Users) — strip group/world access
+      //      (these are the SIDs that a profile-rooted directory would
+      //      also lack). icacls accepts the `*<SID>` prefix in place of a
+      //      principal name.
+      //   3. /grant *<current-user-SID>:(OI)(CI)F — grant the current user
+      //      full control with object + container inherit so child files
+      //      inherit user-only access. The current user's SID is parsed
+      //      from `whoami /user` so we don't rely on %USERNAME% resolving
+      //      to a locale-stable display name.
       const restrictedDir = join(tmpDir, 'restricted')
       mkdirSync(restrictedDir)
 
-      const user = process.env.USERNAME || process.env.USER || ''
-      assert.ok(user, 'USERNAME env var must be set to assert ACL inheritance')
+      // Parse the current user's SID from `whoami /user`. The SID format
+      // (`S-1-<authority>-<rid>...`) is invariant across locales, so the
+      // regex match holds regardless of the column headers' language.
+      const whoami = spawnSync('whoami', ['/user'], { encoding: 'utf-8' })
+      assert.strictEqual(whoami.status, 0, `whoami /user failed: ${whoami.stderr}`)
+      const userSid = (whoami.stdout.match(/\bS-1-[\d-]+/) || [])[0]
+      assert.ok(userSid, `failed to extract current user SID from whoami /user output:\n${whoami.stdout}`)
 
       const breakInherit = spawnSync('icacls', [restrictedDir, '/inheritance:d'], { encoding: 'utf-8' })
       assert.strictEqual(breakInherit.status, 0, `icacls /inheritance:d failed: ${breakInherit.stderr}`)
 
-      // Remove group/world SIDs. We use unlocalized strings — GitHub-hosted
-      // windows-latest is en-US, and non-en runners are not a current
-      // target. We tolerate "no such ACE" exits (the SIDs may not be
-      // present in the inherited ACL after :d), so we don't assert
-      // success on the remove steps.
-      spawnSync('icacls', [restrictedDir, '/remove', 'Users'], { encoding: 'utf-8' })
-      spawnSync('icacls', [restrictedDir, '/remove', 'Everyone'], { encoding: 'utf-8' })
-      spawnSync('icacls', [restrictedDir, '/remove', 'Authenticated Users'], { encoding: 'utf-8' })
+      // Remove group/world ACEs by well-known SID rather than by their
+      // localised principal names. We tolerate "no such ACE" exits (the
+      // SIDs may not be present in the inherited ACL after :d), so we
+      // don't assert success on the remove steps.
+      //   *S-1-5-32-545  BUILTIN\Users
+      //   *S-1-1-0       Everyone
+      //   *S-1-5-11      NT AUTHORITY\Authenticated Users
+      spawnSync('icacls', [restrictedDir, '/remove', '*S-1-5-32-545'], { encoding: 'utf-8' })
+      spawnSync('icacls', [restrictedDir, '/remove', '*S-1-1-0'], { encoding: 'utf-8' })
+      spawnSync('icacls', [restrictedDir, '/remove', '*S-1-5-11'], { encoding: 'utf-8' })
 
       // Grant the current user full control with OI/CI so files inherit
-      // user-only access.
-      const grant = spawnSync('icacls', [restrictedDir, '/grant', `${user}:(OI)(CI)F`], { encoding: 'utf-8' })
+      // user-only access. `*<SID>` keeps the call locale-independent.
+      const grant = spawnSync('icacls', [restrictedDir, '/grant', `*${userSid}:(OI)(CI)F`], { encoding: 'utf-8' })
       assert.strictEqual(grant.status, 0, `icacls /grant failed: ${grant.stderr}`)
 
-      // Write the file via the helper and read back its ACL. The
-      // security contract: a file written under a user-only profile
-      // directory inherits an ACL that excludes Users, Everyone, and
-      // Authenticated Users.
+      // Write the file via the helper and read back its ACL via
+      // `icacls /save`, which emits the ACL in SDDL form. SDDL is a
+      // locale-independent serialisation that references principals by
+      // SID string (e.g. `(A;;FA;;;S-1-5-32-545)` for an Allow ACE on
+      // BUILTIN\Users) — the plain `icacls <file>` output resolves SIDs
+      // back to display names, which would be locale-dependent and undo
+      // the point of using SIDs above. `/save` expects a relative
+      // filename and writes it under the targeted file's directory.
       const filePath = join(restrictedDir, 'secret.json')
       writeFileRestricted(filePath, JSON.stringify({ token: 'sensitive' }))
       assert.ok(existsSync(filePath), 'file must exist after writeFileRestricted')
 
-      const acl = spawnSync('icacls', [filePath], { encoding: 'utf-8' })
-      assert.strictEqual(acl.status, 0, `icacls read failed: ${acl.stderr}`)
+      const sddlFile = 'secret.json.sddl'
+      const save = spawnSync(
+        'icacls',
+        ['secret.json', '/save', sddlFile, '/Q'],
+        { cwd: restrictedDir, encoding: 'utf-8' }
+      )
+      assert.strictEqual(save.status, 0, `icacls /save failed: ${save.stderr}`)
+      const sddl = readFileSync(join(restrictedDir, sddlFile), 'utf-8')
 
-      // Each ACE line looks like:  "  BUILTIN\\Users:(R)"  or
-      // "  Everyone:(F)" — case-insensitive substring is robust enough
-      // for the assertion. If the ACE is missing entirely, the substring
-      // simply isn't found, which is what we want.
-      const output = acl.stdout.toLowerCase()
-      assert.ok(!output.includes('\\users:'), `icacls output must not grant BUILTIN\\Users access:\n${acl.stdout}`)
-      assert.ok(!output.includes('everyone:'), `icacls output must not grant Everyone access:\n${acl.stdout}`)
-      assert.ok(!output.includes('authenticated users:'), `icacls output must not grant Authenticated Users access:\n${acl.stdout}`)
+      // Assert the SDDL does not contain ACEs for the group/world SIDs.
+      // An ACE for a SID embeds it in `(A;...;<sid>)`; if the ACE is
+      // absent the SID simply isn't anywhere in the SDDL text.
+      assert.ok(
+        !sddl.includes('S-1-5-32-545'),
+        `SDDL must not contain BUILTIN\\Users (*S-1-5-32-545):\n${sddl}`
+      )
+      assert.ok(
+        !sddl.includes('S-1-1-0'),
+        `SDDL must not contain Everyone (*S-1-1-0):\n${sddl}`
+      )
+      assert.ok(
+        !sddl.includes('S-1-5-11'),
+        `SDDL must not contain Authenticated Users (*S-1-5-11):\n${sddl}`
+      )
     })
   })
 
