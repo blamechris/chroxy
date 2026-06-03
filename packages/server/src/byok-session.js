@@ -118,10 +118,14 @@ export class ClaudeByokSession extends BaseSession {
     // when the Task tool dispatches a subagent.
     //
     // #5016: `agent_event` carries the child Task subagent's intermediate
-    // wire events (tool_start / tool_result / tool_input_delta /
-    // stream_delta / result) tagged with the parent `toolUseId` so the
-    // dashboard can render the child's progress as nested sub-bubbles
-    // under the parent's Task tool_call.
+    // wire events (tool_start / tool_input_delta / tool_result /
+    // stream_delta) tagged with the parent `toolUseId` so the dashboard
+    // can render the child's progress as nested sub-bubbles under the
+    // parent's Task tool_call. The child's `result` is intentionally NOT
+    // forwarded — usage/cost folds into the parent's per-turn
+    // accumulator and the final summary text becomes the parent's
+    // Task tool_result content; replaying it as a nested event would
+    // double-render the same content.
     return ['tool_start', 'tool_result', 'tool_input_delta', 'agent_spawned', 'agent_completed', 'agent_event']
   }
 
@@ -1345,9 +1349,23 @@ export class ClaudeByokSession extends BaseSession {
     // all descendants under the outermost Task bubble. The original
     // (grand-child) `parentToolUseId` is preserved on the payload's
     // `parentToolUseId` for downstream renderers that may want to
-    // distinguish depth.
+    // distinguish depth — we merge it INTO the forwarded payload so
+    // consumers can read `payload.parentToolUseId` to recover the
+    // immediate-parent (grand-child Task) id. Without this merge the
+    // grand-child's id is lost on the way up; the comment claimed
+    // preservation but the original implementation dropped it.
+    // A non-string `e?.type` would re-emit as `'agent_event'` which
+    // the consumer reducer doesn't recognise — skip those so noise
+    // doesn't reach the wire.
     child.on('agent_event', (e) => {
-      this._emitAgentEvent(toolUseId, e?.type || 'agent_event', e?.payload ?? {})
+      if (typeof e?.type !== 'string') return
+      const basePayload = (e?.payload && typeof e.payload === 'object' && !Array.isArray(e.payload))
+        ? e.payload
+        : {}
+      const mergedPayload = e?.parentToolUseId
+        ? { ...basePayload, parentToolUseId: e.parentToolUseId }
+        : basePayload
+      this._emitAgentEvent(toolUseId, e.type, mergedPayload)
     })
 
     // Register a cascade hook on the parent's signal — interrupt()

@@ -3846,6 +3846,11 @@ describe('ClaudeByokSession', () => {
       assert.ok(forwarded, 'grand-child tool_start must be forwarded')
       assert.equal(forwarded.parentToolUseId, 'tu_task_5016',
         'grand-child events must re-tag with the OUTERMOST parent toolUseId')
+      // The original grand-child parentToolUseId (immediate parent = the
+      // child Task) is preserved on payload.parentToolUseId so
+      // depth-aware consumers can reconstruct the chain.
+      assert.equal(forwarded.payload.parentToolUseId, 'tu_grandchild_task',
+        'grand-child events must preserve the immediate parent toolUseId on payload')
     })
 
     it('agent_event listed in customEvents so SessionManager forwards it as a transient event', () => {

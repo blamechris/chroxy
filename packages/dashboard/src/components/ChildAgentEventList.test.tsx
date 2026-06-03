@@ -56,6 +56,23 @@ describe('reduceEvents (#5016)', () => {
     expect(out.tools).toHaveLength(0)
   })
 
+  it('inserts a blank-line boundary when stream_delta messageId changes', () => {
+    // Multi-round Tasks fire stream_delta on multiple child messageIds.
+    // Without a boundary, the two paragraphs would fuse mid-sentence.
+    const out = __reduceEventsForTest([
+      { type: 'stream_delta', payload: { messageId: 'r1', delta: 'First.' } },
+      { type: 'stream_delta', payload: { messageId: 'r2', delta: 'Second.' } },
+    ])
+    expect(out.assistantText).toBe('First.\n\nSecond.')
+  })
+
+  it('does not insert a boundary on the very first stream_delta', () => {
+    const out = __reduceEventsForTest([
+      { type: 'stream_delta', payload: { messageId: 'r1', delta: 'Hi.' } },
+    ])
+    expect(out.assistantText).toBe('Hi.')
+  })
+
   it('synthesises a row when tool_result arrives without a preceding tool_start', () => {
     // Defensive against a child race where the events arrive out of order.
     const out = __reduceEventsForTest([

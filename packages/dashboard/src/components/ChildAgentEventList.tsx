@@ -10,16 +10,21 @@
  *   - One row per `tool_start` / `tool_result` pair, keyed by the
  *     child's `toolUseId`. `tool_input_delta` chunks accumulate onto
  *     the row's `inputPartial`; `tool_result` resolves the row.
- *   - `stream_delta` chunks are concatenated into a single text block
- *     keyed by `messageId` so the child's assistant text reads as one
- *     paragraph rather than N fragments.
+ *   - `stream_delta` chunks are concatenated into a single text block;
+ *     contiguous deltas inside the same `messageId` merge directly,
+ *     while a `messageId` transition inserts a blank line so multi-
+ *     round child output doesn't fuse unrelated paragraphs.
  *   - The collapsing rules mirror the top-level `ToolBubble`'s: a row
  *     opens collapsed and expands on click. The default starting state
  *     is "all collapsed" so a Task with many child tools doesn't
  *     explode the layout the first time it's expanded.
- *   - Unknown event types are rendered as a small grey muted line so
- *     a future event kind (e.g. `result` from the child's per-round
- *     summary) doesn't disappear silently.
+ *   - Unknown event types are silently ignored by the reducer (they
+ *     don't appear in the rendered list). This is intentional: today
+ *     the only possible non-recognised types are forward-compat
+ *     payloads (e.g. a future `permission_request` re-emit). A
+ *     surfaced "unknown event" row would confuse users in v2; if a
+ *     new event kind ships, add an explicit branch to the reducer
+ *     and a styled row at the same time.
  *
  * Why a flat list and not a recursive `ToolBubble`:
  *   The child's tool_use events are not first-class `ChatMessage`s on
@@ -93,6 +98,11 @@ function reduceEvents(events: ChildAgentEvent[]): {
   const tools: ChildToolRow[] = []
   const byId = new Map<string, ChildToolRow>()
   let assistantText = ''
+  // Track the messageId of the last stream_delta we appended so we can
+  // insert a blank-line boundary on transition. Without this, multi-
+  // round Tasks (multiple child messageIds within one parent dispatch)
+  // would fuse two unrelated paragraphs of assistant text together.
+  let lastStreamMessageId: string | null = null
   for (const ev of events) {
     const p = ev.payload || {}
     if (ev.type === 'tool_start') {
@@ -144,11 +154,27 @@ function reduceEvents(events: ChildAgentEvent[]): {
       row.hasResult = true
     } else if (ev.type === 'stream_delta') {
       const delta = typeof p.delta === 'string' ? p.delta : null
-      if (delta) assistantText += delta
+      if (delta) {
+        const messageId = typeof p.messageId === 'string' ? p.messageId : null
+        // On a messageId transition (and only if we have any prior
+        // text), insert a blank-line boundary so the previous round's
+        // paragraph is visually separated from the new round.
+        if (
+          messageId
+          && lastStreamMessageId
+          && messageId !== lastStreamMessageId
+          && assistantText.length > 0
+        ) {
+          assistantText += '\n\n'
+        }
+        assistantText += delta
+        if (messageId) lastStreamMessageId = messageId
+      }
     }
-    // Unknown types fall through silently — kept off the rendered
-    // list since they could be permission_request / result / etc.
-    // that aren't part of the nested-bubble surface in v2.
+    // Unknown types fall through silently and are NOT rendered.
+    // Adding a new surface (e.g. nested permission_request rows) means
+    // adding an explicit branch above AND a styled row in the JSX —
+    // a generic "unknown event" line would just be noise to users.
   }
   return { tools, assistantText }
 }
