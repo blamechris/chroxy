@@ -98,6 +98,16 @@ export function ShortcutsSection() {
               const isEditing = editingId === entry.id
               const displayBinding = formatBindingForDisplay(entry.binding, isMac)
               const defaultDisplay = formatBindingForDisplay(entry.defaultBinding, isMac)
+              // #4970 — sessionbar scope is informational-only: the actual
+              // handler in SessionBar.tsx hardcodes the keys (Shift+Space,
+              // arrows, etc.) and never consults `registry.matchEvent`. A
+              // rebind here would silently do nothing — the cheat sheet,
+              // tooltip, and SR announcement would all advertise the new
+              // combo while the tab still only responds to the original
+              // keys. Disable Edit/Reset for this scope until the handler
+              // is migrated to `registry.matchEvent` (see issue #4970).
+              const isReadOnly = entry.scope === 'sessionbar'
+              const readOnlyTitle = 'Not rebindable yet — this shortcut is fixed in this release.'
               return (
                 <li key={entry.id} className="shortcuts-section-row" data-testid={`shortcut-row-${entry.id}`}>
                   <div className="shortcuts-section-row-description">
@@ -105,6 +115,15 @@ export function ShortcutsSection() {
                     {entry.isCustomized && (
                       <span className="shortcuts-section-row-default" title={`Default: ${defaultDisplay}`}>
                         (default {defaultDisplay})
+                      </span>
+                    )}
+                    {isReadOnly && (
+                      <span
+                        className="shortcuts-section-row-readonly"
+                        data-testid={`shortcut-readonly-${entry.id}`}
+                        title={readOnlyTitle}
+                      >
+                        (not rebindable)
                       </span>
                     )}
                   </div>
@@ -125,6 +144,8 @@ export function ShortcutsSection() {
                           type="button"
                           className="settings-secondary-button"
                           onClick={() => { setEditingId(entry.id); setError(null) }}
+                          disabled={isReadOnly}
+                          title={isReadOnly ? readOnlyTitle : undefined}
                           data-testid={`shortcut-edit-${entry.id}`}
                           aria-label={`Edit shortcut for ${entry.description}`}
                         >
@@ -134,7 +155,8 @@ export function ShortcutsSection() {
                           type="button"
                           className="settings-secondary-button"
                           onClick={() => registry.resetBinding(entry.id)}
-                          disabled={!entry.isCustomized}
+                          disabled={isReadOnly || !entry.isCustomized}
+                          title={isReadOnly ? readOnlyTitle : undefined}
                           data-testid={`shortcut-reset-${entry.id}`}
                           aria-label={`Reset shortcut for ${entry.description}`}
                         >

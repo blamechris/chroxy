@@ -161,4 +161,47 @@ describe('<ShortcutsSection>', () => {
       expect(screen.getByText('Sidebar')).toBeInTheDocument()
     })
   })
+
+  // #4970 — the SessionBar reorder ladder is owned by SessionBar.tsx and
+  // hardcodes the keys. A rebind via Settings would silently do nothing
+  // (the cheat sheet, tooltip, and SR announcement would all advertise the
+  // new combo while the tab still responded to Shift+Space). Until the
+  // handler migrates to `registry.matchEvent`, mark `sessionbar`-scoped
+  // entries as non-rebindable so the rebind surface can't mislead.
+  describe('sessionbar scope is read-only (#4970)', () => {
+    it('still renders the session.reorder.lift row so it stays discoverable', () => {
+      installFreshRegistry()
+      render(<ShortcutsSection />)
+      expect(screen.getByTestId('shortcut-row-session.reorder.lift')).toBeInTheDocument()
+      expect(screen.getByTestId('shortcut-binding-session.reorder.lift')).toHaveTextContent('Shift+Space')
+    })
+
+    it('disables the Edit button for sessionbar-scoped entries', () => {
+      installFreshRegistry()
+      render(<ShortcutsSection />)
+      const editBtn = screen.getByTestId('shortcut-edit-session.reorder.lift') as HTMLButtonElement
+      expect(editBtn.disabled).toBe(true)
+      expect(editBtn).toHaveAttribute('title', expect.stringContaining('Not rebindable'))
+    })
+
+    it('disables the Reset button for sessionbar-scoped entries', () => {
+      installFreshRegistry()
+      render(<ShortcutsSection />)
+      const resetBtn = screen.getByTestId('shortcut-reset-session.reorder.lift') as HTMLButtonElement
+      expect(resetBtn.disabled).toBe(true)
+    })
+
+    it('renders a "(not rebindable)" hint next to the description', () => {
+      installFreshRegistry()
+      render(<ShortcutsSection />)
+      expect(screen.getByTestId('shortcut-readonly-session.reorder.lift')).toHaveTextContent('not rebindable')
+    })
+
+    it('does NOT disable Edit on global-scoped entries (regression guard)', () => {
+      installFreshRegistry()
+      render(<ShortcutsSection />)
+      const editBtn = screen.getByTestId('shortcut-edit-palette.toggle') as HTMLButtonElement
+      expect(editBtn.disabled).toBe(false)
+    })
+  })
 })
