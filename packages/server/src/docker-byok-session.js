@@ -84,10 +84,8 @@
  */
 
 import { execFile } from 'child_process'
-import { mkdirSync, writeFileSync } from 'fs'
 import { randomBytes } from 'crypto'
-import { homedir } from 'os'
-import { isAbsolute, join, posix } from 'path'
+import { isAbsolute, posix } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
@@ -239,18 +237,28 @@ export class DockerByokSession extends ClaudeByokSession {
    * @param {string} [opts.containerId]              Attach to an existing container
    *   instead of launching one (env-manager managed). When omitted, the
    *   session owns the container and tears it down on destroy().
-   * @param {boolean} [opts.useDevcontainer=false]   #5024: Parse
-   *   `.devcontainer/devcontainer.json` (or `.devcontainer.json`) from
-   *   cwd and overlay its `image` / `remoteUser` / `containerEnv` /
-   *   `mounts` / `forwardPorts` / `postCreateCommand` onto the launch.
-   *   Explicit constructor opts always win; devcontainer.json is the
-   *   fallback default. No-op when the file is absent or malformed.
+   * @param {boolean} [opts.useDevcontainer=false]   #5024: Opt-in flag
+   *   — when true, parse `.devcontainer/devcontainer.json` (or the
+   *   `.devcontainer.json` sidecar) from cwd and overlay its
+   *   `image` / `remoteUser` / `containerEnv` / `mounts` /
+   *   `forwardPorts` / `postCreateCommand` onto the launch. Explicit
+   *   constructor opts always win; devcontainer.json is the fallback
+   *   default. No-op when the file is absent or malformed.
+   *
+   *   This is opt-in (not auto-discovery from cwd) so existing
+   *   sessions whose cwd happens to contain a devcontainer.json don't
+   *   silently change behaviour. The caller (CLI flag, dashboard
+   *   toggle, env-manager) is responsible for setting this when the
+   *   user has asked for devcontainer-driven environments.
    * @param {string} [opts.composeFile]              #5024: Path to a
    *   `docker-compose.yml`. When set, start() runs `docker compose up
    *   -d` under a session-scoped project id and attaches to the named
    *   service container. destroy() runs `docker compose down
    *   --remove-orphans` to tear the whole stack down. Pooling is
    *   disabled in this mode.
+   *
+   *   This is opt-in (not auto-discovery from cwd) — see the note on
+   *   `useDevcontainer` above. The caller passes the path explicitly.
    * @param {string} [opts.composeService]           #5024: Optional
    *   service name from the compose file to attach to (the "primary"
    *   service). When omitted, the first service from `docker compose
@@ -647,7 +655,15 @@ export class DockerByokSession extends ClaudeByokSession {
             if (typeof port === 'number' && Number.isFinite(port) && port > 0 && port < 65536) {
               runArgs.push('-p', `${port}:${port}`)
             } else if (typeof port === 'string' && /^\d+(:\d+)?$/.test(port)) {
-              runArgs.push('-p', port)
+              // Bare-port strings ("3000") would otherwise become
+              // `docker run -p 3000`, which Docker treats as "publish
+              // container port 3000 to a RANDOM host port" — surprising
+              // for a DevContainer-style forward where the model
+              // expects 3000:3000. Normalise to host:container when the
+              // colon is missing so the numeric and string forms
+              // behave identically.
+              const normalized = port.includes(':') ? port : `${port}:${port}`
+              runArgs.push('-p', normalized)
             } else {
               log.warn(`devcontainer.json forwardPorts entry rejected (invalid): ${port}`)
             }

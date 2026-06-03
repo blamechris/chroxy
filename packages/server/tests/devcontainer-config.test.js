@@ -142,6 +142,19 @@ describe('validateMounts()', () => {
     assert.equal(result, undefined)
     assert.ok(warnings.some(m => m.includes('unparseable')))
   })
+
+  it('normalises a relative cwd before containment check — fix from PR #5070 review', () => {
+    // Pass a cwd that's already absolute but with a trailing `.` —
+    // pre-fix, the raw string comparison `cwd + '/'` would mismatch
+    // because resolve() of the source strips the `.`. Now both sides
+    // run through resolve() so the comparison stays consistent.
+    const result = validateMounts(
+      [`source=${tmpDir}/sub,target=/workspace/sub,type=bind`],
+      `${tmpDir}/.`,
+      { logger: captureLogger },
+    )
+    assert.equal(result?.length, 1, `expected the mount to be accepted, warnings: ${warnings.join('; ')}`)
+  })
 })
 
 describe('extractMountSource()', () => {
@@ -162,6 +175,26 @@ describe('extractMountSource()', () => {
 
   it('returns null for invalid input', () => {
     assert.equal(extractMountSource('just-a-string'), null)
+  })
+
+  it('parses Windows drive-letter paths (forward slash) — fix from PR #5070 review', () => {
+    // Without the drive-letter handling, the plain split-on-`:` would
+    // return `C` as the source and tank validation.
+    assert.equal(extractMountSource('C:/proj/sub:/workspace/sub'), 'C:/proj/sub')
+  })
+
+  it('parses Windows drive-letter paths (back slash) — fix from PR #5070 review', () => {
+    assert.equal(extractMountSource('C:\\proj\\sub:/workspace/sub'), 'C:\\proj\\sub')
+  })
+
+  it('parses Windows drive-letter paths with mount options', () => {
+    assert.equal(extractMountSource('D:/data:/workspace/data:ro'), 'D:/data')
+  })
+
+  it('returns null for a Windows path that has no target separator', () => {
+    // `C:\proj` alone has the drive-letter colon but no source/target
+    // boundary — there's nothing to extract.
+    assert.equal(extractMountSource('C:\\proj'), null)
   })
 })
 

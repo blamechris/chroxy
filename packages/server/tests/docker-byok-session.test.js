@@ -1104,6 +1104,42 @@ describe('DockerByokSession — devcontainer.json overlay (#5024)', () => {
     }
   })
 
+  it('start() normalises bare-port strings to host:container — fix from PR #5070 review', async () => {
+    // Pre-fix, a string "3000" would become `docker run -p 3000`,
+    // which Docker treats as "publish container port 3000 to a RANDOM
+    // host port" — surprising for a DevContainer forward where the
+    // model expects 3000:3000. Both numeric `3000` and bare-string
+    // `"3000"` should now produce the same `-p 3000:3000` mapping.
+    const cwd = makeDevcontainerCwd({
+      forwardPorts: ['3000', '5432', '8080:80'],
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_str_ports\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const ports = []
+      for (let i = 0; i < runCall.args.length; i++) {
+        if (runCall.args[i] === '-p') ports.push(runCall.args[i + 1])
+      }
+      assert.deepEqual(ports, ['3000:3000', '5432:5432', '8080:80'])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
   it('start() rejects mounts pointing outside cwd', async () => {
     const cwd = makeDevcontainerCwd({
       mounts: [
