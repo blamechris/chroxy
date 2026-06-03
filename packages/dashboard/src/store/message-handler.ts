@@ -1522,9 +1522,24 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
           // `"He said \"done.\""` reads as ending in `"` and the #4889 split
           // would wrongly disable — paragraph breaks across a tool boundary
           // would be lost.
-          const stripped = lastNonWs.replace(/[)\]}"'’”»›]+$/, '');
+          // #5014 — also strip CJK closing brackets (`」』）`) so a
+          // fullwidth-terminated sentence wrapped in CJK quotes still
+          // reads as sentence-complete.
+          const stripped = lastNonWs.replace(/[)\]}"'’”»›」』）]+$/, '');
           const lastChar = stripped.charAt(stripped.length - 1);
-          const endsSentence = lastChar === '.' || lastChar === '!' || lastChar === '?';
+          // #5014 — recognize CJK fullwidth sentence terminators
+          // (`．` U+FF0E, `！` U+FF01, `？` U+FF1F) and the ideographic
+          // full stop (`。` U+3002) alongside ASCII. Without these, CJK
+          // assistant output would coalesce two sentences across a tool
+          // boundary when the user expects a paragraph break.
+          const endsSentence =
+            lastChar === '.' ||
+            lastChar === '!' ||
+            lastChar === '?' ||
+            lastChar === '．' ||
+            lastChar === '！' ||
+            lastChar === '？' ||
+            lastChar === '。';
           const endsHardBreak = /\n\s*$/.test(priorFullForGate);
           if (!endsSentence && !endsHardBreak) {
             toolAfter = false;
