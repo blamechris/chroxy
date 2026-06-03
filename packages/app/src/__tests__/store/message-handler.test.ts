@@ -2226,6 +2226,61 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
     expect(responses).toHaveLength(4);
     expect(responses.map((r) => r.content)).toEqual(['A', 'cont-0', 'cont-1', 'cont-2']);
   });
+
+  it('does NOT split during replay -- server-reassembled history must stay intact', () => {
+    // History is reassembled server-side: a single `stream_delta` carries the
+    // entire post-tool tail in one chunk against the original messageId. If
+    // the client split it again, replayed history would gain a phantom
+    // continuation slot that never existed in the live turn. The guard at
+    // `_ctx.replayingSessions.has(...)` skips the split for replaying sessions
+    // -- this test pins that behavior so it can't silently regress.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Enter replay mode for s1 -- mirrors the live wire sequence: server emits
+    // `history_replay_start` before streaming the cached transcript.
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+
+    // Replay the same shape as the FIX test above (text -> tool -> text),
+    // sharing one messageId. Without the replay guard, the second delta would
+    // create a continuation slot.
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'preamble',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_a',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_a',
+      input: { command: 'ls' },
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'summary',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const responses = ss.messages.filter((m) => m.type === 'response');
+    // ONE response slot whose content is both deltas concatenated -- no
+    // continuation slot was created because the session is replaying.
+    expect(responses).toHaveLength(1);
+    expect(responses[0].id).toBe('resp-1');
+    expect(responses[0].content).toBe('preamblesummary');
+  });
 });
 
 describe('stream_end handler', () => {
