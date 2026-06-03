@@ -6,7 +6,7 @@
  *          notification_prefs_set (#4541)
  */
 import { randomUUID } from 'node:crypto'
-import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -140,6 +140,28 @@ async function handleInput(ws, client, msg, ctx) {
     //      actionable hint ("session restarted — pick a session below")
     //      and clear its stale activeSessionId locally. Mirrors the existing
     //      `code: 'resume_unknown'` affordance (#4947).
+    //
+    // IMPORTANT (Copilot review #4979): `resolveSession()` returns null for
+    // two distinct reasons — (a) the session truly does not exist, and
+    // (b) the client has a `boundSessionId` and `msg.sessionId` disagrees with
+    // it (session-token binding enforcement in handler-utils.js). Case (b) is
+    // a SESSION_TOKEN_MISMATCH, not a SESSION_NOT_FOUND, and conflating them
+    // would (i) mislabel the operator log line and (ii) cause a dashboard
+    // consumer keyed on SESSION_NOT_FOUND to clear local state for what is
+    // actually an authorization failure. Check the binding-mismatch case
+    // FIRST and emit the canonical SESSION_TOKEN_MISMATCH envelope (#2912 —
+    // unified shape across all call sites via buildSessionTokenMismatchPayload).
+    if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
+      log.info(`input rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
+      ctx.send(ws, {
+        type: 'session_error',
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessionManager,
+          boundSessionId: client.boundSessionId,
+        }),
+      })
+      return
+    }
     if (msg.sessionId) {
       log.info(`input dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
       ctx.send(ws, {
@@ -479,6 +501,23 @@ function handleInterrupt(ws, client, msg, ctx) {
   // wedge. An interrupt addressed to a stale session ID used to drop on the
   // floor with no log line and no client-side error. Surface both so the
   // dashboard can clear stale state and the operator can grep chroxy.log.
+  //
+  // IMPORTANT (Copilot review #4979): like handleInput, resolveSession() can
+  // return null for binding mismatches as well as truly-missing sessions.
+  // Disambiguate before emitting so a binding mismatch surfaces as the
+  // canonical SESSION_TOKEN_MISMATCH envelope rather than being mislabelled
+  // as a stale-ID drop.
+  if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
+    log.info(`interrupt rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
+    ctx.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
+    return
+  }
   if (msg.sessionId) {
     log.info(`interrupt dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
     ctx.send(ws, {

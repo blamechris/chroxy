@@ -1191,15 +1191,15 @@ describe('SessionManager.restoreState', () => {
     mgr.destroyAll()
   })
 
-  // #4935 — pin the daemon-restart contract: restored sessions get FRESH
-  // session IDs (createSession() always calls randomBytes(16) at line 555 of
-  // session-manager.js). The dashboard's persisted activeSessionId pointing
-  // at a pre-restart ID is therefore stale on reconnect, which is the root
-  // cause of the post-restart silent wedge investigated in #4935.
+  // #4935 — pin the daemon-restart contract: restoreState() creates fresh
+  // random session IDs for every restored session. The dashboard's persisted
+  // activeSessionId pointing at a pre-restart ID is therefore stale on
+  // reconnect, which is the root cause of the post-restart silent wedge
+  // investigated in #4935.
   //
   // The test simulates the exact scenario from the issue:
-  //   1. Create sessions, persist state, capture their IDs.
-  //   2. Tear down (`destroyAll` + new SessionManager) — daemon restart.
+  //   1. Write a synthetic state file with explicit pre-restart IDs.
+  //   2. Construct a fresh SessionManager from that file — daemon restart.
   //   3. restoreState() — sessions come back with NEW IDs.
   //   4. getSession(oldId) returns null — input addressed to the pre-restart
   //      ID would fail the resolveSession() lookup and trip the structured
@@ -1211,14 +1211,14 @@ describe('SessionManager.restoreState', () => {
   // broader implications); what it CAN do is make the silent drop visible.
   // This test pins the precondition that triggers the visibility fix.
   it('restored sessions get fresh IDs — old IDs are gone, lookups return null (#4935)', () => {
-    // First boot: create two sessions and let the auto-persist write to disk.
-    // Skip preflight + use a mock provider so we don't fork claude binaries
-    // during the test. Real sessions are constructed via createSession but
-    // the provider is mocked out below so we don't actually spawn anything.
+    // We bypass createSession on a first boot and write a synthetic
+    // state file directly — the behavioural contract under test is the
+    // restore-side ID regeneration, not the persistence-write path
+    // (which is covered by the SessionManager auto-persist suite below).
     const stateFile1 = join(tempDir, 'state-v1.json')
 
-    // Write a state file directly (simpler than driving createSession's
-    // full path — we only need to test the restore-side ID regeneration).
+    // Write a state file directly with explicit pre-restart IDs the
+    // dashboard's localStorage might still hold post-restart.
     writeFileSync(stateFile1, JSON.stringify({
       version: 1,
       timestamp: Date.now(),

@@ -98,6 +98,36 @@ describe('input-handlers', () => {
       assert.match(ctx._sent[0].message, /Session not found: deadbeef-stale-session-id/)
     })
 
+    // #4935 Copilot review feedback — disambiguate bound-session mismatch from
+    // truly-missing sessions. `resolveSession()` returns null for both cases;
+    // emitting SESSION_NOT_FOUND for an authorization failure would let a
+    // dashboard consumer keyed on SESSION_NOT_FOUND clear its local state
+    // (and ID-binding) when the user is in fact bound to a *different* session
+    // they're allowed to touch. The canonical SESSION_TOKEN_MISMATCH envelope
+    // (#2912) belongs here instead.
+    it('sends SESSION_TOKEN_MISMATCH (not SESSION_NOT_FOUND) when client is bound to a different session (#4935 review)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('bound-id', { session, name: 'BoundSession', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      // Client is bound to bound-id but addresses a different sessionId.
+      const client = makeClient({ boundSessionId: 'bound-id' })
+      inputHandlers.input(
+        makeWs(),
+        client,
+        { data: 'hello', sessionId: 'some-other-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH',
+        'binding mismatch must emit SESSION_TOKEN_MISMATCH, not SESSION_NOT_FOUND')
+      assert.equal(ctx._sent[0].boundSessionId, 'bound-id')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundSession')
+      assert.equal(ctx._sent[0].attemptedSessionId, undefined,
+        'binding-mismatch envelope must not carry SESSION_NOT_FOUND fields')
+    })
+
     it('sends session_error for invalid attachment type', () => {
       const sessions = new Map()
       const session = createMockSession()
@@ -650,6 +680,29 @@ describe('input-handlers', () => {
       assert.equal(ctx._sent[0].type, 'session_error')
       assert.equal(ctx._sent[0].code, 'SESSION_NOT_FOUND')
       assert.equal(ctx._sent[0].attemptedSessionId, 'deadbeef-stale-session-id')
+    })
+
+    // #4935 Copilot review feedback — same disambiguation as handleInput:
+    // bound-session mismatch on an interrupt is an authorization failure,
+    // not a stale-ID drop.
+    it('sends SESSION_TOKEN_MISMATCH (not SESSION_NOT_FOUND) when client is bound to a different session (#4935 review)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('bound-id', { session, name: 'BoundSession', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ boundSessionId: 'bound-id' })
+      inputHandlers.interrupt(
+        makeWs(),
+        client,
+        { sessionId: 'some-other-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx._sent[0].boundSessionId, 'bound-id')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundSession')
+      assert.equal(ctx._sent[0].attemptedSessionId, undefined)
     })
   })
 
