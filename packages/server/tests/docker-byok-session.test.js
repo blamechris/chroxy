@@ -2666,6 +2666,139 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
     })
     assert.equal(session._pool, null)
   })
+
+  // #5079 — ANTHROPIC_API_KEY forwarding into compose primary service
+  // via a host-side tmpfile + `docker --env-file`. The bare-image path
+  // already forwards via `docker run --env`; these tests pin the
+  // symmetric compose behaviour.
+
+  it('writes an --env-file tmpfile with ANTHROPIC_API_KEY at compose-up and unlinks on destroy (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const writes = []
+    const unlinks = []
+    const backend = composeBackendStub({ primaryId: 'COMPOSE_API_KEY' })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: (path, content) => writes.push({ path, content }),
+      _unlinkEnvFile: (path) => unlinks.push(path),
+      _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-tmpfile-secret' },
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    // Exactly one tmpfile written, containing the key — never bare argv.
+    assert.equal(writes.length, 1, 'expected one env-file write at compose-up')
+    assert.match(writes[0].path, /chroxy-byok-.+\.env$/, 'tmpfile path should be session-scoped')
+    assert.equal(writes[0].content, 'ANTHROPIC_API_KEY=sk-ant-tmpfile-secret\n')
+    // The session tracks the path so destroy can clean it up.
+    assert.equal(session._composeEnvFile, writes[0].path)
+    // Backend received the file via the documented opt.
+    assert.equal(backend.createCalls[0].envFile, writes[0].path)
+    // No --env flag in argv — confirm the key never appears in any
+    // execFile call (info, etc.) on the host side.
+    const argvDump = JSON.stringify(_execFile.calls)
+    assert.equal(
+      argvDump.includes('sk-ant-tmpfile-secret'), false,
+      'ANTHROPIC_API_KEY must not appear in host argv',
+    )
+    await session.destroy()
+    // File is unlinked on destroy (best-effort, idempotent).
+    assert.deepEqual(unlinks, [writes[0].path], 'env-file should be unlinked on destroy')
+  })
+
+  it('skips the env-file when ANTHROPIC_API_KEY is absent (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const writes = []
+    const unlinks = []
+    const backend = composeBackendStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: (p, c) => writes.push({ p, c }),
+      _unlinkEnvFile: (p) => unlinks.push(p),
+      _envForApiKey: { /* no ANTHROPIC_API_KEY */ },
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(writes.length, 0, 'no env-file should be written when ANTHROPIC_API_KEY is absent')
+    assert.equal(session._composeEnvFile, null)
+    assert.equal(backend.createCalls[0].envFile, null)
+    await session.destroy()
+    assert.equal(unlinks.length, 0, 'no env-file to unlink')
+  })
+
+  it('forwards --env-file on every _execAsContainerUser dispatch in compose mode (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const execCalls = []
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        return { containerId: 'C', containerCliPath: '/x', services: [] }
+      },
+      async destroyComposeEnvironment() {},
+      async execInEnvironment(_containerId, opts) {
+        execCalls.push(opts)
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: () => {},
+      _unlinkEnvFile: () => {},
+      _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-exec-secret' },
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    // Trigger a tool dispatch via the public helper.
+    await session._execAsContainerUser({ cmd: 'true' })
+    const dispatch = execCalls.at(-1)
+    assert.ok(dispatch.envFile, 'compose mode must pass envFile on dispatch')
+    assert.match(dispatch.envFile, /chroxy-byok-.+\.env$/)
+    // Key MUST NOT appear in the dispatch's env object (that would
+    // bypass the tmpfile and leak to argv via --env KEY=VAL).
+    assert.equal(dispatch.env, undefined, 'compose dispatch must not pass --env for the API key')
+    await session.destroy()
+  })
+
+  it('unlinks the env-file on compose start failure (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const writes = []
+    const unlinks = []
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        throw new Error('compose primary not running')
+      },
+      async destroyComposeEnvironment(opts) { this.destroyCalls.push(opts) },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: (p, c) => writes.push({ p, c }),
+      _unlinkEnvFile: (p) => unlinks.push(p),
+      _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-fail-secret' },
+    })
+    session.on('error', () => {})
+    await session.start()
+    assert.equal(writes.length, 1, 'tmpfile written before compose up')
+    assert.equal(unlinks.length >= 1, true, 'tmpfile unlinked on start failure')
+    assert.equal(session._composeEnvFile, null, 'env-file path cleared on failure')
+  })
 })
 
 // Force a tick so any background EventEmitter cleanup completes
