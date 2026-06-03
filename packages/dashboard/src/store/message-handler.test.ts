@@ -1944,6 +1944,221 @@ describe('dashboard message-handler dispatch', () => {
         expect(responses[0].content).toBe('(see the docs for more.)')
         expect(responses[1].content).toBe('Continuing with the next section.')
       })
+
+      // #5014 — unicode sentence terminators (CJK fullwidth + ideographic
+      // full stop) must also satisfy the gate so paragraph splits are
+      // preserved across a tool boundary in non-ASCII assistant output.
+      it('STILL splits when prior ends in a fullwidth full stop (U+FF0E)', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'ファイルを確認します．',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: {},
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: '次の段落です．',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('ファイルを確認します．')
+        expect(responses[1].content).toBe('次の段落です．')
+      })
+
+      it('STILL splits when prior ends in a fullwidth exclamation mark (U+FF01)', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'やった！',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: {},
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: '続行します．',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('やった！')
+        expect(responses[1].content).toBe('続行します．')
+      })
+
+      it('STILL splits when prior ends in a fullwidth question mark (U+FF1F)', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'これは正しいですか？',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: {},
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: '確認しました．',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('これは正しいですか？')
+        expect(responses[1].content).toBe('確認しました．')
+      })
+
+      it('STILL splits when prior ends in an ideographic full stop (U+3002)', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: '准备检查文件。',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: {},
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: '现在归档。',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('准备检查文件。')
+        expect(responses[1].content).toBe('现在归档。')
+      })
     })
   })
 

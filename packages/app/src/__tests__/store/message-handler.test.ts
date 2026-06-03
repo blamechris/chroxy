@@ -2788,6 +2788,169 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       expect(responses[0].content).toBe('(see the docs for more.)');
       expect(responses[1].content).toBe('Continuing with the next section.');
     });
+
+    // #5014 -- unicode sentence terminators (CJK fullwidth + ideographic
+    // full stop) must also satisfy the gate so paragraph splits are
+    // preserved across a tool boundary in non-ASCII assistant output.
+    it('STILL splits when prior ends in a fullwidth full stop (U+FF0E)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'ファイルを確認します．',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '次の段落です．',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('ファイルを確認します．');
+      expect(responses[1].content).toBe('次の段落です．');
+    });
+
+    it('STILL splits when prior ends in a fullwidth exclamation mark (U+FF01)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'やった！',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '続行します．',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('やった！');
+      expect(responses[1].content).toBe('続行します．');
+    });
+
+    it('STILL splits when prior ends in a fullwidth question mark (U+FF1F)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'これは正しいですか？',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '確認しました．',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('これは正しいですか？');
+      expect(responses[1].content).toBe('確認しました．');
+    });
+
+    it('STILL splits when prior ends in an ideographic full stop (U+3002)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '准备检查文件。',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '现在归档。',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('准备检查文件。');
+      expect(responses[1].content).toBe('现在归档。');
+    });
   });
 });
 
