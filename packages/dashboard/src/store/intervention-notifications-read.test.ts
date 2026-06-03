@@ -15,7 +15,7 @@
  * Scope is in-memory only — `sessionNotifications` is transient and resets
  * on reload/reconnect (see types.ts:SessionNotification.readAt JSDoc).
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { SessionNotification } from './types'
 
 function makeNotification(overrides: Partial<SessionNotification> = {}): SessionNotification {
@@ -71,16 +71,21 @@ describe('SessionNotification read/unread tracking (#4890)', () => {
       sessionNotifications: [makeNotification({ id: 'n-1' })],
     })
 
+    // Deterministic Date.now() so we can prove the second call would have
+    // observed a distinct value if the action weren't idempotent — without
+    // depending on real-time setTimeout (which could land in the same ms
+    // on fast machines and miss a regression).
+    const nowSpy = vi.spyOn(Date, 'now')
+    nowSpy.mockReturnValueOnce(1_700_000_000_000) // first mark-read
     useConnectionStore.getState().markSessionNotificationRead('n-1')
     const firstReadAt = useConnectionStore.getState().sessionNotifications[0]!.readAt
-    expect(firstReadAt).toBeTypeOf('number')
+    expect(firstReadAt).toBe(1_700_000_000_000)
 
-    // Wait a tick to ensure a distinct timestamp would otherwise be recorded
-    await new Promise(r => setTimeout(r, 5))
-
+    nowSpy.mockReturnValueOnce(1_700_000_000_999) // second mark-read — would clobber if non-idempotent
     useConnectionStore.getState().markSessionNotificationRead('n-1')
     const secondReadAt = useConnectionStore.getState().sessionNotifications[0]!.readAt
     expect(secondReadAt).toBe(firstReadAt)
+    nowSpy.mockRestore()
   })
 
   it('markSessionNotificationRead is a no-op for unknown id', async () => {

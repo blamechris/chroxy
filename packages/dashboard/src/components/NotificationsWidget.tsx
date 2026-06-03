@@ -12,10 +12,11 @@
  *   - Items render with a bolder weight / `notifications-widget-item--unread`
  *     class while `readAt === undefined`; once stamped they fade to a
  *     muted "read" treatment but stay in the list.
- *   - Clicking a row marks the alert as read AND switches to its session
- *     (the most common operator intent — both intents are also achievable
- *     individually via the row's two affordances: the session label
- *     anchor switches sessions, the eyeball icon marks-read-only).
+ *   - Clicking a row body marks the alert as read AND switches to its
+ *     session (the most common operator intent). Two per-row affordances
+ *     decompose the intent: the eyeball button marks-read without
+ *     switching (only rendered on unread rows), and the "×" button
+ *     dismisses (removes) the alert outright.
  *   - "Mark all read" stamps every currently-unread alert in one batch.
  *
  * Scope — in-memory only. `sessionNotifications` is transient and resets

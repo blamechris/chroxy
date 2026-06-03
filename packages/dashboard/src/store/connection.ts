@@ -2439,11 +2439,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   // #4890 — Slack-style intervention notifications widget. `read` (a
   // timestamp) is distinct from `dismiss` (removal). Reading means the
-  // operator acknowledged the alert (opened the widget, clicked through to
-  // the session, or hit "Mark all read") and it should stop counting toward
-  // the unread badge while remaining in the widget's history list.
-  // Idempotent: a second mark-read keeps the first timestamp so re-opens
-  // don't masquerade as fresh acknowledges.
+  // operator explicitly acknowledged the alert — clicking a widget row,
+  // hitting the per-row "mark as read" button, "Mark all read", or
+  // switching to the alert's session via any session-switch path. Opening
+  // the widget panel by itself does NOT mark notifications read; only the
+  // explicit per-row / bulk / session-switch actions do. Once stamped, the
+  // alert stops counting toward the unread badge but remains in the
+  // widget's history list. Idempotent: a second mark-read keeps the first
+  // timestamp so re-opens don't masquerade as fresh acknowledges.
   markSessionNotificationRead: (id: string) => {
     set((state) => ({
       sessionNotifications: state.sessionNotifications.map((n) =>

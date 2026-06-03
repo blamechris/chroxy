@@ -268,10 +268,13 @@ export interface SessionNotification {
   requestId?: string;
   /**
    * #4890 — Slack-style read/unread tracking. Set to `Date.now()` when the
-   * operator has acknowledged the alert (opened the notifications widget,
-   * clicked through to the session, or hit "Mark all read"). Absent means
-   * unread; presence means the alert no longer counts toward the
-   * widget's unread badge count.
+   * operator has acknowledged the alert via an explicit action: clicking a
+   * row in the notifications widget (which both marks read and switches
+   * sessions), the per-row "mark as read" affordance, "Mark all read", or
+   * by switching to the alert's session via any session-switch path.
+   * Absent means unread; presence means the alert no longer counts toward
+   * the widget's unread badge count. Note: simply opening the widget panel
+   * does NOT mark notifications as read on its own.
    *
    * Tracked in memory only — `sessionNotifications` itself is transient and
    * resets on reload/reconnect, so persisting `readAt` would outlive the
