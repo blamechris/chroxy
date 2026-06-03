@@ -4,10 +4,12 @@
  * Features: active highlight, status dot, close/rename, cwd badge, model badge, provider badge.
  *
  * #4831 — tabs are drag-and-drop reorderable. Native HTML5 DnD (no new deps).
- * Reordering also supports keyboard: focus a tab, press Shift+Space to "lift"
- * it into reorder mode, then Arrow Left / Right to move it, then Space /
- * Enter / Escape to drop. The `+` (new session) button is anchored at the
- * right edge and is NOT draggable / not a drop target.
+ * Reordering also supports keyboard: focus a tab, press Space (or Shift+Space)
+ * to "lift" it into reorder mode, then Arrow Left / Right to move it, then
+ * Space / Enter / Escape to drop. Plain Space is the WAI-ARIA grid pattern
+ * and matches the #4831 acceptance criteria; Shift+Space is retained as an
+ * alias. The `+` (new session) button is anchored at the right edge and is
+ * NOT draggable / not a drop target.
  */
 import { useState, useCallback, useRef, useEffect } from 'react'
 import type { SessionVisualStatus } from '@chroxy/store-core'
@@ -69,7 +71,15 @@ function shortenProvider(provider: string): string {
  * #4831 — pure reorder helper, exported for tests. Moves the entry at
  * `fromIndex` to `toIndex` (insert-before semantics; matches typical drop
  * UX where the dragged tab takes the dropped-on tab's slot and pushes it
- * one over). Returns a NEW array; never mutates the input.
+ * one over). Never mutates the input.
+ *
+ * Return-reference contract:
+ * - On a successful move (the indices are in range and not a no-op), returns
+ *   a NEW array (the result of `slice() + splice()`).
+ * - On a no-op (`fromIndex === toIndex`) or out-of-range indices, returns the
+ *   ORIGINAL `ids` reference unchanged. Callers using referential equality to
+ *   detect "nothing changed" can rely on this; callers that always want a new
+ *   reference must clone explicitly.
  */
 export function reorderTabs(ids: string[], fromIndex: number, toIndex: number): string[] {
   if (fromIndex === toIndex) return ids
@@ -225,13 +235,15 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             }}
             onKeyDown={e => {
               if (renamingId === session.sessionId) return
-              // #4831 — keyboard reorder ladder. Shift+Space toggles "lift"
-              // mode. While lifted, ArrowLeft / ArrowRight step the tab,
-              // and Enter / Space / Escape commit / cancel the lift.
-              // Plain Space / Enter retain their existing tab-activate
-              // behaviour so we don't break established UX for users who
-              // never engage reorder mode.
-              if (e.key === ' ' && e.shiftKey && !reorderDisabled) {
+              // #4831 — keyboard reorder ladder. Both Space (matches the
+              // #4831 acceptance criteria + WAI-ARIA grid pattern) and
+              // Shift+Space toggle "lift" mode when reorder is wired.
+              // While lifted, ArrowLeft / ArrowRight step the tab, and
+              // Enter / Space / Escape commit / cancel the lift.
+              // When reorder is NOT wired (or while not lifted), plain
+              // Space falls through to the tab-activate handler below so
+              // role="tab" semantics are preserved; Enter always activates.
+              if (e.key === ' ' && !reorderDisabled) {
                 e.preventDefault()
                 setKeyboardLiftId(prev => prev === session.sessionId ? null : session.sessionId)
                 return
@@ -242,7 +254,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                   setKeyboardLiftId(null)
                   return
                 }
-                if (e.key === 'Enter' || e.key === ' ') {
+                if (e.key === 'Enter') {
                   e.preventDefault()
                   setKeyboardLiftId(null)
                   return

@@ -922,6 +922,16 @@ export function App() {
   // server is still authoritative for which sessions EXIST; this slice
   // controls only the visual order in the top tab strip (issue #4831).
   const [tabOrder, setTabOrder] = useState<string[]>(() => loadPersistedSessionTabOrder())
+  // #4831 — `loadPersistedSessionTabOrder` reads under the *current*
+  // server scope (set by `setServerScope` on server-switch). The initial
+  // `useState` only fires once on mount, so without this effect a server
+  // switch in the same browser tab would leave SessionBar showing the
+  // previous server's tabOrder until a full page refresh. Re-load whenever
+  // the active server changes so each server gets its own persisted order.
+  const activeServerId = useConnectionStore(s => s.activeServerId)
+  useEffect(() => {
+    setTabOrder(loadPersistedSessionTabOrder())
+  }, [activeServerId])
   const handleReorderTabs = useCallback((nextOrder: string[]) => {
     setTabOrder(nextOrder)
     persistSessionTabOrder(nextOrder)

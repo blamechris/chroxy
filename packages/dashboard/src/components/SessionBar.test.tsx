@@ -602,7 +602,7 @@ describe('SessionBar', () => {
       expect(btnPos).toBeGreaterThan(tablistPos)
     })
 
-    it('keyboard reorder: Shift+Space lifts, ArrowRight moves, Escape cancels lift', () => {
+    it('keyboard reorder: Space lifts, ArrowRight moves, Escape cancels lift', () => {
       const onReorder = vi.fn()
       render(
         <SessionBar
@@ -615,8 +615,8 @@ describe('SessionBar', () => {
         />
       )
       const tabA = screen.getByTestId('session-tab-a')
-      // Lift "a" into reorder mode
-      fireEvent.keyDown(tabA, { key: ' ', shiftKey: true })
+      // Lift "a" into reorder mode (plain Space matches #4831 AC)
+      fireEvent.keyDown(tabA, { key: ' ' })
       expect(tabA.getAttribute('aria-grabbed')).toBe('true')
       // Move "a" one slot right — should land in position 1 of ['b','a','c']
       fireEvent.keyDown(tabA, { key: 'ArrowRight' })
@@ -624,6 +624,25 @@ describe('SessionBar', () => {
       // Escape clears the lift state (no further reorder)
       fireEvent.keyDown(tabA, { key: 'Escape' })
       expect(tabA.getAttribute('aria-grabbed')).toBe(null)
+    })
+
+    it('keyboard reorder: Shift+Space alias also lifts', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      fireEvent.keyDown(tabA, { key: ' ', shiftKey: true })
+      expect(tabA.getAttribute('aria-grabbed')).toBe('true')
+      fireEvent.keyDown(tabA, { key: 'ArrowRight' })
+      expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c'])
     })
 
     it('click-to-activate still works when reorder is wired', () => {
