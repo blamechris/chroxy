@@ -173,6 +173,11 @@ vi.mock('./store/connection', () => {
     // `addServerErrorMock` so tests can assert on the call args directly.
     addServerError: addServerErrorMock,
     dismissSessionNotification: vi.fn(),
+    // #4890 — Slack-style intervention notifications widget read/unread
+    // actions wired through the store. The widget consumes these
+    // selectors at render time so the mock state needs them present.
+    markSessionNotificationRead: vi.fn(),
+    markAllSessionNotificationsRead: vi.fn(),
     markPromptAnsweredByRequestId: vi.fn(),
     sessionNotifications: [],
     setTerminalWriteCallback: vi.fn(),

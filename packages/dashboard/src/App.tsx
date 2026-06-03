@@ -34,6 +34,7 @@ import { StatusBar } from './components/StatusBar'
 import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
 import { SkillsPanel } from './components/SkillsPanel'
 import { HeaderOverflowMenu, type HeaderOverflowItem } from './components/HeaderOverflowMenu'
+import { NotificationsWidget } from './components/NotificationsWidget'
 import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
@@ -529,6 +530,11 @@ export function App() {
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
   const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
+  // #4890 — Slack-style notifications widget read/unread actions. Pulled
+  // as discrete selectors so a notifications-only state change doesn't
+  // re-render unrelated chrome.
+  const markSessionNotificationRead = useConnectionStore(s => s.markSessionNotificationRead)
+  const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
   const markPromptAnsweredByRequestId = useConnectionStore(s => s.markPromptAnsweredByRequestId)
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
@@ -1985,6 +1991,20 @@ export function App() {
             <span className="chrome-new-session-icon" aria-hidden="true">+</span>
             <span className="chrome-new-session-label">New Session</span>
           </button>
+          {/* #4890 — Slack-style intervention notifications widget. Bell
+              with unread badge → dropdown listing every intervention alert
+              (read + unread) so the operator gets a durable "do I have
+              outstanding interventions to deal with?" signal. The earlier
+              transient banners (NotificationBanners — still rendered above
+              the main content for unread alerts) keep their role as
+              foreground popups; the widget owns the durable history. */}
+          <NotificationsWidget
+            notifications={sessionNotifications}
+            onSwitchSession={handleSwitchSession}
+            onMarkRead={markSessionNotificationRead}
+            onMarkAllRead={markAllSessionNotificationsRead}
+            onDismiss={dismissSessionNotification}
+          />
           {/* #4974: Skills / Copy / Settings collapsed behind a single
               "⋯" overflow trigger. Previously these three icon buttons
               lived inline in header-right alongside `+ New Session` and

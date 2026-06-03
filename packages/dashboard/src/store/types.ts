@@ -266,6 +266,22 @@ export interface SessionNotification {
   message: string;
   timestamp: number;
   requestId?: string;
+  /**
+   * #4890 — Slack-style read/unread tracking. Set to `Date.now()` when the
+   * operator has acknowledged the alert via an explicit action: clicking a
+   * row in the notifications widget (which both marks read and switches
+   * sessions), the per-row "mark as read" affordance, "Mark all read", or
+   * by switching to the alert's session via any session-switch path.
+   * Absent means unread; presence means the alert no longer counts toward
+   * the widget's unread badge count. Note: simply opening the widget panel
+   * does NOT mark notifications as read on its own.
+   *
+   * Tracked in memory only — `sessionNotifications` itself is transient and
+   * resets on reload/reconnect, so persisting `readAt` would outlive the
+   * matching alert. Cross-device read sync is out of scope for v1 and would
+   * need a server-side persistence model (see PR #4890 follow-ups).
+   */
+  readAt?: number;
 }
 
 /**
@@ -800,6 +816,19 @@ export interface ConnectionState {
 
   // Session notification actions
   dismissSessionNotification: (id: string) => void;
+  /**
+   * #4890 — Slack-style notifications widget read/unread tracking.
+   *
+   * `markSessionNotificationRead(id)` stamps `readAt = Date.now()` on a single
+   * alert so it no longer counts toward the unread badge. Idempotent: calling
+   * twice keeps the first read timestamp (we don't want re-opens to look
+   * like a brand-new acknowledge).
+   *
+   * `markAllSessionNotificationsRead()` is the "Mark all read" affordance —
+   * stamps every currently-unread alert in one batch.
+   */
+  markSessionNotificationRead: (id: string) => void;
+  markAllSessionNotificationsRead: () => void;
 
   // #4982 — session-not-found chip state
   setSessionNotFoundError: (err: SessionNotFoundErrorState | null) => void;
