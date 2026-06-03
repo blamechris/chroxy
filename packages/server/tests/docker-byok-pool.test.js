@@ -299,6 +299,76 @@ describe('DockerContainerPool — shutdown', () => {
   })
 })
 
+describe('DockerContainerPool — markSoiled() (#5043)', () => {
+  /**
+   * A "soiled" container is one whose filesystem may have leaked into a
+   * snapshot image layer (or otherwise become coupled to a specific
+   * conversation). It MUST NOT be returned to the pool for another
+   * session to acquire. The session marks the container soiled when it
+   * takes a snapshot, then calls release() as normal — the pool
+   * intercepts the release and evicts inline instead of pooling.
+   *
+   * This is the design hook for #5023 (docker-byok snapshot/restore).
+   */
+  it('release after markSoiled evicts instead of pooling', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    pool.markSoiled('CONTAINER_SOILED')
+    const kept = await pool.release('k', 'CONTAINER_SOILED')
+    assert.equal(kept, false, 'soiled container must NOT be retained')
+    assert.equal(pool.size(), 0)
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1)
+    assert.ok(rmCalls[0].args.includes('CONTAINER_SOILED'))
+    // After eviction the soiled tracking entry is cleared so the same
+    // container id (if docker recycles ids in a future run) isn't
+    // poisoned forever.
+    assert.equal(pool.isSoiled('CONTAINER_SOILED'), false)
+  })
+
+  it('markSoiled is idempotent — calling twice is a no-op', () => {
+    const pool = new DockerContainerPool({ _execFile: execFileStub() })
+    pool.markSoiled('CONTAINER_DUP')
+    pool.markSoiled('CONTAINER_DUP')
+    assert.equal(pool.isSoiled('CONTAINER_DUP'), true)
+  })
+
+  it('markSoiled ignores null / empty container ids', () => {
+    const pool = new DockerContainerPool({ _execFile: execFileStub() })
+    pool.markSoiled(null)
+    pool.markSoiled('')
+    pool.markSoiled(undefined)
+    assert.equal(pool.isSoiled(null), false)
+    assert.equal(pool.isSoiled(''), false)
+  })
+
+  it('soiled marker only affects the specific container id', async () => {
+    const pool = new DockerContainerPool({
+      _execFile: execFileStub(),
+      _setTimeout: timerStubs().setT,
+      _clearTimeout: timerStubs().clearT,
+    })
+    pool.markSoiled('CONTAINER_A')
+    // Releasing a DIFFERENT id with the same key still works normally.
+    const kept = await pool.release('k', 'CONTAINER_B')
+    assert.equal(kept, true)
+    assert.equal(pool.size(), 1)
+  })
+
+  it('shutdown clears the soiled set', async () => {
+    const pool = new DockerContainerPool({ _execFile: execFileStub() })
+    pool.markSoiled('CONTAINER_X')
+    assert.equal(pool.isSoiled('CONTAINER_X'), true)
+    await pool.shutdown()
+    assert.equal(pool.isSoiled('CONTAINER_X'), false)
+  })
+})
+
 describe('getSharedPool() — singleton + env wiring', () => {
   beforeEach(() => _resetSharedPool())
   afterEach(() => _resetSharedPool())

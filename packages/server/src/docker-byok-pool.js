@@ -40,11 +40,16 @@
  *     responsible for `_verifyContainer()` after acquire — if the
  *     container died while idle (docker daemon restart, OOM kill, host
  *     reboot), the session falls back to `_startContainer()`.
- *   - Interaction with snapshot/restore: deferred — pooled containers do
- *     NOT participate in snapshot/restore yet (a snapshot of a pooled
- *     container could be acquired by an unrelated session). When a
- *     snapshot is taken, the session must mark the container "soiled" so
- *     it goes to eviction on release.
+ *   - Interaction with snapshot/restore (#5043): the pool exposes
+ *     `markSoiled(containerId)` so when docker-byok grows snapshot
+ *     support (#5023), a session that took a snapshot can mark its
+ *     container so the next `release()` call evicts it inline instead of
+ *     pooling. A soiled container's filesystem may have leaked into a
+ *     snapshot image layer (or otherwise become coupled to a specific
+ *     conversation) — handing it to an unrelated session would silently
+ *     surface another conversation's files / auth. Soiling is a property
+ *     of the container id, not the session, so it survives across the
+ *     release call and is cleared once the container is evicted.
  *
  * Why a separate module
  * ---------------------
@@ -123,6 +128,13 @@ export class DockerContainerPool {
     this._clearTimeout = opts._clearTimeout || clearTimeout
     /** @type {Map<string, Array<{ containerId: string, timer: any }>>} */
     this._entries = new Map()
+    /**
+     * Container ids marked soiled by `markSoiled()`. A soiled id at
+     * `release()` time is evicted inline instead of being pooled — see
+     * #5043 and the class docstring's snapshot/restore section.
+     * @type {Set<string>}
+     */
+    this._soiledIds = new Set()
     this._shuttingDown = false
   }
 
@@ -164,6 +176,18 @@ export class DockerContainerPool {
     // with no id was calling `docker rm -f` with an empty argument.
     if (!containerId) return false
     if (this._shuttingDown) {
+      this._soiledIds.delete(containerId)
+      await this._evict(containerId)
+      return false
+    }
+    // #5043: soiled containers (snapshot taken, or otherwise coupled to a
+    // particular conversation) MUST NOT be returned to the pool — the
+    // next session of the same shape would silently inherit the previous
+    // session's filesystem state. Evict inline and clear the marker so
+    // the soiled set doesn't grow unbounded.
+    if (this._soiledIds.has(containerId)) {
+      this._soiledIds.delete(containerId)
+      log.info(`pool release: ${containerId.slice(0, 12)} marked soiled; evicting instead of pooling`)
       await this._evict(containerId)
       return false
     }
@@ -208,6 +232,43 @@ export class DockerContainerPool {
   }
 
   /**
+   * Mark a container "soiled" so the next `release()` call evicts it
+   * inline instead of returning it to the pool. Used by callers that
+   * have done something to the container's filesystem which couples it
+   * to the current session — most importantly, taking a Docker snapshot
+   * (#5023). A snapshot includes the container's writable layer, so any
+   * files the previous session wrote / authenticated would silently leak
+   * into the next acquirer of this container.
+   *
+   * Idempotent — calling twice with the same id is a no-op. Null / empty
+   * / non-string ids are silently ignored so callers don't need to
+   * branch on whether they actually hold a container. No-ops cleanly
+   * when the pool is disabled (the session holds `this._pool = null`
+   * and never gets here).
+   *
+   * @param {string} containerId
+   */
+  markSoiled(containerId) {
+    if (typeof containerId !== 'string' || containerId.length === 0) return
+    if (this._soiledIds.has(containerId)) return
+    this._soiledIds.add(containerId)
+    log.info(`marked container ${containerId.slice(0, 12)} soiled — next release will evict`)
+  }
+
+  /**
+   * Whether a container has been marked soiled. Exposed for tests and
+   * dashboard introspection; production callers use `markSoiled()` and
+   * let `release()` handle the eviction.
+   *
+   * @param {string} containerId
+   * @returns {boolean}
+   */
+  isSoiled(containerId) {
+    if (typeof containerId !== 'string' || containerId.length === 0) return false
+    return this._soiledIds.has(containerId)
+  }
+
+  /**
    * Cancel all idle timers and `docker rm -f` every entry. After
    * shutdown, `acquire()` always returns null and `release()` evicts
    * inline. Idempotent.
@@ -222,6 +283,9 @@ export class DockerContainerPool {
       }
     }
     this._entries.clear()
+    // Clear the soiled-id tracking — a future pool instance (lazy
+    // singleton, test reset) starts from a clean slate.
+    this._soiledIds.clear()
     log.info(`shutdown: evicting ${toRemove.length} pooled container(s)`)
     await Promise.all(toRemove.map((id) => this._evict(id).catch((err) => {
       log.warn(`shutdown eviction of ${id.slice(0, 12)} failed: ${err.message}`)

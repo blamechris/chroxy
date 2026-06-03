@@ -900,6 +900,135 @@ describe('DockerByokSession — across-session pool (#5022)', () => {
   })
 })
 
+describe('DockerByokSession — snapshot soiling integration (#5043)', () => {
+  /**
+   * Same shape as the across-session pool stub above, but with the
+   * `markSoiled` hook the session calls when its container has taken
+   * (or restored from) a snapshot. Records every markSoiled call.
+   */
+  function poolStubWithSoiling({ acquireReturn = null } = {}) {
+    const calls = { acquire: [], release: [], markSoiled: [] }
+    const soiled = new Set()
+    let nextAcquire = acquireReturn
+    return {
+      calls,
+      acquire(key) {
+        calls.acquire.push(key)
+        const v = nextAcquire
+        nextAcquire = null
+        return v
+      },
+      async release(key, containerId) {
+        calls.release.push({ key, containerId })
+        if (soiled.has(containerId)) {
+          soiled.delete(containerId)
+          return false
+        }
+        return true
+      },
+      markSoiled(containerId) {
+        if (!containerId) return
+        soiled.add(containerId)
+        calls.markSoiled.push(containerId)
+      },
+      isSoiled(containerId) {
+        return soiled.has(containerId)
+      },
+    }
+  }
+
+  it('markActiveContainerSoiled forwards the live container id to the pool', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_SNAP\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerId, 'CONTAINER_SNAP')
+    session.markActiveContainerSoiled()
+    assert.deepEqual(pool.calls.markSoiled, ['CONTAINER_SNAP'])
+    assert.equal(pool.isSoiled('CONTAINER_SNAP'), true)
+
+    await session.destroy()
+  })
+
+  it('markActiveContainerSoiled is a no-op when pooling is disabled', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_NOPOOL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _poolEnv: {}, // pool disabled
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(session._pool, null)
+    // Must not throw, must not crash — just silently no-op.
+    session.markActiveContainerSoiled()
+    await session.destroy()
+  })
+
+  it('markActiveContainerSoiled is a no-op when there is no live container', () => {
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile: execFileStub({ info: { stdout: 'ok' } }),
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    // No start() — no container assigned. Should not crash and should
+    // not call into the pool with a null id.
+    session.markActiveContainerSoiled()
+    assert.deepEqual(pool.calls.markSoiled, [])
+  })
+
+  it('soiled containers are docker-rm-f\'d on destroy, not pooled', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_DIRTY\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // Snapshot taken mid-session — mark the container soiled.
+    session.markActiveContainerSoiled()
+
+    await session.destroy()
+
+    // The session called release(), and the pool returned false
+    // (evicted) because of the soiled marker. From the session's POV
+    // it released to the pool — the pool is responsible for the actual
+    // `docker rm -f`. We assert release WAS called (so the session
+    // didn't bypass the pool, which would defeat the design hook).
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_DIRTY')
+  })
+})
+
 describe('docker-byok provider registration', () => {
   it('registerDockerProvider() wires docker-byok when environments are enabled and docker is available', async () => {
     // Spy on console.warn so accidental log noise during the test
