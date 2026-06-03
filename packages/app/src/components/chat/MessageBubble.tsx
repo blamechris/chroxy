@@ -23,6 +23,7 @@ import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permis
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
 import { StreamStallChip } from '../StreamStallChip';
+import { ResumeUnknownChip } from '../ResumeUnknownChip';
 
 /**
  * #4755 — single-question Other / freeform answer payload (mobile parity
@@ -169,6 +170,26 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
       <StreamStallChip
         errorText={message.content?.trim() || ''}
         onRetry={onRetryStreamStall}
+      />
+    );
+  }
+
+  // #4971: dedicated chip for `error{code: 'resume_unknown'}` (server PR
+  // #4944, dashboard companion #4947). CliSession has already auto-fallen-
+  // back to a fresh conversation by the time this lands — the chip
+  // explains that calmly instead of the loud red crash bubble, and
+  // surfaces `attemptedResumeId` as subtext for operator correlation
+  // against `~/.chroxy/session-state.json.resumeConversationId`.
+  if (isError && message.code === 'resume_unknown') {
+    return (
+      <ResumeUnknownChip
+        // #4971 review: pass the raw content through (no `.trim()`) so
+        // any meaningful trailing context / newlines the server includes
+        // (e.g. wrapped CLI stderr) survive end-to-end into the chip's
+        // `accessibilityHint`. Matches the dashboard call site, which
+        // forwards `message.content` verbatim.
+        errorText={message.content ?? ''}
+        attemptedResumeId={message.attemptedResumeId}
       />
     );
   }
