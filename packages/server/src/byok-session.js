@@ -31,7 +31,7 @@ import {
 } from './models.js'
 import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
 import { translateSdkEvent } from './byok-event-translator.js'
-import { BUILTIN_TOOLS } from './byok-tools.js'
+import { BUILTIN_TOOLS, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
 import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
 import { MCPFleet, MCP_TOOL_PREFIX } from './byok-mcp-fleet.js'
@@ -1148,9 +1148,16 @@ export class ClaudeByokSession extends BaseSession {
    *     the local onAbort listener so the cascade happens even on a
    *     micro-race between the abort and the child's sendMessage.
    *
+   * Per-launch permission-mode override (#5017):
+   *   The model may pass an optional `permission_mode` field on the Task
+   *   input. When set, it overrides the inherited mode for this one
+   *   launch — but only if it is at-most-as-permissive as the parent
+   *   (plan < approve < acceptEdits < auto). Requesting a stricter mode
+   *   is allowed; requesting a more permissive mode is rejected with
+   *   an is_error tool_result.
+   *
    * Deferred (per scope note):
    *   - Sub-bubble UI / mid-flight tool surfacing for the child
-   *   - Per-launch permission-mode override (currently inherits)
    *   - subagent_type profile registry — the field is accepted in the
    *     schema for forward-compat but the runner ignores it in v1
    *
@@ -1167,6 +1174,33 @@ export class ClaudeByokSession extends BaseSession {
         content: 'Task tool requires a non-empty `prompt` field describing the work for the subagent.',
         isError: true,
       }
+    }
+    // #5017: per-launch permission_mode override. When omitted, the child
+    // inherits the parent's mode (existing v1 behaviour). When set, the
+    // value must be a known mode AND at-most-as-permissive as the parent
+    // (plan < approve < acceptEdits < auto) — a subagent must not be able
+    // to escalate beyond the policy the user picked for the parent.
+    let childPermissionMode = this.permissionMode
+    if (input?.permission_mode !== undefined) {
+      const requested = input.permission_mode
+      if (typeof requested !== 'string' || !TASK_PERMISSION_MODE_LIST.includes(requested)) {
+        return {
+          content: `Task tool: invalid \`permission_mode\` "${requested}". Allowed values: ${TASK_PERMISSION_MODE_LIST.join(', ')}.`,
+          isError: true,
+        }
+      }
+      const parentRank = TASK_PERMISSION_MODE_RANK[this.permissionMode]
+      const requestedRank = TASK_PERMISSION_MODE_RANK[requested]
+      // parentRank can be undefined if the parent's mode is somehow
+      // off-list (shouldn't happen — base-session validates — but defend
+      // anyway). Treat that as "no override allowed".
+      if (parentRank === undefined || requestedRank > parentRank) {
+        return {
+          content: `Task tool: \`permission_mode\` "${requested}" is more permissive than the parent's mode "${this.permissionMode}". Subagents must be at-most-as-permissive as the parent.`,
+          isError: true,
+        }
+      }
+      childPermissionMode = requested
     }
     if (signal?.aborted) {
       return { content: 'Interrupted by user before subagent spawned', isError: true }
@@ -1213,10 +1247,13 @@ export class ClaudeByokSession extends BaseSession {
       // Inherit permission mode so the subagent runs under the same
       // gating policy as the parent — a user who set `auto` doesn't
       // want the child to start prompting again, and a user in
-      // `approve` mode expects to gate the child's tools too. Direct
-      // assignment (vs setPermissionMode) is safe here: the child is
-      // fresh, not busy, and has no pending permissions to flush.
-      child.permissionMode = this.permissionMode
+      // `approve` mode expects to gate the child's tools too. When the
+      // model passes a `permission_mode` override on the Task input
+      // (#5017), we use that instead — already validated above to be
+      // at-most-as-permissive as the parent. Direct assignment (vs
+      // setPermissionMode) is safe here: the child is fresh, not busy,
+      // and has no pending permissions to flush.
+      child.permissionMode = childPermissionMode
       this._subagentSessions.set(toolUseId, child)
     } catch (ctorErr) {
       // Balance the agent_spawned emit + _activeAgents.set above so the

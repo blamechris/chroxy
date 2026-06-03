@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES } from '../src/byok-tools.js'
+import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } from '../src/byok-tools.js'
 
 /**
  * BUILTIN_TOOLS is the array passed verbatim into the SDK's
@@ -121,5 +121,38 @@ describe('BUILTIN_TOOLS', () => {
   it('BUILTIN_TOOL_NAMES contains Task (#4049)', () => {
     assert.ok(BUILTIN_TOOL_NAMES.has('Task'),
       'Task must be in BUILTIN_TOOL_NAMES so the executor catches misrouted dispatches')
+  })
+
+  it('Task input_schema exposes optional `permission_mode` enum (#5017)', () => {
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    const prop = task.input_schema.properties.permission_mode
+    assert.ok(prop, 'permission_mode property must exist on Task input_schema')
+    assert.equal(prop.type, 'string')
+    assert.deepEqual([...prop.enum].sort(), [...TASK_PERMISSION_MODE_LIST].sort())
+    // Must remain optional — required list is only description + prompt.
+    assert.ok(!task.input_schema.required.includes('permission_mode'),
+      'permission_mode must NOT be in required')
+  })
+
+  it('Task description discloses the per-launch permission_mode override + at-most-as-permissive rule (#5017)', () => {
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.match(task.description, /permission_mode/, 'description must name the override field')
+    assert.match(task.description, /permissive|stricter|at-most/i,
+      'description must disclose the at-most-as-permissive rule')
+  })
+
+  it('TASK_PERMISSION_MODE_RANK orders modes by permissiveness (#5017)', () => {
+    // Lower number = more restrictive. The strict ordering pins the
+    // contract that drives _executeTaskTool's validation:
+    // plan < approve < acceptEdits < auto.
+    assert.equal(TASK_PERMISSION_MODE_LIST.length, 4)
+    assert.ok(TASK_PERMISSION_MODE_RANK.plan < TASK_PERMISSION_MODE_RANK.approve)
+    assert.ok(TASK_PERMISSION_MODE_RANK.approve < TASK_PERMISSION_MODE_RANK.acceptEdits)
+    assert.ok(TASK_PERMISSION_MODE_RANK.acceptEdits < TASK_PERMISSION_MODE_RANK.auto)
+    // Every list entry must have a rank.
+    for (const mode of TASK_PERMISSION_MODE_LIST) {
+      assert.equal(typeof TASK_PERMISSION_MODE_RANK[mode], 'number',
+        `${mode} must have a rank`)
+    }
   })
 })

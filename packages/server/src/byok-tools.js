@@ -21,6 +21,32 @@
 export const TODO_STATUS_LIST = Object.freeze(['pending', 'in_progress', 'completed'])
 export const TODO_STATUSES = new Set(TODO_STATUS_LIST)
 
+/**
+ * Permissiveness ranking for the Task tool's per-launch `permission_mode`
+ * override (#5017). Lower number = more restrictive; higher = more permissive.
+ *
+ *   plan        (0) — model is asked to plan before acting; tool calls still
+ *                     gate on approval (and `plan` mode itself short-circuits
+ *                     write tools server-side).
+ *   approve     (1) — default; every tool call gates on user approval.
+ *   acceptEdits (2) — Read/Write/Edit/NotebookEdit/Glob/Grep auto-approved.
+ *   auto        (3) — every tool call auto-approved (skip-permissions).
+ *
+ * The Task tool refuses to launch a subagent under a mode strictly more
+ * permissive than the parent's. Equal-or-stricter is allowed.
+ *
+ * Kept here (next to the schema enum) so the JSON-schema property, the
+ * runtime validator in byok-session, and the test matrix all read from
+ * one source of truth.
+ */
+export const TASK_PERMISSION_MODE_LIST = Object.freeze(['plan', 'approve', 'acceptEdits', 'auto'])
+export const TASK_PERMISSION_MODE_RANK = Object.freeze({
+  plan: 0,
+  approve: 1,
+  acceptEdits: 2,
+  auto: 3,
+})
+
 export const BUILTIN_TOOLS = [
   {
     name: 'Read',
@@ -157,14 +183,18 @@ export const BUILTIN_TOOLS = [
     description:
       'Spawn a focused sub-agent (subagent) to handle a delegated piece of work. The ' +
       'sub-agent runs as a fresh ClaudeByokSession with its own isolated message history, ' +
-      'inheriting this session\'s permission mode and cwd. Use it to: research a topic without ' +
-      'polluting the parent context, run multi-step work in a focused scope, or delegate a ' +
-      'task that needs its own tool budget. The sub-agent\'s final assistant text is returned ' +
+      'inheriting this session\'s permission mode and cwd by default. Use it to: research a topic ' +
+      'without polluting the parent context, run multi-step work in a focused scope, or delegate ' +
+      'a task that needs its own tool budget. The sub-agent\'s final assistant text is returned ' +
       'as the tool_result — intermediate tool calls happen inside the child and are NOT ' +
       'surfaced to the parent (only `agent_spawned` / `agent_completed` events fire). ' +
       'Token cost is accumulated into the parent turn\'s `result.cost` so accounting stays ' +
       'attributed to the user-facing session. ' +
-      'Cancellation: interrupting the parent cascades to the child via a shared AbortSignal.',
+      'Cancellation: interrupting the parent cascades to the child via a shared AbortSignal. ' +
+      'Optional `permission_mode` overrides the inherited mode for this single launch, but ' +
+      'is constrained to be at-most-as-permissive as the parent (ranking: plan < approve < ' +
+      'acceptEdits < auto). Requesting a stricter mode is allowed; requesting a more ' +
+      'permissive mode is rejected with an is_error tool_result.',
     input_schema: {
       type: 'object',
       properties: {
@@ -179,6 +209,11 @@ export const BUILTIN_TOOLS = [
         subagent_type: {
           type: 'string',
           description: 'Optional subagent profile id (e.g. "general", "researcher"). Currently informational only — ignored by the runner in v1.',
+        },
+        permission_mode: {
+          type: 'string',
+          enum: [...TASK_PERMISSION_MODE_LIST],
+          description: 'Optional per-launch permission mode for the subagent. Must be at-most-as-permissive as the parent (plan < approve < acceptEdits < auto). When omitted, the subagent inherits the parent\'s mode.',
         },
       },
       required: ['description', 'prompt'],
