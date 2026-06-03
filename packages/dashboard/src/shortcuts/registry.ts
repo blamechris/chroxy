@@ -25,7 +25,17 @@
  */
 
 export type ShortcutCategory = 'navigation' | 'composer' | 'session' | 'view' | 'sidebar' | 'other'
-export type ShortcutScope = 'global' | 'composer'
+/**
+ * Scopes partition the keydown surfaces:
+ *   - `global`   — fired by the window-level dispatcher (useShortcutDispatch).
+ *   - `composer` — fired by the InputBar's local keydown handler.
+ *   - `sessionbar` — keyboard ladder owned by SessionBar tabs. Listed
+ *     in the registry purely so the cheat sheet / Settings surface the
+ *     combo (#4949). The global dispatcher MUST NOT fire it, because
+ *     Shift+Space outside text inputs would otherwise be `preventDefault`'d
+ *     everywhere, breaking native text fields.
+ */
+export type ShortcutScope = 'global' | 'composer' | 'sessionbar'
 
 export interface ShortcutDef {
   id: string

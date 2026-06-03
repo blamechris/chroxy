@@ -818,6 +818,19 @@ export function Sidebar({
                           tabIndex={visibleIds.indexOf(`resumable:${conv.conversationId}`) === focusedIndex ? 0 : -1}
                           className="sidebar-resumable-item"
                           data-testid={`resumable-item-${conv.conversationId}`}
+                          // #4939: resumable rows sit inside the outer
+                          // .sidebar-repo treeitem which becomes
+                          // draggable=true once onReorderRepos is wired.
+                          // HTML5 drag-and-drop bubbles, so without an
+                          // explicit guard here a click-and-drag on this
+                          // row would start the PARENT repo's drag
+                          // (visual + reorder side-effect both wrong).
+                          // draggable=false marks this child as a drag
+                          // source no-op, and stopPropagation on
+                          // dragstart prevents the event reaching the
+                          // outer repo's handleRepoDragStart.
+                          draggable={false}
+                          onDragStart={e => e.stopPropagation()}
                           onClick={() => onResumeSession(conv.conversationId)}
                           onContextMenu={e => {
                             // #4372: stopPropagation so the right-click does

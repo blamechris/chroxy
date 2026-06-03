@@ -183,4 +183,22 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     category: 'sidebar',
     scope: 'global',
   },
+  // #4949 — SessionBar keyboard reorder ladder. Shipped in #4945 but
+  // was undiscoverable: no cheat-sheet entry, no tooltip. The ladder
+  // is owned by SessionBar.tsx itself (focused-tab keydown handler),
+  // so this entry exists purely so users can find it in the `?`
+  // overlay and the Settings UI.
+  //
+  // Scope is `sessionbar` (not `global`) on purpose — the global
+  // dispatcher unconditionally calls preventDefault() on any matched
+  // id, which would break Shift+Space everywhere outside text inputs.
+  // The `sessionbar` scope is only consumed by the registry's
+  // list()/cheat-sheet path, never by matchEvent.
+  {
+    id: 'session.reorder.lift',
+    defaultBinding: 'shift+space',
+    description: 'Lift session tab for keyboard reorder (Arrow Left/Right to move, Enter/Escape to commit/cancel)',
+    category: 'session',
+    scope: 'sessionbar',
+  },
 ]

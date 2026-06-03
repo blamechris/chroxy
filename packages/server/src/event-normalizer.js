@@ -401,6 +401,38 @@ Object.assign(EVENT_MAP, {
       timestamp: Date.now(),
     }
     if (data.code) msg.code = data.code
+    // #4947: forward `attemptedResumeId` when CliSession's resume-failure
+    // path tagged the error envelope (see cli-session.js
+    // `_handleChildClose` — emits `error{code:'resume_unknown',
+    // attemptedResumeId, message}` from server PR #4944). The dashboard
+    // ResumeUnknownChip surfaces this id as subtext so operators can
+    // correlate against `~/.chroxy/session-state.json.resumeConversationId`
+    // without grepping logs.
+    //
+    // Hardening (from PR #4967 Copilot review):
+    //   1. Gate strictly on `code === 'resume_unknown'` so a buggy producer
+    //      can't sneak the field onto unrelated error envelopes.
+    //   2. Trim whitespace and treat whitespace-only as missing — same UX
+    //      guard the chip's render-time check already applies, but enforced
+    //      at the wire boundary so downstream consumers (mobile app, future
+    //      log/console viewers) see a consistent "present or absent, never
+    //      present-but-empty" shape.
+    //   3. Enforce the same 256-char cap the wire schema declares
+    //      (`ServerMessageSchema.attemptedResumeId`). The server doesn't
+    //      validate outgoing messages against ServerMessageSchema before
+    //      send, so without this guard a misbehaving producer could ship a
+    //      megabyte payload that the dashboard accepts (lax client parse)
+    //      but trips Zod-validating consumers. Silently truncate rather
+    //      than drop — the truncated id still helps operator triage.
+    if (
+      data.code === 'resume_unknown' &&
+      typeof data.attemptedResumeId === 'string'
+    ) {
+      const trimmed = data.attemptedResumeId.trim()
+      if (trimmed.length > 0) {
+        msg.attemptedResumeId = trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed
+      }
+    }
     return { messages: [{ msg }] }
   },
 
