@@ -628,6 +628,278 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
   })
 })
 
+describe('DockerByokSession — per-session container reuse', () => {
+  /**
+   * #5022 invariant: one `docker run` per session, regardless of how
+   * many tool dispatches the session performs. This is the baseline
+   * the pool layer builds on top of — without it, even one warm-pool
+   * acquire would only save the first turn's cold-start.
+   */
+  it('keeps the same container id across multiple tool dispatches (no fresh docker run)', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_REUSE_42\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: 'hello\n', stderr: '' },
+    })
+    const session = new DockerByokSession({ cwd: '/host/cwd', _execFile, _dockerBackend })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const idAfterStart = session._containerId
+    assert.equal(idAfterStart, 'CONTAINER_REUSE_42')
+
+    // Three back-to-back tool dispatches.
+    await session._dispatchBuiltinTool({ toolName: 'Bash', input: { command: 'echo a' } })
+    await session._dispatchBuiltinTool({ toolName: 'Bash', input: { command: 'echo b' } })
+    await session._dispatchBuiltinTool({ toolName: 'Bash', input: { command: 'echo c' } })
+
+    // Same container id throughout the session.
+    assert.equal(session._containerId, idAfterStart)
+    // Only ONE `docker run` for the entire session (the initial launch).
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 1, 'expected exactly one docker run per session')
+    // All three dispatches went through the backend (not via docker run).
+    assert.equal(_dockerBackend.calls.length, 3)
+    for (const call of _dockerBackend.calls) {
+      assert.equal(call.containerId, idAfterStart)
+    }
+
+    await session.destroy()
+  })
+})
+
+describe('DockerByokSession — across-session pool (#5022)', () => {
+  /**
+   * Minimal pool stub: records `acquire` / `release` calls so we can
+   * assert the session's start/destroy paths flow through the pool
+   * without spinning up a real DockerContainerPool.
+   */
+  function poolStub({ acquireReturn = null } = {}) {
+    const calls = { acquire: [], release: [] }
+    let nextAcquire = acquireReturn
+    return {
+      calls,
+      acquire(key) {
+        calls.acquire.push(key)
+        const v = nextAcquire
+        nextAcquire = null
+        return v
+      },
+      async release(key, containerId) {
+        calls.release.push({ key, containerId })
+        return true
+      },
+      setNextAcquire(id) {
+        nextAcquire = id
+      },
+    }
+  }
+
+  it('cache miss: launches a fresh container and releases it to the pool on destroy', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_FRESH\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const _dockerBackend = backendStub()
+    const pool = poolStub({ acquireReturn: null })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // Pool was asked, but missed → docker run was called.
+    assert.equal(pool.calls.acquire.length, 1)
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 1)
+    assert.equal(session._containerId, 'CONTAINER_FRESH')
+    assert.equal(session._acquiredFromPool, false)
+
+    await session.destroy()
+
+    // On destroy, the container is released to the pool (not docker-rm-f'd).
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_FRESH')
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 0, 'destroy must NOT inline-rm when releasing to pool')
+  })
+
+  it('cache hit: reuses the pooled container, skips docker run + useradd', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      // `exec` matches the verify call (`docker exec <id> true`).
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const _dockerBackend = backendStub()
+    const pool = poolStub({ acquireReturn: 'CONTAINER_POOLED' })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerId, 'CONTAINER_POOLED')
+    assert.equal(session._acquiredFromPool, true)
+    // Crucially: no `docker run` happened.
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 0, 'pool hit must skip docker run')
+    // And no `useradd` on the reused container (already provisioned).
+    const setupCalls = _execFile.calls.filter((c) =>
+      c.args[0] === 'exec' && c.args.some((a) => typeof a === 'string' && a.includes('useradd')))
+    assert.equal(setupCalls.length, 0, 'pool hit must skip useradd')
+
+    await session.destroy()
+    // Container released back to the pool.
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_POOLED')
+  })
+
+  it('cache hit but pooled container dead: evicts the dead id and launches fresh', async () => {
+    // The verify call (`docker exec <id> true`) fails — pooled
+    // container died while idle. The session should drop it and
+    // launch a fresh container.
+    let execCount = 0
+    const _execFile = (cmd, args, opts, callback) => {
+      _execFile.calls.push({ cmd, args: [...args], opts })
+      const sub = args[0]
+      if (sub === 'info') return callback(null, 'ok', '')
+      if (sub === 'exec') {
+        execCount++
+        // First exec is the verify of the pooled container — fail it.
+        // Subsequent execs (useradd + chown for the fresh container) succeed.
+        if (execCount === 1) {
+          const err = new Error('No such container: CONTAINER_DEAD')
+          err.stderr = 'No such container: CONTAINER_DEAD'
+          return callback(err, '', 'No such container: CONTAINER_DEAD')
+        }
+        return callback(null, '', '')
+      }
+      if (sub === 'run') return callback(null, 'CONTAINER_FALLBACK\n', '')
+      if (sub === 'rm') return callback(null, '', '')
+      callback(null, '', '')
+    }
+    _execFile.calls = []
+
+    const _dockerBackend = backendStub()
+    const pool = poolStub({ acquireReturn: 'CONTAINER_DEAD' })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // Fell back to docker run with a new id.
+    assert.equal(session._containerId, 'CONTAINER_FALLBACK')
+    assert.equal(session._acquiredFromPool, false)
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 1)
+    // The dead pooled id was best-effort docker-rm-f'd.
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_DEAD')))
+
+    await session.destroy()
+  })
+
+  it('does NOT engage the pool when externally-managed containerId is supplied', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+    })
+    const pool = poolStub()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      containerId: 'EXTERNAL_MANAGED',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // External container path — pool was never consulted.
+    assert.equal(pool.calls.acquire.length, 0)
+    assert.equal(session._containerId, 'EXTERNAL_MANAGED')
+
+    await session.destroy()
+
+    // External container is NOT released to the pool, and NOT removed.
+    assert.equal(pool.calls.release.length, 0)
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 0)
+  })
+
+  it('does NOT engage the pool when pool flag is disabled (default behaviour)', async () => {
+    // No _pool injected, no CHROXY_DOCKER_BYOK_POOL env var → session
+    // should fall through to the existing inline `docker rm -f` path.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_DEFAULT\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _poolEnv: {}, // explicitly empty env → disabled
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(session._pool, null)
+
+    await session.destroy()
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1, 'with pool disabled, destroy() falls back to docker rm -f')
+    assert.ok(rmCalls[0].args.includes('CONTAINER_DEFAULT'))
+  })
+
+  it('skips pool release when session start failed (no leak via dirty pool)', async () => {
+    // Missing creds → super.start() bails before _containerReady is set.
+    // The pool MUST NOT receive a container that never went healthy.
+    delete process.env.ANTHROPIC_API_KEY
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_HALF\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStub()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    // Do NOT stub _client — super.start() will see no key and bail.
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, false)
+    // Pool was never released — the dirty container was docker-rm-f'd.
+    assert.equal(pool.calls.release.length, 0)
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_HALF')),
+      'half-started container must be rm-f\'d, not pooled')
+  })
+})
+
 describe('docker-byok provider registration', () => {
   it('registerDockerProvider() wires docker-byok when environments are enabled and docker is available', async () => {
     // Spy on console.warn so accidental log noise during the test
