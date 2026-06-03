@@ -168,8 +168,14 @@ export function formatBindingForDisplay(canonical: string, isMac: boolean): stri
       // PRETTY_KEY_NAMES for the W3C `KeyboardEvent.key` names whose
       // generic title-case rendering looks broken; otherwise leave
       // punctuation as-is and title-case the rest.
+      //
+      // Use an own-property check on PRETTY_KEY_NAMES so a binding with
+      // a key like "constructor" / "toString" / "__proto__" (possible
+      // via localStorage override tampering or a future binding source)
+      // does not pick up `Object.prototype.<name>` and render a
+      // function reference in the UI.
       if (/^[a-z]$/.test(part)) out.push(part.toUpperCase())
-      else if (PRETTY_KEY_NAMES[part]) out.push(PRETTY_KEY_NAMES[part])
+      else if (Object.prototype.hasOwnProperty.call(PRETTY_KEY_NAMES, part)) out.push(PRETTY_KEY_NAMES[part]!)
       else if (/^[a-z]/.test(part)) out.push(part.charAt(0).toUpperCase() + part.slice(1))
       else out.push(part)
     } else {
