@@ -20,9 +20,12 @@
  * -----------------------------------------
  *   - Default OFF: opt-in via `CHROXY_DOCKER_BYOK_POOL=1` or pool option
  *     so today's per-session behaviour is preserved unless asked for.
- *   - Cache key: `image|cwd|memoryLimit|cpuLimit|containerUser`. Cwd is
- *     part of the key because the host cwd is bind-mounted at /workspace
- *     — reusing a container across cwds would silently leak host paths.
+ *   - Cache key: `image|cwd|memoryLimit|cpuLimit|containerUser` —
+ *     extended with `|<devcontainerFingerprint>` when a session opted
+ *     into `useDevcontainer` (#5080) so a changed devcontainer.json
+ *     overlay invalidates pre-existing pooled containers. Cwd is part
+ *     of the key because the host cwd is bind-mounted at /workspace —
+ *     reusing a container across cwds would silently leak host paths.
  *     Resource limits are part of the key so a session that asked for
  *     `--memory 4g` doesn't pick up a 1g container.
  *   - Eviction: per-entry idle timeout (default 5 minutes) — a setTimeout
@@ -116,23 +119,46 @@ export const DEFAULT_MAX_AGE_MS = 30 * 60 * 1000
  * shape used by `DockerContainerPool#acquire` / `#release` so the
  * session and the pool can compute keys independently.
  *
+ * `devcontainerFingerprint` (#5080) is an optional short hash of the
+ * resolved devcontainer.json overlay. When `useDevcontainer: true` is
+ * set, the session passes a SHA-1 of the parsed config so that a change
+ * to `mounts` / `containerEnv` / `forwardPorts` / `postCreateCommand`
+ * cache-busts the key — otherwise a pool hit would silently return a
+ * container provisioned against a STALE devcontainer.json.
+ *
+ * Non-devcontainer sessions pass `null` (or omit the field), preserving
+ * backward compatibility — the joined key remains
+ * `image|cwd|memoryLimit|cpuLimit|containerUser`, so pre-fingerprint
+ * keys still match and devcontainer + non-devcontainer sessions of the
+ * same resource shape never collide (the trailing `|<fp>` is only
+ * appended when a fingerprint is supplied).
+ *
  * @param {object} spec
  * @param {string} spec.image
  * @param {string} spec.cwd
  * @param {string} spec.memoryLimit
  * @param {string} spec.cpuLimit
  * @param {string} spec.containerUser
+ * @param {string|null} [spec.devcontainerFingerprint] — optional short
+ *   hash of the resolved devcontainer overlay (#5080)
  * @returns {string}
  */
 export function buildPoolKey(spec) {
   if (!spec || typeof spec !== 'object') {
     throw new Error('buildPoolKey: spec is required')
   }
-  const { image, cwd, memoryLimit, cpuLimit, containerUser } = spec
+  const { image, cwd, memoryLimit, cpuLimit, containerUser, devcontainerFingerprint } = spec
   if (!image || !cwd || !memoryLimit || !cpuLimit || !containerUser) {
     throw new Error('buildPoolKey: image, cwd, memoryLimit, cpuLimit, containerUser are required')
   }
-  return [image, cwd, memoryLimit, cpuLimit, containerUser].join('|')
+  const base = [image, cwd, memoryLimit, cpuLimit, containerUser].join('|')
+  // Only append the fingerprint segment when one was supplied. A
+  // non-devcontainer session keeps the original 5-segment key shape,
+  // matching pre-#5080 callers exactly so existing entries still hit.
+  if (typeof devcontainerFingerprint === 'string' && devcontainerFingerprint.length > 0) {
+    return `${base}|${devcontainerFingerprint}`
+  }
+  return base
 }
 
 /**

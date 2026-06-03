@@ -93,6 +93,98 @@ describe('buildPoolKey()', () => {
   it('throws when spec is not an object', () => {
     assert.throws(() => buildPoolKey(null), /required/)
   })
+
+  // #5080: optional devcontainer-overlay fingerprint
+  it('omits the fingerprint segment when devcontainerFingerprint is null', () => {
+    const key = buildPoolKey({
+      image: 'node:22-slim',
+      cwd: '/host/cwd',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+      devcontainerFingerprint: null,
+    })
+    // Backward compat: pre-#5080 callers (no fingerprint at all) and
+    // explicit null both produce the same 5-segment key.
+    assert.equal(key, 'node:22-slim|/host/cwd|2g|2|chroxy')
+  })
+
+  it('omits the fingerprint segment when devcontainerFingerprint is undefined', () => {
+    const key = buildPoolKey({
+      image: 'node:22-slim',
+      cwd: '/host/cwd',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+      devcontainerFingerprint: undefined,
+    })
+    assert.equal(key, 'node:22-slim|/host/cwd|2g|2|chroxy')
+  })
+
+  it('omits the fingerprint segment when devcontainerFingerprint is empty string', () => {
+    const key = buildPoolKey({
+      image: 'node:22-slim',
+      cwd: '/host/cwd',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+      devcontainerFingerprint: '',
+    })
+    assert.equal(key, 'node:22-slim|/host/cwd|2g|2|chroxy')
+  })
+
+  it('appends the fingerprint as a trailing segment when supplied', () => {
+    const key = buildPoolKey({
+      image: 'node:22-slim',
+      cwd: '/host/cwd',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+      devcontainerFingerprint: 'abcdef1234567890',
+    })
+    assert.equal(key, 'node:22-slim|/host/cwd|2g|2|chroxy|abcdef1234567890')
+  })
+
+  it('two different fingerprints produce two different keys (cache-bust on devcontainer.json change)', () => {
+    const base = {
+      image: 'node:22-slim',
+      cwd: '/host/cwd',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+    }
+    const oldKey = buildPoolKey({ ...base, devcontainerFingerprint: 'oldfingerprint01' })
+    const newKey = buildPoolKey({ ...base, devcontainerFingerprint: 'newfingerprint02' })
+    assert.notEqual(oldKey, newKey)
+  })
+
+  it('same fingerprint produces the same key (warm pool hit on unchanged devcontainer.json)', () => {
+    const base = {
+      image: 'node:22-slim',
+      cwd: '/host/cwd',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+      devcontainerFingerprint: 'samefingerprint1',
+    }
+    assert.equal(buildPoolKey(base), buildPoolKey({ ...base }))
+  })
+
+  it('devcontainer session and non-devcontainer session produce DIFFERENT keys for the same resource shape', () => {
+    // Otherwise a non-devcontainer session could acquire a container
+    // provisioned with a devcontainer overlay (different env / mounts),
+    // which would silently surface the overlay state.
+    const base = {
+      image: 'node:22-slim',
+      cwd: '/host/cwd',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+    }
+    const plain = buildPoolKey(base)
+    const dc = buildPoolKey({ ...base, devcontainerFingerprint: 'feedfacedeadbeef' })
+    assert.notEqual(plain, dc)
+  })
 })
 
 describe('isPoolEnabled()', () => {
