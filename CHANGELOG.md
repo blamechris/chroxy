@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.42] - 2026-06-03
+
+Single-fix release. Voice input on macOS desktop finally produces transcripts — v0.9.40's entitlement fix was necessary but two follow-on bugs in the Swift helper kept it silent until now. No other changes.
+
+### Fixed
+
+- **🚨 Voice input actually transcribes on macOS desktop now (#4985):** v0.9.40's `audio-input` entitlement fix (#4954) let `speech-helper` reach `tcc_send_request_authorization()` without being killed, but two runtime bugs kept the helper from ever producing transcripts:
+  - `semaphore.wait()` was nested INSIDE the `requestAuthorization` completion closure. Since `requestAuthorization` is async, the closure runs on a background queue later — but `startRecognition()` itself had no blocking call at function scope. The helper submitted the TCC request and exited cleanly in ~100ms (exit 0, zero stderr) BEFORE TCC responded, before `audioEngine.start()` ran, before the recognition task was even created. This is why the v0.9.40 entitlement verification didn't catch the regression — the helper signed correctly and the prior `exit 0 in 100ms` *looked* like clean execution.
+  - Apple's `SFSpeechRecognizer.recognitionTask(with:resultHandler:)` invokes its result handler on the **main thread**. Even with the scope bug fixed, blocking main on a DispatchSemaphore prevented the handler from firing, so recognition would run forever without producing partials or finals. Switched to driving `RunLoop.main` instead — services both the async authorization completion AND Apple-framework main-thread callbacks; `teardown()` calls `CFRunLoopStop()` to break out cleanly. Copilot caught that `RunLoop.current` should be `RunLoop.main` explicitly so the loop being driven always matches the one `setDone()` stops, regardless of which thread invokes `startRecognition()` in the future (`ea6e3ba3`).
+  - Dropped the unconditional `requiresOnDeviceRecognition = true`. When on-device assets aren't downloaded for the user's locale, the recognition task hangs silently with no result and no error. Letting Speech pick its source (on-device when ready, network otherwise) is reliably responsive across configurations. Note: voice audio MAY transit Apple's recognition servers for users whose on-device assets aren't installed — same behavior as Apple's first-party Dictation feature.
+  - Live verification: trace logging captured `Hello` at +1.6s → `Hello world` at +2.0s → `Hello world test` at +2.8s on a manual click → speak → stop cycle, where the prior helper produced zero callbacks before dying. Live confirmed working on the installed Chroxy.app — mic icon flips, partial transcripts stream into the input box, final transcript stays when stopped.
+
+### Follow-up issues filed during this sweep
+
+- #4986 — `speech.rs` 3-second SIGTERM kill-fallback in `stop()` previously masked this bug (helper "exited cleanly" via SIGKILL after Tauri timed out). The fallback should log a warning when it fires, so future bugs of this shape don't slip past local testing.
+
+
+
 ## [0.9.41] - 2026-06-02
 
 Sixth daytime sweep: three user-visible bug fixes landed in parallel. One desktop UI fix (topbar overlap from the v0.9.39 New Session button), one chat rendering fix (mid-word fragmentation around tool/skill bubbles), and one server reliability fix (silent send failures after daemon restart now surface a structured error envelope). No version bumps to dependencies, no schema migrations, no breaking changes.
