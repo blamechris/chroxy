@@ -1687,14 +1687,25 @@ export class SessionManager extends EventEmitter {
         // would silently drop out of cumulativeUsage / sessionCost /
         // budget gates (#5038).
         //
-        // Turn-terminal: both events fire exactly once per turn (success
-        // OR error, never both — see byok-session._emitTurnError + the
-        // success-path result emit), so accounting an `error` here can't
-        // double-count with a later `result` for the same turn.
+        // Single-counting guarantee: the `Number.isFinite(data?.cost)`
+        // predicate below — NOT result/error mutual exclusion — is what
+        // ensures we account each priced turn exactly once.
+        //   - Happy path: a single `result` (with finite cost) per turn.
+        //   - byok-session error path: a single `error` (with finite cost
+        //     for the partial spend, see #5037).
+        //   - Stream-stall path (sdk-session._handleStreamStall and
+        //     cli-session._emitInterruptedTurnResult): emits BOTH a
+        //     synthetic `result` AND `error` for the same turn — but the
+        //     synthetic `result` carries `cost: null`, so the
+        //     Number.isFinite gate filters it. The `error` half is
+        //     plain stream-stall metadata (no cost field), also filtered.
+        // No emit topology change is needed to add new failure paths as
+        // long as they keep this invariant (priced terminal ⇒ exactly one
+        // event with a finite cost per turn).
         //
-        // Use Number.isFinite so NaN / Infinity (provider bugs) don't
-        // poison cumulative totals or trigger spurious budget events
-        // (#4088 review).
+        // Number.isFinite also guards against NaN / Infinity (provider
+        // bugs) poisoning cumulative totals or triggering spurious budget
+        // events (#4088 review).
         if ((event === 'result' || event === 'error') && Number.isFinite(data?.cost)) {
           const sessionEntry = this._sessions.get(sessionId)
           const model = session.currentModel || sessionEntry?.model || null
