@@ -1243,8 +1243,13 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     // user already answered, so the late expiry is a no-op (#2833).
     const promptMsg = state.sessionStates.s1!.messages[0]!;
     expect(promptMsg.content).toBe(originalContent);
-    // Banner is still cleaned up so nothing dangles in the UI.
-    expect(state.sessionNotifications.find((n) => n.requestId === 'req-resolved')).toBeUndefined();
+    // #5008 — the notification row is preserved as durable widget history,
+    // but stamped read so the banner stack drops it. Pre-#5008 we
+    // hard-removed the row, which silently drained every resolved/expired
+    // alert from the NotificationsWidget.
+    const banner = state.sessionNotifications.find((n) => n.requestId === 'req-resolved');
+    expect(banner).toBeDefined();
+    expect(banner!.readAt).toBeTypeOf('number');
 
     _testMessageHandler.clearContext();
   });
