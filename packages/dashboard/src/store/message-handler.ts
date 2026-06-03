@@ -1501,6 +1501,35 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
             }
           }
         }
+        // #4999 — mid-sentence fragmentation gate. The post-#4889 split only
+        // makes sense when the prior bubble's text reached a sentence boundary
+        // (the LLM finished a thought before invoking the tool); otherwise the
+        // tool interrupted mid-sentence and the post-tool delta is the same
+        // sentence continuing. Treat the prior slot as "sentence-complete"
+        // only when its trailing non-whitespace character is a sentence
+        // terminator (`.`, `!`, `?`) or a hard line break (`\n`). A bubble
+        // that ends with a word char, open paren, comma, colon, dash, etc.
+        // is mid-sentence — route the delta back to the existing slot so the
+        // sentence renders as one contiguous bubble (followed by the tool).
+        if (toolAfter) {
+          const priorFullForGate = slot.type === 'response' ? slot.content + bufferedContent : '';
+          // Trim trailing whitespace before inspecting the last char so e.g.
+          // `"...sentence.   "` still reads as sentence-complete.
+          const lastNonWs = priorFullForGate.replace(/\s+$/, '');
+          // Strip trailing closing punctuation/quotes that commonly follow a
+          // sentence terminator (`.")`, `."`, `!'`, `?)`, etc.) so the gate
+          // looks at the terminator itself, not the wrapper. Without this,
+          // `"He said \"done.\""` reads as ending in `"` and the #4889 split
+          // would wrongly disable — paragraph breaks across a tool boundary
+          // would be lost.
+          const stripped = lastNonWs.replace(/[)\]}"'’”»›]+$/, '');
+          const lastChar = stripped.charAt(stripped.length - 1);
+          const endsSentence = lastChar === '.' || lastChar === '!' || lastChar === '?';
+          const endsHardBreak = /\n\s*$/.test(priorFullForGate);
+          if (!endsSentence && !endsHardBreak) {
+            toolAfter = false;
+          }
+        }
         if (toolAfter) {
           // #4975 — mid-word peel. The LLM sometimes interrupts a text
           // content block to call a tool, splitting a word across the
