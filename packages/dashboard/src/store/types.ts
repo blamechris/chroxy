@@ -123,6 +123,11 @@ export interface ProviderCapabilities {
   // method existence — only providers whose session class implements
   // setPermissionRules report this as true (#3072).
   sessionRules?: boolean;
+  // #5026: true when the provider runs sessions inside an isolated Docker
+  // container (docker-cli, docker-sdk, docker-byok). The dashboard surfaces
+  // this with a visual badge + container settings knobs (image / memory /
+  // cpu / containerUser) in the New Session modal's advanced section.
+  containerized?: boolean;
 }
 
 // #3404 audit (F1+F5): per-provider auth state for grey-out + billing panel.

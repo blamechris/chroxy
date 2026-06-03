@@ -4401,6 +4401,40 @@
   letter-spacing: 0.02em;
 }
 
+/* #5026: distinct chrome for the "Containerized" badge so docker-* providers
+   read as sandboxed at a glance. Borrows the accent-blue palette already
+   used for primary affordances elsewhere in the modal. */
+.capability-badge[data-capability="containerized"] {
+  background: var(--accent-blue-subtle, rgba(96, 165, 250, 0.15));
+  border-color: var(--accent-blue, #60a5fa);
+  color: var(--accent-blue, #60a5fa);
+  font-weight: 600;
+}
+
+/* #5026: hint shown under the capability badges when a containerized
+   provider is selected. Lower-emphasis than the warning-toned fix-hint
+   but matches its block geometry so the modal still rhythms cleanly. */
+.provider-container-hint {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-session-bar, var(--bg-tertiary));
+  border-left: 3px solid var(--accent-blue, #60a5fa);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.provider-container-hint-label {
+  font-weight: 600;
+  color: var(--accent-blue, #60a5fa);
+}
+
+.provider-container-hint-body {
+  color: var(--text-secondary);
+}
+
 .provider-billing-hint {
   width: 100%;
   font-size: 11px;
