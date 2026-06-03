@@ -171,4 +171,154 @@ describe('StatusBar', () => {
       expect(title).not.toMatch(/input \+/)
     })
   })
+
+  // #5065: absolute `used / total` token meter in the header status line.
+  // The meter REPLACES the plain text chip when all three required inputs
+  // are present (input + output + contextWindow) so users see the same
+  // information the FooterBar shows, in the at-a-glance header location.
+  describe('#5065 — context-window meter (used / total + bar)', () => {
+    it('renders absolute used/total when input + output + contextWindow are all provided', () => {
+      render(
+        <StatusBar
+          contextPercent={3}
+          inputTokens={25000}
+          outputTokens={5000}
+          contextWindow={1_000_000}
+        />,
+      )
+      const label = screen.getByTestId('status-context-label')
+      expect(label).toHaveTextContent('30.0k / 1M tokens')
+    })
+
+    it('renders the meter container with progressbar a11y semantics', () => {
+      render(
+        <StatusBar
+          contextPercent={30}
+          inputTokens={60000}
+          outputTokens={0}
+          contextWindow={200_000}
+        />,
+      )
+      expect(screen.getByTestId('status-context-meter')).toBeInTheDocument()
+      const bar = screen.getByRole('progressbar', { name: /context window usage/i })
+      expect(bar.getAttribute('aria-valuenow')).toBe('30')
+      expect(bar.getAttribute('aria-valuemin')).toBe('0')
+      expect(bar.getAttribute('aria-valuemax')).toBe('100')
+    })
+
+    it('caps the fill width at 100% even when the model went over budget', () => {
+      const { container } = render(
+        <StatusBar
+          contextPercent={130}
+          inputTokens={1_300_000}
+          outputTokens={0}
+          contextWindow={1_000_000}
+        />,
+      )
+      const fill = container.querySelector('.status-context-fill') as HTMLElement
+      expect(fill.style.width).toBe('100%')
+      // The numeric label still shows the true used count (1.3M), so the
+      // user gets the "you're over" signal in text even though the bar is
+      // pegged at 100% width.
+      expect(screen.getByTestId('status-context-label')).toHaveTextContent('1.3M / 1M tokens')
+    })
+
+    it('applies the over-budget class past 100% to drive the pulse animation', () => {
+      const { container } = render(
+        <StatusBar
+          contextPercent={120}
+          inputTokens={1_200_000}
+          outputTokens={0}
+          contextWindow={1_000_000}
+        />,
+      )
+      const bar = container.querySelector('.status-context-bar')
+      expect(bar!.className).toContain('over-budget')
+    })
+
+    it('applies the high class at >= 80% (matches FooterBar threshold)', () => {
+      const { container } = render(
+        <StatusBar
+          contextPercent={85}
+          inputTokens={850_000}
+          outputTokens={0}
+          contextWindow={1_000_000}
+        />,
+      )
+      const bar = container.querySelector('.status-context-bar')
+      expect(bar!.className).toContain('high')
+      expect(bar!.className).not.toContain('over-budget')
+    })
+
+    it('applies the medium class between 50% and 80%', () => {
+      const { container } = render(
+        <StatusBar
+          contextPercent={60}
+          inputTokens={600_000}
+          outputTokens={0}
+          contextWindow={1_000_000}
+        />,
+      )
+      const bar = container.querySelector('.status-context-bar')
+      expect(bar!.className).toContain('medium')
+    })
+
+    it('hides the meter and falls back to the text chip when no contextWindow is provided', () => {
+      render(
+        <StatusBar
+          context="30k tokens"
+          contextPercent={30}
+          inputTokens={30000}
+          outputTokens={0}
+          // contextWindow intentionally omitted (e.g. no model selected yet)
+        />,
+      )
+      expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+      expect(screen.getByText('30k tokens')).toBeInTheDocument()
+    })
+
+    it('hides the meter when token usage is zero (idle session, no turn yet)', () => {
+      render(
+        <StatusBar
+          contextPercent={null}
+          inputTokens={0}
+          outputTokens={0}
+          contextWindow={1_000_000}
+        />,
+      )
+      expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+      // The text chip still falls back to NBSP (no `context` prop given).
+    })
+
+    it('hides the meter when contextPercent is null even if tokens are present', () => {
+      // Defensive: percent comes from App.tsx's useMemo; when null (no
+      // model match, etc.) we have no signal for the bar fill — hide.
+      render(
+        <StatusBar
+          context="30k tokens"
+          contextPercent={null}
+          inputTokens={30000}
+          outputTokens={0}
+          contextWindow={1_000_000}
+        />,
+      )
+      expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+    })
+
+    it('inherits the contextTooltip on the meter (same in/out breakdown as the text chip)', () => {
+      render(
+        <StatusBar
+          contextPercent={30}
+          inputTokens={25000}
+          outputTokens={5000}
+          contextWindow={1_000_000}
+        />,
+      )
+      const meter = screen.getByTestId('status-context-meter')
+      const title = meter.getAttribute('title') ?? ''
+      expect(title).toContain('30%')
+      expect(title).toContain('25k input')
+      expect(title).toContain('5k output')
+    })
+  })
 })

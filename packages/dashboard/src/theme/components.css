@@ -3860,6 +3860,62 @@
   min-width: 50px;
 }
 
+/*
+ * #5065: header context-window meter — `used / total tokens` label +
+ * fill bar. Sized smaller than the footer's variant (50px bar vs 60px)
+ * so the header status line stays compact; shares the same colour
+ * thresholds + over-budget pulse so the two surfaces flip from green →
+ * yellow → red in lockstep.
+ */
+.status-context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.status-context-bar {
+  display: inline-block;
+  width: 50px;
+  height: 6px;
+  background: var(--bg-tertiary, #1a1a2e);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.status-context-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-green, #48bb78);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.status-context-bar.medium .status-context-fill {
+  background: var(--accent-yellow, #ecc94b);
+}
+
+.status-context-bar.high .status-context-fill {
+  background: var(--accent-red, #e53e3e);
+}
+
+.status-context-bar.over-budget .status-context-fill {
+  background: var(--accent-red-dark, #c53030);
+  animation: statusContextOverBudgetPulse 2s ease-in-out infinite;
+}
+
+@keyframes statusContextOverBudgetPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+.status-context-label {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .busy-indicator {
   width: 8px;
   height: 8px;
