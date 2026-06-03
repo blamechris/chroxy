@@ -417,6 +417,13 @@ export class DockerByokSession extends ClaudeByokSession {
     this._explicitImage = opts.image
     this._explicitContainerUser = opts.containerUser
     this._dcConfig = null
+    // #5080: short SHA-1 of the resolved devcontainer overlay, used to
+    // namespace the pool key so a changed devcontainer.json invalidates
+    // any pooled container provisioned against the old config. Stays
+    // null until `_resolveDevContainer()` runs (or `useDevcontainer` is
+    // false), which keeps the pool key shape backward-compatible for
+    // non-devcontainer sessions.
+    this._devcontainerFingerprint = null
 
     // #5024: Docker Compose support. When `composeFile` is set, start()
     // shells out `docker compose up -d` against that file and attaches
@@ -678,6 +685,14 @@ export class DockerByokSession extends ClaudeByokSession {
    * The host cwd is part of the key because /workspace is bind-mounted
    * from cwd — reusing a container across cwds would silently surface
    * files from another workspace.
+   *
+   * #5080: When `useDevcontainer` is set, the resolved devcontainer
+   * overlay's SHA-1 fingerprint is also part of the key so a changed
+   * `.devcontainer/devcontainer.json` (new mount, different
+   * `containerEnv`, etc.) cannot silently reuse a container provisioned
+   * against the OLD config. Non-devcontainer sessions pass null and the
+   * key shape stays exactly as it was — those sessions can still pool
+   * with each other.
    */
   _poolKey() {
     return buildPoolKey({
@@ -686,6 +701,7 @@ export class DockerByokSession extends ClaudeByokSession {
       memoryLimit: this._memoryLimit,
       cpuLimit: this._cpuLimit,
       containerUser: this._containerUser,
+      devcontainerFingerprint: this._devcontainerFingerprint,
     })
   }
 
@@ -723,6 +739,22 @@ export class DockerByokSession extends ClaudeByokSession {
    * #5022 — across-session idle pool. Per-session reuse of the same
    * container across turns is handled in `_dispatchBuiltinTool` and
    * does not depend on the pool.
+   *
+   * #5080 — When `useDevcontainer: true`, parsing the
+   * `.devcontainer/devcontainer.json` overlay happens BEFORE the pool
+   * lookup, and the resolved overlay's SHA-1 fingerprint is folded into
+   * the pool key. Concretely:
+   *   - the resolved `image` and `remoteUser` are part of the key as
+   *     first-class segments (they change which image is pulled / which
+   *     user the container runs as), AND
+   *   - the fingerprint covers `mounts`, `containerEnv`, `forwardPorts`,
+   *     and `postCreateCommand` — these ARE applied to `docker run` (as
+   *     `-v`, `-e`, `-p`) and the post-create exec, but they are NOT
+   *     part of the base 5-segment key shape, so they need the
+   *     fingerprint to invalidate a stale pooled container.
+   * If any of those change, the next acquire misses and a fresh
+   * container is launched. Non-devcontainer sessions pass a null
+   * fingerprint and their pool key shape is unchanged.
    */
   async _acquireOrStartContainer() {
     // #5024: compose mode short-circuits the entire pool + bare-image
@@ -733,7 +765,11 @@ export class DockerByokSession extends ClaudeByokSession {
       return
     }
     // #5024: devcontainer parsing must happen BEFORE the pool lookup
-    // because the resolved image/user are part of the pool key.
+    // because the resolved image/user are part of the pool key. #5080:
+    // the same call also computes `_devcontainerFingerprint`, which
+    // is folded into the pool key so a changed devcontainer.json
+    // overlay invalidates any pooled container provisioned against the
+    // old config.
     if (this._useDevcontainer) {
       this._resolveDevContainer()
     }
@@ -808,6 +844,59 @@ export class DockerByokSession extends ClaudeByokSession {
       mounts: validateMounts(config.mounts, cwd, { logger: log }),
       containerEnv: sanitizeContainerEnv(config.containerEnv, { logger: log }),
     }
+    // #5080: Compute the pool-key fingerprint from the FULLY-RESOLVED
+    // overlay (after mount validation + env sanitisation), not the raw
+    // parsed file. That way two devcontainer.json files that differ
+    // only in rejected fields produce the same fingerprint (and reuse a
+    // container) while any genuine config change cache-busts the key.
+    // The fingerprint covers ONLY non-key overlay fields (mounts,
+    // containerEnv, forwardPorts, postCreateCommand) — image and
+    // remoteUser are already first-class segments of the pool key, so
+    // including them in the fingerprint would cause spurious cache
+    // misses when an explicit constructor opt has overridden them but
+    // the devcontainer.json file value changed.
+    this._devcontainerFingerprint = this._computeDevcontainerFingerprint(this._dcConfig)
+  }
+
+  /**
+   * #5080: Compute a short, stable SHA-1 fingerprint of the resolved
+   * devcontainer overlay. The full SHA-1 is overkill for a cache-bust
+   * key and bloats logs — the first 16 hex chars are 64 bits of
+   * entropy, which is enough to make accidental collisions effectively
+   * impossible within a single host's pool.
+   *
+   * Fingerprinted fields are **only** the non-key overlay state —
+   * `mounts`, `containerEnv`, `forwardPorts`, `postCreateCommand`. The
+   * resolved `image` and `remoteUser` are NOT fingerprinted because
+   * they're already first-class segments of the pool key (and because
+   * an explicit constructor opt may have overridden the devcontainer.json
+   * value, in which case a change to the file's `image` field doesn't
+   * actually change the resolved launch shape).
+   *
+   * Note on stability: `JSON.stringify` follows insertion order for
+   * plain objects, which is fine for `_dcConfig` because both the
+   * parser and the sanitiser build it in a deterministic order. If a
+   * future refactor reshuffles the fields, two equivalent configs
+   * could fingerprint differently — at worst that's a one-time pool
+   * miss after the change, never a stale-config hit.
+   *
+   * @param {object|null} resolved
+   * @returns {string|null}
+   */
+  _computeDevcontainerFingerprint(resolved) {
+    if (!resolved || typeof resolved !== 'object') return null
+    // Project the resolved overlay down to only the fields that
+    // affect container provisioning but are NOT already in the base
+    // pool key. Built in a fixed key order so the fingerprint is
+    // stable regardless of how the source `resolved` object was
+    // assembled.
+    const fingerprintInput = {
+      mounts: resolved.mounts,
+      containerEnv: resolved.containerEnv,
+      forwardPorts: resolved.forwardPorts,
+      postCreateCommand: resolved.postCreateCommand,
+    }
+    return createHash('sha1').update(JSON.stringify(fingerprintInput)).digest('hex').slice(0, 16)
   }
 
   /**

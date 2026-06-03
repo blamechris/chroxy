@@ -2204,6 +2204,279 @@ describe('DockerByokSession — devcontainer.json overlay (#5024)', () => {
   })
 })
 
+describe('DockerByokSession — devcontainer fingerprint in pool key (#5080)', () => {
+  /**
+   * The stale-config hazard fixed by #5080:
+   *   1. Session A starts with devcontainer.json A. Container provisioned
+   *      with A's `containerEnv` / `mounts` / `postCreateCommand`. Pool
+   *      caches it on release.
+   *   2. Operator edits devcontainer.json.
+   *   3. Session B starts at the same cwd; without the fingerprint the
+   *      pool key matches A's and B silently picks up the stale container.
+   *
+   * These tests assert the post-fix behaviour: a changed overlay produces
+   * a different pool key, an unchanged overlay produces the same key, and
+   * a non-devcontainer session keeps the pre-#5080 5-segment key shape.
+   */
+  function makeDevcontainerCwd(content) {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(dir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(dir, '.devcontainer', 'devcontainer.json'), JSON.stringify(content))
+    return dir
+  }
+
+  function makeSession(cwd, opts = {}) {
+    return new DockerByokSession({
+      cwd,
+      useDevcontainer: true,
+      _execFile: execFileStub(),
+      _dockerBackend: backendStub(),
+      ...opts,
+    })
+  }
+
+  it('useDevcontainer: false → key has the pre-#5080 5-segment shape (backward compat)', () => {
+    // A non-devcontainer session must NOT have a trailing fingerprint
+    // segment, so old pool entries (released before this PR) still hit
+    // and non-devcontainer sessions all share one bucket.
+    const session = new DockerByokSession({
+      cwd: '/tmp/non-devcontainer-cwd',
+      _execFile: execFileStub(),
+      _dockerBackend: backendStub(),
+    })
+    const key = session._poolKey()
+    // image|cwd|memoryLimit|cpuLimit|containerUser → 5 segments, no
+    // trailing |<fingerprint>.
+    assert.equal(key.split('|').length, 5)
+    assert.equal(session._devcontainerFingerprint, null)
+  })
+
+  it('useDevcontainer: true → fingerprint is populated and folded into the key', () => {
+    const cwd = makeDevcontainerCwd({
+      containerEnv: { LANG: 'fr_FR.UTF-8' },
+    })
+    try {
+      const session = makeSession(cwd)
+      // Before _resolveDevContainer, the fingerprint is null.
+      assert.equal(session._devcontainerFingerprint, null)
+      session._resolveDevContainer()
+      assert.ok(session._devcontainerFingerprint, 'fingerprint should be populated after resolve')
+      assert.equal(typeof session._devcontainerFingerprint, 'string')
+      assert.equal(session._devcontainerFingerprint.length, 16)
+      // 16 hex chars
+      assert.match(session._devcontainerFingerprint, /^[0-9a-f]{16}$/)
+      const key = session._poolKey()
+      // Now 6 segments — base shape + fingerprint suffix.
+      assert.equal(key.split('|').length, 6)
+      assert.ok(key.endsWith(`|${session._devcontainerFingerprint}`),
+        `expected key to end with |<fingerprint>, got ${key}`)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('two identical devcontainer.json files → SAME pool key (warm pool can hit)', () => {
+    // The fingerprint is purely a function of the resolved overlay, so
+    // two sessions parsing identical devcontainer.json content must
+    // produce identical fingerprints — otherwise the pool would never
+    // hit across sessions in the common case (an unchanged file).
+    const dc = {
+      image: 'node:22-slim',
+      containerEnv: { LANG: 'en_US.UTF-8' },
+      forwardPorts: [3000],
+    }
+    const cwdA = makeDevcontainerCwd(dc)
+    const cwdB = makeDevcontainerCwd(dc)
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      // Same fingerprint even though cwd differs (cwd is part of the
+      // key, but the fingerprint should not depend on cwd).
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'identical devcontainer.json content must fingerprint identically')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed containerEnv → DIFFERENT fingerprint and pool key (#5080 stale-config fix)', () => {
+    // This is the concrete hazard scenario from the issue:
+    //   - sessionA with LANG=fr_FR.UTF-8
+    //   - operator edits the file
+    //   - sessionB with LANG=en_US.UTF-8 at the same cwd
+    // Pre-#5080 both produced the same key. Post-#5080 they must differ.
+    const cwdA = makeDevcontainerCwd({ containerEnv: { LANG: 'fr_FR.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+      // The cwds differ too (separate tmpdirs) so use _poolKey directly
+      // to make sure the bust survives even with matching resource shape.
+      const baseSpec = {
+        image: sessionA._image,
+        cwd: '/host/fixed-cwd',
+        memoryLimit: sessionA._memoryLimit,
+        cpuLimit: sessionA._cpuLimit,
+        containerUser: sessionA._containerUser,
+      }
+      const keyA = `${[baseSpec.image, baseSpec.cwd, baseSpec.memoryLimit, baseSpec.cpuLimit, baseSpec.containerUser].join('|')}|${sessionA._devcontainerFingerprint}`
+      const keyB = `${[baseSpec.image, baseSpec.cwd, baseSpec.memoryLimit, baseSpec.cpuLimit, baseSpec.containerUser].join('|')}|${sessionB._devcontainerFingerprint}`
+      assert.notEqual(keyA, keyB, 'changed containerEnv must produce a different pool key')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed forwardPorts → DIFFERENT fingerprint', () => {
+    const cwdA = makeDevcontainerCwd({ forwardPorts: [3000] })
+    const cwdB = makeDevcontainerCwd({ forwardPorts: [3000, 5432] })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed postCreateCommand → DIFFERENT fingerprint', () => {
+    const cwdA = makeDevcontainerCwd({ postCreateCommand: 'npm install' })
+    const cwdB = makeDevcontainerCwd({ postCreateCommand: 'pnpm install' })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed mounts → DIFFERENT fingerprint (when mount survives validation)', () => {
+    // Mounts outside cwd are filtered out by validateMounts(), so to
+    // get two different post-validation overlays we need two mounts
+    // that both live inside their respective cwds. The mount strings
+    // differ in shape so the fingerprint must bust.
+    const cwdA = makeDevcontainerCwd({})
+    const cwdB = makeDevcontainerCwd({})
+    try {
+      // Put a mount that's actually inside each cwd so validateMounts
+      // keeps it. Reference the cwd via a subdirectory.
+      mkdirSync(join(cwdA, 'src'), { recursive: true })
+      mkdirSync(join(cwdB, 'src'), { recursive: true })
+      writeFileSync(join(cwdA, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+        mounts: [`${cwdA}/src:/workspace/src`],
+      }))
+      writeFileSync(join(cwdB, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+        mounts: [`${cwdB}/src:/workspace/src-other`],
+      }))
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('no devcontainer.json file → fingerprint is the empty-object hash (stable, non-null)', () => {
+    // useDevcontainer: true with no actual devcontainer.json is a
+    // documented no-op (see the "useDevcontainer with no devcontainer.json
+    // is a no-op" test above). The resolved overlay is essentially
+    // empty, so the fingerprint should still be computed and stable —
+    // two such sessions should pool together.
+    const cwdA = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-no-file-a-'))
+    const cwdB = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-no-file-b-'))
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.ok(sessionA._devcontainerFingerprint, 'empty overlay should still fingerprint')
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'two empty overlays must fingerprint identically')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('devcontainer session and non-devcontainer session at the same cwd produce DIFFERENT keys', () => {
+    // Otherwise the non-devcontainer session could pick up a container
+    // provisioned with the devcontainer overlay (different env / mounts
+    // baked in), silently surfacing the overlay state.
+    const cwd = makeDevcontainerCwd({ containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionDc = makeSession(cwd)
+      const sessionPlain = new DockerByokSession({
+        cwd,
+        _execFile: execFileStub(),
+        _dockerBackend: backendStub(),
+      })
+      sessionDc._resolveDevContainer()
+      const keyDc = sessionDc._poolKey()
+      const keyPlain = sessionPlain._poolKey()
+      assert.notEqual(keyDc, keyPlain)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('changed image (overridden by explicit opt) → SAME fingerprint (no spurious cache miss)', () => {
+    // image and remoteUser are first-class segments of the pool key,
+    // not part of the fingerprint. If a session pins image via an
+    // explicit constructor opt, editing the devcontainer.json image
+    // field doesn't change the resolved launch shape — so the
+    // fingerprint must not bust. (The base key would still match
+    // because explicit image wins, so the pool entry remains valid.)
+    const cwdA = makeDevcontainerCwd({ image: 'node:20-slim', containerEnv: { LANG: 'en_US.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ image: 'node:22-slim', containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA, { image: 'pinned-image:latest' })
+      const sessionB = makeSession(cwdB, { image: 'pinned-image:latest' })
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'image is not fingerprinted — it is a first-class key segment')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed remoteUser → SAME fingerprint (already a first-class key segment)', () => {
+    // Same logic as image — remoteUser drives the `containerUser` slot
+    // of the base key, so fingerprinting it would double-count.
+    const cwdA = makeDevcontainerCwd({ remoteUser: 'vscode', containerEnv: { LANG: 'en_US.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ remoteUser: 'node', containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA, { containerUser: 'pinned-user' })
+      const sessionB = makeSession(cwdB, { containerUser: 'pinned-user' })
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'remoteUser is not fingerprinted — it is a first-class key segment')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('DockerByokSession — Docker Compose support (#5024)', () => {
   function composeBackendStub({ primaryId = 'COMPOSE_PRIMARY_abc', destroyCalls = [] } = {}) {
     return {
