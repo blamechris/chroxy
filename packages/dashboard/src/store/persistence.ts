@@ -31,6 +31,8 @@ const KEY_SIDEBAR_PANEL_COLLAPSED = `${KEY_PREFIX}sidebar_panel_collapsed`;
 // orders without clobbering each other.
 const KEY_SIDEBAR_REPO_ORDER = `${KEY_PREFIX}sidebar_repo_order`;
 const KEY_SIDEBAR_SESSION_ORDER = `${KEY_PREFIX}sidebar_session_order`;
+// #4831 — user-defined SessionBar tab order (overlay on server-supplied sessions)
+const KEY_SESSION_TAB_ORDER = `${KEY_PREFIX}session_tab_order`;
 
 // ---------------------------------------------------------------------------
 // Server-scoped persistence — keys scoped by server ID to prevent data loss
@@ -446,6 +448,53 @@ export function loadPersistedShowConsoleTab(): boolean {
     return localStorage.getItem(KEY_SHOW_CONSOLE_TAB) === 'true';
   } catch {
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// #4831 — SessionBar tab order persistence
+//
+// The server returns `sessions[]` in the order they were created / activated;
+// users want to drag tabs in the top SessionBar strip to reorder them. We
+// keep the server's list as the source of truth for *membership* (created /
+// removed / restored) but layer a user-defined ORDER on top, persisted in
+// localStorage so it survives reload + Tauri restart.
+//
+// Storage shape: `string[]` of sessionIds in user order. Sessions not yet
+// seen by the user (server added one between reloads) get appended to the
+// end on render; sessions removed by the server are filtered out of the
+// order array on the next reorder save (no GC needed — the array is
+// reapplied by id, so stale ids are harmlessly ignored).
+//
+// Server-scoped — different servers have different session sets, so each
+// server gets its own persisted tab order.
+// ---------------------------------------------------------------------------
+
+/** Persist the SessionBar tab order (server-scoped). */
+export function persistSessionTabOrder(order: string[]): void {
+  try {
+    const key = scopedKey(KEY_SESSION_TAB_ORDER);
+    if (order.length === 0) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify(order));
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load the persisted SessionBar tab order. Returns [] when unset / invalid. */
+export function loadPersistedSessionTabOrder(): string[] {
+  try {
+    const raw = scopedRead(KEY_SESSION_TAB_ORDER);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Defensive: only string entries — anything else is corrupt persistence
+    return parsed.filter((x): x is string => typeof x === 'string');
+  } catch {
+    return [];
   }
 }
 

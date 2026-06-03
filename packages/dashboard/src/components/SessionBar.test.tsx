@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
-import { SessionBar, type SessionTabData } from './SessionBar'
+import { SessionBar, reorderTabs, type SessionTabData } from './SessionBar'
 
 afterEach(cleanup)
 
@@ -449,6 +449,197 @@ describe('SessionBar', () => {
       const btn = screen.getByTestId('new-session-btn')
       expect(btn.getAttribute('title'), 'new-session needs title').toBeTruthy()
       expect(btn.getAttribute('aria-label'), 'new-session needs aria-label').toBeTruthy()
+    })
+  })
+
+  // #4831 — drag-to-reorder. Users want to drag tabs in the top SessionBar
+  // strip to reorder them; the new order persists across reload. These
+  // tests cover the pure reorder helper, the drag-emit path, the keyboard
+  // reorder ladder, the anchored `+` button, and click-to-activate left
+  // intact under the new draggable attribute.
+  describe('#4831 drag-to-reorder', () => {
+    function makeThree(): SessionTabData[] {
+      return [
+        { sessionId: 'a', name: 'Alpha', isBusy: false, isActive: true },
+        { sessionId: 'b', name: 'Beta', isBusy: false, isActive: false },
+        { sessionId: 'c', name: 'Charlie', isBusy: false, isActive: false },
+      ]
+    }
+
+    describe('reorderTabs helper', () => {
+      it('moves forward (insert-before semantics)', () => {
+        // Move index 0 ("a") onto index 2 ("c"): "a" should land at the
+        // position "c" used to occupy after "c" shifts left.
+        expect(reorderTabs(['a', 'b', 'c'], 0, 2)).toEqual(['b', 'a', 'c'])
+      })
+      it('moves backward', () => {
+        // Move index 2 ("c") onto index 0 ("a"): "c" takes slot 0.
+        expect(reorderTabs(['a', 'b', 'c'], 2, 0)).toEqual(['c', 'a', 'b'])
+      })
+      it('returns the same array reference when no-op', () => {
+        const arr = ['a', 'b', 'c']
+        expect(reorderTabs(arr, 1, 1)).toBe(arr)
+      })
+      it('ignores out-of-range indices', () => {
+        const arr = ['a', 'b']
+        expect(reorderTabs(arr, -1, 0)).toBe(arr)
+        expect(reorderTabs(arr, 0, -1)).toBe(arr)
+        expect(reorderTabs(arr, 5, 0)).toBe(arr)
+      })
+    })
+
+    it('marks tabs as draggable when onReorder is wired', () => {
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      const tab = screen.getByTestId('session-tab-a')
+      expect(tab.getAttribute('draggable')).toBe('true')
+    })
+
+    it('does NOT mark tabs as draggable when onReorder is missing', () => {
+      // Back-compat: existing callers (and tests above) didn't pass onReorder
+      // and shouldn't suddenly get drag behavior they didn't opt into.
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+        />
+      )
+      const tab = screen.getByTestId('session-tab-a')
+      expect(tab.getAttribute('draggable')).toBe('false')
+    })
+
+    it('emits onReorder with the new id order on drop', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      const tabC = screen.getByTestId('session-tab-c')
+      // Minimal DataTransfer stub for jsdom (the component calls setData
+      // and reads dropEffect / effectAllowed in defensive try/catch).
+      const dataTransfer = {
+        data: {} as Record<string, string>,
+        setData(format: string, val: string) { this.data[format] = val },
+        getData(format: string) { return this.data[format] ?? '' },
+        effectAllowed: 'all',
+        dropEffect: 'none',
+        types: [] as string[],
+      }
+      fireEvent.dragStart(tabA, { dataTransfer })
+      fireEvent.dragOver(tabC, { dataTransfer })
+      fireEvent.drop(tabC, { dataTransfer })
+      expect(onReorder).toHaveBeenCalledTimes(1)
+      // Insert-before semantics: dropping "a" onto "c" inserts "a" at "c"'s
+      // original slot; "c" had already shifted left by one when "a" was
+      // removed, so the final ordering is ["b", "a", "c"].
+      expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c'])
+    })
+
+    it('does not emit onReorder when dropping a tab onto itself', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      const dataTransfer = {
+        data: {} as Record<string, string>,
+        setData(format: string, val: string) { this.data[format] = val },
+        getData(format: string) { return this.data[format] ?? '' },
+        effectAllowed: 'all',
+        dropEffect: 'none',
+        types: [] as string[],
+      }
+      fireEvent.dragStart(tabA, { dataTransfer })
+      fireEvent.drop(tabA, { dataTransfer })
+      expect(onReorder).not.toHaveBeenCalled()
+    })
+
+    it('+ (new session) button is NOT draggable and stays after the tabs', () => {
+      const { container } = render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      const newBtn = screen.getByTestId('new-session-btn')
+      // The + button is rendered outside the tablist, so it has no draggable
+      // attribute and no role="tab".
+      expect(newBtn.getAttribute('draggable')).toBe(null)
+      expect(newBtn.getAttribute('role')).not.toBe('tab')
+      // DOM order: the tablist comes before the new-session button.
+      const tablist = container.querySelector('[role="tablist"]')!
+      const tablistPos = Array.from(container.firstChild!.childNodes).indexOf(tablist)
+      const btnPos = Array.from(container.firstChild!.childNodes).indexOf(newBtn)
+      expect(btnPos).toBeGreaterThan(tablistPos)
+    })
+
+    it('keyboard reorder: Shift+Space lifts, ArrowRight moves, Escape cancels lift', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      // Lift "a" into reorder mode
+      fireEvent.keyDown(tabA, { key: ' ', shiftKey: true })
+      expect(tabA.getAttribute('aria-grabbed')).toBe('true')
+      // Move "a" one slot right — should land in position 1 of ['b','a','c']
+      fireEvent.keyDown(tabA, { key: 'ArrowRight' })
+      expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c'])
+      // Escape clears the lift state (no further reorder)
+      fireEvent.keyDown(tabA, { key: 'Escape' })
+      expect(tabA.getAttribute('aria-grabbed')).toBe(null)
+    })
+
+    it('click-to-activate still works when reorder is wired', () => {
+      const onSwitch = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={onSwitch}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      fireEvent.click(screen.getByTestId('session-tab-b'))
+      expect(onSwitch).toHaveBeenCalledWith('b')
     })
   })
 })
