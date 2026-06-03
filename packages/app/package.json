@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/app",
-  "version": "0.9.41",
+  "version": "0.9.42",
   "description": "Chroxy mobile app",
   "main": "index.js",
   "scripts": {
