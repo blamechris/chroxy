@@ -450,6 +450,104 @@ describe('Sidebar aria-keyshortcuts (#4941)', () => {
   })
 })
 
+// #4972 — Sidebar reorder ladder now consults the registry, so a user
+// rebind in Settings actually changes the runtime keys (not just the
+// Settings/cheat-sheet display). These tests pin that contract: rebind
+// the shortcut, fire the NEW combo, observe the reorder callback fires.
+describe('Sidebar reorder honors registry rebindings (#4972)', () => {
+  // Each case in this suite mutates the module-level shared shortcut
+  // registry via __setSharedRegistryForTesting. Without a restore step
+  // a later case (or a later test file in the same vitest worker) would
+  // inherit the rebinds, making the suite order-dependent. Install a
+  // fresh default registry after each case so the contract resets.
+  afterEach(async () => {
+    const { createShortcutRegistry } = await import('../shortcuts/registry')
+    const { __setSharedRegistryForTesting } = await import('../shortcuts/useShortcutRegistry')
+    const { DEFAULT_SHORTCUTS } = await import('../shortcuts/defaults')
+    __setSharedRegistryForTesting(createShortcutRegistry(DEFAULT_SHORTCUTS))
+  })
+
+  // Async dynamic imports so the registry tooling lives next to its tests
+  // without forcing all the other suites in this file to load it.
+  it('after rebinding sidebar.reorder.down to cmd+j, the new combo moves a session down', async () => {
+    const { createShortcutRegistry, normalizeBinding } = await import('../shortcuts/registry')
+    const { __setSharedRegistryForTesting } = await import('../shortcuts/useShortcutRegistry')
+    const { DEFAULT_SHORTCUTS } = await import('../shortcuts/defaults')
+    const reg = createShortcutRegistry(DEFAULT_SHORTCUTS)
+    reg.setBinding('sidebar.reorder.down', normalizeBinding('cmd+j'))
+    __setSharedRegistryForTesting(reg)
+
+    const onReorderSessions = vi.fn()
+    renderSidebar({ onReorderSessions })
+    const s2 = screen.getByTestId('session-item-s2')
+    fireEvent.keyDown(s2, { key: 'j', metaKey: true })
+    expect(onReorderSessions).toHaveBeenCalledWith(
+      '/home/user/projects/api',
+      ['s1', 's3', 's2'],
+    )
+  })
+
+  it('after rebinding sidebar.reorder.up to cmd+k, the new combo moves a repo up', async () => {
+    const { createShortcutRegistry, normalizeBinding } = await import('../shortcuts/registry')
+    const { __setSharedRegistryForTesting } = await import('../shortcuts/useShortcutRegistry')
+    const { DEFAULT_SHORTCUTS } = await import('../shortcuts/defaults')
+    const reg = createShortcutRegistry(DEFAULT_SHORTCUTS)
+    // cmd+k conflicts with palette.toggle by default; clear that first
+    // so the rebind succeeds.
+    reg.setBinding('palette.toggle', normalizeBinding('cmd+shift+k'))
+    reg.setBinding('sidebar.reorder.up', normalizeBinding('cmd+k'))
+    __setSharedRegistryForTesting(reg)
+
+    const onReorderRepos = vi.fn()
+    renderSidebar({ onReorderRepos })
+    const webRepo = screen.getByTestId('sidebar-repo-/home/user/projects/web')
+    fireEvent.keyDown(webRepo, { key: 'k', metaKey: true })
+    expect(onReorderRepos).toHaveBeenCalledWith([
+      '/home/user/projects/web',
+      '/home/user/projects/api',
+      '/home/user/projects/cli',
+    ])
+  })
+
+  it('after rebinding, the OLD default combo no longer reorders', async () => {
+    const { createShortcutRegistry, normalizeBinding } = await import('../shortcuts/registry')
+    const { __setSharedRegistryForTesting } = await import('../shortcuts/useShortcutRegistry')
+    const { DEFAULT_SHORTCUTS } = await import('../shortcuts/defaults')
+    const reg = createShortcutRegistry(DEFAULT_SHORTCUTS)
+    reg.setBinding('sidebar.reorder.up', normalizeBinding('cmd+j'))
+    reg.setBinding('sidebar.reorder.down', normalizeBinding('cmd+y'))
+    __setSharedRegistryForTesting(reg)
+
+    const onReorderSessions = vi.fn()
+    renderSidebar({ onReorderSessions })
+    const s2 = screen.getByTestId('session-item-s2')
+    // Default alt+arrowup combo is no longer bound to reorder
+    fireEvent.keyDown(s2, { key: 'ArrowUp', altKey: true })
+    expect(onReorderSessions).not.toHaveBeenCalled()
+  })
+
+  it('aria-keyshortcuts reflects the rebound combo, not the default', async () => {
+    const { createShortcutRegistry, normalizeBinding } = await import('../shortcuts/registry')
+    const { __setSharedRegistryForTesting } = await import('../shortcuts/useShortcutRegistry')
+    const { DEFAULT_SHORTCUTS } = await import('../shortcuts/defaults')
+    const reg = createShortcutRegistry(DEFAULT_SHORTCUTS)
+    reg.setBinding('sidebar.reorder.up', normalizeBinding('cmd+j'))
+    reg.setBinding('sidebar.reorder.down', normalizeBinding('cmd+y'))
+    __setSharedRegistryForTesting(reg)
+
+    renderSidebar({ onReorderRepos: vi.fn() })
+    const apiRepo = screen.getByTestId('sidebar-repo-/home/user/projects/api')
+    const announced = apiRepo.getAttribute('aria-keyshortcuts') || ''
+    // ARIA-spec modifier tokens, NOT UI display labels — aria-keyshortcuts
+    // is consumed by assistive tech which expects "Meta", "Control", "Alt",
+    // "Shift" per WAI-ARIA 1.2. The on-screen cheat sheet uses
+    // formatBindingForDisplay separately for human-readable rendering.
+    expect(announced).not.toMatch(/Alt\+Arrow/)
+    expect(announced).toMatch(/Meta\+J/)
+    expect(announced).toMatch(/Meta\+Y/)
+  })
+})
+
 describe('Sidebar resumable rows do not hijack parent repo drag (#4939)', () => {
   /**
    * Regression for #4939: resumable conversation rows sit inside the

@@ -158,17 +158,15 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   // Cmd+1 .. Cmd+9 tab-switch entries — one per digit.
   ...tabSwitchShortcuts,
   // -- #4941: sidebar reorder discoverability ----------------------
-  // These two entries describe the existing Alt+ArrowUp / Alt+ArrowDown
-  // keyboard reorder shortcut on draggable sidebar rows (#4832). They
-  // are intentionally informational-only: the actual keydown handler
-  // lives in Sidebar.tsx and matches `event.altKey && event.key ===
-  // 'ArrowUp'|'ArrowDown'` directly rather than via the registry, so a
-  // user rebind here does NOT change runtime behaviour today. The
-  // entries exist so the `?` cheat sheet and Settings rebind list both
-  // surface the shortcut — the previous gap left users with no path
-  // to discover keyboard reorder short of reading the PR or the source.
-  // When the row-level handler is migrated to `registry.matchEvent`,
-  // these entries become functional without further migration.
+  // These two entries describe the keyboard reorder shortcut on
+  // draggable sidebar rows (#4832). Default is Alt+ArrowUp/Down.
+  //
+  // #4972 — Sidebar.tsx now consults `registry.matchEvent(e, 'global')`
+  // when checking these shortcuts, so a user rebind in Settings flows
+  // through to runtime behaviour AND the row's aria-keyshortcuts SR
+  // announcement. The discoverability surfaces (`?` cheat sheet,
+  // Settings rebind list) and the runtime handler now share one source
+  // of truth.
   {
     id: 'sidebar.reorder.up',
     defaultBinding: 'alt+arrowup',
