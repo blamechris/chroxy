@@ -13,7 +13,7 @@
  *     to docker-* providers)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import type { ProviderInfo } from '../store/types'
 
 vi.mock('../hooks/usePathAutocomplete', () => ({
@@ -184,8 +184,60 @@ describe('docker-byok provider-selector runtime polish (#5026)', () => {
     )
     const hint = screen.getByTestId('provider-container-hint')
     // When environments exist the hint should steer the user to the
-    // dropdown rather than telling them to create one.
-    expect(hint.textContent).toMatch(/Pick an environment/i)
+    // dropdown rather than telling them to create one. The dropdown lives
+    // in the Advanced section, so the copy must point there (#5036
+    // Copilot review) — not the previous misleading "below" wording.
+    expect(hint.textContent).toMatch(/Pick an Environment/i)
+    expect(hint.textContent).toMatch(/Advanced/)
+  })
+
+  // #5036 Copilot review: the previous gate left the hint visible even
+  // after the user had explicitly selected an Environment, at which point
+  // the dropdown's own form-hint already explains what container will
+  // launch and the redundant "Container settings:" block was noise.
+  it('hides the container hint once an Environment is selected', () => {
+    ;(globalThis as unknown as { __TEST_STATE__: Record<string, unknown> }).__TEST_STATE__ = {
+      ...buildState('docker-byok', [DOCKER_BYOK_PROVIDER]),
+      environments: [
+        {
+          id: 'env-1',
+          name: 'main',
+          cwd: '/tmp',
+          image: 'node:22-slim',
+          containerId: 'abc',
+          containerUser: 'chroxy',
+          containerCliPath: '/usr/local/bin/claude',
+          status: 'running',
+          sessions: [],
+          createdAt: new Date().toISOString(),
+          memoryLimit: '2g',
+          cpuLimit: '2',
+        },
+      ],
+    }
+    render(
+      <CreateSessionModal
+        open={true}
+        onClose={vi.fn()}
+        onCreate={vi.fn()}
+        initialCwd=""
+        knownCwds={[]}
+        existingNames={[]}
+      />,
+    )
+    // Hint visible before an Environment is picked.
+    expect(screen.getByTestId('provider-container-hint')).toBeTruthy()
+    // Open Advanced so the Environment dropdown is reachable.
+    // Multiple nodes contain "Advanced" (the toggle button + the new
+    // copy inside the hint), so target the toggle button explicitly.
+    const advancedToggle = document.querySelector('.advanced-toggle-btn') as HTMLButtonElement
+    expect(advancedToggle).toBeTruthy()
+    fireEvent.click(advancedToggle)
+    const envSelect = screen.getByLabelText(/^Environment$/) as HTMLSelectElement
+    fireEvent.change(envSelect, { target: { value: 'env-1' } })
+    // Hint must disappear — the dropdown's own form-hint now describes
+    // what will launch.
+    expect(screen.queryByTestId('provider-container-hint')).toBeNull()
   })
 
   it('surfaces the docker-byok vs. claude-byok trade-off in the billing hint', () => {

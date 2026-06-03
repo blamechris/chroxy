@@ -686,13 +686,18 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             </div>
           )
         })()}
-        {/* #5026: when a containerized provider is selected and no
-            environment is picked, hint at the Environments panel as the
-            path for customising image / memory / cpu / containerUser.
-            The provider will fall back to its built-in defaults
-            (node:22-slim, 2g, 2 cpus, chroxy user) when launched without
-            an environmentId. */}
-        {availableProviders.length > 0 && selectedProviderInfo?.capabilities?.containerized && !selectedProviderUnready && (
+        {/* #5026: when a containerized provider is selected and the
+            user hasn't yet picked an environment, hint at the Environments
+            panel as the path for customising image / memory / cpu /
+            containerUser. The provider will fall back to its built-in
+            defaults (node:22-slim, 2g, 2 cpus, chroxy user) when launched
+            without an environmentId. Once an environment is selected we
+            hide the hint — the Environment dropdown's own form-hint
+            ("Connect to a persistent environment container") takes over
+            and tells the user what they'll get. (#5036 Copilot review:
+            without the !environmentId gate, the hint and the dropdown
+            both ended up describing the same thing.) */}
+        {availableProviders.length > 0 && selectedProviderInfo?.capabilities?.containerized && !selectedProviderUnready && !environmentId && (
           <div
             className="provider-container-hint"
             data-testid="provider-container-hint"
@@ -701,8 +706,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             <span className="provider-container-hint-label">Container settings:</span>{' '}
             <span className="provider-container-hint-body">
               {environments.length > 0
-                ? 'Pick an environment below to use its image / memory / CPU. Otherwise the provider defaults apply (node:22-slim, 2g RAM, 2 CPUs).'
-                : 'Uses the provider defaults (node:22-slim, 2g RAM, 2 CPUs). Create an Environment to customise image / memory / CPU / container user.'}
+                ? 'Pick an Environment in Advanced to use its image / memory / CPU. Otherwise the provider defaults apply (node:22-slim, 2g RAM, 2 CPUs).'
+                : 'Uses the provider defaults (node:22-slim, 2g RAM, 2 CPUs). Open the Environments panel to create one with a custom image / memory / CPU / container user.'}
             </span>
           </div>
         )}
