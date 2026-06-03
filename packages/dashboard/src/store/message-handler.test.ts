@@ -1833,6 +1833,117 @@ describe('dashboard message-handler dispatch', () => {
         expect(responses[0].content).toBe('What is the state of the PR?')
         expect(responses[1].content).toBe('It looks open.')
       })
+
+      it('STILL splits when prior ends in a sentence terminator wrapped in closing punctuation/quotes', () => {
+        // Copilot review of #5011 — a completed sentence followed by closing
+        // punctuation (`.")`, `."`, `!'`, `?)`) was being treated as
+        // mid-sentence because the gate only inspected the very last char.
+        // Strip trailing closers before evaluating the terminator so the
+        // #4889 paragraph split still fires.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'He said "the build is done."',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: {},
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'Filing the report now.',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('He said "the build is done."')
+        expect(responses[1].content).toBe('Filing the report now.')
+      })
+
+      it('STILL splits when prior ends in a terminator wrapped in a closing paren', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: '(see the docs for more.)',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Read',
+            toolUseId: 'toolu_a',
+            input: { file_path: '/x' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'Continuing with the next section.',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('(see the docs for more.)')
+        expect(responses[1].content).toBe('Continuing with the next section.')
+      })
     })
   })
 

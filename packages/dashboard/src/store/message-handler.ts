@@ -1516,7 +1516,14 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
           // Trim trailing whitespace before inspecting the last char so e.g.
           // `"...sentence.   "` still reads as sentence-complete.
           const lastNonWs = priorFullForGate.replace(/\s+$/, '');
-          const lastChar = lastNonWs.charAt(lastNonWs.length - 1);
+          // Strip trailing closing punctuation/quotes that commonly follow a
+          // sentence terminator (`.")`, `."`, `!'`, `?)`, etc.) so the gate
+          // looks at the terminator itself, not the wrapper. Without this,
+          // `"He said \"done.\""` reads as ending in `"` and the #4889 split
+          // would wrongly disable — paragraph breaks across a tool boundary
+          // would be lost.
+          const stripped = lastNonWs.replace(/[)\]}"'’”»›]+$/, '');
+          const lastChar = stripped.charAt(stripped.length - 1);
           const endsSentence = lastChar === '.' || lastChar === '!' || lastChar === '?';
           const endsHardBreak = /\n\s*$/.test(priorFullForGate);
           if (!endsSentence && !endsHardBreak) {

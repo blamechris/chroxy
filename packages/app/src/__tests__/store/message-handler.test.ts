@@ -2622,6 +2622,172 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       expect(responses[0].content).toBe('Let me check chroxy before filing.');
       expect(responses[1].content).toBe('Filing now.');
     });
+
+    it('coalesces when prior ends in an open paren and incoming starts mid-sentence', () => {
+      // Defensive: punctuation that isn't a sentence terminator (open paren,
+      // colon, comma) also indicates the sentence continues.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'See the helper (',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Read',
+        toolUseId: 'toolu_a',
+        input: { file_path: '/x' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'utils.ts).',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(1);
+      expect(responses[0].content).toBe('See the helper (utils.ts).');
+    });
+
+    it('STILL splits when prior ends in a question mark', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'What is the state of the PR?',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'It looks open.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('What is the state of the PR?');
+      expect(responses[1].content).toBe('It looks open.');
+    });
+
+    it('STILL splits when prior ends in a sentence terminator wrapped in closing punctuation/quotes', () => {
+      // Copilot review of #5011 -- a completed sentence followed by closing
+      // punctuation (`.")`, `."`, `!'`, `?)`) was being treated as
+      // mid-sentence because the gate only inspected the very last char.
+      // Strip trailing closers before evaluating the terminator so the
+      // #4889 paragraph split still fires.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'He said "the build is done."',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Filing the report now.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('He said "the build is done."');
+      expect(responses[1].content).toBe('Filing the report now.');
+    });
+
+    it('STILL splits when prior ends in a terminator wrapped in a closing paren', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '(see the docs for more.)',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Read',
+        toolUseId: 'toolu_a',
+        input: { file_path: '/x' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Continuing with the next section.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('(see the docs for more.)');
+      expect(responses[1].content).toBe('Continuing with the next section.');
+    });
   });
 });
 
