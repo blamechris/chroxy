@@ -856,5 +856,84 @@ describe('CliSession stream-event handling', () => {
       assert.equal(results[0].cost, 0.001)
       assert.equal(results[0].duration, 250)
     })
+
+    it('forwards the full usage payload on streamed turns, with no fallback message (#5095)', () => {
+      // Companion pin to #5084's fallback gate. The fallback is suppressed
+      // on streamed turns (ctx.hasStreamStarted === true), but we must also
+      // prove the `result` event still carries the canonical `usage` payload
+      // — input_tokens, output_tokens, cache_creation_input_tokens,
+      // cache_read_input_tokens — so the session-manager cost-gate
+      // (session-manager.js:1709 → _trackUsage) has the raw token counts to
+      // accumulate for the dashboard meter. A regression where #5084's
+      // fallback gate swallowed `usage` emission for streamed turns would
+      // silently zero the meter for every subscription user. This is the
+      // verification gap PR #5087 deferred.
+      const session = createSession()
+      const messages = []
+      const results = []
+      session.on('message', (m) => messages.push(m))
+      session.on('result', (r) => results.push(r))
+
+      // Drive a normal streamed turn end-to-end.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed reply' },
+        },
+      })
+
+      // Subscription-billed result: cost is null (no per-turn $$$), but
+      // usage carries real token counts. The `usage` payload here is the
+      // exact shape `claude -p` emits on a subscription-billing path.
+      const usage = {
+        input_tokens: 137,
+        output_tokens: 42,
+        cache_creation_input_tokens: 1024,
+        cache_read_input_tokens: 8192,
+      }
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'streamed reply',
+        total_cost_usd: null,
+        duration_ms: 250,
+        usage,
+      })
+
+      // Primary contract: NO synthetic fallback message on streamed turns.
+      // The stream_delta is the canonical surface for the text — a fallback
+      // here would double-emit the reply.
+      assert.equal(messages.length, 0)
+
+      // Canonical contract: the `result` event the session-manager listens
+      // for carries the full usage object verbatim. session-manager's
+      // _trackUsage reads `resultData.usage.{input_tokens, output_tokens,
+      // cache_read_input_tokens, cache_creation_input_tokens}` — pin all
+      // four so a future regression that drops a field (e.g. shallow
+      // restructure that forgets cache_* keys) fails here, not silently in
+      // the meter.
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 'sess-1')
+      assert.equal(results[0].cost, null)
+      assert.equal(results[0].duration, 250)
+      assert.ok(results[0].usage, 'usage must be present on streamed-turn result')
+      assert.equal(results[0].usage.input_tokens, 137)
+      assert.equal(results[0].usage.output_tokens, 42)
+      assert.equal(results[0].usage.cache_creation_input_tokens, 1024)
+      assert.equal(results[0].usage.cache_read_input_tokens, 8192)
+      // Identity check: the result event must forward the same usage object
+      // reference (or an equivalent shape) that the wire payload carried —
+      // not a synthesized subset that drops cache fields.
+      assert.deepEqual(results[0].usage, usage)
+    })
   })
 })
