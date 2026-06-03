@@ -44,11 +44,13 @@ export function moveItem<T>(items: readonly T[], fromIndex: number, toIndex: num
  *   preserving their relative order from the input array. New sessions
  *   land at the bottom of the list — they don't shuffle existing entries.
  *
- * This is the function the sidebar memo runs every render, so it
- * intentionally returns a fresh array only when reordering actually
- * happens; if the live order already matches `order` (plus any tail
- * additions), the result is still a fresh array but the contents are
- * stable for downstream memoization.
+ * This is the function the sidebar memo runs every render. It always
+ * allocates a fresh array whenever `order.length > 0` — even if the
+ * resulting sequence is identical to `items` — so callers MUST NOT rely
+ * on referential equality to detect "no change". Use a contents-based
+ * comparison (or downstream memoization keyed on the id list) instead.
+ * The only reference-stable fast path is `order.length === 0`, where we
+ * return `items.slice()` unchanged in order.
  */
 export function applyOrderById<T>(
   items: readonly T[],

@@ -385,6 +385,25 @@ describe('Sidebar keyboard reorder (#4832)', () => {
     fireEvent.keyDown(s2, { key: 'ArrowDown' })
     expect(onReorderSessions).not.toHaveBeenCalled()
   })
+
+  it('does not reorder sessions via Alt+Arrow while a filter is active', () => {
+    // Mirrors the drag guard: reordering from a filtered subset would
+    // persist a partial order. The keyboard shortcut must obey the same
+    // rule the drag handler does.
+    const onReorderSessions = vi.fn()
+    renderSidebar({ filter: 'api', onReorderSessions })
+    const s2 = screen.getByTestId('session-item-s2')
+    fireEvent.keyDown(s2, { key: 'ArrowDown', altKey: true })
+    expect(onReorderSessions).not.toHaveBeenCalled()
+  })
+
+  it('does not reorder repos via Alt+Arrow while a filter is active', () => {
+    const onReorderRepos = vi.fn()
+    renderSidebar({ filter: 'api', onReorderRepos })
+    const apiRepo = screen.getByTestId('sidebar-repo-/home/user/projects/api')
+    fireEvent.keyDown(apiRepo, { key: 'ArrowDown', altKey: true })
+    expect(onReorderRepos).not.toHaveBeenCalled()
+  })
 })
 
 describe('Sidebar reorder persistence (#4832)', () => {

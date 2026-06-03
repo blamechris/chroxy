@@ -363,6 +363,11 @@ export function Sidebar({
   const handleRepoReorderKey = useCallback(
     (path: string) => (event: React.KeyboardEvent<HTMLElement>): boolean => {
       if (!onReorderRepos) return false
+      // Mirror the drag guard (`draggable={... && !filter}`) — reordering
+      // from a filtered view would persist an order derived from the
+      // visible subset, silently shuffling hidden repos relative to each
+      // other. Disable the keyboard reorder shortcut while filtering too.
+      if (filter) return false
       if (!event.altKey) return false
       if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return false
       const paths = filteredRepos.map(r => r.path)
@@ -374,12 +379,15 @@ export function Sidebar({
       onReorderRepos(next)
       return true
     },
-    [onReorderRepos, filteredRepos],
+    [onReorderRepos, filteredRepos, filter],
   )
 
   const handleSessionReorderKey = useCallback(
     (repoPath: string, sessionId: string) => (event: React.KeyboardEvent<HTMLElement>): boolean => {
       if (!onReorderSessions) return false
+      // Same rationale as handleRepoReorderKey: filtered subset would
+      // produce a partial persisted order.
+      if (filter) return false
       if (!event.altKey) return false
       if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return false
       const repo = filteredRepos.find(r => r.path === repoPath)
@@ -393,7 +401,7 @@ export function Sidebar({
       onReorderSessions(repoPath, next)
       return true
     },
-    [onReorderSessions, filteredRepos],
+    [onReorderSessions, filteredRepos, filter],
   )
 
   // Resize handle drag logic

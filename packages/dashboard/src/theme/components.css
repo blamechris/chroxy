@@ -656,7 +656,7 @@
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--accent-blue, #4d9fff);
+  background: var(--accent-blue, #4a9eff);
   pointer-events: none;
   border-radius: 1px;
 }
