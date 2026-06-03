@@ -92,3 +92,12 @@ name: All E2E flows
 # multi-question payload without bailing. Extends once mobile
 # renderer iterates all N questions.
 - runFlow: ask-user-question-multi.yaml
+
+# Flow 19: AskUserQuestion Other → freeform send-path (#4877 / #4755)
+# — exercises the third (deferred) acceptance criterion of #4755:
+# tapping the synthesized Other sentinel, typing a freeform answer,
+# and pressing Send. Pins the PR #4864 mobile parity with the
+# dashboard's `{answer:<otherLabel>, freeformText, toolUseId}` wire
+# shape end-to-end on a real RN runtime (testIDs `approval-freetext-input`
+# / `approval-freetext-send`).
+- runFlow: ask-question-other-freeform.yaml
