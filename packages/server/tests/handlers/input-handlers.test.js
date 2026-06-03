@@ -69,6 +69,65 @@ describe('input-handlers', () => {
       assert.match(ctx._sent[0].message, /No active session/)
     })
 
+    // #4935 — visibility for the silent post-restart wedge. A stale `sessionId`
+    // on the wire (the dashboard's persisted activeSessionId points at a
+    // pre-restart session ID that no longer exists post-restore) used to
+    // produce a generic `session_error` envelope with no `code` field — the
+    // dashboard's toast fired with a useless "Session not found: <id>" string
+    // and no machine-readable signal to clear the stale local ID. Now the
+    // envelope carries `code: 'SESSION_NOT_FOUND'` + `attemptedSessionId` so
+    // the dashboard can branch on it and prompt the user to pick another
+    // session (mirrors the existing `code: 'resume_unknown'` affordance from
+    // #4947). The handler also logs at INFO level so chroxy.log shows the
+    // mismatch — pre-#4935, the log line for this path was DEBUG-only.
+    it('sends structured SESSION_NOT_FOUND when sessionId references a non-existent session (#4935)', () => {
+      const ctx = makeCtx()
+      const client = makeClient({ activeSessionId: null })
+      inputHandlers.input(
+        makeWs(),
+        client,
+        { data: 'hello', sessionId: 'deadbeef-stale-session-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1, 'exactly one error envelope should be emitted')
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_NOT_FOUND',
+        'envelope must include code:SESSION_NOT_FOUND so dashboard can branch')
+      assert.equal(ctx._sent[0].attemptedSessionId, 'deadbeef-stale-session-id',
+        'envelope must echo the stale sessionId so dashboard can clear its local state')
+      assert.match(ctx._sent[0].message, /Session not found: deadbeef-stale-session-id/)
+    })
+
+    // #4935 Copilot review feedback — disambiguate bound-session mismatch from
+    // truly-missing sessions. `resolveSession()` returns null for both cases;
+    // emitting SESSION_NOT_FOUND for an authorization failure would let a
+    // dashboard consumer keyed on SESSION_NOT_FOUND clear its local state
+    // (and ID-binding) when the user is in fact bound to a *different* session
+    // they're allowed to touch. The canonical SESSION_TOKEN_MISMATCH envelope
+    // (#2912) belongs here instead.
+    it('sends SESSION_TOKEN_MISMATCH (not SESSION_NOT_FOUND) when client is bound to a different session (#4935 review)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('bound-id', { session, name: 'BoundSession', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      // Client is bound to bound-id but addresses a different sessionId.
+      const client = makeClient({ boundSessionId: 'bound-id' })
+      inputHandlers.input(
+        makeWs(),
+        client,
+        { data: 'hello', sessionId: 'some-other-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH',
+        'binding mismatch must emit SESSION_TOKEN_MISMATCH, not SESSION_NOT_FOUND')
+      assert.equal(ctx._sent[0].boundSessionId, 'bound-id')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundSession')
+      assert.equal(ctx._sent[0].attemptedSessionId, undefined,
+        'binding-mismatch envelope must not carry SESSION_NOT_FOUND fields')
+    })
+
     it('sends session_error for invalid attachment type', () => {
       const sessions = new Map()
       const session = createMockSession()
@@ -601,6 +660,49 @@ describe('input-handlers', () => {
       // Should not throw
       inputHandlers.interrupt(makeWs(), makeClient(), {}, ctx)
       assert.equal(ctx._sent.length, 0)
+    })
+
+    // #4935 — when the client explicitly addresses a stale sessionId (post-
+    // daemon-restart, the dashboard's persisted activeSessionId points at a
+    // pre-restart session ID), interrupt used to drop silently. Now we mirror
+    // the input-handler structured-error response so the dashboard can clear
+    // its local state and surface an actionable hint. (The no-sessionId case
+    // above stays silent: nothing to clear, no actionable signal.)
+    it('sends structured SESSION_NOT_FOUND when sessionId is stale (#4935)', () => {
+      const ctx = makeCtx()
+      inputHandlers.interrupt(
+        makeWs(),
+        makeClient(),
+        { sessionId: 'deadbeef-stale-session-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_NOT_FOUND')
+      assert.equal(ctx._sent[0].attemptedSessionId, 'deadbeef-stale-session-id')
+    })
+
+    // #4935 Copilot review feedback — same disambiguation as handleInput:
+    // bound-session mismatch on an interrupt is an authorization failure,
+    // not a stale-ID drop.
+    it('sends SESSION_TOKEN_MISMATCH (not SESSION_NOT_FOUND) when client is bound to a different session (#4935 review)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('bound-id', { session, name: 'BoundSession', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ boundSessionId: 'bound-id' })
+      inputHandlers.interrupt(
+        makeWs(),
+        client,
+        { sessionId: 'some-other-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx._sent[0].boundSessionId, 'bound-id')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundSession')
+      assert.equal(ctx._sent[0].attemptedSessionId, undefined)
     })
   })
 
