@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } from '../src/byok-tools.js'
+import { SUBAGENT_PROFILE_NAMES } from '../src/byok-subagent-profiles.js'
 
 /**
  * BUILTIN_TOOLS is the array passed verbatim into the SDK's
@@ -139,6 +140,20 @@ describe('BUILTIN_TOOLS', () => {
     assert.match(task.description, /permission_mode/, 'description must name the override field')
     assert.match(task.description, /permissive|stricter|at-most/i,
       'description must disclose the at-most-as-permissive rule')
+  })
+
+  it('Task description enumerates the subagent_type profile names (#5018)', () => {
+    // The model can only request a subagent profile it knows exists.
+    // Pin the description so it surfaces every available profile id from
+    // the SUBAGENT_PROFILES registry — a future profile addition that
+    // forgets to update this string would fail loudly here.
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.match(task.description, /subagent_type/,
+      'description must name the subagent_type field')
+    for (const profileName of SUBAGENT_PROFILE_NAMES) {
+      assert.ok(task.description.includes(profileName),
+        `Task description must enumerate profile id "${profileName}"`)
+    }
   })
 
   it('TASK_PERMISSION_MODE_RANK orders modes by permissiveness (#5017)', () => {

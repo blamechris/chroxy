@@ -13,6 +13,8 @@
  *   - MCP — #4048
  */
 
+import { SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
+
 /**
  * Valid TodoWrite status values. Single source of truth — the JSON-schema
  * enum below and the Set used for runtime validation both derive from
@@ -202,7 +204,12 @@ export const BUILTIN_TOOLS = [
       'permissive mode is rejected with an is_error tool_result. ' +
       'MCP tools: by default the sub-agent inherits the parent\'s MCP fleet (same ' +
       '`mcp__<server>__<tool>` set as this turn), at zero extra spawn cost. Pass ' +
-      '`inherit_mcp: false` to launch a sub-agent with built-in tools only (no MCP).',
+      '`inherit_mcp: false` to launch a sub-agent with built-in tools only (no MCP). ' +
+      'Subagent profiles (#5018): pass `subagent_type` to bias the child toward a focused role. ' +
+      `Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}. Each profile carries a tailored ` +
+      'system prompt and may restrict the child\'s tool set (e.g. code-reviewer is read-only). ' +
+      'Unknown subagent_type values are rejected with an is_error tool_result so a misspelled ' +
+      'profile id fails loudly rather than silently dropping the requested behaviour.',
     input_schema: {
       type: 'object',
       properties: {
@@ -216,7 +223,11 @@ export const BUILTIN_TOOLS = [
         },
         subagent_type: {
           type: 'string',
-          description: 'Optional subagent profile id (e.g. "general", "researcher"). Currently informational only — ignored by the runner in v1.',
+          enum: [...SUBAGENT_PROFILE_NAMES],
+          description:
+            'Optional subagent profile id. When set, the runner applies the profile\'s system prompt '
+            + `and tool-set restriction to the child. Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}. `
+            + 'Unknown values are rejected with an is_error tool_result.',
         },
         permission_mode: {
           type: 'string',
