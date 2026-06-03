@@ -3911,6 +3911,16 @@ describe('ClaudeByokSession', () => {
         'rejection message must name the offending field')
       assert.equal(childSpawned, false,
         'no subagent must be spawned when inherit_mcp is invalid')
+      // #5019 review: the rejection must run BEFORE agent_spawned is
+      // emitted and BEFORE _activeAgents is populated — otherwise the
+      // dashboard's active-agents badge would show a phantom entry that
+      // never clears. Mirrors the placement of the permission_mode
+      // typecheck (#5017). Pins the early-return cleanliness.
+      const spawnEvents = captured.filter((e) => e.name === 'agent_spawned')
+      assert.equal(spawnEvents.length, 0,
+        'agent_spawned must NOT be emitted when inherit_mcp rejection fires')
+      assert.equal(session._activeAgents.size, 0,
+        '_activeAgents must stay empty on inherit_mcp rejection — no phantom badge entry')
       await session.destroy()
     })
 

@@ -1224,6 +1224,25 @@ export class ClaudeByokSession extends BaseSession {
       }
       childPermissionMode = requested
     }
+    // #5019: validate inherit_mcp type BEFORE the agent_spawned emit /
+    // _activeAgents.set so a non-boolean value (string "true", number 1,
+    // null — anything `typeof !== 'boolean'`) returns an is_error result
+    // without leaving a phantom entry in _activeAgents or emitting an
+    // unbalanced agent_spawned. The dashboard's active-agents badge would
+    // otherwise show a spawn that never clears. Mirrors the placement of
+    // the permission_mode validation above. The model gets a crisp signal
+    // naming the offending field rather than us silently coercing to one
+    // of the two paths.
+    let inheritMcp = true
+    if (input?.inherit_mcp !== undefined) {
+      if (typeof input.inherit_mcp !== 'boolean') {
+        return {
+          content: `Task tool: invalid \`inherit_mcp\` value (got ${typeof input.inherit_mcp}). Must be a boolean.`,
+          isError: true,
+        }
+      }
+      inheritMcp = input.inherit_mcp
+    }
     if (signal?.aborted) {
       return { content: 'Interrupted by user before subagent spawned', isError: true }
     }
@@ -1268,21 +1287,6 @@ export class ClaudeByokSession extends BaseSession {
     // populated _activeAgents — we MUST balance that with a matching
     // agent_completed + _activeAgents delete + matching error tool_result
     // so the dashboard badge clears and we don't leak the entry.
-    //
-    // Validate inherit_mcp type before reading: a non-boolean value
-    // (string "true", number 1, null) is rejected with an is_error
-    // tool_result so the model gets a clear signal rather than us
-    // silently coercing to one of the two paths.
-    let inheritMcp = true
-    if (input?.inherit_mcp !== undefined) {
-      if (typeof input.inherit_mcp !== 'boolean') {
-        return {
-          content: `Task tool: invalid \`inherit_mcp\` value (got ${typeof input.inherit_mcp}). Must be a boolean.`,
-          isError: true,
-        }
-      }
-      inheritMcp = input.inherit_mcp
-    }
     let child
     try {
       const ClaudeByokSessionCtor = this.constructor
