@@ -76,9 +76,9 @@ export class DockerBackend {
    * @returns {Promise<{ containerId: string, containerCliPath: string, services: Array }>}
    */
   async createComposeEnvironment(opts) {
-    const { cwd, composeFile, composeProject, containerUser, primaryService } = opts
+    const { cwd, composeFile, composeProject, containerUser, primaryService, envFile } = opts
 
-    await this._composeUp(composeFile, composeProject, cwd)
+    await this._composeUp(composeFile, composeProject, cwd, envFile)
 
     let containerId
     try {
@@ -137,7 +137,7 @@ export class DockerBackend {
 
   /**
    * @param {string} containerId
-   * @param {{ cmd: string, env?: Object.<string,string>, cwd?: string, timeout?: number }} opts
+   * @param {{ cmd: string, env?: Object.<string,string>, envFile?: string, cwd?: string, timeout?: number }} opts
    * @returns {Promise<{ stdout: string, stderr: string }>}
    *
    * opts.env — all key/value pairs are forwarded as `--env KEY=VAL` flags.
@@ -150,6 +150,15 @@ export class DockerBackend {
    * execInEnvironment is a general-purpose helper invoked with an explicit env
    * object constructed by the caller. The caller is responsible for passing only
    * the vars required for the command. process.env is never consulted.
+   *
+   * opts.envFile — forwarded as `--env-file <path>`. Useful for secrets that
+   * must not appear in `ps` output (`docker exec --env KEY=secret` exposes
+   * the value in the process listing). The file format follows Docker's own
+   * env file spec: one `KEY=VALUE` pair per line, no quoting required.
+   * Callers are responsible for creating the file with 0600 permissions and
+   * unlinking it when no longer needed. docker-byok (#5079) uses this to
+   * forward `ANTHROPIC_API_KEY` into compose-managed containers without
+   * exposing the key in argv.
    *
    * opts.cwd — forwarded as `--workdir <cwd>`.  The path must already be an
    * absolute path *inside* the container; callers are responsible for remapping
@@ -164,7 +173,7 @@ export class DockerBackend {
    * (#5021) passes it for every tool dispatch so file ops respect the
    * `useradd` + `chown /workspace` setup done at container start.
    */
-  execInEnvironment(containerId, { cmd, env, cwd, timeout = 30_000, user } = {}) {
+  execInEnvironment(containerId, { cmd, env, envFile, cwd, timeout = 30_000, user } = {}) {
     return new Promise((resolve, reject) => {
       const execArgs = ['exec']
 
@@ -181,6 +190,10 @@ export class DockerBackend {
 
       if (cwd) {
         execArgs.push('--workdir', cwd)
+      }
+
+      if (envFile) {
+        execArgs.push('--env-file', envFile)
       }
 
       if (env) {
@@ -545,11 +558,19 @@ export class DockerBackend {
     })
   }
 
-  _composeUp(composeFile, project, cwd) {
+  _composeUp(composeFile, project, cwd, envFile) {
     return new Promise((resolve, reject) => {
-      this._execFile('docker', [
-        'compose', '-f', composeFile, '-p', project, 'up', '-d',
-      ], { encoding: 'utf-8', timeout: 120_000, cwd }, (err, _stdout, stderr) => {
+      // `docker compose --env-file <path>` (before the subcommand) sets the
+      // env used for compose-file interpolation, so a compose service that
+      // declares `environment: [ANTHROPIC_API_KEY]` or `${ANTHROPIC_API_KEY}`
+      // picks the value up without the operator having to hand-edit their
+      // compose file. The file is short-lived (tmpfile created + unlinked
+      // by the caller) and lives at 0600 so the key never appears in `ps`
+      // output. (#5079)
+      const args = ['compose']
+      if (envFile) args.push('--env-file', envFile)
+      args.push('-f', composeFile, '-p', project, 'up', '-d')
+      this._execFile('docker', args, { encoding: 'utf-8', timeout: 120_000, cwd }, (err, _stdout, stderr) => {
         if (err) {
           reject(new Error(stderr ? stderr.trim() : err.message))
           return
