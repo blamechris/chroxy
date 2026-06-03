@@ -3,7 +3,7 @@
  * StatusBar tests are in StatusBar.test.tsx
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within, act } from '@testing-library/react'
 import { SessionBar, reorderTabs, type SessionTabData } from './SessionBar'
 
 afterEach(cleanup)
@@ -643,6 +643,153 @@ describe('SessionBar', () => {
       expect(tabA.getAttribute('aria-grabbed')).toBe('true')
       fireEvent.keyDown(tabA, { key: 'ArrowRight' })
       expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c'])
+    })
+
+    // #4946 — Native HTML5 dragleave fires when the cursor crosses into a
+    // child element (status dot, cwd/model/provider chips, close button),
+    // even though the user hasn't actually left the tab. Without the
+    // relatedTarget guard this causes the .drag-over affordance to flicker.
+    //
+    // Helper: `fireEvent.dragLeave(..., { relatedTarget })` does not actually
+    // attach relatedTarget to the synthesized event (jsdom limitation — the
+    // EventInit shape doesn't pass DragEventInit.relatedTarget through). We
+    // build a bubbling dragleave Event manually and defineProperty the field
+    // so the React handler sees a real DOM-like dragleave.
+    function dispatchDragLeave(target: Element, relatedTarget: Node | null) {
+      const evt = new Event('dragleave', { bubbles: true, cancelable: true })
+      Object.defineProperty(evt, 'relatedTarget', { value: relatedTarget, configurable: true })
+      // act() flushes the synchronous React state update triggered by the
+      // dispatched event (fireEvent does this automatically; raw
+      // dispatchEvent does not).
+      act(() => { target.dispatchEvent(evt) })
+    }
+
+    it('does not clear drag-over highlight when crossing inner chips (#4946)', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={[
+            { sessionId: 'a', name: 'Alpha', isBusy: false, isActive: true },
+            {
+              sessionId: 'b', name: 'Beta', isBusy: false, isActive: false,
+              cwd: '/home/user/projects/api',
+              model: 'claude-opus-4-6',
+              provider: 'claude',
+            },
+            { sessionId: 'c', name: 'Charlie', isBusy: false, isActive: false },
+          ]}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      const tabB = screen.getByTestId('session-tab-b')
+      const dataTransfer = {
+        data: {} as Record<string, string>,
+        setData(format: string, val: string) { this.data[format] = val },
+        getData(format: string) { return this.data[format] ?? '' },
+        effectAllowed: 'all',
+        dropEffect: 'none',
+        types: [] as string[],
+      }
+      // Start dragging A, hover B → drag-over highlight applied.
+      fireEvent.dragStart(tabA, { dataTransfer })
+      fireEvent.dragOver(tabB, { dataTransfer })
+      expect(tabB.className).toContain('drag-over')
+
+      // Simulate cursor crossing into an inner child (the cwd chip).
+      // Native browsers fire dragleave on tabB with relatedTarget pointing at
+      // the child — without the guard this would clear dragOverId and remove
+      // the highlight, causing visible flicker.
+      const cwdChip = tabB.querySelector('.tab-cwd')!
+      expect(cwdChip).toBeTruthy()
+      dispatchDragLeave(tabB, cwdChip)
+      expect(tabB.className).toContain('drag-over')
+
+      const modelChip = tabB.querySelector('.tab-model')!
+      expect(modelChip).toBeTruthy()
+      dispatchDragLeave(tabB, modelChip)
+      expect(tabB.className).toContain('drag-over')
+
+      const providerChip = tabB.querySelector('.tab-provider')!
+      expect(providerChip).toBeTruthy()
+      dispatchDragLeave(tabB, providerChip)
+      expect(tabB.className).toContain('drag-over')
+    })
+
+    it('clears drag-over highlight when cursor genuinely leaves the tab (#4946)', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={[
+            { sessionId: 'a', name: 'Alpha', isBusy: false, isActive: true },
+            { sessionId: 'b', name: 'Beta', isBusy: false, isActive: false },
+            { sessionId: 'c', name: 'Charlie', isBusy: false, isActive: false },
+          ]}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      const tabB = screen.getByTestId('session-tab-b')
+      const tabC = screen.getByTestId('session-tab-c')
+      const dataTransfer = {
+        data: {} as Record<string, string>,
+        setData(format: string, val: string) { this.data[format] = val },
+        getData(format: string) { return this.data[format] ?? '' },
+        effectAllowed: 'all',
+        dropEffect: 'none',
+        types: [] as string[],
+      }
+      fireEvent.dragStart(tabA, { dataTransfer })
+      fireEvent.dragOver(tabB, { dataTransfer })
+      expect(tabB.className).toContain('drag-over')
+
+      // Leave to a sibling tab — relatedTarget is NOT contained in tabB, so
+      // the highlight should clear.
+      dispatchDragLeave(tabB, tabC)
+      expect(tabB.className).not.toContain('drag-over')
+    })
+
+    it('clears drag-over highlight when relatedTarget is null (cursor leaves window) (#4946)', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={[
+            { sessionId: 'a', name: 'Alpha', isBusy: false, isActive: true },
+            { sessionId: 'b', name: 'Beta', isBusy: false, isActive: false },
+          ]}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      const tabB = screen.getByTestId('session-tab-b')
+      const dataTransfer = {
+        data: {} as Record<string, string>,
+        setData(format: string, val: string) { this.data[format] = val },
+        getData(format: string) { return this.data[format] ?? '' },
+        effectAllowed: 'all',
+        dropEffect: 'none',
+        types: [] as string[],
+      }
+      fireEvent.dragStart(tabA, { dataTransfer })
+      fireEvent.dragOver(tabB, { dataTransfer })
+      expect(tabB.className).toContain('drag-over')
+
+      // relatedTarget is null when the cursor leaves the browser window —
+      // treat as a genuine boundary exit and clear the highlight.
+      dispatchDragLeave(tabB, null)
+      expect(tabB.className).not.toContain('drag-over')
     })
 
     it('click-to-activate still works when reorder is wired', () => {
