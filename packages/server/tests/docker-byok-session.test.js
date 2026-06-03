@@ -1029,6 +1029,305 @@ describe('DockerByokSession — snapshot soiling integration (#5043)', () => {
   })
 })
 
+describe('DockerByokSession — snapshot / restore (#5023)', () => {
+  /**
+   * Snapshot tests cover the MVP shape:
+   *   - snapshot()  → docker commit + markSoiled + metadata write
+   *   - restore via `snapshotImage` opt → docker run with the snapshot
+   *     tag, skip useradd, and auto-soil the live container so the
+   *     restored conversation's FS doesn't leak into the next acquirer.
+   *
+   * Same pool-with-soiling stub shape as #5043 — snapshot integration
+   * runs through markSoiled so a snapshotted container always exits via
+   * inline `docker rm -f` rather than going back to the pool.
+   */
+  function poolStubWithSoiling({ acquireReturn = null } = {}) {
+    const calls = { acquire: [], release: [], markSoiled: [] }
+    const soiled = new Set()
+    let nextAcquire = acquireReturn
+    return {
+      calls,
+      acquire(key) {
+        calls.acquire.push(key)
+        const v = nextAcquire
+        nextAcquire = null
+        return v
+      },
+      async release(key, containerId) {
+        calls.release.push({ key, containerId })
+        if (soiled.has(containerId)) {
+          soiled.delete(containerId)
+          return false
+        }
+        return true
+      },
+      markSoiled(containerId) {
+        if (!containerId) return
+        soiled.add(containerId)
+        calls.markSoiled.push(containerId)
+      },
+      isSoiled(containerId) {
+        return soiled.has(containerId)
+      },
+    }
+  }
+
+  /**
+   * Docker backend stub specialised for snapshot tests — records every
+   * `commitEnvironment` call so we can assert the snapshot tag shape.
+   */
+  function backendStubWithCommit(opts = {}) {
+    const calls = { exec: [], commit: [] }
+    return {
+      calls,
+      async execInEnvironment(containerId, execOpts) {
+        calls.exec.push({ containerId, ...execOpts })
+        return { stdout: '', stderr: '' }
+      },
+      async commitEnvironment(containerId, imageTag) {
+        calls.commit.push({ containerId, imageTag })
+        if (opts.commitError) throw opts.commitError
+        return opts.commitSha || `sha256:${imageTag.replace(/[^a-z0-9]/gi, '').slice(0, 64)}`
+      },
+    }
+  }
+
+  it('snapshot() commits the live container under a chroxy-byok-snap tag', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_SNAP_OK\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = backendStubWithCommit()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend,
+      snapshotsDir: join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const snap = await session.snapshot({ name: 'after-deps' })
+
+    assert.equal(backend.calls.commit.length, 1, 'commitEnvironment was called exactly once')
+    const commit = backend.calls.commit[0]
+    assert.equal(commit.containerId, 'CONTAINER_SNAP_OK')
+    assert.match(commit.imageTag, /^chroxy-byok-snap:/, 'snapshot tag uses chroxy-byok-snap prefix')
+
+    // Snapshot result shape: tag, name, createdAt, sourceCwd, sourceImage.
+    assert.equal(snap.tag, commit.imageTag)
+    assert.equal(snap.name, 'after-deps')
+    assert.ok(typeof snap.createdAt === 'string' && snap.createdAt.length > 0)
+    assert.equal(snap.sourceCwd, '/host/cwd')
+    assert.equal(snap.sourceImage, 'node:22-slim')
+
+    await session.destroy()
+  })
+
+  it('snapshot() marks the live container soiled so the pool evicts on release', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_SNAP_DIRTY\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      _pool: pool,
+      snapshotsDir: join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    await session.snapshot({ name: 'mid-session' })
+
+    // Pool was told this container is dirty — release will evict.
+    assert.deepEqual(pool.calls.markSoiled, ['CONTAINER_SNAP_DIRTY'])
+    assert.equal(pool.isSoiled('CONTAINER_SNAP_DIRTY'), true)
+
+    await session.destroy()
+
+    // Release fired and the pool returned false (evicted, not pooled).
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_SNAP_DIRTY')
+  })
+
+  it('snapshot() persists metadata JSON to snapshotsDir for ops visibility', async () => {
+    const { existsSync, readFileSync, readdirSync } = await import('node:fs')
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_META\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const snapshotsDir = join(tmpHome, 'snapshots')
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      snapshotsDir,
+      sourceSessionId: 'sess-abc',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const snap = await session.snapshot({ name: 'with-meta' })
+    assert.ok(existsSync(snapshotsDir), 'snapshotsDir was created')
+    const files = readdirSync(snapshotsDir).filter((f) => f.endsWith('.json'))
+    assert.equal(files.length, 1, 'one metadata JSON was written')
+    const meta = JSON.parse(readFileSync(join(snapshotsDir, files[0]), 'utf-8'))
+    assert.equal(meta.tag, snap.tag)
+    assert.equal(meta.name, 'with-meta')
+    assert.equal(meta.sourceCwd, '/host/cwd')
+    assert.equal(meta.sourceImage, 'node:22-slim')
+    assert.equal(meta.sourceSessionId, 'sess-abc')
+    assert.equal(typeof meta.createdAt, 'string')
+
+    await session.destroy()
+  })
+
+  it('snapshot() rejects when the container is not ready', async () => {
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile: execFileStub({ info: { stdout: 'ok' } }),
+      _dockerBackend: backendStubWithCommit(),
+    })
+    // No start() — container is not ready.
+    await assert.rejects(
+      () => session.snapshot({ name: 'too-early' }),
+      /not ready/i,
+    )
+  })
+
+  it('snapshot() surfaces docker commit failures as Error', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_FAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = backendStubWithCommit({
+      commitError: new Error('disk full'),
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend,
+      snapshotsDir: join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    await assert.rejects(
+      () => session.snapshot({ name: 'will-fail' }),
+      /disk full/,
+    )
+    await session.destroy()
+  })
+
+  it('snapshotImage opt restores: uses the snapshot tag and skips useradd', async () => {
+    const runCalls = []
+    const execCmds = []
+    const _execFile = (cmd, args, opts, callback) => {
+      const sub = args[0]
+      if (sub === 'info') return callback(null, 'ok', '')
+      if (sub === 'run') {
+        runCalls.push([...args])
+        return callback(null, 'CONTAINER_RESTORED\n', '')
+      }
+      if (sub === 'exec') {
+        execCmds.push([...args])
+        return callback(null, '', '')
+      }
+      if (sub === 'rm') return callback(null, '', '')
+      callback(null, '', '')
+    }
+
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      snapshotImage: 'chroxy-byok-snap:abc123-1700000000000',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // The `docker run` invocation used the snapshot tag as the image.
+    assert.equal(runCalls.length, 1)
+    const runArgs = runCalls[0]
+    // image is third-to-last (before "sleep" "infinity")
+    const imageIdx = runArgs.length - 3
+    assert.equal(runArgs[imageIdx], 'chroxy-byok-snap:abc123-1700000000000')
+
+    // No `useradd` should have run on the restored container — the
+    // snapshot image already has the user baked in.
+    const setupCalls = execCmds.filter((args) =>
+      args.some((a) => typeof a === 'string' && a.includes('useradd')))
+    assert.equal(setupCalls.length, 0, 'restore must skip useradd')
+
+    await session.destroy()
+  })
+
+  it('snapshotImage opt auto-soils the restored container so reuse cannot leak', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_RESTORED_DIRTY\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      _pool: pool,
+      snapshotImage: 'chroxy-byok-snap:abc-123',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // The restored container is automatically marked soiled — its FS is
+    // coupled to the source conversation's history.
+    assert.deepEqual(pool.calls.markSoiled, ['CONTAINER_RESTORED_DIRTY'])
+
+    await session.destroy()
+
+    // And it's evicted on release, not pooled.
+    assert.equal(pool.calls.release.length, 1)
+  })
+
+  it('snapshot() persists metadata even when snapshotsDir is brand-new', async () => {
+    const { existsSync, readdirSync } = await import('node:fs')
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_MK\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const nested = join(tmpHome, 'deeply', 'nested', 'snaps')
+    assert.equal(existsSync(nested), false)
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      snapshotsDir: nested,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    await session.snapshot({ name: 'mkdir-test' })
+    assert.ok(existsSync(nested))
+    assert.equal(readdirSync(nested).filter((f) => f.endsWith('.json')).length, 1)
+
+    await session.destroy()
+  })
+})
+
 describe('docker-byok provider registration', () => {
   it('registerDockerProvider() wires docker-byok when environments are enabled and docker is available', async () => {
     // Spy on console.warn so accidental log noise during the test
