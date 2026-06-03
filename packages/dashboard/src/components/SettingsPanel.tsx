@@ -21,6 +21,8 @@ import {
   isVoiceInputMode,
 } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
+import { isMacPlatform } from '../utils/platform'
+import { getTauriInvoke } from '../utils/tauri-bridge'
 import {
   getTunnelMode,
   setTunnelMode,
@@ -695,6 +697,31 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [allowAutoPerm, setAllowAutoPerm] = useState<boolean>(false)
   const [autoPermError, setAutoPermError] = useState<string | null>(null)
   const [autoPermDirty, setAutoPermDirty] = useState<boolean>(false)
+  // #4956 — Tooling reset hint state. The Tauri command runs `tccutil reset
+  // Microphone/SpeechRecognition com.chroxy.desktop`; we only surface the
+  // button on macOS-in-Tauri (other platforms have no TCC, and the browser
+  // can't shell out). Status feedback is intentionally inline (not a toast)
+  // so the user sees the outcome next to the button they pressed.
+  const [speechResetStatus, setSpeechResetStatus] = useState<
+    'idle' | 'running' | 'success' | 'error'
+  >('idle')
+  const [speechResetError, setSpeechResetError] = useState<string | null>(null)
+  const showSpeechResetButton = inTauri && isMacPlatform()
+  const handleResetSpeechPermissions = useCallback(async () => {
+    setSpeechResetStatus('running')
+    setSpeechResetError(null)
+    try {
+      const invoke = getTauriInvoke()
+      if (!invoke) {
+        throw new Error('Tauri invoke unavailable')
+      }
+      await invoke('reset_speech_permissions')
+      setSpeechResetStatus('success')
+    } catch (err) {
+      setSpeechResetStatus('error')
+      setSpeechResetError(err instanceof Error ? err.message : String(err))
+    }
+  }, [])
   const [autoPermSaving, setAutoPermSaving] = useState<boolean>(false)
 
   // #4660 / #4662 / #4739: per-session preamble text area. Local draft
@@ -737,6 +764,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     setAutoPermError(null)
     setAutoPermDirty(false)
     setAutoPermSaving(false)
+    // #4998 review — match the panel-scoped reset pattern used for
+    // tunnelError / autoPermError so a stale success/error hint from a
+    // previous open doesn't linger across reopens.
+    setSpeechResetStatus('idle')
+    setSpeechResetError(null)
     // Read saved setting (what user selected)
     getTunnelMode().then(mode => {
       if (mode) setTunnelModeState(mode)
@@ -1094,6 +1126,59 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 end-of-utterance timing.
               </p>
             </div>
+            {/* #4956 — macOS-only reset for cached TCC denials. Surfaced
+                after #4954 shipped the helper-entitlement fix because end
+                users upgrading from a broken build (v0.9.40 and earlier)
+                still hit the old TCC denial against the prior codesign
+                hash. The Rust side runs `tccutil reset Microphone +
+                SpeechRecognition com.chroxy.desktop`; on next mic use macOS
+                re-prompts and the new entitled signature gets allowed.
+                Gated on inTauri + macOS so the button doesn't show as a
+                no-op on Linux/Windows or in browser. */}
+            {showSpeechResetButton && (
+              <div className="settings-field" data-testid="speech-reset-row">
+                <label htmlFor="speech-reset-button">Reset macOS speech permissions</label>
+                <button
+                  type="button"
+                  id="speech-reset-button"
+                  className="settings-secondary-button"
+                  onClick={handleResetSpeechPermissions}
+                  disabled={speechResetStatus === 'running'}
+                  data-testid="speech-reset-button"
+                >
+                  {speechResetStatus === 'running' ? 'Resetting…' : 'Reset now'}
+                </button>
+                {speechResetStatus === 'success' && (
+                  <p
+                    className="settings-hint"
+                    data-testid="speech-reset-success"
+                    role="status"
+                  >
+                    Speech permissions reset. Click the mic again — macOS will
+                    prompt for permission, and the new entitled helper
+                    signature will be allowed.
+                  </p>
+                )}
+                {speechResetStatus === 'error' && speechResetError && (
+                  <p
+                    className="settings-hint settings-error"
+                    data-testid="speech-reset-error"
+                    role="alert"
+                  >
+                    Reset failed: {speechResetError}
+                  </p>
+                )}
+                {speechResetStatus === 'idle' && (
+                  <p className="settings-hint">
+                    Use this if voice input still says &ldquo;permission
+                    denied&rdquo; after upgrading. Chroxy v0.9.40+ ships with a
+                    new helper signature; macOS may cache a denial for the old
+                    signature. Resets <code>Microphone</code> and{' '}
+                    <code>SpeechRecognition</code> for <code>com.chroxy.desktop</code>.
+                  </p>
+                )}
+              </div>
+            )}
           </section>
 
           {/* #3852: customizable keyboard-shortcut bindings. Lives next

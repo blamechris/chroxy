@@ -552,6 +552,49 @@ fn stop_voice_input(
     Ok(())
 }
 
+/// #4956 — reset macOS TCC permissions for Microphone + Speech Recognition
+/// so a user upgrading past a codesign-hash change (e.g. v0.9.40 shipped
+/// the helper-entitlement fix from #4954, but the macOS TCC database
+/// remembered the entitlement-less hash) doesn't have to know `tccutil`
+/// exists. Surfaced in Settings → Voice Input as a button.
+///
+/// Runs both `tccutil reset Microphone com.chroxy.desktop` and
+/// `tccutil reset SpeechRecognition com.chroxy.desktop`. Either failing
+/// individually still returns Err so the UI surfaces the real problem
+/// (most likely: macOS prompted for admin elevation and the user
+/// cancelled). On success the dashboard surfaces a one-shot confirmation
+/// reminding the user to re-grant on the next mic click.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn reset_speech_permissions(window: tauri::Window) -> Result<(), String> {
+    require_main_window(&window)?;
+    // The bundle id is fixed at compile-time in tauri.conf.json; keeping it
+    // hard-coded here matches verify-entitlements.sh and the troubleshooting
+    // docs so the three references stay aligned by sight.
+    const BUNDLE_ID: &str = "com.chroxy.desktop";
+
+    for service in ["Microphone", "SpeechRecognition"] {
+        let output = std::process::Command::new("tccutil")
+            .args(["reset", service, BUNDLE_ID])
+            .output()
+            .map_err(|e| format!("Failed to invoke tccutil for {service}: {e}"))?;
+        if !output.status.success() {
+            // Some tccutil failures only write diagnostics to stdout (or
+            // stderr is empty); include both so the UI never shows a blank
+            // error string when the exit status is non-zero (#4998 review).
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "tccutil reset {service} {BUNDLE_ID} exited with status {}: stderr={} stdout={}",
+                output.status.code().unwrap_or(-1),
+                stderr.trim(),
+                stdout.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Read the current clipboard image and return it as a base64-encoded PNG.
 ///
 /// Returns `Ok(None)` when the clipboard does not currently hold an image —
@@ -659,6 +702,8 @@ pub fn run() {
             start_voice_input,
             #[cfg(target_os = "macos")]
             stop_voice_input,
+            #[cfg(target_os = "macos")]
+            reset_speech_permissions,
             tile_window,
             read_clipboard_image,
             reveal_in_finder,

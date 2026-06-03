@@ -28,6 +28,7 @@ const APP_COMMANDS: &[&str] = &[
     "voice_available",
     "start_voice_input",
     "stop_voice_input",
+    "reset_speech_permissions",
     "tile_window",
     "read_clipboard_image",
     "reveal_in_finder",

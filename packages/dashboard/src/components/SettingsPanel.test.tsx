@@ -2233,4 +2233,77 @@ describe('SettingsPanel', () => {
       expect(text).toMatch(/Stop after silence \(browser decides\)/)
     })
   })
+
+  // #4956 — Reset macOS speech permissions affordance. Gated on
+  // inTauri && macOS so the button doesn't show as a no-op on Linux/
+  // Windows or in browser (where there's no shell to invoke tccutil).
+  describe('Reset macOS speech permissions (#4956)', () => {
+    const tauriInvoke = vi.fn()
+    const setTauriEnv = (mac: boolean, tauri: boolean) => {
+      Object.defineProperty(window.navigator, 'userAgent', {
+        configurable: true,
+        value: mac
+          ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Test'
+          : 'Mozilla/5.0 (X11; Linux x86_64) Test',
+      })
+      if (tauri) {
+        ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+          invoke: tauriInvoke,
+        }
+      } else {
+        delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+      }
+    }
+
+    afterEach(() => {
+      tauriInvoke.mockReset()
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    })
+
+    it('does NOT render the reset row in the browser (non-Tauri)', () => {
+      setTauriEnv(true, false) // macOS UA but not Tauri
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('speech-reset-row')).toBeNull()
+    })
+
+    it('does NOT render the reset row on Linux even when running in Tauri', () => {
+      setTauriEnv(false, true)
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('speech-reset-row')).toBeNull()
+    })
+
+    it('renders the reset row with an idle hint on macOS-in-Tauri', () => {
+      setTauriEnv(true, true)
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('speech-reset-row')).toBeInTheDocument()
+      expect(screen.getByTestId('speech-reset-button')).toHaveTextContent('Reset now')
+      // Idle hint mentions both reset targets so an operator triaging knows
+      // what the button is about to do.
+      const row = screen.getByTestId('speech-reset-row')
+      expect(row.textContent).toContain('Microphone')
+      expect(row.textContent).toContain('SpeechRecognition')
+      expect(row.textContent).toContain('com.chroxy.desktop')
+    })
+
+    it('invokes the reset_speech_permissions Tauri command and surfaces a success hint', async () => {
+      setTauriEnv(true, true)
+      tauriInvoke.mockResolvedValue(undefined)
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('speech-reset-button'))
+      // findByTestId waits for the success hint to mount, replacing the
+      // earlier `setTimeout(..., 0)` flush which was flaky across runtimes
+      // (#4998 review).
+      await screen.findByTestId('speech-reset-success')
+      expect(tauriInvoke).toHaveBeenCalledWith('reset_speech_permissions')
+    })
+
+    it('surfaces an error hint when the Tauri command rejects', async () => {
+      setTauriEnv(true, true)
+      tauriInvoke.mockRejectedValue(new Error('tccutil reset Microphone exited with status 1'))
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('speech-reset-button'))
+      const errEl = await screen.findByTestId('speech-reset-error')
+      expect(errEl.textContent).toContain('tccutil reset Microphone exited with status 1')
+    })
+  })
 })
