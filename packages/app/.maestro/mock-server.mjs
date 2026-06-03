@@ -548,6 +548,87 @@ wss.on('connection', (ws) => {
           break
         }
 
+        // #4762: trigger phrase 'show-multi-question' emits the four
+        // wedge shapes #4735 / #4604 Chunk B require coverage for —
+        // mixed (single-select + multi-select + with-Other in one
+        // payload). The dashboard's MultiQuestionForm exercises every
+        // branch in a single payload because the dashboard renders
+        // all N questions inline (#4760 lifted the suppression for
+        // SDK-mode sessions). The mobile MessageBubble currently
+        // renders only `questions[0]` so this flow pins the wire→Q[0]
+        // path for the mixed payload — when the mobile multi-question
+        // renderer lands the flow extends to iterate every question
+        // (`approval-question-1` / `approval-question-2`).
+        //
+        // The mixed shape exercises three independent wire branches
+        // in a single payload:
+        //   - Q[0]: single-select with model-supplied 'Other' label —
+        //     normalizeQuestion's `modelSuppliedOther` path (see
+        //     packages/store-core/src/handlers/index.ts:3670) preserves
+        //     it with `value === label` ("Other") rather than appending
+        //     the synthetic OTHER_OPTION_VALUE sentinel — so the testID
+        //     resolves to `approval-button-Other`, not
+        //     `approval-button-__chroxy_other__`.
+        //   - Q[1]: multi-select (`multiSelect: true`) — Other
+        //     sentinel is intentionally NOT appended (see
+        //     normalizeQuestion's `isMultiSelect` branch); a regression
+        //     that flipped the gate would surface as an extra option
+        //     when downstream renderers iterate Q[1].
+        //   - Q[2]: single-select with synthetic 'Other' (no model-
+        //     supplied entry) — handleUserQuestion appends the
+        //     OTHER_OPTION_VALUE sentinel automatically.
+        //
+        // toolUseId reuses the multi-question counter so repeated
+        // triggers don't collide (same rationale as
+        // show-ask-user-question-multi above).
+        if (text.trim() === 'show-multi-question') {
+          showAskUserQuestionCounter += 1
+          const toolUseId = `tu-multi-question-mock-${showAskUserQuestionCounter}`
+          send(ws, {
+            type: 'user_question',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            questions: [
+              // Q[0] — single-select with model-supplied 'Other'.
+              // Lowercase 'approve' / 'deny' so the
+              // `approval-button-<value>` testID matches the canonical
+              // selectors used by the existing ask-user-question flows.
+              {
+                question: 'Q1 — deploy to production?',
+                options: [
+                  { label: 'approve' },
+                  { label: 'deny' },
+                  { label: 'Other' },
+                ],
+              },
+              // Q[1] — multi-select. The Other sentinel is deliberately
+              // NOT appended by normalizeQuestion for multi-select
+              // questions (multi-select forms produced by claude SDK
+              // never include a free-text fallback).
+              {
+                question: 'Q2 — which areas to verify?',
+                multiSelect: true,
+                options: [
+                  { label: 'app' },
+                  { label: 'server' },
+                  { label: 'dashboard' },
+                ],
+              },
+              // Q[2] — single-select with synthetic Other (no model-
+              // supplied entry; handleUserQuestion appends the
+              // OTHER_OPTION_VALUE sentinel automatically).
+              {
+                question: 'Q3 — rollback strategy?',
+                options: [
+                  { label: 'auto-rollback' },
+                  { label: 'manual-rollback' },
+                ],
+              },
+            ],
+          })
+          break
+        }
+
         // #4697 Chunk B: 4-question multi-question form mirrors the
         // shape #4604 Chunk B pinned at the server level. The mobile
         // MessageBubble currently renders only `questions[0]` (the
