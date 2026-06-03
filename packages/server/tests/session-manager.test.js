@@ -1191,84 +1191,89 @@ describe('SessionManager.restoreState', () => {
     mgr.destroyAll()
   })
 
-  // #4935 — pin the daemon-restart contract: restoreState() creates fresh
-  // random session IDs for every restored session. The dashboard's persisted
-  // activeSessionId pointing at a pre-restart ID is therefore stale on
-  // reconnect, which is the root cause of the post-restart silent wedge
-  // investigated in #4935.
-  //
-  // The test simulates the exact scenario from the issue:
-  //   1. Write a synthetic state file with explicit pre-restart IDs.
-  //   2. Construct a fresh SessionManager from that file — daemon restart.
-  //   3. restoreState() — sessions come back with NEW IDs.
-  //   4. getSession(oldId) returns null — input addressed to the pre-restart
-  //      ID would fail the resolveSession() lookup and trip the structured
-  //      SESSION_NOT_FOUND error path (see input-handlers.test.js for the
-  //      handler-side assertion).
-  //
-  // The fix in input-handlers.js can't restore the old ID (that would
-  // require persisting + restoring the random ID itself, a wider change with
-  // broader implications); what it CAN do is make the silent drop visible.
-  // This test pins the precondition that triggers the visibility fix.
-  it('restored sessions get fresh IDs — old IDs are gone, lookups return null (#4935)', () => {
-    // We bypass createSession on a first boot and write a synthetic
-    // state file directly — the behavioural contract under test is the
-    // restore-side ID regeneration, not the persistence-write path
-    // (which is covered by the SessionManager auto-persist suite below).
+  // #4983 — restoreState preserves persisted IDs so the dashboard's
+  // localStorage-cached activeSessionId still resolves after a daemon
+  // restart. Inverts the original #4935 test, which asserted the
+  // opposite (`restored sessions get fresh IDs`) — that contract was
+  // the root cause of the wedge investigated in #4935, and #4979
+  // shipped a visibility safety net (SESSION_NOT_FOUND). This PR is the
+  // deeper fix: preserve the ID so the safety net never has to fire on
+  // a same-host daemon restart.
+  it('restoreState reuses persisted session IDs so dashboard lookups survive a daemon restart (#4983)', () => {
     const stateFile1 = join(tempDir, 'state-v1.json')
 
-    // Write a state file directly with explicit pre-restart IDs the
-    // dashboard's localStorage might still hold post-restart.
+    // Persisted IDs in valid 32-char lower-case hex (matches the format
+    // createSession emits via randomBytes(16).toString('hex')). Pre-#4983
+    // versions of this test used placeholder strings that wouldn't match
+    // the validation regex; real state files always carry the canonical
+    // hex shape.
+    const persistedIdA = 'a'.repeat(32)
+    const persistedIdB = 'b'.repeat(32)
     writeFileSync(stateFile1, JSON.stringify({
       version: 1,
       timestamp: Date.now(),
       sessions: [
-        {
-          // Pre-restart session ID that the dashboard might still hold.
-          id: 'preRestartId-AAAAAAAAAAAAAAAA',
-          name: 'Rah6',
-          cwd: '/tmp',
-          model: null,
-          permissionMode: 'approve',
-          sdkSessionId: null,
-        },
-        {
-          id: 'preRestartId-BBBBBBBBBBBBBBBB',
-          name: 'No-it-all',
-          cwd: '/tmp',
-          model: null,
-          permissionMode: 'auto',
-          sdkSessionId: null,
-        },
+        { id: persistedIdA, name: 'Rah6', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        { id: persistedIdB, name: 'No-it-all', cwd: '/tmp', model: null, permissionMode: 'auto', sdkSessionId: null },
       ],
     }))
 
-    // Simulate the daemon restart: fresh SessionManager from the same file.
     const mgr2 = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile1 })
     const firstNewId = mgr2.restoreState()
     assert.ok(firstNewId, 'restoreState should return the first restored session ID')
 
-    // The fresh IDs must differ from the persisted IDs — this is what makes
-    // the dashboard's persisted activeSessionId stale post-restart.
-    assert.notEqual(firstNewId, 'preRestartId-AAAAAAAAAAAAAAAA',
-      'restored session ID must differ from the persisted ID (#4935 precondition)')
+    // The whole point of #4983: persisted IDs survive intact.
+    assert.equal(firstNewId, persistedIdA,
+      'restored session ID must match the persisted ID so dashboard\'s cached activeSessionId resolves')
     const sessions = mgr2.listSessions()
     assert.equal(sessions.length, 2, 'both sessions should restore')
-    for (const s of sessions) {
-      assert.notEqual(s.sessionId, 'preRestartId-AAAAAAAAAAAAAAAA')
-      assert.notEqual(s.sessionId, 'preRestartId-BBBBBBBBBBBBBBBB')
-    }
+    const ids = sessions.map(s => s.sessionId)
+    assert.ok(ids.includes(persistedIdA), `expected ${persistedIdA} in restored ids: ${ids.join(', ')}`)
+    assert.ok(ids.includes(persistedIdB), `expected ${persistedIdB} in restored ids: ${ids.join(', ')}`)
 
-    // Lookup by the OLD ID returns null — this is the moment the daemon
-    // silently dropped the dashboard's input in the original #4935 wedge.
-    // The visibility fix in input-handlers.js converts that null into a
-    // structured `session_error{code:'SESSION_NOT_FOUND', attemptedSessionId}`
-    // so the dashboard can recover. Pin both invariants here.
-    assert.equal(mgr2.getSession('preRestartId-AAAAAAAAAAAAAAAA'), null,
-      'lookup by stale pre-restart ID must return null — handler then trips the SESSION_NOT_FOUND path')
-    assert.equal(mgr2.getSession('preRestartId-BBBBBBBBBBBBBBBB'), null)
+    // The actual #4935 wedge scenario: dashboard input addressed to the
+    // pre-restart ID now resolves, instead of triggering SESSION_NOT_FOUND.
+    assert.ok(mgr2.getSession(persistedIdA), 'lookup by persisted ID must succeed — no resend loop')
+    assert.ok(mgr2.getSession(persistedIdB))
 
     mgr2.destroyAll()
+  })
+
+  // #4983 — defense-in-depth: a malformed persisted ID (wrong length,
+  // non-hex chars, etc.) must fall back to a fresh random ID instead of
+  // throwing or polluting the session map. Future state-file corruption
+  // (downgrade-then-upgrade, manual edits, etc.) must not wedge boot.
+  it('restoreState falls back to a fresh ID when the persisted id is malformed (#4983)', () => {
+    const stateFile1 = join(tempDir, 'state-malformed.json')
+    writeFileSync(stateFile1, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        // Too short
+        { id: 'deadbeef', name: 'short', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Wrong charset (uppercase + dashes)
+        { id: 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE', name: 'uuid-style', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Valid 32-char hex — must still survive intact
+        { id: 'c'.repeat(32), name: 'ok', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile1 })
+    mgr.restoreState()
+
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 3, 'all three sessions should restore even with malformed ids')
+    const validHex = /^[a-f0-9]{32}$/
+    for (const s of sessions) {
+      assert.match(s.sessionId, validHex, `session id ${s.sessionId} must be valid hex (corrupted persisted ids reassigned)`)
+    }
+    // Valid id survived; malformed ones reassigned to a new random hex.
+    const ids = sessions.map(s => s.sessionId)
+    assert.ok(ids.includes('c'.repeat(32)), 'the well-formed persisted id must survive intact')
+    assert.equal(mgr.getSession('deadbeef'), null, 'malformed short id must not be looked-up-able')
+    assert.equal(mgr.getSession('AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'), null, 'uppercase/dash id must not be looked-up-able')
+
+    mgr.destroyAll()
   })
 })
 

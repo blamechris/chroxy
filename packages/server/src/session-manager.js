@@ -523,9 +523,15 @@ export class SessionManager extends EventEmitter {
    *   entirely). Forwarded to ClaudeTuiSession; other providers ignore it harmlessly via
    *   destructuring. When omitted, falls back to the SessionManager-wide
    *   `defaultSkipPermissions` (set from `chroxy start --dangerously-skip-permissions`).
+   * @param {string} [options.preserveId] - Optional 32-char lower-case hex session id to
+   *   reuse instead of generating a fresh `randomBytes(16).toString('hex')`. Invalid
+   *   format OR a collision with an already-live entry falls back to a fresh random id
+   *   so callers can safely pass any value. Primary use: `restoreState` reusing the
+   *   persisted id so dashboard's localStorage-cached `activeSessionId` still resolves
+   *   after a daemon restart (#4983).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false, preserveId } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -552,7 +558,22 @@ export class SessionManager extends EventEmitter {
       throw err
     }
 
-    const sessionId = randomBytes(16).toString('hex')
+    // #4983 — preserve persisted ID on restoreState so dashboard's
+    // localStorage-cached activeSessionId still resolves after a daemon
+    // restart. Validate the format strictly (32 lower-case hex chars,
+    // matching the randomBytes(16).toString('hex') output below) so a
+    // corrupted state file can't inject a malformed id; also guard
+    // against accidental collisions with sessions that already exist in
+    // this manager (defense in depth — restoreState runs at boot before
+    // any other createSession call, but the param is API-exposed and
+    // future callers shouldn't be able to clobber a live entry).
+    const preserve =
+      typeof preserveId === 'string' &&
+      /^[a-f0-9]{32}$/.test(preserveId) &&
+      !this._sessions.has(preserveId)
+        ? preserveId
+        : null
+    const sessionId = preserve ?? randomBytes(16).toString('hex')
     const sessionName = name || `Session ${++this._sessionCounter}`
 
     // Pre-flight: verify the provider's binary exists and required credential
@@ -1290,6 +1311,14 @@ export class SessionManager extends EventEmitter {
         // empty history for all not-yet-processed sessions, erasing the
         // data we're trying to restore.
         const sessionId = this.createSession({
+          // #4983 — reuse the persisted ID so dashboard's localStorage-
+          // cached activeSessionId still resolves after a daemon restart.
+          // createSession validates the format (32-char lower-case hex);
+          // a malformed or duplicate id falls back to randomBytes so the
+          // call still succeeds. The dashboard's #4982 SESSION_NOT_FOUND
+          // chip is the safety net for the malformed/missing/cross-host
+          // cases that this preservation can't help with.
+          preserveId: saved.id,
           name: saved.name,
           cwd: saved.cwd,
           model: saved.model,
