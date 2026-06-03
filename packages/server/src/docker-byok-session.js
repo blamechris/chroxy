@@ -98,7 +98,9 @@
 
 import { execFile } from 'child_process'
 import { createHash, randomBytes } from 'crypto'
-import { isAbsolute, posix } from 'path'
+import { writeFileSync, unlinkSync } from 'fs'
+import { tmpdir } from 'os'
+import { isAbsolute, join, posix } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
@@ -433,6 +435,19 @@ export class DockerByokSession extends ClaudeByokSession {
     // environment-manager's `chroxy-${envId}` naming. Resolved lazily
     // in start() so construction stays deterministic.
     this._composeProject = null
+    // #5079 — host-side tmpfile path for the compose env-file. Written
+    // at compose-up time when ANTHROPIC_API_KEY is present in the host
+    // env, passed to every `docker exec` via `--env-file` so the key is
+    // forwarded into model-spawned commands WITHOUT exposing it on the
+    // host's process-listing (`docker exec --env KEY=secret` is visible
+    // in `ps`). The file is mode 0600 and lives under os.tmpdir(); it's
+    // unlinked on destroy() (and best-effort on start-failure paths).
+    this._composeEnvFile = null
+    // Test seam: override the writer / unlinker so tests can assert the
+    // file lifecycle without touching the real filesystem.
+    this._writeEnvFile = opts._writeEnvFile || ((p, c) => writeFileSync(p, c, { mode: 0o600 }))
+    this._unlinkEnvFile = opts._unlinkEnvFile || ((p) => { try { unlinkSync(p) } catch { /* ignore */ } })
+    this._envForApiKey = opts._envForApiKey || process.env
 
     const user = opts.containerUser || DEFAULT_USER
     if (!VALID_USERNAME_RE.test(user)) {
@@ -806,12 +821,48 @@ export class DockerByokSession extends ClaudeByokSession {
    * host cwd is mounted at /workspace via the compose file (the user
    * is responsible for that volume mapping), and tool dispatch goes
    * through the same `_execAsContainerUser` path.
+   *
+   * #5079 — ANTHROPIC_API_KEY forwarding. The bare-image path forwards
+   * the key via `docker run --env`; compose mode does the same job via
+   * an `--env-file` tmpfile so the key is symmetric with the bare path
+   * without being exposed in `ps` output. The tmpfile is written at
+   * 0600 under os.tmpdir() and:
+   *   - passed to `docker compose --env-file <path>` so a service that
+   *     references `${ANTHROPIC_API_KEY}` in its compose file resolves
+   *     the value during interpolation; and
+   *   - reused on every `_execAsContainerUser` dispatch so a Bash command
+   *     the model spawns inside the container (e.g. `curl
+   *     api.anthropic.com` or a one-off `claude -p`) sees the key.
+   * destroy() unlinks the file. When `ANTHROPIC_API_KEY` is not set in
+   * the host env, no tmpfile is created — the path stays at `null` and
+   * `_execAsContainerUser` skips the `--env-file` flag.
    */
   async _startComposeStack() {
     if (!this._composeProject) {
       this._composeProject = `chroxy-byok-${randomBytes(6).toString('hex')}`
     }
     const cwd = this.cwd || process.cwd()
+    // #5079: write the ANTHROPIC_API_KEY tmpfile BEFORE compose up so
+    // the file is on disk for both compose interpolation AND for the
+    // exec dispatches that follow. Created at 0600 under os.tmpdir()
+    // with a session-scoped random suffix to avoid collision between
+    // parallel byok sessions on the same host.
+    const apiKey = this._envForApiKey?.ANTHROPIC_API_KEY
+    if (apiKey) {
+      const envFilePath = join(tmpdir(), `chroxy-byok-${this._composeProject}.env`)
+      try {
+        this._writeEnvFile(envFilePath, `ANTHROPIC_API_KEY=${apiKey}\n`)
+        this._composeEnvFile = envFilePath
+      } catch (err) {
+        // Non-fatal: log and proceed without the env file. The model
+        // running inside the container won't see the key (matching the
+        // pre-#5079 behaviour) but the host-side agent loop is what
+        // actually authenticates to Anthropic, so the session still
+        // functions for the common case.
+        log.warn(`docker-byok compose: failed to write env-file ${envFilePath}: ${err.message}`)
+        this._composeEnvFile = null
+      }
+    }
     log.info(`docker-byok compose stack starting (file=${this._composeFile} project=${this._composeProject} service=${this._composeService || '<first>'})`)
     let result
     try {
@@ -822,8 +873,15 @@ export class DockerByokSession extends ClaudeByokSession {
         composeProject: this._composeProject,
         containerUser: this._containerUser,
         primaryService: this._composeService,
+        envFile: this._composeEnvFile,
       })
     } catch (err) {
+      // Compose up failed — unlink the tmpfile before re-throwing so a
+      // start-failure path doesn't leak the key on disk.
+      if (this._composeEnvFile) {
+        this._unlinkEnvFile(this._composeEnvFile)
+        this._composeEnvFile = null
+      }
       const error = new Error(`docker compose start failed: ${err.message}`)
       error.code = err.code || 'compose_start_failed'
       throw error
@@ -1122,12 +1180,20 @@ export class DockerByokSession extends ClaudeByokSession {
    * execInEnvironment didn't forward a `-u` flag. The hardening
    * (`--cap-drop ALL`, `no-new-privileges`) still capped what root could
    * do, but the explicit non-root design intent was silently violated.
+   *
+   * #5079: in compose mode, when a tmpfile holding ANTHROPIC_API_KEY was
+   * written at start time, forward it via `--env-file` so the model's
+   * Bash commands inside the container see the key — without exposing
+   * it on the host's `ps` output (`--env KEY=secret` would). Bare-image
+   * sessions don't need this: their `docker run --env ANTHROPIC_API_KEY`
+   * already attached the key to the container env at launch time.
    */
   _execAsContainerUser({ cmd, timeout = 30_000 }) {
     return this._dockerBackend.execInEnvironment(this._containerId, {
       cmd,
       timeout,
       user: this._containerUser,
+      envFile: this._composeEnvFile || undefined,
     })
   }
 
@@ -1359,10 +1425,17 @@ export class DockerByokSession extends ClaudeByokSession {
     // nulling state so the finally-block has them.
     const composeFile = this._composeFile
     const composeProject = this._composeProject
+    // #5079: unlink the ANTHROPIC_API_KEY tmpfile created at compose-up
+    // time. Snapshot the path BEFORE nulling so the finally-block has
+    // it; unlink AFTER `compose down` runs (the tmpfile is referenced
+    // by the down call indirectly via the project metadata, and we want
+    // a clean teardown order — compose first, then secret material).
+    const composeEnvFile = this._composeEnvFile
     const cwd = this.cwd || process.cwd()
     this._containerId = null
     this._containerReady = false
     this._acquiredFromPool = false
+    this._composeEnvFile = null
     try {
       await super.destroy()
     } finally {
@@ -1378,6 +1451,10 @@ export class DockerByokSession extends ClaudeByokSession {
           })
         } catch (err) {
           log.warn(`compose destroy failed: ${err.message}`)
+        }
+        // Unlink the env-file last — best-effort, silent on missing.
+        if (composeEnvFile) {
+          this._unlinkEnvFile(composeEnvFile)
         }
       } else if (!containerId || !owned) {
         // Nothing for us to clean up — externally-managed container
