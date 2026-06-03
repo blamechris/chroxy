@@ -93,7 +93,10 @@ describe('MessageBubble resume-unknown handling (#4971)', () => {
     const response = {
       id: 'resp-1',
       type: 'response',
-      // @ts-expect-error — deliberately wrong shape for the regression guard
+      // Deliberately wrong shape for the regression guard — a non-error
+      // message carrying `code: 'resume_unknown'` should NOT route into
+      // the chip (the dispatch table gates on `isError`). Cast through
+      // ChatMessage so the test compiles without weakening callers.
       code: 'resume_unknown',
       content: 'Assistant response content',
       timestamp: Date.now(),
