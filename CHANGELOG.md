@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.39] - 2026-06-02
+
+Fourth daytime sweep: 7 issues landed. Two new visible features (drag-to-reorder for both SessionBar tabs and Sidebar rows), one prominent New Session button + Tauri menu bar, plus four #4887 / #4889 follow-ups (mobile text-chunk mirror, resume-failure error path, auto-checkpoint UX test, resume_conversation test coverage).
+
+### Added
+
+- **Drag-to-reorder SessionBar tabs (#4831 → #4945):** dashboard top-row session tabs are now drag-reorderable via native HTML5 DnD (no new dependency). Order is server-scoped + persisted to localStorage. Keyboard: `Space` lifts a tab into reorder mode (per ARIA grid pattern), arrows move, `Enter` drops, `Esc` cancels. `Shift+Space` kept as alias for back-compat. Three follow-ups: #4946 (drag-over flicker), #4949 (shortcut help/tooltip), #4951 (live-region a11y).
+- **Drag-to-reorder Sidebar rows (#4832 → #4938):** left-sidebar session + repo rows are now drag-reorderable. Repo order is a flat list of cwd paths; session order is keyed by repo cwd so reordering within one name-group never reshuffles another. Both server-scoped. Filter-active reorder is gated off (typing in the filter shouldn't fight the user's session order). Three follow-ups: #4939 (parent drag bubbling through nested children), #4940 (reorder refresh on server switch), #4941 (Alt+Arrow shortcut in shortcut help + `aria-keyshortcuts`).
+- **Prominent "New Session" button + Tauri menu bar entry (#4695 → #4943):** dashboard header gets a top-level New Session button (sharing the existing `handleNewSession` callback). Tauri macOS menu bar gets a "File → New Session" entry wired through a Rust→JS bridge. Additional menu entries (switch session, open settings, etc.) tracked in #4942 to keep this PR scoped.
+- **`resume_unknown` error code for failed `claude --resume` (#4929 → #4944):** when the spawned `claude --resume` process emits a known-failure pattern (seven stderr regexes) AND `attemptedResumeId` is set, the session surfaces a distinct `resume_unknown` error code with a one-shot fallback latch (subsequent restarts in the same wedge don't re-emit). Dashboard surfacing tracked in #4947, escalation UX in #4948, regex tightening in #4950.
+
+### Changed
+
+- **Mobile text-chunk continuation split mirrors dashboard #4889 (#4922 → #4937):** verbatim port of the v0.9.38 dashboard fix (single-hop `_deltaIdRemaps` + index-based scan + replay-guard) into the mobile message handler. Closes the mobile half of the text-concatenation bug.
+
+### Tests / Internal
+
+- **CLI session auto-checkpoint UX contract pinned (#4930 → #4934):** 271-line test suite covering the new auto-checkpoint side-effect introduced by #4928 — frequency tripwire, payload shape, restore/rewind path interaction. Describe block names both #4930 and #4928 for git-blame traceability.
+- **CLI `resume_conversation` end-to-end coverage (#4931 → #4936):** 15 subtests covering the new resume_conversation path enabled by #4928 — happy path, missing prior context, malformed resume id, capability gating. Fixed a latent false-pass in `conversation-handlers.test.js` where a `cwd` validator was short-circuiting before the `createSession` spy ran (Copilot catch — pinned with explicit `callCount === 1` assertion to prevent regression).
+
+### Process notes
+
+- One PR (#4945) required manual rebase + conflict resolution: collided with #4938 on `dashboard/src/store/persistence.ts` (two reorder persistence keys in the same constant block) and `dashboard/src/App.tsx` (overlapping import additions). Rebased onto main, hand-merged both intents (both reorder feature sets coexist now), force-pushed, CI green on retry.
+- v0.9.38 install + bundle swap exposed a real bug: sessions can wedge silently after daemon restart — sends don't reach the daemon, no Working indicator. Filed as **#4935** (high priority follow-up; not addressed in v0.9.39). Likely backpressure-eviction loop on reconnect for large-history sessions OR stale session-ID reference in the dashboard's client-side state.
+
+### Follow-up issues filed during this sweep
+
+- #4935 — bug(server): sessions wedge silently after daemon restart (real bug from the v0.9.38 install).
+- #4939 — fix(dashboard): sidebar nested rows bubble drag events to parent rows.
+- #4940 — fix(dashboard): sidebar reorder state doesn't refresh on server switch.
+- #4941 — a11y(dashboard): expose `Alt+ArrowUp/Down` in shortcut help + `aria-keyshortcuts`.
+- #4942 — feat(desktop): additional Tauri menu bar entries beyond "New Session".
+- #4946 — fix(dashboard): SessionBar drag-over flicker when crossing inner chips.
+- #4947 — feat(dashboard): render path for `resume_unknown` error code.
+- #4948 — design: escalation UX after `resume_unknown` fallback.
+- #4949 — feat(dashboard): expose SessionBar reorder shortcut in tooltip / shortcut help.
+- #4950 — fix(server): tighten broad `/resume.*failed/i` regex in resume-failure classifier.
+- #4951 — a11y(dashboard): swap deprecated `aria-grabbed` for live-region drag announcements.
+
 ## [0.9.38] - 2026-06-02
 
 Third daytime sweep: 11 issues landed — 3 real bug fixes (CLI cold-start resume, dashboard text concatenation, TUI wire fingerprint) plus 8 polish/observability follow-ups from v0.9.37. The Windows `writeFileRestricted` atomicity gap closes here, completing the three-PR arc (#4865 atomic POSIX → #4904 caller collapse → #4925 Windows parity).
