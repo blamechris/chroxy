@@ -369,6 +369,30 @@ export class DockerByokSession extends ClaudeByokSession {
   }
 
   /**
+   * Mark this session's live container "soiled" — its filesystem has
+   * been coupled to the current conversation (most often by taking a
+   * Docker snapshot) and MUST NOT be handed to a future session via the
+   * pool. The pool intercepts the next `release()` and evicts inline.
+   *
+   * Integration point for #5023 (docker-byok snapshot/restore): when
+   * snapshot support lands, the snapshot helper must call this AFTER
+   * `docker commit` succeeds (the snapshot includes the writable layer,
+   * so the container's auth / files / artifacts are now part of an
+   * image that's tied to this conversation). The restore-from-snapshot
+   * path does the same — restoring previous state into the live
+   * container couples it to a specific session's history.
+   *
+   * No-ops cleanly when pooling is disabled (no `_pool`) or when the
+   * session does not hold a container (no `_containerId` yet). Safe to
+   * call multiple times — `markSoiled` is idempotent.
+   */
+  markActiveContainerSoiled() {
+    if (!this._pool) return
+    if (!this._containerId) return
+    this._pool.markSoiled(this._containerId)
+  }
+
+  /**
    * If pooling is enabled, try to claim a warm container for this
    * session's resource shape. On a hit, verify the container still
    * responds to `docker exec` — if so, skip `_startContainer()`
