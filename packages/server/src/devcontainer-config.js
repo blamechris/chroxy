@@ -1,14 +1,10 @@
 /**
- * DevContainer config helpers (#5024).
+ * DevContainer config helpers (#5024, #5077).
  *
- * Pure functions used by DockerByokSession (per-session containers)
- * to parse and validate `.devcontainer/devcontainer.json`.
- *
- * EnvironmentManager (persistent environments) still carries its own
- * `_parseDevContainer` / `_validateMounts` / `_sanitizeContainerEnv`
- * instance methods today; consolidation onto this module is tracked
- * separately (issue #5077). Until that lands, treat the two
- * implementations as siblings — keep parity if you touch one.
+ * Pure functions used by BOTH the per-session DockerByokSession path
+ * and the persistent EnvironmentManager.create() path to parse and
+ * validate `.devcontainer/devcontainer.json`. Single source of truth
+ * for devcontainer field handling — touch one place, not two.
  *
  * Exports:
  *   - `parseDevContainer(cwd, { logger })` — read + parse + filter
