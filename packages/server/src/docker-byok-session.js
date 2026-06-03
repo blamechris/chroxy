@@ -54,6 +54,7 @@ import { execFile } from 'child_process'
 import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
+import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { createLogger } from './logger.js'
 import { isAbsolute, posix } from 'path'
 
@@ -200,6 +201,12 @@ export class DockerByokSession extends ClaudeByokSession {
    * @param {object} [opts._dockerBackend]           Test seam — pre-built backend
    * @param {Function} [opts._execFile]              Test seam — used by preflight
    *   (defaults to child_process.execFile)
+   * @param {object} [opts._pool]                    Test seam — explicit pool
+   *   instance. When omitted and pooling is enabled (via env), the shared
+   *   process-wide pool is used. When omitted and pooling is disabled,
+   *   pooling is skipped entirely (per-session lifecycle only).
+   * @param {Record<string,string>} [opts._poolEnv]  Test seam — alternate env
+   *   for pool enablement, defaults to `process.env`.
    */
   constructor(opts = {}) {
     // Forward every BaseSession/ClaudeByokSession opt verbatim via
@@ -227,6 +234,22 @@ export class DockerByokSession extends ClaudeByokSession {
     this._dockerBackend = opts._dockerBackend || new DockerBackend()
     this._execFile = opts._execFile || execFile
     this._containerReady = false
+    // #5022: across-session idle pool. Off by default — opted in via env
+    // or by passing an explicit `_pool` instance. Per-session reuse of
+    // the same container across multiple turns is unconditional and
+    // independent of pooling.
+    const poolEnv = opts._poolEnv || process.env
+    if (opts._pool) {
+      this._pool = opts._pool
+    } else if (!opts.containerId && isPoolEnabled(poolEnv)) {
+      this._pool = getSharedPool(poolEnv)
+    } else {
+      this._pool = null
+    }
+    // Set to `true` if the container picked up THIS session originated
+    // from the pool — used at destroy() time to decide between pool
+    // release and inline `docker rm -f`.
+    this._acquiredFromPool = false
   }
 
   /**
@@ -277,7 +300,7 @@ export class DockerByokSession extends ClaudeByokSession {
 
     if (this._containerOwned) {
       try {
-        await this._startContainer()
+        await this._acquireOrStartContainer()
       } catch (err) {
         this.emit('error', {
           code: err.code || 'docker_error',
@@ -325,6 +348,62 @@ export class DockerByokSession extends ClaudeByokSession {
       return
     }
     this._containerReady = true
+  }
+
+  /**
+   * Compute the pool key for this session's resource shape. Same shape
+   * used by `DockerContainerPool` so acquire / release lookups match.
+   *
+   * The host cwd is part of the key because /workspace is bind-mounted
+   * from cwd — reusing a container across cwds would silently surface
+   * files from another workspace.
+   */
+  _poolKey() {
+    return buildPoolKey({
+      image: this._image,
+      cwd: this.cwd || process.cwd(),
+      memoryLimit: this._memoryLimit,
+      cpuLimit: this._cpuLimit,
+      containerUser: this._containerUser,
+    })
+  }
+
+  /**
+   * If pooling is enabled, try to claim a warm container for this
+   * session's resource shape. On a hit, verify the container still
+   * responds to `docker exec` — if so, skip `_startContainer()`
+   * entirely. On a miss (or on a verify failure), fall back to a fresh
+   * launch.
+   *
+   * #5022 — across-session idle pool. Per-session reuse of the same
+   * container across turns is handled in `_dispatchBuiltinTool` and
+   * does not depend on the pool.
+   */
+  async _acquireOrStartContainer() {
+    if (this._pool) {
+      const key = this._poolKey()
+      const reused = this._pool.acquire(key)
+      if (reused) {
+        this._containerId = reused
+        try {
+          await this._verifyContainer()
+          // Pool hit: skip `useradd` + `chown` — already done by the
+          // session that originally provisioned this container, and
+          // the user persists across container restarts (image layer).
+          this._acquiredFromPool = true
+          log.info(`reused pooled container ${reused.slice(0, 12)}`)
+          return
+        } catch (err) {
+          // The pooled container died while idle (daemon restart, OOM
+          // kill). Forget it and fall through to a fresh launch.
+          log.warn(`pooled container ${reused.slice(0, 12)} failed verify: ${err.message} — launching fresh`)
+          this._containerId = null
+          // Best-effort cleanup of the stale id — fire-and-forget.
+          this._execFile('docker', ['rm', '-f', reused], { stdio: 'ignore' }, () => {})
+        }
+      }
+    }
+    await this._startContainer()
   }
 
   /**
@@ -701,25 +780,67 @@ export class DockerByokSession extends ClaudeByokSession {
    * Tear down the container we own, then call super.destroy() so the
    * agent-loop teardown (MCP fleet, permissions, listeners) runs.
    * When attached to an external container, leave it running.
+   *
+   * #5022: when pooling is enabled and the session went start-clean
+   * (`_containerReady` was set), the container is released back to the
+   * pool for the next session of the same resource shape to claim. On
+   * any error path — or if pooling is disabled — fall back to inline
+   * `docker rm -f`.
    */
   async destroy() {
     const containerId = this._containerId
     const owned = this._containerOwned
+    const wasReady = this._containerReady
+    const pool = this._pool
+    const acquiredFromPool = this._acquiredFromPool
     this._containerId = null
     this._containerReady = false
+    this._acquiredFromPool = false
     try {
       await super.destroy()
     } finally {
-      if (containerId && owned) {
-        log.info(`removing container ${containerId.slice(0, 12)}`)
-        await new Promise((resolve) => {
-          this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
-            if (err) log.warn(`failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
-            resolve()
-          })
-        })
+      if (!containerId || !owned) {
+        // Nothing for us to clean up — externally-managed container
+        // stays running for whoever owns it.
+      } else if (pool && wasReady) {
+        // Healthy session end → hand back to the pool. The pool may
+        // still evict (over cap, shutting down) but that's its call.
+        log.info(`releasing container ${containerId.slice(0, 12)} to pool`)
+        try {
+          await pool.release(this._poolKeyFor(containerId), containerId)
+        } catch (err) {
+          log.warn(`pool release of ${containerId.slice(0, 12)} failed: ${err.message} — falling back to docker rm -f`)
+          await this._rmContainer(containerId)
+        }
+      } else {
+        log.info(`removing container ${containerId.slice(0, 12)}${acquiredFromPool ? ' (was pooled)' : ''}`)
+        await this._rmContainer(containerId)
       }
     }
+  }
+
+  /**
+   * Inline `docker rm -f` fallback. Swallows errors — the alternative
+   * is leaking a container, which is worse than a warn log.
+   */
+  _rmContainer(containerId) {
+    return new Promise((resolve) => {
+      this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
+        if (err) log.warn(`failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
+        resolve()
+      })
+    })
+  }
+
+  /**
+   * Pool key for a specific container id. Currently this just computes
+   * from the session's resource shape — the containerId arg is here
+   * because the destroy() path may be called after `this._containerId`
+   * has been nulled out. Kept as a method so a future variant (per-
+   * container key derived from labels) can override.
+   */
+  _poolKeyFor(_containerId) {
+    return this._poolKey()
   }
 }
 
