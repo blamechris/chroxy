@@ -793,6 +793,64 @@ describe('CliSession stream-event handling', () => {
       assert.equal(messages.length, 0)
     })
 
+    it('exposes the streamed reply via stream_delta on a normal streamed turn (#5090)', () => {
+      // Companion to the no-fallback case above. The `messages.length === 0`
+      // assertion only proves the fallback was suppressed — it does NOT prove
+      // the consumer sees the streamed text. Without this companion, a future
+      // regression where `stream_delta` is silently dropped AND the fallback
+      // is also suppressed would still pass the no-fallback test (both bugs
+      // would cancel out and the consumer would see nothing).
+      //
+      // Pin that the concatenated `stream_delta` chunks compose the final
+      // response text the consumer would render.
+      const session = createSession()
+      const messages = []
+      const streamDeltas = []
+      session.on('message', (m) => messages.push(m))
+      session.on('stream_delta', (d) => streamDeltas.push(d.delta))
+
+      // Same wire sequence as the no-fallback case, but split the text across
+      // two deltas so we also pin that concatenation order is preserved.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed ' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'reply' },
+        },
+      })
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'streamed reply',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      // Primary contract (mirrors the no-fallback case): no synthesized
+      // response message on streamed turns.
+      assert.equal(messages.length, 0)
+      // New contract: the streamed text reached the consumer via stream_delta,
+      // and the concatenated chunks equal the canonical reply text.
+      assert.equal(streamDeltas.length, 2)
+      assert.equal(streamDeltas.join(''), 'streamed reply')
+    })
+
     it('does not emit fallback when data.result is empty or missing', () => {
       const session = createSession()
       const messages = []
