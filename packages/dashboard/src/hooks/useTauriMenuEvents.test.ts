@@ -96,8 +96,8 @@ describe('useTauriMenuEvents (#4695 / #4942)', () => {
     // a dashboard handler) is enumerated here. Items the Rust side
     // handles directly (Shell > Start/Stop/Restart/Open Console/Open in
     // Finder, Tunnel > Quick/Named/None, Help > Documentation/Report
-    // Issue/Check for Updates) intentionally do NOT appear in this list
-    // — they never reach the dashboard.
+    // Issue/Check for Updates, Window > Bring All to Front) intentionally
+    // do NOT appear in this list — they never reach the dashboard.
     const ENUMERATED_MENU_ROUTES: Array<{
       event: string
       prop:
@@ -109,7 +109,6 @@ describe('useTauriMenuEvents (#4695 / #4942)', () => {
         | 'onReload'
         | 'onTunnelSettings'
         | 'onPreferences'
-        | 'onBringAllToFront'
     }> = [
       { event: 'menu://connect-to-server', prop: 'onConnectToServer' },
       { event: 'menu://disconnect', prop: 'onDisconnect' },
@@ -119,7 +118,6 @@ describe('useTauriMenuEvents (#4695 / #4942)', () => {
       { event: 'menu://view-reload', prop: 'onReload' },
       { event: 'menu://tunnel-settings', prop: 'onTunnelSettings' },
       { event: 'menu://preferences', prop: 'onPreferences' },
-      { event: 'menu://window-bring-all-to-front', prop: 'onBringAllToFront' },
     ]
 
     for (const { event, prop } of ENUMERATED_MENU_ROUTES) {
@@ -147,6 +145,19 @@ describe('useTauriMenuEvents (#4695 / #4942)', () => {
         }
       }).not.toThrow()
       expect(onNewSession).not.toHaveBeenCalled()
+    })
+
+    it('does NOT subscribe to menu://window-bring-all-to-front (handled Rust-side)', () => {
+      // The Rust handler (`handle_bring_all_to_front`) iterates every
+      // webview window and brings each one forward — including
+      // secondary windows like `qr_popup`. The dashboard intentionally
+      // has no subscription here so the event never reaches React
+      // (and `window::show_window` doesn't get double-fired). If this
+      // test starts failing, the routing was changed; update either
+      // the hook or this test (not both) — never both at once.
+      const onNewSession = vi.fn()
+      renderHook(() => useTauriMenuEvents({ onNewSession }))
+      expect(listeners.has('menu://window-bring-all-to-front')).toBe(false)
     })
   })
 })

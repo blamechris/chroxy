@@ -1442,11 +1442,11 @@ export function App() {
   //                            Settings panel; tunnel mode lives there)
   //   - onPreferences       — Chroxy > Preferences… (opens Settings)
   //
-  // Window > Bring All to Front is intentionally NOT wired through
-  // this hook today: focusing the main window is already handled
-  // Rust-side by `window::show_window` in `on_menu_event`, so the
-  // dashboard has nothing to do beyond what the Rust dispatch already
-  // does.
+  // Window > Bring All to Front is handled entirely Rust-side
+  // (`handle_bring_all_to_front` iterates every webview window — main
+  // and any open `qr_popup` — and brings each one forward). The
+  // dashboard has no state to mutate, so it doesn't appear in the hook
+  // surface at all.
   const menuConnectToServer = useCallback(() => {
     // The dashboard's existing "connect to a different server" surface
     // is the Settings panel's Server Registry section. The menu item

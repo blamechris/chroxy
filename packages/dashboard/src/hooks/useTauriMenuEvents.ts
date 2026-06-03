@@ -60,8 +60,11 @@ export interface TauriMenuHandlers {
   onTunnelSettings?: () => void
   /** Triggered by `Chroxy > Preferences…` (id `app_menu:preferences`). */
   onPreferences?: () => void
-  /** Triggered by `Window > Bring All to Front` (id `app_menu:window-bring-all-to-front`). */
-  onBringAllToFront?: () => void
+  // NOTE: `Window > Bring All to Front` is handled entirely Rust-side
+  // (`handle_bring_all_to_front` iterates every webview window). The
+  // dashboard has no state to mutate — and `window::show_window` alone
+  // only targets the `main` webview, missing secondary windows like
+  // `qr_popup`. No hook prop for it.
 }
 
 // Concrete contract pinned by the Rust side: each `app_menu:<id>`
@@ -86,8 +89,8 @@ const MENU_EVENT_HANDLERS: Array<{
   { event: 'menu://tunnel-settings', prop: 'onTunnelSettings' },
   // Chroxy submenu
   { event: 'menu://preferences', prop: 'onPreferences' },
-  // Window submenu
-  { event: 'menu://window-bring-all-to-front', prop: 'onBringAllToFront' },
+  // Window submenu — `Bring All to Front` is handled Rust-side directly
+  // (see `handle_bring_all_to_front`), so it has no entry here.
 ]
 
 export function useTauriMenuEvents(handlers: TauriMenuHandlers): void {
@@ -101,7 +104,6 @@ export function useTauriMenuEvents(handlers: TauriMenuHandlers): void {
     onReload,
     onTunnelSettings,
     onPreferences,
-    onBringAllToFront,
   } = handlers
   useEffect(() => {
     const listen = getTauriListen()
@@ -121,7 +123,6 @@ export function useTauriMenuEvents(handlers: TauriMenuHandlers): void {
       onReload,
       onTunnelSettings,
       onPreferences,
-      onBringAllToFront,
     }
 
     for (const { event, prop } of MENU_EVENT_HANDLERS) {
@@ -150,6 +151,5 @@ export function useTauriMenuEvents(handlers: TauriMenuHandlers): void {
     onReload,
     onTunnelSettings,
     onPreferences,
-    onBringAllToFront,
   ])
 }

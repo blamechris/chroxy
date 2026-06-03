@@ -816,6 +816,20 @@ pub fn run() {
                             handle_check_updates(app);
                             return;
                         }
+                        // #4942 — Window > Bring All to Front. Handled
+                        // Rust-side because the dashboard has no state
+                        // to mutate AND because the unconditional
+                        // `window::show_window(app)` below only raises
+                        // the `main` webview — it misses secondary
+                        // windows like `qr_popup` (built by
+                        // `handle_show_qr`). Iterate every webview
+                        // window and call `show()` + `set_focus()` so
+                        // a click here actually brings ALL Chroxy
+                        // windows forward.
+                        "window-bring-all-to-front" => {
+                            handle_bring_all_to_front(app);
+                            return;
+                        }
                         _ => {}
                     }
                 }
@@ -823,8 +837,7 @@ pub fn run() {
                 // dashboard's `useTauriMenuEvents` hook to consume.
                 // Covers File > New Session, File > Connect to Server…,
                 // File > Disconnect, View > *, Tunnel > Settings…,
-                // Chroxy > Preferences…, Window > Bring All to Front,
-                // etc.
+                // Chroxy > Preferences…, etc.
                 let event_name = format!("menu://{}", action);
                 let _ = app.emit(&event_name, ());
                 // Make sure the main window is foregrounded so the
@@ -1948,6 +1961,26 @@ fn handle_open_config_in_finder(app: &tauri::AppHandle) {
 #[cfg(target_os = "macos")]
 fn handle_open_url(_app: &tauri::AppHandle, url: &str) {
     let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+/// #4942 — Window > Bring All to Front. Iterates every Tauri webview
+/// window (today: `main`, plus `qr_popup` when `handle_show_qr` has
+/// opened it) and brings each one forward. macOS classically defines
+/// "Bring All to Front" as "raise all of the application's windows
+/// above other apps' windows" — `window::show_window` alone only
+/// targets `main`, so the QR popup would stay hidden behind the active
+/// app. We also call `set_focus()` after the iteration to ensure the
+/// main window ends up the key window. macOS-only.
+#[cfg(target_os = "macos")]
+fn handle_bring_all_to_front(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    for (_label, win) in app.webview_windows() {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    // Land focus on `main` last so the user keeps interacting with the
+    // dashboard rather than a secondary window like `qr_popup`.
+    window::show_window(app);
 }
 
 fn handle_check_updates(app: &tauri::AppHandle) {
