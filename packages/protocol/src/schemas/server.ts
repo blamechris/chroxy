@@ -134,6 +134,15 @@ export const ServerMessageSchema = z.object({
   options: z.any().optional(),
   timestamp: z.number(),
   code: z.string().max(64).optional(),
+  // #4947: only set on `messageType: 'error'` envelopes whose `code` is
+  // `'resume_unknown'` (CliSession `_handleChildClose` resume-failure path,
+  // server PR #4944). Carries the conversation id chroxy passed to
+  // `claude --resume <id>` before the CLI rejected it; dashboards surface
+  // it under the auto-fallback affordance for operator correlation against
+  // the persisted state file (`resumeConversationId` in
+  // `~/.chroxy/session-state.json`). Optional + length-capped so a
+  // malformed producer can't pollute the wire with megabyte payloads.
+  attemptedResumeId: z.string().max(256).optional(),
 })
 
 export const ServerToolStartSchema = z.object({

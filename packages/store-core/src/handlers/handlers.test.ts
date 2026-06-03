@@ -5640,6 +5640,103 @@ describe('handleMessage', () => {
     }
   })
 
+  // #4947: server PR #4944 emits `error{code:'resume_unknown',
+  // attemptedResumeId, message}` when the claude CLI rejects a `--resume
+  // <id>` because the conversation id is unknown locally. The dashboard
+  // ResumeUnknownChip surfaces `attemptedResumeId` as subtext so operators
+  // can correlate against the persisted state file. Without preserving the
+  // field on the ChatMessage here, the chip would degrade to "headline
+  // only" and the (Optional) acceptance-criterion subtext would never
+  // render in practice.
+  describe('attemptedResumeId preservation (#4947)', () => {
+    it('preserves a string attemptedResumeId on the ChatMessage', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'Previous Claude conversation could not be resumed',
+          code: 'resume_unknown',
+          attemptedResumeId: 'abc123-def456-7890',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.code).toBe('resume_unknown')
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123-def456-7890')
+      }
+    })
+
+    it('leaves attemptedResumeId undefined when the wire field is missing', () => {
+      // Pre-#4944 servers and every non-resume_unknown error envelope omit
+      // the field entirely. ChatMessage simply stays undefined and the
+      // chip's hasId guard hides the subtext slot.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'something else',
+          code: 'stream_stall',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('coerces a non-string attemptedResumeId to undefined (defense in depth)', () => {
+      // Same hardening as `code: 42` above. A malformed producer must not
+      // populate the chat-message field with garbage that the chip will
+      // then render verbatim.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: 42,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('coerces an empty-string attemptedResumeId to undefined', () => {
+      // Empty string is treated as missing — the chip's render guard
+      // already treats whitespace-only as absent, but normalising at the
+      // store boundary means downstream consumers (mobile app, future
+      // log/console viewers) see the same shape: present or absent, never
+      // present-but-empty.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+  })
+
   it('skips user_input outside replay (live echo handled elsewhere)', () => {
     const out = handleMessage(
       { messageType: 'user_input', content: 'hi', timestamp: 1 },

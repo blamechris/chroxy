@@ -401,6 +401,20 @@ Object.assign(EVENT_MAP, {
       timestamp: Date.now(),
     }
     if (data.code) msg.code = data.code
+    // #4947: forward `attemptedResumeId` when CliSession's resume-failure
+    // path tagged the error envelope (see cli-session.js
+    // `_handleChildClose` — emits `error{code:'resume_unknown',
+    // attemptedResumeId, message}` from server PR #4944). The dashboard
+    // ResumeUnknownChip surfaces this id as subtext so operators can
+    // correlate against `~/.chroxy/session-state.json.resumeConversationId`
+    // without grepping logs. Only a non-empty string is forwarded — a
+    // missing or empty field would render as an "Attempted id:" slot with
+    // no value, which looks broken. Length cap on the wire schema
+    // (`ServerMessageSchema.attemptedResumeId`, 256 chars) keeps a
+    // malformed producer from polluting the wire.
+    if (typeof data.attemptedResumeId === 'string' && data.attemptedResumeId.length > 0) {
+      msg.attemptedResumeId = data.attemptedResumeId
+    }
     return { messages: [{ msg }] }
   },
 

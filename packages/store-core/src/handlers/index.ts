@@ -3916,6 +3916,17 @@ export function handleMessage(
     // (defensive against malformed payloads) is dropped to keep junk off
     // the store.
     ...(typeof msg.code === 'string' ? { code: msg.code } : {}),
+    // #4947: preserve `attemptedResumeId` for `error{code:'resume_unknown'}`
+    // bubbles (server PR #4944). The dashboard ResumeUnknownChip surfaces
+    // it as subtext for operator correlation against the persisted state
+    // file. Same defensive type-check pattern as `code`: a non-string or
+    // empty-string payload is dropped rather than stored, so a malformed
+    // producer can't render "Attempted id: " with no value (which looks
+    // like a UI bug). Pre-#4944 servers omit the field entirely and the
+    // ChatMessage simply stays `attemptedResumeId: undefined`.
+    ...(typeof msg.attemptedResumeId === 'string' && msg.attemptedResumeId.length > 0
+      ? { attemptedResumeId: msg.attemptedResumeId }
+      : {}),
   }
 
   // Surface rate-limit / usage-limit / quota / overloaded errors prominently (#616).
