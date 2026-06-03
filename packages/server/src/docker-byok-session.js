@@ -36,9 +36,22 @@
  *
  * Deferred (follow-up issues)
  * ---------------------------
+ *   - (none currently tracked — see "Recently added" below)
+ *
+ * Recently added
+ * --------------
  *   - Per-session container reuse / pooling (#5022 — landed)
  *   - DevContainer / Compose-driven environments (#5024 — landed)
- *   - postCreateCommand hook (#5024 — landed alongside devcontainer)
+ *   - Snapshot / restore (#5023 — landed)
+ *   - postCreateCommand hook (#5025) — opt-in DevContainer-style setup
+ *     command (single string or array) that runs once inside the
+ *     container before any tool dispatch. Marker-cached on /tmp so a
+ *     pooled container that already ran the same command skips it.
+ *     This is the explicit ctor opt with marker caching + timeout +
+ *     error handling. The `useDevcontainer` overlay parses a
+ *     devcontainer.json's own `postCreateCommand` field separately and
+ *     runs it non-fatally inside `_startContainer` — that path predates
+ *     #5025 and remains the devcontainer-config integration.
  *
  * DevContainer + Compose (#5024)
  * -----------------------------
@@ -57,8 +70,8 @@
  *     stack tears down. Pooling is disabled in compose mode.
  *   - Default (neither opt) — original v1 bare-image launch path.
  *
- * Snapshot / restore (#5023, this revision)
- * -----------------------------------------
+ * Snapshot / restore (#5023)
+ * --------------------------
  *   - `snapshot({ name? })` runs `docker commit <containerId>
  *     chroxy-byok-snap:<rand>-<ts>` via the backend, marks the live
  *     container "soiled" so the pool evicts it on release (#5043), and
@@ -84,7 +97,7 @@
  */
 
 import { execFile } from 'child_process'
-import { randomBytes } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { isAbsolute, posix } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
@@ -96,6 +109,7 @@ import {
   validateMounts,
   sanitizeContainerEnv,
 } from './devcontainer-config.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 
 const log = createLogger('docker-byok')
 
@@ -121,6 +135,27 @@ const READ_MAX_BYTES = 256 * 1024
  * stages the content from a file already inside the container.
  */
 const WRITE_MAX_BYTES = 512 * 1024
+
+/**
+ * Default cap on how long a postCreateCommand can run before it's
+ * treated as a hang. Five minutes mirrors what DevContainer-style
+ * setups (npm install, apt-get install) typically need on first run
+ * while still bounding a runaway script. Callers can override via the
+ * `postCreateTimeoutMs` ctor opt (#5025).
+ */
+const DEFAULT_POST_CREATE_TIMEOUT_MS = 5 * 60 * 1000
+
+/**
+ * Where the post-create completion marker lives inside the container.
+ * `/tmp` survives across `docker exec` invocations within the same
+ * container (the layered FS persists for the container's lifetime), so
+ * a future session that reuses the same container via the pool can
+ * probe this file and skip re-running an already-applied setup.
+ *
+ * The marker filename embeds a SHA-256 fingerprint of the command, so
+ * a CHANGED command produces a different marker and is re-applied.
+ */
+const POST_CREATE_MARKER_PREFIX = '/tmp/.chroxy-post-create-'
 
 /**
  * Map a host-absolute file_path under this.cwd into the container's
@@ -194,6 +229,51 @@ function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`
 }
 
+/**
+ * Coerce a `postCreateCommand` opt into a single shell-string that the
+ * container can run via `bash -c`. DevContainer's spec allows either a
+ * single command string or an array of strings; we honour both. Arrays
+ * are joined with ` && ` so every step must succeed — if step 1 fails,
+ * step 2 doesn't run, and the overall exit code is non-zero (which the
+ * session treats as a setup failure).
+ *
+ * Returns `null` when the opt is missing, an empty string, or an empty
+ * array — those all mean "no post-create hook" and let `start()` skip
+ * the marker probe entirely (#5025).
+ *
+ * Strictness: any non-string entry inside an array throws (#5063 review
+ * — Copilot). Silently dropping a non-string entry would mask
+ * misconfiguration (e.g. `postCreateCommand: ['npm install', null,
+ * 'npm test']` would have run install + test, skipping the failed
+ * middle slot, instead of failing loudly at construction). The same
+ * goes for empty-string entries — those almost certainly indicate a
+ * typo / templating bug and should be surfaced.
+ */
+export function normalizePostCreateCommand(value) {
+  if (value == null) return null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null
+    const parts = value.map((entry, idx) => {
+      if (typeof entry !== 'string') {
+        throw new Error(
+          `postCreateCommand[${idx}] must be a string (got ${entry === null ? 'null' : typeof entry})`,
+        )
+      }
+      const trimmed = entry.trim()
+      if (trimmed.length === 0) {
+        throw new Error(`postCreateCommand[${idx}] must be a non-empty string`)
+      }
+      return trimmed
+    })
+    return parts.join(' && ')
+  }
+  throw new Error('postCreateCommand must be a string or an array of strings')
+}
+
 export class DockerByokSession extends ClaudeByokSession {
   static get displayLabel() {
     return 'Claude (BYOK — Docker container)'
@@ -263,6 +343,19 @@ export class DockerByokSession extends ClaudeByokSession {
    *   service name from the compose file to attach to (the "primary"
    *   service). When omitted, the first service from `docker compose
    *   ps` is picked.
+   * @param {string|string[]} [opts.postCreateCommand=null]
+   *   #5025: DevContainer-style setup command(s) that run inside the
+   *   container once after launch and before the session is marked
+   *   ready. Strings run verbatim; arrays are joined with ` && ` so
+   *   every step must succeed. A SHA-256 marker file on /tmp prevents
+   *   re-execution when the same container is reused across sessions
+   *   (#5022 pool). Only runs for owned containers — externally-managed
+   *   containers are the caller's responsibility. This ctor opt is
+   *   independent of (and runs in addition to) any `postCreateCommand`
+   *   field parsed from devcontainer.json under `useDevcontainer`.
+   * @param {number} [opts.postCreateTimeoutMs=300_000]
+   *   #5025: Cap on how long postCreateCommand can run before it's
+   *   treated as a hang (default 5 minutes).
    * @param {object} [opts._dockerBackend]           Test seam — pre-built backend
    * @param {Function} [opts._execFile]              Test seam — used by preflight
    *   (defaults to child_process.execFile)
@@ -351,6 +444,29 @@ export class DockerByokSession extends ClaudeByokSession {
     // from the pool — used at destroy() time to decide between pool
     // release and inline `docker rm -f`.
     this._acquiredFromPool = false
+
+    // #5025 — DevContainer-style postCreateCommand hook. Normalised to
+    // a single string (arrays joined with ` && `) and SHA-256-hashed so
+    // a marker file on /tmp lets a reused pool container skip the run
+    // when the same command was already applied. `null` (the default)
+    // disables the hook entirely — start() takes no extra round trips.
+    //
+    // Timeout is validated via the shared `isOperatorTimeoutInRange`
+    // helper (#5063 review — Copilot). Same MAX_SANE_DURATION_MS (24h)
+    // ceiling the protocol schemas + ws-history apply — a typoed
+    // `postCreateTimeoutMs: 99999999999` (extra digit) silently falls
+    // back to the 5-minute default and logs a warning instead of
+    // creating a many-hours `docker exec` hang.
+    this._postCreateCommand = normalizePostCreateCommand(opts.postCreateCommand)
+    this._postCreateTimeoutMs = isOperatorTimeoutInRange(opts.postCreateTimeoutMs, {
+      name: 'postCreateTimeoutMs',
+      log,
+    })
+      ? opts.postCreateTimeoutMs
+      : DEFAULT_POST_CREATE_TIMEOUT_MS
+    this._postCreateMarkerPath = this._postCreateCommand
+      ? `${POST_CREATE_MARKER_PREFIX}${createHash('sha256').update(this._postCreateCommand).digest('hex').slice(0, 16)}`
+      : null
   }
 
   /**
@@ -409,6 +525,26 @@ export class DockerByokSession extends ClaudeByokSession {
         })
         await this.destroy()
         return
+      }
+
+      // #5025: run the DevContainer-style postCreateCommand after the
+      // container is up but before super.start() — that way a setup
+      // failure (missing package.json, broken npm script) fails the
+      // session start instead of silently surfacing on the first tool
+      // call. Only runs for OWNED containers; externally-managed ones
+      // are the caller's responsibility (e.g. an env-manager that
+      // already drove its own post-create).
+      if (this._postCreateCommand) {
+        try {
+          await this._runPostCreateCommandIfNeeded()
+        } catch (err) {
+          this.emit('error', {
+            code: 'post_create_command_failed',
+            message: `docker-byok postCreateCommand failed: ${err.message}`,
+          })
+          await this.destroy()
+          return
+        }
       }
     } else {
       // External container — verify it's reachable before we lie to
@@ -756,6 +892,70 @@ export class DockerByokSession extends ClaudeByokSession {
         })
       })
     })
+  }
+
+  /**
+   * #5025 — DevContainer-style postCreateCommand hook.
+   *
+   * Idempotency contract: a SHA-256-derived marker file lives at
+   * `/tmp/.chroxy-post-create-<hash>` inside the container. If the
+   * probe (`test -f <marker>`) succeeds, the command has already been
+   * applied to THIS container and we skip the run entirely — that's
+   * the whole reason the #5022 pool layer is useful for setup-heavy
+   * workspaces. A different command produces a different hash, so a
+   * change to `postCreateCommand` between sessions reuses the same
+   * container but re-runs setup.
+   *
+   * Failure surface: any non-zero exit (including timeout, backend
+   * reject, or marker-write failure) throws — the caller is `start()`,
+   * which converts the throw into a `post_create_command_failed` error
+   * event and tears the session down. The marker is only written on
+   * full success (command itself succeeds AND the marker write
+   * succeeds), so a half-applied state can never be cached.
+   */
+  async _runPostCreateCommandIfNeeded() {
+    if (!this._postCreateCommand || !this._postCreateMarkerPath) return
+    // Probe for the marker. The backend rejects on non-zero exit, so a
+    // `test -f` that finds the marker resolves clean and a missing
+    // marker throws. Catch the throw and fall through to the run path
+    // — any OTHER failure (daemon down, exec disabled) will also throw
+    // here, and the run path will rediscover the underlying error.
+    let markerPresent = false
+    try {
+      await this._execAsContainerUser({
+        cmd: `test -f ${shellQuote(this._postCreateMarkerPath)}`,
+        timeout: 10_000,
+      })
+      markerPresent = true
+    } catch {
+      markerPresent = false
+    }
+    if (markerPresent) {
+      log.info(`postCreateCommand already applied (marker ${this._postCreateMarkerPath.slice(-12)}) — skipping`)
+      return
+    }
+
+    log.info(`running postCreateCommand (timeout=${this._postCreateTimeoutMs}ms)`)
+    // Run the command. The backend's execInEnvironment forwards both
+    // stdout and stderr and rejects on non-zero exit, so we don't need
+    // to inspect an exit code here — a throw IS the failure path.
+    await this._execAsContainerUser({
+      cmd: this._postCreateCommand,
+      timeout: this._postCreateTimeoutMs,
+    })
+
+    // Stamp the marker so the next session that lands on this container
+    // skips the run. `mkdir -p` on the prefix would be wrong (the prefix
+    // is /tmp, which always exists), so just `touch` the file. Failure
+    // here ALSO fails the post-create — without a marker write, a
+    // future reuse would re-run a command we just successfully applied,
+    // which would be wasteful and (for non-idempotent commands like
+    // `apt-get install`) potentially incorrect.
+    await this._execAsContainerUser({
+      cmd: `touch ${shellQuote(this._postCreateMarkerPath)}`,
+      timeout: 10_000,
+    })
+    log.info(`postCreateCommand applied — marker stamped at ${this._postCreateMarkerPath.slice(-12)}`)
   }
 
   /**
