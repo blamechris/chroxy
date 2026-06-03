@@ -16,9 +16,10 @@
  *   7. Outside-click dismisses the menu (capturing-phase mousedown so
  *      we close before any sibling button handler fires).
  */
+import { useState } from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { HeaderOverflowMenu } from './HeaderOverflowMenu'
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { HeaderOverflowMenu, type HeaderOverflowItem } from './HeaderOverflowMenu'
 
 afterEach(cleanup)
 
@@ -222,6 +223,66 @@ describe('HeaderOverflowMenu (#4974)', () => {
       fireEvent.click(trigger)
       fireEvent.mouseDown(screen.getByTestId('outside-btn'))
       expect(document.activeElement).toBe(trigger)
+    })
+
+    // PR #4996 review feedback — focus restore must converge through a
+    // single cleanup branch so the window.blur dismiss path doesn't
+    // silently skip it.
+    it('returns focus to the trigger when the menu is dismissed via window blur', () => {
+      render(<HeaderOverflowMenu items={baseItems} />)
+      const trigger = screen.getByTestId('header-overflow-trigger')
+      fireEvent.click(trigger)
+      expect(screen.getByTestId('header-overflow-menu')).toBeInTheDocument()
+      // Simulate the window-level blur dismiss (e.g. user switches apps
+      // or clicks into devtools). The focus-restore cleanup must still
+      // fire for this branch.
+      fireEvent.blur(window)
+      expect(screen.queryByTestId('header-overflow-menu')).not.toBeInTheDocument()
+      expect(document.activeElement).toBe(trigger)
+    })
+
+    // PR #4996 review feedback — when visibleItems shrinks while open
+    // (e.g. App.tsx gates Copy Transcript on viewMode), focusedIndex
+    // must clamp so a) some <li> still has tabIndex={0}, b) the
+    // focus-sync effect doesn't read a null ref.
+    it('clamps focusedIndex when items shrink while the menu is open', () => {
+      // Wrapper lets the test mutate the items prop after opening the
+      // menu — mirrors the real-world App.tsx case where a parent
+      // re-renders with fewer items mid-interaction.
+      function Wrapper({ initialItems }: { initialItems: HeaderOverflowItem[] }) {
+        const [items, setItems] = useState(initialItems)
+        return (
+          <div>
+            <button
+              data-testid="shrink-btn"
+              onClick={() => setItems(items.slice(0, 1))}
+            >
+              shrink
+            </button>
+            <HeaderOverflowMenu items={items} />
+          </div>
+        )
+      }
+      const items: HeaderOverflowItem[] = [
+        { id: 'skills', label: 'Skills', onClick: vi.fn() },
+        { id: 'copy', label: 'Copy', onClick: vi.fn() },
+        { id: 'settings', label: 'Settings', onClick: vi.fn() },
+      ]
+      render(<Wrapper initialItems={items} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      // Move focus to the last item so focusedIndex=2.
+      const first = screen.getByTestId('header-overflow-item-skills')
+      fireEvent.keyDown(first, { key: 'End' })
+      const last = screen.getByTestId('header-overflow-item-settings')
+      expect(last.tabIndex).toBe(0)
+      // Shrink to 1 item — focusedIndex (2) is now out of range.
+      act(() => {
+        fireEvent.click(screen.getByTestId('shrink-btn'))
+      })
+      // After clamp: the single remaining item must hold tabIndex={0}
+      // (the index has been clamped to 0, which is the only valid slot).
+      const onlyRemaining = screen.getByTestId('header-overflow-item-skills')
+      expect(onlyRemaining.tabIndex).toBe(0)
     })
 
     it('wires aria-controls between trigger and menu', () => {

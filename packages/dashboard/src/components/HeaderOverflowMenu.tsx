@@ -85,18 +85,15 @@ export function HeaderOverflowMenu({
       const target = e.target as Node
       if (menuRef.current && menuRef.current.contains(target)) return
       if (triggerRef.current && triggerRef.current.contains(target)) return
-      // #4980 — outside-click dismiss must also restore focus to the
-      // trigger so keyboard-only users don't lose their place in the
-      // header. The Escape branch below already does this; mirror it
-      // here so all dismiss paths converge on the same end state.
+      // #4980 — focus restoration is handled centrally by the cleanup
+      // effect below; just flip `open` and let all dismiss paths
+      // converge through the same restore branch.
       setOpen(false)
-      triggerRef.current?.focus()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
         setOpen(false)
-        triggerRef.current?.focus()
       }
     }
     const onBlur = () => setOpen(false)
@@ -122,6 +119,37 @@ export function HeaderOverflowMenu({
     if (first) first.focus()
   }, [open])
 
+  // #4980 (review feedback PR #4996) — single focus-restore cleanup that
+  // runs whenever `open` transitions true → false so every dismiss path
+  // (Escape, outside-click, window blur, item activation) converges
+  // reliably. Without this, the window.blur path silently skipped focus
+  // restore, and the per-branch `triggerRef.current?.focus()` calls
+  // during mousedown could race the browser's own focus-on-click. This
+  // mirrors SessionContextMenu's unmount focus-restore pattern (#4248).
+  //
+  // We snapshot whatever was focused at the moment the menu opens,
+  // falling back to the trigger button (which is always how the menu
+  // was opened from a user gesture, even if the click didn't move
+  // browser focus). The `isConnected` guard handles the case where the
+  // snapshot was removed from the DOM during the menu lifetime — e.g.
+  // the parent re-rendered and unmounted the trigger.
+  useEffect(() => {
+    if (!open) return
+    const active = document.activeElement as HTMLElement | null
+    // If focus is on <body> or a still-mounted menu item from a prior
+    // interaction, fall back to the trigger — that's the conventional
+    // anchor a keyboard user expects to land back on.
+    const previouslyFocused =
+      active && active !== document.body && !menuRef.current?.contains(active)
+        ? active
+        : triggerRef.current
+    return () => {
+      if (previouslyFocused && previouslyFocused.isConnected) {
+        previouslyFocused.focus()
+      }
+    }
+  }, [open])
+
   // #4980 — when focusedIndex changes (via arrow keys / Home / End),
   // imperatively move focus to the matching item. Same pattern as
   // SessionContextMenu.
@@ -133,17 +161,28 @@ export function HeaderOverflowMenu({
     }
   }, [focusedIndex, open])
 
+  // #4980 (review feedback PR #4996) — clamp `focusedIndex` when the
+  // visible item set shrinks while the menu is open (e.g. App.tsx gates
+  // Copy Transcript on viewMode/hasMessages, so the row can disappear
+  // mid-interaction). If we don't clamp, no <li> ends up with
+  // tabIndex={0} and the focus-sync effect above reads a null ref —
+  // arrow nav silently stops working until the menu is re-opened.
+  useEffect(() => {
+    if (!open) return
+    if (focusedIndex >= visibleItems.length && visibleItems.length > 0) {
+      setFocusedIndex(visibleItems.length - 1)
+    }
+  }, [visibleItems.length, focusedIndex, open])
+
   if (visibleItems.length === 0) return null
 
   const activate = (item: HeaderOverflowItem) => {
     try {
       item.onClick?.()
     } finally {
+      // #4980 — focus restoration handled by the open-transition cleanup
+      // effect above; just flip `open` here.
       setOpen(false)
-      // #4980 — return focus to trigger after item activation so the
-      // next Tab press lands on the next header control. Without this,
-      // focus is left on a since-unmounted <li> and falls back to body.
-      triggerRef.current?.focus()
     }
   }
 
