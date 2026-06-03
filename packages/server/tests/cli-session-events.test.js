@@ -722,4 +722,139 @@ describe('CliSession stream-event handling', () => {
       session.destroy()
     })
   })
+
+  describe('result fallback for non-streamed text (#5064 — /compact)', () => {
+    // The CLI's `/compact` slash command returns the compaction summary in
+    // `data.result` but emits either no `assistant` event at all, or one
+    // with empty / no-growth text content. Without a fallback the dashboard
+    // sees nothing — no stream_start, no message, no acknowledgement.
+    // SDK mode mirrors this fallback at sdk-session.js:801.
+
+    it('emits a fallback response message when result text exists and no stream started', () => {
+      const session = createSession()
+      const messages = []
+      const streams = []
+      session.on('message', (m) => messages.push(m))
+      session.on('stream_start', () => streams.push('start'))
+      session.on('stream_end', () => streams.push('end'))
+
+      // Simulate /compact: result arrives directly with summary text,
+      // no stream_event, no assistant event with non-empty text.
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'Conversation compacted to summary.',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      assert.equal(messages.length, 1)
+      assert.equal(messages[0].type, 'response')
+      assert.equal(messages[0].content, 'Conversation compacted to summary.')
+      // No stream_start / stream_end — pure fallback path.
+      assert.equal(streams.length, 0)
+    })
+
+    it('does not emit fallback when a stream already fired (normal streamed turn)', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // Simulate normal streamed turn: stream_event drives text delta,
+      // then result arrives with the same text echoed in data.result.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed reply' },
+        },
+      })
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'streamed reply',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      // Streamed turns must NOT double-emit a fallback message —
+      // the stream_delta is the canonical surface for the text.
+      assert.equal(messages.length, 0)
+    })
+
+    it('does not emit fallback when data.result is empty or missing', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // Result with no `result` field at all (e.g. error subtype, tool turn).
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      assert.equal(messages.length, 0)
+
+      // Result with empty string `result`.
+      session._currentMessageId = 'msg-2'
+      session._currentCtx = {
+        hasStreamStarted: false,
+        didStreamText: false,
+        assistantTextSeen: 0,
+        currentContentBlockType: null,
+        currentToolName: null,
+        currentToolUseId: null,
+        toolInputChunks: '',
+        toolInputBytes: 0,
+        toolInputOverflow: false,
+      }
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: '',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      assert.equal(messages.length, 0)
+    })
+
+    it('emits a result event regardless of fallback path', () => {
+      const session = createSession()
+      const results = []
+      session.on('result', (r) => results.push(r))
+
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'Conversation compacted.',
+        total_cost_usd: 0.001,
+        duration_ms: 250,
+        usage: { input_tokens: 10 },
+      })
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 'sess-1')
+      assert.equal(results[0].cost, 0.001)
+      assert.equal(results[0].duration, 250)
+    })
+  })
 })
