@@ -1332,13 +1332,12 @@ export function App() {
     setShowCreateSession(true)
   }, [])
 
-  // #4695 — bridge the macOS menu bar "File > New Session" item to
-  // `handleNewSession` (the same callback the chrome "New Session"
-  // button uses). The sidebar's per-project "+" row and the command
-  // palette's `new-session` entry currently open the create-session
-  // dialog through their own inline handlers, so they are NOT routed
-  // through this hook. Hook is a no-op outside Tauri (web dashboard).
-  useTauriMenuEvents({ onNewSession: handleNewSession })
+  // #4695 / #4942 — bridge the macOS menu bar items to App-state
+  // handlers. See the `useTauriMenuEvents` call below `handleShowQr`
+  // (further down in this file) for the actual wiring — we can't
+  // invoke it inline here because the View > Show QR item reuses
+  // `handleShowQr`, which depends on `fetchQrInto`, which is declared
+  // further down. The hook is a no-op outside Tauri (web dashboard).
 
   const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean; skipPermissions?: boolean }) => {
     setSessionCreateError(null)
@@ -1419,6 +1418,78 @@ export function App() {
   }, [])
 
   const handleShowQr = useCallback(() => fetchQrInto('/qr'), [fetchQrInto])
+
+  // #4695 / #4942 — bridge the macOS menu bar items to App-state
+  // handlers. The sidebar's per-project "+" row and the command
+  // palette entries currently open their respective dialogs through
+  // inline handlers, so they are NOT routed through this hook. Hook
+  // is a no-op outside Tauri (web dashboard).
+  //
+  // Handler wiring (one prop per menu item that flows through this
+  // hook — Rust-side direct dispatches like Shell > Start aren't here):
+  //   - onNewSession        — File > New Session (same callback the
+  //                            chrome "New Session" button uses)
+  //   - onConnectToServer   — File > Connect to Server… (opens the
+  //                            Settings panel; the Server Registry
+  //                            section is the existing surface for
+  //                            managing connections)
+  //   - onDisconnect        — File > Disconnect (calls the store's
+  //                            disconnect action; no-op if not
+  //                            connected)
+  //   - onToggleSidebar     — View > Toggle Sidebar (same setter as
+  //                            the Cmd+B registry handler)
+  //   - onTogglePlanMode    — View > Toggle Plan Mode (same logic as
+  //                            the Shift+Tab registry handler)
+  //   - onShowQr            — View > Show QR Code (same fetch the
+  //                            chrome "Show QR" affordance triggers)
+  //   - onReload            — View > Reload (window.location.reload —
+  //                            Tauri's webview honours this)
+  //   - onTunnelSettings    — Tunnel > Tunnel Settings… (opens the
+  //                            Settings panel; tunnel mode lives there)
+  //   - onPreferences       — Chroxy > Preferences… (opens Settings)
+  //
+  // Window > Bring All to Front is handled entirely Rust-side
+  // (`handle_bring_all_to_front` iterates every webview window — main
+  // and any open `qr_popup` — and brings each one forward). The
+  // dashboard has no state to mutate, so it doesn't appear in the hook
+  // surface at all.
+  const menuConnectToServer = useCallback(() => {
+    // The dashboard's existing "connect to a different server" surface
+    // is the Settings panel's Server Registry section. The menu item
+    // opens Settings; the user picks a registry entry there.
+    setSettingsOpen(true)
+  }, [])
+  const menuDisconnect = useCallback(() => {
+    useConnectionStore.getState().disconnect()
+  }, [])
+  const menuToggleSidebar = useCallback(() => {
+    setSidebarOpen(prev => !prev)
+  }, [])
+  const menuTogglePlanMode = useCallback(() => {
+    const state = useConnectionStore.getState()
+    if (state.permissionMode === 'plan') {
+      setPermissionMode(state.previousPermissionMode || 'approve')
+    } else {
+      setPermissionMode('plan')
+    }
+  }, [setPermissionMode])
+  const menuReload = useCallback(() => {
+    window.location.reload()
+  }, [])
+  const menuOpenSettings = useCallback(() => {
+    setSettingsOpen(true)
+  }, [])
+  useTauriMenuEvents({
+    onNewSession: handleNewSession,
+    onConnectToServer: menuConnectToServer,
+    onDisconnect: menuDisconnect,
+    onToggleSidebar: menuToggleSidebar,
+    onTogglePlanMode: menuTogglePlanMode,
+    onShowQr: handleShowQr,
+    onReload: menuReload,
+    onTunnelSettings: menuOpenSettings,
+    onPreferences: menuOpenSettings,
+  })
 
   // #3070: per-session "Share this session" QR. Issues a token bound to the
   // active session — the scanner can chat into it but cannot list/switch

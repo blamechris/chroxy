@@ -56,6 +56,27 @@ struct TrayMenuItems {
     tunnel_none: CheckMenuItem<tauri::Wry>,
 }
 
+/// #4942 — App-menu (macOS menu bar) item handles. Kept separate from
+/// `TrayMenuItems` so the two surfaces stay decoupled; only the radio
+/// items (tunnel mode) and the server-state-gated entries (Shell items)
+/// need cross-menu state sync, and we touch both menus together when a
+/// tunnel-mode change OR a server-status change fans out.
+#[cfg(target_os = "macos")]
+struct AppMenuItems {
+    /// Shell submenu entries. Enabled state mirrors the tray menu's
+    /// Start/Stop/Restart/Console gating (see `update_menu_state`).
+    shell_start: MenuItem<tauri::Wry>,
+    shell_stop: MenuItem<tauri::Wry>,
+    shell_restart: MenuItem<tauri::Wry>,
+    shell_open_console: MenuItem<tauri::Wry>,
+    /// Tunnel radios — kept in lockstep with the tray's tunnel radios
+    /// via `handle_set_tunnel_mode` so toggling from either surface
+    /// updates the other.
+    tunnel_quick: CheckMenuItem<tauri::Wry>,
+    tunnel_named: CheckMenuItem<tauri::Wry>,
+    tunnel_none: CheckMenuItem<tauri::Wry>,
+}
+
 // ── Tauri IPC commands ──────────────────────────────────────────────
 
 #[tauri::command]
@@ -274,6 +295,15 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
 
     // Update tray menu checkboxes
     if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
+        let items = lock_or_recover(&items);
+        let _ = items.tunnel_quick.set_checked(mode == "quick");
+        let _ = items.tunnel_named.set_checked(mode == "named");
+        let _ = items.tunnel_none.set_checked(mode == "none");
+    }
+    // #4942 — also sync the macOS app-menu radios so a dashboard-driven
+    // tunnel-mode change keeps both menu surfaces consistent.
+    #[cfg(target_os = "macos")]
+    if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
         let items = lock_or_recover(&items);
         let _ = items.tunnel_quick.set_checked(mode == "quick");
         let _ = items.tunnel_named.set_checked(mode == "named");
@@ -717,28 +747,103 @@ pub fn run() {
             { Mutex::new(()) }
         })
         .on_menu_event(|app, event| {
-            // #4695 — app-menu (macOS menu bar) item dispatch. Tray menu
-            // events are handled by their own builder-scoped closure
-            // (`on_menu_event` in build_tray_menu). The two surfaces
-            // intentionally use disjoint id namespaces:
+            // #4695 / #4942 — app-menu (macOS menu bar) item dispatch.
+            // Tray menu events are handled by their own builder-scoped
+            // closure (`on_menu_event` in build_tray_menu). The two
+            // surfaces intentionally use disjoint id namespaces:
             //   - tray:    "start", "stop", "dashboard", …
             //   - app-menu: "app_menu:<action>" (this match)
             // The `app_menu:` prefix means stray cross-fires would
             // simply no-op rather than accidentally invoke the wrong
-            // tray handler. The concrete contract here is: strip the
-            // prefix and emit a `menu://<action>` event for the
-            // dashboard to handle. The dashboard's `useTauriMenuEvents`
-            // hook subscribes to those events and routes each one to a
-            // React-side callback supplied by App.tsx — whether that
-            // callback is shared with another UI affordance (button,
-            // palette entry, etc.) is decided by App.tsx, not here.
+            // tray handler.
+            //
+            // Two routing classes:
+            //   1. Server-control / tunnel / Help-browser actions —
+            //      call the existing tray handlers directly. No
+            //      dashboard round-trip is needed; the tray handlers
+            //      already know how to keep both menus' state in sync.
+            //   2. Dashboard-state actions (new session, sidebar
+            //      toggle, plan mode, etc.) — emit `menu://<action>`
+            //      so the dashboard's `useTauriMenuEvents` hook can
+            //      route to a React-side callback supplied by App.tsx.
+            //      Whether that callback is shared with another UI
+            //      affordance (button, palette entry, …) is decided
+            //      by App.tsx, not here.
             let id = event.id().as_ref();
             if let Some(action) = id.strip_prefix("app_menu:") {
+                // The app-menu surface emitting these ids is itself
+                // macOS-only today (see the menu builder block below),
+                // so gate the arms that call macOS-only helpers to
+                // match.
+                #[cfg(target_os = "macos")]
+                {
+                    match action {
+                        "shell-start" => { handle_start(app); return; }
+                        "shell-stop" => { handle_stop(app); return; }
+                        "shell-restart" => { handle_restart(app); return; }
+                        "shell-open-in-finder" => {
+                            handle_open_config_in_finder(app);
+                            return;
+                        }
+                        "shell-open-console" => { handle_console(app); return; }
+                        "tunnel-quick" => {
+                            handle_set_tunnel_mode(app, "quick");
+                            return;
+                        }
+                        "tunnel-named" => {
+                            handle_set_tunnel_mode(app, "named");
+                            return;
+                        }
+                        "tunnel-none" => {
+                            handle_set_tunnel_mode(app, "none");
+                            return;
+                        }
+                        "help-documentation" => {
+                            handle_open_url(
+                                app,
+                                "https://github.com/blamechris/chroxy#readme",
+                            );
+                            return;
+                        }
+                        "help-report-issue" => {
+                            handle_open_url(
+                                app,
+                                "https://github.com/blamechris/chroxy/issues/new",
+                            );
+                            return;
+                        }
+                        "help-check-updates" => {
+                            handle_check_updates(app);
+                            return;
+                        }
+                        // #4942 — Window > Bring All to Front. Handled
+                        // Rust-side because the dashboard has no state
+                        // to mutate AND because the unconditional
+                        // `window::show_window(app)` below only raises
+                        // the `main` webview — it misses secondary
+                        // windows like `qr_popup` (built by
+                        // `handle_show_qr`). Iterate every webview
+                        // window and call `show()` + `set_focus()` so
+                        // a click here actually brings ALL Chroxy
+                        // windows forward.
+                        "window-bring-all-to-front" => {
+                            handle_bring_all_to_front(app);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Default route: emit `menu://<action>` for the
+                // dashboard's `useTauriMenuEvents` hook to consume.
+                // Covers File > New Session, File > Connect to Server…,
+                // File > Disconnect, View > *, Tunnel > Settings…,
+                // Chroxy > Preferences…, etc.
                 let event_name = format!("menu://{}", action);
                 let _ = app.emit(&event_name, ());
-                // Make sure the main window is foregrounded so the user
-                // sees the dashboard react (otherwise a menu click with
-                // the window minimized would silently no-op).
+                // Make sure the main window is foregrounded so the
+                // user sees the dashboard react (otherwise a menu
+                // click with the window minimized would silently
+                // no-op).
                 window::show_window(app);
             }
         })
@@ -749,26 +854,57 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::AboutMetadata;
+                // #4942 — "Preferences…" appended to the Chroxy
+                // submenu so ⌘, opens the dashboard SettingsPanel from
+                // the menu bar (the dashboard already binds ⌘, via
+                // `settings.open`; macOS will route the chord through
+                // the menu bar first once an item with that accelerator
+                // is installed).
+                let preferences_item = MenuItemBuilder::with_id(
+                    "app_menu:preferences",
+                    "Preferences…",
+                )
+                .accelerator("CmdOrCtrl+,")
+                .build(app)?;
                 let app_menu = SubmenuBuilder::new(app, "Chroxy")
                     .about(Some(AboutMetadata::default()))
+                    .separator()
+                    .item(&preferences_item)
                     .separator()
                     .quit()
                     .build()?;
                 // #4695 — File menu. v1 ships with a single item ("New
                 // Session") so the most-used action has a menu-bar entry
                 // matching Terminal.app / iTerm / VS Code muscle memory.
-                // Follow-up issue tracks the rest of the proposed
-                // submenu layout (Shell / View / Tunnel / Help — see
-                // #4695). The accelerator is `Cmd+N`, matching the
-                // dashboard's `session.new` shortcut definition; macOS
-                // routes the chord through the menu bar first when one
-                // is installed, so this entry also serves as the system-
+                // The accelerator is `Cmd+N`, matching the dashboard's
+                // `session.new` shortcut definition; macOS routes the
+                // chord through the menu bar first when one is
+                // installed, so this entry also serves as the system-
                 // level Cmd+N hint.
                 let new_session_item = MenuItemBuilder::with_id("app_menu:new-session", "New Session")
                     .accelerator("CmdOrCtrl+N")
                     .build(app)?;
+                // #4942 — Connect to Server… / Disconnect siblings.
+                // Cmd+O matches "open a connection" muscle memory from
+                // Terminal.app / iTerm; Shift+Cmd+D mirrors Apple's HIG
+                // for disconnect actions.
+                let connect_item = MenuItemBuilder::with_id(
+                    "app_menu:connect-to-server",
+                    "Connect to Server…",
+                )
+                .accelerator("CmdOrCtrl+O")
+                .build(app)?;
+                let disconnect_item = MenuItemBuilder::with_id(
+                    "app_menu:disconnect",
+                    "Disconnect",
+                )
+                .accelerator("Shift+CmdOrCtrl+D")
+                .build(app)?;
                 let file_menu = SubmenuBuilder::new(app, "File")
                     .item(&new_session_item)
+                    .separator()
+                    .item(&connect_item)
+                    .item(&disconnect_item)
                     .build()?;
                 let edit_menu = SubmenuBuilder::new(app, "Edit")
                     .undo()
@@ -779,17 +915,196 @@ pub fn run() {
                     .paste()
                     .select_all()
                     .build()?;
+                // #4942 — Shell submenu. Items mirror tray entries
+                // (Start / Stop / Restart / Open Console). "Open in
+                // Finder" reveals ~/.chroxy/ so the user can inspect
+                // server config / logs without leaving the app. All
+                // five items dispatch to existing handlers in
+                // `on_menu_event` (no dashboard round-trip).
+                let shell_start = MenuItemBuilder::with_id(
+                    "app_menu:shell-start",
+                    "Start Server",
+                )
+                .build(app)?;
+                let shell_stop = MenuItemBuilder::with_id(
+                    "app_menu:shell-stop",
+                    "Stop Server",
+                )
+                .build(app)?;
+                let shell_restart = MenuItemBuilder::with_id(
+                    "app_menu:shell-restart",
+                    "Restart Server",
+                )
+                .build(app)?;
+                let shell_open_in_finder = MenuItemBuilder::with_id(
+                    "app_menu:shell-open-in-finder",
+                    "Open in Finder",
+                )
+                .build(app)?;
+                let shell_open_console = MenuItemBuilder::with_id(
+                    "app_menu:shell-open-console",
+                    "Open Console",
+                )
+                .build(app)?;
+                let shell_menu = SubmenuBuilder::new(app, "Shell")
+                    .item(&shell_start)
+                    .item(&shell_stop)
+                    .item(&shell_restart)
+                    .separator()
+                    .item(&shell_open_in_finder)
+                    .item(&shell_open_console)
+                    .build()?;
+                // #4942 — View submenu. Items dispatch to the
+                // dashboard (the toggles all live in App-level React
+                // state). The accelerators intentionally match the
+                // dashboard shortcut registry defaults so the menu-
+                // bar entry serves as the canonical key-binding hint:
+                //   - Toggle Sidebar:    ⌘B  (`sidebar.toggle`)
+                //   - Toggle Plan Mode:  ⇧⌥P (the registry default is
+                //     Shift+Tab, which macOS menus can't represent;
+                //     the menu surface picks a non-colliding chord)
+                //   - Show QR:           ⇧⌘Q
+                //   - Reload:            ⌘R  (Tauri webview reload)
+                // Cmd+\ ("cycle split") from the proposal collides
+                // with the existing `view.cycleSplit` registry binding
+                // and is not duplicated here — the dashboard already
+                // handles that chord via the registry.
+                let view_toggle_sidebar = MenuItemBuilder::with_id(
+                    "app_menu:view-toggle-sidebar",
+                    "Toggle Sidebar",
+                )
+                .accelerator("CmdOrCtrl+B")
+                .build(app)?;
+                let view_toggle_plan_mode = MenuItemBuilder::with_id(
+                    "app_menu:view-toggle-plan-mode",
+                    "Toggle Plan Mode",
+                )
+                .accelerator("Shift+Alt+P")
+                .build(app)?;
+                let view_show_qr = MenuItemBuilder::with_id(
+                    "app_menu:view-show-qr",
+                    "Show QR Code",
+                )
+                .accelerator("Shift+CmdOrCtrl+Q")
+                .build(app)?;
+                let view_reload = MenuItemBuilder::with_id(
+                    "app_menu:view-reload",
+                    "Reload",
+                )
+                .accelerator("CmdOrCtrl+R")
+                .build(app)?;
+                let view_menu = SubmenuBuilder::new(app, "View")
+                    .item(&view_toggle_sidebar)
+                    .item(&view_toggle_plan_mode)
+                    .separator()
+                    .item(&view_show_qr)
+                    .item(&view_reload)
+                    .build()?;
+                // #4942 — Tunnel submenu. Radios mirror the tray
+                // menu's tunnel-mode submenu (`tunnel_quick` /
+                // `tunnel_named` / `tunnel_none`) and dispatch to the
+                // same Rust handler (`handle_set_tunnel_mode`), which
+                // keeps both menus' checked state in sync. "Tunnel
+                // Settings…" routes to the dashboard so it can open
+                // the Settings panel.
+                let current_tunnel = {
+                    let s = app.state::<Mutex<DesktopSettings>>();
+                    let g = lock_or_recover(&s);
+                    g.tunnel_mode.clone()
+                };
+                let tunnel_quick_app = CheckMenuItemBuilder::with_id(
+                    "app_menu:tunnel-quick",
+                    "Quick Tunnel",
+                )
+                .checked(current_tunnel == "quick")
+                .build(app)?;
+                let tunnel_named_app = CheckMenuItemBuilder::with_id(
+                    "app_menu:tunnel-named",
+                    "Named Tunnel",
+                )
+                .checked(current_tunnel == "named")
+                .build(app)?;
+                let tunnel_none_app = CheckMenuItemBuilder::with_id(
+                    "app_menu:tunnel-none",
+                    "No Tunnel",
+                )
+                .checked(current_tunnel == "none")
+                .build(app)?;
+                let tunnel_settings_item = MenuItemBuilder::with_id(
+                    "app_menu:tunnel-settings",
+                    "Tunnel Settings…",
+                )
+                .build(app)?;
+                let tunnel_menu = SubmenuBuilder::new(app, "Tunnel")
+                    .item(&tunnel_quick_app)
+                    .item(&tunnel_named_app)
+                    .item(&tunnel_none_app)
+                    .separator()
+                    .item(&tunnel_settings_item)
+                    .build()?;
+                // #4942 — Window submenu. Append "Bring All to Front"
+                // as a custom item — Tauri's SubmenuBuilder doesn't
+                // expose a predefined `bring_all_to_front()` today.
+                let bring_all_to_front = MenuItemBuilder::with_id(
+                    "app_menu:window-bring-all-to-front",
+                    "Bring All to Front",
+                )
+                .build(app)?;
                 let window_menu = SubmenuBuilder::new(app, "Window")
                     .minimize()
                     .close_window()
+                    .separator()
+                    .item(&bring_all_to_front)
+                    .build()?;
+                // #4942 — Help submenu. Documentation / Report Issue
+                // open browser URLs Rust-side; Check for Updates
+                // reuses the tray's `handle_check_updates`.
+                let help_documentation = MenuItemBuilder::with_id(
+                    "app_menu:help-documentation",
+                    "Documentation",
+                )
+                .build(app)?;
+                let help_report_issue = MenuItemBuilder::with_id(
+                    "app_menu:help-report-issue",
+                    "Report Issue",
+                )
+                .build(app)?;
+                let help_check_updates = MenuItemBuilder::with_id(
+                    "app_menu:help-check-updates",
+                    "Check for Updates",
+                )
+                .build(app)?;
+                let help_menu = SubmenuBuilder::new(app, "Help")
+                    .item(&help_documentation)
+                    .item(&help_report_issue)
+                    .separator()
+                    .item(&help_check_updates)
                     .build()?;
                 let menu = MenuBuilder::new(app)
                     .item(&app_menu)
                     .item(&file_menu)
                     .item(&edit_menu)
+                    .item(&shell_menu)
+                    .item(&view_menu)
+                    .item(&tunnel_menu)
                     .item(&window_menu)
+                    .item(&help_menu)
                     .build()?;
                 app.set_menu(menu)?;
+
+                // #4942 — Track app-menu item handles so we can keep
+                // the Shell submenu's enabled state in sync with the
+                // server status (via `update_menu_state`) and the
+                // Tunnel radios in sync with `handle_set_tunnel_mode`.
+                app.manage(Mutex::new(AppMenuItems {
+                    shell_start: shell_start.clone(),
+                    shell_stop: shell_stop.clone(),
+                    shell_restart: shell_restart.clone(),
+                    shell_open_console: shell_open_console.clone(),
+                    tunnel_quick: tunnel_quick_app.clone(),
+                    tunnel_named: tunnel_named_app.clone(),
+                    tunnel_none: tunnel_none_app.clone(),
+                }));
 
                 // Workaround for Tauri bug #13605: Tauri's SubmenuBuilder doesn't
                 // register the Window submenu with NSApp.windowsMenu, so macOS
@@ -1131,6 +1446,34 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
                 let _ = items.dashboard.set_enabled(false);
                 let _ = items.console.set_enabled(false);
                 let _ = items.show_qr.set_enabled(false);
+            }
+        }
+    }
+    // #4942 — mirror the gating on the macOS app-menu Shell submenu so
+    // the menu-bar entries reflect server status the same way the tray
+    // items do. The "Open in Finder" item is intentionally always
+    // enabled (it just reveals ~/.chroxy/), so it's omitted here.
+    #[cfg(target_os = "macos")]
+    if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
+        let items = lock_or_recover(&items);
+        match state {
+            MenuState::Running => {
+                let _ = items.shell_start.set_enabled(false);
+                let _ = items.shell_stop.set_enabled(true);
+                let _ = items.shell_restart.set_enabled(true);
+                let _ = items.shell_open_console.set_enabled(true);
+            }
+            MenuState::Stopped => {
+                let _ = items.shell_start.set_enabled(true);
+                let _ = items.shell_stop.set_enabled(false);
+                let _ = items.shell_restart.set_enabled(false);
+                let _ = items.shell_open_console.set_enabled(false);
+            }
+            MenuState::Restarting => {
+                let _ = items.shell_start.set_enabled(false);
+                let _ = items.shell_stop.set_enabled(false);
+                let _ = items.shell_restart.set_enabled(false);
+                let _ = items.shell_open_console.set_enabled(false);
             }
         }
     }
@@ -1524,12 +1867,21 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
             "cloudflared not found. Install with: brew install cloudflared",
         );
         // Revert the checkbox to current mode
+        let current = app
+            .try_state::<Mutex<DesktopSettings>>()
+            .map(|s| lock_or_recover(&s).tunnel_mode.clone())
+            .unwrap_or_else(|| "quick".to_string());
         if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
             let items = lock_or_recover(&items);
-            let current = app
-                .try_state::<Mutex<DesktopSettings>>()
-                .map(|s| lock_or_recover(&s).tunnel_mode.clone())
-                .unwrap_or_else(|| "quick".to_string());
+            let _ = items.tunnel_quick.set_checked(current == "quick");
+            let _ = items.tunnel_named.set_checked(current == "named");
+            let _ = items.tunnel_none.set_checked(current == "none");
+        }
+        // #4942 — also revert the app-menu radios so a click on either
+        // surface leaves both consistent when cloudflared is missing.
+        #[cfg(target_os = "macos")]
+        if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
+            let items = lock_or_recover(&items);
             let _ = items.tunnel_quick.set_checked(current == "quick");
             let _ = items.tunnel_named.set_checked(current == "named");
             let _ = items.tunnel_none.set_checked(current == "none");
@@ -1551,6 +1903,15 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
         let _ = items.tunnel_named.set_checked(mode == "named");
         let _ = items.tunnel_none.set_checked(mode == "none");
     }
+    // #4942 — keep the app-menu Tunnel radios in lockstep with the tray
+    // radios so toggling from either surface updates the other.
+    #[cfg(target_os = "macos")]
+    if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
+        let items = lock_or_recover(&items);
+        let _ = items.tunnel_quick.set_checked(mode == "quick");
+        let _ = items.tunnel_named.set_checked(mode == "named");
+        let _ = items.tunnel_none.set_checked(mode == "none");
+    }
 
     send_notification(
         app,
@@ -1565,6 +1926,61 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
             }
         ),
     );
+}
+
+/// #4942 — Open `~/.chroxy/` in Finder so the user can inspect server
+/// config / logs without leaving the app. macOS-only: gated alongside
+/// the app-menu Shell submenu (which is only built on macOS today).
+#[cfg(target_os = "macos")]
+fn handle_open_config_in_finder(app: &tauri::AppHandle) {
+    let Some(config_path) = config::config_path() else {
+        send_notification(
+            app,
+            "Open in Finder",
+            "Could not determine ~/.chroxy/ location.",
+        );
+        return;
+    };
+    // Reveal the parent directory, not the file itself; on first run
+    // the config file may not exist yet but the directory should.
+    let target = match config_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => config_path.clone(),
+    };
+    if !target.exists() {
+        let _ = std::fs::create_dir_all(&target);
+    }
+    let _ = std::process::Command::new("open").arg(&target).spawn();
+}
+
+/// #4942 — Open an arbitrary URL in the user's default browser. Used
+/// by the Help submenu (Documentation / Report Issue). We avoid pulling
+/// in `tauri-plugin-opener` and instead shell out to `open(1)` — keeps
+/// the new surface footprint zero new dependencies / zero new tauri
+/// commands. macOS-only.
+#[cfg(target_os = "macos")]
+fn handle_open_url(_app: &tauri::AppHandle, url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+/// #4942 — Window > Bring All to Front. Iterates every Tauri webview
+/// window (today: `main`, plus `qr_popup` when `handle_show_qr` has
+/// opened it) and brings each one forward. macOS classically defines
+/// "Bring All to Front" as "raise all of the application's windows
+/// above other apps' windows" — `window::show_window` alone only
+/// targets `main`, so the QR popup would stay hidden behind the active
+/// app. We also call `set_focus()` after the iteration to ensure the
+/// main window ends up the key window. macOS-only.
+#[cfg(target_os = "macos")]
+fn handle_bring_all_to_front(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    for (_label, win) in app.webview_windows() {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    // Land focus on `main` last so the user keeps interacting with the
+    // dashboard rather than a secondary window like `qr_popup`.
+    window::show_window(app);
 }
 
 fn handle_check_updates(app: &tauri::AppHandle) {
