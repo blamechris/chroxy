@@ -109,6 +109,7 @@ import {
   validateMounts,
   sanitizeContainerEnv,
 } from './devcontainer-config.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 
 const log = createLogger('docker-byok')
 
@@ -239,6 +240,14 @@ function shellQuote(s) {
  * Returns `null` when the opt is missing, an empty string, or an empty
  * array — those all mean "no post-create hook" and let `start()` skip
  * the marker probe entirely (#5025).
+ *
+ * Strictness: any non-string entry inside an array throws (#5063 review
+ * — Copilot). Silently dropping a non-string entry would mask
+ * misconfiguration (e.g. `postCreateCommand: ['npm install', null,
+ * 'npm test']` would have run install + test, skipping the failed
+ * middle slot, instead of failing loudly at construction). The same
+ * goes for empty-string entries — those almost certainly indicate a
+ * typo / templating bug and should be surfaced.
  */
 export function normalizePostCreateCommand(value) {
   if (value == null) return null
@@ -247,10 +256,19 @@ export function normalizePostCreateCommand(value) {
     return trimmed.length > 0 ? trimmed : null
   }
   if (Array.isArray(value)) {
-    const parts = value
-      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
-      .filter((entry) => entry.length > 0)
-    if (parts.length === 0) return null
+    if (value.length === 0) return null
+    const parts = value.map((entry, idx) => {
+      if (typeof entry !== 'string') {
+        throw new Error(
+          `postCreateCommand[${idx}] must be a string (got ${entry === null ? 'null' : typeof entry})`,
+        )
+      }
+      const trimmed = entry.trim()
+      if (trimmed.length === 0) {
+        throw new Error(`postCreateCommand[${idx}] must be a non-empty string`)
+      }
+      return trimmed
+    })
     return parts.join(' && ')
   }
   throw new Error('postCreateCommand must be a string or an array of strings')
@@ -432,8 +450,18 @@ export class DockerByokSession extends ClaudeByokSession {
     // a marker file on /tmp lets a reused pool container skip the run
     // when the same command was already applied. `null` (the default)
     // disables the hook entirely — start() takes no extra round trips.
+    //
+    // Timeout is validated via the shared `isOperatorTimeoutInRange`
+    // helper (#5063 review — Copilot). Same MAX_SANE_DURATION_MS (24h)
+    // ceiling the protocol schemas + ws-history apply — a typoed
+    // `postCreateTimeoutMs: 99999999999` (extra digit) silently falls
+    // back to the 5-minute default and logs a warning instead of
+    // creating a many-hours `docker exec` hang.
     this._postCreateCommand = normalizePostCreateCommand(opts.postCreateCommand)
-    this._postCreateTimeoutMs = Number.isFinite(opts.postCreateTimeoutMs) && opts.postCreateTimeoutMs > 0
+    this._postCreateTimeoutMs = isOperatorTimeoutInRange(opts.postCreateTimeoutMs, {
+      name: 'postCreateTimeoutMs',
+      log,
+    })
       ? opts.postCreateTimeoutMs
       : DEFAULT_POST_CREATE_TIMEOUT_MS
     this._postCreateMarkerPath = this._postCreateCommand

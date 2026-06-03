@@ -1128,7 +1128,7 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
     await session.destroy()
   })
 
-  it('joins an array postCreateCommand with && so all steps run', async () => {
+  it('joins an array postCreateCommand with && so steps run sequentially and stop on the first failure', async () => {
     const _execFile = execFileStub({
       info: { stdout: 'ok' },
       run: { stdout: 'CONTAINER_POSTCREATE_ARR\n' },
@@ -1152,6 +1152,42 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
     assert.match(combined.cmd, /npm install.*&&.*npm run build/)
 
     await session.destroy()
+  })
+
+  it('throws on a non-string entry inside a postCreateCommand array (no silent drop)', () => {
+    // #5063 review (Copilot, comment id 3349258851): silently mapping a
+    // non-string entry to '' would mask misconfiguration — e.g. an
+    // array like ['npm install', null, 'npm test'] would have run only
+    // the first and last steps, skipping the middle slot without any
+    // surface. Now we throw at construction so the operator sees the
+    // typo / templating bug immediately.
+    assert.throws(
+      () => new DockerByokSession({
+        cwd: '/host/cwd',
+        postCreateCommand: ['npm install', null, 'npm test'],
+        _execFile: execFileStub({ info: { stdout: 'ok' } }),
+        _dockerBackend: { async execInEnvironment() { return { stdout: '', stderr: '' } } },
+      }),
+      /postCreateCommand\[1\] must be a string \(got null\)/,
+    )
+    assert.throws(
+      () => new DockerByokSession({
+        cwd: '/host/cwd',
+        postCreateCommand: ['npm install', 42, 'npm test'],
+        _execFile: execFileStub({ info: { stdout: 'ok' } }),
+        _dockerBackend: { async execInEnvironment() { return { stdout: '', stderr: '' } } },
+      }),
+      /postCreateCommand\[1\] must be a string \(got number\)/,
+    )
+    assert.throws(
+      () => new DockerByokSession({
+        cwd: '/host/cwd',
+        postCreateCommand: ['npm install', '   ', 'npm test'],
+        _execFile: execFileStub({ info: { stdout: 'ok' } }),
+        _dockerBackend: { async execInEnvironment() { return { stdout: '', stderr: '' } } },
+      }),
+      /postCreateCommand\[1\] must be a non-empty string/,
+    )
   })
 
   it('fails session start with a clear error event when post-create exits non-zero', async () => {
@@ -1238,6 +1274,40 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
     )
     assert.ok(installCall, 'expected install invocation')
     assert.equal(installCall.timeout, 300_000)
+
+    await session.destroy()
+  })
+
+  it('caps a typoed postCreateTimeoutMs above MAX_SANE_DURATION_MS (24h) back to the 5-min default', async () => {
+    // #5063 review (Copilot, comment id 3349258916): a typoed timeout
+    // like `99999999999` (extra digit) should fall back to the default
+    // rather than producing a many-hours docker exec. The shared
+    // `isOperatorTimeoutInRange` helper applies the same ceiling the
+    // protocol schemas already enforce.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_HUGE\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      // 25h — just over MAX_SANE_DURATION_MS (24h)
+      postCreateTimeoutMs: 25 * 60 * 60 * 1000,
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const installCall = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.ok(installCall, 'expected install invocation')
+    assert.equal(installCall.timeout, 300_000,
+      'over-ceiling timeout must fall back to the 5-min default')
 
     await session.destroy()
   })
