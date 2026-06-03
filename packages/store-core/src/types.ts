@@ -86,6 +86,19 @@ export interface ChatMessage {
    * Undefined for legacy errors that carry no code.
    */
   code?: string;
+  /**
+   * #4947: only set on `type: 'error'` bubbles whose `code` is
+   * `'resume_unknown'` (server PR #4944 — CliSession's
+   * `_handleChildClose` resume-failure path). Carries the conversation id
+   * chroxy passed to `claude --resume <id>` before the CLI rejected it.
+   * The dashboard `ResumeUnknownChip` surfaces this as small mono-spaced
+   * subtext under the headline so operators investigating a recurring
+   * resume failure can correlate against the persisted state file
+   * (`resumeConversationId` in `~/.chroxy/session-state.json`) without
+   * grepping logs. Undefined for every other error code and for
+   * pre-#4944 servers that don't emit the field.
+   */
+  attemptedResumeId?: string;
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
   /**
