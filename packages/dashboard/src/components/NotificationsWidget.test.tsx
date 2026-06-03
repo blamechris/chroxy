@@ -294,7 +294,7 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('panel is role="menu" with menuitem rows once open', () => {
+  it('list is role="menu" with menuitem rows once open', () => {
     render(
       <NotificationsWidget
         notifications={[
@@ -308,8 +308,16 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
       />,
     )
     fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    // #5009 — role="menu" sits on the <ul>, not the outer panel <div>,
+    // so the menu's only children are role="menuitem" rows (per the
+    // WAI-ARIA menu pattern). The header / "Mark all read" / per-row
+    // action buttons stay outside the menu sub-tree.
+    const list = screen.getByTestId('notifications-widget-list')
+    expect(list.getAttribute('role')).toBe('menu')
+    expect(list.getAttribute('aria-orientation')).toBe('vertical')
+    // Outer panel keeps its labelling but does NOT carry role="menu".
     const panel = screen.getByTestId('notifications-widget-panel')
-    expect(panel.getAttribute('role')).toBe('menu')
+    expect(panel.getAttribute('role')).toBeNull()
     expect(
       screen.getByTestId('notifications-widget-item-body-n-1').getAttribute('role'),
     ).toBe('menuitem')
@@ -542,6 +550,84 @@ describe('NotificationsWidget — WAI-ARIA keyboard navigation (#5009)', () => {
     fireEvent.blur(window)
     expect(screen.queryByTestId('notifications-widget-panel')).not.toBeInTheDocument()
     expect(document.activeElement).toBe(trigger)
+  })
+
+  it('role="menu" sits on the <ul>, with "Mark all read" outside the menu sub-tree and per-row actions excluded from Tab order', () => {
+    // #5009 — Copilot review feedback (PR #5030). The original
+    // implementation put role="menu" on the outer panel <div> which
+    // also wrapped the header "Mark all read" button — breaking the
+    // WAI-ARIA menu pattern (a menu's only top-level descendants
+    // should be menuitems). After the fix, role="menu" sits on the
+    // <ul>, "Mark all read" lives in the header above the menu, and
+    // the per-row eye / × action buttons (which DO sit inside the <li>
+    // for visual alignment) carry tabIndex={-1} so they can't pollute
+    // the menu's Tab order while it's open.
+    render(
+      <NotificationsWidget
+        notifications={[
+          makeNotification({ id: 'n-1' }),
+          makeNotification({ id: 'n-2', requestId: 'req-other' }),
+        ]}
+        onSwitchSession={vi.fn()}
+        onMarkRead={vi.fn()}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const menu = screen.getByTestId('notifications-widget-list')
+    expect(menu.getAttribute('role')).toBe('menu')
+    // "Mark all read" sits OUTSIDE the role="menu" sub-tree.
+    expect(menu.contains(screen.getByTestId('notifications-widget-mark-all-read'))).toBe(false)
+    // Per-row action buttons are tabIndex=-1 — they don't pollute the
+    // menu's Tab order even though they live inside the <li> for
+    // visual alignment with the row.
+    expect(screen.getByTestId('notifications-widget-item-mark-read-n-1').tabIndex).toBe(-1)
+    expect(screen.getByTestId('notifications-widget-item-dismiss-n-1').tabIndex).toBe(-1)
+    expect(screen.getByTestId('notifications-widget-item-dismiss-n-2').tabIndex).toBe(-1)
+  })
+
+  it('Enter activates the focused row (mark read + switch session + close)', () => {
+    const onMarkRead = vi.fn()
+    const onSwitchSession = vi.fn()
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1', sessionId: 'sess-target' })]}
+        onSwitchSession={onSwitchSession}
+        onMarkRead={onMarkRead}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const first = screen.getByTestId('notifications-widget-item-body-n-1')
+    fireEvent.keyDown(first, { key: 'Enter' })
+    expect(onMarkRead).toHaveBeenCalledWith('n-1')
+    expect(onSwitchSession).toHaveBeenCalledWith('sess-target')
+    expect(screen.queryByTestId('notifications-widget-panel')).not.toBeInTheDocument()
+  })
+
+  it('Space activates the focused row (mark read + switch session + close)', () => {
+    // #5009 — Space activation explicitly wired so a focused button
+    // inside an overflow-y container doesn't scroll the panel instead
+    // of activating the row. Matches HeaderOverflowMenu.
+    const onMarkRead = vi.fn()
+    const onSwitchSession = vi.fn()
+    render(
+      <NotificationsWidget
+        notifications={[makeNotification({ id: 'n-1', sessionId: 'sess-target' })]}
+        onSwitchSession={onSwitchSession}
+        onMarkRead={onMarkRead}
+        onMarkAllRead={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('notifications-widget-trigger'))
+    const first = screen.getByTestId('notifications-widget-item-body-n-1')
+    fireEvent.keyDown(first, { key: ' ' })
+    expect(onMarkRead).toHaveBeenCalledWith('n-1')
+    expect(onSwitchSession).toHaveBeenCalledWith('sess-target')
+    expect(screen.queryByTestId('notifications-widget-panel')).not.toBeInTheDocument()
   })
 })
 

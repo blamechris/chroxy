@@ -30,13 +30,18 @@
  *
  * #5009 — a11y + theme polish (follow-up to #5005):
  *   - Full WAI-ARIA Authoring Practices menu pattern (matches
- *     HeaderOverflowMenu #4980): role="menu", role="menuitem" rows,
- *     roving tabindex, ArrowDown/Up wrap-around, Home/End jumps, Enter
- *     activates focused row.
+ *     HeaderOverflowMenu #4980): role="menu" on the <ul> (so its only
+ *     children are role="menuitem" rows — the surrounding header /
+ *     "Mark all read" / per-row action buttons stay outside the menu
+ *     sub-tree), roving tabindex, ArrowDown/Up wrap-around, Home/End
+ *     jumps, Enter/Space activate focused row.
  *   - Focus moves into the first item when the panel opens and returns
  *     to the trigger on every dismiss path (Escape, outside-click,
  *     window blur, item activation).
  *   - `aria-controls` wires the trigger to the panel id via `useId()`.
+ *     The panel is the popover container; the menu (the <ul>) is one
+ *     of its children. AT announces the panel as a labelled region and
+ *     the menu as the keyboard-navigable list inside it.
  *   - Bell + eye glyphs are inline SVG (consistent with other header
  *     icons that render via CSS / plain unicode, not platform color
  *     emoji fonts — important inside stripped-down Tauri webviews).
@@ -292,9 +297,7 @@ export function NotificationsWidget({
           id={panelId}
           className="notifications-widget-panel"
           data-testid="notifications-widget-panel"
-          role="menu"
           aria-label="Intervention notifications"
-          aria-orientation="vertical"
         >
           <div className="notifications-widget-header">
             <span className="notifications-widget-title">Notifications</span>
@@ -317,9 +320,18 @@ export function NotificationsWidget({
               No notifications.
             </div>
           ) : (
+            // #5009 — role="menu" sits on the <ul> so its only
+            // descendants are role="menuitem" rows. The surrounding
+            // header / "Mark all read" / per-row eye / × buttons stay
+            // outside the menu sub-tree (placing them inside would
+            // violate the WAI-ARIA menu pattern and undermine roving
+            // tabindex). Mirrors HeaderOverflowMenu / SessionContextMenu.
             <ul
               className="notifications-widget-list"
               data-testid="notifications-widget-list"
+              role="menu"
+              aria-label="Intervention notifications"
+              aria-orientation="vertical"
             >
               {sorted.map((n, index) => {
                 const isUnread = n.readAt === undefined
@@ -357,10 +369,25 @@ export function NotificationsWidget({
                       setFocusedIndex(sorted.length - 1)
                       break
                     }
+                    case 'Enter':
+                    case ' ': {
+                      // #5009 — Enter activates the row natively on a
+                      // <button>, but Space scrolls the overflow-y
+                      // container in some browsers when focus is on a
+                      // button inside it. preventDefault + explicit
+                      // activation matches HeaderOverflowMenu's handler
+                      // and keeps Space behavior consistent across
+                      // browsers.
+                      e.preventDefault()
+                      e.stopPropagation()
+                      onMarkRead(n.id)
+                      onSwitchSession(n.sessionId)
+                      setOpen(false)
+                      break
+                    }
                     // Escape is handled at the document level so it
                     // still fires when focus has drifted away from the
-                    // panel. Enter/Space activate the body button's
-                    // default click handler — no extra wire-up needed.
+                    // panel.
                     default:
                       break
                   }
@@ -406,10 +433,19 @@ export function NotificationsWidget({
                         {formatRelative(n.timestamp, now)}
                       </span>
                     </button>
+                    {/* #5009 — per-row action buttons sit inside the
+                        <li> for visual alignment, but tabIndex={-1}
+                        keeps them out of the Tab order while the menu
+                        is open. Keyboard activation uses the menuitem
+                        button's Enter/Space (which marks read + switches
+                        session) or the dedicated "Mark all read" button
+                        in the header. Mouse users still get per-row
+                        affordances. */}
                     <div className="notifications-widget-item-actions">
                       {isUnread && (
                         <button
                           type="button"
+                          tabIndex={-1}
                           className="notifications-widget-item-mark-read"
                           data-testid={`notifications-widget-item-mark-read-${n.id}`}
                           aria-label="Mark as read"
@@ -424,6 +460,7 @@ export function NotificationsWidget({
                       )}
                       <button
                         type="button"
+                        tabIndex={-1}
                         className="notifications-widget-item-dismiss"
                         data-testid={`notifications-widget-item-dismiss-${n.id}`}
                         aria-label="Dismiss"
