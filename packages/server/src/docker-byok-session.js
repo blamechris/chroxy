@@ -549,6 +549,19 @@ export class DockerByokSession extends ClaudeByokSession {
           // is a real command failure: tear down the owned container.
           if (err && err.code === 'post_create_marker_write_failed') {
             log.warn(`docker-byok postCreateCommand marker write failed (non-fatal — command did succeed): ${err.message}`)
+            // #5089 review (Copilot, comment id 3349977279): soil the
+            // pool container so it isn't recycled. Without this, the
+            // next session that acquires this container sees no marker,
+            // re-runs the full postCreateCommand, and almost certainly
+            // re-fails the marker write for the same underlying reason
+            // (read-only /tmp, no space, AppArmor profile). That re-run
+            // is wasteful for idempotent commands like `npm install`
+            // and potentially incorrect for non-idempotent ones like
+            // `apt-get install`. Soiling makes the pool evict THIS
+            // container on release() and start a fresh one for the
+            // next acquire, while the current session continues to
+            // ready — the command DID succeed inside this container.
+            this.markActiveContainerSoiled()
             this.emit('error', {
               code: 'post_create_marker_write_failed',
               message: `docker-byok postCreateCommand marker write failed: ${err.message}`,

@@ -1286,6 +1286,74 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
     await session.destroy()
   })
 
+  it('soils the pool container when the marker write fails so it is evicted on release (#5089 review)', async () => {
+    // #5089 review (Copilot, comment id 3349977279): a container whose
+    // marker write failed is broken in a real way for the cache stamp
+    // (likely read-only /tmp, no space, AppArmor profile). If we let
+    // it back into the pool, the next acquire will re-run the full
+    // postCreateCommand, find no marker, and re-fail the touch for the
+    // same underlying reason — wasteful for `npm install`, potentially
+    // incorrect for `apt-get install`. Soiling the container makes the
+    // pool evict it on release(), so the next session gets a fresh
+    // container. THIS session still completes because the command did
+    // succeed inside the container.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_MARKERSOIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const markerErr = Object.assign(new Error('exec_failed: cannot touch /tmp/.chroxy-post-create-…: Read-only file system'), {
+      code: 'exec_failed',
+      exitCode: 1,
+    })
+    const backend = freshContainerBackend({
+      execResponses: {
+        'npm install': { stdout: 'added 42 packages\n', stderr: '' },
+      },
+      markerWriteError: markerErr,
+    })
+    // Tiny pool spy — only `markSoiled` is exercised by the path under
+    // test. `acquire`/`release` return null/undefined so the start()
+    // flow falls through to the normal owned-container path used by the
+    // sibling marker-fail test.
+    const soilCalls = []
+    const poolSpy = {
+      acquire: () => null,
+      release: async () => {},
+      markSoiled: (id) => { soilCalls.push(id) },
+      forget: async () => {},
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+      _pool: poolSpy,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    // Distinct marker code still surfaces (regression guard on #5068).
+    const markerEvent = events.find((e) => e.code === 'post_create_marker_write_failed')
+    assert.ok(markerEvent, 'expected post_create_marker_write_failed event')
+
+    // Session continues to ready — the command DID succeed.
+    assert.equal(session._containerReady, true,
+      'marker-write failure must not tear down — session still functional')
+
+    // The container must have been soiled exactly once with this
+    // session's containerId. Without the soil call, the pool would
+    // recycle a container whose marker write keeps failing.
+    assert.equal(soilCalls.length, 1, 'expected exactly one markSoiled call')
+    assert.equal(soilCalls[0], session._containerId,
+      'soil call must target this session\'s container id')
+
+    await session.destroy()
+  })
+
   it('forwards a configurable postCreateTimeoutMs to the backend exec', async () => {
     const _execFile = execFileStub({
       info: { stdout: 'ok' },
