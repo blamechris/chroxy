@@ -1,0 +1,119 @@
+name: Auto-tag Release PR
+
+# Fires when a `chore(release): cut vX.Y.Z` PR merges to main and pushes the
+# matching `vX.Y.Z` annotated tag. The release workflow (release.yml) is
+# triggered on `tags: ['v*']` and takes it from there.
+#
+# Background: v0.9.13–v0.9.19 release PRs all merged successfully but the tags
+# were never pushed by hand, so no release artifacts (Docker, Tauri bundles,
+# GitHub Release) ever shipped for those versions. See #4627. This workflow
+# removes the manual tag-push step entirely.
+#
+# Idempotency: if the tag already exists on the remote (e.g. a maintainer
+# pushed it by hand before the workflow ran, or this workflow is re-run on
+# the same commit), the job exits 0 without trying to recreate it.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  tag:
+    name: Tag release commit
+    runs-on: ubuntu-24.04
+    # Only fire on `chore(release): cut vX.Y.Z` commits. Checking head_commit
+    # here scopes the workflow off the wire (no checkout for non-release
+    # commits). The job step does a defence-in-depth re-parse before tagging.
+    if: "startsWith(github.event.head_commit.message, 'chore(release): cut v')"
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN for the push. Tags pushed by this
+          # token DO trigger other workflows (unlike the documented
+          # restriction for branches/PRs) when the workflow uses
+          # `permissions: contents: write` — confirmed by GitHub Actions docs
+          # for tag refs. release.yml's `on: push: tags: ['v*']` will fire.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse version from commit message
+        id: parse
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          # Match `chore(release): cut vX.Y.Z` on the first line, ignoring any
+          # trailing PR number, parenthetical, or suffix. Refuse to tag if the
+          # version doesn't match strict semver — guards against typos like
+          # `cut v0.9` or `cut v0.9.x-rc1` accidentally producing a release.
+          first_line=$(printf '%s\n' "$COMMIT_MESSAGE" | head -n 1)
+          echo "First line: $first_line"
+
+          version=$(printf '%s' "$first_line" | sed -nE 's/^chore\(release\): cut v([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+          if [ -z "$version" ]; then
+            echo "::error::Commit message did not match 'chore(release): cut vX.Y.Z' — refusing to tag."
+            echo "First line was: $first_line"
+            exit 1
+          fi
+
+          tag="v$version"
+          echo "Parsed version: $version"
+          echo "Tag: $tag"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify package version matches commit subject
+        env:
+          PARSED_VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          # Defence-in-depth: the commit subject claims version $PARSED_VERSION,
+          # but the actual bump might have a different number in the package
+          # files (e.g. an aborted bump, hand-edit, or mis-typed subject). If
+          # they disagree, refuse to tag — pushing a wrong tag would trigger
+          # a release for a version that doesn't match what's in package.json.
+          pkg_version=$(node -e "console.log(require('./packages/server/package.json').version)")
+          echo "Package version: $pkg_version"
+          echo "Subject version: $PARSED_VERSION"
+          if [ "$pkg_version" != "$PARSED_VERSION" ]; then
+            echo "::error::packages/server/package.json version ($pkg_version) does not match commit subject version ($PARSED_VERSION) — refusing to tag."
+            exit 1
+          fi
+
+      - name: Check if tag already exists
+        id: check
+        env:
+          TAG: ${{ steps.parse.outputs.tag }}
+        run: |
+          # Idempotency: if someone pushed the tag by hand before this workflow
+          # ran (or this workflow is re-run on the same commit), skip cleanly.
+          # `git ls-remote --tags` queries the remote directly so we don't get
+          # tricked by a stale local refs/tags/.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::notice::Tag $TAG already exists on origin — nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $TAG does not exist yet — will create it."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.parse.outputs.tag }}
+          VERSION: ${{ steps.parse.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Annotated tag (-a) so `git describe` and release tooling can find
+          # the message. Use github-actions[bot] identity — this is the same
+          # identity GitHub uses for auto-merge commits, so it's the
+          # conventional choice for workflow-authored tags.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$TAG" "$SHA" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
+          echo "::notice::Pushed tag $TAG at $SHA — release.yml will pick it up."
