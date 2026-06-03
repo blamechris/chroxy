@@ -5,6 +5,7 @@ import {
   SUBAGENT_PROFILE_NAMES,
   getSubagentProfile,
 } from '../src/byok-subagent-profiles.js'
+import { SESSION_PREAMBLE_MAX_LENGTH } from '../src/base-session.js'
 
 /**
  * #5018: subagent profile registry. The byok Task tool looks up profiles
@@ -62,6 +63,27 @@ describe('SUBAGENT_PROFILES (#5018)', () => {
 
   it('SUBAGENT_PROFILE_NAMES is frozen', () => {
     assert.ok(Object.isFrozen(SUBAGENT_PROFILE_NAMES))
+  })
+
+  it('every profile systemPrompt fits under SESSION_PREAMBLE_MAX_LENGTH (#5073)', () => {
+    // #5073: the byok Task tool applies a profile to a child session via
+    // `child.setSessionPreamble(profile.systemPrompt)` (see
+    // `byok-session.js:_executeTaskTool`), which silently trims and caps
+    // at SESSION_PREAMBLE_MAX_LENGTH. Today's seed (~200-400 chars each)
+    // is well under the cap, but a future contributor could add a profile
+    // with a multi-kilobyte systemPrompt — that wouldn't crash, but the
+    // cap would silently truncate the tail, and the child would see a
+    // half-instruction. The model behaviour silently degrades.
+    //
+    // Pinning every profile under SESSION_PREAMBLE_MAX_LENGTH here makes
+    // the invariant explicit so a future profile addition that would rely
+    // on silent truncation fails at CI rather than at runtime.
+    for (const [id, profile] of Object.entries(SUBAGENT_PROFILES)) {
+      assert.ok(
+        profile.systemPrompt.length <= SESSION_PREAMBLE_MAX_LENGTH,
+        `profile ${id} systemPrompt (${profile.systemPrompt.length} chars) exceeds SESSION_PREAMBLE_MAX_LENGTH (${SESSION_PREAMBLE_MAX_LENGTH})`,
+      )
+    }
   })
 })
 
