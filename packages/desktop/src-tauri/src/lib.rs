@@ -579,11 +579,16 @@ fn reset_speech_permissions(window: tauri::Window) -> Result<(), String> {
             .output()
             .map_err(|e| format!("Failed to invoke tccutil for {service}: {e}"))?;
         if !output.status.success() {
+            // Some tccutil failures only write diagnostics to stdout (or
+            // stderr is empty); include both so the UI never shows a blank
+            // error string when the exit status is non-zero (#4998 review).
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(format!(
-                "tccutil reset {service} {BUNDLE_ID} exited with status {}: {}",
+                "tccutil reset {service} {BUNDLE_ID} exited with status {}: stderr={} stdout={}",
                 output.status.code().unwrap_or(-1),
-                stderr.trim()
+                stderr.trim(),
+                stdout.trim()
             ));
         }
     }

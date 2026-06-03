@@ -2290,10 +2290,11 @@ describe('SettingsPanel', () => {
       tauriInvoke.mockResolvedValue(undefined)
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       fireEvent.click(screen.getByTestId('speech-reset-button'))
-      // Allow the async chain (invoke → state update) to flush.
-      await new Promise((r) => setTimeout(r, 0))
+      // findByTestId waits for the success hint to mount, replacing the
+      // earlier `setTimeout(..., 0)` flush which was flaky across runtimes
+      // (#4998 review).
+      await screen.findByTestId('speech-reset-success')
       expect(tauriInvoke).toHaveBeenCalledWith('reset_speech_permissions')
-      expect(screen.getByTestId('speech-reset-success')).toBeInTheDocument()
     })
 
     it('surfaces an error hint when the Tauri command rejects', async () => {
@@ -2301,8 +2302,7 @@ describe('SettingsPanel', () => {
       tauriInvoke.mockRejectedValue(new Error('tccutil reset Microphone exited with status 1'))
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       fireEvent.click(screen.getByTestId('speech-reset-button'))
-      await new Promise((r) => setTimeout(r, 0))
-      const errEl = screen.getByTestId('speech-reset-error')
+      const errEl = await screen.findByTestId('speech-reset-error')
       expect(errEl.textContent).toContain('tccutil reset Microphone exited with status 1')
     })
   })

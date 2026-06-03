@@ -764,6 +764,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     setAutoPermError(null)
     setAutoPermDirty(false)
     setAutoPermSaving(false)
+    // #4998 review — match the panel-scoped reset pattern used for
+    // tunnelError / autoPermError so a stale success/error hint from a
+    // previous open doesn't linger across reopens.
+    setSpeechResetStatus('idle')
+    setSpeechResetError(null)
     // Read saved setting (what user selected)
     getTunnelMode().then(mode => {
       if (mode) setTunnelModeState(mode)
@@ -1132,9 +1137,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 no-op on Linux/Windows or in browser. */}
             {showSpeechResetButton && (
               <div className="settings-field" data-testid="speech-reset-row">
-                <label>Reset macOS speech permissions</label>
+                <label htmlFor="speech-reset-button">Reset macOS speech permissions</label>
                 <button
                   type="button"
+                  id="speech-reset-button"
                   className="settings-secondary-button"
                   onClick={handleResetSpeechPermissions}
                   disabled={speechResetStatus === 'running'}
@@ -1165,7 +1171,7 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 {speechResetStatus === 'idle' && (
                   <p className="settings-hint">
                     Use this if voice input still says &ldquo;permission
-                    denied&rdquo; after upgrading. Chroxy v0.9.41+ ships with a
+                    denied&rdquo; after upgrading. Chroxy v0.9.40+ ships with a
                     new helper signature; macOS may cache a denial for the old
                     signature. Resets <code>Microphone</code> and{' '}
                     <code>SpeechRecognition</code> for <code>com.chroxy.desktop</code>.
