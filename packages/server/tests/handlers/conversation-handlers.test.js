@@ -2,6 +2,9 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { conversationHandlers } from '../../src/handlers/conversation-handlers.js'
 import { createSpy, createMockSession } from '../test-helpers.js'
+import { CliSession, buildClaudeCliArgs } from '../../src/cli-session.js'
+import { SdkSession } from '../../src/sdk-session.js'
+import { CodexSession } from '../../src/codex-session.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
@@ -9,6 +12,10 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy(),
     broadcastToSession: createSpy(),
+    broadcastSessionList: createSpy(),
+    // autoSubscribeOtherClients (handler-utils.js) iterates ctx.clients; empty
+    // Map is sufficient for handler-unit tests where no other clients exist.
+    clients: new Map(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
     // Default test stubs — never touch real ~/.claude/projects
@@ -240,6 +247,334 @@ describe('conversation-handlers', () => {
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(sent.boundSessionId, 'sess-gone')
       assert.equal(sent.boundSessionName, null)
+    })
+
+    // Issue #4931 — coverage for the resume_conversation path enabled by #4928
+    //
+    // Before #4928, CliSession declared `capabilities.resume = false` so the
+    // handler at conversation-handlers.js:69 bailed early with "This provider
+    // does not support conversation resume" whenever the active session was a
+    // CLI session. PR #4928 flipped that capability to `true`, which means
+    // resume_conversation now proceeds for active CLI sessions and creates a
+    // brand-new CLI session with the supplied conversationId wired into the
+    // spawn argv via `--resume`. The following suite pins:
+    //
+    //   1. The handler proceeds past the capability gate when the active
+    //      session's provider declares `capabilities.resume === true` (the
+    //      new CLI path; previously only SDK satisfied this).
+    //   2. `createSession` is called with the exact conversationId forwarded
+    //      as `resumeSessionId` — the load-bearing field that ultimately
+    //      becomes `--resume <id>` in the spawned `claude -p` argv.
+    //   3. The `session_switched` payload carries the resumed conversationId
+    //      back to the client so the UI can render the resume marker.
+    //   4. Providers that still declare `resume: false` (codex, gemini, byok,
+    //      claude-tui) continue to be rejected — pinning the capability gate
+    //      so a future provider change can't silently regress the contract.
+    //   5. Edge cases: stale / unknown conversationId surfaces via the
+    //      createSession error path (relates to #4929); malformed UUIDs are
+    //      rejected at the format gate before any provider work happens.
+    describe('Issue #4931 — coverage for the new CLI resume path (#4928)', () => {
+      it('proceeds past the capability gate when the active session is a CLI session', async () => {
+        // CliSession.capabilities.resume === true (flipped in #4928).
+        // The handler must NOT short-circuit with "provider does not support
+        // conversation resume" — it should proceed to create a new session.
+        assert.equal(CliSession.capabilities.resume, true,
+          'precondition: CliSession declares resume capability (#4928); without this the test is meaningless')
+
+        const sessions = new Map()
+        // Active session entry whose .session.constructor === CliSession.
+        // The handler reads `activeEntry.session.constructor.capabilities?.resume`,
+        // so the prototype's capabilities getter is what gates the call — not
+        // anything on the instance. Wiring the prototype directly avoids
+        // having to construct a real CliSession (which would spawn the
+        // `claude` binary on test startup).
+        const activeSession = createMockSession()
+        Object.setPrototypeOf(activeSession, CliSession.prototype)
+        sessions.set('active-cli', { session: activeSession, name: 'Active CLI', cwd: '/tmp' })
+
+        const newSession = createMockSession()
+        newSession.resumeSessionId = '00000000-0000-0000-0000-000000000abc'
+        sessions.set('new-id', { session: newSession, name: 'Resumed', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        const client = makeClient({ activeSessionId: 'active-cli' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-000000000abc',
+        }, ctx)
+
+        // No "provider does not support" error.
+        const errors = ctx._sent.filter(m => m.type === 'session_error')
+        assert.deepEqual(errors, [],
+          'CLI active session must NOT trigger the capability-gate rejection (#4928 enabled this path)')
+        // createSession was actually called — handler proceeded past the gate.
+        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+          'handler must invoke createSession when the capability check passes')
+      })
+
+      it('forwards the conversationId verbatim as resumeSessionId to createSession (--resume payload)', async () => {
+        // The createSession opts.resumeSessionId is the value that flows into
+        // CliSession's constructor, seeds `_sessionId`, and ultimately appears
+        // as `--resume <id>` in the spawned argv (pinned end-to-end below).
+        const sessions = new Map()
+        const activeSession = createMockSession()
+        Object.setPrototypeOf(activeSession, CliSession.prototype)
+        sessions.set('active-cli', { session: activeSession, name: 'Active', cwd: '/tmp' })
+
+        const newSession = createMockSession()
+        newSession.resumeSessionId = '11111111-2222-3333-4444-555555555555'
+        sessions.set('new-id', { session: newSession, name: 'Resumed', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        const captured = []
+        ctx.sessionManager.createSession = createSpy((opts) => { captured.push(opts); return 'new-id' })
+        const client = makeClient({ activeSessionId: 'active-cli' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '11111111-2222-3333-4444-555555555555',
+          name: 'Custom Name',
+        }, ctx)
+
+        assert.equal(captured.length, 1)
+        assert.equal(captured[0].resumeSessionId, '11111111-2222-3333-4444-555555555555',
+          'createSession must receive the resume id verbatim — this becomes `--resume <id>` in the spawned argv')
+        assert.equal(captured[0].name, 'Custom Name',
+          'user-supplied name must propagate (resumed sessions are user-visible in the session list)')
+      })
+
+      it('end-to-end: createSession opts feed buildClaudeCliArgs → --resume <conversationId>', () => {
+        // Composite assertion that pins the chain the handler enables:
+        //   handler.resume_conversation
+        //     → SessionManager.createSession({ resumeSessionId: <uuid> })
+        //         → providerOpts.resumeSessionId
+        //             → new CliSession({ resumeSessionId })  // seeds _sessionId
+        //                 → start() → buildClaudeCliArgs({ resumeSessionId: _sessionId })
+        //                     → argv includes ['--resume', <uuid>]
+        //
+        // The middle hops are already pinned by cli-session-resume.test.js +
+        // session-manager.test.js; this test pins the handler-side input
+        // (`resumeSessionId` in createSession opts) all the way to the spawn
+        // argv, so a refactor that drops the field anywhere in the chain
+        // surfaces here.
+        const conversationId = '99999999-aaaa-bbbb-cccc-dddddddddddd'
+
+        // Step 1: SessionManager forwards `resumeSessionId` into provider opts
+        // unchanged (session-manager.js:646: `resumeSessionId: resumeSessionId || null`).
+        const providerOpts = { resumeSessionId: conversationId }
+
+        // Step 2: CliSession constructor seeds `_sessionId` from the opt
+        // (cli-session.js:268: `this._sessionId = ... resumeSessionId : null`).
+        // We don't construct a real CliSession (spawn-heavy); the contract is
+        // pinned in cli-session-resume.test.js.
+        const seededSessionId = providerOpts.resumeSessionId
+
+        // Step 3: start() calls buildClaudeCliArgs with `resumeSessionId: _sessionId`
+        // (cli-session.js:351).
+        const args = buildClaudeCliArgs({
+          model: null,
+          permissionMode: 'approve',
+          allowedTools: [],
+          skillsText: '',
+          resumeSessionId: seededSessionId,
+        })
+
+        const resumeIdx = args.indexOf('--resume')
+        assert.ok(resumeIdx >= 0,
+          'argv must carry --resume; without it the spawned claude subprocess starts a fresh conversation and loses the prior transcript')
+        assert.equal(args[resumeIdx + 1], conversationId,
+          'the --resume argument must be the exact conversationId the handler received')
+      })
+
+      it('session_switched payload echoes the resumed conversationId back to the client', async () => {
+        // The dashboard reads `conversationId` from session_switched to render
+        // a "resumed" badge. The handler reads it from
+        // `entry.session.resumeSessionId` — which for CliSession mirrors
+        // `_sessionId` (cli-session.js:324) and is seeded by the constructor
+        // from the `resumeSessionId` opt.
+        const sessions = new Map()
+        const activeSession = createMockSession()
+        Object.setPrototypeOf(activeSession, CliSession.prototype)
+        sessions.set('active-cli', { session: activeSession, name: 'Active', cwd: '/tmp' })
+
+        const resumed = createMockSession()
+        resumed.resumeSessionId = '00000000-0000-0000-0000-000000000777'
+        sessions.set('new-id', { session: resumed, name: 'Resumed CLI', cwd: '/home/dev' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        const client = makeClient({ activeSessionId: 'active-cli' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-000000000777',
+        }, ctx)
+
+        const switched = ctx._sent.find(m => m.type === 'session_switched')
+        assert.ok(switched, 'session_switched must be sent on a successful resume')
+        assert.equal(switched.sessionId, 'new-id')
+        assert.equal(switched.name, 'Resumed CLI')
+        assert.equal(switched.cwd, '/home/dev')
+        assert.equal(switched.conversationId, '00000000-0000-0000-0000-000000000777',
+          'session_switched.conversationId must surface the resumed id so the client can render the resume marker (matches buildClaudeCliArgs --resume value)')
+      })
+
+      it('client side-effects: activeSessionId set + subscribed to new session', async () => {
+        // After a successful resume the client's active session must flip to
+        // the freshly-created entry and that entry must be added to the
+        // subscription set so subsequent broadcasts reach the ws.
+        const sessions = new Map()
+        const activeSession = createMockSession()
+        Object.setPrototypeOf(activeSession, CliSession.prototype)
+        sessions.set('prior-cli', { session: activeSession, name: 'Prior', cwd: '/tmp' })
+        sessions.set('new-id', { session: createMockSession(), name: 'New', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        const client = makeClient({ activeSessionId: 'prior-cli' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-0000000000ff',
+        }, ctx)
+
+        assert.equal(client.activeSessionId, 'new-id',
+          'active session must flip to the newly-created resumed session')
+        assert.ok(client.subscribedSessionIds.has('new-id'),
+          'client must be subscribed to the new session id so broadcasts reach it')
+      })
+
+      it('surfaces a session_error when createSession throws (stale / unknown id; relates to #4929)', async () => {
+        // A conversationId may pass the UUID format gate but still refer to a
+        // stale or never-existed conversation. SessionManager.createSession's
+        // error surfaces in the catch block at conversation-handlers.js:106.
+        // Until #4929 wires a structured error code, the contract is that the
+        // user sees an actionable session_error rather than a crash or silent
+        // success.
+        const sessions = new Map()
+        const activeSession = createMockSession()
+        Object.setPrototypeOf(activeSession, CliSession.prototype)
+        sessions.set('active-cli', { session: activeSession, name: 'Active', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => {
+          throw new Error('Directory does not exist: /nonexistent')
+        })
+        const client = makeClient({ activeSessionId: 'active-cli' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-0000000dead0',
+          cwd: '/nonexistent',
+        }, ctx)
+
+        const sessionErrors = ctx._sent.filter(m => m.type === 'session_error')
+        assert.equal(sessionErrors.length, 1,
+          'a single session_error must be sent when createSession throws')
+        assert.match(sessionErrors[0].message, /Directory does not exist/,
+          'the underlying createSession error message must reach the client (#4929 will replace this with a structured error code)')
+      })
+
+      it('SDK active session (also resume: true) takes the same proceed path', async () => {
+        // Parallel pinning so a future refactor that special-cased CLI vs SDK
+        // can't quietly diverge — both providers have `capabilities.resume`
+        // true and must reach createSession.
+        assert.equal(SdkSession.capabilities.resume, true,
+          'SdkSession resume capability is the reference contract; CLI now matches it (#4928)')
+
+        const sessions = new Map()
+        const activeSession = createMockSession()
+        Object.setPrototypeOf(activeSession, SdkSession.prototype)
+        sessions.set('active-sdk', { session: activeSession, name: 'SDK', cwd: '/tmp' })
+        sessions.set('new-id', { session: createMockSession(), name: 'Resumed', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        const client = makeClient({ activeSessionId: 'active-sdk' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-000000000123',
+        }, ctx)
+
+        assert.equal(ctx.sessionManager.createSession.callCount, 1)
+        const errors = ctx._sent.filter(m => m.type === 'session_error')
+        assert.deepEqual(errors, [], 'SDK active session must also proceed past the capability gate')
+      })
+
+      it('non-resume providers (codex) are still rejected at the capability gate', async () => {
+        // CodexSession.capabilities.resume === false. The handler must reject
+        // BEFORE calling createSession so the bug enabled by #4928 (CLI now
+        // proceeds) doesn't accidentally let other providers through.
+        assert.equal(CodexSession.capabilities.resume, false,
+          'precondition: codex still does not support resume; without this the test asserts the wrong contract')
+
+        const sessions = new Map()
+        const activeSession = createMockSession()
+        Object.setPrototypeOf(activeSession, CodexSession.prototype)
+        sessions.set('active-codex', { session: activeSession, name: 'Codex', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => 'should-not-be-called')
+        const client = makeClient({ activeSessionId: 'active-codex' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-000000000456',
+        }, ctx)
+
+        assert.equal(ctx.sessionManager.createSession.callCount, 0,
+          'createSession must NOT be called when the active provider declares resume: false')
+        const errors = ctx._sent.filter(m => m.type === 'session_error')
+        assert.equal(errors.length, 1)
+        assert.match(errors[0].message, /does not support conversation resume/,
+          'rejection message must point the client at the capability mismatch')
+      })
+
+      it('no active session: handler skips the capability gate entirely', async () => {
+        // The gate at conversation-handlers.js:68-72 only runs when
+        // `client.activeSessionId` exists AND maps to a session. A fresh
+        // client with no active session resumes into a new CLI session
+        // (the default provider) without any capability check. This pins the
+        // boundary so the gate stays narrowly scoped to the active-session
+        // case and never spuriously blocks a fresh resume.
+        const sessions = new Map()
+        const newSession = createMockSession()
+        newSession.resumeSessionId = '00000000-0000-0000-0000-0000000000aa'
+        sessions.set('new-id', { session: newSession, name: 'Resumed', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        const client = makeClient({ activeSessionId: null })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-0000000000aa',
+        }, ctx)
+
+        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+          'with no active session, the capability gate is bypassed and createSession runs')
+        const switched = ctx._sent.find(m => m.type === 'session_switched')
+        assert.ok(switched, 'session_switched must still be emitted')
+        assert.equal(switched.conversationId, '00000000-0000-0000-0000-0000000000aa')
+      })
+
+      it('stale active session id (no map entry) skips the gate and proceeds', async () => {
+        // If client.activeSessionId points at a session that was removed
+        // (e.g. cleaned up between events), the handler's
+        // `getSession(activeSessionId)` returns undefined → `activeEntry` is
+        // falsy → the gate is skipped. This pins the safety net so a
+        // race-y client state can't wedge resume requests.
+        const sessions = new Map()
+        sessions.set('new-id', { session: createMockSession(), name: 'Resumed', cwd: '/tmp' })
+
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        const client = makeClient({ activeSessionId: 'ghost-session' })
+
+        await conversationHandlers.resume_conversation(makeWs(), client, {
+          conversationId: '00000000-0000-0000-0000-0000000000bb',
+        }, ctx)
+
+        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+          'stale activeSessionId must not block resume — gate skips when entry is missing')
+        const errors = ctx._sent.filter(m => m.type === 'session_error')
+        assert.deepEqual(errors, [])
+      })
     })
   })
 
