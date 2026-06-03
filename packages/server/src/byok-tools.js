@@ -25,9 +25,14 @@ export const TODO_STATUSES = new Set(TODO_STATUS_LIST)
  * Permissiveness ranking for the Task tool's per-launch `permission_mode`
  * override (#5017). Lower number = more restrictive; higher = more permissive.
  *
- *   plan        (0) — model is asked to plan before acting; tool calls still
- *                     gate on approval (and `plan` mode itself short-circuits
- *                     write tools server-side).
+ *   plan        (0) — system prompt asks the model to plan before acting;
+ *                     every tool call still gates on user approval through
+ *                     PermissionManager (the byok provider has
+ *                     `planMode: false` and PermissionManager does not
+ *                     special-case 'plan', so the gating is identical to
+ *                     'approve' from the executor's point of view — the
+ *                     restrictiveness comes from the prompt + approval gate,
+ *                     not a server-side write-tool block).
  *   approve     (1) — default; every tool call gates on user approval.
  *   acceptEdits (2) — Read/Write/Edit/NotebookEdit/Glob/Grep auto-approved.
  *   auto        (3) — every tool call auto-approved (skip-permissions).
