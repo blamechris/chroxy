@@ -79,12 +79,21 @@ const PROVIDER_BILLING: Record<string, string> = {
   'claude-byok': 'Direct Anthropic API — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
   'docker-cli': 'Docker-isolated — uses your Claude subscription',
   'docker-sdk': 'Docker-isolated — uses Anthropic API credits',
+  // #5026: docker-byok runs the BYOK agent loop on the host (so chroxy talks
+  // to api.anthropic.com directly) while file/Bash tool execution happens
+  // inside an isolated Docker container. Trade-off vs. claude-byok: same
+  // billing (your ANTHROPIC_API_KEY), but tool side-effects are sandboxed.
+  'docker-byok': 'Direct Anthropic API (your ANTHROPIC_API_KEY) — tool execution sandboxed in a Docker container. Same billing as claude-byok, isolated filesystem.',
   'codex': 'Uses OpenAI API credits',
   'gemini': 'Uses Google API credits',
 }
 
 /** Short labels for capability badges. */
 const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, string][] = [
+  // #5026: containerized first so the most-distinctive capability of
+  // docker-* providers reads at a glance. Stays hidden for host-only
+  // providers (capabilities.containerized is falsy on those).
+  ['containerized', 'Containerized'],
   ['resume', 'Resume'],
   ['planMode', 'Plan'],
   ['permissions', 'Permissions'],
@@ -663,12 +672,40 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           if (badges.length === 0) return null
           return (
             <div className="provider-capabilities" data-testid="provider-capabilities">
-              {badges.map(([, label]) => (
-                <span key={label} className="capability-badge">{label}</span>
+              {badges.map(([key, label]) => (
+                // #5026: data-capability lets CSS pick out the
+                // containerized badge for a distinct chrome so the eye
+                // reads "this provider is sandboxed" at a glance,
+                // without changing how the other badges render.
+                <span
+                  key={label}
+                  className="capability-badge"
+                  data-capability={key}
+                >{label}</span>
               ))}
             </div>
           )
         })()}
+        {/* #5026: when a containerized provider is selected and no
+            environment is picked, hint at the Environments panel as the
+            path for customising image / memory / cpu / containerUser.
+            The provider will fall back to its built-in defaults
+            (node:22-slim, 2g, 2 cpus, chroxy user) when launched without
+            an environmentId. */}
+        {availableProviders.length > 0 && selectedProviderInfo?.capabilities?.containerized && !selectedProviderUnready && (
+          <div
+            className="provider-container-hint"
+            data-testid="provider-container-hint"
+            role="note"
+          >
+            <span className="provider-container-hint-label">Container settings:</span>{' '}
+            <span className="provider-container-hint-body">
+              {environments.length > 0
+                ? 'Pick an environment below to use its image / memory / CPU. Otherwise the provider defaults apply (node:22-slim, 2g RAM, 2 CPUs).'
+                : 'Uses the provider defaults (node:22-slim, 2g RAM, 2 CPUs). Create an Environment to customise image / memory / CPU / container user.'}
+            </span>
+          </div>
+        )}
       </div>
       <div className="advanced-toggle">
         <button

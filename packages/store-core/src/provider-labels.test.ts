@@ -8,7 +8,7 @@ import {
 describe('PROVIDER_LABELS', () => {
   it('contains entries for all known providers', () => {
     const expectedKeys = [
-      'claude-sdk', 'claude-cli', 'claude-tui', 'docker-cli', 'docker-sdk', 'docker', 'gemini', 'codex',
+      'claude-sdk', 'claude-cli', 'claude-tui', 'claude-byok', 'docker-cli', 'docker-sdk', 'docker-byok', 'docker', 'gemini', 'codex',
     ]
     for (const key of expectedKeys) {
       expect(PROVIDER_LABELS).toHaveProperty(key)
@@ -100,6 +100,18 @@ describe('getProviderInfo', () => {
     const info = getProviderInfo('claude-experimental')
     expect(info.short).toBe('EXPERIMENTAL')
     expect(info.type).toBe('other')
+  })
+
+  // #5026: docker-byok must not regress to the generic fallback. The
+  // selector reads `getProviderLabel('docker-byok')` for the option label;
+  // without this entry it would show the bare provider id.
+  it('docker-byok returns canonical metadata', () => {
+    const info = getProviderInfo('docker-byok')
+    expect(info.short).toBe('Docker BYOK')
+    expect(info.label).toBe('Claude (BYOK — Docker container)')
+    expect(info.type).toBe('sdk')
+    expect(info.tooltip).toContain('container')
+    expect(info.tooltip).toContain('ANTHROPIC_API_KEY')
   })
 
   it('every known provider has a label field matching PROVIDER_LABELS', () => {

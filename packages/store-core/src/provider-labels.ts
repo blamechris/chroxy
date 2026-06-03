@@ -39,6 +39,12 @@ const KNOWN_PROVIDERS: Record<string, ProviderDisplayInfo> = {
     tooltip: 'Direct Anthropic API via @anthropic-ai/sdk — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
     type: 'sdk',
   },
+  'docker-byok': {
+    short: 'Docker BYOK',
+    label: 'Claude (BYOK — Docker container)',
+    tooltip: 'BYOK agent loop on the host, tool execution (Read/Write/Edit/Bash/Glob/Grep) inside an isolated Docker container. Per-token billing with your own ANTHROPIC_API_KEY.',
+    type: 'sdk',
+  },
   'docker-cli': {
     short: 'Docker CLI',
     label: 'Claude Code (Docker CLI)',
