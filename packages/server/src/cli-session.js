@@ -45,6 +45,14 @@ const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
  * If claude CLI ever changes its wording, the test will fail loudly here
  * rather than silently regressing back into the "exited unexpectedly" respawn
  * loop reported in #4929.
+ *
+ * #4950 — the original seventh pattern `/resume.*failed/i` was too loose:
+ * unrelated stderr like "tool resume failed" or "user wanted to resume after
+ * the failed sync" would falsely classify as resume_unknown and wipe
+ * `_sessionId` mid-conversation. The three replacement patterns require both
+ * the resume verb AND a session/conversation/id keyword nearby, so a tool-side
+ * failure that happens to log "resume failed" in isolation no longer triggers
+ * a phantom `_sessionId` wipe.
  */
 export const RESUME_UNKNOWN_STDERR_PATTERNS = [
   /no conversation found/i,
@@ -53,7 +61,12 @@ export const RESUME_UNKNOWN_STDERR_PATTERNS = [
   /no such conversation/i,
   /unknown session/i,
   /could not find session/i,
-  /resume.*failed/i,
+  // #4950 — tightened replacements for the dropped `/resume.*failed/i`. Each
+  // requires the resume verb to co-occur with session/conversation/id so the
+  // matcher stays scoped to the --resume-id failure mode it was designed for.
+  /resume.*(fail|error).*(session|conversation|id)/i,
+  /resume.*(session|conversation|id).*(fail|error)/i,
+  /(fail|could not|unable to|cannot).*resume.*(session|conversation|id)/i,
 ]
 
 /**
