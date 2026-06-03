@@ -87,13 +87,22 @@ export interface ChatMessage {
    */
   code?: string;
   /**
-   * #4947: only set on `type: 'error'` bubbles whose `code` is
-   * `'resume_unknown'` (server PR #4944 — CliSession's
-   * `_handleChildClose` resume-failure path). Carries the conversation id
-   * chroxy passed to `claude --resume <id>` before the CLI rejected it.
-   * The dashboard `ResumeUnknownChip` surfaces this as small mono-spaced
-   * subtext under the headline so operators investigating a recurring
-   * resume failure can correlate against the persisted state file
+   * #4947 / #5006: only set on `type: 'error'` bubbles whose `code` is one
+   * of the two resume-failure codes emitted by CliSession's
+   * `_handleChildClose` resume-failure path:
+   *   - `'resume_unknown'` (server PR #4944) — recoverable: the CLI
+   *     rejected `--resume <id>` and chroxy has already auto-fallen-back
+   *     to a fresh conversation.
+   *   - `'resume_unknown_exhausted'` (server PR #5004) — terminal: the
+   *     post-fallback retry ALSO matched the unknown-resume pattern; the
+   *     server has stopped auto-respawning and the user must start a
+   *     fresh session manually.
+   *
+   * Carries the conversation id chroxy passed to `claude --resume <id>`
+   * before the CLI rejected it. The dashboard / mobile
+   * `ResumeUnknownChip` surfaces this as small mono-spaced subtext under
+   * the headline so operators investigating a recurring resume failure
+   * can correlate against the persisted state file
    * (`resumeConversationId` in `~/.chroxy/session-state.json`) without
    * grepping logs. Undefined for every other error code and for
    * pre-#4944 servers that don't emit the field.

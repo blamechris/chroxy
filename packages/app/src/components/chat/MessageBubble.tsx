@@ -174,15 +174,24 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
     );
   }
 
-  // #4971: dedicated chip for `error{code: 'resume_unknown'}` (server PR
-  // #4944, dashboard companion #4947). CliSession has already auto-fallen-
-  // back to a fresh conversation by the time this lands — the chip
-  // explains that calmly instead of the loud red crash bubble, and
-  // surfaces `attemptedResumeId` as subtext for operator correlation
-  // against `~/.chroxy/session-state.json.resumeConversationId`.
-  if (isError && message.code === 'resume_unknown') {
+  // #4971 / #5006: dedicated chip for the two resume-failure error codes:
+  //   - `error{code: 'resume_unknown'}` (server PR #4944, dashboard #4947,
+  //     mobile #4971) — RECOVERABLE. CliSession has already auto-fallen-
+  //     back to a fresh conversation by the time this lands; chip renders
+  //     the polite "starting fresh" headline.
+  //   - `error{code: 'resume_unknown_exhausted'}` (server PR #5004) —
+  //     TERMINAL. The post-fallback retry ALSO failed; chip renders the
+  //     "auto-recovery exhausted, start a new session manually" headline
+  //     so the user knows auto-recovery has given up.
+  // Both variants surface `attemptedResumeId` as subtext for operator
+  // correlation against `~/.chroxy/session-state.json.resumeConversationId`.
+  if (
+    isError &&
+    (message.code === 'resume_unknown' || message.code === 'resume_unknown_exhausted')
+  ) {
     return (
       <ResumeUnknownChip
+        variant={message.code === 'resume_unknown_exhausted' ? 'exhausted' : 'recoverable'}
         // #4971 review: pass the raw content through (no `.trim()`) so
         // any meaningful trailing context / newlines the server includes
         // (e.g. wrapped CLI stderr) survive end-to-end into the chip's

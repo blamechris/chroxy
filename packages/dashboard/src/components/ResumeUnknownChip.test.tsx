@@ -106,4 +106,66 @@ describe('ResumeUnknownChip (#4947)', () => {
     expect(screen.queryByTestId('stream-stall-chip')).toBeNull()
     expect(screen.queryByTestId('ask-user-question-stall-chip')).toBeNull()
   })
+
+  // #5006: terminal-escalation variant for `resume_unknown_exhausted`
+  // (server PR #5004). When the post-fallback retry ALSO matches the
+  // unknown-resume pattern, the server has stopped auto-respawning — the
+  // user MUST start a fresh session manually. The chip switches to a
+  // distinct headline that conveys "auto-recovery exhausted" so the
+  // operator doesn't think this is the recoverable amber chip on its
+  // second occurrence and wait for an auto-fallback that isn't coming.
+  describe('variant="exhausted" (#5006 — terminal escalation)', () => {
+    it('renders a distinct "auto-recovery exhausted" headline', () => {
+      render(
+        <ResumeUnknownChip
+          variant="exhausted"
+          errorText="Auto-recovery exhausted: …"
+        />,
+      )
+      const chip = screen.getByTestId('resume-unknown-chip')
+      expect(chip).toBeInTheDocument()
+      // Headline must convey the terminal nature (the operator action
+      // required is "start a fresh session manually" — distinct from the
+      // recoverable variant's "starting fresh" auto-fallback phrasing).
+      expect(chip.textContent).toMatch(/auto-recovery|exhausted/i)
+      expect(chip.textContent).toMatch(/start a (new|fresh) session/i)
+      // Must NOT match the recoverable variant's headline — different
+      // affordance, different copy.
+      expect(chip.textContent).not.toMatch(/starting fresh/i)
+    })
+
+    it('still surfaces attemptedResumeId subtext on the exhausted variant', () => {
+      // Operator-correlation requirement is the SAME for both variants —
+      // the failed conversation id helps identify the persisted state-file
+      // entry that needs investigating.
+      render(
+        <ResumeUnknownChip
+          variant="exhausted"
+          errorText="x"
+          attemptedResumeId="abc123-def456-7890"
+        />,
+      )
+      const subtext = screen.getByTestId('resume-unknown-chip-id')
+      expect(subtext.textContent).toContain('abc123-def456-7890')
+    })
+
+    it('uses role="alert" so assistive tech announces the terminal state with urgency', () => {
+      // Unlike the recoverable variant (which uses role="status" + polite
+      // live-region — chroxy has already recovered), the exhausted variant
+      // is terminal and demands user action. role="alert" matches the
+      // accessibility convention for an escalated, assertive announcement.
+      render(<ResumeUnknownChip variant="exhausted" errorText="x" />)
+      const chip = screen.getByTestId('resume-unknown-chip')
+      expect(chip.getAttribute('role')).toBe('alert')
+    })
+
+    it('defaults to the recoverable variant when no variant prop is passed (back-compat)', () => {
+      // Existing call sites pass no variant — they must continue to render
+      // the recoverable copy unchanged (variant: 'recoverable' is implicit).
+      render(<ResumeUnknownChip errorText="x" />)
+      const chip = screen.getByTestId('resume-unknown-chip')
+      expect(chip.textContent).toMatch(/starting fresh/i)
+      expect(chip.getAttribute('role')).toBe('status')
+    })
+  })
 })

@@ -3940,11 +3940,22 @@ export function handleMessage(
     // file. Pre-#4944 servers omit the field entirely and the ChatMessage
     // simply stays `attemptedResumeId: undefined`.
     //
+    // #5006: also accept the terminal-escalation code
+    // `resume_unknown_exhausted` (server PR #5004). When the post-fallback
+    // retry ALSO matches the unknown-resume pattern, the server stops
+    // auto-respawning and emits this distinct code so the chip can switch
+    // to an "auto-recovery exhausted, start a fresh session manually"
+    // affordance. event-normalizer.js already forwards `attemptedResumeId`
+    // for the new code; without widening this gate the field would be
+    // silently stripped at the store boundary and the chip would degrade
+    // to "headline only" — defeating the operator-correlation feature.
+    //
     // Hardening (from PR #4967 Copilot review):
-    //   1. Gate strictly on `msgType === 'error' && msg.code === 'resume_unknown'`
-    //      — the field is documented as only valid on that envelope, so a
-    //      buggy producer attaching it to other types shouldn't pollute the
-    //      store with out-of-contract data.
+    //   1. Gate strictly on `msgType === 'error'` AND one of the two
+    //      resume-failure codes — the field is documented as only valid on
+    //      those envelopes, so a buggy producer attaching it to other types
+    //      (or other error codes) shouldn't pollute the store with
+    //      out-of-contract data.
     //   2. Trim whitespace and treat whitespace-only as missing — matches
     //      the chip's render-time guard so the store and the renderer
     //      agree.
@@ -3955,7 +3966,7 @@ export function handleMessage(
     //      drop so the truncated id still helps operator triage.
     ...(msgType === 'error' &&
     typeof msg.code === 'string' &&
-    msg.code === 'resume_unknown' &&
+    (msg.code === 'resume_unknown' || msg.code === 'resume_unknown_exhausted') &&
     typeof msg.attemptedResumeId === 'string'
       ? (() => {
           const trimmed = msg.attemptedResumeId.trim()

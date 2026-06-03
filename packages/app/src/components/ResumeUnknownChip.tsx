@@ -1,23 +1,32 @@
 /**
- * ResumeUnknownChip — #4971 (mobile-app companion to dashboard #4947).
+ * ResumeUnknownChip — #4971 / #5006 (mobile-app companion to dashboard
+ * #4947 / #5006).
  *
- * Replaces the generic red error bubble when the server emits
- * `error{code: 'resume_unknown'}` (server PR #4944). The server fires this
- * code when claude CLI rejects a `--resume <id>` because the conversation
- * id is unknown locally (operator wiped `~/.claude/projects/` between
- * chroxy boots, restored a state file from a different machine, etc.).
+ * Replaces the generic red error bubble when the server emits one of the
+ * two resume-failure codes from CliSession's `_handleChildClose` path:
  *
- * The CliSession has already auto-fallen-back to a fresh conversation by
- * the time this chip surfaces — the model loses the prior transcript but
- * the chroxy ring buffer transcript is preserved in the UI. So we render a
- * calm operator-friendly explanation rather than the loud red crash toast,
- * matching the spirit of the mobile StreamStallChip (#4476): "recoverable,
- * here's what happened, here's what to expect next".
+ *   - `error{code: 'resume_unknown'}` (server PR #4944) — RECOVERABLE.
+ *     CliSession has already auto-fallen-back to a fresh conversation by
+ *     the time the chip surfaces. The model loses the prior transcript
+ *     but the chroxy ring buffer transcript is preserved in the UI. We
+ *     render a calm operator-friendly explanation rather than the loud
+ *     red crash toast.
+ *
+ *   - `error{code: 'resume_unknown_exhausted'}` (server PR #5004) —
+ *     TERMINAL. The post-fallback retry ALSO matched the unknown-resume
+ *     pattern; the server has stopped auto-respawning and the user must
+ *     start a fresh session manually. The chip switches headline /
+ *     accessibilityLabel copy so AT users get the "auto-recovery
+ *     exhausted, action needed" signal — `accessibilityRole="alert"` is
+ *     already used on the recoverable variant (mobile RN convention is
+ *     louder by default than the dashboard's status/alert split), so the
+ *     variant difference rides on the label + visible text.
  *
  * `attemptedResumeId` (when provided) renders as small mono-spaced subtext
  * for operator correlation against the persisted state file
  * (`resumeConversationId` in ~/.chroxy/session-state.json) — answers "which
  * conversation did we lose?" without forcing the operator to grep logs.
+ * Surfaces on both variants because the correlation use case is identical.
  * Defensive empty/whitespace guard mirrors the dashboard component so a
  * stale or trimmed empty value can't produce a broken-looking "Attempted
  * id: " slot.
@@ -43,27 +52,49 @@ export interface ResumeUnknownChipProps {
    * (matches the dashboard chip's defensive guard).
    */
   attemptedResumeId?: string;
+  /**
+   * #5006 — variant switch matched against the server error code:
+   *   - `'recoverable'` (default) — `code: 'resume_unknown'`; chip renders
+   *     the "starting fresh" headline.
+   *   - `'exhausted'` — `code: 'resume_unknown_exhausted'`; chip renders
+   *     the "auto-recovery exhausted" headline + "start a new session
+   *     manually" call-to-action.
+   * Optional + defaulted so existing call sites that pre-date #5006
+   * continue to render the recoverable copy unchanged.
+   */
+  variant?: 'recoverable' | 'exhausted';
 }
 
-export function ResumeUnknownChip({ errorText, attemptedResumeId }: ResumeUnknownChipProps) {
+const RECOVERABLE_HEADLINE = 'Previous conversation could not be resumed — starting fresh';
+const EXHAUSTED_HEADLINE = 'Auto-recovery exhausted — start a new session manually to continue';
+
+export function ResumeUnknownChip({
+  errorText,
+  attemptedResumeId,
+  variant = 'recoverable',
+}: ResumeUnknownChipProps) {
   // Empty-string defense — same rationale as the dashboard chip and the
   // SessionNotFoundChip: a stale or trimmed empty value should not produce
   // a broken-looking "Attempted id: " slot with no value.
   const hasId = typeof attemptedResumeId === 'string' && attemptedResumeId.trim().length > 0;
+
+  // #5006: switch headline copy on the variant. accessibilityRole stays
+  // `'alert'` for both variants — the mobile RN convention is to use the
+  // assertive role on recoverable amber chips too (parity with
+  // StreamStallChip). The label difference carries the urgency signal.
+  const headline = variant === 'exhausted' ? EXHAUSTED_HEADLINE : RECOVERABLE_HEADLINE;
 
   return (
     <View
       testID="resume-unknown-chip"
       accessibilityRole="alert"
       accessibilityLiveRegion="polite"
-      accessibilityLabel="Previous conversation could not be resumed — starting fresh"
+      accessibilityLabel={headline}
       accessibilityHint={errorText}
       style={styles.container}
     >
       <View style={styles.dot} />
-      <Text style={styles.label}>
-        Previous conversation could not be resumed — starting fresh
-      </Text>
+      <Text style={styles.label}>{headline}</Text>
       {hasId && (
         // #4971 review: drop `accessibilityElementsHidden` /
         // `importantForAccessibility="no"` so the attempted id is
