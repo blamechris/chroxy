@@ -1,0 +1,204 @@
+appId: com.blamechris.chroxy
+name: ChatView AskUserQuestion Other → freeform send-path (#4877 / #4755)
+---
+
+# #4877 — Maestro coverage for the third (deferred) acceptance criterion of
+# #4755: the mobile Other → freeform send-path. PR #4864 landed mobile parity
+# for the dashboard's `{answer:<otherLabel>, freeformText, toolUseId}` wire
+# shape (#4651 / PR #4753 server side); this flow exercises that path
+# end-to-end on a real RN runtime so a regression in any layer
+# (MessageBubble's Other-mode toggle, the freetext input testIDs, the
+# `OtherFreeformAnswer` shape produced by handleSelectOption, the wire
+# serializer in connection.ts, or the answered-text post-submit render)
+# surfaces as a hard test failure rather than a silent footgun.
+#
+# Trigger: 'show-ask-other' user input → mock-server.mjs emits a
+# `user_question` envelope with two real options ('production' / 'staging').
+# The store-core `handleUserQuestion` normalizer auto-appends the synthetic
+# OTHER_OPTION_VALUE (`__chroxy_other__`) sentinel to every single-select
+# question with at least one real option (see packages/store-core/src/
+# handlers/index.ts ~L3680). The MessageBubble therefore renders three
+# option buttons; tapping the Other one swaps the option row for the
+# freetext input that PR #4864 anchored with `approval-freetext-input`
+# + `approval-freetext-send` testIDs.
+#
+# Selectors:
+#   id: approval-question-0                       — prompt header (Q[0])
+#   id: approval-button-production                — model option (value === label)
+#   id: approval-button-staging                   — model option
+#   id: approval-button-__chroxy_other__          — synthesized Other sentinel
+#                                                   (value === OTHER_OPTION_VALUE)
+#   id: approval-freetext-input                   — freetext TextInput (#4864)
+#   id: approval-freetext-send                    — Send button (#4864)
+#
+# Regression coverage:
+#   - Wire→render path: server emits `user_question` with real options →
+#     store-core appends Other sentinel → MessageBubble renders three buttons.
+#   - Other-tap path: `approval-button-__chroxy_other__` press flips local
+#     `otherActive` true → option row unmounts, freetext input + Send mount.
+#   - Send path: typed text + Send tap fires `handleSelectOption` with the
+#     `{otherLabel, freeformText}` object shape → `sendUserQuestionResponse`
+#     serializes `{type:'user_question_response', answer:<label>,
+#     freeformText:<typed>, toolUseId}` on the wire.
+#   - Answered render: `markPromptAnswered` stores the typed text (NOT the
+#     literal 'Other' label) — `answeredIsFreeText` becomes true and
+#     `styles.promptFreetextAnswered` renders the user's actual answer
+#     (matches dashboard `formatQuestionAnswerSummary` UX behaviour).
+#
+# Self-contained (no `runFlow: setup/...`) for the same reason the sibling
+# ask-user-question{,-deny,-multi}.yaml flows are: setup/ targets Expo Go
+# (host.exp.Exponent) while this needs the chroxy dev client
+# (com.blamechris.chroxy).
+#
+# Tested devices: portrait iPhone 15 Pro (iOS 17+).
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Ensure Chat tab.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that makes the mock server emit a
+# `user_question` envelope. Real options here are 'production' /
+# 'staging' so the synthesized Other sentinel is visually distinct
+# from any model-supplied label and the post-answer freeform text
+# can't be confused with an option label by the assertion.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-ask-other"
+
+- tapOn:
+    id: "chat-send-button"
+
+# Drop the keyboard so the prompt bubble + option buttons aren't
+# covered by the input area.
+- hideKeyboard
+
+# Wait for the prompt bubble header to render.
+- extendedWaitUntil:
+    visible:
+      id: "approval-question-0"
+    timeout: 10000
+
+# Pin all three buttons are visible — the two model-supplied options +
+# the auto-appended Other sentinel. The presence of the Other button
+# proves the store-core normalizer's auto-append still fires for
+# single-select questions with at least one option (regression for
+# #3746 / #3752).
+- assertVisible:
+    id: "approval-button-production"
+- assertVisible:
+    id: "approval-button-staging"
+- assertVisible:
+    id: "approval-button-__chroxy_other__"
+
+- takeScreenshot: ask-question-other-prompt-rendered
+
+# Tap the synthesized Other button. MessageBubble flips local
+# `otherActive` true, which swaps the option row for the freetext
+# input + Send/Cancel buttons. Per the PR #4864 testIDs landing.
+- tapOn:
+    id: "approval-button-__chroxy_other__"
+- waitForAnimationToEnd
+
+# Assert the freetext input + Send button materialized. These are
+# the canonical PR #4864 anchors — a regression that drops the
+# testIDs (e.g. an Other → freetext refactor that loses the prop)
+# fails the flow here.
+- extendedWaitUntil:
+    visible:
+      id: "approval-freetext-input"
+    timeout: 5000
+- assertVisible:
+    id: "approval-freetext-send"
+
+- takeScreenshot: ask-question-other-freetext-mounted
+
+# Type a freeform answer into the input. Choose a phrase distinct
+# from any option label so the post-answer assertion can't pass
+# accidentally by matching 'production' / 'staging' / 'Other'.
+- tapOn:
+    id: "approval-freetext-input"
+- inputText: "ephemeral-preview-env-42"
+- hideKeyboard
+
+# Tap Send. SessionScreen.handleSelectOption receives the
+# `{otherLabel:'Other', freeformText:'ephemeral-preview-env-42'}`
+# shape, forwards it to `sendUserQuestionResponse`, which serializes
+# `{type:'user_question_response', answer:'Other',
+# freeformText:'ephemeral-preview-env-42', toolUseId}` on the wire.
+# The mock-server `case 'user_question_response'` logs the payload
+# (visible in the `[mock]` audit trail). Locally, `markPromptAnswered`
+# stores the typed text (NOT the 'Other' label) — matches the
+# dashboard parity shape pinned by PR #4864 / #4651.
+- tapOn:
+    id: "approval-freetext-send"
+- waitForAnimationToEnd
+
+- takeScreenshot: ask-question-other-freeform-sent
+
+# Post-answer assertions:
+#   1. The freetext input + Send button unmounted — `showFreetextInput`
+#      gates on `!message.answered`, so once the answer arrives the
+#      whole row disappears (regression for the answered-state UX).
+#   2. The typed text renders in `styles.promptFreetextAnswered`
+#      (italic, textSecondary) — `answeredIsFreeText` is true because
+#      `message.answered === 'ephemeral-preview-env-42'` doesn't
+#      match any option's value. This is the parity behaviour with
+#      `formatQuestionAnswerSummary` on the dashboard.
+- assertNotVisible:
+    id: "approval-freetext-input"
+- assertNotVisible:
+    id: "approval-freetext-send"
+- assertVisible: "ephemeral-preview-env-42"

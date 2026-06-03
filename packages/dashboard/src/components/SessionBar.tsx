@@ -235,7 +235,17 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
               if (dragOverId !== session.sessionId) setDragOverId(session.sessionId)
             }}
-            onDragLeave={() => {
+            onDragLeave={e => {
+              // #4946 — native dragleave fires when the cursor crosses into a
+              // child element (status dot, cwd / model / provider chips, close
+              // button), even though the user hasn't actually left the tab.
+              // Without this guard the drop-target affordance flickers as the
+              // cursor moves over inner chips. Skip the clear when relatedTarget
+              // is still contained within this tab; only clear on a genuine
+              // boundary exit (relatedTarget is null, the document, or another
+              // tab / sibling element).
+              const next = e.relatedTarget as Node | null
+              if (next && e.currentTarget.contains(next)) return
               if (dragOverId === session.sessionId) setDragOverId(null)
             }}
             onDrop={e => {
