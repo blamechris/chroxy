@@ -198,8 +198,32 @@ export class DockerBackend {
       execArgs.push(containerId, 'bash', '-c', cmd)
 
       this._execFile('docker', execArgs, { encoding: 'utf-8', timeout }, (err, stdout, stderr) => {
-        if (err) reject(new Error(stderr ? stderr.trim() : err.message))
-        else resolve({ stdout: stdout || '', stderr: stderr || '' })
+        if (err) {
+          // #5067 — Preserve both captured streams on failure. The error
+          // message stays stderr-first (existing callers rely on that
+          // shape for log lines), but we attach raw `stdout` / `stderr`
+          // properties so the caller can surface BOTH streams in a
+          // user-facing error event without re-running the command.
+          //
+          // npm install, repo bootstrap scripts, and apt-get commonly
+          // print the actually-useful diagnostic on stdout; dropping it
+          // here turned every post-create failure into a guess-and-retry.
+          //
+          // Falls through to err.message when stderr is empty, matching
+          // the pre-#5067 behaviour for stderr-silent commands. The
+          // post-create caller in docker-byok-session.js applies its own
+          // POST_CREATE_OUTPUT_CAP_BYTES truncation before serialising
+          // into the error event payload.
+          const wrapped = new Error(stderr ? stderr.trim() : err.message)
+          wrapped.stdout = stdout || ''
+          wrapped.stderr = stderr || ''
+          if (err.code) wrapped.code = err.code
+          if (err.signal) wrapped.signal = err.signal
+          if (typeof err.killed === 'boolean') wrapped.killed = err.killed
+          reject(wrapped)
+        } else {
+          resolve({ stdout: stdout || '', stderr: stderr || '' })
+        }
       })
     })
   }

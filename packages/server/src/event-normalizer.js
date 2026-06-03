@@ -457,6 +457,28 @@ Object.assign(EVENT_MAP, {
         msg.attemptedResumeId = trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed
       }
     }
+    // #5067: forward captured `stdout` / `stderr` on docker-byok
+    // postCreateCommand failures so the operator can diagnose without
+    // re-running the broken setup. The session layer
+    // (docker-byok-session.js) already tail-caps each stream to
+    // POST_CREATE_OUTPUT_CAP_BYTES (4 KiB) before emitting; we re-cap at
+    // the wire boundary at 8 KiB per stream as a belt-and-suspenders
+    // bound (matches ServerMessageSchema.{stdout,stderr}.max(8192)) so a
+    // misbehaving producer can't ship a megabyte payload that the
+    // dashboard accepts but trips Zod-validating consumers. Gated
+    // strictly on the post-create-failure code so a buggy producer can't
+    // sneak the fields onto unrelated error envelopes — same hardening
+    // pattern as the resume_unknown gate above. Empty-string and
+    // non-string both treated as "absent" so receivers see a consistent
+    // "present or absent, never present-but-empty" shape.
+    if (data.code === 'post_create_command_failed') {
+      if (typeof data.stdout === 'string' && data.stdout.length > 0) {
+        msg.stdout = data.stdout.length > 8192 ? data.stdout.slice(0, 8192) : data.stdout
+      }
+      if (typeof data.stderr === 'string' && data.stderr.length > 0) {
+        msg.stderr = data.stderr.length > 8192 ? data.stderr.slice(0, 8192) : data.stderr
+      }
+    }
     return { messages: [{ msg }] }
   },
 

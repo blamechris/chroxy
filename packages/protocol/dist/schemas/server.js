@@ -140,6 +140,17 @@ export const ServerMessageSchema = z.object({
     // length-capped so a malformed producer can't pollute the wire with
     // megabyte payloads.
     attemptedResumeId: z.string().max(256).optional(),
+    // #5067: captured stdout/stderr from a failed docker-byok
+    // postCreateCommand. Only set on `messageType: 'error'` envelopes
+    // whose `code` is `'post_create_command_failed'`; the session layer
+    // (docker-byok-session.js) tail-caps each stream to 4 KiB before
+    // emitting, and event-normalizer.js re-caps at 8 KiB at the wire
+    // boundary. The 8192 ceiling here is the wire-schema bound;
+    // producers (the session layer) apply a tighter cap. Optional so
+    // existing error envelopes (resume_unknown, generic crashes) stay
+    // shape-compatible.
+    stdout: z.string().max(8192).optional(),
+    stderr: z.string().max(8192).optional(),
 });
 export const ServerToolStartSchema = z.object({
     type: z.literal('tool_start'),

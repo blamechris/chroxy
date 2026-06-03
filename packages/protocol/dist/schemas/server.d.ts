@@ -93,6 +93,8 @@ export declare const ServerMessageSchema: z.ZodObject<{
     timestamp: z.ZodNumber;
     code: z.ZodOptional<z.ZodString>;
     attemptedResumeId: z.ZodOptional<z.ZodString>;
+    stdout: z.ZodOptional<z.ZodString>;
+    stderr: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{
     type: z.ZodLiteral<"tool_start">;

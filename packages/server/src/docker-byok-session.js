@@ -158,6 +158,34 @@ const DEFAULT_POST_CREATE_TIMEOUT_MS = 5 * 60 * 1000
 const POST_CREATE_MARKER_PREFIX = '/tmp/.chroxy-post-create-'
 
 /**
+ * #5067 — Per-stream cap on captured postCreateCommand output included
+ * in the `post_create_command_failed` error event payload. Sized so the
+ * trailing tail of a typical `npm install` failure (the lines that
+ * actually identify the broken package) survives, while a runaway
+ * script that spammed MBs of progress can't push the WS frame past the
+ * encryption ceiling. We keep the TAIL because diagnostic info (the
+ * actual exception, ENOENT, exit codes) almost always lands at the end.
+ */
+const POST_CREATE_OUTPUT_CAP_BYTES = 4 * 1024
+
+/**
+ * Truncate a captured stream to the last `cap` bytes, emitting a
+ * `[truncated — first N bytes omitted]` prefix when we drop anything.
+ * The header is a single line so log scrapers can detect truncation
+ * without parsing the whole payload. Bytes (not chars) — a UTF-8
+ * multibyte sequence at the cut boundary will be replaced by U+FFFD
+ * when decoded, which is acceptable for a diagnostic tail.
+ */
+function tailCapture(text, cap = POST_CREATE_OUTPUT_CAP_BYTES) {
+  if (typeof text !== 'string' || text.length === 0) return ''
+  const buf = Buffer.from(text, 'utf8')
+  if (buf.length <= cap) return text
+  const omitted = buf.length - cap
+  const tail = buf.subarray(buf.length - cap).toString('utf8')
+  return `[truncated — first ${omitted} bytes omitted]\n${tail}`
+}
+
+/**
  * Map a host-absolute file_path under this.cwd into the container's
  * /workspace mount. Defends against path traversal by refusing absolute
  * paths that aren't under cwd. Relative paths are joined onto
@@ -568,9 +596,19 @@ export class DockerByokSession extends ClaudeByokSession {
               fatal: false,
             })
           } else {
+            // #5067 — Surface BOTH captured streams so the operator can
+            // diagnose without re-running the failed setup. The backend's
+            // `execInEnvironment` (docker.js) attaches `stdout` / `stderr`
+            // on the rejected Error; we tail-cap each to keep the event
+            // payload bounded. `err.stdout` / `err.stderr` are guaranteed
+            // to be strings (empty when not captured) for the docker-backed
+            // path; the `?? ''` guards a synthetic throw (e.g. invalid user
+            // regex) that didn't pass through the docker exec callback.
             this.emit('error', {
               code: 'post_create_command_failed',
               message: `docker-byok postCreateCommand failed: ${err.message}`,
+              stdout: tailCapture(err.stdout ?? ''),
+              stderr: tailCapture(err.stderr ?? ''),
             })
             await this.destroy()
             return
