@@ -61,7 +61,10 @@ func requestAuthorization(completion: @escaping (Bool) -> Void) {
     }
 }
 
-// Set to true by teardown() to break out of the main RunLoop.
+// Set to true by setDone() to break out of the main RunLoop. setDone() is
+// called from teardown() (the normal stop path) AND from early error paths
+// in startRecognition() — permission denied, recognizer unavailable, or
+// audio-engine start failure — so the helper exits promptly in all cases.
 var done = false
 let doneLock = NSLock()
 
@@ -188,8 +191,13 @@ func startRecognition() {
     // (the async authorization completion above) AND Apple framework callbacks
     // (the recognition result handler). teardown() calls CFRunLoopStop, which
     // returns control here so the function (and process) can exit cleanly.
+    //
+    // Explicitly drive RunLoop.main (not RunLoop.current) so the loop being
+    // driven here always matches the one setDone() stops via
+    // CFRunLoopStop(CFRunLoopGetMain()), regardless of which thread invokes
+    // startRecognition() in the future.
     while !isDone() {
-        RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0))
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 1.0))
     }
 }
 
