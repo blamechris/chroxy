@@ -1649,6 +1649,7 @@ export function App() {
       navigation: 'Global',
       view: 'Global',
       session: 'Session',
+      sidebar: 'Sidebar',
       composer: 'Input',
       other: 'Global',
     }

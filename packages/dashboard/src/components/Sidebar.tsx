@@ -631,6 +631,14 @@ export function Sidebar({
                   data-testid={`sidebar-repo-${repo.path}`}
                   data-drop-position={repoDragOver ?? undefined}
                   tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}
+                  // #4941: surface the Alt+ArrowUp/Down keyboard reorder
+                  // shortcut for screen readers and assistive tech. Only
+                  // set when reorder is actually wired (callback present
+                  // AND no filter active) so the announced shortcut
+                  // doesn't lie when the row isn't actually reorderable.
+                  // The space-separated multi-combo format follows the
+                  // WAI-ARIA spec (`Alt+ArrowUp Alt+ArrowDown`).
+                  aria-keyshortcuts={!!onReorderRepos && !filter ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
                   // #4372: bind onContextMenu on the outer treeitem (not the
                   // inner .sidebar-repo-header) so that App's handler can
                   // call `event.currentTarget.focus()` on a focusable element.
@@ -712,6 +720,11 @@ export function Sidebar({
                             // confusing partial ordering.
                             draggable={!!onReorderSessions && !filter}
                             data-drop-position={sessionDragOver ?? undefined}
+                            // #4941: see the matching repo-row attribute
+                            // above — same rationale (discoverability for
+                            // assistive tech, only set when the shortcut
+                            // is functionally wired on this row).
+                            aria-keyshortcuts={!!onReorderSessions && !filter ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
                             onClick={() => onSessionClick(session.sessionId)}
                             onContextMenu={e => {
                               // #4372: stopPropagation so the right-click

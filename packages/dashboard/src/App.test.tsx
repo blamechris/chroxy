@@ -311,6 +311,24 @@ describe('App', () => {
     expect(screen.queryByText('Cmd+Enter')).not.toBeInTheDocument()
   })
 
+  // #4941 — the sidebar drag-to-reorder shortcut was previously invisible
+  // anywhere outside the source code. After landing the discoverability
+  // follow-up, opening the `?` cheat sheet shows the two reorder entries
+  // alongside their descriptions and a dedicated "Sidebar" section
+  // heading, so users can find them.
+  it('lists the sidebar reorder shortcuts in the cheat sheet under a Sidebar section (#4941)', () => {
+    render(<App />)
+    fireEvent.keyDown(window, { key: '?' })
+
+    expect(screen.getByText('Alt+ArrowUp')).toBeInTheDocument()
+    expect(screen.getByText('Alt+ArrowDown')).toBeInTheDocument()
+    expect(screen.getByText('Move sidebar row up (when focused)')).toBeInTheDocument()
+    expect(screen.getByText('Move sidebar row down (when focused)')).toBeInTheDocument()
+    // Confirm the entries render under the new "Sidebar" group (h3),
+    // not folded into another section.
+    expect(screen.getByRole('heading', { level: 3, name: 'Sidebar' })).toBeInTheDocument()
+  })
+
   // #4432 — the cheat sheet's tab-switch row used to be derived from
   // session.switch.1's binding alone, then string-replaced "1$" with
   // "1-9". When the other eight bindings still pointed at their
