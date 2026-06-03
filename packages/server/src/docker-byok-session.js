@@ -1,0 +1,662 @@
+/**
+ * docker-byok provider (#4053) — runs the claude-byok agent loop on the
+ * host (chroxy speaks HTTPS to api.anthropic.com directly), but redirects
+ * built-in tool execution (Read / Write / Edit / Bash / Glob / Grep) into
+ * an isolated Docker container.
+ *
+ * Design summary
+ * --------------
+ * BYOK is in-process: the agent loop runs inside chroxy and there is no
+ * subprocess for the model. The isolation boundary here is the TOOLS —
+ * the model can still read and write files, but those file ops act on
+ * the CONTAINER'S filesystem (which mounts the host cwd at /workspace),
+ * and Bash commands the model wants to run execute inside the container
+ * with `--cap-drop ALL`, a pids cap, and a non-root user. Anything else
+ * — model streaming, permission gating, MCP dispatch, cost accounting —
+ * is inherited unchanged from ClaudeByokSession.
+ *
+ * What's in v1 (this file)
+ * ------------------------
+ *   - Container lifecycle: start (with preflight `docker info`), destroy
+ *   - Workspace volume mount at /workspace (cwd → /workspace, same as
+ *     docker-sdk-session.js)
+ *   - Tool dispatch override (`_dispatchBuiltinTool`) for the file/bash
+ *     surface. Read uses `cat`; Write uses `tee` via stdin; Edit reads,
+ *     mutates host-side, writes back; Bash/Glob/Grep run via
+ *     `bash -c` inside the container.
+ *   - ANTHROPIC_API_KEY forwarded into the container at `docker run`
+ *     time (the AC asks for it; the running agent in chroxy is what
+ *     actually authenticates to the Anthropic API — the container has
+ *     the env in case a Bash command needs it, e.g. a `claude -p` smoke
+ *     test inside the container).
+ *   - TodoWrite + WebFetch stay host-side (TodoWrite is an in-memory
+ *     map; WebFetch is HTTP from chroxy and doesn't touch the FS).
+ *   - MCP, Task subagent, permission gating, cost accounting — all
+ *     inherited verbatim from ClaudeByokSession.
+ *
+ * Deferred (follow-up issues)
+ * ---------------------------
+ *   - Per-session container reuse / pooling
+ *   - Snapshot/restore (Docker commit-based snapshots already exist for
+ *     docker-cli / docker-sdk — wiring them up for docker-byok belongs
+ *     in a follow-up so docker-byok ships small)
+ *   - DevContainer / Compose-driven environments
+ *   - postCreateCommand hook
+ *
+ * Per `project_worktree_before_docker.md` in project memory: worktree
+ * isolation happens BEFORE Docker. This class does not own worktree
+ * setup — the SessionManager / environment-manager already worktree the
+ * cwd before constructing the session, and we mount whatever cwd the
+ * SessionManager hands us.
+ */
+
+import { execFile } from 'child_process'
+import { ClaudeByokSession } from './byok-session.js'
+import { DockerBackend } from './environments/backends/docker.js'
+import { classifyDockerError } from './docker-session.js'
+import { createLogger } from './logger.js'
+import { isAbsolute, posix } from 'path'
+
+const log = createLogger('docker-byok')
+
+/** POSIX username pattern — same shape as docker-sdk-session.js. */
+const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
+
+const DEFAULT_IMAGE = 'node:22-slim'
+const DEFAULT_MEMORY_LIMIT = '2g'
+const DEFAULT_CPU_LIMIT = '2'
+const DEFAULT_USER = 'chroxy'
+const CONTAINER_WORKSPACE = '/workspace'
+
+/**
+ * Cap on Read output size to keep tool_result payloads bounded.
+ * Mirrors the host-side `readFileTool` philosophy — large files should
+ * be sliced via `offset`/`limit`.
+ */
+const READ_MAX_BYTES = 256 * 1024
+
+/**
+ * Cap on Write payload size. Larger writes should be done by the model
+ * via a sequence of smaller writes or — better — a Bash command that
+ * stages the content from a file already inside the container.
+ */
+const WRITE_MAX_BYTES = 512 * 1024
+
+/**
+ * Map a host-absolute file_path under this.cwd into the container's
+ * /workspace mount. Defends against path traversal by refusing absolute
+ * paths that aren't under cwd. Relative paths are joined onto
+ * /workspace using POSIX semantics — the container is always Linux.
+ *
+ * Returns a string the model can pass into a `docker exec` command, or
+ * throws an Error whose message is safe to surface as a tool_result.
+ *
+ * @param {string} filePath
+ * @param {string} hostCwd
+ */
+export function remapToContainerPath(filePath, hostCwd) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    const err = new Error('file_path is required')
+    err.code = 'EINVAL'
+    throw err
+  }
+  if (typeof hostCwd !== 'string' || hostCwd.length === 0) {
+    const err = new Error('host cwd is not configured')
+    err.code = 'EINVAL'
+    throw err
+  }
+  // POSIX containers — normalise the host cwd to a POSIX-style mount
+  // root so prefix-matching works on Windows hosts too. Trailing
+  // slashes get stripped so `cwd === '/Users/foo'` and the file
+  // `/Users/foo` itself map to '/workspace' rather than '/workspace/'.
+  const normHostCwd = hostCwd.replace(/\/+$/, '')
+  if (isAbsolute(filePath)) {
+    if (filePath === normHostCwd) return CONTAINER_WORKSPACE
+    if (filePath.startsWith(normHostCwd + '/')) {
+      const suffix = filePath.slice(normHostCwd.length)
+      return posix.join(CONTAINER_WORKSPACE, suffix)
+    }
+    const err = new Error(`path outside workspace: ${filePath} is not under ${normHostCwd}`)
+    err.code = 'EACCES'
+    throw err
+  }
+  // Relative path → join onto /workspace.
+  const joined = posix.join(CONTAINER_WORKSPACE, filePath)
+  if (!joined.startsWith(CONTAINER_WORKSPACE)) {
+    // posix.join() collapses `../` segments — if the result escapes
+    // /workspace, refuse the call.
+    const err = new Error(`path outside workspace: ${filePath} resolves to ${joined}`)
+    err.code = 'EACCES'
+    throw err
+  }
+  return joined
+}
+
+/**
+ * Quote a string for safe interpolation inside single-quoted bash
+ * arguments. Mirrors the shellQuote pattern used elsewhere in chroxy.
+ */
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`
+}
+
+export class DockerByokSession extends ClaudeByokSession {
+  static get displayLabel() {
+    return 'Claude (BYOK — Docker container)'
+  }
+
+  static get capabilities() {
+    return { ...ClaudeByokSession.capabilities, containerized: true }
+  }
+
+  /**
+   * Preflight credentials block. Same shape as ClaudeByokSession — the
+   * agent loop still runs on the host so the credential set / hint /
+   * required-ness is identical to host-side BYOK. The container itself
+   * does NOT need to be authenticated to talk to Anthropic; chroxy
+   * does that. ANTHROPIC_API_KEY is forwarded as a convenience for the
+   * model's Bash command (e.g. a one-off `curl api.anthropic.com`).
+   */
+  static get preflight() {
+    return {
+      ...ClaudeByokSession.preflight,
+      label: 'Claude (BYOK — Docker container)',
+    }
+  }
+
+  /**
+   * Reuse ClaudeByokSession's resolveAuth: same env vars, same
+   * credential file path, same readiness rules. The container's
+   * absence of ~/.chroxy state does NOT change anything here — the
+   * agent loop runs on the host.
+   */
+  static resolveAuth(env, helpers) {
+    return ClaudeByokSession.resolveAuth(env, helpers)
+  }
+
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.image='node:22-slim']     Container image
+   * @param {string} [opts.memoryLimit='2g']         `docker run --memory`
+   * @param {string} [opts.cpuLimit='2']             `docker run --cpus`
+   * @param {string} [opts.containerUser='chroxy']   Non-root user inside container
+   * @param {string} [opts.containerId]              Attach to an existing container
+   *   instead of launching one (env-manager managed). When omitted, the
+   *   session owns the container and tears it down on destroy().
+   * @param {object} [opts._dockerBackend]           Test seam — pre-built backend
+   * @param {Function} [opts._execFile]              Test seam — used by preflight
+   *   (defaults to child_process.execFile)
+   */
+  constructor(opts = {}) {
+    // Forward every BaseSession/ClaudeByokSession opt verbatim via
+    // spread (`...opts`) so the lint-session-opt-forwarding linter is
+    // satisfied and we never accidentally drop a BaseSession opt
+    // (`feedback_jsonl_subprocess_middle_layer.md` in project memory).
+    // Override `provider` so the session reports `docker-byok` for
+    // wire-protocol consumers (display label, capabilities matrix).
+    super({ ...opts, provider: opts.provider || 'docker-byok' })
+
+    const user = opts.containerUser || DEFAULT_USER
+    if (!VALID_USERNAME_RE.test(user)) {
+      throw new Error(`Invalid containerUser "${user}" — must match POSIX username rules`)
+    }
+    this._containerUser = user
+    this._image = opts.image || DEFAULT_IMAGE
+    this._memoryLimit = opts.memoryLimit || DEFAULT_MEMORY_LIMIT
+    this._cpuLimit = opts.cpuLimit || DEFAULT_CPU_LIMIT
+    // External container support — when an env-manager hands us an
+    // already-running containerId we attach to it and DON'T tear it
+    // down on destroy.
+    const containerId = typeof opts.containerId === 'string' ? opts.containerId.trim() : null
+    this._containerId = containerId || null
+    this._containerOwned = !containerId
+    this._dockerBackend = opts._dockerBackend || new DockerBackend()
+    this._execFile = opts._execFile || execFile
+    this._containerReady = false
+  }
+
+  /**
+   * Preflight check: confirm the local Docker daemon is reachable
+   * before any state mutation. Resolves true on success, rejects with
+   * a classified error (code:'docker_not_running' etc.) on failure.
+   *
+   * Exposed as a method so callers (tests, dashboards) can probe
+   * docker readiness without instantiating the full session.
+   */
+  _preflightDocker() {
+    return new Promise((resolve, reject) => {
+      this._execFile('docker', ['info'], { encoding: 'utf-8', timeout: 10_000 }, (err, _stdout, stderr) => {
+        if (err) {
+          const classified = classifyDockerError(err, stderr)
+          const error = new Error(classified.message)
+          error.code = classified.code
+          reject(error)
+          return
+        }
+        resolve(true)
+      })
+    })
+  }
+
+  /**
+   * Launch the container if we own it, then call super.start() so the
+   * Anthropic client / MCP fleet / ready event all wire up normally.
+   *
+   * When attaching to an external container (env-manager managed),
+   * skips the launch but still preflights `docker info` so a dead
+   * daemon doesn't silently fail the first tool call.
+   */
+  async start() {
+    try {
+      await this._preflightDocker()
+    } catch (err) {
+      // Surface preflight failures as a session error (same shape as
+      // docker-sdk-session uses for its own start-failure path) and
+      // tear down — the session can't function without Docker.
+      this.emit('error', {
+        code: err.code || 'docker_error',
+        message: `docker-byok preflight: ${err.message}`,
+      })
+      await this.destroy()
+      return
+    }
+
+    if (this._containerOwned) {
+      try {
+        await this._startContainer()
+      } catch (err) {
+        this.emit('error', {
+          code: err.code || 'docker_error',
+          message: `docker-byok failed to start container: ${err.message}`,
+        })
+        await this.destroy()
+        return
+      }
+    } else {
+      // External container — verify it's reachable before we lie to
+      // the model about being ready.
+      try {
+        await this._verifyContainer()
+      } catch (err) {
+        this.emit('error', {
+          code: err.code || 'docker_error',
+          message: `docker-byok external container not reachable: ${err.message}`,
+        })
+        await this.destroy()
+        return
+      }
+    }
+
+    this._containerReady = true
+    await super.start()
+  }
+
+  /**
+   * Launch a long-lived container with the host cwd mounted at
+   * /workspace and the standard chroxy hardening (cap-drop, pids
+   * limit, no-new-privileges, non-root user). Mirrors the runArgs
+   * shape used by docker-sdk-session.js so the security posture is
+   * identical across the two providers.
+   */
+  _startContainer() {
+    return new Promise((resolve, reject) => {
+      const runArgs = [
+        'run', '-d', '--init', '--rm',
+        '--memory', this._memoryLimit,
+        '--cpus', this._cpuLimit,
+        '--pids-limit', '512',
+        '--cap-drop', 'ALL',
+        '--security-opt', 'no-new-privileges',
+        '-v', `${this.cwd || process.cwd()}:${CONTAINER_WORKSPACE}`,
+        '-w', CONTAINER_WORKSPACE,
+      ]
+
+      // Issue AC: forward ANTHROPIC_API_KEY at `docker run` time. The
+      // agent loop on the host is what actually authenticates to the
+      // Anthropic API, but the model may want to invoke `curl` or a
+      // CLI inside the container that expects this env var.
+      const apiKey = process.env.ANTHROPIC_API_KEY
+      if (apiKey) {
+        runArgs.push('--env', `ANTHROPIC_API_KEY=${apiKey}`)
+      }
+
+      if (process.platform === 'linux') {
+        runArgs.push('--add-host', 'host.docker.internal:host-gateway')
+      }
+
+      runArgs.push(this._image, 'sleep', 'infinity')
+
+      log.info(
+        `starting container (image=${this._image} memory=${this._memoryLimit} cpus=${this._cpuLimit})`,
+      )
+
+      this._execFile('docker', runArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
+        if (err) {
+          const classified = classifyDockerError(err, stderr)
+          const error = new Error(classified.message)
+          error.code = classified.code
+          reject(error)
+          return
+        }
+        this._containerId = stdout.trim()
+        log.info(`container started: ${this._containerId.slice(0, 12)}`)
+
+        // Set up non-root user + chown workspace so the model isn't
+        // running as root inside the container. Same script
+        // docker-sdk-session uses — keep the two in lockstep.
+        const setupCmd = [
+          `useradd -m -s /bin/bash ${this._containerUser}`,
+          `chown ${this._containerUser}:${this._containerUser} ${CONTAINER_WORKSPACE}`,
+        ].join(' && ')
+
+        this._execFile('docker', [
+          'exec', this._containerId, 'bash', '-c', setupCmd,
+        ], { encoding: 'utf-8', timeout: 30_000 }, (setupErr) => {
+          if (setupErr) {
+            reject(new Error(`Failed to create container user: ${setupErr.message}`))
+            return
+          }
+          log.info(`created non-root user "${this._containerUser}" in container`)
+          resolve()
+        })
+      })
+    })
+  }
+
+  /**
+   * Confirm an externally-managed container is reachable via
+   * `docker exec`. Used when `containerId` was supplied at construction.
+   */
+  _verifyContainer() {
+    return new Promise((resolve, reject) => {
+      this._execFile('docker', [
+        'exec', this._containerId, 'true',
+      ], { encoding: 'utf-8', timeout: 10_000 }, (err, _stdout, stderr) => {
+        if (err) {
+          const classified = classifyDockerError(err, stderr)
+          const error = new Error(classified.message)
+          error.code = classified.code
+          reject(error)
+          return
+        }
+        resolve()
+      })
+    })
+  }
+
+  /**
+   * Override ClaudeByokSession's dispatcher: route file ops and Bash
+   * into the container instead of running them in-process on the host.
+   *
+   * TodoWrite stays host-side (it's a pure in-memory map). WebFetch
+   * stays host-side (it's HTTP and never touches the host FS — putting
+   * it in the container would only add latency).
+   */
+  async _dispatchBuiltinTool({ toolName, input, signal }) {
+    if (!this._containerReady || !this._containerId) {
+      return {
+        content: `docker-byok: container not ready (tool ${toolName})`,
+        isError: true,
+      }
+    }
+    try {
+      switch (toolName) {
+        case 'Read':
+          return await this._containerRead(input)
+        case 'Write':
+          return await this._containerWrite(input)
+        case 'Edit':
+          return await this._containerEdit(input)
+        case 'Bash':
+          return await this._containerBash(input, signal)
+        case 'Glob':
+          return await this._containerGlob(input, signal)
+        case 'Grep':
+          return await this._containerGrep(input, signal)
+        case 'TodoWrite':
+        case 'WebFetch':
+        case 'AskUserQuestion':
+          // Host-side execution is correct for these — see class docstring.
+          return await super._dispatchBuiltinTool({ toolName, input, signal })
+        default:
+          return await super._dispatchBuiltinTool({ toolName, input, signal })
+      }
+    } catch (err) {
+      // Mirror byok-tool-executor.js's catch-all: surface as an
+      // is_error tool_result so the model can recover or report up.
+      return {
+        content: `Tool ${toolName} failed in docker-byok: ${err?.message || String(err)}`,
+        isError: true,
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Tool implementations — container-side
+  // ─────────────────────────────────────────────────────────────────────────
+
+  async _containerRead(input) {
+    const containerPath = remapToContainerPath(input?.file_path, this.cwd)
+    // Use sed for offset/limit slicing inside the container so we
+    // don't transfer megabytes only to throw them away on the host.
+    // Default cap mirrors readFileTool's "2000 lines" — apply both a
+    // line cap (sed -n) AND a byte cap (head -c) so a single 1GB line
+    // can't blow the tool_result payload.
+    const offset = Number(input?.offset)
+    const limit = Number(input?.limit)
+    const startLine = Number.isFinite(offset) && offset > 0 ? offset : 1
+    const lineCap = Number.isFinite(limit) && limit > 0 ? limit : 2000
+    const endLine = startLine + lineCap - 1
+    const cmd = `sed -n '${startLine},${endLine}p' ${shellQuote(containerPath)} | head -c ${READ_MAX_BYTES}`
+    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
+      this._containerId,
+      { cmd, timeout: 30_000 },
+    )
+    if (stderr && stderr.trim()) {
+      return { content: `Read failed: ${stderr.trim()}`, isError: true }
+    }
+    return { content: stdout, isError: false }
+  }
+
+  async _containerWrite(input) {
+    const containerPath = remapToContainerPath(input?.file_path, this.cwd)
+    const content = typeof input?.content === 'string' ? input.content : ''
+    if (Buffer.byteLength(content, 'utf8') > WRITE_MAX_BYTES) {
+      return {
+        content: `Write refused: content exceeds ${WRITE_MAX_BYTES} bytes — split into smaller writes`,
+        isError: true,
+      }
+    }
+    // Stream the content via a heredoc-style pipe. `tee` is friendly
+    // when stdin is provided; `mkdir -p` ensures parent dirs exist.
+    // We base64-encode on the way in to dodge any quoting hazards
+    // with newlines / single quotes / backticks in `content`.
+    const encoded = Buffer.from(content, 'utf8').toString('base64')
+    const parentDir = posix.dirname(containerPath)
+    const cmd = [
+      `mkdir -p ${shellQuote(parentDir)}`,
+      `echo ${shellQuote(encoded)} | base64 -d > ${shellQuote(containerPath)}`,
+      `wc -c < ${shellQuote(containerPath)}`,
+    ].join(' && ')
+    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
+      this._containerId,
+      { cmd, timeout: 30_000 },
+    )
+    if (stderr && stderr.trim()) {
+      return { content: `Write failed: ${stderr.trim()}`, isError: true }
+    }
+    const bytesWritten = Number(stdout.trim()) || 0
+    return {
+      content: `Wrote ${bytesWritten} bytes to ${input.file_path}.`,
+      isError: false,
+    }
+  }
+
+  async _containerEdit(input) {
+    const containerPath = remapToContainerPath(input?.file_path, this.cwd)
+    const oldString = typeof input?.old_string === 'string' ? input.old_string : ''
+    const newString = typeof input?.new_string === 'string' ? input.new_string : ''
+    const replaceAll = input?.replace_all === true
+    if (oldString.length === 0) {
+      return { content: 'Edit refused: old_string is required', isError: true }
+    }
+    // Read the file via the same execInEnvironment path so a missing
+    // file surfaces as a tool_result rather than an exception.
+    const { stdout: existing, stderr: readErr } = await this._dockerBackend.execInEnvironment(
+      this._containerId,
+      { cmd: `cat ${shellQuote(containerPath)}`, timeout: 30_000 },
+    )
+    if (readErr && readErr.trim()) {
+      return { content: `Edit failed: ${readErr.trim()}`, isError: true }
+    }
+    let replacements = 0
+    let updated
+    if (replaceAll) {
+      const parts = existing.split(oldString)
+      replacements = parts.length - 1
+      updated = parts.join(newString)
+    } else {
+      const idx = existing.indexOf(oldString)
+      if (idx === -1) {
+        return {
+          content: `Edit failed: old_string not found in ${input.file_path}`,
+          isError: true,
+        }
+      }
+      const dup = existing.indexOf(oldString, idx + oldString.length)
+      if (dup !== -1) {
+        return {
+          content: `Edit failed: old_string matches multiple sites in ${input.file_path}; add context or pass replace_all`,
+          isError: true,
+        }
+      }
+      replacements = 1
+      updated = existing.slice(0, idx) + newString + existing.slice(idx + oldString.length)
+    }
+    if (replacements === 0) {
+      return {
+        content: `Edit failed: old_string not found in ${input.file_path}`,
+        isError: true,
+      }
+    }
+    const writeResult = await this._containerWrite({ file_path: input.file_path, content: updated })
+    if (writeResult.isError) return writeResult
+    return {
+      content: `Replaced ${replacements} occurrence(s) in ${input.file_path}.`,
+      isError: false,
+    }
+  }
+
+  async _containerBash(input, signal) {
+    const command = input?.command
+    if (typeof command !== 'string' || command.length === 0) {
+      return { content: 'EINVAL: command is required', isError: true }
+    }
+    if (signal?.aborted) {
+      return { content: 'Interrupted before docker exec', isError: true }
+    }
+    const requested = Number(input?.timeout)
+    // 600s ceiling mirrors the host-side Bash tool — long enough for
+    // a slow test suite but bounded so the session never strands on a
+    // runaway loop.
+    const timeoutMs = Number.isFinite(requested) && requested > 0
+      ? Math.min(requested, 600_000)
+      : 30_000
+    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
+      this._containerId,
+      { cmd: command, timeout: timeoutMs },
+    )
+    const parts = []
+    if (stdout) parts.push(`stdout:\n${stdout}`)
+    if (stderr) parts.push(`stderr:\n${stderr}`)
+    parts.push('[exit=0]')
+    return { content: parts.join('\n\n'), isError: false }
+  }
+
+  async _containerGlob(input, signal) {
+    const pattern = input?.pattern
+    if (typeof pattern !== 'string' || pattern.length === 0) {
+      return { content: 'EINVAL: pattern is required', isError: true }
+    }
+    if (/[$`;|&><()\\\n\r]/.test(pattern)) {
+      return {
+        content: 'EINVAL: glob pattern contains shell-dangerous characters',
+        isError: true,
+      }
+    }
+    if (signal?.aborted) {
+      return { content: 'Interrupted before docker exec', isError: true }
+    }
+    const root = input?.path
+      ? remapToContainerPath(input.path, this.cwd)
+      : CONTAINER_WORKSPACE
+    const cmd = `shopt -s globstar nullglob; cd ${shellQuote(root)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`
+    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
+      this._containerId,
+      { cmd, timeout: 30_000 },
+    )
+    if (!stdout && stderr && stderr.trim()) {
+      return { content: `Glob failed: ${stderr.trim()}`, isError: true }
+    }
+    const files = stdout.split('\n').filter(Boolean)
+    if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
+    return { content: files.join('\n'), isError: false }
+  }
+
+  async _containerGrep(input, signal) {
+    const pattern = input?.pattern
+    if (typeof pattern !== 'string' || pattern.length === 0) {
+      return { content: 'EINVAL: pattern is required', isError: true }
+    }
+    if (signal?.aborted) {
+      return { content: 'Interrupted before docker exec', isError: true }
+    }
+    const root = input?.path
+      ? remapToContainerPath(input.path, this.cwd)
+      : CONTAINER_WORKSPACE
+    const ci = input?.['-i'] === true ? '-i' : ''
+    const ln = input?.['-n'] !== false ? '-n' : ''
+    const globArg = typeof input?.glob === 'string' && input.glob.length > 0
+      ? ` --glob ${shellQuote(input.glob)}` : ''
+    const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(root)}`
+    const grepCmd = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(root)}`
+    const cmd = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
+    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
+      this._containerId,
+      { cmd, timeout: 30_000 },
+    )
+    if (!stdout && stderr && stderr.trim()) {
+      return { content: `Grep failed: ${stderr.trim()}`, isError: true }
+    }
+    if (!stdout) return { content: `No matches for ${pattern}`, isError: false }
+    return { content: stdout, isError: false }
+  }
+
+  /**
+   * Tear down the container we own, then call super.destroy() so the
+   * agent-loop teardown (MCP fleet, permissions, listeners) runs.
+   * When attached to an external container, leave it running.
+   */
+  async destroy() {
+    const containerId = this._containerId
+    const owned = this._containerOwned
+    this._containerId = null
+    this._containerReady = false
+    try {
+      await super.destroy()
+    } finally {
+      if (containerId && owned) {
+        log.info(`removing container ${containerId.slice(0, 12)}`)
+        await new Promise((resolve) => {
+          this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
+            if (err) log.warn(`failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
+            resolve()
+          })
+        })
+      }
+    }
+  }
+}
+
+// Re-exported for tests + dashboard introspection.
+export { CONTAINER_WORKSPACE }
