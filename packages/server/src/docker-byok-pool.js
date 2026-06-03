@@ -157,11 +157,13 @@ export class DockerContainerPool {
    * @returns {Promise<boolean>}
    */
   async release(key, containerId) {
+    // Guard a null/empty id before any eviction work — a shutdown release
+    // with no id was calling `docker rm -f` with an empty argument.
+    if (!containerId) return false
     if (this._shuttingDown) {
       await this._evict(containerId)
       return false
     }
-    if (!containerId) return false
     const total = this._totalSize()
     const bucket = this._entries.get(key) || []
     if (bucket.length >= this._maxPerKey || total >= this._maxTotal) {
@@ -254,7 +256,10 @@ export class DockerContainerPool {
    */
   _evict(containerId) {
     return new Promise((resolve) => {
-      this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
+      // `execFile` ignores `stdio`; cap the buffer so a misbehaving
+      // docker(8) can't OOM us on stderr. 64 KiB is plenty for an error
+      // path that should produce a one-line "no such container" at most.
+      this._execFile('docker', ['rm', '-f', containerId], { maxBuffer: 64 * 1024 }, (err) => {
         if (err) {
           log.warn(`docker rm -f ${containerId.slice(0, 12)} failed: ${err.message}`)
         }

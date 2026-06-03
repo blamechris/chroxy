@@ -398,8 +398,12 @@ export class DockerByokSession extends ClaudeByokSession {
           // kill). Forget it and fall through to a fresh launch.
           log.warn(`pooled container ${reused.slice(0, 12)} failed verify: ${err.message} — launching fresh`)
           this._containerId = null
-          // Best-effort cleanup of the stale id — fire-and-forget.
-          this._execFile('docker', ['rm', '-f', reused], { stdio: 'ignore' }, () => {})
+          // Best-effort cleanup of the stale id — fire-and-forget. We
+          // don't await this because the pool has already untracked the
+          // id; the rm is just hygiene. `execFile` ignores `stdio`, so
+          // cap `maxBuffer` instead to keep a misbehaving docker(8)
+          // bounded.
+          this._execFile('docker', ['rm', '-f', reused], { maxBuffer: 64 * 1024 }, () => {})
         }
       }
     }
@@ -825,7 +829,9 @@ export class DockerByokSession extends ClaudeByokSession {
    */
   _rmContainer(containerId) {
     return new Promise((resolve) => {
-      this._execFile('docker', ['rm', '-f', containerId], { stdio: 'ignore' }, (err) => {
+      // `execFile` ignores `stdio`; cap `maxBuffer` so a misbehaving
+      // docker(8) can't OOM us on stderr.
+      this._execFile('docker', ['rm', '-f', containerId], { maxBuffer: 64 * 1024 }, (err) => {
         if (err) log.warn(`failed to remove container ${containerId.slice(0, 12)}: ${err.message}`)
         resolve()
       })
