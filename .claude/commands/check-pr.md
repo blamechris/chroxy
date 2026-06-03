@@ -198,8 +198,8 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
 **Reason:** Clear explanation of why this is correct
 
 **Evidence:**
-- Per CLAUDE.md: no semicolons, single quotes
-- Used on line 78 in _process()"
+- per CLAUDE.md: no semicolons, single quotes
+- Reference to similar code in codebase"
 ```
 
 ---
@@ -212,7 +212,7 @@ When a suggestion is valid but out of scope for this PR. You MUST create a GitHu
 
 ```bash
 # 1. ALWAYS create the issue — this is NOT optional
-# NEVER write "Created a follow-up issue" without the URL
+# NEVER write "Created a follow-up issue" without the URL. The URL is the whole point.
 ISSUE_URL=$(gh issue create \
   --title "Short descriptive title" \
   --label "enhancement" \
@@ -323,17 +323,26 @@ THREAD_IDS=$(gh api graphql --paginate -f query="
     }
   }" --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .id')
 
-# Resolve each unresolved thread via Python — bash interpolation of the
-# Base64-ish thread IDs (PRRT_*) into the GraphQL mutation string can corrupt
-# them, so the ID never touches the shell (merge.md Critical Rule 4). The
-# THREAD_IDS fetch above stays in bash (it only emits IDs, never interpolates
-# them). Each failure is surfaced per-thread rather than swallowed.
+# Resolve each unresolved thread via Python — pass the Base64-ish thread ID
+# (PRRT_*) as a GraphQL *variable* (-f id=...) so it never gets interpolated
+# into the query string or the shell (merge.md Critical Rule 4). The
+# --paginate THREAD_IDS fetch above stays in bash (it only emits IDs). gh
+# exits 0 even when the GraphQL response body carries an `errors` array, so
+# validate the parsed response's isResolved rather than the exit code;
+# surface each failure per-thread.
 echo "$THREAD_IDS" | python3 -c "
-import sys, subprocess
+import sys, subprocess, json
+q = 'mutation(\$id: ID!) { resolveReviewThread(input: {threadId: \$id}) { thread { isResolved } } }'
 for tid in sys.stdin.read().split():
-    mutation = 'mutation { resolveReviewThread(input: {threadId: \"' + tid + '\"}) { thread { isResolved } } }'
-    r = subprocess.run(['gh', 'api', 'graphql', '-f', 'query=' + mutation], capture_output=True, text=True)
-    print('  resolved: ' + tid if r.returncode == 0 else '  FAILED to resolve: ' + tid)
+    r = subprocess.run(['gh', 'api', 'graphql', '-f', 'query=' + q, '-f', 'id=' + tid], capture_output=True, text=True)
+    ok = False
+    if r.returncode == 0:
+        try:
+            d = json.loads(r.stdout)
+            ok = 'errors' not in d and d['data']['resolveReviewThread']['thread']['isResolved'] is True
+        except (ValueError, KeyError, TypeError):
+            ok = False
+    print('  resolved: ' + tid if ok else '  FAILED to resolve: ' + tid)
 "
 
 # Verify zero unresolved threads remain. --paginate emits one length per page,
@@ -359,7 +368,7 @@ echo "Unresolved threads: ${UNRESOLVED}"
 
 **Pagination cap:** `gh api graphql --paginate` follows `pageInfo.hasNextPage` until exhausted — no implicit cap. On the rare PR with thousands of threads, GitHub's GraphQL rate limit (5000 points/hr) is the practical ceiling. If you see HTTP 403 with "API rate limit exceeded" from gh on step 6b, the resolve loop will short-circuit on the failing call and the verify will report nonzero — re-run after the rate limit window resets.
 
-**When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **always resolve**.
+**When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **always resolve**. Chroxy branch protection REQUIRES conversation resolution — do NOT skip.
 
 **Edge cases:**
 - A thread you marked FALSE POSITIVE: still resolve it. The reply records the rationale; if a reviewer disagrees, they can re-open the thread.
@@ -451,4 +460,4 @@ Then below the table, list:
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```
-<!-- skill-templates: check-pr f7a7edc 2026-06-03 -->
+<!-- skill-templates: check-pr cc062bc 2026-06-03 -->
