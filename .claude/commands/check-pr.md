@@ -24,7 +24,7 @@ PR_AGE_SECONDS=$(gh pr view ${PR_NUM} --json createdAt \
 
 # Check Copilot review status
 COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif ((sort_by(.submitted_at) | last | .state) == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (any(.[]; .state == "PENDING")) then "IN_PROGRESS" else "COMPLETED" end')
 
 # If no review exists yet AND PR is less than 5 min old, wait for it to appear
 if [ "$COPILOT_STATUS" = "NOT_FOUND" ] && [ "${PR_AGE_SECONDS%.*}" -lt 300 ]; then
@@ -32,7 +32,7 @@ if [ "$COPILOT_STATUS" = "NOT_FOUND" ] && [ "${PR_AGE_SECONDS%.*}" -lt 300 ]; th
   for i in $(seq 1 10); do
     sleep 30
     COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif ((sort_by(.submitted_at) | last | .state) == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (any(.[]; .state == "PENDING")) then "IN_PROGRESS" else "COMPLETED" end')
     [ "$COPILOT_STATUS" != "NOT_FOUND" ] && echo "Copilot review detected (status: $COPILOT_STATUS)" && break
   done
 fi
@@ -43,7 +43,7 @@ if [ "$COPILOT_STATUS" = "IN_PROGRESS" ]; then
   for i in $(seq 1 10); do
     sleep 30
     COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif ((sort_by(.submitted_at) | last | .state) == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (any(.[]; .state == "PENDING")) then "IN_PROGRESS" else "COMPLETED" end')
     [ "$COPILOT_STATUS" != "IN_PROGRESS" ] && break
   done
 fi
@@ -199,7 +199,7 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
 
 **Evidence:**
 - per CLAUDE.md: no semicolons, single quotes
-- Reference to similar code in codebase"
+- Used on line 78 in _process()"
 ```
 
 ---
@@ -451,4 +451,4 @@ Then below the table, list:
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```
-<!-- skill-templates: check-pr 21fa678 2026-06-03 -->
+<!-- skill-templates: check-pr 0a76684 2026-06-03 -->

@@ -82,7 +82,7 @@ All required checks must be `SUCCESS` or `SKIPPED`. If any are failing or pendin
 COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
   --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] |
     if length == 0 then "NOT_FOUND"
-    elif ((sort_by(.submitted_at) | last | .state) == "PENDING") then "IN_PROGRESS"
+    elif any(.[]; .state == "PENDING") then "IN_PROGRESS"
     else "COMPLETED" end')
 ```
 
@@ -108,11 +108,12 @@ WORKFLOW_USER=$(gh api user --jq .login)
 # Scope to the Copilot bot so this step only processes Copilot threads, as the
 # heading claims — human review comments are out of scope for batch-merge.
 UNREPLIED=$(echo "$ALL_COMMENTS" | jq --arg user "$WORKFLOW_USER" '
-  [.[] | select(.in_reply_to_id == null)
-       | select(.user.login == "copilot-pull-request-reviewer[bot]")] |
-  map(select(.id as $id |
-    [.. | select(.in_reply_to_id? == $id) | select(.user.login == $user)] | length == 0
-  ))
+  . as $all
+  | [ $all[]
+      | select(.in_reply_to_id == null)
+      | select(.user.login == "copilot-pull-request-reviewer[bot]")
+      | select(.id as $id
+          | ($all | any(.[]; .in_reply_to_id == $id and .user.login == $user)) | not) ]
 ')
 ```
 
@@ -288,4 +289,4 @@ After all PRs processed:
 8. **Handle stale reviews** — Pushing fixes invalidates reviews. Wait for fresh cycle.
 9. **Compose with `/fix-ci`** — Don't reinvent CI diagnosis.
 10. **No attribution** — Follow project's attribution policy in any fix commits.
-<!-- skill-templates: batch-merge 21fa678 2026-06-03 -->
+<!-- skill-templates: batch-merge 0a76684 2026-06-03 -->
