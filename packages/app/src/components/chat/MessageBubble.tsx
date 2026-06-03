@@ -183,7 +183,12 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
   if (isError && message.code === 'resume_unknown') {
     return (
       <ResumeUnknownChip
-        errorText={message.content?.trim() || ''}
+        // #4971 review: pass the raw content through (no `.trim()`) so
+        // any meaningful trailing context / newlines the server includes
+        // (e.g. wrapped CLI stderr) survive end-to-end into the chip's
+        // `accessibilityHint`. Matches the dashboard call site, which
+        // forwards `message.content` verbatim.
+        errorText={message.content ?? ''}
         attemptedResumeId={message.attemptedResumeId}
       />
     );

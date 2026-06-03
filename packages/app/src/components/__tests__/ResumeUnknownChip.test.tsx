@@ -107,4 +107,19 @@ describe('ResumeUnknownChip (#4971)', () => {
     const chip = tree.root.findByProps({ testID: 'resume-unknown-chip' });
     expect(chip.props.accessibilityRole).toBe('alert');
   });
+
+  it('leaves the attempted id subtext natively accessible (regression: do not hide from SR)', () => {
+    // #4971 review: an earlier revision set `accessibilityElementsHidden`
+    // / `importantForAccessibility="no"` on the id subtext, which
+    // silently masked the attempted conversation id from screen readers
+    // even though it was the most operationally relevant detail in the
+    // chip. Pin the natural-accessibility behavior so a future
+    // refactor can't re-hide it.
+    const tree = render(
+      <ResumeUnknownChip errorText="Resume failed" attemptedResumeId="abc-123" />,
+    );
+    const idSubtext = tree.root.findByProps({ testID: 'resume-unknown-chip-id' });
+    expect(idSubtext.props.accessibilityElementsHidden).toBeUndefined();
+    expect(idSubtext.props.importantForAccessibility).toBeUndefined();
+  });
 });

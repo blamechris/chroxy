@@ -26,7 +26,7 @@
  * (and the other amber-recoverable surfaces) so the user learns one
  * affordance — the chip visual language is shared.
  */
-import { StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import { COLORS } from '../constants/colors';
 
 export interface ResumeUnknownChipProps {
@@ -65,11 +65,16 @@ export function ResumeUnknownChip({ errorText, attemptedResumeId }: ResumeUnknow
         Previous conversation could not be resumed — starting fresh
       </Text>
       {hasId && (
+        // #4971 review: drop `accessibilityElementsHidden` /
+        // `importantForAccessibility="no"` so the attempted id is
+        // naturally announced by screen readers (mirrors the dashboard
+        // chip, which renders the id as visible text the AT tree picks
+        // up via the standard sibling traversal). The container's
+        // `accessibilityLabel` stays minimal and `accessibilityHint`
+        // continues to carry the raw error verbatim for triage.
         <Text
           testID="resume-unknown-chip-id"
           style={styles.idSubtext}
-          accessibilityElementsHidden
-          importantForAccessibility="no"
           selectable
         >
           Attempted id: {attemptedResumeId}
@@ -109,7 +114,12 @@ const styles = StyleSheet.create({
     width: '100%',
     marginTop: 4,
     fontSize: 12,
-    fontFamily: 'monospace',
+    // #4971 review: iOS doesn't ship a font literally named "monospace" —
+    // RN falls back to a system font that varies by iOS version. Use the
+    // same Menlo/monospace pair as ToolBubble / DiffViewer /
+    // MarkdownRenderer so the attempted id renders in a consistent
+    // monospace face across platforms.
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     color: COLORS.textSecondary,
     opacity: 0.85,
   },
