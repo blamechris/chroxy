@@ -106,6 +106,7 @@ import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
 import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { createLogger } from './logger.js'
+import { writeFileRestricted } from './platform.js'
 import {
   parseDevContainer,
   validateMounts,
@@ -479,15 +480,19 @@ export class DockerByokSession extends ClaudeByokSession {
     this._dockerBackend = opts._dockerBackend || new DockerBackend()
     this._execFile = opts._execFile || execFile
     this._containerReady = false
-    // #5023 snapshot / restore opts.
+    // #5023 snapshot / restore opts. All string opts are trimmed before
+    // the length check so callers passing whitespace-only values (e.g.
+    // `'   '`) get the same default as no-opt-at-all — matches how
+    // composeFile / composeService / containerId / snapshotImage handle
+    // their inputs (#5100 review).
     this._snapshotImage = typeof opts.snapshotImage === 'string' && opts.snapshotImage.trim().length > 0
       ? opts.snapshotImage.trim()
       : null
-    this._snapshotsDir = typeof opts.snapshotsDir === 'string' && opts.snapshotsDir.length > 0
-      ? opts.snapshotsDir
+    this._snapshotsDir = typeof opts.snapshotsDir === 'string' && opts.snapshotsDir.trim().length > 0
+      ? opts.snapshotsDir.trim()
       : join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'snapshots')
-    this._sourceSessionId = typeof opts.sourceSessionId === 'string' && opts.sourceSessionId.length > 0
-      ? opts.sourceSessionId
+    this._sourceSessionId = typeof opts.sourceSessionId === 'string' && opts.sourceSessionId.trim().length > 0
+      ? opts.sourceSessionId.trim()
       : null
     // #5022: across-session idle pool. Off by default — opted in via env
     // or by passing an explicit `_pool` instance. Per-session reuse of
@@ -802,8 +807,12 @@ export class DockerByokSession extends ClaudeByokSession {
     } catch (err) {
       // Persistence is best-effort — the snapshot tag in the daemon is
       // the source of truth. Log and continue so the caller still gets
-      // the tag.
-      log.warn(`snapshot: failed to persist metadata for ${tag}: ${err.message}`)
+      // the tag. Defensive message extraction (#5100 review) so a
+      // non-Error throw (string / plain object) doesn't crash the
+      // log call itself — the whole point of this branch is to keep
+      // snapshot() reliable when metadata persistence fails.
+      const msg = err && typeof err.message === 'string' ? err.message : String(err)
+      log.warn(`snapshot: failed to persist metadata for ${tag}: ${msg}`)
     }
     log.info(`snapshot: ${tag} (name="${snapName}") committed`)
     return metadata
@@ -830,10 +839,12 @@ export class DockerByokSession extends ClaudeByokSession {
    * sidecar JSON lands. The mkdir is recursive so a brand-new
    * `~/.chroxy/snapshots/` is created on demand.
    *
-   * The file is created with restrictive perms (0600 — owner read/
-   * write only, dir 0700) because the metadata embeds host paths and
-   * optionally `sourceSessionId`. This matches the posture other
-   * `$CHROXY_CONFIG_DIR` state files use (session-state, credentials).
+   * Uses the shared `writeFileRestricted` helper (#5100 review) so the
+   * write is atomic (temp+rename) and the file lands at 0600 on POSIX
+   * with the same cross-platform contract every other
+   * `$CHROXY_CONFIG_DIR` state file uses (session-state, credentials,
+   * device-preferences, models cache). Dir is 0o700 on POSIX; the dir
+   * mode is ignored on Windows where ACLs are the right mechanism.
    */
   _persistSnapshotMetadata(tag, metadata) {
     mkdirSync(this._snapshotsDir, { recursive: true, mode: 0o700 })
@@ -842,7 +853,7 @@ export class DockerByokSession extends ClaudeByokSession {
     // surfaces here.
     const slug = tag.split(':').pop().replace(/[^a-zA-Z0-9_.-]/g, '_')
     const filePath = join(this._snapshotsDir, `${slug}.json`)
-    writeFileSync(filePath, JSON.stringify(metadata, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 })
+    writeFileRestricted(filePath, JSON.stringify(metadata, null, 2) + '\n')
   }
 
   /**

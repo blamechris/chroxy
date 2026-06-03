@@ -1269,9 +1269,13 @@ describe('DockerByokSession — snapshot / restore (#5023)', () => {
     // The `docker run` invocation used the snapshot tag as the image.
     assert.equal(runCalls.length, 1)
     const runArgs = runCalls[0]
-    // image is third-to-last (before "sleep" "infinity")
-    const imageIdx = runArgs.length - 3
-    assert.equal(runArgs[imageIdx], 'chroxy-byok-snap:abc123-1700000000000')
+    // Anchor on the known `sleep infinity` command tail rather than the
+    // arg-list length so adding/removing unrelated `docker run` flags
+    // doesn't shift the assertion off the image position (#5100 review).
+    const sleepIdx = runArgs.indexOf('sleep')
+    assert.ok(sleepIdx > 0 && runArgs[sleepIdx + 1] === 'infinity',
+      'docker run tail must end "<image> sleep infinity"')
+    assert.equal(runArgs[sleepIdx - 1], 'chroxy-byok-snap:abc123-1700000000000')
 
     // No `useradd` should have run on the restored container — the
     // snapshot image already has the user baked in.
@@ -1372,11 +1376,15 @@ describe('DockerByokSession — snapshot / restore (#5023)', () => {
     // The pool MUST NOT have been asked for a container — restore is
     // not poolable.
     assert.equal(pool.calls.acquire.length, 0, 'pool.acquire() must not be called when snapshotImage is set')
-    // Docker run fired with the snapshot tag as the image.
+    // Docker run fired with the snapshot tag as the image. Anchor on
+    // the known `sleep infinity` command tail so unrelated `docker run`
+    // flag changes don't shift the assertion (#5100 review).
     assert.equal(runCalls.length, 1)
     const runArgs = runCalls[0]
-    const imageIdx = runArgs.length - 3
-    assert.equal(runArgs[imageIdx], 'chroxy-byok-snap:bypass-test')
+    const sleepIdx = runArgs.indexOf('sleep')
+    assert.ok(sleepIdx > 0 && runArgs[sleepIdx + 1] === 'infinity',
+      'docker run tail must end "<image> sleep infinity"')
+    assert.equal(runArgs[sleepIdx - 1], 'chroxy-byok-snap:bypass-test')
     // And the active container id is the freshly-launched one, NOT the
     // pool's would-be hit.
     assert.equal(session._containerId, 'CONTAINER_FRESH_FROM_SNAP')
