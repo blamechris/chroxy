@@ -1913,10 +1913,21 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
     if (!found) {
       set({ messages: updater({ messages: get().messages }).messages });
     }
-    // Auto-dismiss matching notification banner
+    // #5008 — drain the banner stack (which filters by `readAt === undefined`)
+    // without dropping the entry from `sessionNotifications`. Pre-#5008 we
+    // hard-removed the row, which silently drained every resolved alert from
+    // the NotificationsWidget's "durable history" view. Stamping `readAt`
+    // instead keeps the row visible in the widget (read row treatment) while
+    // the banner stack still vanishes.
+    //
+    // Idempotent — only stamp entries that have not already been acked, so a
+    // server-driven resolution arriving after the operator already marked the
+    // row read via the widget can't clobber the original ack timestamp.
     set((s) => ({
-      sessionNotifications: s.sessionNotifications.filter(
-        (n) => n.requestId !== resolvedRequestId
+      sessionNotifications: s.sessionNotifications.map((n) =>
+        n.requestId === resolvedRequestId && n.readAt === undefined
+          ? { ...n, readAt: Date.now() }
+          : n
       ),
     }));
   }
@@ -2900,10 +2911,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // append so the UI does not surface this as an error to the user.
         const alreadyResolved = Boolean(get().resolvedPermissions?.[expiredRequestId]);
         if (alreadyResolved) {
-          // Still dismiss any lingering notification banner for this request.
+          // #5008 — drain the banner stack without dropping the row from the
+          // widget's durable history. See handlePermissionResolved for the
+          // full rationale; this branch handles the #2833 race where expiry
+          // arrives after we already resolved locally.
           set((s) => ({
-            sessionNotifications: s.sessionNotifications.filter(
-              (n) => n.requestId !== expiredRequestId
+            sessionNotifications: s.sessionNotifications.map((n) =>
+              n.requestId === expiredRequestId && n.readAt === undefined
+                ? { ...n, readAt: Date.now() }
+                : n
             ),
           }));
           // #2839: surface a user-centric info toast confirming the
@@ -2923,10 +2939,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             ),
           }));
         }
-        // Auto-dismiss matching notification banner (#1580)
+        // #5008 — drain banner without dropping widget history. Mark the
+        // matching row read; the banner filter (`readAt === undefined`)
+        // drops it and the widget keeps the entry as part of its durable
+        // intervention history. Updates the original #1580 auto-dismiss
+        // contract from "remove" to "mark-read-and-keep".
         set((s) => ({
-          sessionNotifications: s.sessionNotifications.filter(
-            (n) => n.requestId !== expiredRequestId
+          sessionNotifications: s.sessionNotifications.map((n) =>
+            n.requestId === expiredRequestId && n.readAt === undefined
+              ? { ...n, readAt: Date.now() }
+              : n
           ),
         }));
       }
