@@ -73,6 +73,20 @@ describe('formatBindingForDisplay', () => {
     expect(formatBindingForDisplay('cmd+,', true)).toBe('Cmd+,')
     expect(formatBindingForDisplay('cmd+\\', true)).toBe('Cmd+\\')
   })
+
+  // #4964 review (Copilot) — PRETTY_KEY_NAMES lookup must do an
+  // own-property check so a binding whose key happens to be an
+  // Object.prototype name ("constructor", "toString", "__proto__")
+  // does not pick up the inherited function/object and render a
+  // function reference (or "[object Object]") in the cheat-sheet UI.
+  // These inputs are not produced by real KeyboardEvent.key today but
+  // can arrive via tampered localStorage overrides or a future binding
+  // source, so we guard at the lookup site.
+  it('falls back to title-case for key names that collide with Object.prototype', () => {
+    expect(formatBindingForDisplay('cmd+constructor', true)).toBe('Cmd+Constructor')
+    expect(formatBindingForDisplay('cmd+tostring', true)).toBe('Cmd+Tostring')
+    expect(formatBindingForDisplay('alt+hasownproperty', true)).toBe('Option+Hasownproperty')
+  })
 })
 
 describe('createShortcutRegistry', () => {

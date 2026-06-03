@@ -136,4 +136,29 @@ describe('<ShortcutsSection>', () => {
     render(<ShortcutsSection />)
     expect(screen.getByTestId('shortcut-binding-palette.toggle')).toHaveTextContent('Ctrl+K')
   })
+
+  // #4941 — the sidebar drag-to-reorder shortcut from #4832 used to be
+  // hardcoded in Sidebar.tsx with no registry entry, so it never showed
+  // up in the Settings rebind panel OR the `?` cheat sheet. Users had
+  // to read the PR / source to discover Alt+ArrowUp/Down even existed.
+  // The reorder handler is still hardcoded for now (a follow-up will
+  // migrate it to registry.matchEvent), but these entries surface the
+  // shortcut in both discoverability UIs.
+  describe('sidebar reorder shortcut discoverability (#4941)', () => {
+    it('lists the up/down reorder entries under the Sidebar group', () => {
+      installFreshRegistry()
+      render(<ShortcutsSection />)
+      expect(screen.getByTestId('shortcut-row-sidebar.reorder.up')).toBeInTheDocument()
+      expect(screen.getByTestId('shortcut-row-sidebar.reorder.down')).toBeInTheDocument()
+      // Default bindings should render with the Mac/Option prefix.
+      expect(screen.getByTestId('shortcut-binding-sidebar.reorder.up')).toHaveTextContent('Option+ArrowUp')
+      expect(screen.getByTestId('shortcut-binding-sidebar.reorder.down')).toHaveTextContent('Option+ArrowDown')
+    })
+
+    it('renders the "Sidebar" group heading so the entries are discoverable visually', () => {
+      installFreshRegistry()
+      render(<ShortcutsSection />)
+      expect(screen.getByText('Sidebar')).toBeInTheDocument()
+    })
+  })
 })

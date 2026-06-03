@@ -24,7 +24,7 @@
  *   machine sync, server-side shortcuts.
  */
 
-export type ShortcutCategory = 'navigation' | 'composer' | 'session' | 'view' | 'other'
+export type ShortcutCategory = 'navigation' | 'composer' | 'session' | 'view' | 'sidebar' | 'other'
 /**
  * Scopes partition the keydown surfaces:
  *   - `global`   — fired by the window-level dispatcher (useShortcutDispatch).
@@ -130,12 +130,39 @@ export function parseBinding(input: string): ParsedBinding {
 }
 
 /**
+ * Pretty-name lookup for KeyboardEvent.key values whose default
+ * title-case rendering ("Arrowup", "Pageup") looks broken. Keys not in
+ * this table fall back to the generic capitalisation rule below.
+ *
+ * #4941: introduced when the sidebar reorder shortcut (alt+arrowup /
+ * alt+arrowdown) started appearing in the cheat sheet — the bare
+ * title-case form rendered as "Option+Arrowup" which is visually wrong.
+ */
+const PRETTY_KEY_NAMES: Record<string, string> = {
+  arrowup: 'ArrowUp',
+  arrowdown: 'ArrowDown',
+  arrowleft: 'ArrowLeft',
+  arrowright: 'ArrowRight',
+  pageup: 'PageUp',
+  pagedown: 'PageDown',
+  enter: 'Enter',
+  tab: 'Tab',
+  escape: 'Escape',
+  backspace: 'Backspace',
+  delete: 'Delete',
+  home: 'Home',
+  end: 'End',
+  space: 'Space',
+  insert: 'Insert',
+}
+
+/**
  * Render a canonical binding ("cmd+shift+p") in a human-friendly form
  * for the UI. On macOS the modifier reads "Cmd", elsewhere "Ctrl".
  *
  * Single-character keys are uppercased; punctuation and longer key
- * names ("Enter", "Tab", "Escape") are normalised to title case so the
- * cheat sheet stays readable.
+ * names ("Enter", "Tab", "Escape") are normalised via PRETTY_KEY_NAMES
+ * so the cheat sheet stays readable.
  */
 export function formatBindingForDisplay(canonical: string, isMac: boolean): string {
   if (!canonical) return ''
@@ -147,9 +174,18 @@ export function formatBindingForDisplay(canonical: string, isMac: boolean): stri
     else if (part === 'shift') out.push('Shift')
     else if (part === 'alt') out.push(isMac ? 'Option' : 'Alt')
     else if (i === parts.length - 1) {
-      // Final token is the key. Uppercase single ASCII letters; leave
-      // punctuation as-is; title-case multi-char names like "enter".
+      // Final token is the key. Uppercase single ASCII letters; consult
+      // PRETTY_KEY_NAMES for the W3C `KeyboardEvent.key` names whose
+      // generic title-case rendering looks broken; otherwise leave
+      // punctuation as-is and title-case the rest.
+      //
+      // Use an own-property check on PRETTY_KEY_NAMES so a binding with
+      // a key like "constructor" / "toString" / "__proto__" (possible
+      // via localStorage override tampering or a future binding source)
+      // does not pick up `Object.prototype.<name>` and render a
+      // function reference in the UI.
       if (/^[a-z]$/.test(part)) out.push(part.toUpperCase())
+      else if (Object.prototype.hasOwnProperty.call(PRETTY_KEY_NAMES, part)) out.push(PRETTY_KEY_NAMES[part]!)
       else if (/^[a-z]/.test(part)) out.push(part.charAt(0).toUpperCase() + part.slice(1))
       else out.push(part)
     } else {
