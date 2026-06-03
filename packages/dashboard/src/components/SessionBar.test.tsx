@@ -615,15 +615,18 @@ describe('SessionBar', () => {
         />
       )
       const tabA = screen.getByTestId('session-tab-a')
-      // Lift "a" into reorder mode (plain Space matches #4831 AC)
+      // Lift "a" into reorder mode (plain Space matches #4831 AC).
+      // #4951 — the lifted state is marked with the `lifted` class instead
+      // of the deprecated aria-grabbed attribute; aria-grabbed was removed
+      // in WAI-ARIA 1.1.
       fireEvent.keyDown(tabA, { key: ' ' })
-      expect(tabA.getAttribute('aria-grabbed')).toBe('true')
+      expect(tabA.classList.contains('lifted')).toBe(true)
       // Move "a" one slot right — should land in position 1 of ['b','a','c']
       fireEvent.keyDown(tabA, { key: 'ArrowRight' })
       expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c'])
       // Escape clears the lift state (no further reorder)
       fireEvent.keyDown(tabA, { key: 'Escape' })
-      expect(tabA.getAttribute('aria-grabbed')).toBe(null)
+      expect(tabA.classList.contains('lifted')).toBe(false)
     })
 
     it('keyboard reorder: Shift+Space alias also lifts', () => {
@@ -639,8 +642,9 @@ describe('SessionBar', () => {
         />
       )
       const tabA = screen.getByTestId('session-tab-a')
+      // #4951 — lifted state uses the `lifted` class, not aria-grabbed.
       fireEvent.keyDown(tabA, { key: ' ', shiftKey: true })
-      expect(tabA.getAttribute('aria-grabbed')).toBe('true')
+      expect(tabA.classList.contains('lifted')).toBe(true)
       fireEvent.keyDown(tabA, { key: 'ArrowRight' })
       expect(onReorder).toHaveBeenCalledWith(['b', 'a', 'c'])
     })
@@ -659,6 +663,195 @@ describe('SessionBar', () => {
       )
       fireEvent.click(screen.getByTestId('session-tab-b'))
       expect(onSwitch).toHaveBeenCalledWith('b')
+    })
+  })
+
+  // #4951 — a11y follow-up to #4831 / PR #4945. aria-grabbed is deprecated
+  // in WAI-ARIA 1.1; the modern pattern is a polite live region that
+  // announces drag state changes (pickup / over / drop / cancel) plus an
+  // aria-describedby hint that tells SR users the reorder shortcut keys.
+  describe('#4951 live-region drag announcements', () => {
+    function makeThree(): SessionTabData[] {
+      return [
+        { sessionId: 'a', name: 'Alpha', isBusy: false, isActive: true },
+        { sessionId: 'b', name: 'Beta', isBusy: false, isActive: false },
+        { sessionId: 'c', name: 'Charlie', isBusy: false, isActive: false },
+      ]
+    }
+
+    function dataTransferStub() {
+      return {
+        data: {} as Record<string, string>,
+        setData(format: string, val: string) { this.data[format] = val },
+        getData(format: string) { return this.data[format] ?? '' },
+        effectAllowed: 'all',
+        dropEffect: 'none',
+        types: [] as string[],
+      }
+    }
+
+    it('does NOT set the deprecated aria-grabbed attribute on draggable tabs', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      // Even after a keyboard lift, aria-grabbed must not appear — it's
+      // deprecated in ARIA 1.1+ and most screen readers ignore it.
+      fireEvent.keyDown(tabA, { key: ' ' })
+      expect(tabA.hasAttribute('aria-grabbed')).toBe(false)
+    })
+
+    it('renders a polite live region for drag announcements', () => {
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      const region = screen.getByTestId('session-bar-reorder-announcer')
+      expect(region.getAttribute('aria-live')).toBe('polite')
+      expect(region.getAttribute('aria-atomic')).toBe('true')
+      expect(region.getAttribute('role')).toBe('status')
+      // Initially empty so the first paint does not announce anything.
+      expect(region.textContent).toBe('')
+    })
+
+    it('announces "Picked up" on keyboard lift', () => {
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      fireEvent.keyDown(tabA, { key: ' ' })
+      const region = screen.getByTestId('session-bar-reorder-announcer')
+      expect(region.textContent).toMatch(/picked up/i)
+      expect(region.textContent).toMatch(/alpha/i)
+    })
+
+    it('announces "Dropped" with the new position on keyboard commit', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      // Lift, move, commit
+      fireEvent.keyDown(tabA, { key: ' ' })
+      fireEvent.keyDown(tabA, { key: 'ArrowRight' })
+      fireEvent.keyDown(tabA, { key: 'Enter' })
+      const region = screen.getByTestId('session-bar-reorder-announcer')
+      expect(region.textContent).toMatch(/dropped/i)
+      expect(region.textContent).toMatch(/alpha/i)
+      // "2 of 3" — alpha moved from position 1 to position 2.
+      expect(region.textContent).toMatch(/2 of 3/)
+    })
+
+    it('announces "Cancelled" when Escape ends the lift', () => {
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      fireEvent.keyDown(tabA, { key: ' ' })
+      fireEvent.keyDown(tabA, { key: 'Escape' })
+      const region = screen.getByTestId('session-bar-reorder-announcer')
+      expect(region.textContent).toMatch(/cancelled|canceled/i)
+      expect(region.textContent).toMatch(/alpha/i)
+    })
+
+    it('announces "Picked up" / "Over" / "Dropped" on pointer drag', () => {
+      const onReorder = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={onReorder}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      const tabC = screen.getByTestId('session-tab-c')
+      const dataTransfer = dataTransferStub()
+
+      fireEvent.dragStart(tabA, { dataTransfer })
+      const region = screen.getByTestId('session-bar-reorder-announcer')
+      expect(region.textContent).toMatch(/picked up/i)
+
+      fireEvent.dragOver(tabC, { dataTransfer })
+      expect(region.textContent).toMatch(/over/i)
+      expect(region.textContent).toMatch(/charlie/i)
+
+      fireEvent.drop(tabC, { dataTransfer })
+      expect(region.textContent).toMatch(/dropped/i)
+    })
+
+    it('exposes a hidden reorder hint via aria-describedby on each tab', () => {
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      const describedBy = tabA.getAttribute('aria-describedby')
+      expect(describedBy).toBeTruthy()
+      const hint = document.getElementById(describedBy!)
+      expect(hint).toBeTruthy()
+      // Hint should mention the reorder shortcut so SR users discover it.
+      expect(hint!.textContent).toMatch(/space/i)
+      expect(hint!.textContent).toMatch(/arrow/i)
+    })
+
+    it('does NOT set aria-describedby when reorder is not wired', () => {
+      // Back-compat: callers that haven't opted into reorder shouldn't be
+      // told about a shortcut that doesn't apply.
+      render(
+        <SessionBar
+          sessions={makeThree()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+        />
+      )
+      const tabA = screen.getByTestId('session-tab-a')
+      expect(tabA.getAttribute('aria-describedby')).toBe(null)
     })
   })
 })

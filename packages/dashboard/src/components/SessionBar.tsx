@@ -10,8 +10,16 @@
  * and matches the #4831 acceptance criteria; Shift+Space is retained as an
  * alias. The `+` (new session) button is anchored at the right edge and is
  * NOT draggable / not a drop target.
+ *
+ * #4951 — accessibility follow-up to #4831 / PR #4945. `aria-grabbed` is
+ * deprecated in WAI-ARIA 1.1+ (and never had reliable screen-reader
+ * support); the modern pattern is a visually-hidden polite live region
+ * that announces drag-state transitions ("Picked up X", "Over Y",
+ * "Dropped X at position 2 of 3", "Cancelled"). Each draggable tab also
+ * carries `aria-describedby` pointing at a hidden hint that explains the
+ * reorder shortcut, so SR users discover it on focus.
  */
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useId } from 'react'
 import type { SessionVisualStatus } from '@chroxy/store-core'
 import { getProviderInfo } from '../lib/provider-labels'
 
@@ -68,6 +76,24 @@ function shortenProvider(provider: string): string {
 }
 
 /**
+ * #4951 — visually-hidden style for the drag-state live region and the
+ * reorder-shortcut hint. Mirrors the "1px clipped box" recipe used by
+ * `ConnectionAnnouncer` so screen readers still announce the content
+ * (unlike `display: none` / `visibility: hidden`).
+ */
+const SR_ONLY_STYLE: React.CSSProperties = {
+  position: 'absolute',
+  width: '1px',
+  height: '1px',
+  padding: 0,
+  margin: '-1px',
+  overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+}
+
+/**
  * #4831 — pure reorder helper, exported for tests. Moves the entry at
  * `fromIndex` to `toIndex` (insert-before semantics; matches typical drop
  * UX where the dragged tab takes the dropped-on tab's slot and pushes it
@@ -113,6 +139,17 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
   // a pointer; Space / Enter commits, Escape cancels.
   const [keyboardLiftId, setKeyboardLiftId] = useState<string | null>(null)
 
+  // #4951 — live-region announcement string. Replaces deprecated
+  // `aria-grabbed`. We coalesce all drag-state transitions into a single
+  // polite live region so SR users get a narrative ("Picked up Alpha. …
+  // Dropped Alpha at position 2 of 3.") rather than silent state changes.
+  // Starts empty so the initial mount doesn't announce anything.
+  const [reorderAnnouncement, setReorderAnnouncement] = useState('')
+  // Stable id for the hidden reorder-shortcut hint that draggable tabs
+  // reference via `aria-describedby`. `useId` keeps it unique per render
+  // tree (important if multiple SessionBars are mounted in tests).
+  const reorderHintId = useId()
+
   useEffect(() => {
     if (renamingId && inputRef.current) {
       inputRef.current.focus()
@@ -145,6 +182,9 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
   // so we look up indices from the live `sessions` array (which already
   // reflects the user's current order, since App.tsx feeds it back in via
   // `onReorder`). No-ops when `onReorder` isn't wired.
+  //
+  // #4951 — also pushes a "Dropped …" announcement into the live region
+  // describing the final position so SR users hear where the tab landed.
   const emitReorder = useCallback((from: string, to: string) => {
     if (!onReorder) return
     if (from === to) return
@@ -154,11 +194,24 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
     if (fromIdx === -1 || toIdx === -1) return
     const next = reorderTabs(ids, fromIdx, toIdx)
     onReorder(next)
+    const movedSession = sessions.find(s => s.sessionId === from)
+    if (movedSession) {
+      // 1-indexed position so the announcement reads naturally
+      // ("position 2 of 3", not "position 1 of 3" for the second slot).
+      const landed = next.indexOf(from) + 1
+      setReorderAnnouncement(
+        `Dropped ${movedSession.name} at position ${landed} of ${next.length}.`
+      )
+    }
   }, [sessions, onReorder])
 
   // #4831 — keyboard step. `dir` is +1 (right) / -1 (left). Mutates via
   // `emitReorder` (insert-before semantics: stepping right swaps with the
   // next neighbor by inserting after it).
+  //
+  // #4951 — the live-region "Dropped …" announcement is emitted by
+  // `emitReorder` itself, so each keyboard step also produces a polite
+  // narration of the new position.
   const stepKeyboard = useCallback((sessionId: string, dir: 1 | -1) => {
     if (!onReorder) return
     const ids = sessions.map(s => s.sessionId)
@@ -171,6 +224,13 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
     const insertAt = dir > 0 ? idx + 2 : idx - 1
     const next = reorderTabs(ids, idx, insertAt)
     onReorder(next)
+    const movedSession = sessions.find(s => s.sessionId === sessionId)
+    if (movedSession) {
+      const landed = next.indexOf(sessionId) + 1
+      setReorderAnnouncement(
+        `Dropped ${movedSession.name} at position ${landed} of ${next.length}.`
+      )
+    }
   }, [sessions, onReorder])
 
   return (
@@ -193,7 +253,12 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             data-testid={`session-tab-${session.sessionId}`}
             role="tab"
             aria-selected={session.isActive}
-            aria-grabbed={isLifted || isDragging ? true : undefined}
+            // #4951 — aria-grabbed (and aria-dropeffect) were removed in
+            // WAI-ARIA 1.1; the lift state is conveyed via the `lifted`
+            // CSS class (visual) + the live-region announcement (SR).
+            // aria-describedby points SR users at the hidden reorder hint
+            // so they discover the Space / Arrow shortcut on focus.
+            aria-describedby={reorderDisabled ? undefined : reorderHintId}
             tabIndex={0}
             // #4831 — native HTML5 DnD attributes. `draggable` is only enabled
             // when a reorder callback is wired (so consumers that don't opt
@@ -207,6 +272,10 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               // the payload isn't read on drop (we resolve from state).
               try { e.dataTransfer.setData('text/plain', session.sessionId) } catch { /* jsdom */ }
               if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+              // #4951 — narrate the pickup so SR users know the drag started.
+              setReorderAnnouncement(
+                `Picked up ${session.name}. Use Arrow Left or Arrow Right to move, Space or Enter to drop, Escape to cancel.`
+              )
             }}
             onDragEnd={() => {
               setDraggingId(null)
@@ -218,7 +287,14 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               // drop target — without it the drop event never fires.
               e.preventDefault()
               if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-              if (dragOverId !== session.sessionId) setDragOverId(session.sessionId)
+              if (dragOverId !== session.sessionId) {
+                setDragOverId(session.sessionId)
+                // #4951 — announce hover-over so SR users hear which tab
+                // they're about to displace. We only announce on the FIRST
+                // entry into a given target (not every dragover tick) by
+                // guarding with the `dragOverId !== sessionId` check above.
+                setReorderAnnouncement(`Over ${session.name}.`)
+              }
             }}
             onDragLeave={() => {
               if (dragOverId === session.sessionId) setDragOverId(null)
@@ -245,18 +321,42 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               // role="tab" semantics are preserved; Enter always activates.
               if (e.key === ' ' && !reorderDisabled) {
                 e.preventDefault()
-                setKeyboardLiftId(prev => prev === session.sessionId ? null : session.sessionId)
+                // #4951 — announce the lift / commit transitions in the
+                // live region. Plain Space toggles the lift state, so the
+                // narration depends on whether we're entering or leaving
+                // reorder mode for THIS tab.
+                setKeyboardLiftId(prev => {
+                  if (prev === session.sessionId) {
+                    setReorderAnnouncement(`Dropped ${session.name}.`)
+                    return null
+                  }
+                  setReorderAnnouncement(
+                    `Picked up ${session.name}. Use Arrow Left or Arrow Right to move, Space or Enter to drop, Escape to cancel.`
+                  )
+                  return session.sessionId
+                })
                 return
               }
               if (keyboardLiftId === session.sessionId) {
                 if (e.key === 'Escape') {
                   e.preventDefault()
                   setKeyboardLiftId(null)
+                  // #4951 — narrate cancel so SR users know nothing moved.
+                  setReorderAnnouncement(`Cancelled reorder of ${session.name}.`)
                   return
                 }
                 if (e.key === 'Enter') {
                   e.preventDefault()
                   setKeyboardLiftId(null)
+                  // #4951 — Enter is the "commit" alias. Each prior
+                  // ArrowLeft / ArrowRight already announced the
+                  // new position via `stepKeyboard` → `emitReorder`,
+                  // so we don't re-narrate the resting state here
+                  // (that would risk reading a stale position if
+                  // the parent has not yet propagated the new order
+                  // back through the `sessions` prop). Leaving the
+                  // last "Dropped X at position N of M" announcement
+                  // in the live region is the settled narration.
                   return
                 }
                 if (e.key === 'ArrowRight') {
@@ -414,6 +514,29 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
       >
         +
       </button>
+
+      {/* #4951 — visually-hidden hint referenced via `aria-describedby`
+          on each draggable tab. Renders unconditionally so the id stays
+          stable; tabs only point at it when `onReorder` is wired. */}
+      <span id={reorderHintId} style={SR_ONLY_STYLE}>
+        Press Space to pick up this tab for reorder, then use Arrow Left or
+        Arrow Right to move it. Press Space or Enter to drop, Escape to
+        cancel.
+      </span>
+
+      {/* #4951 — polite live region that narrates drag-state transitions
+          (pickup, hover-over, drop, cancel). Replaces the deprecated
+          `aria-grabbed` attribute. `aria-atomic="true"` so the entire
+          message is re-read on each change, not just the diff. */}
+      <div
+        data-testid="session-bar-reorder-announcer"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        style={SR_ONLY_STYLE}
+      >
+        {reorderAnnouncement}
+      </div>
     </div>
   )
 }
