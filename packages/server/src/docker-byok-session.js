@@ -387,9 +387,14 @@ export class DockerByokSession extends ClaudeByokSession {
         this._containerId = reused
         try {
           await this._verifyContainer()
-          // Pool hit: skip `useradd` + `chown` — already done by the
-          // session that originally provisioned this container, and
-          // the user persists across container restarts (image layer).
+          // Pool hit: skip `useradd` + `chown` — the previous session
+          // ran them inside THIS container, and we're reusing the same
+          // running container (it never stopped, so `/etc/passwd` and
+          // `/workspace` ownership stay put). If pooling ever switches
+          // to stop/start (or commit/restart), this assumption needs to
+          // be revisited — a stopped-then-restarted container preserves
+          // its layered FS but the previous-session assumption about
+          // "the user already exists" still holds at the FS level.
           this._acquiredFromPool = true
           log.info(`reused pooled container ${reused.slice(0, 12)}`)
           return

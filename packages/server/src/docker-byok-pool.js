@@ -129,8 +129,11 @@ export class DockerContainerPool {
   /**
    * Try to claim an idle container for `key`. Returns the container id
    * on hit, `null` on miss. The entry is REMOVED from the pool — the
-   * caller now owns the container until they call `release()` or
-   * `evict()`.
+   * caller now owns the container until they call `release()` (to hand
+   * it back) or `docker rm -f` it themselves. There is no public
+   * `evict()` — eviction is internal (`_evict`); a caller that wants to
+   * forcibly destroy an acquired container just runs `docker rm -f` and
+   * never calls `release()`.
    *
    * @param {string} key
    * @returns {string|null}
