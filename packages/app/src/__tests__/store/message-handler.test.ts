@@ -4043,6 +4043,95 @@ describe('error handler', () => {
 
     expect(Alert.alert).toHaveBeenCalledWith('Server Error', 'An unexpected server error occurred');
   });
+
+  // #5039 — PR #5037 added optional `usage` + `cost` to the server's error
+  // envelope when the failed turn folded any parent + Task subagent rounds
+  // before erroring out. The mobile Alert must append the pre-formatted
+  // partial-cost sub-line to the body so the user sees what the failed turn
+  // cost; the dashboard surfaces the same line under its error toast.
+  describe('partial-cost sub-line (#5039)', () => {
+    it('appends the partial-cost line to the Alert body when cost+usage present', () => {
+      const alertSpy = Alert.alert as jest.Mock;
+      alertSpy.mockClear();
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: null,
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.0875,
+        usage: {
+          input_tokens: 1234,
+          output_tokens: 3400,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      });
+
+      // Sub-line is appended on a blank line so the cost stands out from
+      // the headline error message. Pre-formatted via the shared
+      // `formatPartialCostLine` helper, so the mobile alert and the
+      // dashboard toast sub-line stay byte-identical.
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Server Error',
+        'stream failed\n\nThis turn cost $0.087 (1.2K in · 3.4K out)',
+      );
+    });
+
+    it('renders the cost-only line when usage is missing (subscription provider)', () => {
+      const alertSpy = Alert.alert as jest.Mock;
+      alertSpy.mockClear();
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: null,
+        code: 'ABORT',
+        message: 'cancelled',
+        cost: 0.05,
+      });
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Server Error',
+        'cancelled\n\nThis turn cost $0.050',
+      );
+    });
+
+    it('does NOT append a sub-line when the wire shape has no partials (pre-#5037)', () => {
+      // Pre-PR #5037 servers don't carry partials; the Alert body must
+      // remain the bare error message — no trailing newlines, no
+      // empty cost line.
+      const alertSpy = Alert.alert as jest.Mock;
+      alertSpy.mockClear();
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: null,
+        code: 'STREAM_ERROR',
+        message: 'no partials here',
+      });
+      expect(alertSpy).toHaveBeenCalledWith('Server Error', 'no partials here');
+    });
+  });
 });
 
 // Issue #2944: web_task_error with SESSION_TOKEN_MISMATCH + boundSessionName should

@@ -869,6 +869,127 @@ describe('handleError', () => {
     expect(handleError({ fatal: 0 as unknown as boolean }).fatal).toBeUndefined()
     expect(handleError({ fatal: null as unknown as boolean }).fatal).toBeUndefined()
   })
+
+  // #5039 — partial-cost passthrough. PR #5037 added optional usage + cost
+  // fields to the server's error envelope when the failed turn folded any
+  // parent + Task subagent rounds before the error fired. The dashboard
+  // toast and mobile alert use the parsed snapshot to render a "this turn
+  // cost $X" sub-line; the parser is the single source of truth for the
+  // strict-finite gate that decides whether the snapshot is usable.
+  describe('partialCost (#5039 — PR #5037 wire passthrough)', () => {
+    it('parses cost + usage into the partialCost slot when both present', () => {
+      const result = handleError({
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.0875,
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 3400,
+          cache_read_input_tokens: 500,
+          cache_creation_input_tokens: 100,
+        },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.0875,
+        inputTokens: 1200,
+        outputTokens: 3400,
+        cacheReadTokens: 500,
+        cacheCreationTokens: 100,
+      })
+    })
+
+    it('keeps partialCost when usage is missing (subscription-billed provider)', () => {
+      // Subscription-billed providers can produce a cost without a usage
+      // breakdown — keep the cost surfaced so the user still sees the
+      // failed-turn spend even when the token counters are unavailable.
+      const result = handleError({
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.05,
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.05,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('falls back to null when cost is missing (pre-#5037 wire shape)', () => {
+      // Pre-PR #5037 servers don't carry partials; the parser must
+      // surface null so consumers can branch on presence without
+      // re-implementing the gate.
+      expect(handleError({ code: 'STREAM_ERROR', message: 'x' }).partialCost).toBeNull()
+    })
+
+    it('rejects NaN / Infinity / negative / non-number cost (matches _trackUsage gate)', () => {
+      // Server-side _trackUsage (#5038) only accumulates Number.isFinite
+      // costs — mirror that gate here so a provider bug can't poison
+      // the partial-cost display either.
+      expect(handleError({ cost: NaN }).partialCost).toBeNull()
+      expect(handleError({ cost: Infinity }).partialCost).toBeNull()
+      expect(handleError({ cost: -0.01 }).partialCost).toBeNull()
+      expect(handleError({ cost: '0.05' as unknown as number }).partialCost).toBeNull()
+      expect(handleError({ cost: null as unknown as number }).partialCost).toBeNull()
+    })
+
+    it('zeroes individual non-finite token fields without losing other counters', () => {
+      // Best-effort token parse: a single bad counter (NaN, negative,
+      // non-number) drops just that field — the rest of the breakdown
+      // still surfaces. Without this, a provider that emits one bogus
+      // counter would null the whole partial snapshot.
+      const result = handleError({
+        cost: 0.02,
+        usage: {
+          input_tokens: 1000,
+          output_tokens: NaN,
+          cache_read_input_tokens: -5,
+          cache_creation_input_tokens: 'x',
+        },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.02,
+        inputTokens: 1000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('treats non-object usage as empty (zero tokens, cost still surfaced)', () => {
+      // A wire-side typo (`usage: 'oops'`) must not poison the cost
+      // surface — fall back to zero counters and still render the cost.
+      const result = handleError({
+        cost: 0.03,
+        usage: 'oops' as unknown as Record<string, number>,
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.03,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('accepts cost: 0 (free / cache-only turn) and surfaces the snapshot', () => {
+      // A 100%-cached turn can still fold a non-zero usage breakdown
+      // without billing — the user benefits from seeing those tokens
+      // even if the cost is $0.
+      const result = handleError({
+        cost: 0,
+        usage: { input_tokens: 50, output_tokens: 0, cache_read_input_tokens: 1000 },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0,
+        inputTokens: 50,
+        outputTokens: 0,
+        cacheReadTokens: 1000,
+        cacheCreationTokens: 0,
+      })
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

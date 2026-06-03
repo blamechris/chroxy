@@ -6,7 +6,8 @@
  * one source of truth.
  */
 import { describe, it, expect } from 'vitest'
-import { formatCostBadge, formatCostBreakdown } from './cost-format'
+import { formatCostBadge, formatCostBreakdown, formatPartialCostLine } from './cost-format'
+import type { ErrorPartialCost } from './cost-format'
 import type { CumulativeUsage } from './types'
 
 describe('formatCostBadge (#4123)', () => {
@@ -67,5 +68,54 @@ describe('formatCostBreakdown (#4123)', () => {
       turnsBilled: 0,
     }
     expect(formatCostBreakdown(usage)).toContain(`Input tokens: ${localeNum(1234567)}`)
+  })
+})
+
+describe('formatPartialCostLine (#5039)', () => {
+  const partial = (over: Partial<ErrorPartialCost> = {}): ErrorPartialCost => ({
+    costUsd: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    ...over,
+  })
+
+  it('includes cost + abbreviated input/output tokens when both present', () => {
+    // Cost formatting delegates to `formatCostBadge`: $0.01-$1 → 3 decimals.
+    expect(
+      formatPartialCostLine(partial({ costUsd: 0.0875, inputTokens: 1234, outputTokens: 3400 })),
+    ).toBe('This turn cost $0.087 (1.2K in · 3.4K out)')
+  })
+
+  it('falls back to cost-only when both input and output tokens are zero', () => {
+    // Subscription-billed providers can emit a cost without a usage
+    // breakdown — surface the cost alone rather than a misleading
+    // "(0 in · 0 out)" suffix. Cost formatting matches formatCostBadge:
+    // $0.05 lands in the 3-decimal band → "$0.050".
+    expect(formatPartialCostLine(partial({ costUsd: 0.05 }))).toBe('This turn cost $0.050')
+  })
+
+  it('still renders sub-line when only one of the token counters is non-zero', () => {
+    expect(
+      formatPartialCostLine(partial({ costUsd: 0.001, inputTokens: 500, outputTokens: 0 })),
+    ).toBe('This turn cost $0.0010 (500 in · 0 out)')
+    expect(
+      formatPartialCostLine(partial({ costUsd: 0.001, inputTokens: 0, outputTokens: 750 })),
+    ).toBe('This turn cost $0.0010 (0 in · 750 out)')
+  })
+
+  it('uses K/M abbreviation matching SidebarTokenView.formatTokenCount', () => {
+    expect(
+      formatPartialCostLine(
+        partial({ costUsd: 1.5, inputTokens: 1_234_567, outputTokens: 999_499 }),
+      ),
+    ).toBe('This turn cost $1.50 (1.23M in · 999.5K out)')
+  })
+
+  it('renders $0 when costUsd is exactly 0 (free / fully-cached turn)', () => {
+    expect(
+      formatPartialCostLine(partial({ costUsd: 0, inputTokens: 50, outputTokens: 0 })),
+    ).toBe('This turn cost $0 (50 in · 0 out)')
   })
 })

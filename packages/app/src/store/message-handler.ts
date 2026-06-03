@@ -116,6 +116,10 @@ import {
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
+  // #5039: shared partial-cost line helper — the same one the dashboard
+  // toast uses, so the mobile Alert and the dashboard sub-line can't
+  // drift apart on copy/format.
+  formatPartialCostLine,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
@@ -3064,7 +3068,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'error': {
       // Structured error response from a handler catch block.
       // Log it and surface a modal alert so the user knows something failed.
-      const { code: errCode, message: errMsg, requestId: errRequestId } = sharedError(msg);
+      // #5039: `partialCost` carries the optional PR #5037 fold of parent
+      // + Task subagent rounds completed before the error fired. When
+      // present, append the pre-formatted sub-line to the Alert body so
+      // the user sees what the failed turn cost — same wording as the
+      // dashboard toast sub-line.
+      const {
+        code: errCode,
+        message: errMsg,
+        requestId: errRequestId,
+        partialCost,
+      } = sharedError(msg);
+      const partialCostLine = partialCost ? formatPartialCostLine(partialCost) : null;
+      // Build the Alert body once so the permission-mode branch below and
+      // the generic fallback both surface the partial-cost line.
+      const alertBody = partialCostLine ? `${errMsg}\n\n${partialCostLine}` : errMsg;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
 
       // Match against an in-flight set_permission_mode request — if the
@@ -3092,9 +3110,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           set({ pendingPermissionConfirm: null });
 
           if (errCode === 'CAPABILITY_NOT_SUPPORTED') {
+            // The targeted "Permission Mode Unavailable" alert uses its
+            // own fallback copy when errMsg is empty; the partial-cost
+            // line stays appended either way.
+            const permissionBody = errMsg || 'This provider does not support permission mode switching.';
             Alert.alert(
               'Permission Mode Unavailable',
-              errMsg || 'This provider does not support permission mode switching.',
+              partialCostLine ? `${permissionBody}\n\n${partialCostLine}` : permissionBody,
             );
             break;
           }
@@ -3104,7 +3126,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       }
 
-      Alert.alert('Server Error', errMsg);
+      Alert.alert('Server Error', alertBody);
       break;
     }
 

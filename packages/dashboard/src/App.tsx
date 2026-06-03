@@ -1163,6 +1163,12 @@ export function App() {
                 actionDisabledLabel: 'Reconnecting…',
               }
             : {}),
+          // #5039: optional partial-cost sub-line surfaced under the
+          // main toast message when PR #5037 folded any parent + Task
+          // subagent rounds onto the error envelope before the error
+          // fired. Undefined for every error path that didn't carry
+          // partials, so the existing message-only toast is unchanged.
+          ...(e.partialCostLine ? { subMessage: e.partialCostLine } : {}),
         })),
       ...infoNotifications
         .map(e => ({ id: e.id, message: e.message, level: 'info' as const })),

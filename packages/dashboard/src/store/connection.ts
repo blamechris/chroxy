@@ -2378,7 +2378,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ logEntries: [] });
   },
 
-  addServerError: (message, action, severity) => {
+  addServerError: (message, action, severity, partialCostLine) => {
     const now = Date.now();
     const err = {
       id: nextMessageId('info'),
@@ -2395,6 +2395,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // MAX_TOOL_ROUNDS_REACHED) from destructive STREAM_ERROR / ABORT.
       // Defaults to 'error' when unset — existing call sites unchanged.
       ...(severity ? { severity } : {}),
+      // #5039: optional partial-cost sub-line surfaced under the main
+      // message when PR #5037 folded parent + Task subagent rounds onto
+      // the error envelope. Only attached when the caller has a
+      // non-empty pre-formatted line — undefined for every error path
+      // that doesn't carry partials so the toast renders message-only.
+      ...(partialCostLine ? { partialCostLine } : {}),
     };
     set((state) => ({
       serverErrors: [...state.serverErrors, err].slice(-10),

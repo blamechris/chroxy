@@ -168,7 +168,11 @@ export {
 export {
   formatCostBadge,
   formatCostBreakdown,
+  // #5039: error-path partial-cost helper shared by dashboard toast
+  // sub-line and mobile Alert.alert body.
+  formatPartialCostLine,
 } from './cost-format'
+export type { ErrorPartialCost } from './cost-format'
 
 export type {
   SessionVisualStatus,
