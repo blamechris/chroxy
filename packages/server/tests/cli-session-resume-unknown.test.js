@@ -83,6 +83,14 @@ describe('CliSession resume-unknown — stderr matcher (#4929)', () => {
       'Unable to resume conversation: missing id',
       'Cannot resume conversation: deleted',
       'Resume of session abc-123 failed',
+      // #4969 — gerund form ("resuming") must classify the same way as the
+      // imperative ("resume"). claude CLI may emit either; both indicate the
+      // same --resume-id failure mode.
+      'Error resuming session abc-123',
+      'Error resuming conversation abc',
+      'Resuming session failed',
+      'resuming conversation failed: not found',
+      'Could not finish resuming session abc',
     ]
     for (const line of samples) {
       assert.equal(stderrIndicatesUnknownResume([line]), true,
@@ -103,6 +111,25 @@ describe('CliSession resume-unknown — stderr matcher (#4929)', () => {
     for (const line of safeSamples) {
       assert.equal(stderrIndicatesUnknownResume([line]), false,
         `"${line}" must NOT trigger resume-unknown — wiping _sessionId on transient errors would discard the prior conversation`)
+    }
+  })
+
+  it('#4968 — does NOT match "id" substring inside unrelated words (invalid, considered, avoided, widget, mid, kid)', () => {
+    // Bare `id` (no word boundary) would match as a substring inside common
+    // English words, re-introducing the false positives #4966 was designed to
+    // prevent. Each of these would wipe `_sessionId` mid-conversation if the
+    // anchor regressed, breaking the same #4950 invariant.
+    const substringBleeds = [
+      'failed to resume invalid input',
+      'resume considered failed',
+      'Could not resume — avoided',
+      'resume widget failed',
+      'unable to resume mid-write',
+      'Failed to resume kid mode',
+    ]
+    for (const line of substringBleeds) {
+      assert.equal(stderrIndicatesUnknownResume([line]), false,
+        `#4968 — "${line}" must NOT classify as resume-unknown; \`id\` is a substring of an unrelated word here, not the keyword we care about`)
     }
   })
 
