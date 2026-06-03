@@ -455,6 +455,18 @@ describe('Sidebar aria-keyshortcuts (#4941)', () => {
 // Settings/cheat-sheet display). These tests pin that contract: rebind
 // the shortcut, fire the NEW combo, observe the reorder callback fires.
 describe('Sidebar reorder honors registry rebindings (#4972)', () => {
+  // Each case in this suite mutates the module-level shared shortcut
+  // registry via __setSharedRegistryForTesting. Without a restore step
+  // a later case (or a later test file in the same vitest worker) would
+  // inherit the rebinds, making the suite order-dependent. Install a
+  // fresh default registry after each case so the contract resets.
+  afterEach(async () => {
+    const { createShortcutRegistry } = await import('../shortcuts/registry')
+    const { __setSharedRegistryForTesting } = await import('../shortcuts/useShortcutRegistry')
+    const { DEFAULT_SHORTCUTS } = await import('../shortcuts/defaults')
+    __setSharedRegistryForTesting(createShortcutRegistry(DEFAULT_SHORTCUTS))
+  })
+
   // Async dynamic imports so the registry tooling lives next to its tests
   // without forcing all the other suites in this file to load it.
   it('after rebinding sidebar.reorder.down to cmd+j, the new combo moves a session down', async () => {
@@ -526,11 +538,13 @@ describe('Sidebar reorder honors registry rebindings (#4972)', () => {
     renderSidebar({ onReorderRepos: vi.fn() })
     const apiRepo = screen.getByTestId('sidebar-repo-/home/user/projects/api')
     const announced = apiRepo.getAttribute('aria-keyshortcuts') || ''
+    // ARIA-spec modifier tokens, NOT UI display labels — aria-keyshortcuts
+    // is consumed by assistive tech which expects "Meta", "Control", "Alt",
+    // "Shift" per WAI-ARIA 1.2. The on-screen cheat sheet uses
+    // formatBindingForDisplay separately for human-readable rendering.
     expect(announced).not.toMatch(/Alt\+Arrow/)
-    // Display format depends on UA (Cmd on Mac, Ctrl on Linux jsdom);
-    // accept either — the contract is that the rebound combo appears.
-    expect(announced).toMatch(/(Cmd|Ctrl)\+J/i)
-    expect(announced).toMatch(/(Cmd|Ctrl)\+Y/i)
+    expect(announced).toMatch(/Meta\+J/)
+    expect(announced).toMatch(/Meta\+Y/)
   })
 })
 

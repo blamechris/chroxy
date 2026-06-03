@@ -18,6 +18,7 @@ import {
   normalizeBinding,
   parseBinding,
   formatBindingForDisplay,
+  formatBindingForAria,
   STORAGE_KEY,
   type ShortcutDef,
 } from './registry'
@@ -86,6 +87,41 @@ describe('formatBindingForDisplay', () => {
     expect(formatBindingForDisplay('cmd+constructor', true)).toBe('Cmd+Constructor')
     expect(formatBindingForDisplay('cmd+tostring', true)).toBe('Cmd+Tostring')
     expect(formatBindingForDisplay('alt+hasownproperty', true)).toBe('Option+Hasownproperty')
+  })
+})
+
+// #4993 — `aria-keyshortcuts` is consumed by assistive tech, which
+// expects WAI-ARIA 1.2 modifier tokens ("Meta", "Control", "Alt",
+// "Shift") — NOT the UI display labels we show humans ("Cmd", "Ctrl",
+// "Option"). formatBindingForAria is the platform-neutral sibling of
+// formatBindingForDisplay for that purpose.
+describe('formatBindingForAria', () => {
+  it('maps cmd to Meta per WAI-ARIA spec', () => {
+    expect(formatBindingForAria('cmd+k')).toBe('Meta+K')
+    expect(formatBindingForAria('cmd+j')).toBe('Meta+J')
+  })
+  it('maps ctrl to Control per WAI-ARIA spec', () => {
+    expect(formatBindingForAria('ctrl+k')).toBe('Control+K')
+  })
+  it('maps alt and shift to their spec names', () => {
+    expect(formatBindingForAria('alt+shift+p')).toBe('Alt+Shift+P')
+  })
+  it('renders arrow keys in KeyboardEvent.key casing', () => {
+    expect(formatBindingForAria('alt+arrowup')).toBe('Alt+ArrowUp')
+    expect(formatBindingForAria('alt+arrowdown')).toBe('Alt+ArrowDown')
+    expect(formatBindingForAria('alt+arrowleft')).toBe('Alt+ArrowLeft')
+    expect(formatBindingForAria('alt+arrowright')).toBe('Alt+ArrowRight')
+  })
+  it('passes punctuation through unchanged', () => {
+    expect(formatBindingForAria('cmd+,')).toBe('Meta+,')
+    expect(formatBindingForAria('cmd+\\')).toBe('Meta+\\')
+  })
+  it('returns the empty string for an empty binding', () => {
+    expect(formatBindingForAria('')).toBe('')
+  })
+  it('upper-cases single ASCII letters but leaves multi-char keys alone', () => {
+    expect(formatBindingForAria('shift+enter')).toBe('Shift+Enter')
+    expect(formatBindingForAria('cmd+shift+escape')).toBe('Meta+Shift+Escape')
   })
 })
 

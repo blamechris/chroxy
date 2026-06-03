@@ -19,8 +19,7 @@ import {
 } from '../store/persistence'
 import { moveItem, orderToIds } from '../utils/reorderById'
 import { useShortcutRegistry } from '../shortcuts/useShortcutRegistry'
-import { formatBindingForDisplay } from '../shortcuts/registry'
-import { isMacPlatform } from '../utils/platform'
+import { formatBindingForAria } from '../shortcuts/registry'
 
 export interface ActiveSessionNode {
   sessionId: string
@@ -143,10 +142,14 @@ export function Sidebar({
   // keyshortcuts attribute also reads from the registry so screen
   // readers announce the effective binding instead of the hardcoded
   // default. The hook re-renders on every binding change.
+  //
+  // `aria-keyshortcuts` is platform-neutral per WAI-ARIA 1.2: it uses
+  // spec modifier names ("Meta", "Control") not UI labels ("Cmd",
+  // "Ctrl"), and multiple alternative combos are space-separated.
   const shortcutRegistry = useShortcutRegistry()
   const reorderUpBinding = shortcutRegistry.getBinding('sidebar.reorder.up')
   const reorderDownBinding = shortcutRegistry.getBinding('sidebar.reorder.down')
-  const reorderAriaKeyshortcuts = `${formatBindingForDisplay(reorderUpBinding, isMacPlatform())} ${formatBindingForDisplay(reorderDownBinding, isMacPlatform())}`
+  const reorderAriaKeyshortcuts = `${formatBindingForAria(reorderUpBinding)} ${formatBindingForAria(reorderDownBinding)}`
 
   // #4303 — sidebar panel slot state. Initialized from localStorage via
   // props so SSR / tests stay deterministic. Each setter mirrors to
@@ -384,7 +387,9 @@ export function Sidebar({
       // changes the runtime keys. The direction is derived from the
       // matched id, not from event.key, so a rebind like cmd+j/cmd+k
       // works as well as the default alt+arrowup/down.
-      const matched = shortcutRegistry.matchEvent(event as unknown as KeyboardEvent, 'global')
+      // matchEvent's KeyEventLike is structural; React's KeyboardEvent
+      // satisfies it directly (no DOM cast needed).
+      const matched = shortcutRegistry.matchEvent(event, 'global')
       const dir = matched === 'sidebar.reorder.up' ? -1
         : matched === 'sidebar.reorder.down' ? 1
         : 0
@@ -408,7 +413,8 @@ export function Sidebar({
       // produce a partial persisted order.
       if (filter) return false
       // #4972 — match via registry; see handleRepoReorderKey rationale.
-      const matched = shortcutRegistry.matchEvent(event as unknown as KeyboardEvent, 'global')
+      // React KeyboardEvent structurally satisfies KeyEventLike.
+      const matched = shortcutRegistry.matchEvent(event, 'global')
       const dir = matched === 'sidebar.reorder.up' ? -1
         : matched === 'sidebar.reorder.down' ? 1
         : 0

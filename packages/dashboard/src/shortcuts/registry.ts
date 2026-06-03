@@ -157,6 +157,51 @@ const PRETTY_KEY_NAMES: Record<string, string> = {
 }
 
 /**
+ * Render a canonical binding ("cmd+shift+p") in the WAI-ARIA token form
+ * required by `aria-keyshortcuts` (WAI-ARIA 1.2 §6.6.5). Screen readers
+ * announce the spec modifier names ("Meta", "Control", "Alt", "Shift")
+ * — NOT the UI labels we show humans ("Cmd", "Ctrl", "Option").
+ *
+ *   cmd   → Meta      (the macOS Command key per ARIA spec)
+ *   ctrl  → Control
+ *   alt   → Alt
+ *   shift → Shift
+ *
+ * Arrow keys use the `KeyboardEvent.key` casing ("ArrowUp") which is
+ * also the form ARIA wants. Single ASCII letters are uppercased.
+ * Other tokens fall through unchanged so punctuation stays as-is.
+ *
+ * Output is `+`-joined per ARIA token grammar; callers concatenate
+ * multiple combos with a single space ("Meta+J Meta+Y") — that's how
+ * the spec encodes alternatives for one element.
+ */
+export function formatBindingForAria(canonical: string): string {
+  if (!canonical) return ''
+  const parts = canonical.split('+')
+  const out: string[] = []
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i]!
+    if (part === 'cmd') out.push('Meta')
+    else if (part === 'ctrl') out.push('Control')
+    else if (part === 'shift') out.push('Shift')
+    else if (part === 'alt') out.push('Alt')
+    else if (i === parts.length - 1) {
+      // Final token is the key. PRETTY_KEY_NAMES holds the canonical
+      // `KeyboardEvent.key` casing for non-printable keys ("ArrowUp",
+      // "PageDown", "Enter") which is also what ARIA wants. Own-property
+      // check matches formatBindingForDisplay to avoid Object.prototype
+      // leakage from tampered overrides.
+      if (/^[a-z]$/.test(part)) out.push(part.toUpperCase())
+      else if (Object.prototype.hasOwnProperty.call(PRETTY_KEY_NAMES, part)) out.push(PRETTY_KEY_NAMES[part]!)
+      else out.push(part)
+    } else {
+      out.push(part)
+    }
+  }
+  return out.join('+')
+}
+
+/**
  * Render a canonical binding ("cmd+shift+p") in a human-friendly form
  * for the UI. On macOS the modifier reads "Cmd", elsewhere "Ctrl".
  *
