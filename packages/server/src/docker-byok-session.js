@@ -36,12 +36,45 @@
  *
  * Deferred (follow-up issues)
  * ---------------------------
- *   - Per-session container reuse / pooling
- *   - Snapshot/restore (Docker commit-based snapshots already exist for
- *     docker-cli / docker-sdk — wiring them up for docker-byok belongs
- *     in a follow-up so docker-byok ships small)
- *   - DevContainer / Compose-driven environments
- *   - postCreateCommand hook
+ *   - Per-session container reuse / pooling (#5022 — landed)
+ *   - DevContainer / Compose-driven environments (#5024 — landed)
+ *   - postCreateCommand hook (#5024 — landed alongside devcontainer)
+ *
+ * DevContainer + Compose (#5024)
+ * -----------------------------
+ *   - `useDevcontainer: true` — start() parses .devcontainer/
+ *     devcontainer.json (or .devcontainer.json) from cwd, validates
+ *     mounts/env via the shared `devcontainer-config.js` helper, then
+ *     overlays `image` / `remoteUser` / `containerEnv` / `mounts` /
+ *     `forwardPorts` / `postCreateCommand` onto the bare-image launch.
+ *     Explicit constructor opts always win — devcontainer.json is the
+ *     fallback default.
+ *   - `composeFile: '<path>'` + optional `composeService: '<name>'` —
+ *     start() shells `docker compose up -d` against the file (under a
+ *     session-scoped project id), identifies the named service's
+ *     container, and attaches to it. destroy() runs `docker compose
+ *     down --remove-orphans` against the same project so the whole
+ *     stack tears down. Pooling is disabled in compose mode.
+ *   - Default (neither opt) — original v1 bare-image launch path.
+ *
+ * Snapshot / restore (#5023, this revision)
+ * -----------------------------------------
+ *   - `snapshot({ name? })` runs `docker commit <containerId>
+ *     chroxy-byok-snap:<rand>-<ts>` via the backend, marks the live
+ *     container "soiled" so the pool evicts it on release (#5043), and
+ *     writes a small metadata JSON to `snapshotsDir` (defaults to
+ *     `~/.chroxy/snapshots/`, override via `CHROXY_CONFIG_DIR`) so ops
+ *     can list snapshot names without parsing `docker image ls`.
+ *   - To restore, pass `snapshotImage: <tag>` to the constructor. The
+ *     session uses that tag as the image at `docker run` time and skips
+ *     the `useradd` + `chown` setup (the snapshot already has those
+ *     baked in). The restored container is auto-soiled — restoring
+ *     previous state into a live container couples it to the snapshot's
+ *     original conversation history.
+ *   - Pool interaction: a snapshotted or restored container goes
+ *     through `release()` as normal, but the pool sees the soil marker
+ *     and evicts inline instead of pooling. UI / multi-snapshot listing
+ *     is deferred to a follow-up.
  *
  * Per `project_worktree_before_docker.md` in project memory: worktree
  * isolation happens BEFORE Docker. This class does not own worktree
@@ -51,12 +84,18 @@
  */
 
 import { execFile } from 'child_process'
+import { randomBytes } from 'crypto'
+import { isAbsolute, posix } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
 import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { createLogger } from './logger.js'
-import { isAbsolute, posix } from 'path'
+import {
+  parseDevContainer,
+  validateMounts,
+  sanitizeContainerEnv,
+} from './devcontainer-config.js'
 
 const log = createLogger('docker-byok')
 
@@ -198,6 +237,32 @@ export class DockerByokSession extends ClaudeByokSession {
    * @param {string} [opts.containerId]              Attach to an existing container
    *   instead of launching one (env-manager managed). When omitted, the
    *   session owns the container and tears it down on destroy().
+   * @param {boolean} [opts.useDevcontainer=false]   #5024: Opt-in flag
+   *   — when true, parse `.devcontainer/devcontainer.json` (or the
+   *   `.devcontainer.json` sidecar) from cwd and overlay its
+   *   `image` / `remoteUser` / `containerEnv` / `mounts` /
+   *   `forwardPorts` / `postCreateCommand` onto the launch. Explicit
+   *   constructor opts always win; devcontainer.json is the fallback
+   *   default. No-op when the file is absent or malformed.
+   *
+   *   This is opt-in (not auto-discovery from cwd) so existing
+   *   sessions whose cwd happens to contain a devcontainer.json don't
+   *   silently change behaviour. The caller (CLI flag, dashboard
+   *   toggle, env-manager) is responsible for setting this when the
+   *   user has asked for devcontainer-driven environments.
+   * @param {string} [opts.composeFile]              #5024: Path to a
+   *   `docker-compose.yml`. When set, start() runs `docker compose up
+   *   -d` under a session-scoped project id and attaches to the named
+   *   service container. destroy() runs `docker compose down
+   *   --remove-orphans` to tear the whole stack down. Pooling is
+   *   disabled in this mode.
+   *
+   *   This is opt-in (not auto-discovery from cwd) — see the note on
+   *   `useDevcontainer` above. The caller passes the path explicitly.
+   * @param {string} [opts.composeService]           #5024: Optional
+   *   service name from the compose file to attach to (the "primary"
+   *   service). When omitted, the first service from `docker compose
+   *   ps` is picked.
    * @param {object} [opts._dockerBackend]           Test seam — pre-built backend
    * @param {Function} [opts._execFile]              Test seam — used by preflight
    *   (defaults to child_process.execFile)
@@ -216,6 +281,37 @@ export class DockerByokSession extends ClaudeByokSession {
     // Override `provider` so the session reports `docker-byok` for
     // wire-protocol consumers (display label, capabilities matrix).
     super({ ...opts, provider: opts.provider || 'docker-byok' })
+
+    // #5024: DevContainer auto-discovery (off by default). When set,
+    // start() reads `.devcontainer/devcontainer.json` from cwd and
+    // overlays its `image` / `remoteUser` / `containerEnv` / `mounts` /
+    // `forwardPorts` / `postCreateCommand` onto the session defaults.
+    // Explicit constructor opts always win — devcontainer.json acts as
+    // the "fallback default" when the operator hasn't set a field.
+    this._useDevcontainer = opts.useDevcontainer === true
+    // Record raw caller opts now so the merge in start() can tell
+    // "caller set image=X" apart from "default".
+    this._explicitImage = opts.image
+    this._explicitContainerUser = opts.containerUser
+    this._dcConfig = null
+
+    // #5024: Docker Compose support. When `composeFile` is set, start()
+    // shells out `docker compose up -d` against that file and attaches
+    // to the named service container instead of running a fresh image.
+    // The compose stack is owned by THIS session: destroy() tears it
+    // down with `docker compose down --remove-orphans`. To attach to a
+    // pre-existing compose stack, pass `containerId` instead.
+    this._composeFile = typeof opts.composeFile === 'string' && opts.composeFile.trim()
+      ? opts.composeFile.trim()
+      : null
+    this._composeService = typeof opts.composeService === 'string' && opts.composeService.trim()
+      ? opts.composeService.trim()
+      : null
+    // Compose project id — a session-scoped suffix so two sessions
+    // pointed at the same compose file get isolated stacks. Mirrors
+    // environment-manager's `chroxy-${envId}` naming. Resolved lazily
+    // in start() so construction stays deterministic.
+    this._composeProject = null
 
     const user = opts.containerUser || DEFAULT_USER
     if (!VALID_USERNAME_RE.test(user)) {
@@ -238,10 +334,15 @@ export class DockerByokSession extends ClaudeByokSession {
     // or by passing an explicit `_pool` instance. Per-session reuse of
     // the same container across multiple turns is unconditional and
     // independent of pooling.
+    // #5024: pooling is also disabled when the session manages a
+    // compose stack — the pool key is shaped for single-container
+    // resource shape (image/memory/cpu/user) and would silently reuse
+    // a bare-image container for a compose session. The destroy() path
+    // for compose unconditionally runs `docker compose down`.
     const poolEnv = opts._poolEnv || process.env
     if (opts._pool) {
       this._pool = opts._pool
-    } else if (!opts.containerId && isPoolEnabled(poolEnv)) {
+    } else if (!opts.containerId && !this._composeFile && isPoolEnabled(poolEnv)) {
       this._pool = getSharedPool(poolEnv)
     } else {
       this._pool = null
@@ -404,6 +505,18 @@ export class DockerByokSession extends ClaudeByokSession {
    * does not depend on the pool.
    */
   async _acquireOrStartContainer() {
+    // #5024: compose mode short-circuits the entire pool + bare-image
+    // path. The compose stack owns its own container; destroy()
+    // unwinds it with `docker compose down`.
+    if (this._composeFile) {
+      await this._startComposeStack()
+      return
+    }
+    // #5024: devcontainer parsing must happen BEFORE the pool lookup
+    // because the resolved image/user are part of the pool key.
+    if (this._useDevcontainer) {
+      this._resolveDevContainer()
+    }
     if (this._pool) {
       const key = this._poolKey()
       const reused = this._pool.acquire(key)
@@ -439,6 +552,82 @@ export class DockerByokSession extends ClaudeByokSession {
   }
 
   /**
+   * #5024: Parse `.devcontainer/devcontainer.json` from cwd and
+   * overlay supported fields onto this session's state. Explicit
+   * constructor opts always win — devcontainer.json is the fallback.
+   * No-op when no devcontainer.json exists or the file is malformed
+   * (the parser logs and returns `{}`).
+   *
+   * Stores the parsed config in `this._dcConfig` so `_startContainer`
+   * can apply `mounts` / `containerEnv` / `forwardPorts` /
+   * `postCreateCommand` to the `docker run` and `docker exec` calls.
+   */
+  _resolveDevContainer() {
+    const cwd = this.cwd || process.cwd()
+    const config = parseDevContainer(cwd, { logger: log })
+    if (config && Object.keys(config).length > 0) {
+      log.info(`devcontainer.json overlay active (cwd=${cwd})`)
+    }
+    // image: caller opt wins over devcontainer.json wins over DEFAULT_IMAGE.
+    if (!this._explicitImage && config.image) {
+      this._image = config.image
+    }
+    // remoteUser: caller opt wins over devcontainer.json wins over DEFAULT_USER.
+    if (!this._explicitContainerUser && config.remoteUser) {
+      // Validate the user name — devcontainer.json is untrusted input.
+      if (VALID_USERNAME_RE.test(config.remoteUser)) {
+        this._containerUser = config.remoteUser
+      } else {
+        log.warn(`devcontainer.json remoteUser "${config.remoteUser}" rejected — keeping ${this._containerUser}`)
+      }
+    }
+    // Validate mounts and env now so a bad value surfaces at start time
+    // instead of when docker rejects the run call.
+    this._dcConfig = {
+      ...config,
+      mounts: validateMounts(config.mounts, cwd, { logger: log }),
+      containerEnv: sanitizeContainerEnv(config.containerEnv, { logger: log }),
+    }
+  }
+
+  /**
+   * #5024: Bring up the compose stack and identify the primary service
+   * container. The stack is owned by THIS session — destroy() runs
+   * `docker compose down --remove-orphans` against the same project id.
+   *
+   * Mirrors EnvironmentManager._createComposeEnvironment so the
+   * security posture is identical: the named service container has its
+   * non-root user created the same way the bare-image path does, the
+   * host cwd is mounted at /workspace via the compose file (the user
+   * is responsible for that volume mapping), and tool dispatch goes
+   * through the same `_execAsContainerUser` path.
+   */
+  async _startComposeStack() {
+    if (!this._composeProject) {
+      this._composeProject = `chroxy-byok-${randomBytes(6).toString('hex')}`
+    }
+    const cwd = this.cwd || process.cwd()
+    log.info(`docker-byok compose stack starting (file=${this._composeFile} project=${this._composeProject} service=${this._composeService || '<first>'})`)
+    let result
+    try {
+      result = await this._dockerBackend.createComposeEnvironment({
+        envId: this._composeProject,
+        cwd,
+        composeFile: this._composeFile,
+        composeProject: this._composeProject,
+        containerUser: this._containerUser,
+        primaryService: this._composeService,
+      })
+    } catch (err) {
+      const error = new Error(`docker compose start failed: ${err.message}`)
+      error.code = err.code || 'compose_start_failed'
+      throw error
+    }
+    this._containerId = result.containerId
+    log.info(`docker-byok compose primary container: ${this._containerId.slice(0, 12)}`)
+  }
+
+  /**
    * Launch a long-lived container with the host cwd mounted at
    * /workspace and the standard chroxy hardening (cap-drop, pids
    * limit, no-new-privileges, non-root user). Mirrors the runArgs
@@ -465,6 +654,44 @@ export class DockerByokSession extends ClaudeByokSession {
       const apiKey = process.env.ANTHROPIC_API_KEY
       if (apiKey) {
         runArgs.push('--env', `ANTHROPIC_API_KEY=${apiKey}`)
+      }
+
+      // #5024: devcontainer.json overlay — extra mounts, env, and port
+      // forwards. Mounts and env were already validated/sanitized by
+      // `_resolveDevContainer()`; whatever survived is safe to pass
+      // straight through. `forwardPorts` accepts integers and
+      // "host:container" strings — both shapes emit `-p X:Y`.
+      const dc = this._dcConfig
+      if (dc) {
+        if (Array.isArray(dc.mounts)) {
+          for (const mount of dc.mounts) {
+            runArgs.push('--mount', mount)
+          }
+        }
+        if (dc.containerEnv && typeof dc.containerEnv === 'object') {
+          for (const [key, value] of Object.entries(dc.containerEnv)) {
+            runArgs.push('--env', `${key}=${value}`)
+          }
+        }
+        if (Array.isArray(dc.forwardPorts)) {
+          for (const port of dc.forwardPorts) {
+            if (typeof port === 'number' && Number.isFinite(port) && port > 0 && port < 65536) {
+              runArgs.push('-p', `${port}:${port}`)
+            } else if (typeof port === 'string' && /^\d+(:\d+)?$/.test(port)) {
+              // Bare-port strings ("3000") would otherwise become
+              // `docker run -p 3000`, which Docker treats as "publish
+              // container port 3000 to a RANDOM host port" — surprising
+              // for a DevContainer-style forward where the model
+              // expects 3000:3000. Normalise to host:container when the
+              // colon is missing so the numeric and string forms
+              // behave identically.
+              const normalized = port.includes(':') ? port : `${port}:${port}`
+              runArgs.push('-p', normalized)
+            } else {
+              log.warn(`devcontainer.json forwardPorts entry rejected (invalid): ${port}`)
+            }
+          }
+        }
       }
 
       if (process.platform === 'linux') {
@@ -504,6 +731,27 @@ export class DockerByokSession extends ClaudeByokSession {
             return
           }
           log.info(`created non-root user "${this._containerUser}" in container`)
+
+          // #5024: devcontainer.json postCreateCommand. Runs once,
+          // after useradd, as the non-root user. Failures are
+          // non-fatal — log a warning so the session can still start.
+          // postCreateCommand in devcontainer.json is primarily for
+          // installing language toolchains; bound at 5 minutes here,
+          // same ceiling DockerBackend._runPostCreateCommand uses.
+          const dcLocal = this._dcConfig
+          if (dcLocal && typeof dcLocal.postCreateCommand === 'string' && dcLocal.postCreateCommand.length > 0) {
+            this._execFile('docker', [
+              'exec', '-u', this._containerUser, this._containerId, 'bash', '-c', dcLocal.postCreateCommand,
+            ], { encoding: 'utf-8', timeout: 300_000 }, (postErr) => {
+              if (postErr) {
+                log.warn(`postCreateCommand failed (non-fatal): ${postErr.message}`)
+              } else {
+                log.info('postCreateCommand completed')
+              }
+              resolve()
+            })
+            return
+          }
           resolve()
         })
       })
@@ -825,13 +1073,32 @@ export class DockerByokSession extends ClaudeByokSession {
     const wasReady = this._containerReady
     const pool = this._pool
     const acquiredFromPool = this._acquiredFromPool
+    // #5024: compose teardown uses `docker compose down` against the
+    // session-scoped project id. Snapshot the project + file BEFORE
+    // nulling state so the finally-block has them.
+    const composeFile = this._composeFile
+    const composeProject = this._composeProject
+    const cwd = this.cwd || process.cwd()
     this._containerId = null
     this._containerReady = false
     this._acquiredFromPool = false
     try {
       await super.destroy()
     } finally {
-      if (!containerId || !owned) {
+      if (composeFile && composeProject) {
+        // Compose mode: tear the whole stack down. The pool is
+        // disabled in compose mode so we never need the release path.
+        log.info(`removing compose stack ${composeProject} (file=${composeFile})`)
+        try {
+          await this._dockerBackend.destroyComposeEnvironment({
+            composeFile,
+            composeProject,
+            cwd,
+          })
+        } catch (err) {
+          log.warn(`compose destroy failed: ${err.message}`)
+        }
+      } else if (!containerId || !owned) {
         // Nothing for us to clean up — externally-managed container
         // stays running for whoever owns it.
       } else if (pool && wasReady) {

@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
@@ -1059,6 +1059,486 @@ describe('docker-byok provider registration', () => {
       // still importable and the lazy registration is idempotent.
       assert.match(err.message, /Unknown provider/)
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// #5024 — DevContainer + Compose support
+// ─────────────────────────────────────────────────────────────────────
+
+describe('DockerByokSession — devcontainer.json overlay (#5024)', () => {
+  /**
+   * Write a .devcontainer/devcontainer.json fixture into a fresh tmp
+   * dir and return the dir for use as cwd.
+   */
+  function makeDevcontainerCwd(content, { sidecar = false } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-dc-test-'))
+    if (sidecar) {
+      writeFileSync(join(dir, '.devcontainer.json'), JSON.stringify(content))
+    } else {
+      mkdirSync(join(dir, '.devcontainer'), { recursive: true })
+      writeFileSync(join(dir, '.devcontainer', 'devcontainer.json'), JSON.stringify(content))
+    }
+    return dir
+  }
+
+  it('constructor records useDevcontainer flag but defers parsing', () => {
+    const cwd = makeDevcontainerCwd({ image: 'python:3.12-slim' })
+    try {
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile: execFileStub(),
+        _dockerBackend: backendStub(),
+      })
+      assert.equal(session._useDevcontainer, true)
+      assert.equal(session._dcConfig, null, 'parse should be deferred to start()')
+      assert.equal(session._image, 'node:22-slim', 'default preserved before resolve')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() overlays devcontainer.json image when no explicit image is passed', async () => {
+    const cwd = makeDevcontainerCwd({ image: 'python:3.12-slim' })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_dc_image\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      assert.ok(runCall, 'docker run was not called')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.ok(sleepIdx > 0, 'expected sleep as command')
+      assert.equal(runCall.args[sleepIdx - 1], 'python:3.12-slim')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('explicit constructor image wins over devcontainer.json image', async () => {
+    const cwd = makeDevcontainerCwd({ image: 'python:3.12-slim' })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_explicit\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        image: 'node:22-bookworm',
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.equal(runCall.args[sleepIdx - 1], 'node:22-bookworm')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() applies containerEnv from devcontainer.json as --env flags', async () => {
+    const cwd = makeDevcontainerCwd({
+      image: 'node:22-slim',
+      containerEnv: { LANG: 'en_US.UTF-8', NODE_OPTIONS: '--max-old-space-size=2048' },
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_env\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      assert.ok(runCall.args.some(a => a === 'LANG=en_US.UTF-8'), 'LANG env not forwarded')
+      assert.ok(runCall.args.some(a => a === 'NODE_OPTIONS=--max-old-space-size=2048'), 'NODE_OPTIONS env not forwarded')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() drops invalid containerEnv keys (defence-in-depth)', async () => {
+    const cwd = makeDevcontainerCwd({
+      containerEnv: { 'BAD;KEY': 'evil', 'GOOD_KEY': 'fine' },
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_sanitize\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      assert.ok(!runCall.args.some(a => a.startsWith('BAD;KEY=')), 'invalid key leaked through')
+      assert.ok(runCall.args.some(a => a === 'GOOD_KEY=fine'), 'valid key missing')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() applies forwardPorts as -p flags', async () => {
+    const cwd = makeDevcontainerCwd({
+      forwardPorts: [3000, 5432, '8080:80'],
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_ports\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const ports = []
+      for (let i = 0; i < runCall.args.length; i++) {
+        if (runCall.args[i] === '-p') ports.push(runCall.args[i + 1])
+      }
+      assert.deepEqual(ports, ['3000:3000', '5432:5432', '8080:80'])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() normalises bare-port strings to host:container — fix from PR #5070 review', async () => {
+    // Pre-fix, a string "3000" would become `docker run -p 3000`,
+    // which Docker treats as "publish container port 3000 to a RANDOM
+    // host port" — surprising for a DevContainer forward where the
+    // model expects 3000:3000. Both numeric `3000` and bare-string
+    // `"3000"` should now produce the same `-p 3000:3000` mapping.
+    const cwd = makeDevcontainerCwd({
+      forwardPorts: ['3000', '5432', '8080:80'],
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_str_ports\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const ports = []
+      for (let i = 0; i < runCall.args.length; i++) {
+        if (runCall.args[i] === '-p') ports.push(runCall.args[i + 1])
+      }
+      assert.deepEqual(ports, ['3000:3000', '5432:5432', '8080:80'])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() rejects mounts pointing outside cwd', async () => {
+    const cwd = makeDevcontainerCwd({
+      mounts: [
+        'source=/etc/shadow,target=/workspace/shadow,type=bind',
+        `source=${tmpdir()}/safe,target=/safe,type=bind`,
+      ],
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_mount\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const mounts = []
+      for (let i = 0; i < runCall.args.length; i++) {
+        if (runCall.args[i] === '--mount') mounts.push(runCall.args[i + 1])
+      }
+      assert.deepEqual(mounts, [])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() runs postCreateCommand as the non-root user after useradd', async () => {
+    const cwd = makeDevcontainerCwd({ postCreateCommand: 'npm install' })
+    try {
+      const execCalls = []
+      const _execFile = (cmd, args, opts, cb) => {
+        execCalls.push({ cmd, args: [...args] })
+        if (args[0] === 'info') return cb(null, 'ok', '')
+        if (args[0] === 'run') return cb(null, 'CONTAINER_post\n', '')
+        if (args[0] === 'exec') return cb(null, '', '')
+        if (args[0] === 'rm') return cb(null, '', '')
+        return cb(null, '', '')
+      }
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const postCall = execCalls.find(c => c.args[0] === 'exec' && c.args.includes('npm install'))
+      assert.ok(postCall, 'postCreateCommand exec not found')
+      assert.ok(postCall.args.includes('-u'), 'postCreateCommand missing -u flag')
+      assert.equal(postCall.args[postCall.args.indexOf('-u') + 1], 'chroxy')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('useDevcontainer with no devcontainer.json is a no-op (default v1 path)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'chroxy-dc-nofile-'))
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_nodc\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.equal(runCall.args[sleepIdx - 1], 'node:22-slim')
+      const mounts = runCall.args.filter(a => a === '--mount')
+      assert.equal(mounts.length, 0)
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('reads .devcontainer.json sidecar form when .devcontainer/ is absent', async () => {
+    const cwd = makeDevcontainerCwd({ image: 'alpine:3.20' }, { sidecar: true })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_sidecar\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.equal(runCall.args[sleepIdx - 1], 'alpine:3.20')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('devcontainer.json remoteUser is applied when validated', async () => {
+    const cwd = makeDevcontainerCwd({ remoteUser: 'devuser' })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_user\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const setupCall = _execFile.calls.find(c =>
+        c.args[0] === 'exec' && c.args.includes('bash') && c.args.some(a => typeof a === 'string' && a.includes('useradd')))
+      assert.ok(setupCall, 'useradd exec not found')
+      assert.ok(setupCall.args.some(a => typeof a === 'string' && a.includes('useradd -m -s /bin/bash devuser')),
+        `expected useradd for devuser, got: ${setupCall.args.join(' ')}`)
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('DockerByokSession — Docker Compose support (#5024)', () => {
+  function composeBackendStub({ primaryId = 'COMPOSE_PRIMARY_abc', destroyCalls = [] } = {}) {
+    return {
+      createCalls: [],
+      destroyCalls,
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        return {
+          containerId: primaryId,
+          containerCliPath: '/usr/local/bin/claude',
+          services: [{ name: opts.primaryService || 'app', status: 'running', primary: true }],
+        }
+      },
+      async destroyComposeEnvironment(opts) {
+        destroyCalls.push(opts)
+      },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+  }
+
+  it('constructor accepts composeFile + composeService', () => {
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile: execFileStub(),
+      _dockerBackend: composeBackendStub(),
+    })
+    assert.equal(session._composeFile, '/proj/docker-compose.yml')
+    assert.equal(session._composeService, 'web')
+    assert.equal(session._composeProject, null, 'project id deferred to start()')
+    assert.equal(session._pool, null)
+  })
+
+  it('start() brings up compose stack and attaches to primary service', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = composeBackendStub({ primaryId: 'COMPOSE_PRIMARY_xyz' })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(backend.createCalls.length, 1)
+    const call = backend.createCalls[0]
+    assert.equal(call.composeFile, '/proj/docker-compose.yml')
+    assert.equal(call.primaryService, 'web')
+    assert.match(call.composeProject, /^chroxy-byok-[0-9a-f]+$/)
+    assert.equal(session._containerId, 'COMPOSE_PRIMARY_xyz')
+    assert.equal(session._containerReady, true)
+    await session.destroy()
+  })
+
+  it('destroy() runs docker compose down against the session project', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const destroyCalls = []
+    const backend = composeBackendStub({ destroyCalls })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    const projectId = session._composeProject
+    await session.destroy()
+    assert.equal(destroyCalls.length, 1)
+    assert.equal(destroyCalls[0].composeFile, '/proj/docker-compose.yml')
+    assert.equal(destroyCalls[0].composeProject, projectId)
+    assert.equal(_execFile.calls.filter(c => c.args[0] === 'rm').length, 0)
+  })
+
+  it('compose start failure tears down stack and emits session error', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        const err = new Error('compose primary not running')
+        err.code = 'compose_primary_missing'
+        throw err
+      },
+      async destroyComposeEnvironment(opts) { this.destroyCalls.push(opts) },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    const events = []
+    session.on('error', e => events.push(e))
+    await session.start()
+    assert.equal(events.length, 1)
+    assert.match(events[0].message, /compose start failed/)
+    assert.equal(session._containerReady, false)
+  })
+
+  it('compose mode skips the pool even when CHROXY_DOCKER_BYOK_POOL_ENABLED is set', () => {
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile: execFileStub(),
+      _dockerBackend: composeBackendStub(),
+      _poolEnv: { CHROXY_DOCKER_BYOK_POOL_ENABLED: '1' },
+    })
+    assert.equal(session._pool, null)
   })
 })
 
