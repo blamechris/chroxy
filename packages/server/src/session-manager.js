@@ -523,6 +523,12 @@ export class SessionManager extends EventEmitter {
    *   entirely). Forwarded to ClaudeTuiSession; other providers ignore it harmlessly via
    *   destructuring. When omitted, falls back to the SessionManager-wide
    *   `defaultSkipPermissions` (set from `chroxy start --dangerously-skip-permissions`).
+   * @param {string} [options.preserveId] - Optional 32-char lower-case hex session id to
+   *   reuse instead of generating a fresh `randomBytes(16).toString('hex')`. Invalid
+   *   format OR a collision with an already-live entry falls back to a fresh random id
+   *   so callers can safely pass any value. Primary use: `restoreState` reusing the
+   *   persisted id so dashboard's localStorage-cached `activeSessionId` still resolves
+   *   after a daemon restart (#4983).
    * @returns {string} sessionId
    */
   createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false, preserveId } = {}) {
