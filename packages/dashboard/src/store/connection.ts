@@ -403,6 +403,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverErrors: [],
   infoNotifications: [],
   sessionNotifications: [],
+  sessionNotFoundError: null,
   resolvedPermissions: {},
   serverPhase: null,
   tunnelProgress: null,
@@ -2151,6 +2152,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     if (sessionId === activeSessionId) return;
 
+    // #4982 — operator picked a live session, so the lost-id banner from
+    // the prior SESSION_NOT_FOUND is no longer relevant. Clear it here so
+    // a stale banner doesn't outlive the resolution.
+    if (get().sessionNotFoundError) set({ sessionNotFoundError: null });
+
     // Optimistically switch to cached state + dismiss notifications for target session
     const cached = sessionStates[sessionId];
     const filteredNotifications = get().sessionNotifications.filter(
@@ -2421,6 +2427,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set((state) => ({
       sessionNotifications: state.sessionNotifications.filter((n) => n.id !== id),
     }));
+  },
+
+  // #4982 — SessionNotFoundChip banner state setters. message-handler sets
+  // the value from `session_error{code:'SESSION_NOT_FOUND'}` (and also
+  // clears activeSessionId in the same set call to break the resend loop).
+  // Dismiss clears the banner; switchSession also clears it (see the
+  // explicit clear in switchSession below).
+  setSessionNotFoundError: (err) => {
+    set({ sessionNotFoundError: err });
+  },
+  dismissSessionNotFoundError: () => {
+    set({ sessionNotFoundError: null });
   },
 
   // Multi-server registry actions

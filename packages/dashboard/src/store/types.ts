@@ -268,6 +268,24 @@ export interface SessionNotification {
   requestId?: string;
 }
 
+/**
+ * #4982 — state for the SessionNotFoundChip banner.
+ *
+ * Set by message-handler when the server emits
+ * `session_error{code:'SESSION_NOT_FOUND', attemptedSessionId, message}`,
+ * surfaced as a calm banner over the empty pane (the operator's old
+ * activeSessionId is also cleared so chat sends don't loop the same error).
+ * The banner offers a Dismiss action that clears this field; clicking a
+ * different session in the sidebar also clears it (operator picked a new
+ * live id, lost-id surface is no longer relevant).
+ */
+export interface SessionNotFoundErrorState {
+  /** The id chroxy passed before the server rejected it. May be null. */
+  attemptedSessionId: string | null;
+  /** Server-provided message text (verbatim). */
+  message: string;
+}
+
 export interface FilePickerItem {
   path: string;
   type: 'file';
@@ -514,6 +532,17 @@ export interface ConnectionState {
 
   // Background session notifications (permission, question, completed, error)
   sessionNotifications: SessionNotification[];
+
+  // #4982 — set when the server emits `session_error{code:'SESSION_NOT_FOUND'}`.
+  // Activated by message-handler.ts:case 'session_error' on the
+  // SESSION_NOT_FOUND branch; cleared by the SessionNotFoundChip dismiss
+  // action OR by a subsequent successful switchSession (the operator picked
+  // a new live session, so the lost-id chip is no longer relevant).
+  //
+  // Co-occurs with `activeSessionId === null` — clearing the stale id is
+  // what stops the dashboard from re-sending against the dead id and
+  // looping the same toast (#4935 wedge UX).
+  sessionNotFoundError: SessionNotFoundErrorState | null;
 
   // Resolved permission decisions keyed by requestId. Persists the
   // user's Allow/Deny/AllowSession choice across component remounts
@@ -771,6 +800,10 @@ export interface ConnectionState {
 
   // Session notification actions
   dismissSessionNotification: (id: string) => void;
+
+  // #4982 — session-not-found chip state
+  setSessionNotFoundError: (err: SessionNotFoundErrorState | null) => void;
+  dismissSessionNotFoundError: () => void;
 
   // Dev server preview
   closeDevPreview: (port: number) => void;
