@@ -1697,10 +1697,17 @@ describe('App', () => {
       const item = openOverflowAndGetCopyItem()
       fireEvent.click(item)
 
+      // Wait for the clipboard write to resolve (state-only assertion —
+      // keeps the waitFor callback side-effect-free per RTL guidance;
+      // re-opening the menu inside the retry loop would toggle it open
+      // and closed on each tick and make the test non-deterministic).
       await waitFor(() => {
-        const after = openOverflowAndGetCopyItem()
-        expect(after.textContent).toContain('✓')
+        expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       })
+      // `transcriptCopied` flipped to true — re-open the menu and read
+      // the row's current glyph.
+      const after = openOverflowAndGetCopyItem()
+      expect(after.textContent).toContain('✓')
       expect(addServerErrorMock).not.toHaveBeenCalled()
     })
   })
