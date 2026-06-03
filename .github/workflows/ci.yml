@@ -44,6 +44,53 @@ jobs:
           path: packages/server/coverage/
           retention-days: 14
 
+  changes:
+    name: Detect Changed Paths
+    # Lightweight ubuntu job that classifies which paths a PR touches so
+    # downstream jobs can self-gate. Today this only feeds the Windows
+    # platform-tests job (#5002) — `windows-latest` is billed at a 5x
+    # multiplier vs `ubuntu-24.04`, so we only fire it on PRs that touch
+    # the files it actually covers. Pushes to `main` skip this job and
+    # always run the Windows suite (see `server-tests-windows.if`).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request'
+    # `dorny/paths-filter` calls the GitHub REST API (`listFiles`) to read the
+    # PR's changed-file list on `pull_request` events. The workflow-level
+    # `permissions: contents: read` block at the top of this file zeros out
+    # every other scope, so we have to re-grant `pull-requests: read` at the
+    # job level — without it, the API call fails with "Resource not accessible
+    # by integration" on fork PRs and (potentially) any future GitHub change
+    # that tightens the implicit same-repo grant. Same-repo PRs happen to work
+    # today via the implicit token grant, but the explicit permission is what
+    # the action documents and what survives a fork PR.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      platform: ${{ steps.filter.outputs.platform }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - id: filter
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        with:
+          filters: |
+            platform:
+              # Source — the production Windows code path lives in
+              # platform.js today, but glob with `platform*` so a future
+              # `platform-windows.js` / `platform-posix.js` split still
+              # triggers the Windows job without an edit here.
+              - 'packages/server/src/platform*.js'
+              # Tests — both the cross-platform suite (exercises the
+              # Windows branch via `_isWindowsOverride`) and the
+              # Windows-only suite. Glob covers any future
+              # platform-*.test.js additions.
+              - 'packages/server/tests/platform*.test.js'
+              # Workflow itself — so edits to this gating logic always
+              # exercise the gated job on the same PR.
+              - '.github/workflows/ci.yml'
+
   server-tests-windows:
     name: Server Platform Tests (Windows)
     # Real Windows runner coverage for `writeFileRestricted`'s Windows
@@ -61,6 +108,26 @@ jobs:
     # depends on node-pty / POSIX signals / shell scripts that don't have
     # a Windows analogue. The full POSIX suite continues to run on
     # `ubuntu-24.04` in the `server-tests` job above.
+    #
+    # Trigger gate (#5002): `windows-latest` is 5x the per-minute cost
+    # of `ubuntu-24.04`. To avoid paying that on every PR push:
+    #   * On `push` to `main` we ALWAYS run — catches transitive breakage
+    #     from PRs that merged without touching platform.js but broke
+    #     something the Windows suite covers.
+    #   * On `pull_request` we only run when the `changes` job flagged
+    #     a platform-related edit. Filter scope (see `changes` above) is
+    #     deliberately a touch broader than just `platform.js` to cover
+    #     the foreseeable refactor that splits the file in two.
+    needs: changes
+    # `always()` is required because the `changes` job is gated to
+    # `pull_request` and gets skipped on `push` events. Without it,
+    # the default `needs:` semantics ("skip downstream when any
+    # dependency is skipped") would also skip this job on pushes to
+    # `main`, which is the exact opposite of what we want.
+    if: |
+      always() &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' && needs.changes.result == 'success' && needs.changes.outputs.platform == 'true'))
     runs-on: windows-latest
     timeout-minutes: 10
     defaults:
