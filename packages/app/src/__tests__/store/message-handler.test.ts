@@ -2424,6 +2424,104 @@ describe('post-tool text chunks split into continuation slots (#4922 / #4889)', 
       expect(responses[0].content).toBe('Let me check chroxy before filing.');
       expect(responses[1].content).toBe('Filing now.');
     });
+
+    it('does NOT peel when prior ends in word char BUT incoming delta starts with whitespace (normal word boundary)', () => {
+      // #4975 follow-up -- Copilot found that the original heuristic only
+      // inspected the prior tail and would peel a complete trailing word
+      // ("Running") even when the post-tool delta starts with whitespace
+      // (a normal word boundary, no mid-word split to repair). The peel
+      // must require BOTH the prior slot to end in a word char AND the
+      // incoming delta to begin with one. Without this gate the prior
+      // bubble loses its trailing word and the continuation bubble
+      // inherits it, visibly moving text across the tool boundary.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      // Prior delta ends with `Running` (word char `g`).
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Starting Phase 1 — agent-review on PR #3 is up. Running',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Task',
+        toolUseId: 'toolu_a',
+        input: { description: 'agent-review' },
+      });
+      // Incoming delta starts with a space -- a normal word boundary.
+      // The heuristic must NOT peel `"Running"` even though the prior
+      // ends in a word char.
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: ' /full-review then /batch-merge.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      // `Running` stays on the pre-tool bubble -- no peel.
+      expect(responses[0].content).toBe('Starting Phase 1 — agent-review on PR #3 is up. Running');
+      // Post-tool bubble starts with the leading space exactly as the
+      // server sent it; no `Running` prefix.
+      expect(responses[1].content).toBe(' /full-review then /batch-merge.');
+    });
+
+    it('does NOT peel when prior ends in word char BUT incoming delta starts with punctuation', () => {
+      // Mirror of the whitespace case -- `.`, `\n`, `(`, `:` etc. are all
+      // word boundaries the LLM emits. The peel must stay dormant.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Fetched PR',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      // Newline + punctuation start -- `.` is not a word char, so no peel.
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '. Next step: review.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('Fetched PR');
+      expect(responses[1].content).toBe('. Next step: review.');
+    });
   });
 });
 

@@ -1363,6 +1363,130 @@ describe('dashboard message-handler dispatch', () => {
         expect(responses[0].content).toBe('Let me check chroxy before filing.')
         expect(responses[1].content).toBe('Filing now.')
       })
+
+      it('does NOT peel when prior ends in word char BUT incoming delta starts with whitespace (normal word boundary)', () => {
+        // #4975 follow-up — Copilot found that the original heuristic only
+        // inspected the prior tail and would peel a complete trailing word
+        // ("Running") even when the post-tool delta starts with whitespace
+        // (a normal word boundary, no mid-word split to repair). The peel
+        // must require BOTH the prior slot to end in a word char AND the
+        // incoming delta to begin with one. Without this gate the prior
+        // bubble loses its trailing word and the continuation bubble
+        // inherits it, visibly moving text across the tool boundary.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        // Prior delta ends with `Running` (word char `g`).
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'Starting Phase 1 — agent-review on PR #3 is up. Running',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Task',
+            toolUseId: 'toolu_a',
+            input: { description: 'agent-review' },
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        // Incoming delta starts with a space — a normal word boundary.
+        // The heuristic must NOT peel `"Running"` even though the prior
+        // ends in a word char.
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: ' /full-review then /batch-merge.',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        // `Running` stays on the pre-tool bubble — no peel.
+        expect(responses[0].content).toBe('Starting Phase 1 — agent-review on PR #3 is up. Running')
+        // Post-tool bubble starts with the leading space exactly as the
+        // server sent it; no `Running` prefix.
+        expect(responses[1].content).toBe(' /full-review then /batch-merge.')
+      })
+
+      it('does NOT peel when prior ends in word char BUT incoming delta starts with punctuation', () => {
+        // Mirror of the whitespace case — `.`, `\n`, `(`, `:` etc. are all
+        // word boundaries the LLM emits. The peel must stay dormant.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessions: [{ sessionId: 's1', name: 'S1' } as any],
+            sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage(
+          { type: 'stream_start', messageId: 'resp-1', sessionId: 's1' },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: 'Fetched PR',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: 'toolu_a',
+            tool: 'Bash',
+            toolUseId: 'toolu_a',
+            input: {},
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        // Newline + punctuation start — `.` is not a word char, so no peel.
+        handleMessage(
+          {
+            type: 'stream_delta',
+            messageId: 'resp-1',
+            sessionId: 's1',
+            delta: '. Next step: review.',
+          },
+          ctx() as any,
+        )
+        vi.runAllTimers()
+
+        const ss = (store.getState() as any).sessionStates.s1
+        const responses = ss.messages.filter((m: any) => m.type === 'response')
+        expect(responses).toHaveLength(2)
+        expect(responses[0].content).toBe('Fetched PR')
+        expect(responses[1].content).toBe('. Next step: review.')
+      })
     })
   })
 

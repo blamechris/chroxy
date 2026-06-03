@@ -1672,12 +1672,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               // The post-#4889 split would otherwise show "Del" in one
               // bubble and "egating..." in another with the tool between.
               // Detect the mid-word case (last char of the prior slot's
-              // full content is a word char) and peel the trailing partial
-              // word off the prior slot, seeding the continuation buffer
-              // with it. Result: the word reassembles in the continuation
-              // bubble.
+              // full content is a word char AND the FIRST char of the
+              // incoming post-tool delta is also a word char -- both sides
+              // of the boundary must be in a word, else the LLM emitted
+              // a normal word boundary and the peel would wrongly move a
+              // complete trailing word across the tool bubble) and peel
+              // the trailing partial word off the prior slot, seeding the
+              // continuation buffer with it. Result: the word reassembles
+              // in the continuation bubble.
               const priorFull = slot.type === 'response' ? slot.content + bufferedContent : '';
-              const midWordMatch = priorFull.match(/[A-Za-z0-9_]+$/);
+              const incomingDelta = msg.delta as string;
+              const incomingStartsMidWord = /^[A-Za-z0-9_]/.test(incomingDelta);
+              const midWordMatch = incomingStartsMidWord ? priorFull.match(/[A-Za-z0-9_]+$/) : null;
               let priorTail = '';
               if (midWordMatch && midWordMatch[0].length > 0) {
                 priorTail = midWordMatch[0];
