@@ -1065,7 +1065,7 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
    * `{ stdout: '', stderr: '' }` for the command itself, mirroring the
    * non-post-create `backendStub` helper.
    */
-  function freshContainerBackend({ execResponses = {} } = {}) {
+  function freshContainerBackend({ execResponses = {}, markerWriteError = null } = {}) {
     let markerPresent = false
     const calls = []
     return {
@@ -1082,6 +1082,11 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
             throw err
           }
           if (cmd.startsWith('touch ')) {
+            // #5068: opt-in marker-write failure so the
+            // command-success / marker-write-failure path is testable.
+            // Without this we'd have to write a bespoke backend stub
+            // for every test in that family.
+            if (markerWriteError) throw markerWriteError
             markerPresent = true
             return { stdout: '', stderr: '' }
           }
@@ -1223,6 +1228,62 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
     const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
     assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_POSTCREATE_FAIL')),
       'failed start must tear down the owned container')
+  })
+
+  it('emits post_create_marker_write_failed (not post_create_command_failed) when the command succeeded but the marker touch failed', async () => {
+    // #5068: the marker-write path is internal infrastructure — if the
+    // command itself succeeded, the operator should not see a
+    // `post_create_command_failed` and assume their setup script
+    // exploded. They should see a distinct code that tells them future
+    // pool reuses will re-run setup because the cache stamp didn't land.
+    // The session itself stays alive because setup DID apply inside the
+    // container — it's the cache that broke, not the workload.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_MARKERFAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const markerErr = Object.assign(new Error('exec_failed: cannot touch /tmp/.chroxy-post-create-…: Read-only file system'), {
+      code: 'exec_failed',
+      exitCode: 1,
+    })
+    const backend = freshContainerBackend({
+      execResponses: {
+        'npm install': { stdout: 'added 42 packages\n', stderr: '' },
+      },
+      markerWriteError: markerErr,
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const markerEvent = events.find((e) => e.code === 'post_create_marker_write_failed')
+    assert.ok(markerEvent, 'expected a post_create_marker_write_failed error event')
+    assert.equal(markerEvent.fatal, false, 'marker-write failure must be flagged non-fatal — the command did succeed')
+    assert.match(markerEvent.message, /marker write failed/)
+
+    const cmdFailEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.equal(cmdFailEvent, undefined,
+      'marker-write failure must NOT surface as post_create_command_failed (the command actually succeeded)')
+
+    // Command succeeded → session should still come up ready and the
+    // owned container MUST NOT be torn down. An operator can retry on
+    // the next session; the workload is functional now.
+    assert.equal(session._containerReady, true,
+      'marker-write failure must not tear down — the command succeeded and the session is functional')
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 0,
+      'marker-write failure must not trigger container tear-down')
+
+    await session.destroy()
   })
 
   it('forwards a configurable postCreateTimeoutMs to the backend exec', async () => {

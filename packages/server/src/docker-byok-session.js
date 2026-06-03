@@ -538,12 +538,30 @@ export class DockerByokSession extends ClaudeByokSession {
         try {
           await this._runPostCreateCommandIfNeeded()
         } catch (err) {
-          this.emit('error', {
-            code: 'post_create_command_failed',
-            message: `docker-byok postCreateCommand failed: ${err.message}`,
-          })
-          await this.destroy()
-          return
+          // #5068: distinguish two failure modes that previously shared
+          // one error code. A `post_create_marker_write_failed` tag on
+          // the throw means the command itself succeeded — only the
+          // SHA-256 marker `touch` failed. The session is functional
+          // (setup was applied inside this container), but a future
+          // pool reuse will re-run setup because the cache marker
+          // wasn't stamped. Surface that as a non-fatal warning and
+          // keep the session alive. Anything else (or a missing tag)
+          // is a real command failure: tear down the owned container.
+          if (err && err.code === 'post_create_marker_write_failed') {
+            log.warn(`docker-byok postCreateCommand marker write failed (non-fatal — command did succeed): ${err.message}`)
+            this.emit('error', {
+              code: 'post_create_marker_write_failed',
+              message: `docker-byok postCreateCommand marker write failed: ${err.message}`,
+              fatal: false,
+            })
+          } else {
+            this.emit('error', {
+              code: 'post_create_command_failed',
+              message: `docker-byok postCreateCommand failed: ${err.message}`,
+            })
+            await this.destroy()
+            return
+          }
         }
       }
     } else {
@@ -906,12 +924,15 @@ export class DockerByokSession extends ClaudeByokSession {
    * change to `postCreateCommand` between sessions reuses the same
    * container but re-runs setup.
    *
-   * Failure surface: any non-zero exit (including timeout, backend
-   * reject, or marker-write failure) throws — the caller is `start()`,
-   * which converts the throw into a `post_create_command_failed` error
-   * event and tears the session down. The marker is only written on
-   * full success (command itself succeeds AND the marker write
-   * succeeds), so a half-applied state can never be cached.
+   * Failure surface: any non-zero exit on the command itself (timeout,
+   * backend reject, etc.) throws bare — the caller in `start()` converts
+   * the throw into a `post_create_command_failed` error event and tears
+   * the session down. A failure on the marker `touch` step throws an
+   * error tagged with `code: 'post_create_marker_write_failed'` so the
+   * caller can distinguish: the command DID succeed, only the cache
+   * stamp didn't land, and the session is still functional (#5068).
+   * The marker is only written on full success of the command, so a
+   * half-applied state can never be cached as "already applied".
    */
   async _runPostCreateCommandIfNeeded() {
     if (!this._postCreateCommand || !this._postCreateMarkerPath) return
@@ -947,14 +968,23 @@ export class DockerByokSession extends ClaudeByokSession {
     // Stamp the marker so the next session that lands on this container
     // skips the run. `mkdir -p` on the prefix would be wrong (the prefix
     // is /tmp, which always exists), so just `touch` the file. Failure
-    // here ALSO fails the post-create — without a marker write, a
-    // future reuse would re-run a command we just successfully applied,
-    // which would be wasteful and (for non-idempotent commands like
-    // `apt-get install`) potentially incorrect.
-    await this._execAsContainerUser({
-      cmd: `touch ${shellQuote(this._postCreateMarkerPath)}`,
-      timeout: 10_000,
-    })
+    // here is rethrown with a distinct `post_create_marker_write_failed`
+    // tag (#5068) so the caller in start() can tell it apart from a
+    // command failure — the command DID succeed for THIS session, but
+    // without a marker write a future pool reuse will re-run setup,
+    // which is wasteful for idempotent commands like `npm install` and
+    // potentially incorrect for non-idempotent ones like `apt-get install`.
+    try {
+      await this._execAsContainerUser({
+        cmd: `touch ${shellQuote(this._postCreateMarkerPath)}`,
+        timeout: 10_000,
+      })
+    } catch (err) {
+      const wrapped = new Error(err && err.message ? err.message : String(err))
+      wrapped.code = 'post_create_marker_write_failed'
+      wrapped.cause = err
+      throw wrapped
+    }
     log.info(`postCreateCommand applied — marker stamped at ${this._postCreateMarkerPath.slice(-12)}`)
   }
 
