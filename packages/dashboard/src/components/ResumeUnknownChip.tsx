@@ -1,24 +1,31 @@
 /**
- * ResumeUnknownChip — #4947
+ * ResumeUnknownChip — #4947 / #5006
  *
- * Replaces the generic red error bubble when the server emits
- * `error{code: 'resume_unknown'}` (server PR #4944). The server fires this
- * code when claude CLI rejects a `--resume <id>` because the conversation
- * id is unknown locally (operator wiped `~/.claude/projects/` between
- * chroxy boots, restored a state file from a different machine, etc.).
+ * Replaces the generic red error bubble when the server emits one of the
+ * two resume-failure codes from CliSession's `_handleChildClose` path:
  *
- * The CliSession has already auto-fallen-back to a fresh conversation by
- * the time this chip surfaces — the model loses the prior transcript but
- * the chroxy ring buffer transcript is preserved in the UI. So we render a
- * calm operator-friendly explanation rather than the loud red crash toast,
- * matching the spirit of StreamStallChip (#4476) and AskUserQuestionStallChip
- * (#4615): "this is recoverable, here's what happened, here's what to
- * expect next".
+ *   - `error{code: 'resume_unknown'}` (server PR #4944) — RECOVERABLE.
+ *     CliSession has already auto-fallen-back to a fresh conversation by
+ *     the time the chip surfaces. The model loses the prior transcript
+ *     but the chroxy ring buffer transcript is preserved in the UI. We
+ *     render a calm operator-friendly explanation rather than the loud
+ *     red crash toast, matching the spirit of StreamStallChip (#4476)
+ *     and AskUserQuestionStallChip (#4615): "this is recoverable, here's
+ *     what happened, here's what to expect next".
+ *
+ *   - `error{code: 'resume_unknown_exhausted'}` (server PR #5004) —
+ *     TERMINAL. The post-fallback retry ALSO matched the unknown-resume
+ *     pattern; the server has stopped auto-respawning and the user must
+ *     start a fresh session manually. The chip switches headline copy
+ *     and uses an assertive live-region (`role="alert"`) so AT users get
+ *     an unambiguous "auto-recovery gave up, action needed" signal —
+ *     distinct from the recoverable variant's polite status announce.
  *
  * `attemptedResumeId` (when provided) renders as small mono-spaced subtext
  * for operator correlation against the persisted state file
  * (`resumeConversationId` in ~/.chroxy/session-state.json) — answers "which
  * conversation did we lose?" without forcing the operator to grep logs.
+ * Surfaces on both variants because the correlation use case is identical.
  *
  * Reuses the `stream-stall-chip` CSS classes — the amber-warning palette
  * already conveys "recoverable" and the three stall chips share a single
@@ -46,6 +53,19 @@ export interface ResumeUnknownChipProps {
    * look like a UI bug.
    */
   attemptedResumeId?: string
+  /**
+   * #5006 — variant switch matched against the server error code:
+   *   - `'recoverable'` (default) — `code: 'resume_unknown'`, chroxy has
+   *     already auto-fallen-back; chip renders polite status with the
+   *     "starting fresh" headline.
+   *   - `'exhausted'` — `code: 'resume_unknown_exhausted'`, auto-recovery
+   *     has given up; chip renders an assertive alert with the
+   *     "auto-recovery exhausted" headline and a "start a fresh session
+   *     manually" call-to-action.
+   * Optional + defaulted so existing call sites that pre-date #5006
+   * continue to render the recoverable copy unchanged.
+   */
+  variant?: 'recoverable' | 'exhausted'
 }
 
 // #4947 — small mono-spaced subtext for the attempted id slot. Inline to
@@ -61,22 +81,37 @@ const ID_SUBTEXT_STYLE: CSSProperties = {
   opacity: 0.75,
 }
 
-export function ResumeUnknownChip({ errorText, attemptedResumeId }: ResumeUnknownChipProps) {
+export function ResumeUnknownChip({
+  errorText,
+  attemptedResumeId,
+  variant = 'recoverable',
+}: ResumeUnknownChipProps) {
   // Treat empty / whitespace-only strings as missing so a stale or
   // defensive empty value can't degrade the headline into a broken-looking
   // "Attempted id: " slot.
   const hasId = typeof attemptedResumeId === 'string' && attemptedResumeId.trim().length > 0
 
+  // #5006: switch headline + a11y role on the variant. The recoverable
+  // variant uses `role="status"` (polite live region — chroxy already
+  // recovered) whereas the exhausted variant uses `role="alert"` (assertive
+  // — the user must take action). Keep the same `stream-stall-chip` palette
+  // so the visual language stays shared; the AT role + copy carry the
+  // urgency difference.
+  const isExhausted = variant === 'exhausted'
+  const headline = isExhausted
+    ? 'Auto-recovery exhausted — start a new session manually to continue'
+    : 'Previous conversation could not be resumed — starting fresh'
+  const role = isExhausted ? 'alert' : 'status'
+
   return (
     <div
       className="stream-stall-chip"
       data-testid="resume-unknown-chip"
-      role="status"
+      data-variant={variant}
+      role={role}
       title={errorText}
     >
-      <span className="stream-stall-chip-text">
-        Previous conversation could not be resumed — starting fresh
-      </span>
+      <span className="stream-stall-chip-text">{headline}</span>
       {hasId && (
         <span
           data-testid="resume-unknown-chip-id"

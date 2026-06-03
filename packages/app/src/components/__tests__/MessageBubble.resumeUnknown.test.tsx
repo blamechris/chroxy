@@ -105,4 +105,41 @@ describe('MessageBubble resume-unknown handling (#4971)', () => {
     const chips = tree.root.findAllByProps({ testID: 'resume-unknown-chip' });
     expect(chips).toHaveLength(0);
   });
+
+  // #5006: terminal-escalation code from server PR #5004. MessageBubble
+  // must route both resume-failure codes through the chip — otherwise
+  // `resume_unknown_exhausted` falls through to the generic red error
+  // bubble and the user never sees the "auto-recovery exhausted, start
+  // a new session manually" affordance.
+  it('renders the ResumeUnknownChip for error{code: "resume_unknown_exhausted"} (#5006)', () => {
+    const tree = render({
+      id: 'err-exhausted-1',
+      type: 'error',
+      code: 'resume_unknown_exhausted',
+      content: 'Auto-recovery exhausted: …',
+      attemptedResumeId: 'abc-123',
+      timestamp: Date.now(),
+    } as ChatMessage);
+    const chip = tree.root.findByProps({ testID: 'resume-unknown-chip' });
+    expect(chip).toBeDefined();
+    // accessibilityLabel must reflect the exhausted variant so AT users
+    // get the right urgency signal — not the recoverable "starting fresh"
+    // copy.
+    expect(chip.props.accessibilityLabel).toMatch(
+      /exhausted|start a (new|fresh) session/i,
+    );
+  });
+
+  it('forwards attemptedResumeId on the exhausted variant too (#5006)', () => {
+    const tree = render({
+      id: 'err-exhausted-2',
+      type: 'error',
+      code: 'resume_unknown_exhausted',
+      content: 'Auto-recovery exhausted: …',
+      attemptedResumeId: 'corr-xyz',
+      timestamp: Date.now(),
+    } as ChatMessage);
+    const idSubtext = tree.root.findByProps({ testID: 'resume-unknown-chip-id' });
+    expect(idSubtext).toBeDefined();
+  });
 });

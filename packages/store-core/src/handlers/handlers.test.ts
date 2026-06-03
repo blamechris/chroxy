@@ -5838,6 +5838,53 @@ describe('handleMessage', () => {
         expect(out.chatMessage.attemptedResumeId).toBe('a'.repeat(256))
       }
     })
+
+    // #5006: server PR #5004 introduced the terminal-escalation code
+    // `resume_unknown_exhausted` emitted when the post-fallback retry ALSO
+    // matches the unknown-resume pattern. event-normalizer.js already
+    // forwards `attemptedResumeId` for the new code; the store-core gate
+    // must mirror that or the field is silently stripped before reaching
+    // the dashboard / mobile chip. These tests pin the widened gate.
+    it('#5006 — preserves attemptedResumeId on resume_unknown_exhausted (terminal escalation)', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content:
+            'Auto-recovery exhausted: Claude CLI rejected the resumed conversation id and a fresh-start retry also failed.',
+          code: 'resume_unknown_exhausted',
+          attemptedResumeId: 'abc123-def456-7890',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.code).toBe('resume_unknown_exhausted')
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123-def456-7890')
+      }
+    })
+
+    it('#5006 — trims and truncates attemptedResumeId on resume_unknown_exhausted (same hardening as resume_unknown)', () => {
+      const oversized = '   ' + 'a'.repeat(500) + '   '
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown_exhausted',
+          attemptedResumeId: oversized,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('a'.repeat(256))
+      }
+    })
   })
 
   it('skips user_input outside replay (live echo handled elsewhere)', () => {

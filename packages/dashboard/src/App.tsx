@@ -1727,22 +1727,28 @@ export function App() {
       )
     }
 
-    // #4947: dedicated chip for `error{code: 'resume_unknown'}` errors
-    // (server PR #4944). The server emits this when the claude CLI rejects
-    // a `--resume <id>` because the conversation id is unknown locally
-    // (operator wiped ~/.claude/projects/ between chroxy boots, restored a
-    // state file from a different machine, etc.). CliSession has ALREADY
-    // auto-fallen-back to a fresh conversation by the time this lands —
-    // the chip explains that and (when present) surfaces
-    // `attemptedResumeId` as subtext for operator correlation against
-    // `~/.chroxy/session-state.json.resumeConversationId`. Distinct from
-    // the stream_stall / ASK_USER_QUESTION_STALL chips because no retry
-    // affordance is needed: the fresh conversation is already running.
-    // Mirrors the chip pattern for consistency with the recoverable-error
-    // visual language.
-    if (storeMsg.type === 'error' && storeMsg.code === 'resume_unknown') {
+    // #4947 / #5006: dedicated chip for the two resume-failure error codes:
+    //   - `error{code: 'resume_unknown'}` (server PR #4944) — RECOVERABLE.
+    //     CliSession has ALREADY auto-fallen-back to a fresh conversation
+    //     by the time this lands; chip renders the polite "starting fresh"
+    //     copy.
+    //   - `error{code: 'resume_unknown_exhausted'}` (server PR #5004) —
+    //     TERMINAL. The post-fallback retry ALSO failed; the server has
+    //     stopped auto-respawning and the chip renders the "auto-recovery
+    //     exhausted, start a fresh session manually" copy + assertive
+    //     `role="alert"` so AT users get the urgency signal.
+    // Both variants surface `attemptedResumeId` as subtext for operator
+    // correlation against `~/.chroxy/session-state.json.resumeConversationId`.
+    // Distinct from the stream_stall / ASK_USER_QUESTION_STALL chips
+    // because no retry affordance is needed (recoverable: fresh conversation
+    // already running; exhausted: user must start a new session manually).
+    if (
+      storeMsg.type === 'error' &&
+      (storeMsg.code === 'resume_unknown' || storeMsg.code === 'resume_unknown_exhausted')
+    ) {
       return (
         <ResumeUnknownChip
+          variant={storeMsg.code === 'resume_unknown_exhausted' ? 'exhausted' : 'recoverable'}
           errorText={storeMsg.content}
           attemptedResumeId={storeMsg.attemptedResumeId}
         />
