@@ -1326,6 +1326,54 @@ describe('DockerByokSession — snapshot / restore (#5023)', () => {
 
     await session.destroy()
   })
+
+  it('snapshotImage opt bypasses pool acquire — always launches fresh from the snapshot tag', async () => {
+    // Regression: pre-fix, _acquireOrStartContainer would call
+    // _pool.acquire() even when snapshotImage was set. A pool hit
+    // (matching the resource key — image/cwd/memory/cpu/user) returned
+    // a stock container and _startContainer() never ran, so the
+    // snapshot tag was silently ignored AND the recycled container's
+    // writable layer (unrelated auth/scratch) leaked in.
+    const runCalls = []
+    const _execFile = (cmd, args, opts, callback) => {
+      const sub = args[0]
+      if (sub === 'info') return callback(null, 'ok', '')
+      if (sub === 'run') {
+        runCalls.push([...args])
+        return callback(null, 'CONTAINER_FRESH_FROM_SNAP\n', '')
+      }
+      if (sub === 'exec') return callback(null, '', '')
+      if (sub === 'rm') return callback(null, '', '')
+      callback(null, '', '')
+    }
+    // Pool would happily return POOLED_STOCK_CID for this session's
+    // resource shape — if the bypass guard ever regresses, this stub
+    // makes the regression load-bearing.
+    const pool = poolStubWithSoiling({ acquireReturn: 'POOLED_STOCK_CID' })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      _pool: pool,
+      snapshotImage: 'chroxy-byok-snap:bypass-test',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // The pool MUST NOT have been asked for a container — restore is
+    // not poolable.
+    assert.equal(pool.calls.acquire.length, 0, 'pool.acquire() must not be called when snapshotImage is set')
+    // Docker run fired with the snapshot tag as the image.
+    assert.equal(runCalls.length, 1)
+    const runArgs = runCalls[0]
+    const imageIdx = runArgs.length - 3
+    assert.equal(runArgs[imageIdx], 'chroxy-byok-snap:bypass-test')
+    // And the active container id is the freshly-launched one, NOT the
+    // pool's would-be hit.
+    assert.equal(session._containerId, 'CONTAINER_FRESH_FROM_SNAP')
+
+    await session.destroy()
+  })
 })
 
 describe('docker-byok provider registration', () => {

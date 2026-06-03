@@ -527,15 +527,20 @@ export class DockerByokSession extends ClaudeByokSession {
    * Best-effort, sync I/O: we hold a docker tag whether or not the
    * sidecar JSON lands. The mkdir is recursive so a brand-new
    * `~/.chroxy/snapshots/` is created on demand.
+   *
+   * The file is created with restrictive perms (0600 — owner read/
+   * write only, dir 0700) because the metadata embeds host paths and
+   * optionally `sourceSessionId`. This matches the posture other
+   * `$CHROXY_CONFIG_DIR` state files use (session-state, credentials).
    */
   _persistSnapshotMetadata(tag, metadata) {
-    mkdirSync(this._snapshotsDir, { recursive: true })
+    mkdirSync(this._snapshotsDir, { recursive: true, mode: 0o700 })
     // Tag is `chroxy-byok-snap:<rand>-<ts>` — split on ':' to get the
     // filename-safe slug. Defensive replace in case a custom tag ever
     // surfaces here.
     const slug = tag.split(':').pop().replace(/[^a-zA-Z0-9_.-]/g, '_')
     const filePath = join(this._snapshotsDir, `${slug}.json`)
-    writeFileSync(filePath, JSON.stringify(metadata, null, 2) + '\n', 'utf-8')
+    writeFileSync(filePath, JSON.stringify(metadata, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 })
   }
 
   /**
@@ -548,9 +553,18 @@ export class DockerByokSession extends ClaudeByokSession {
    * #5022 — across-session idle pool. Per-session reuse of the same
    * container across turns is handled in `_dispatchBuiltinTool` and
    * does not depend on the pool.
+   *
+   * #5023 — when `_snapshotImage` is set the pool is BYPASSED. The
+   * pool key derives from `_image`, not `_snapshotImage`, so a hit
+   * would hand back a stock container and `_startContainer()` would
+   * never run — the snapshot tag would be silently ignored. Worse,
+   * the recycled container's writable layer (auth, scratch state) is
+   * unrelated to the snapshot the caller asked to restore. Restored
+   * containers are auto-soiled anyway so they can't return to the
+   * pool — skipping the acquire path is the consistent move.
    */
   async _acquireOrStartContainer() {
-    if (this._pool) {
+    if (this._pool && !this._snapshotImage) {
       const key = this._poolKey()
       const reused = this._pool.acquire(key)
       if (reused) {
