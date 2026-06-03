@@ -18,6 +18,9 @@ import {
   persistSidebarPanelCollapsed,
 } from '../store/persistence'
 import { moveItem, orderToIds } from '../utils/reorderById'
+import { useShortcutRegistry } from '../shortcuts/useShortcutRegistry'
+import { formatBindingForDisplay } from '../shortcuts/registry'
+import { isMacPlatform } from '../utils/platform'
 
 export interface ActiveSessionNode {
   sessionId: string
@@ -135,6 +138,15 @@ export function Sidebar({
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [focusedIndex, setFocusedIndex] = useState(0)
   const treeRef = useRef<HTMLDivElement>(null)
+  // #4972 — Sidebar reorder ladder now consults the registry so a user
+  // rebind in Settings actually changes runtime behaviour. The aria-
+  // keyshortcuts attribute also reads from the registry so screen
+  // readers announce the effective binding instead of the hardcoded
+  // default. The hook re-renders on every binding change.
+  const shortcutRegistry = useShortcutRegistry()
+  const reorderUpBinding = shortcutRegistry.getBinding('sidebar.reorder.up')
+  const reorderDownBinding = shortcutRegistry.getBinding('sidebar.reorder.down')
+  const reorderAriaKeyshortcuts = `${formatBindingForDisplay(reorderUpBinding, isMacPlatform())} ${formatBindingForDisplay(reorderDownBinding, isMacPlatform())}`
 
   // #4303 — sidebar panel slot state. Initialized from localStorage via
   // props so SSR / tests stay deterministic. Each setter mirrors to
@@ -368,18 +380,25 @@ export function Sidebar({
       // visible subset, silently shuffling hidden repos relative to each
       // other. Disable the keyboard reorder shortcut while filtering too.
       if (filter) return false
-      if (!event.altKey) return false
-      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return false
+      // #4972 — match via registry so a user rebind in Settings actually
+      // changes the runtime keys. The direction is derived from the
+      // matched id, not from event.key, so a rebind like cmd+j/cmd+k
+      // works as well as the default alt+arrowup/down.
+      const matched = shortcutRegistry.matchEvent(event as unknown as KeyboardEvent, 'global')
+      const dir = matched === 'sidebar.reorder.up' ? -1
+        : matched === 'sidebar.reorder.down' ? 1
+        : 0
+      if (dir === 0) return false
       const paths = filteredRepos.map(r => r.path)
       const idx = paths.indexOf(path)
       if (idx < 0) return false
-      const target = event.key === 'ArrowUp' ? idx - 1 : idx + 1
+      const target = idx + dir
       if (target < 0 || target >= paths.length) return true // swallow, no-op at edges
       const next = moveItem(paths, idx, target)
       onReorderRepos(next)
       return true
     },
-    [onReorderRepos, filteredRepos, filter],
+    [onReorderRepos, filteredRepos, filter, shortcutRegistry],
   )
 
   const handleSessionReorderKey = useCallback(
@@ -388,20 +407,24 @@ export function Sidebar({
       // Same rationale as handleRepoReorderKey: filtered subset would
       // produce a partial persisted order.
       if (filter) return false
-      if (!event.altKey) return false
-      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return false
+      // #4972 — match via registry; see handleRepoReorderKey rationale.
+      const matched = shortcutRegistry.matchEvent(event as unknown as KeyboardEvent, 'global')
+      const dir = matched === 'sidebar.reorder.up' ? -1
+        : matched === 'sidebar.reorder.down' ? 1
+        : 0
+      if (dir === 0) return false
       const repo = filteredRepos.find(r => r.path === repoPath)
       if (!repo) return false
       const ids = orderToIds(repo.activeSessions, s => s.sessionId)
       const idx = ids.indexOf(sessionId)
       if (idx < 0) return false
-      const target = event.key === 'ArrowUp' ? idx - 1 : idx + 1
+      const target = idx + dir
       if (target < 0 || target >= ids.length) return true
       const next = moveItem(ids, idx, target)
       onReorderSessions(repoPath, next)
       return true
     },
-    [onReorderSessions, filteredRepos, filter],
+    [onReorderSessions, filteredRepos, filter, shortcutRegistry],
   )
 
   // Resize handle drag logic
@@ -637,8 +660,12 @@ export function Sidebar({
                   // AND no filter active) so the announced shortcut
                   // doesn't lie when the row isn't actually reorderable.
                   // The space-separated multi-combo format follows the
-                  // WAI-ARIA spec (`Alt+ArrowUp Alt+ArrowDown`).
-                  aria-keyshortcuts={!!onReorderRepos && !filter ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+                  // WAI-ARIA spec.
+                  //
+                  // #4972: built from the registry's effective binding so a
+                  // user rebind in Settings flows through to the SR
+                  // announcement, not just the cheat sheet.
+                  aria-keyshortcuts={!!onReorderRepos && !filter ? reorderAriaKeyshortcuts : undefined}
                   // #4372: bind onContextMenu on the outer treeitem (not the
                   // inner .sidebar-repo-header) so that App's handler can
                   // call `event.currentTarget.focus()` on a focusable element.
@@ -724,7 +751,7 @@ export function Sidebar({
                             // above — same rationale (discoverability for
                             // assistive tech, only set when the shortcut
                             // is functionally wired on this row).
-                            aria-keyshortcuts={!!onReorderSessions && !filter ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+                            aria-keyshortcuts={!!onReorderSessions && !filter ? reorderAriaKeyshortcuts : undefined}
                             onClick={() => onSessionClick(session.sessionId)}
                             onContextMenu={e => {
                               // #4372: stopPropagation so the right-click
