@@ -1923,10 +1923,16 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
     // Idempotent — only stamp entries that have not already been acked, so a
     // server-driven resolution arriving after the operator already marked the
     // row read via the widget can't clobber the original ack timestamp.
+    //
+    // Hoist `Date.now()` out of the `.map(...)` so every matching row in this
+    // mutation shares a single timestamp. Matches the existing pattern at
+    // connection.ts:2167 (`switchReadStamp`) and connection.ts:2461
+    // (`markAllSessionNotificationsRead`).
+    const readStamp = Date.now();
     set((s) => ({
       sessionNotifications: s.sessionNotifications.map((n) =>
         n.requestId === resolvedRequestId && n.readAt === undefined
-          ? { ...n, readAt: Date.now() }
+          ? { ...n, readAt: readStamp }
           : n
       ),
     }));
@@ -2914,11 +2920,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // #5008 — drain the banner stack without dropping the row from the
           // widget's durable history. See handlePermissionResolved for the
           // full rationale; this branch handles the #2833 race where expiry
-          // arrives after we already resolved locally.
+          // arrives after we already resolved locally. Single timestamp per
+          // mutation — see handlePermissionResolved for the pattern source.
+          const readStamp = Date.now();
           set((s) => ({
             sessionNotifications: s.sessionNotifications.map((n) =>
               n.requestId === expiredRequestId && n.readAt === undefined
-                ? { ...n, readAt: Date.now() }
+                ? { ...n, readAt: readStamp }
                 : n
             ),
           }));
@@ -2943,11 +2951,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // matching row read; the banner filter (`readAt === undefined`)
         // drops it and the widget keeps the entry as part of its durable
         // intervention history. Updates the original #1580 auto-dismiss
-        // contract from "remove" to "mark-read-and-keep".
+        // contract from "remove" to "mark-read-and-keep". Single timestamp
+        // per mutation — see handlePermissionResolved for the pattern source.
+        const readStamp = Date.now();
         set((s) => ({
           sessionNotifications: s.sessionNotifications.map((n) =>
             n.requestId === expiredRequestId && n.readAt === undefined
-              ? { ...n, readAt: Date.now() }
+              ? { ...n, readAt: readStamp }
               : n
           ),
         }));
