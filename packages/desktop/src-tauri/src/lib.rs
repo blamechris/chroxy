@@ -671,6 +671,29 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             { Mutex::new(()) }
         })
+        .on_menu_event(|app, event| {
+            // #4695 — app-menu (macOS menu bar) item dispatch. Tray menu
+            // events are handled by their own builder-scoped closure
+            // (`on_menu_event` in build_tray_menu). The two surfaces
+            // intentionally use disjoint id namespaces:
+            //   - tray:    "start", "stop", "dashboard", …
+            //   - app-menu: "app_menu:<action>" (this match)
+            // The `app_menu:` prefix means stray cross-fires would
+            // simply no-op rather than accidentally invoke the wrong
+            // tray handler. The actual side effect is event emission —
+            // the dashboard's useTauriMenuEvents listener invokes the
+            // matching command (so menu items and command palette
+            // entries share one handler).
+            let id = event.id().as_ref();
+            if let Some(action) = id.strip_prefix("app_menu:") {
+                let event_name = format!("menu://{}", action);
+                let _ = app.emit(&event_name, ());
+                // Make sure the main window is foregrounded so the user
+                // sees the dashboard react (otherwise a menu click with
+                // the window minimized would silently no-op).
+                window::show_window(app);
+            }
+        })
         .setup(|app| {
             // App menu bar — required for macOS Sequoia window tiling keyboard shortcuts.
             // macOS routes fn+ctrl+arrow through the Window menu's "Move & Resize" items.
@@ -682,6 +705,22 @@ pub fn run() {
                     .about(Some(AboutMetadata::default()))
                     .separator()
                     .quit()
+                    .build()?;
+                // #4695 — File menu. v1 ships with a single item ("New
+                // Session") so the most-used action has a menu-bar entry
+                // matching Terminal.app / iTerm / VS Code muscle memory.
+                // Follow-up issue tracks the rest of the proposed
+                // submenu layout (Shell / View / Tunnel / Help — see
+                // #4695). The accelerator is `Cmd+N`, matching the
+                // dashboard's `session.new` shortcut definition; macOS
+                // routes the chord through the menu bar first when one
+                // is installed, so this entry also serves as the system-
+                // level Cmd+N hint.
+                let new_session_item = MenuItemBuilder::with_id("app_menu:new-session", "New Session")
+                    .accelerator("CmdOrCtrl+N")
+                    .build(app)?;
+                let file_menu = SubmenuBuilder::new(app, "File")
+                    .item(&new_session_item)
                     .build()?;
                 let edit_menu = SubmenuBuilder::new(app, "Edit")
                     .undo()
@@ -698,6 +737,7 @@ pub fn run() {
                     .build()?;
                 let menu = MenuBuilder::new(app)
                     .item(&app_menu)
+                    .item(&file_menu)
                     .item(&edit_menu)
                     .item(&window_menu)
                     .build()?;
