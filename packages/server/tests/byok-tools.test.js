@@ -9,9 +9,9 @@ import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES } fr
  */
 
 describe('BUILTIN_TOOLS', () => {
-  it('exposes the documented toolset (PR 2 v1 + WebFetch #4050 + TodoWrite #4051)', () => {
+  it('exposes the documented toolset (PR 2 v1 + WebFetch #4050 + TodoWrite #4051 + Task #4049)', () => {
     const names = BUILTIN_TOOLS.map((t) => t.name).sort()
-    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'TodoWrite', 'WebFetch', 'Write'])
+    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Task', 'TodoWrite', 'WebFetch', 'Write'])
   })
 
   it('every tool has a name, description, and input_schema', () => {
@@ -97,5 +97,29 @@ describe('BUILTIN_TOOLS', () => {
       assert.ok(TODO_STATUSES.has(status), `TODO_STATUSES Set must include ${status}`)
     }
     assert.equal(TODO_STATUSES.size, TODO_STATUS_LIST.length)
+  })
+
+  it('Task requires description and prompt (#4049)', () => {
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.ok(task, 'Task must be registered')
+    assert.deepEqual(task.input_schema.required.sort(), ['description', 'prompt'])
+    // subagent_type is forward-compat but optional in v1.
+    assert.equal(task.input_schema.properties.subagent_type?.type, 'string')
+  })
+
+  it('Task description discloses subagent semantics + cancellation cascade (#4049)', () => {
+    // Pin the contract so a future rewording can't strip the
+    // user-facing guarantees (focused scope, isolated history,
+    // cancellation cascade, cost attribution).
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.match(task.description, /sub-?agent|subagent/i)
+    assert.match(task.description, /isolated|focused|fresh/i)
+    assert.match(task.description, /cancel|interrupt|abort/i)
+    assert.match(task.description, /cost|token/i)
+  })
+
+  it('BUILTIN_TOOL_NAMES contains Task (#4049)', () => {
+    assert.ok(BUILTIN_TOOL_NAMES.has('Task'),
+      'Task must be in BUILTIN_TOOL_NAMES so the executor catches misrouted dispatches')
   })
 })

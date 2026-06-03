@@ -10,7 +10,6 @@
  * the SDK consumes them as Anthropic API tool definitions.
  *
  * Deferred to follow-up issues (see #4047 epic):
- *   - Task (subagent) — #4049
  *   - MCP — #4048
  */
 
@@ -151,6 +150,38 @@ export const BUILTIN_TOOLS = [
         },
       },
       required: ['todos'],
+    },
+  },
+  {
+    name: 'Task',
+    description:
+      'Spawn a focused sub-agent (subagent) to handle a delegated piece of work. The ' +
+      'sub-agent runs as a fresh ClaudeByokSession with its own isolated message history, ' +
+      'inheriting this session\'s permission mode and cwd. Use it to: research a topic without ' +
+      'polluting the parent context, run multi-step work in a focused scope, or delegate a ' +
+      'task that needs its own tool budget. The sub-agent\'s final assistant text is returned ' +
+      'as the tool_result — intermediate tool calls happen inside the child and are NOT ' +
+      'surfaced to the parent (only `agent_spawned` / `agent_completed` events fire). ' +
+      'Token cost is accumulated into the parent turn\'s `result.cost` so accounting stays ' +
+      'attributed to the user-facing session. ' +
+      'Cancellation: interrupting the parent cascades to the child via a shared AbortSignal.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        description: {
+          type: 'string',
+          description: 'Short (3-5 word) description of the task. Surfaced as the sub-agent label in the UI.',
+        },
+        prompt: {
+          type: 'string',
+          description: 'Full task prompt sent to the sub-agent as its initial user message.',
+        },
+        subagent_type: {
+          type: 'string',
+          description: 'Optional subagent profile id (e.g. "general", "researcher"). Currently informational only — ignored by the runner in v1.',
+        },
+      },
+      required: ['description', 'prompt'],
     },
   },
   {
