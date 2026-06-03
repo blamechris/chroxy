@@ -3315,6 +3315,93 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    it('surfaces subagent cost on parent error-path turns (#5020)', async () => {
+      // Pin the #5020 contract: when the parent's overall turn errors AFTER
+      // a subagent already ran, the user is still billed for the child's
+      // API calls — those must surface in the parent's STREAM_ERROR event
+      // payload so the user can see what the failed turn cost.
+      //
+      // Pre-#5020: error event carried only { code, message } — child cost
+      // was silently dropped at _finishTurn reset.
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      session.setPermissionMode('auto')
+      const captured = captureEvents(session)
+      let parentRound = 0
+      let childInFlight = false
+      session._client = {
+        messages: {
+          stream: () => {
+            // If a child session is live, return the child's stream.
+            if (childInFlight) {
+              return fakeStream(
+                [],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'child finished' }],
+                  usage: { input_tokens: 2000, output_tokens: 800 },
+                },
+              )
+            }
+            parentRound += 1
+            if (parentRound === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_task_err', name: 'Task', input: { description: 'd', prompt: 'do work' } }],
+                  usage: { input_tokens: 10, output_tokens: 10 },
+                },
+              )
+            }
+            // Parent's round 2 (after child has run) — throw to drive the
+            // STREAM_ERROR path. This is the bug surface: the child's
+            // usage is already in _subagentUsageThisTurn but the catch
+            // block never folds it in before _finishTurn resets.
+            throw new Error('upstream blew up on round 2')
+          },
+        },
+      }
+      // Wrap _executeTaskTool to flip the childInFlight flag while the
+      // child's stream runs (the child shares the parent's client).
+      const origExecute = session._executeTaskTool.bind(session)
+      session._executeTaskTool = async function (args) {
+        childInFlight = true
+        try { return await origExecute(args) }
+        finally { childInFlight = false }
+      }
+      await session.start()
+      await session.sendMessage('delegate then fail')
+
+      const errs = captured.filter((e) => e.name === 'error')
+      const streamErr = errs.find((e) => e.payload?.code === 'STREAM_ERROR')
+      assert.ok(streamErr, 'STREAM_ERROR must fire on parent round-2 failure')
+      // The parent's round-1 usage (10in/10out) + child's usage
+      // (2000in/800out) MUST be surfaced on the error event so the user
+      // sees what the failed turn cost. Round 2 never completed so its
+      // usage is 0 (no finalMessage to read from).
+      assert.ok(streamErr.payload.usage, 'STREAM_ERROR must carry partial usage')
+      assert.equal(streamErr.payload.usage.input_tokens, 2010,
+        'parent round-1 input + child input fold into error event')
+      assert.equal(streamErr.payload.usage.output_tokens, 810,
+        'parent round-1 output + child output fold into error event')
+      // Cost (Opus 4.7): (2010 * 15 + 810 * 75) / 1e6
+      const expectedCost = (2010 * 15 + 810 * 75) / 1e6
+      assert.ok(typeof streamErr.payload.cost === 'number',
+        'STREAM_ERROR must carry partial cost')
+      assert.ok(Math.abs(streamErr.payload.cost - expectedCost) < 1e-9,
+        `expected partial cost ~= ${expectedCost}, got ${streamErr.payload.cost}`)
+      // No result event fires on the error path — usage/cost surface
+      // exclusively via the error event.
+      assert.equal(captured.filter((e) => e.name === 'result').length, 0,
+        'no result event on error path')
+      // Accumulators must reset for the next turn (existing #4049 contract).
+      assert.equal(session._subagentCostThisTurn, 0,
+        'subagent cost accumulator resets after the failed turn')
+      assert.equal(session._subagentUsageThisTurn.input_tokens, 0,
+        'subagent usage accumulator resets after the failed turn')
+      await session.destroy()
+    })
+
     it('parent interrupt cascades to child subagent', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')

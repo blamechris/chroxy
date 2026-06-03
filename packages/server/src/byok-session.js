@@ -862,8 +862,23 @@ export class ClaudeByokSession extends BaseSession {
       if (this._history.length > historyLengthBeforeSend) {
         this._history.length = historyLengthBeforeSend
       }
+      // #5020: fold any subagent (Task tool) usage + cost into the
+      // partial turn totals BEFORE the error fires so the user sees
+      // what the failed turn cost. Without this fold the child's
+      // tokens are silently dropped at _finishTurn reset even though
+      // the user is still billed for them. Mirrors the success-path
+      // fold above; the partial totals reflect every completed parent
+      // round + every completed child API call before the failure.
+      turnUsage.input_tokens += this._subagentUsageThisTurn.input_tokens
+      turnUsage.output_tokens += this._subagentUsageThisTurn.output_tokens
+      turnUsage.cache_read_input_tokens += this._subagentUsageThisTurn.cache_read_input_tokens
+      turnUsage.cache_creation_input_tokens += this._subagentUsageThisTurn.cache_creation_input_tokens
+      turnCost += this._subagentCostThisTurn
       this.emit('stream_end', { messageId })
-      this._emitTurnError(messageId, err, 'STREAM_ERROR')
+      this._emitTurnError(messageId, err, 'STREAM_ERROR', {
+        usage: turnUsage,
+        cost: turnCost,
+      })
     } finally {
       // #4080: per-turn isolation guarantee. The per-round clear after
       // finalMessage() above runs on the success path; an iteration or
@@ -1421,7 +1436,7 @@ export class ClaudeByokSession extends BaseSession {
     }
   }
 
-  _emitTurnError(messageId, err, fallbackCode) {
+  _emitTurnError(messageId, err, fallbackCode, partials) {
     // #4057: SDK v0.81+ throws `APIUserAbortError` (not the generic
     // `AbortError`) when an in-flight messages.stream sees its signal
     // aborted. Primary check is `instanceof` — the SDK class itself
@@ -1431,6 +1446,15 @@ export class ClaudeByokSession extends BaseSession {
     // (the SDK's own internal abort helper uses this convention). The
     // signal.aborted fallback catches paths where the SDK swallowed
     // the original error and re-threw something we don't recognise.
+    //
+    // #5020: `partials` carries the parent's completed-round usage +
+    // cost (already folded with any subagent Task tool spend). Surface
+    // it on every error path — ABORT and STREAM_ERROR alike — so the
+    // user can see what the failed turn cost. The error envelope schema
+    // is `.passthrough()` (ServerErrorEnvelopeSchema, protocol/server.ts)
+    // so additional fields propagate without a wire-side schema change.
+    // Optional / undefined-safe: pre-#5020 call sites pass nothing and
+    // the fields are simply absent on the event payload.
     const aborted =
       err instanceof APIUserAbortError ||
       err?.name === 'AbortError' ||
@@ -1440,12 +1464,18 @@ export class ClaudeByokSession extends BaseSession {
         messageId,
         message: 'Interrupted by user',
         code: 'ABORT',
+        ...(partials ? { usage: partials.usage, cost: partials.cost } : {}),
       })
       return
     }
     const code = err?.status ? `HTTP_${err.status}` : (err?.code || fallbackCode)
     const message = err?.message || String(err)
-    this.emit('error', { messageId, message, code })
+    this.emit('error', {
+      messageId,
+      message,
+      code,
+      ...(partials ? { usage: partials.usage, cost: partials.cost } : {}),
+    })
   }
 
   _finishTurn() {
