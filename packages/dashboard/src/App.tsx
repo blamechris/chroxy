@@ -33,6 +33,7 @@ import { SessionBar, type SessionTabData, type SessionStatus } from './component
 import { StatusBar } from './components/StatusBar'
 import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
 import { SkillsPanel } from './components/SkillsPanel'
+import { HeaderOverflowMenu, type HeaderOverflowItem } from './components/HeaderOverflowMenu'
 import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
 import { QuestionPrompt } from './components/QuestionPrompt'
@@ -1977,46 +1978,54 @@ export function App() {
             <span className="chrome-new-session-icon" aria-hidden="true">+</span>
             <span className="chrome-new-session-label">New Session</span>
           </button>
-          {/* #3209: Skills toggle, moved to header-right as an icon
-              button. Was previously a text button in header-center
-              where it competed for space with the model dropdown. */}
-          <button
-            type="button"
-            className="header-icon-btn"
-            data-testid="btn-toggle-skills-panel"
-            onClick={() => {
-              setSkillsPanelOpen(prev => {
-                const next = !prev
-                if (next) requestListSkills()
-                return next
-              })
-            }}
-            aria-label="Skills"
-            title="Skills"
-          >
-            &#129513;
-          </button>
-          {viewMode === 'chat' && storeMessages.length > 0 && (
-            <button
-              className="header-icon-btn"
-              onClick={handleCopyTranscript}
-              aria-label="Copy chat transcript"
-              data-testid="btn-copy-transcript"
-              title={transcriptCopied ? 'Copied!' : `Copy transcript (${formatShortcutKeys('Cmd+Shift+T')})`}
-              type="button"
-            >
-              {transcriptCopied ? '✓' : '⎘'}
-            </button>
-          )}
-          <button
-            className="header-icon-btn"
-            onClick={() => setSettingsOpen(true)}
-            aria-label="Settings"
-            title={`Settings (${formatShortcutKeys('Cmd+,')})`}
-            type="button"
-          >
-            &#9881;
-          </button>
+          {/* #4974: Skills / Copy / Settings collapsed behind a single
+              "⋯" overflow trigger. Previously these three icon buttons
+              lived inline in header-right alongside `+ New Session` and
+              the StatusBar, which at ≤1400px widths overlapped the
+              model selector chevron in header-center. Each item keeps
+              its existing handler, aria-label, and data-testid via the
+              HeaderOverflowMenu's `items[]` (testids still discoverable
+              from inside the open menu so the existing test coverage
+              for the underlying actions continues to apply).
+              The filter pattern (truthy `onClick`) mirrors the
+              SessionContextMenu capability gate — Copy is only present
+              when the chat view is active and has at least one
+              message, so the dropdown grows/shrinks naturally without
+              dead rows. */}
+          {(() => {
+            const overflowItems: HeaderOverflowItem[] = [
+              {
+                id: 'skills',
+                label: 'Skills',
+                icon: '\u{1F9E9}',
+                title: 'Skills',
+                onClick: () => {
+                  setSkillsPanelOpen(prev => {
+                    const next = !prev
+                    if (next) requestListSkills()
+                    return next
+                  })
+                },
+              },
+              viewMode === 'chat' && storeMessages.length > 0
+                ? {
+                    id: 'copy-transcript',
+                    label: transcriptCopied ? 'Transcript copied' : 'Copy transcript',
+                    icon: transcriptCopied ? '✓' : '⎘',
+                    title: transcriptCopied ? 'Copied!' : `Copy transcript (${formatShortcutKeys('Cmd+Shift+T')})`,
+                    onClick: handleCopyTranscript,
+                  }
+                : { id: 'copy-transcript', label: 'Copy transcript' },
+              {
+                id: 'settings',
+                label: 'Settings',
+                icon: '⚙',
+                title: `Settings (${formatShortcutKeys('Cmd+,')})`,
+                onClick: () => setSettingsOpen(true),
+              },
+            ]
+            return <HeaderOverflowMenu items={overflowItems} />
+          })()}
           <StatusBar
             cost={sessionCost ?? undefined}
             context={formatContext(contextUsage)}
