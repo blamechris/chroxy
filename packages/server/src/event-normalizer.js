@@ -145,6 +145,24 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #5016: nested-sub-bubble support — a Task subagent's intermediate
+  // wire event (tool_start / tool_result / tool_input_delta /
+  // stream_delta) re-emitted by the parent under `agent_event` so the
+  // dashboard renders it inside the parent's Task tool_call bubble.
+  // `parentToolUseId` is the parent's tool_use id (same key used by
+  // agent_spawned / agent_completed). `eventType` is the child's
+  // original event name. `payload` is the verbatim child event payload.
+  agent_event: (data) => ({
+    messages: [{
+      msg: {
+        type: 'agent_event',
+        parentToolUseId: data.parentToolUseId,
+        eventType: data.type,
+        payload: data.payload ?? {},
+      },
+    }],
+  }),
+
   // #4307: pending-background-shells snapshot changed for a session.
   // BaseSession emits this on both push (run_in_background tool_result
   // observed) and clear (BashOutput tool_use observed). Full snapshot

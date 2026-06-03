@@ -157,6 +157,34 @@ export interface ChatMessage {
    * the banner from the cached metadata.
    */
   evaluator?: EvaluatorRewriteMeta;
+  /**
+   * #5016 — Task subagent child progress, attached to the parent's
+   * `tool_use` (Task) bubble. Each entry is one wire event the child
+   * emitted (re-emitted by the parent as `agent_event` and routed back
+   * to the parent bubble by `handleAgentEvent`). Renderers iterate this
+   * list to surface nested sub-bubbles inside the Task tool_call.
+   *
+   * Only set on `type: 'tool_use'` bubbles whose `toolUseId` matches a
+   * Task tool_use whose subagent emitted at least one progress event.
+   * Undefined for all other bubbles and for Task tool_use bubbles whose
+   * child finished without intermediate output (rare — child went
+   * straight from spawn to final text in one shot).
+   */
+  childAgentEvents?: ChildAgentEvent[];
+}
+
+/**
+ * #5016 — One nested wire event emitted by a Task subagent. Kept
+ * shape-loose because the underlying payload mirrors the server's
+ * `tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`
+ * event shapes, and a strict union here would duplicate that surface.
+ * Renderers switch on `type` and access the fields they recognise.
+ */
+export interface ChildAgentEvent {
+  /** Wire event name (`'tool_start'`, `'tool_result'`, `'tool_input_delta'`, `'stream_delta'`). */
+  type: string;
+  /** Verbatim payload from the child's event (shape depends on `type`). */
+  payload: Record<string, unknown>;
 }
 
 export interface SavedConnection {

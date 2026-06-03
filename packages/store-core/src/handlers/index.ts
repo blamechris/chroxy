@@ -2923,6 +2923,93 @@ export function handleAgentCompleted(
 }
 
 // ---------------------------------------------------------------------------
+// #5016 — agent_event (Task subagent nested progress)
+//
+// Server forwards each child wire event (tool_start / tool_result /
+// tool_input_delta / stream_delta) as `agent_event{parentToolUseId,
+// eventType, payload}`. This handler resolves the target session and
+// returns a builder that appends the event to the parent Task `tool_use`
+// bubble's `childAgentEvents[]`. Renderers iterate the list to surface
+// nested sub-bubbles inside the Task tool_call.
+//
+// Coalescing: `stream_delta` events are appended verbatim — the
+// renderer concatenates contiguous deltas per messageId. We don't
+// coalesce in the handler because the child's stream may carry
+// multiple distinct `messageId`s across rounds within one Task, and
+// the renderer is the source of truth for grouping by id.
+// ---------------------------------------------------------------------------
+
+/** Builder result for `agent_event` — patch depends on the existing message list. */
+export interface AgentEventBuilder {
+  sessionId: string | null
+  /**
+   * Apply the builder to the session's current chat-message list.
+   * Returns the same reference when no matching parent bubble is
+   * present (event arrives before the Task tool_use is registered —
+   * extremely rare given the server's ordering guarantee that
+   * tool_start fires before any nested agent_event, but defended
+   * for robustness against test stubs and replay paths).
+   */
+  applyTo: (current: ChatMessage[]) => ChatMessage[]
+}
+
+/**
+ * Resolve target session and produce a builder that appends one nested
+ * child wire event to the parent Task tool_use bubble's
+ * `childAgentEvents[]`.
+ *
+ * Missing / non-string `parentToolUseId` is a no-op (returns same
+ * reference). Missing / non-string `eventType` is also a no-op — the
+ * downstream renderer keys on `type`, and a bubble with `type: ''`
+ * would render nothing useful while still bloating state.
+ *
+ * `payload` is normalised to `{}` when missing / non-object so the
+ * `ChildAgentEvent.payload` field stays a stable plain object shape.
+ * Arrays and primitives are rejected (treated as `{}`) — payloads
+ * from the server are always objects.
+ *
+ * No-op when the parent bubble is absent: the event is dropped on the
+ * floor. We deliberately do NOT buffer pending events for a parent
+ * that hasn't arrived yet — the server's ordering guarantees that the
+ * parent's `tool_start` (which creates the bubble) fires before any
+ * nested `agent_event` carrying its `toolUseId`. If that invariant
+ * breaks in future, the symptom is a missing sub-bubble (visible to
+ * users), not data corruption.
+ */
+export function handleAgentEvent(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): AgentEventBuilder {
+  const parentToolUseId = typeof msg.parentToolUseId === 'string'
+    ? msg.parentToolUseId
+    : null
+  const eventType = typeof msg.eventType === 'string' && msg.eventType
+    ? msg.eventType
+    : null
+  const rawPayload = msg.payload
+  const payload: Record<string, unknown> =
+    rawPayload !== null
+    && typeof rawPayload === 'object'
+    && !Array.isArray(rawPayload)
+      ? (rawPayload as Record<string, unknown>)
+      : {}
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    applyTo: (current) => {
+      if (!parentToolUseId || !eventType) return current
+      let mutated = false
+      const next = current.map((m) => {
+        if (m.type !== 'tool_use' || m.toolUseId !== parentToolUseId) return m
+        mutated = true
+        const nextEvents = [...(m.childAgentEvents || []), { type: eventType, payload }]
+        return { ...m, childAgentEvents: nextEvents }
+      })
+      return mutated ? next : current
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // #4307 — background_work_changed
 //
 // Snapshot-replacement: each event carries the full pending list for the

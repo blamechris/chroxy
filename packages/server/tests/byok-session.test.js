@@ -3938,6 +3938,146 @@ describe('ClaudeByokSession', () => {
     })
   })
 
+  describe('Task subagent nested progress events (#5016)', () => {
+    /**
+     * Build a parent that emits a single Task tool_use. Once the child
+     * is registered we manually drive its EventEmitter via the captured
+     * reference so we can simulate the child emitting tool_start /
+     * tool_input_delta / tool_result / stream_delta without having to
+     * stand up a second full agent loop. The parent's `_executeTaskTool`
+     * subscribes to those child events and re-emits `agent_event` —
+     * which is what these tests exercise.
+     */
+    async function runTaskAndDriveChild(driveChild) {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      // Force-allow any parent permission check (mirrors the override
+      // tests). These cases focus on event forwarding inside
+      // _executeTaskTool; permission gating is exercised elsewhere.
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = []
+      session.on('agent_event', (e) => captured.push(e))
+      session.on('agent_spawned', (e) => captured.push({ ...e, _name: 'agent_spawned' }))
+      session.on('agent_completed', (e) => captured.push({ ...e, _name: 'agent_completed' }))
+      // Replace the child-construction step so we can grab the child
+      // reference + control its `sendMessage` to deterministically emit
+      // a sequence of intermediate events, then resolve.
+      let childRef = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        childRef = v
+        // Stub child.sendMessage to drive the simulated child events,
+        // then emit `result` (which causes _executeTaskTool's done
+        // promise to resolve and finalise the parent's tool_result).
+        v.sendMessage = async () => {
+          await driveChild(v)
+          v.emit('result', {
+            messageId: 'cm_1',
+            usage: { input_tokens: 10, output_tokens: 20 },
+            cost: 0,
+          })
+          v.emit('stream_end', { messageId: 'cm_1' })
+          v._isBusy = false
+        }
+        return origSet(k, v)
+      }
+      // Stub parent's client to emit Task once then end-turn.
+      let parentRound = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            parentRound += 1
+            if (parentRound === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_task_5016', name: 'Task', input: { description: 'd', prompt: 'p' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('go')
+      await session.destroy()
+      return { captured, childRef }
+    }
+
+    it('re-emits child tool_start/tool_input_delta/tool_result as agent_event tagged with parentToolUseId', async () => {
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('tool_start', { messageId: 'cm_1', toolUseId: 'tu_child_read', tool: 'Read', input: { file_path: '/tmp/x.txt' } })
+        child.emit('tool_input_delta', { messageId: 'cm_1', toolUseId: 'tu_child_read', partialJson: '{"file_path":' })
+        child.emit('tool_input_delta', { messageId: 'cm_1', toolUseId: 'tu_child_read', partialJson: '"/tmp/x.txt"}' })
+        child.emit('tool_result', { messageId: 'cm_1', toolUseId: 'tu_child_read', result: 'hello\nfrom child', isError: false })
+      })
+      const events = captured.filter((e) => e.parentToolUseId)
+      assert.ok(events.length >= 4, `expected >=4 agent_events, got ${events.length}`)
+      // Each event carries the parent's toolUseId, the child's wire
+      // event name, and the verbatim child payload.
+      assert.ok(events.every((e) => e.parentToolUseId === 'tu_task_5016'),
+        'every agent_event must carry the parent toolUseId')
+      const toolStart = events.find((e) => e.type === 'tool_start')
+      assert.ok(toolStart)
+      assert.equal(toolStart.payload.toolUseId, 'tu_child_read')
+      assert.equal(toolStart.payload.tool, 'Read')
+      const toolResult = events.find((e) => e.type === 'tool_result')
+      assert.ok(toolResult)
+      assert.equal(toolResult.payload.toolUseId, 'tu_child_read')
+      assert.equal(toolResult.payload.result, 'hello\nfrom child')
+      const deltas = events.filter((e) => e.type === 'tool_input_delta')
+      assert.equal(deltas.length, 2)
+      assert.equal(deltas[0].payload.partialJson, '{"file_path":')
+      assert.equal(deltas[1].payload.partialJson, '"/tmp/x.txt"}')
+    })
+
+    it('re-emits child stream_delta as agent_event so dashboard sees child assistant text', async () => {
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('stream_delta', { messageId: 'cm_1', delta: 'Hello ' })
+        child.emit('stream_delta', { messageId: 'cm_1', delta: 'world.' })
+      })
+      const deltas = captured.filter((e) => e.type === 'stream_delta')
+      assert.equal(deltas.length, 2, 'both stream_delta chunks must be re-emitted')
+      assert.equal(deltas[0].parentToolUseId, 'tu_task_5016')
+      assert.equal(deltas[0].payload.delta, 'Hello ')
+      assert.equal(deltas[1].payload.delta, 'world.')
+    })
+
+    it('nested Task: grand-child agent_event is re-tagged with the outermost parent toolUseId', async () => {
+      // The child's `agent_event` listener forwards grand-child progress
+      // up the chain re-tagged with THIS parent's toolUseId. Simulate
+      // by emitting a synthetic `agent_event` on the child as if the
+      // child itself had dispatched a Task.
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('agent_event', {
+          parentToolUseId: 'tu_grandchild_task',
+          type: 'tool_start',
+          payload: { messageId: 'gc_1', toolUseId: 'tu_gc_read', tool: 'Read', input: {} },
+        })
+      })
+      const forwarded = captured.find((e) => e.type === 'tool_start' && e.payload.toolUseId === 'tu_gc_read')
+      assert.ok(forwarded, 'grand-child tool_start must be forwarded')
+      assert.equal(forwarded.parentToolUseId, 'tu_task_5016',
+        'grand-child events must re-tag with the OUTERMOST parent toolUseId')
+      // The original grand-child parentToolUseId (immediate parent = the
+      // child Task) is preserved on payload.parentToolUseId so
+      // depth-aware consumers can reconstruct the chain.
+      assert.equal(forwarded.payload.parentToolUseId, 'tu_grandchild_task',
+        'grand-child events must preserve the immediate parent toolUseId on payload')
+    })
+
+    it('agent_event listed in customEvents so SessionManager forwards it as a transient event', () => {
+      assert.ok(ClaudeByokSession.customEvents.includes('agent_event'),
+        'agent_event must be in customEvents for ws-forwarding to pick it up')
+    })
+  })
+
   describe('lifecycle', () => {
     it('destroy() is idempotent and clears history', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })

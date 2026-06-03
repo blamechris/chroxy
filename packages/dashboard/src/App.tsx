@@ -1665,6 +1665,7 @@ export function App() {
           serverName={storeMsg.serverName}
           isTail={msg.id === chatTailMessageId}
           resultImages={storeMsg.toolResultImages}
+          childAgentEvents={storeMsg.childAgentEvents}
         />
       )
     }

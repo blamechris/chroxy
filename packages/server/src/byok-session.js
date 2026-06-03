@@ -116,7 +116,17 @@ export class ClaudeByokSession extends BaseSession {
     // being listed), but pin them here so the capability matrix /
     // dashboard introspection reflect that this provider emits them
     // when the Task tool dispatches a subagent.
-    return ['tool_start', 'tool_result', 'tool_input_delta', 'agent_spawned', 'agent_completed']
+    //
+    // #5016: `agent_event` carries the child Task subagent's intermediate
+    // wire events (tool_start / tool_input_delta / tool_result /
+    // stream_delta) tagged with the parent `toolUseId` so the dashboard
+    // can render the child's progress as nested sub-bubbles under the
+    // parent's Task tool_call. The child's `result` is intentionally NOT
+    // forwarded — usage/cost folds into the parent's per-turn
+    // accumulator and the final summary text becomes the parent's
+    // Task tool_result content; replaying it as a nested event would
+    // double-render the same content.
+    return ['tool_start', 'tool_result', 'tool_input_delta', 'agent_spawned', 'agent_completed', 'agent_event']
   }
 
   /**
@@ -1346,6 +1356,9 @@ export class ClaudeByokSession extends BaseSession {
 
     child.on('stream_delta', (e) => {
       if (typeof e?.delta === 'string') textChunks.push(e.delta)
+      // #5016: forward the child's stream_delta to the parent so the
+      // dashboard can render its assistant text as a nested sub-bubble.
+      this._emitAgentEvent(toolUseId, 'stream_delta', e)
     })
     child.on('result', (e) => {
       const u = e?.usage || {}
@@ -1366,6 +1379,44 @@ export class ClaudeByokSession extends BaseSession {
       // abort, or stream-init throw), stream_end still resolves the
       // promise so this method doesn't hang the parent's tool loop.
       resolveDone()
+    })
+    // #5016: forward the child's per-tool wire events to the parent as
+    // `agent_event` carrying the parent toolUseId so the dashboard
+    // groups them under the Task tool_call bubble. Cost / usage are
+    // intentionally NOT replayed here (they fold once via the parent's
+    // own per-turn accumulators above — no double-counting).
+    child.on('tool_start', (e) => {
+      this._emitAgentEvent(toolUseId, 'tool_start', e)
+    })
+    child.on('tool_input_delta', (e) => {
+      this._emitAgentEvent(toolUseId, 'tool_input_delta', e)
+    })
+    child.on('tool_result', (e) => {
+      this._emitAgentEvent(toolUseId, 'tool_result', e)
+    })
+    // #5016: when the child itself dispatches a Task (grand-child),
+    // its own `agent_event` fires on the child. Forward those too,
+    // re-tagged with THIS parent's toolUseId so the dashboard groups
+    // all descendants under the outermost Task bubble. The original
+    // (grand-child) `parentToolUseId` is preserved on the payload's
+    // `parentToolUseId` for downstream renderers that may want to
+    // distinguish depth — we merge it INTO the forwarded payload so
+    // consumers can read `payload.parentToolUseId` to recover the
+    // immediate-parent (grand-child Task) id. Without this merge the
+    // grand-child's id is lost on the way up; the comment claimed
+    // preservation but the original implementation dropped it.
+    // A non-string `e?.type` would re-emit as `'agent_event'` which
+    // the consumer reducer doesn't recognise — skip those so noise
+    // doesn't reach the wire.
+    child.on('agent_event', (e) => {
+      if (typeof e?.type !== 'string') return
+      const basePayload = (e?.payload && typeof e.payload === 'object' && !Array.isArray(e.payload))
+        ? e.payload
+        : {}
+      const mergedPayload = e?.parentToolUseId
+        ? { ...basePayload, parentToolUseId: e.parentToolUseId }
+        : basePayload
+      this._emitAgentEvent(toolUseId, e.type, mergedPayload)
     })
 
     // Register a cascade hook on the parent's signal — interrupt()
@@ -1435,6 +1486,43 @@ export class ClaudeByokSession extends BaseSession {
       }
     }
     return { content: summary, isError: false }
+  }
+
+  /**
+   * #5016: re-emit a Task subagent's intermediate wire event under the
+   * parent's `agent_event` channel so the dashboard can render nested
+   * sub-bubbles inside the parent's Task tool_call.
+   *
+   * `parentToolUseId` is the toolUseId of the parent's Task tool_use
+   * block (the same id used for `agent_spawned` / `agent_completed`) —
+   * the consumer keys the nested sub-bubble container off this id.
+   *
+   * `type` is the child's original event name (`tool_start`,
+   * `tool_input_delta`, `tool_result`, `stream_delta`). The dashboard
+   * switches on this to render the child's wire event in the same
+   * shape it would for a top-level event.
+   *
+   * `payload` is the original child event payload, passed through
+   * verbatim. Renderers MUST treat fields as best-effort (some payloads
+   * carry messageId / toolUseId, others carry delta text only).
+   *
+   * Nested-Task support: when a Task subagent itself dispatches a Task,
+   * the grand-child's events arrive as `agent_event` on the child
+   * (because each session's `_emitAgentEvent` re-emits to itself), and
+   * we surface them on the parent under the parent's toolUseId. This
+   * means the dashboard sees a flat stream tagged with the IMMEDIATE
+   * parent's id — nested-nested rendering is intentionally not in v2.
+   *
+   * @param {string} parentToolUseId
+   * @param {string} type
+   * @param {object} payload
+   */
+  _emitAgentEvent(parentToolUseId, type, payload) {
+    this.emit('agent_event', {
+      parentToolUseId,
+      type,
+      payload: payload ?? {},
+    })
   }
 
   /**

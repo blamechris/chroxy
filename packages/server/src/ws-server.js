@@ -387,6 +387,7 @@ function _isSecureRequest(req) {
  *   { type: 'rate_limited', message }                   — client rate-limited
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
+ *   { type: 'agent_event', sessionId, parentToolUseId, eventType, payload } — Task subagent intermediate wire event re-emit (#5016, transient; eventType is one of `tool_start` / `tool_input_delta` / `tool_result` / `stream_delta`)
  *   { type: 'background_work_changed', sessionId, pending } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`)
  *   { type: 'provider_list', providers }                — available providers
  *   { type: 'byok_credentials_status', requestId?, status, source, masked?, reason? } — BYOK credentials state for the dashboard (#4052)

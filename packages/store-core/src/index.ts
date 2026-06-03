@@ -28,6 +28,9 @@ export type {
   MessageAttachment,
   ToolResultImage,
   ChatMessage,
+  // #5016 — one nested wire event from a Task subagent, attached to
+  // the parent Task tool_use bubble via `ChatMessage.childAgentEvents[]`.
+  ChildAgentEvent,
   // #4604 Chunk B — one entry per question in a multi-question AskUserQuestion form
   ChatMessageQuestion,
   // #3188: auto-evaluator rewrite metadata attached to system ChatMessages
@@ -411,6 +414,9 @@ export {
   handleGitCommitResult,
   handleAgentSpawned,
   handleAgentCompleted,
+  // #5016 — Task subagent nested progress (one wire event per child
+  // `tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`).
+  handleAgentEvent,
   handleBackgroundWorkChanged,
   handleEnvironmentList,
   handleEnvironmentError,

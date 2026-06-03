@@ -73,6 +73,7 @@ import {
   handleGitCommitResult,
   handleAgentSpawned,
   handleAgentCompleted,
+  handleAgentEvent,
   handleBackgroundWorkChanged,
   handleEnvironmentList,
   handleEnvironmentError,
@@ -3978,6 +3979,140 @@ describe('handleAgentCompleted', () => {
       'tu-1',
       'tu-3',
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5016 — handleAgentEvent (Task subagent nested progress)
+// ---------------------------------------------------------------------------
+describe('handleAgentEvent (#5016)', () => {
+  const mkTaskBubble = (toolUseId: string): ChatMessage => ({
+    id: 'm-' + toolUseId,
+    type: 'tool_use',
+    content: '',
+    tool: 'Task',
+    toolUseId,
+    timestamp: 1000,
+  })
+
+  it('appends a child event to the parent Task tool_use bubble', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-1')]
+    const builder = handleAgentEvent(
+      {
+        sessionId: 'sess-1',
+        parentToolUseId: 'tu-task-1',
+        eventType: 'tool_start',
+        payload: { toolUseId: 'tu-child-1', tool: 'Read', input: { file_path: '/a' } },
+      },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    const next = builder.applyTo(existing)
+    expect(next).not.toBe(existing)
+    expect(next[0]?.childAgentEvents).toEqual([
+      { type: 'tool_start', payload: { toolUseId: 'tu-child-1', tool: 'Read', input: { file_path: '/a' } } },
+    ])
+  })
+
+  it('accumulates multiple child events in order on the same bubble', () => {
+    let messages: ChatMessage[] = [mkTaskBubble('tu-task-2')]
+    const events: { eventType: string; payload: Record<string, unknown> }[] = [
+      { eventType: 'tool_start', payload: { toolUseId: 'c1', tool: 'Read' } },
+      { eventType: 'tool_input_delta', payload: { toolUseId: 'c1', partialJson: '{"x":' } },
+      { eventType: 'tool_result', payload: { toolUseId: 'c1', result: 'hello' } },
+    ]
+    for (const ev of events) {
+      const builder = handleAgentEvent(
+        { parentToolUseId: 'tu-task-2', ...ev },
+        'active-1',
+      )
+      messages = builder.applyTo(messages)
+    }
+    expect(messages[0]?.childAgentEvents).toHaveLength(3)
+    expect(messages[0]?.childAgentEvents?.map((e) => e.type)).toEqual([
+      'tool_start',
+      'tool_input_delta',
+      'tool_result',
+    ])
+  })
+
+  it('returns the same array reference when parentToolUseId is missing', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-3')]
+    const builder = handleAgentEvent(
+      { eventType: 'tool_start', payload: {} },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('returns the same array reference when eventType is missing/empty', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-4')]
+    const builder = handleAgentEvent(
+      { parentToolUseId: 'tu-task-4', payload: {} },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('returns the same array reference when no matching parent bubble exists', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-5')]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-NOT-PRESENT',
+        eventType: 'tool_start',
+        payload: { toolUseId: 'c1' },
+      },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('ignores bubbles whose type is not tool_use even when toolUseId matches', () => {
+    const existing: ChatMessage[] = [
+      // A `response` bubble that happens to carry the same id —
+      // shouldn't be mutated.
+      {
+        id: 'm-decoy',
+        type: 'response',
+        content: 'parent text',
+        toolUseId: 'tu-task-6',
+        timestamp: 100,
+      },
+      mkTaskBubble('tu-task-6'),
+    ]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-6',
+        eventType: 'stream_delta',
+        payload: { delta: 'hi' },
+      },
+      'active-1',
+    )
+    const next = builder.applyTo(existing)
+    // Only the tool_use bubble is patched.
+    expect(next[0]).toBe(existing[0])
+    expect(next[1]?.childAgentEvents).toHaveLength(1)
+  })
+
+  it('normalises non-object payload to {}', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-7')]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-7',
+        eventType: 'stream_delta',
+        payload: null,
+      },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)[0]?.childAgentEvents?.[0]?.payload).toEqual({})
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleAgentEvent(
+      { parentToolUseId: 'x', eventType: 'tool_start', payload: {} },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('active-1')
   })
 })
 
