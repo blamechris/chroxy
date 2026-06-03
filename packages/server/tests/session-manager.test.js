@@ -3258,6 +3258,136 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
     assert.equal(mgr.getSessionCost('s1'), 0)
     assert.equal(costUpdates.length, 0)
   })
+
+  // -------------------------------------------------------------------------
+  // #5038: fold error-path partial usage + cost into the cumulative tracker
+  // -------------------------------------------------------------------------
+  //
+  // PR #5037 surfaces partial `usage` + `cost` on the session `error` event
+  // payload (ABORT and STREAM_ERROR) so the user can see what a failed turn
+  // cost. But the cumulative tracker was gated on `event === 'result'`, so
+  // the partial spend on a failed turn was silently dropped from
+  // cumulativeUsage / sessionCost / budget gates. This pins the widened
+  // gate so the user-billed tokens on a failed turn DO show up in cumulative
+  // totals and budget gates fire as expected.
+
+  it('folds partial cost on STREAM_ERROR into cumulative session cost (#5038)', () => {
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    // Mirror the PR #5037 error envelope shape — `usage` + `cost` are
+    // spread flat onto the error payload (not nested under `partials`).
+    session.emit('error', {
+      messageId: 'msg_err',
+      message: 'upstream blew up',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 100, output_tokens: 50 },
+      cost: 0.025,
+    })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.025) < 1e-9,
+      `getSessionCost must include error-path cost; got ${mgr.getSessionCost('s1')}`)
+    assert.equal(costUpdates.length, 1, 'error event with finite cost must emit cost_update')
+    assert.ok(Math.abs(costUpdates[0].data.sessionCost - 0.025) < 1e-9)
+  })
+
+  it('folds partial cost on ABORT into cumulative session cost (#5038)', () => {
+    // The ABORT path (user-initiated interrupt) is the other error path
+    // that carries partials — pin it too so a refactor that only handles
+    // STREAM_ERROR doesn't half-fix the bug.
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('error', {
+      messageId: 'msg_abort',
+      message: 'Interrupted by user',
+      code: 'ABORT',
+      usage: { input_tokens: 30, output_tokens: 10 },
+      cost: 0.0075,
+    })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.0075) < 1e-9)
+    assert.equal(costUpdates.length, 1, 'ABORT with finite cost must emit cost_update')
+  })
+
+  it('error-path partial cost accumulates token usage into cumulativeUsage (#5038)', () => {
+    const { mgr, session } = makeWired()
+    const usageEvents = captureSessionEvents(mgr, 'session_usage')
+    session.emit('error', {
+      messageId: 'msg_err',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 50 },
+      cost: 0.005,
+    })
+    assert.equal(usageEvents.length, 1, 'session_usage must fire for error-path priced turn')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 200)
+    assert.equal(got.outputTokens, 80)
+    assert.equal(got.cacheReadTokens, 50)
+    assert.equal(got.turnsBilled, 1,
+      'an errored turn counts as a billed turn (the user was charged for it)')
+    assert.ok(Math.abs(got.costUsd - 0.005) < 1e-9)
+  })
+
+  it('error-path partial cost can trigger budget_warning (#5038)', () => {
+    // $1 budget; a single failed turn that cost $0.85 must STILL trip the
+    // 80% warning — otherwise the user can blow past the warning threshold
+    // by chaining errored turns and never see the alert.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('error', {
+      messageId: 'm',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 1 },
+      cost: 0.85,
+    })
+    assert.equal(warnings.length, 1, 'budget_warning must fire on error-path spend')
+    assert.equal(warnings[0].data.percent, 85)
+  })
+
+  it('error-path partial cost can trigger budget_exceeded (#5038)', () => {
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const exceeded = captureSessionEvents(mgr, 'budget_exceeded')
+    session.emit('error', {
+      messageId: 'm',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 1 },
+      cost: 1.05,
+    })
+    assert.equal(exceeded.length, 1, 'budget_exceeded must fire on error-path spend')
+    assert.equal(exceeded[0].data.percent, 105)
+  })
+
+  it('error event without `cost` does NOT tick the tracker (subscription / pre-#5037 shape) (#5038)', () => {
+    // Pre-#5037 errors carried only { code, message }. Subscription-only
+    // providers (cost: null) also emit errors with no cost. Neither must
+    // tick the cumulative tracker.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    const usageEvents = captureSessionEvents(mgr, 'session_usage')
+    session.emit('error', { messageId: 'm', message: 'boom', code: 'STREAM_ERROR' })
+    session.emit('error', { messageId: 'm', message: 'boom', code: 'ABORT', cost: null, usage: null })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+    assert.equal(usageEvents.length, 0)
+  })
+
+  it('error event with NaN / Infinity `cost` does NOT poison cumulative totals (#5038)', () => {
+    // Same defensive gate as the result path (#4088) — NaN / Infinity
+    // would poison cumulativeUsage and trigger spurious budget events.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('error', {
+      messageId: 'm', message: 'boom', code: 'STREAM_ERROR',
+      cost: NaN, usage: { input_tokens: 999 },
+    })
+    session.emit('error', {
+      messageId: 'm', message: 'boom', code: 'STREAM_ERROR',
+      cost: Infinity, usage: { input_tokens: 999 },
+    })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 0)
+  })
 })
 
 // ---------------------------------------------------------------------------
