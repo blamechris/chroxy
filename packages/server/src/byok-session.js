@@ -332,6 +332,13 @@ export class ClaudeByokSession extends BaseSession {
     // #4077: MCPFleet is lazy — created in start() only if servers exist.
     // Held here so destroy() can tear down even if start() never ran.
     this._mcpFleet = null
+    // #5019: when a Task subagent borrows the parent's MCP fleet (the
+    // default behaviour for nested tool use — avoids per-spawn MCP
+    // child-process startup cost), it points _mcpFleet at the parent's
+    // already-running fleet and flips this flag to false. destroy() then
+    // skips fleet.destroy() so the parent's MCP children aren't killed
+    // when the subagent finishes. The parent always owns its own fleet.
+    this._ownsMcpFleet = true
     // #4482: per-call MCP tools/call timeout (ms). null = use byok-mcp-client's
     // DEFAULT_TOOL_CALL_TIMEOUT_MS (30s) via the destructured default in
     // MCPFleet.callTool. Forwarded from session-manager via providerOpts →
@@ -1217,6 +1224,25 @@ export class ClaudeByokSession extends BaseSession {
       }
       childPermissionMode = requested
     }
+    // #5019: validate inherit_mcp type BEFORE the agent_spawned emit /
+    // _activeAgents.set so a non-boolean value (string "true", number 1,
+    // null — anything `typeof !== 'boolean'`) returns an is_error result
+    // without leaving a phantom entry in _activeAgents or emitting an
+    // unbalanced agent_spawned. The dashboard's active-agents badge would
+    // otherwise show a spawn that never clears. Mirrors the placement of
+    // the permission_mode validation above. The model gets a crisp signal
+    // naming the offending field rather than us silently coercing to one
+    // of the two paths.
+    let inheritMcp = true
+    if (input?.inherit_mcp !== undefined) {
+      if (typeof input.inherit_mcp !== 'boolean') {
+        return {
+          content: `Task tool: invalid \`inherit_mcp\` value (got ${typeof input.inherit_mcp}). Must be a boolean.`,
+          isError: true,
+        }
+      }
+      inheritMcp = input.inherit_mcp
+    }
     if (signal?.aborted) {
       return { content: 'Interrupted by user before subagent spawned', isError: true }
     }
@@ -1233,9 +1259,26 @@ export class ClaudeByokSession extends BaseSession {
 
     // Build a child session. Reuse this session's already-resolved
     // client so the API key resolution + Anthropic constructor only
-    // ran once. mcpConfigPath: null skips MCP discovery in the child
-    // (v1: child has no MCP — keeps the scope bounded and avoids the
-    // per-spawn child-process startup cost).
+    // ran once. mcpConfigPath: null skips MCP-config DISCOVERY in the
+    // child — the child does not parse a second copy of ~/.claude.json
+    // and does not spawn its own fleet. Whether the child gets MCP tools
+    // is controlled by the fleet-sharing block below (#5019), not by
+    // the constructor.
+    //
+    // #5019: by default the child borrows the parent's already-running
+    // MCP fleet — this gives nested Task subagents access to the same
+    // mcp__<server>__<tool> set the parent sees, at zero extra spawn
+    // cost (the parent's MCP children are reused). The child does NOT
+    // own the fleet, so destroy() won't kill the parent's MCP children
+    // when the subagent finishes. Per-call permission gating still
+    // runs through the child's own PermissionManager — only the fleet
+    // (process pool + tool catalogue) is shared.
+    //
+    // The model can opt out per-launch by passing `inherit_mcp: false`
+    // on the Task input — useful when the subagent's prompt should be
+    // strictly scoped to built-in tools or when an MCP server is known
+    // to be misbehaving and the user wants to isolate it from the
+    // delegated work. `inherit_mcp` defaults to true when omitted.
     //
     // #5015 review: wrap construction + init in try/catch. If the
     // ClaudeByokSession ctor or any of the field assignments throws
@@ -1259,6 +1302,14 @@ export class ClaudeByokSession extends BaseSession {
       child._client = this._client
       child._apiKeySource = this._apiKeySource
       child._processReady = true
+      // #5019: share the parent's MCP fleet (default) unless the model
+      // explicitly opted out via `inherit_mcp: false`. Borrowed fleets
+      // MUST set _ownsMcpFleet = false so the child's destroy() doesn't
+      // tear down the parent's MCP children.
+      if (inheritMcp && this._mcpFleet) {
+        child._mcpFleet = this._mcpFleet
+        child._ownsMcpFleet = false
+      }
       // Inherit permission mode so the subagent runs under the same
       // gating policy as the parent — a user who set `auto` doesn't
       // want the child to start prompting again, and a user in
@@ -1625,11 +1676,19 @@ export class ClaudeByokSession extends BaseSession {
     // #4077: tear down MCP children with SIGTERM → SIGKILL grace.
     // Awaits up to FLEET_KILL_GRACE_MS (2s) + 500ms safety margin so a
     // hung child cannot stall destroy() indefinitely.
+    //
+    // #5019: only the owning session tears the fleet down. A Task subagent
+    // that borrowed the parent's fleet (_ownsMcpFleet === false) just
+    // drops its reference — destroying the parent's MCP children mid-flight
+    // would kill MCP tool access for the parent and any sibling subagents.
     if (this._mcpFleet) {
       const fleet = this._mcpFleet
+      const owns = this._ownsMcpFleet
       this._mcpFleet = null
-      try { await fleet.destroy() } catch (err) {
-        log.warn(`MCP fleet teardown failed: ${err?.message || err}`)
+      if (owns) {
+        try { await fleet.destroy() } catch (err) {
+          log.warn(`MCP fleet teardown failed: ${err?.message || err}`)
+        }
       }
     }
     this.removeAllListeners()
