@@ -121,10 +121,14 @@ export const DEFAULT_MAX_AGE_MS = 30 * 60 * 1000
  *
  * `devcontainerFingerprint` (#5080) is an optional short hash of the
  * resolved devcontainer.json overlay. When `useDevcontainer: true` is
- * set, the session passes a SHA-1 of the parsed config so that a change
- * to `mounts` / `containerEnv` / `forwardPorts` / `postCreateCommand`
- * cache-busts the key — otherwise a pool hit would silently return a
- * container provisioned against a STALE devcontainer.json.
+ * set, the session passes a SHA-1 of the **fully-resolved** overlay
+ * (after mount validation + env sanitisation, NOT the raw parsed file)
+ * so that a change to `mounts` / `containerEnv` / `forwardPorts` /
+ * `postCreateCommand` cache-busts the key — otherwise a pool hit would
+ * silently return a container provisioned against a STALE
+ * devcontainer.json. `image` and `remoteUser` are deliberately omitted
+ * from the fingerprint because they're already first-class segments of
+ * the pool key.
  *
  * Non-devcontainer sessions pass `null` (or omit the field), preserving
  * backward compatibility — the joined key remains

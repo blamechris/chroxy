@@ -2142,6 +2142,46 @@ describe('DockerByokSession — devcontainer fingerprint in pool key (#5080)', (
       rmSync(cwd, { recursive: true, force: true })
     }
   })
+
+  it('changed image (overridden by explicit opt) → SAME fingerprint (no spurious cache miss)', () => {
+    // image and remoteUser are first-class segments of the pool key,
+    // not part of the fingerprint. If a session pins image via an
+    // explicit constructor opt, editing the devcontainer.json image
+    // field doesn't change the resolved launch shape — so the
+    // fingerprint must not bust. (The base key would still match
+    // because explicit image wins, so the pool entry remains valid.)
+    const cwdA = makeDevcontainerCwd({ image: 'node:20-slim', containerEnv: { LANG: 'en_US.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ image: 'node:22-slim', containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA, { image: 'pinned-image:latest' })
+      const sessionB = makeSession(cwdB, { image: 'pinned-image:latest' })
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'image is not fingerprinted — it is a first-class key segment')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed remoteUser → SAME fingerprint (already a first-class key segment)', () => {
+    // Same logic as image — remoteUser drives the `containerUser` slot
+    // of the base key, so fingerprinting it would double-count.
+    const cwdA = makeDevcontainerCwd({ remoteUser: 'vscode', containerEnv: { LANG: 'en_US.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ remoteUser: 'node', containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA, { containerUser: 'pinned-user' })
+      const sessionB = makeSession(cwdB, { containerUser: 'pinned-user' })
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'remoteUser is not fingerprinted — it is a first-class key segment')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('DockerByokSession — Docker Compose support (#5024)', () => {

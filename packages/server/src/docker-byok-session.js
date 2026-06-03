@@ -660,11 +660,14 @@ export class DockerByokSession extends ClaudeByokSession {
    * `.devcontainer/devcontainer.json` overlay happens BEFORE the pool
    * lookup, and the resolved overlay's SHA-1 fingerprint is folded into
    * the pool key. Concretely:
-   *   - the resolved `image` and `remoteUser` are part of the key (they
-   *     change which container shape a session asks for), AND
+   *   - the resolved `image` and `remoteUser` are part of the key as
+   *     first-class segments (they change which image is pulled / which
+   *     user the container runs as), AND
    *   - the fingerprint covers `mounts`, `containerEnv`, `forwardPorts`,
-   *     and `postCreateCommand` — fields that DO NOT change the docker
-   *     run shape but DO change the container's filesystem / env state.
+   *     and `postCreateCommand` — these ARE applied to `docker run` (as
+   *     `-v`, `-e`, `-p`) and the post-create exec, but they are NOT
+   *     part of the base 5-segment key shape, so they need the
+   *     fingerprint to invalidate a stale pooled container.
    * If any of those change, the next acquire misses and a fresh
    * container is launched. Non-devcontainer sessions pass a null
    * fingerprint and their pool key shape is unchanged.
@@ -762,6 +765,12 @@ export class DockerByokSession extends ClaudeByokSession {
     // parsed file. That way two devcontainer.json files that differ
     // only in rejected fields produce the same fingerprint (and reuse a
     // container) while any genuine config change cache-busts the key.
+    // The fingerprint covers ONLY non-key overlay fields (mounts,
+    // containerEnv, forwardPorts, postCreateCommand) — image and
+    // remoteUser are already first-class segments of the pool key, so
+    // including them in the fingerprint would cause spurious cache
+    // misses when an explicit constructor opt has overridden them but
+    // the devcontainer.json file value changed.
     this._devcontainerFingerprint = this._computeDevcontainerFingerprint(this._dcConfig)
   }
 
@@ -771,6 +780,14 @@ export class DockerByokSession extends ClaudeByokSession {
    * key and bloats logs — the first 16 hex chars are 64 bits of
    * entropy, which is enough to make accidental collisions effectively
    * impossible within a single host's pool.
+   *
+   * Fingerprinted fields are **only** the non-key overlay state —
+   * `mounts`, `containerEnv`, `forwardPorts`, `postCreateCommand`. The
+   * resolved `image` and `remoteUser` are NOT fingerprinted because
+   * they're already first-class segments of the pool key (and because
+   * an explicit constructor opt may have overridden the devcontainer.json
+   * value, in which case a change to the file's `image` field doesn't
+   * actually change the resolved launch shape).
    *
    * Note on stability: `JSON.stringify` follows insertion order for
    * plain objects, which is fine for `_dcConfig` because both the
@@ -784,7 +801,18 @@ export class DockerByokSession extends ClaudeByokSession {
    */
   _computeDevcontainerFingerprint(resolved) {
     if (!resolved || typeof resolved !== 'object') return null
-    return createHash('sha1').update(JSON.stringify(resolved)).digest('hex').slice(0, 16)
+    // Project the resolved overlay down to only the fields that
+    // affect container provisioning but are NOT already in the base
+    // pool key. Built in a fixed key order so the fingerprint is
+    // stable regardless of how the source `resolved` object was
+    // assembled.
+    const fingerprintInput = {
+      mounts: resolved.mounts,
+      containerEnv: resolved.containerEnv,
+      forwardPorts: resolved.forwardPorts,
+      postCreateCommand: resolved.postCreateCommand,
+    }
+    return createHash('sha1').update(JSON.stringify(fingerprintInput)).digest('hex').slice(0, 16)
   }
 
   /**
