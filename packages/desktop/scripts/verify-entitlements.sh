@@ -15,11 +15,13 @@
 #   scripts/verify-entitlements.sh <path-to-app-or-plist>
 #
 # Modes:
-#   - If the target ends with `.plist` or is a regular file, dump its raw
-#     text and check the parent-app required-keys set.
-#   - If the target is a `.app` bundle, run `codesign -d --entitlements -`
-#     against the bundle (parent required-keys set) AND against
-#     Contents/Resources/speech-helper (helper required-keys set).
+#   - If the target ends with `.plist`, dump its raw text and check the
+#     parent-app required-keys set.
+#   - Otherwise (any other file or directory — `.app` bundle or
+#     codesigned Mach-O), run `codesign -d --entitlements -` to extract
+#     the embedded entitlements. When the target is a `.app` bundle, the
+#     embedded `Contents/Resources/speech-helper` Mach-O is also checked
+#     against the helper required-keys set.
 #
 # Exits non-zero if any required entitlement is missing.
 
@@ -60,7 +62,13 @@ fi
 extract_entitlements() {
     local target="$1"
     local blob
-    if [[ "$target" == *.plist ]] || { [ -f "$target" ] && [[ "$target" != *.app ]] && [ ! -d "$target" ]; }; then
+    # Only treat `.plist` targets as raw XML — any other file (including a
+    # Mach-O binary like Contents/Resources/speech-helper) must go through
+    # codesign so we read the embedded entitlements blob instead of cat'ing
+    # the binary, which would either falsely pass (if the binary happens to
+    # contain the matching `<key>...</key>` byte sequence) or falsely report
+    # the wrong failure mode. Caught by Copilot in #4954 review.
+    if [[ "$target" == *.plist ]]; then
         cat "$target"
         return 0
     fi
