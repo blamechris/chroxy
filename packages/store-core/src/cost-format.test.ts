@@ -6,7 +6,12 @@
  * one source of truth.
  */
 import { describe, it, expect } from 'vitest'
-import { formatCostBadge, formatCostBreakdown, formatPartialCostLine } from './cost-format'
+import {
+  formatCostBadge,
+  formatCostBreakdown,
+  formatPartialCostLine,
+  formatTokensCompact,
+} from './cost-format'
 import type { ErrorPartialCost } from './cost-format'
 import type { CumulativeUsage } from './types'
 
@@ -117,5 +122,42 @@ describe('formatPartialCostLine (#5039)', () => {
     expect(
       formatPartialCostLine(partial({ costUsd: 0, inputTokens: 50, outputTokens: 0 })),
     ).toBe('This turn cost $0 (50 in · 0 out)')
+  })
+})
+
+describe('formatTokensCompact (#5065)', () => {
+  it('returns raw count under 1000', () => {
+    expect(formatTokensCompact(0)).toBe('0')
+    expect(formatTokensCompact(1)).toBe('1')
+    expect(formatTokensCompact(999)).toBe('999')
+  })
+
+  it('formats thousands with lowercase k and one decimal', () => {
+    expect(formatTokensCompact(1000)).toBe('1.0k')
+    expect(formatTokensCompact(1234)).toBe('1.2k')
+    expect(formatTokensCompact(30_000)).toBe('30.0k')
+    expect(formatTokensCompact(200_000)).toBe('200.0k')
+  })
+
+  it('rolls over to M before "1000.0k"', () => {
+    // 999_500 rounds to 1000.0k in the simple version; jump to M instead.
+    expect(formatTokensCompact(999_500)).toBe('1M')
+    expect(formatTokensCompact(999_999)).toBe('1M')
+  })
+
+  it('drops the trailing .0 for whole millions (1M, 2M)', () => {
+    expect(formatTokensCompact(1_000_000)).toBe('1M')
+    expect(formatTokensCompact(2_000_000)).toBe('2M')
+  })
+
+  it('keeps one decimal for fractional millions', () => {
+    expect(formatTokensCompact(1_500_000)).toBe('1.5M')
+    expect(formatTokensCompact(1_250_000)).toBe('1.3M')
+  })
+
+  it('returns "0" for non-finite / non-positive (defensive)', () => {
+    expect(formatTokensCompact(-1)).toBe('0')
+    expect(formatTokensCompact(NaN)).toBe('0')
+    expect(formatTokensCompact(Infinity)).toBe('0')
   })
 })

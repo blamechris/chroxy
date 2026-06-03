@@ -2143,6 +2143,13 @@ export function App() {
             contextPercent={contextPercent}
             inputTokens={contextUsage?.inputTokens}
             outputTokens={contextUsage?.outputTokens}
+            // #5065: surface the absolute `used / total` token meter in
+            // the header. We only pass the window when there's an active
+            // model — that's the "no session selected" gate the meter
+            // hides on (`showMeter` requires a positive window).
+            contextWindow={activeModel
+              ? (availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow) ?? DEFAULT_CONTEXT_WINDOW
+              : undefined}
             isBusy={!isIdle}
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}

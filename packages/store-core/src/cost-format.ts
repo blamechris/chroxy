@@ -83,6 +83,41 @@ function formatTokens(n: number): string {
 }
 
 /**
+ * #5065: compact lowercase token formatter for the header status-line
+ * `used / total tokens` label.
+ *
+ *   formatTokensCompact(0)         → "0"
+ *   formatTokensCompact(999)       → "999"
+ *   formatTokensCompact(1_000)     → "1.0k"
+ *   formatTokensCompact(30_000)    → "30.0k"
+ *   formatTokensCompact(999_500)   → "1M"   (rolls to M before "1000.0k")
+ *   formatTokensCompact(1_000_000) → "1M"
+ *   formatTokensCompact(1_500_000) → "1.5M"
+ *
+ * Whole-million values drop the trailing ".0" so the common context-window
+ * sizes (200k / 1M / 2M) render as the marketing label users recognise
+ * rather than "1.0M". Uses lowercase `k` / uppercase `M` to match the
+ * existing `formatContext` helper in App.tsx that already produces "30k
+ * tokens" — keeping the header label visually consistent with the chip.
+ *
+ * Non-finite or non-positive input returns "0" defensively so a corrupted
+ * upstream payload can't poison the renderer with "NaN" / "Infinity".
+ */
+export function formatTokensCompact(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n < 1000) return String(Math.round(n))
+  if (n < 999_500) return `${(n / 1000).toFixed(1)}k`
+  // Round to one decimal first, then strip a trailing ".0" so whole
+  // millions render as "1M" / "2M" / "1M" (rolled over from 999_500)
+  // rather than the visually noisy "1.0M". One decimal is enough
+  // resolution for a status-line chip — sub-100k differences inside a
+  // multi-million window aren't legible there anyway.
+  const m = n / 1_000_000
+  const rounded = m.toFixed(1)
+  return rounded.endsWith('.0') ? `${rounded.slice(0, -2)}M` : `${rounded}M`
+}
+
+/**
  * Build the multi-line breakdown shown in the dashboard's native browser
  * tooltip (the cost-badge hover popover) — one string, six rows separated
  * by newlines, suitable for a `<span title={...}>` attribute.
