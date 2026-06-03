@@ -44,6 +44,7 @@ import { PastedTextModal } from './components/PastedTextModal'
 import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { StreamStallChip } from './components/StreamStallChip'
 import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
+import { ResumeUnknownChip } from './components/ResumeUnknownChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
@@ -1637,6 +1638,28 @@ export function App() {
         <AskUserQuestionStallChip
           errorText={storeMsg.content}
           onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
+        />
+      )
+    }
+
+    // #4947: dedicated chip for `error{code: 'resume_unknown'}` errors
+    // (server PR #4944). The server emits this when the claude CLI rejects
+    // a `--resume <id>` because the conversation id is unknown locally
+    // (operator wiped ~/.claude/projects/ between chroxy boots, restored a
+    // state file from a different machine, etc.). CliSession has ALREADY
+    // auto-fallen-back to a fresh conversation by the time this lands —
+    // the chip explains that and (when present) surfaces
+    // `attemptedResumeId` as subtext for operator correlation against
+    // `~/.chroxy/session-state.json.resumeConversationId`. Distinct from
+    // the stream_stall / ASK_USER_QUESTION_STALL chips because no retry
+    // affordance is needed: the fresh conversation is already running.
+    // Mirrors the chip pattern for consistency with the recoverable-error
+    // visual language.
+    if (storeMsg.type === 'error' && storeMsg.code === 'resume_unknown') {
+      return (
+        <ResumeUnknownChip
+          errorText={storeMsg.content}
+          attemptedResumeId={storeMsg.attemptedResumeId}
         />
       )
     }
