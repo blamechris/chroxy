@@ -4,9 +4,14 @@
  * The Rust side (packages/desktop/src-tauri/src/lib.rs) emits
  * `menu://<action>` events when the user picks an item from the
  * application menu bar. This hook subscribes to those events and
- * dispatches them to the matching React-side callback so menu items
- * and dashboard buttons / palette commands all funnel through the
- * same handler — adding a new menu item only requires:
+ * dispatches each one to the matching React-side callback passed in
+ * via props. The hook itself only guarantees that menu-bar clicks
+ * reach the provided callback — whether a given action's callback is
+ * the same function used by a dashboard button or palette command is
+ * the caller's choice (e.g. App.tsx currently reuses `handleNewSession`
+ * for both the menu bar and the chrome "New Session" button, but the
+ * sidebar's per-project row and the command-palette entry have their
+ * own inline handlers). Adding a new menu item requires:
  *
  *   1. A new `MenuItemBuilder::with_id("app_menu:<action>", …)` entry
  *      in lib.rs's app-menu builder.

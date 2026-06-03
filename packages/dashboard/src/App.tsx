@@ -1226,9 +1226,12 @@ export function App() {
     setShowCreateSession(true)
   }, [])
 
-  // #4695 — bridge the macOS menu bar "File > New Session" item to the
-  // same handler the chrome button and command palette use. Hook is a
-  // no-op outside Tauri (web dashboard).
+  // #4695 — bridge the macOS menu bar "File > New Session" item to
+  // `handleNewSession` (the same callback the chrome "New Session"
+  // button uses). The sidebar's per-project "+" row and the command
+  // palette's `new-session` entry currently open the create-session
+  // dialog through their own inline handlers, so they are NOT routed
+  // through this hook. Hook is a no-op outside Tauri (web dashboard).
   useTauriMenuEvents({ onNewSession: handleNewSession })
 
   const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean; skipPermissions?: boolean }) => {
@@ -1839,9 +1842,15 @@ export function App() {
               Previously the affordance lived only on the per-project
               sidebar row (`sidebar-new-session-<path>`) and inside the
               command palette, neither of which a first-time user finds
-              by scanning the chrome. The button reuses handleNewSession
-              (same setShowCreateSession path the sidebar + palette use)
-              so behaviour stays in one place. */}
+              by scanning the chrome. This button and the macOS menu-bar
+              "File > New Session" item both invoke `handleNewSession`,
+              which clears `pendingCwd` and opens the create-session
+              dialog without a preselected project. The sidebar's "+"
+              row and the palette's `new-session` command each have
+              their own inline handlers (the sidebar passes a cwd; the
+              palette opens the dialog directly), so they share the end
+              state (`setShowCreateSession(true)`) but not this
+              callback. */}
           <button
             type="button"
             className="chrome-new-session-btn"

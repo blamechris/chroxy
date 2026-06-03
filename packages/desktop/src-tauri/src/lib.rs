@@ -680,10 +680,13 @@ pub fn run() {
             //   - app-menu: "app_menu:<action>" (this match)
             // The `app_menu:` prefix means stray cross-fires would
             // simply no-op rather than accidentally invoke the wrong
-            // tray handler. The actual side effect is event emission —
-            // the dashboard's useTauriMenuEvents listener invokes the
-            // matching command (so menu items and command palette
-            // entries share one handler).
+            // tray handler. The concrete contract here is: strip the
+            // prefix and emit a `menu://<action>` event for the
+            // dashboard to handle. The dashboard's `useTauriMenuEvents`
+            // hook subscribes to those events and routes each one to a
+            // React-side callback supplied by App.tsx — whether that
+            // callback is shared with another UI affordance (button,
+            // palette entry, etc.) is decided by App.tsx, not here.
             let id = event.id().as_ref();
             if let Some(action) = id.strip_prefix("app_menu:") {
                 let event_name = format!("menu://{}", action);
