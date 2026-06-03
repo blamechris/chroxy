@@ -71,7 +71,8 @@ import { usePermissionNotification, type PermissionPromptInfo } from './hooks/us
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder } from './store/persistence'
+import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
@@ -556,6 +557,14 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
+  // #4832 — user-defined order for the sidebar's repo groups and the
+  // sessions inside each group. Both are layered on top of the
+  // server-supplied session list and persisted in localStorage so they
+  // survive reload + Tauri restart. State sits at App-level so the
+  // `sidebarRepos` memo below can apply the order to the derived
+  // RepoNode[].
+  const [sidebarRepoOrder, setSidebarRepoOrder] = useState<string[]>(() => loadPersistedSidebarRepoOrder())
+  const [sidebarSessionOrder, setSidebarSessionOrder] = useState<Record<string, string[]>>(() => loadPersistedSidebarSessionOrder())
   // #4045: sidebar right-click context menu state. `null` when closed.
   const [sidebarContextMenu, setSidebarContextMenu] = useState<{
     target: ContextMenuTarget
@@ -990,8 +999,38 @@ export function App() {
       return []
     }
 
-    return [...repoMap.values()]
-  }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage])
+    // #4832 — apply user-defined ordering. Repo groups are reordered
+    // by saved cwd order (unknown ids dropped, new repos appended at
+    // tail). Sessions within each repo are reordered by the per-repo
+    // saved order. `applyOrderById` keeps unsaved sessions / repos at
+    // the end so newly-created entries don't shuffle the existing list.
+    const ordered = applyOrderById([...repoMap.values()], sidebarRepoOrder, r => r.path)
+    return ordered.map(repo => {
+      const savedSessionOrder = sidebarSessionOrder[repo.path]
+      if (!savedSessionOrder || savedSessionOrder.length === 0) return repo
+      return {
+        ...repo,
+        activeSessions: applyOrderById(repo.activeSessions, savedSessionOrder, s => s.sessionId),
+      }
+    })
+  }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage, sidebarRepoOrder, sidebarSessionOrder])
+
+  // #4832 — reorder callbacks wired into the Sidebar component. Both
+  // persist immediately so a reload (or Tauri restart) restores the
+  // order. We update local state synchronously so the UI reflects the
+  // new order on the next render without waiting for a round-trip.
+  const handleReorderRepos = useCallback((orderedPaths: string[]) => {
+    setSidebarRepoOrder(orderedPaths)
+    persistSidebarRepoOrder(orderedPaths)
+  }, [])
+
+  const handleReorderSidebarSessions = useCallback((repoPath: string, orderedIds: string[]) => {
+    setSidebarSessionOrder(prev => {
+      const next = { ...prev, [repoPath]: orderedIds }
+      persistSidebarSessionOrder(next)
+      return next
+    })
+  }, [])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(
@@ -1945,6 +1984,8 @@ export function App() {
           initialPanelHeight={loadPersistedSidebarPanelHeight() ?? 200}
           initialPanelView={loadPersistedSidebarPanelView()}
           initialPanelCollapsed={loadPersistedSidebarPanelCollapsed()}
+          onReorderRepos={handleReorderRepos}
+          onReorderSessions={handleReorderSidebarSessions}
         />
       )}
 

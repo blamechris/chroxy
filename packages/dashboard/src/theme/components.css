@@ -625,6 +625,50 @@
   outline-offset: -2px;
 }
 
+/* #4832 — drag-to-reorder visual feedback.
+ *
+ *   .dragging       — applied to the row currently being dragged. Fades it
+ *                     so the user can see the cursor's drop-target row
+ *                     behind it.
+ *   .drop-before    — applied to the row the cursor is hovering when
+ *                     positioned above the row's midpoint. Renders a 2px
+ *                     accent line along the row's TOP edge.
+ *   .drop-after     — same but for BELOW the midpoint, line at the BOTTOM.
+ *
+ * The lines are absolutely-positioned ::before/::after pseudos that span
+ * the row's full width. The parent rule needs `position: relative` for
+ * the absolute pseudos to anchor correctly.
+ */
+.sidebar-repo,
+.sidebar-session-item {
+  position: relative;
+}
+.sidebar-repo.dragging,
+.sidebar-session-item.dragging {
+  opacity: 0.45;
+}
+.sidebar-repo.drop-before::before,
+.sidebar-session-item.drop-before::before,
+.sidebar-repo.drop-after::after,
+.sidebar-session-item.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-blue, #4a9eff);
+  pointer-events: none;
+  border-radius: 1px;
+}
+.sidebar-repo.drop-before::before,
+.sidebar-session-item.drop-before::before {
+  top: 0;
+}
+.sidebar-repo.drop-after::after,
+.sidebar-session-item.drop-after::after {
+  bottom: 0;
+}
+
 /* SessionContextMenu (#4045) — right-click context menu overlay for sidebar
  * items. Positioned fixed at the click coordinates; the component itself
  * handles outside-click / Escape / blur dismissal. */

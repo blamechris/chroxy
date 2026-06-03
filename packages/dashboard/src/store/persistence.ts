@@ -24,6 +24,13 @@ const KEY_SHOW_CONSOLE_TAB = `${KEY_PREFIX}show_console_tab`;
 const KEY_SIDEBAR_PANEL_HEIGHT = `${KEY_PREFIX}sidebar_panel_height`;
 const KEY_SIDEBAR_PANEL_VIEW = `${KEY_PREFIX}sidebar_panel_view`;
 const KEY_SIDEBAR_PANEL_COLLAPSED = `${KEY_PREFIX}sidebar_panel_collapsed`;
+// #4832 — drag-to-reorder sidebar persistence. Repo order is a flat list of
+// cwd paths; session order is keyed by repo cwd so each name-group keeps
+// its own ordering and a session moved in one repo never reshuffles
+// another. Both are server-scoped so different servers can have different
+// orders without clobbering each other.
+const KEY_SIDEBAR_REPO_ORDER = `${KEY_PREFIX}sidebar_repo_order`;
+const KEY_SIDEBAR_SESSION_ORDER = `${KEY_PREFIX}sidebar_session_order`;
 
 // ---------------------------------------------------------------------------
 // Server-scoped persistence — keys scoped by server ID to prevent data loss
@@ -288,6 +295,89 @@ export function loadPersistedSidebarPanelCollapsed(): boolean {
     return localStorage.getItem(KEY_SIDEBAR_PANEL_COLLAPSED) === '1';
   } catch {
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// #4832 — Drag-to-reorder sidebar persistence
+//
+// The sidebar groups sessions by repo cwd; users can drag both groups
+// (top-level repo entries) and individual sessions (within a group) to
+// reorder them. The order is layered on top of the server-supplied
+// session list (which is ordered by creation time) and persisted in
+// localStorage so it survives reload + Tauri restart.
+//
+// Storage shapes:
+//   repo order:    `string[]` — cwd paths in user order
+//   session order: `Record<string, string[]>` — keyed by repo cwd, value
+//                  is the sessionId array in user order
+//
+// Both are SERVER-SCOPED — different servers have different sessions and
+// repos, so each server gets its own ordering. Unknown ids in the saved
+// order are dropped silently on reapply (see `applyOrderById`), so we
+// never need to GC.
+// ---------------------------------------------------------------------------
+
+/** Persist the sidebar repo (top-level group) order (server-scoped). */
+export function persistSidebarRepoOrder(order: string[]): void {
+  try {
+    const key = scopedKey(KEY_SIDEBAR_REPO_ORDER);
+    if (order.length === 0) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify(order));
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load persisted sidebar repo order. Returns [] when unset / invalid. */
+export function loadPersistedSidebarRepoOrder(): string[] {
+  try {
+    const raw = scopedRead(KEY_SIDEBAR_REPO_ORDER);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === 'string');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Persist sidebar session order per repo (server-scoped).
+ * Pass `{}` to clear all per-repo orderings.
+ */
+export function persistSidebarSessionOrder(order: Record<string, string[]>): void {
+  try {
+    const key = scopedKey(KEY_SIDEBAR_SESSION_ORDER);
+    if (Object.keys(order).length === 0) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify(order));
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load persisted sidebar session order keyed by repo cwd. */
+export function loadPersistedSidebarSessionOrder(): Record<string, string[]> {
+  try {
+    const raw = scopedRead(KEY_SIDEBAR_SESSION_ORDER);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof k === 'string' && Array.isArray(v)) {
+        out[k] = v.filter((x): x is string => typeof x === 'string');
+      }
+    }
+    return out;
+  } catch {
+    return {};
   }
 }
 
