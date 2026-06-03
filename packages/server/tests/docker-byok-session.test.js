@@ -285,6 +285,32 @@ describe('DockerByokSession start() — preflight + lifecycle', () => {
     assert.equal(rmCall, undefined, 'external container must not be removed by the session')
   })
 
+  it('tears down owned container and stays not-ready when super.start fails (missing creds)', async () => {
+    // PR #5021 review fix (Copilot, comment id 3348029212): pre-fix,
+    // _containerReady was set BEFORE super.start(); a missing-creds
+    // failure would leak the owned container.
+    delete process.env.ANTHROPIC_API_KEY
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_ID_leak_test\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({ cwd: tmpHome, _execFile, _dockerBackend: backendStub() })
+    // Do NOT stub _client — let super.start() see no key and bail.
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+    // super.start() emits an error from byok-session.js:369. The
+    // session should NOT mark itself ready, and the owned container
+    // must have been destroyed.
+    assert.equal(session._containerReady, false)
+    assert.equal(session._processReady, false)
+    const rmCall = _execFile.calls.find((c) => c.args[0] === 'rm')
+    assert.ok(rmCall, 'docker rm -f must be called when super.start fails')
+    assert.ok(rmCall.args.includes('CONTAINER_ID_leak_test'))
+  })
+
   it('surfaces a docker_image_not_found error when the run fails', async () => {
     const _execFile = execFileStub({
       info: { stdout: 'ok' },
@@ -327,6 +353,34 @@ describe('remapToContainerPath()', () => {
     )
   })
 
+  it('refuses an absolute path that starts with cwd but escapes via ..', () => {
+    // Regression for PR #5021 review (path traversal):
+    // /host/cwd/../etc/passwd has `slice(cwd.length)` -> '/../etc/passwd',
+    // and posix.join('/workspace', '/../etc/passwd') returns '/etc/passwd'
+    // because the second arg is absolute. Re-asserting startsWith catches it.
+    assert.throws(
+      () => remapToContainerPath('/host/cwd/../etc/passwd', '/host/cwd'),
+      /outside workspace/,
+    )
+    assert.throws(
+      () => remapToContainerPath('/host/cwd/legit/../../etc/passwd', '/host/cwd'),
+      /outside workspace/,
+    )
+    assert.throws(
+      () => remapToContainerPath('/host/cwd/../../root/.ssh/id_rsa', '/host/cwd'),
+      /outside workspace/,
+    )
+  })
+
+  it('refuses a sibling path that shares the cwd prefix (e.g. /host/cwd-evil)', () => {
+    // /host/cwd-evil/secret begins with '/host/cwd' but is not under it.
+    // The `startsWith(normHostCwd + '/')` check covers this — verify it.
+    assert.throws(
+      () => remapToContainerPath('/host/cwd-evil/secret', '/host/cwd'),
+      /outside workspace/,
+    )
+  })
+
   it('refuses an empty file_path', () => {
     assert.throws(
       () => remapToContainerPath('', '/host/cwd'),
@@ -364,9 +418,9 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(_dockerBackend.calls.length, 0)
   })
 
-  it('Read routes to `sed | head` inside the container', async () => {
+  it('Read routes to `sed | head | awk` inside the container and forwards the container user', async () => {
     const _dockerBackend = backendStub({
-      defaultResponse: { stdout: 'file contents here\n', stderr: '' },
+      defaultResponse: { stdout: '    1→file contents here\n', stderr: '' },
     })
     const { session } = buildSession({ backend: _dockerBackend })
     const result = await session._dispatchBuiltinTool({
@@ -378,6 +432,14 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(_dockerBackend.calls.length, 1)
     assert.match(_dockerBackend.calls[0].cmd, /sed -n '1,2000p' '\/workspace\/foo\.txt'/)
     assert.match(_dockerBackend.calls[0].cmd, /head -c/)
+    // PR #5021 review fix (Copilot, comment id 3348029235): the awk
+    // pass formats each line as 5-space-padded line number + arrow,
+    // matching readFileTool's output shape.
+    assert.match(_dockerBackend.calls[0].cmd, /awk.*printf.*%5d→%s/)
+    // PR #5021 review fix (Copilot, comment id 3348029166): every
+    // tool dispatch must forward the non-root container user to
+    // docker exec so the useradd + chown setup is respected.
+    assert.equal(_dockerBackend.calls[0].user, 'chroxy')
   })
 
   it('Read with offset and limit slices in the container', async () => {
@@ -419,6 +481,35 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.match(cmd, /base64 -d > '\/workspace\/src\/new\.js'/)
     // The base64 of 'hello' is aGVsbG8=
     assert.match(cmd, /aGVsbG8=/)
+  })
+
+  it('Write refuses missing/non-string content with EINVAL', async () => {
+    // PR #5021 review fix (Copilot, comment id 3348029266): pre-fix,
+    // a missing `content` field silently truncated the file to zero
+    // bytes. Now it returns EINVAL like host-side writeFileTool.
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'foo.txt' },
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /EINVAL.*content is required/)
+    assert.equal(_dockerBackend.calls.length, 0, 'must not docker exec when content is missing')
+    // Non-string types should also be refused.
+    const result2 = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'foo.txt', content: 12345 },
+    })
+    assert.equal(result2.isError, true)
+    assert.match(result2.content, /EINVAL/)
+    assert.equal(_dockerBackend.calls.length, 0)
+    // Empty string is legitimate (clearing a file) — must still succeed.
+    const result3 = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'foo.txt', content: '' },
+    })
+    assert.equal(result3.isError, false)
   })
 
   it('Write refuses oversize content', async () => {
@@ -502,6 +593,26 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     // Cmd is the rg-or-grep wrapper so both binaries appear:
     assert.match(_dockerBackend.calls[0].cmd, /rg /)
     assert.match(_dockerBackend.calls[0].cmd, /grep -r/)
+    // PR #5021 review fix (Copilot, comment id 3348029186): the
+    // command is suffixed with `; true` so rg/grep's exit code 1
+    // (no matches) doesn't bubble up to execInEnvironment's reject.
+    assert.match(_dockerBackend.calls[0].cmd, /; true$/)
+  })
+
+  it('Grep returns "No matches" when stdout is empty and stderr is clean', async () => {
+    // PR #5021 review fix (Copilot, comment id 3348029186): the
+    // no-match branch was unreachable pre-fix because rg/grep exit 1.
+    // With `; true` masking the exit code, this branch now fires.
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: '', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Grep',
+      input: { pattern: 'nosuchstring' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /No matches for nosuchstring/)
   })
 
   it('TodoWrite remains host-side (falls through to super._dispatchBuiltinTool)', async () => {

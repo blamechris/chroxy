@@ -154,10 +154,30 @@ export class DockerBackend {
    * opts.cwd — forwarded as `--workdir <cwd>`.  The path must already be an
    * absolute path *inside* the container; callers are responsible for remapping
    * host paths to container paths if necessary.
+   *
+   * opts.user — forwarded as `-u <user>` so the command runs as a non-root
+   * container user. Validated against the same POSIX username regex as
+   * `streamCliInEnvironment` to refuse shell-injection payloads. Optional
+   * for backward compatibility (docker-sdk's CLI bootstrap path runs as
+   * root for `npm install -g`, then `streamCliInEnvironment` switches to
+   * the non-root user for the long-lived Claude process). docker-byok
+   * (#5021) passes it for every tool dispatch so file ops respect the
+   * `useradd` + `chown /workspace` setup done at container start.
    */
-  execInEnvironment(containerId, { cmd, env, cwd, timeout = 30_000 }) {
+  execInEnvironment(containerId, { cmd, env, cwd, timeout = 30_000, user } = {}) {
     return new Promise((resolve, reject) => {
       const execArgs = ['exec']
+
+      if (user) {
+        // POSIX username pattern — same regex as docker-sdk-session.js
+        // and docker-byok-session.js. Refuse anything weirder so a
+        // caller-supplied string can't smuggle a flag.
+        if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) {
+          reject(new Error(`Invalid user "${user}" — must match POSIX username rules`))
+          return
+        }
+        execArgs.push('-u', user)
+      }
 
       if (cwd) {
         execArgs.push('--workdir', cwd)

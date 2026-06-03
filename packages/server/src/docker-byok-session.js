@@ -114,7 +114,19 @@ export function remapToContainerPath(filePath, hostCwd) {
     if (filePath === normHostCwd) return CONTAINER_WORKSPACE
     if (filePath.startsWith(normHostCwd + '/')) {
       const suffix = filePath.slice(normHostCwd.length)
-      return posix.join(CONTAINER_WORKSPACE, suffix)
+      const joined = posix.join(CONTAINER_WORKSPACE, suffix)
+      // The suffix preserves a leading `/`, so a payload like
+      // `${cwd}/../etc/passwd` makes posix.join() see the second
+      // argument as absolute and DISCARD the /workspace prefix — the
+      // result would be `/etc/passwd`. Re-assert the same containment
+      // guard as the relative branch so a `..` after the cwd prefix
+      // can't escape the workspace mount.
+      if (joined !== CONTAINER_WORKSPACE && !joined.startsWith(CONTAINER_WORKSPACE + '/')) {
+        const err = new Error(`path outside workspace: ${filePath} resolves to ${joined}`)
+        err.code = 'EACCES'
+        throw err
+      }
+      return joined
     }
     const err = new Error(`path outside workspace: ${filePath} is not under ${normHostCwd}`)
     err.code = 'EACCES'
@@ -122,9 +134,11 @@ export function remapToContainerPath(filePath, hostCwd) {
   }
   // Relative path → join onto /workspace.
   const joined = posix.join(CONTAINER_WORKSPACE, filePath)
-  if (!joined.startsWith(CONTAINER_WORKSPACE)) {
+  if (joined !== CONTAINER_WORKSPACE && !joined.startsWith(CONTAINER_WORKSPACE + '/')) {
     // posix.join() collapses `../` segments — if the result escapes
-    // /workspace, refuse the call.
+    // /workspace, refuse the call. The `+ '/'` is important so that
+    // `/workspaceX` (some sibling path that happens to share the
+    // prefix) can't masquerade as the workspace.
     const err = new Error(`path outside workspace: ${filePath} resolves to ${joined}`)
     err.code = 'EACCES'
     throw err
@@ -287,8 +301,30 @@ export class DockerByokSession extends ClaudeByokSession {
       }
     }
 
+    // Fix for PR #5021 review (Copilot, comment id 3348029212): only
+    // mark the container ready AFTER super.start() succeeds, and
+    // self-destroy on its failure. Pre-fix, super.start()'s missing-
+    // creds path emitted 'error' and returned without setting
+    // _processReady — leaving the owned container running with
+    // _containerReady === true and nobody guaranteed to call destroy().
+    try {
+      await super.start()
+    } catch (err) {
+      this.emit('error', {
+        code: 'session_start_failed',
+        message: `docker-byok session start failed: ${err.message}`,
+      })
+      await this.destroy()
+      return
+    }
+    if (!this._processReady) {
+      // super.start() emitted its own 'error' event (e.g. missing
+      // creds) and returned without marking the session ready. Tear
+      // down the owned container so we don't leak it.
+      await this.destroy()
+      return
+    }
     this._containerReady = true
-    await super.start()
   }
 
   /**
@@ -435,6 +471,26 @@ export class DockerByokSession extends ClaudeByokSession {
   // Tool implementations — container-side
   // ─────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Run a bash command inside the container as the non-root container
+   * user. Single source of truth for every tool dispatch so the `useradd`
+   * + `chown /workspace` setup done at container start is actually
+   * respected. Mirrors `streamCliInEnvironment`'s `-u <user>` behaviour.
+   *
+   * Fix for PR #5021 review (Copilot, comment id 3348029166): pre-fix,
+   * every tool ran as root in the container because the backend's
+   * execInEnvironment didn't forward a `-u` flag. The hardening
+   * (`--cap-drop ALL`, `no-new-privileges`) still capped what root could
+   * do, but the explicit non-root design intent was silently violated.
+   */
+  _execAsContainerUser({ cmd, timeout = 30_000 }) {
+    return this._dockerBackend.execInEnvironment(this._containerId, {
+      cmd,
+      timeout,
+      user: this._containerUser,
+    })
+  }
+
   async _containerRead(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     // Use sed for offset/limit slicing inside the container so we
@@ -447,11 +503,14 @@ export class DockerByokSession extends ClaudeByokSession {
     const startLine = Number.isFinite(offset) && offset > 0 ? offset : 1
     const lineCap = Number.isFinite(limit) && limit > 0 ? limit : 2000
     const endLine = startLine + lineCap - 1
-    const cmd = `sed -n '${startLine},${endLine}p' ${shellQuote(containerPath)} | head -c ${READ_MAX_BYTES}`
-    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
-      this._containerId,
-      { cmd, timeout: 30_000 },
-    )
+    // Fix for PR #5021 review (Copilot, comment id 3348029235): match
+    // the host-side BYOK Read output format (5-space-padded line number,
+    // arrow separator) so the model sees the same line-numbered shape
+    // regardless of provider. The `awk` runs INSIDE the container after
+    // the `sed | head` slice, so we still apply the line cap and the
+    // byte cap before formatting (a 1GB line stays bounded).
+    const cmd = `sed -n '${startLine},${endLine}p' ${shellQuote(containerPath)} | head -c ${READ_MAX_BYTES} | awk -v start=${startLine} 'BEGIN{n=start} {printf "%5d→%s\\n", n, $0; n++}'`
+    const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
     if (stderr && stderr.trim()) {
       return { content: `Read failed: ${stderr.trim()}`, isError: true }
     }
@@ -460,7 +519,15 @@ export class DockerByokSession extends ClaudeByokSession {
 
   async _containerWrite(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
-    const content = typeof input?.content === 'string' ? input.content : ''
+    // Fix for PR #5021 review (Copilot, comment id 3348029266): host-side
+    // writeFileTool returns EINVAL when content is missing/non-string;
+    // pre-fix this branch silently truncated the file to zero bytes.
+    // Allow an empty string (the model may legitimately want to clear a
+    // file) but refuse undefined / number / boolean / null.
+    if (typeof input?.content !== 'string') {
+      return { content: 'EINVAL: content is required (string)', isError: true }
+    }
+    const content = input.content
     if (Buffer.byteLength(content, 'utf8') > WRITE_MAX_BYTES) {
       return {
         content: `Write refused: content exceeds ${WRITE_MAX_BYTES} bytes — split into smaller writes`,
@@ -478,10 +545,7 @@ export class DockerByokSession extends ClaudeByokSession {
       `echo ${shellQuote(encoded)} | base64 -d > ${shellQuote(containerPath)}`,
       `wc -c < ${shellQuote(containerPath)}`,
     ].join(' && ')
-    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
-      this._containerId,
-      { cmd, timeout: 30_000 },
-    )
+    const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
     if (stderr && stderr.trim()) {
       return { content: `Write failed: ${stderr.trim()}`, isError: true }
     }
@@ -502,10 +566,10 @@ export class DockerByokSession extends ClaudeByokSession {
     }
     // Read the file via the same execInEnvironment path so a missing
     // file surfaces as a tool_result rather than an exception.
-    const { stdout: existing, stderr: readErr } = await this._dockerBackend.execInEnvironment(
-      this._containerId,
-      { cmd: `cat ${shellQuote(containerPath)}`, timeout: 30_000 },
-    )
+    const { stdout: existing, stderr: readErr } = await this._execAsContainerUser({
+      cmd: `cat ${shellQuote(containerPath)}`,
+      timeout: 30_000,
+    })
     if (readErr && readErr.trim()) {
       return { content: `Edit failed: ${readErr.trim()}`, isError: true }
     }
@@ -562,10 +626,10 @@ export class DockerByokSession extends ClaudeByokSession {
     const timeoutMs = Number.isFinite(requested) && requested > 0
       ? Math.min(requested, 600_000)
       : 30_000
-    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
-      this._containerId,
-      { cmd: command, timeout: timeoutMs },
-    )
+    const { stdout, stderr } = await this._execAsContainerUser({
+      cmd: command,
+      timeout: timeoutMs,
+    })
     const parts = []
     if (stdout) parts.push(`stdout:\n${stdout}`)
     if (stderr) parts.push(`stderr:\n${stderr}`)
@@ -591,10 +655,7 @@ export class DockerByokSession extends ClaudeByokSession {
       ? remapToContainerPath(input.path, this.cwd)
       : CONTAINER_WORKSPACE
     const cmd = `shopt -s globstar nullglob; cd ${shellQuote(root)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`
-    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
-      this._containerId,
-      { cmd, timeout: 30_000 },
-    )
+    const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
     if (!stdout && stderr && stderr.trim()) {
       return { content: `Glob failed: ${stderr.trim()}`, isError: true }
     }
@@ -620,11 +681,15 @@ export class DockerByokSession extends ClaudeByokSession {
       ? ` --glob ${shellQuote(input.glob)}` : ''
     const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(root)}`
     const grepCmd = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(root)}`
-    const cmd = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
-    const { stdout, stderr } = await this._dockerBackend.execInEnvironment(
-      this._containerId,
-      { cmd, timeout: 30_000 },
-    )
+    // Fix for PR #5021 review (Copilot, comment id 3348029186): rg and
+    // grep -r both exit 1 on "no matches", and execInEnvironment rejects
+    // on any non-zero exit, so the "No matches for ${pattern}" branch
+    // was unreachable. Mask the exit code so we can distinguish
+    // legitimate "no matches" (empty stdout, empty stderr) from real
+    // failures (non-empty stderr). The host-side equivalent
+    // (byok-tool-executor.js) uses the same `|| true` pattern.
+    const cmd = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi; true`
+    const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
     if (!stdout && stderr && stderr.trim()) {
       return { content: `Grep failed: ${stderr.trim()}`, isError: true }
     }
