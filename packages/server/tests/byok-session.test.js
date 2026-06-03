@@ -3370,8 +3370,15 @@ describe('ClaudeByokSession', () => {
       })
       await session.start()
       const turn = session.sendMessage('do long task')
-      // Wait for the child to spawn, then interrupt the parent.
-      await new Promise((r) => setTimeout(r, 20))
+      // #5015 review: wait deterministically for the child to spawn
+      // (agent_spawned fires AFTER _subagentSessions.set + before the
+      // child's sendMessage). A fixed sleep races on loaded CI runners
+      // — if interrupt fires before the spawn, the cascade has nothing
+      // to iterate and the child runs the full 60s timeout.
+      await new Promise((resolve) => {
+        if (session._subagentSessions.size > 0) return resolve()
+        session.once('agent_spawned', resolve)
+      })
       session.interrupt()
       await turn
       assert.ok(childInterruptCalled > 0, 'parent.interrupt() must cascade to child.interrupt()')

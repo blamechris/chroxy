@@ -1188,25 +1188,48 @@ export class ClaudeByokSession extends BaseSession {
     // ran once. mcpConfigPath: null skips MCP discovery in the child
     // (v1: child has no MCP — keeps the scope bounded and avoids the
     // per-spawn child-process startup cost).
-    const ClaudeByokSessionCtor = this.constructor
-    const child = new ClaudeByokSessionCtor({
-      cwd: this.cwd,
-      model: this.model || this._defaultModel,
-      mcpConfigPath: null,
-    })
-    // Skip start()'s credential resolution — share the parent's client
-    // so the child uses the same API key path. Also avoids a duplicate
-    // credentials.json read which could rate-limit on disk for parallel
-    // fan-outs.
-    child._client = this._client
-    child._apiKeySource = this._apiKeySource
-    child._processReady = true
-    // Inherit permission mode so the subagent runs under the same
-    // gating policy as the parent — a user who set `auto` doesn't
-    // want the child to start prompting again, and a user in
-    // `approve` mode expects to gate the child's tools too.
-    child.permissionMode = this.permissionMode
-    this._subagentSessions.set(toolUseId, child)
+    //
+    // #5015 review: wrap construction + init in try/catch. If the
+    // ClaudeByokSession ctor or any of the field assignments throws
+    // (unlikely today but a future refactor could add an init step
+    // that does), the parent has already emitted agent_spawned and
+    // populated _activeAgents — we MUST balance that with a matching
+    // agent_completed + _activeAgents delete + matching error tool_result
+    // so the dashboard badge clears and we don't leak the entry.
+    let child
+    try {
+      const ClaudeByokSessionCtor = this.constructor
+      child = new ClaudeByokSessionCtor({
+        cwd: this.cwd,
+        model: this.model || this._defaultModel,
+        mcpConfigPath: null,
+      })
+      // Skip start()'s credential resolution — share the parent's client
+      // so the child uses the same API key path. Also avoids a duplicate
+      // credentials.json read which could rate-limit on disk for parallel
+      // fan-outs.
+      child._client = this._client
+      child._apiKeySource = this._apiKeySource
+      child._processReady = true
+      // Inherit permission mode so the subagent runs under the same
+      // gating policy as the parent — a user who set `auto` doesn't
+      // want the child to start prompting again, and a user in
+      // `approve` mode expects to gate the child's tools too. Direct
+      // assignment (vs setPermissionMode) is safe here: the child is
+      // fresh, not busy, and has no pending permissions to flush.
+      child.permissionMode = this.permissionMode
+      this._subagentSessions.set(toolUseId, child)
+    } catch (ctorErr) {
+      // Balance the agent_spawned emit + _activeAgents.set above so the
+      // dashboard badge clears and the entry doesn't leak forever.
+      this._activeAgents.delete(toolUseId)
+      this.emit('agent_completed', { toolUseId })
+      log.warn(`subagent construction failed: ${ctorErr?.message || ctorErr}`)
+      return {
+        content: `Subagent construction failed: ${ctorErr?.message || ctorErr}`,
+        isError: true,
+      }
+    }
 
     // Collect the child's stream_delta text into a buffer that becomes
     // the tool_result content. usage / cost are taken from the child's
@@ -1253,6 +1276,24 @@ export class ClaudeByokSession extends BaseSession {
       else signal.addEventListener('abort', onAbort, { once: true })
     }
 
+    // #5015 review: second abort check immediately before sendMessage.
+    // Closes the micro-race where the signal aborts AFTER the top-of-
+    // function `signal?.aborted` check but BEFORE the child flips
+    // _isBusy=true. In that window, the `onAbort` listener fires
+    // child.interrupt() which no-ops (`if (!this._isBusy) return`) —
+    // sendMessage would then proceed and burn tokens after Stop.
+    // Short-circuit with an interrupted result so cancellation is
+    // honored even when the abort lands during this narrow gap.
+    if (signal?.aborted) {
+      if (signal) signal.removeEventListener?.('abort', onAbort)
+      this._subagentSessions.delete(toolUseId)
+      try { await child.destroy() } catch (err) {
+        log.warn(`subagent destroy on pre-send abort failed: ${err?.message || err}`)
+      }
+      this._activeAgents.delete(toolUseId)
+      this.emit('agent_completed', { toolUseId })
+      return { content: 'Interrupted by user before subagent started', isError: true }
+    }
     try {
       await child.sendMessage(prompt)
       await done
