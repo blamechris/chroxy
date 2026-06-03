@@ -502,6 +502,52 @@ wss.on('connection', (ws) => {
           break
         }
 
+        // #4877: trigger phrase 'show-ask-other' emits a single-question
+        // AskUserQuestion so the Maestro ask-question-other-freeform flow
+        // can exercise the Other → freeform send-path on a real RN
+        // runtime. Mirrors the production wire shape `show-ask-user-question`
+        // uses, but with model-supplied option labels that are distinct
+        // from 'approve'/'deny' so the synthesized Other sentinel is the
+        // obvious target — and so the post-answer freeform text bubble
+        // can't be confused with a regular option label.
+        //
+        // The store-core `handleUserQuestion` normalizer appends the
+        // synthetic OTHER_OPTION_VALUE option to every single-select
+        // question that has at least one real option (see
+        // packages/store-core/src/handlers/index.ts ~L3680). The Maestro
+        // flow therefore taps `approval-button-__chroxy_other__` to drop
+        // the MessageBubble into freetext mode, types a freeform answer,
+        // and submits via `approval-freetext-send` — the testIDs that
+        // landed with PR #4864.
+        //
+        // The freeform shape `{otherLabel, freeformText}` is forwarded
+        // by SessionScreen.handleSelectOption to `sendUserQuestionResponse`,
+        // which serializes `{type:'user_question_response', answer:<label>,
+        // freeformText:<typed>, toolUseId}` on the wire. Mock handler
+        // `case 'user_question_response'` logs the payload so a maintainer
+        // can eyeball the wire shape in `[mock]` output; the Maestro
+        // assertion targets the answered-state render (the typed text
+        // renders in `styles.promptFreetextAnswered` after submit).
+        if (text.trim() === 'show-ask-other') {
+          showAskUserQuestionCounter += 1
+          const toolUseId = `tu-askuserquestion-other-mock-${showAskUserQuestionCounter}`
+          send(ws, {
+            type: 'user_question',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            questions: [
+              {
+                question: 'Which environment should I deploy to?',
+                options: [
+                  { label: 'production' },
+                  { label: 'staging' },
+                ],
+              },
+            ],
+          })
+          break
+        }
+
         // #4762: trigger phrase 'show-multi-question' emits the four
         // wedge shapes #4735 / #4604 Chunk B require coverage for —
         // mixed (single-select + multi-select + with-Other in one
@@ -673,7 +719,13 @@ wss.on('connection', (ws) => {
       // path (ws-server.js processes `user_question_response` /
       // `permission_response` symmetrically).
       case 'user_question_response':
-        console.log(`[mock] user_question_response: answer="${msg.answer}" toolUseId="${msg.toolUseId || ''}"`)
+        // #4877: log `freeformText` alongside `answer` so the Other →
+        // freeform send-path's wire shape is visible in the mock audit
+        // trail. When the user picks the synthesized Other option,
+        // `sendUserQuestionResponse` serializes the wire payload
+        // `{answer:<otherLabel>, freeformText:<typed>, toolUseId}` —
+        // the dashboard parity shape pinned by PR #4864.
+        console.log(`[mock] user_question_response: answer="${msg.answer}" freeformText="${msg.freeformText || ''}" toolUseId="${msg.toolUseId || ''}"`)
         break
 
       case 'permission_response':
