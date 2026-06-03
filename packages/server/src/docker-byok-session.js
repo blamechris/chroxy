@@ -796,9 +796,7 @@ export class DockerByokSession extends ClaudeByokSession {
     const tag = this._generateSnapshotTag()
     const sourceCwd = this.cwd || process.cwd()
     const sourceImage = this._snapshotImage || this._image
-    const snapName = (typeof name === 'string' && name.trim().length > 0)
-      ? name.trim()
-      : tag.split(':').pop()
+    const snapName = this._resolveSnapshotName(name, tag)
     const createdAt = new Date().toISOString()
 
     log.info(`snapshot: committing ${this._containerId.slice(0, 12)} → ${tag}`)
@@ -832,6 +830,81 @@ export class DockerByokSession extends ClaudeByokSession {
     }
     log.info(`snapshot: ${tag} (name="${snapName}") committed`)
     return metadata
+  }
+
+  /**
+   * Validate `opts.name` against Docker tag rules so the field stays
+   * safe to surface into the image tag later (#5076).
+   *
+   *   - undefined / null         → fall back to the tag slug (the
+   *     "name is optional" contract: omitted = auto-generated slug)
+   *   - non-string               → EINVAL
+   *   - empty / whitespace-only  → EINVAL (per #5076 AC: a string that
+   *     trims to nothing is not "omitted" — the caller passed
+   *     something and it carries no usable identifier, so reject at
+   *     the API boundary rather than silently substituting the slug)
+   *   - > 64 chars (post-trim)   → EINVAL (Docker caps at 128; we cap
+   *     at 64 to leave headroom for a `<name>-<ts>` composite tag)
+   *   - uppercase or chars       → EINVAL
+   *     outside `[a-z0-9._-]`,
+   *     or leading `.` / `-`     → EINVAL (Docker tag grammar requires
+   *     the leading char to be `[a-zA-Z0-9_]`; we mirror that minus
+   *     the uppercase half)
+   *
+   * Returns the trimmed, validated name (or the tag-slug fallback for
+   * the omitted case).
+   *
+   * @param {unknown} name
+   * @param {string} tag The auto-generated tag, used for the fallback
+   * @returns {string}
+   */
+  _resolveSnapshotName(name, tag) {
+    if (name === undefined || name === null) {
+      return tag.split(':').pop()
+    }
+    if (typeof name !== 'string') {
+      const err = new Error(
+        `docker-byok snapshot(): name must be a string, got ${typeof name}`,
+      )
+      err.code = 'EINVAL'
+      throw err
+    }
+    const trimmed = name.trim()
+    if (trimmed.length === 0) {
+      // Whitespace-only — the caller passed *something*, but it
+      // carries no usable identifier. Per #5076 AC, this is EINVAL at
+      // the API boundary rather than a silent fallback (which would
+      // mask the caller's bug and produce repeated warn-line noise).
+      const err = new Error(
+        'docker-byok snapshot(): name must not be empty or whitespace-only',
+      )
+      err.code = 'EINVAL'
+      throw err
+    }
+    // 64 chars leaves room for a `<name>-<13-digit-ts>` composite tag
+    // under Docker's 128-char ceiling. Bias toward strictness now so
+    // tightening later is not a breaking change.
+    if (trimmed.length > 64) {
+      const err = new Error(
+        `docker-byok snapshot(): name is ${trimmed.length} chars; max is 64`,
+      )
+      err.code = 'EINVAL'
+      throw err
+    }
+    // Docker tag charset: lowercase ASCII letters, digits, `.`, `_`,
+    // `-`. The leading character must be `[a-z0-9_]` — Docker's own
+    // grammar permits a leading underscore (`[a-zA-Z0-9_][a-zA-Z0-9._-]
+    // {0,127}`), so we mirror that minus the uppercase half. `.` and
+    // `-` are still forbidden as the leading char per the reference
+    // grammar.
+    if (!/^[a-z0-9_][a-z0-9._-]*$/.test(trimmed)) {
+      const err = new Error(
+        'docker-byok snapshot(): name must be lowercase and contain only [a-z0-9._-], starting with [a-z0-9_]',
+      )
+      err.code = 'EINVAL'
+      throw err
+    }
+    return trimmed
   }
 
   /**
