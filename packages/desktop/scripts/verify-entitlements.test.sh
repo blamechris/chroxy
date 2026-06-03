@@ -133,6 +133,91 @@ write_plist "$REGEX_COLLIDE_PLIST" \
     "comXappleXsecurityXdeviceXaudio-input"
 assert_exit "treats dots in key as literal, not regex any-char" 1 "$(run_verifier "$REGEX_COLLIDE_PLIST")"
 
+# Case 7 — synthetic .app bundle exercises the helper-in-app code path (#4955).
+#
+# The #4953/#4954 helper-in-app branch only fires when TARGET is a `.app`
+# directory; all prior cases use `.plist` files which take the plist-mode
+# short-circuit and never run the new branch. Without codesign on the test
+# runner — and without a real codesigned helper binary — the parent
+# `extract_entitlements` step short-circuits at line 119 on any unsigned
+# `.app`, so we stub `codesign` to return a valid parent plist and an empty
+# helper plist. This lets the parent check pass and the helper check fail,
+# matching the regression we want to catch.
+#
+# This guards against:
+#   - The `[ -d "$TARGET" ] && [[ "$TARGET" == *.app ]]` guard inverted
+#   - The `Contents/Resources/speech-helper` path string typo'd
+#   - The empty-blob FAIL branch demoted to WARN
+#   - The EXIT_CODE=1 aggregation lost on helper failure
+FAKE_APP="$TMP_DIR/Fake.app"
+mkdir -p "$FAKE_APP/Contents/Resources"
+: > "$FAKE_APP/Contents/Resources/speech-helper"
+
+STUB_DIR="$TMP_DIR/stub-bin"
+mkdir -p "$STUB_DIR"
+# Stub responds to `codesign -d --entitlements - [--xml] <target>` by checking
+# the last argument: helper path → exit 1 (empty blob), anything else → emit
+# a valid parent plist on stdout, exit 0. Matches both codesign invocations
+# in extract_entitlements (with and without --xml).
+cat > "$STUB_DIR/codesign" <<'STUB'
+#!/usr/bin/env bash
+target="${@: -1}"
+if [[ "$target" == *speech-helper* ]]; then
+    exit 1
+fi
+cat <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>
+EOF
+STUB
+chmod +x "$STUB_DIR/codesign"
+
+set +e
+STUB_OUT="$(PATH="$STUB_DIR:$PATH" "$VERIFIER" "$FAKE_APP" 2>&1)"
+STUB_RC=$?
+set -e
+assert_exit "#4955 — synthetic .app with empty-entitlements helper → exit 1" 1 "$STUB_RC"
+
+if printf '%s' "$STUB_OUT" | grep -qF "speech-helper has no embedded entitlements"; then
+    echo "ok   - #4955 — helper-in-app FAIL message present in stderr"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL - #4955 — helper-in-app FAIL message missing (output: $STUB_OUT)" >&2
+    FAIL=$((FAIL + 1))
+fi
+
+# Case 8 — helper absent → WARN, parent-only result (#4955).
+# Guards against the empty-blob branch being conflated with the file-missing
+# branch (today they emit different messages and different exit codes).
+FAKE_APP_NO_HELPER="$TMP_DIR/NoHelper.app"
+mkdir -p "$FAKE_APP_NO_HELPER/Contents/Resources"
+# Note: speech-helper deliberately NOT created.
+
+set +e
+STUB_OUT2="$(PATH="$STUB_DIR:$PATH" "$VERIFIER" "$FAKE_APP_NO_HELPER" 2>&1)"
+STUB_RC2=$?
+set -e
+assert_exit "#4955 — synthetic .app with no helper file → exit 0 (WARN only)" 0 "$STUB_RC2"
+
+if printf '%s' "$STUB_OUT2" | grep -qF "speech-helper not present"; then
+    echo "ok   - #4955 — missing-helper WARN message present in stderr"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL - #4955 — missing-helper WARN message missing (output: $STUB_OUT2)" >&2
+    FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "verify-entitlements tests: $PASS passed, $FAIL failed"
 
