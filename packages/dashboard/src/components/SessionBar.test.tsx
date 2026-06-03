@@ -660,5 +660,68 @@ describe('SessionBar', () => {
       fireEvent.click(screen.getByTestId('session-tab-b'))
       expect(onSwitch).toHaveBeenCalledWith('b')
     })
+
+    // #4949 — the reorder keyboard shortcut shipped in #4945 but was
+    // undiscoverable. Tabs that are reorder-eligible must advertise the
+    // shortcut via both a hover `title` (mouse users) and the
+    // `aria-keyshortcuts` attribute (screen readers / a11y tooling).
+    // Tabs without `onReorder` wired must NOT advertise a shortcut
+    // that does nothing.
+    describe('#4949 reorder shortcut discoverability', () => {
+      it('surfaces Shift+Space in the tab tooltip when onReorder is wired', () => {
+        render(
+          <SessionBar
+            sessions={makeThree()}
+            onSwitch={vi.fn()}
+            onClose={vi.fn()}
+            onRename={vi.fn()}
+            onNewSession={vi.fn()}
+            onReorder={vi.fn()}
+          />
+        )
+        const tab = screen.getByTestId('session-tab-a')
+        expect(tab.getAttribute('title')).toMatch(/Shift\+Space/i)
+        expect(tab.getAttribute('title')).toMatch(/reorder/i)
+      })
+
+      it('sets aria-keyshortcuts when onReorder is wired', () => {
+        render(
+          <SessionBar
+            sessions={makeThree()}
+            onSwitch={vi.fn()}
+            onClose={vi.fn()}
+            onRename={vi.fn()}
+            onNewSession={vi.fn()}
+            onReorder={vi.fn()}
+          />
+        )
+        const tab = screen.getByTestId('session-tab-a')
+        // Per the issue: aria-keyshortcuts is the canonical a11y
+        // attribute for keyboard shortcuts attached to a control.
+        // Both Shift+Space (lift) and Arrow keys (step) should be
+        // present so SRs announce the full ladder.
+        const ks = tab.getAttribute('aria-keyshortcuts') || ''
+        expect(ks).toMatch(/Shift\+Space/i)
+      })
+
+      it('does NOT advertise a reorder shortcut when onReorder is absent', () => {
+        // No onReorder => no reorder capability => no misleading
+        // tooltip / aria-keyshortcuts pointing at a no-op shortcut.
+        render(
+          <SessionBar
+            sessions={makeThree()}
+            onSwitch={vi.fn()}
+            onClose={vi.fn()}
+            onRename={vi.fn()}
+            onNewSession={vi.fn()}
+          />
+        )
+        const tab = screen.getByTestId('session-tab-a')
+        const title = tab.getAttribute('title') || ''
+        const ks = tab.getAttribute('aria-keyshortcuts') || ''
+        expect(title).not.toMatch(/Shift\+Space/i)
+        expect(ks).toBe('')
+      })
+    })
   })
 })
