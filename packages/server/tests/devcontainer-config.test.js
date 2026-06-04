@@ -105,6 +105,107 @@ describe('parseDevContainer()', () => {
     const config = parseDevContainer(tmpDir)
     assert.deepEqual(config, {})
   })
+
+  // #5078 — build / dockerFile / dockerComposeFile
+  it('does not warn on build / dockerFile / dockerComposeFile / service', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      build: { dockerfile: 'Dockerfile' },
+      dockerComposeFile: 'docker-compose.yml',
+      service: 'app',
+    }))
+    parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.equal(warnings.filter(m => m.includes('unsupported field')).length, 0)
+  })
+
+  it('surfaces the devcontainer.json directory as config.dir', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({ image: 'node:22' }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.equal(config.dir, join(tmpDir, '.devcontainer'))
+  })
+
+  it('parses build object with dockerfile / context / target / args', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      build: { dockerfile: 'Dockerfile.dev', context: '..', target: 'builder', args: { NODE_VERSION: '22', FLAG: true } },
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.deepEqual(config.build, {
+      dockerfile: 'Dockerfile.dev',
+      context: '..',
+      target: 'builder',
+      args: { NODE_VERSION: '22', FLAG: 'true' },
+    })
+  })
+
+  it('parses legacy dockerFile string as build.dockerfile', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      dockerFile: 'Dockerfile',
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.deepEqual(config.build, { dockerfile: 'Dockerfile' })
+  })
+
+  it('explicit build object wins over legacy dockerFile', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      dockerFile: 'Legacy.Dockerfile',
+      build: { dockerfile: 'New.Dockerfile' },
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.equal(config.build.dockerfile, 'New.Dockerfile')
+  })
+
+  it('build object without a dockerfile defaults to "Dockerfile"', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      build: { context: '..' },
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.equal(config.build.dockerfile, 'Dockerfile')
+    assert.equal(config.build.context, '..')
+  })
+
+  it('drops non-scalar / invalid-key build.args with a warning', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      build: { dockerfile: 'Dockerfile', args: { GOOD: 'x', NESTED: { a: 1 }, 'BAD;KEY': 'y' } },
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.deepEqual(config.build.args, { GOOD: 'x' })
+    assert.ok(warnings.some(m => m.includes('build.args')))
+  })
+
+  it('normalises dockerComposeFile string to a one-element array', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      dockerComposeFile: 'docker-compose.yml',
+      service: 'web',
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.deepEqual(config.dockerComposeFile, ['docker-compose.yml'])
+    assert.equal(config.service, 'web')
+  })
+
+  it('keeps dockerComposeFile array order and drops non-strings', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      dockerComposeFile: ['base.yml', '', 'override.yml', 42],
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.deepEqual(config.dockerComposeFile, ['base.yml', 'override.yml'])
+  })
+
+  it('drops dockerComposeFile when no usable string paths remain', () => {
+    mkdirSync(join(tmpDir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(tmpDir, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+      dockerComposeFile: ['', '   '],
+    }))
+    const config = parseDevContainer(tmpDir, { logger: captureLogger })
+    assert.equal(config.dockerComposeFile, undefined)
+  })
 })
 
 describe('validateMounts()', () => {

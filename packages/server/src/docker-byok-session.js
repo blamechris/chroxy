@@ -70,6 +70,29 @@
  *     stack tears down. Pooling is disabled in compose mode.
  *   - Default (neither opt) — original v1 bare-image launch path.
  *
+ * DevContainer build / dockerFile / dockerComposeFile (#5078)
+ * ----------------------------------------------------------
+ *   - `build` (object: dockerfile / context / args / target) or the
+ *     legacy `dockerFile` string in devcontainer.json — start() shells
+ *     `docker build` against the project dir and uses the resulting tag
+ *     as the image. The tag is a deterministic SHA-256 of the build
+ *     inputs, so a repeat session with identical inputs reuses the
+ *     already-built image (docker's own layer cache makes the rebuild a
+ *     fast no-op). `build.target` threads to `docker build --target`.
+ *     `build.context` (and `..`) resolves relative to the
+ *     devcontainer.json DIRECTORY, then is contained to the project cwd —
+ *     a context that escapes the workspace is refused. An explicit `image`
+ *     constructor opt always wins over a devcontainer build.
+ *   - `dockerComposeFile` (string | array) in devcontainer.json — when
+ *     `useDevcontainer` is set and no explicit `composeFile` opt was
+ *     passed, the file (resolved relative to the devcontainer.json dir)
+ *     is treated as if the operator passed `composeFile`, and the primary
+ *     service is taken from devcontainer.json's `service` field. The same
+ *     compose lifecycle (up / attach / down) and pooling-disabled posture
+ *     as the explicit `composeFile` opt applies. Arrays use the FIRST
+ *     file (compose overlay merge is not yet supported — the extras are
+ *     logged, not silently dropped).
+ *
  * Snapshot / restore (#5023)
  * --------------------------
  *   - `snapshot({ name? })` runs `docker commit <containerId>
@@ -100,7 +123,7 @@ import { execFile } from 'child_process'
 import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
 import { createHash, randomBytes } from 'crypto'
 import { homedir, tmpdir } from 'os'
-import { isAbsolute, join, posix } from 'path'
+import { isAbsolute, join, posix, resolve, sep } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
@@ -432,6 +455,10 @@ export class DockerByokSession extends ClaudeByokSession {
     this._explicitImage = opts.image
     this._explicitContainerUser = opts.containerUser
     this._dcConfig = null
+    // #5078: normalised devcontainer.json `build` / `dockerFile` spec,
+    // resolved in `_resolveDevContainer()`. Stays null until then (or
+    // when no build is declared / an explicit image opt wins).
+    this._dcBuild = null
     // #5080: short SHA-1 of the resolved devcontainer overlay, used to
     // namespace the pool key so a changed devcontainer.json invalidates
     // any pooled container provisioned against the old config. Stays
@@ -992,21 +1019,34 @@ export class DockerByokSession extends ClaudeByokSession {
    * fingerprint and their pool key shape is unchanged.
    */
   async _acquireOrStartContainer() {
-    // #5024: compose mode short-circuits the entire pool + bare-image
-    // path. The compose stack owns its own container; destroy()
-    // unwinds it with `docker compose down`.
+    // #5024: devcontainer parsing must happen BEFORE the compose +
+    // pool branches because the resolved devcontainer overlay can ITSELF
+    // declare a compose stack (#5078 `dockerComposeFile`) or a
+    // build-from-Dockerfile image, and the resolved image/user are part
+    // of the pool key. #5080: the same call also computes
+    // `_devcontainerFingerprint`, folded into the pool key so a changed
+    // devcontainer.json overlay invalidates any pooled container
+    // provisioned against the old config.
+    if (this._useDevcontainer) {
+      this._resolveDevContainer()
+    }
+    // #5024 / #5078: compose mode short-circuits the entire pool +
+    // bare-image path. The compose stack owns its own container;
+    // destroy() unwinds it with `docker compose down`. `_composeFile`
+    // may have been set by an explicit constructor opt OR by the
+    // devcontainer.json `dockerComposeFile` field resolved just above.
     if (this._composeFile) {
       await this._startComposeStack()
       return
     }
-    // #5024: devcontainer parsing must happen BEFORE the pool lookup
-    // because the resolved image/user are part of the pool key. #5080:
-    // the same call also computes `_devcontainerFingerprint`, which
-    // is folded into the pool key so a changed devcontainer.json
-    // overlay invalidates any pooled container provisioned against the
-    // old config.
-    if (this._useDevcontainer) {
-      this._resolveDevContainer()
+    // #5078: build-from-Dockerfile. When the resolved devcontainer
+    // overlay declares a `build` / `dockerFile`, shell `docker build`
+    // against the project dir and use the resulting tag as the image.
+    // Cached by tag so a repeat session with the same build inputs
+    // reuses the already-built image. Runs BEFORE the pool lookup so the
+    // built tag is the image segment of the pool key.
+    if (this._dcBuild && !this._explicitImage) {
+      await this._buildDevcontainerImage()
     }
     if (this._pool && !this._snapshotImage) {
       const key = this._poolKey()
@@ -1079,6 +1119,13 @@ export class DockerByokSession extends ClaudeByokSession {
       mounts: validateMounts(config.mounts, cwd, { logger: log }),
       containerEnv: sanitizeContainerEnv(config.containerEnv, { logger: log }),
     }
+    // #5078 — devcontainer.json may declare a build (Dockerfile) or a
+    // compose stack. Resolve those onto session state here so
+    // `_acquireOrStartContainer` can branch on them. Explicit constructor
+    // opts (image / composeFile) always win — devcontainer.json is the
+    // fallback, mirroring the image/remoteUser precedence above.
+    this._resolveDevContainerBuild(config, cwd)
+    this._resolveDevContainerCompose(config, cwd)
     // #5080: Compute the pool-key fingerprint from the FULLY-RESOLVED
     // overlay (after mount validation + env sanitisation), not the raw
     // parsed file. That way two devcontainer.json files that differ
@@ -1091,6 +1138,169 @@ export class DockerByokSession extends ClaudeByokSession {
     // misses when an explicit constructor opt has overridden them but
     // the devcontainer.json file value changed.
     this._devcontainerFingerprint = this._computeDevcontainerFingerprint(this._dcConfig)
+  }
+
+  /**
+   * #5078 — Resolve a devcontainer.json `build` / `dockerFile` declaration
+   * onto session state. Stores a normalised build spec in `this._dcBuild`
+   * with absolute, contained paths:
+   *   - `context`   absolute project-relative build context (defaults to
+   *                 the devcontainer.json directory; honours `..`)
+   *   - `dockerfile` path passed to `docker build -f`
+   *   - `target`    multi-stage build target (→ `--target`)
+   *   - `args`      validated `--build-arg KEY=VALUE` pairs
+   *
+   * The build context is resolved relative to the devcontainer.json
+   * DIRECTORY (the spec), not the session cwd, then contained to the
+   * project cwd — a `context: '../..'` that escapes the project tree is
+   * rejected so a malicious devcontainer.json can't hand `docker build` a
+   * context outside the workspace.
+   *
+   * No-op when the overlay declares no build, OR when an explicit
+   * constructor `image` was passed (the operator's image wins — same
+   * precedence the image overlay uses).
+   */
+  _resolveDevContainerBuild(config, cwd) {
+    this._dcBuild = null
+    if (!config || !config.build) return
+    if (this._explicitImage) {
+      log.info('devcontainer.json build ignored — explicit image opt wins')
+      return
+    }
+    const dcDir = config.dir || cwd
+    const absCwd = resolve(cwd)
+    const cwdPrefix = absCwd.endsWith(sep) ? absCwd : absCwd + sep
+
+    // Context defaults to the devcontainer.json dir per spec. Resolve it
+    // relative to that dir so `..` walks up from there, then contain to
+    // the project cwd.
+    const contextResolved = resolve(dcDir, config.build.context || '.')
+    if (contextResolved !== absCwd && !contextResolved.startsWith(cwdPrefix)) {
+      log.warn(
+        `devcontainer.json build.context "${config.build.context}" resolves outside the project dir (${contextResolved}) — ignoring build`,
+      )
+      return
+    }
+
+    // Dockerfile is resolved relative to the build context (docker's own
+    // default) and must also stay inside the project tree.
+    const dockerfileResolved = resolve(contextResolved, config.build.dockerfile)
+    if (dockerfileResolved !== absCwd && !dockerfileResolved.startsWith(cwdPrefix)) {
+      log.warn(
+        `devcontainer.json build.dockerfile "${config.build.dockerfile}" resolves outside the project dir (${dockerfileResolved}) — ignoring build`,
+      )
+      return
+    }
+
+    this._dcBuild = {
+      context: contextResolved,
+      dockerfile: dockerfileResolved,
+      target: typeof config.build.target === 'string' ? config.build.target : null,
+      args: config.build.args && typeof config.build.args === 'object' ? config.build.args : null,
+    }
+  }
+
+  /**
+   * #5078 — Resolve a devcontainer.json `dockerComposeFile` declaration
+   * into the session's compose opts. When present (and no explicit
+   * `composeFile` constructor opt was passed), sets `_composeFile` to the
+   * primary compose file resolved relative to the devcontainer.json dir,
+   * picks the primary service from devcontainer.json's `service` field,
+   * and disables pooling (compose stacks own their container lifecycle).
+   *
+   * The devcontainer spec allows an ARRAY of compose files (base +
+   * overrides). The current backend `_composeUp` shells a single `-f`;
+   * we attach to the FIRST file and warn that overlays are not yet
+   * merged, rather than silently dropping the extras.
+   *
+   * No-op when the overlay declares no compose file or an explicit
+   * `composeFile` constructor opt already won.
+   */
+  _resolveDevContainerCompose(config, cwd) {
+    if (!config || !Array.isArray(config.dockerComposeFile) || config.dockerComposeFile.length === 0) return
+    if (this._composeFile) {
+      log.info('devcontainer.json dockerComposeFile ignored — explicit composeFile opt wins')
+      return
+    }
+    const dcDir = config.dir || cwd
+    const files = config.dockerComposeFile
+    if (files.length > 1) {
+      log.warn(
+        `devcontainer.json dockerComposeFile lists ${files.length} files; only the first ("${files[0]}") is used (compose overlay merge is not yet supported)`,
+      )
+    }
+    this._composeFile = resolve(dcDir, files[0])
+    // Primary service: devcontainer.json `service` field wins; otherwise
+    // fall back to the first service the backend reports.
+    if (!this._composeService && config.service) {
+      this._composeService = config.service
+    }
+    // Compose stacks own their container — pooling is disabled (mirrors
+    // the constructor's compose-mode pool guard).
+    this._pool = null
+  }
+
+  /**
+   * #5078 — Build a Docker image from a devcontainer.json `build` /
+   * `dockerFile` declaration via `docker build`, then use the resulting
+   * tag as `this._image`. Cached by tag: the tag is a deterministic
+   * SHA-256 fingerprint of the build inputs (context, dockerfile, target,
+   * args), so a repeat session with identical inputs produces the same
+   * tag and `docker build`'s own layer cache makes the rebuild a fast
+   * no-op (the image already exists locally).
+   *
+   * Security: every value is passed to `_execFile` as a discrete argv
+   * entry — never string-interpolated into a shell. `--build-arg
+   * KEY=VALUE` pairs use keys already constrained to POSIX env-var shape
+   * by `parseBuild`; values are passed verbatim as a single argv token so
+   * shell metacharacters in a value are inert.
+   */
+  _buildDevcontainerImage() {
+    return new Promise((resolve, reject) => {
+      const build = this._dcBuild
+      const tag = this._computeBuildTag(build)
+      const buildArgs = ['build', '-t', tag, '-f', build.dockerfile]
+      if (build.target) buildArgs.push('--target', build.target)
+      if (build.args) {
+        for (const [key, value] of Object.entries(build.args)) {
+          buildArgs.push('--build-arg', `${key}=${value}`)
+        }
+      }
+      // Context is the final positional argument.
+      buildArgs.push(build.context)
+
+      log.info(`docker-byok building image ${tag} (context=${build.context} dockerfile=${build.dockerfile}${build.target ? ` target=${build.target}` : ''})`)
+      this._execFile('docker', buildArgs, { encoding: 'utf-8', timeout: 600_000 }, (err, _stdout, stderr) => {
+        if (err) {
+          const classified = classifyDockerError(err, stderr)
+          const error = new Error(`docker build failed: ${classified.message}`)
+          error.code = classified.code || 'docker_build_failed'
+          reject(error)
+          return
+        }
+        this._image = tag
+        log.info(`docker-byok built image ${tag}`)
+        resolve()
+      })
+    })
+  }
+
+  /**
+   * #5078 — Deterministic, lowercase, Docker-tag-safe image tag derived
+   * from the build inputs. Same inputs → same tag → `docker build` hits
+   * its local layer cache and the image is reused across sessions.
+   */
+  _computeBuildTag(build) {
+    const fingerprint = createHash('sha256')
+      .update(this._canonicalStringify({
+        context: build.context,
+        dockerfile: build.dockerfile,
+        target: build.target,
+        args: build.args,
+      }))
+      .digest('hex')
+      .slice(0, 16)
+    return `chroxy-byok-build:${fingerprint}`
   }
 
   /**

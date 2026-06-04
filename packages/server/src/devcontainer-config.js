@@ -29,7 +29,7 @@
  */
 
 import { existsSync, readFileSync } from 'fs'
-import { join, resolve, sep } from 'path'
+import { dirname, join, resolve, sep } from 'path'
 import { homedir } from 'os'
 
 const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -62,6 +62,8 @@ export function parseDevContainer(cwd, { logger = NOOP_LOG } = {}) {
   const SUPPORTED_FIELDS = new Set([
     'image', 'forwardPorts', 'containerEnv', 'mounts',
     'remoteUser', 'postCreateCommand',
+    // #5078 — build-from-Dockerfile and compose-from-devcontainer.
+    'build', 'dockerFile', 'dockerComposeFile', 'service',
   ])
   for (const key of Object.keys(raw)) {
     if (!SUPPORTED_FIELDS.has(key)) {
@@ -70,13 +72,120 @@ export function parseDevContainer(cwd, { logger = NOOP_LOG } = {}) {
   }
 
   const config = {}
+  // `dir` is the directory the devcontainer.json lives in — `build.context`
+  // and `dockerComposeFile` are resolved relative to THIS directory (the
+  // devcontainer spec), not the session cwd. Surfaced so the consuming
+  // session can compute the docker-build context / compose-file path
+  // without re-deriving the file location.
+  config.dir = dirname(filePath)
   if (typeof raw.image === 'string' && raw.image.trim()) config.image = raw.image.trim()
   if (typeof raw.remoteUser === 'string' && raw.remoteUser.trim()) config.remoteUser = raw.remoteUser.trim()
   if (typeof raw.postCreateCommand === 'string' && raw.postCreateCommand.trim()) config.postCreateCommand = raw.postCreateCommand.trim()
   if (raw.containerEnv && typeof raw.containerEnv === 'object' && !Array.isArray(raw.containerEnv)) config.containerEnv = raw.containerEnv
   if (Array.isArray(raw.forwardPorts)) config.forwardPorts = raw.forwardPorts.filter(p => typeof p === 'number' || typeof p === 'string')
   if (Array.isArray(raw.mounts)) config.mounts = raw.mounts.filter(m => typeof m === 'string')
+  // #5078 — `service` is the official devcontainer spec name for the
+  // primary compose service (used with `dockerComposeFile`). Kept as a
+  // trimmed string so the session can pick the right service container.
+  if (typeof raw.service === 'string' && raw.service.trim()) config.service = raw.service.trim()
+  // #5078 — `dockerComposeFile` is a string or array of compose-file
+  // paths relative to the devcontainer.json dir. Normalise to an array of
+  // non-empty strings; drop the field entirely if nothing usable remains.
+  const composeFiles = parseDockerComposeFile(raw.dockerComposeFile, { logger })
+  if (composeFiles) config.dockerComposeFile = composeFiles
+  // #5078 — `build` (object) and `dockerFile` (legacy string) both
+  // declare a Dockerfile-driven image. Normalise to a single `build`
+  // shape: { dockerfile, context, args, target }. The legacy `dockerFile`
+  // string is sugar for `{ build: { dockerfile: <string> } }`. An explicit
+  // `build` object wins when both are present.
+  const build = parseBuild(raw.build, raw.dockerFile, { logger })
+  if (build) config.build = build
   return config
+}
+
+/**
+ * #5078 — Normalise `dockerComposeFile` (string | array) into an array of
+ * non-empty path strings. Returns undefined when nothing usable remains so
+ * the caller can `if (composeFiles)` cleanly.
+ */
+function parseDockerComposeFile(value, { logger = NOOP_LOG } = {}) {
+  if (value == null) return undefined
+  const list = Array.isArray(value) ? value : [value]
+  const files = list.filter((f) => typeof f === 'string' && f.trim()).map((f) => f.trim())
+  if (files.length === 0) {
+    if (value !== undefined) logger.warn('devcontainer.json: dockerComposeFile has no usable string paths (ignored)')
+    return undefined
+  }
+  return files
+}
+
+/**
+ * #5078 — Normalise `build` (object) + legacy `dockerFile` (string) into a
+ * single `{ dockerfile, context, args, target }` shape. All fields are
+ * optional except that SOME Dockerfile reference must exist. Returns
+ * undefined when neither input declares a build.
+ *
+ * Strictness: `build.args` values must be primitive (string/number/bool) —
+ * an object/array value is dropped with a warning, because these are
+ * threaded into `docker build --build-arg KEY=VALUE` and a non-scalar
+ * value has no safe textual form. `dockerfile` / `context` / `target`
+ * must be strings; non-string values are dropped with a warning rather
+ * than silently coerced.
+ */
+function parseBuild(rawBuild, rawDockerFile, { logger = NOOP_LOG } = {}) {
+  let dockerfile
+  let context
+  let target
+  let args
+
+  if (rawBuild && typeof rawBuild === 'object' && !Array.isArray(rawBuild)) {
+    if (typeof rawBuild.dockerfile === 'string' && rawBuild.dockerfile.trim()) {
+      dockerfile = rawBuild.dockerfile.trim()
+    }
+    if (typeof rawBuild.context === 'string' && rawBuild.context.trim()) {
+      context = rawBuild.context.trim()
+    }
+    if (typeof rawBuild.target === 'string' && rawBuild.target.trim()) {
+      target = rawBuild.target.trim()
+    }
+    if (rawBuild.args && typeof rawBuild.args === 'object' && !Array.isArray(rawBuild.args)) {
+      const out = {}
+      let has = false
+      for (const [key, value] of Object.entries(rawBuild.args)) {
+        if (!VALID_ENV_KEY_RE.test(key)) {
+          logger.warn(`devcontainer.json: build.args key rejected (invalid characters): ${key}`)
+          continue
+        }
+        if (value == null || typeof value === 'object') {
+          logger.warn(`devcontainer.json: build.args["${key}"] rejected (must be a scalar)`)
+          continue
+        }
+        out[key] = String(value)
+        has = true
+      }
+      if (has) args = out
+    }
+  }
+
+  // Legacy `dockerFile` string is sugar for build.dockerfile. The explicit
+  // build object wins when both name a Dockerfile.
+  if (!dockerfile && typeof rawDockerFile === 'string' && rawDockerFile.trim()) {
+    dockerfile = rawDockerFile.trim()
+  }
+
+  // A build with no Dockerfile and no context is meaningless — but the
+  // devcontainer spec defaults the Dockerfile to `Dockerfile` relative to
+  // the context. Only emit a build when at least one signal is present.
+  if (!dockerfile && !context && !target && !args) return undefined
+
+  const build = {}
+  // Default the dockerfile to `Dockerfile` (the docker / devcontainer
+  // default) when a build object was declared without naming one.
+  build.dockerfile = dockerfile || 'Dockerfile'
+  if (context) build.context = context
+  if (target) build.target = target
+  if (args) build.args = args
+  return build
 }
 
 /**
