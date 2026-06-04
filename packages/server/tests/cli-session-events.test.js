@@ -857,4 +857,175 @@ describe('CliSession stream-event handling', () => {
       assert.equal(results[0].duration, 250)
     })
   })
+
+  describe('result fallback for error-subtype text (#5088)', () => {
+    // Some `claude -p` result events carry human-readable text in a
+    // structured `error.subtype` payload (e.g. permission_denied,
+    // usage_limit_exceeded) but never emit a stream_start. Without a
+    // dedicated fallback the user sees nothing — same silent-disappear
+    // pattern that #5064 fixed for `/compact`. Surface this as a
+    // response bubble but mark it with `kind: 'error'` so downstream
+    // consumers can distinguish error text from a normal `data.result`
+    // reply.
+    //
+    // The `data.result` path in #5064 takes priority — only fall back
+    // to error-subtype text when `data.result` is missing/empty, so we
+    // never double-emit for the same turn.
+    //
+    // Complementary to #5090 (stream_delta pinning) — touch this file
+    // additively, don't disturb the existing describe blocks.
+    function errorSubtype(text) {
+      return {
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        error: { subtype: text },
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      }
+    }
+
+    it('emits a fallback response with kind=error when error.subtype text exists and no stream started', () => {
+      const session = createSession()
+      const messages = []
+      const streams = []
+      session.on('message', (m) => messages.push(m))
+      session.on('stream_start', () => streams.push('start'))
+      session.on('stream_end', () => streams.push('end'))
+
+      session._handleEvent(errorSubtype('Permission denied: write to /etc/hosts'))
+
+      assert.equal(messages.length, 1)
+      assert.equal(messages[0].type, 'response')
+      assert.equal(messages[0].kind, 'error')
+      assert.equal(messages[0].content, 'Permission denied: write to /etc/hosts')
+      // No stream surfaced for this turn — pure fallback path.
+      assert.equal(streams.length, 0)
+    })
+
+    it('does not emit error-subtype fallback when a stream already fired', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // Normal streamed turn first.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed reply' },
+        },
+      })
+      // Then a result event with an error subtype echoes alongside.
+      session._handleEvent(errorSubtype('Permission denied'))
+
+      // The streamed delta is the canonical surface — don't fall back.
+      assert.equal(messages.length, 0)
+    })
+
+    it('prefers data.result over error.subtype when both are present', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        result: 'Conversation compacted to summary.',
+        error: { subtype: 'Permission denied' },
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      })
+
+      // The existing #5064 path wins — don't double-emit.
+      assert.equal(messages.length, 1)
+      assert.equal(messages[0].type, 'response')
+      assert.equal(messages[0].content, 'Conversation compacted to summary.')
+      // No `kind` annotation when `data.result` provided the text.
+      assert.equal(messages[0].kind, undefined)
+    })
+
+    it('does not emit fallback when error.subtype is empty or missing', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // No `error` field at all.
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      })
+      assert.equal(messages.length, 0)
+
+      // `error` present but `subtype` empty.
+      session._currentMessageId = 'msg-2'
+      session._currentCtx = {
+        hasStreamStarted: false,
+        didStreamText: false,
+        assistantTextSeen: 0,
+        currentContentBlockType: null,
+        currentToolName: null,
+        currentToolUseId: null,
+        toolInputChunks: '',
+        toolInputBytes: 0,
+        toolInputOverflow: false,
+      }
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        error: { subtype: '' },
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      })
+      assert.equal(messages.length, 0)
+    })
+
+    it('does not widen to non-result events (system event with error.subtype is ignored)', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // A system event happens to carry an `error.subtype` shaped field —
+      // the fallback must remain scoped to `result` events.
+      session._handleEvent({
+        type: 'system',
+        subtype: 'sub_agent_notification',
+        error: { subtype: 'should-not-fall-back' },
+      })
+
+      // System events emit a `system`-typed message via their own
+      // handler, never the error-subtype fallback's `response` bubble.
+      const fallbackBubbles = messages.filter(
+        (m) => m.type === 'response' && m.kind === 'error'
+      )
+      assert.equal(fallbackBubbles.length, 0)
+    })
+
+    it('still emits the result event after the error-subtype fallback fires', () => {
+      const session = createSession()
+      const results = []
+      session.on('result', (r) => results.push(r))
+
+      session._handleEvent(errorSubtype('Permission denied'))
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 'sess-err')
+    })
+  })
 })
