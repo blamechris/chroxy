@@ -427,10 +427,11 @@ export class DockerContainerPool extends EventEmitter {
    *
    *   - `size`          — number of containers currently parked under
    *                       this key.
-   *   - `oldestIdleMs`  — `now - max(entry.releasedAt)` across the
-   *                       bucket; the idle age of the OLDEST parked
-   *                       container. Useful for leak detection and
-   *                       idle-lifetime distribution.
+   *   - `oldestIdleMs`  — `now - min(entry.releasedAt)` across the
+   *                       bucket; i.e. `max(now - releasedAt)`, the idle
+   *                       age of the OLDEST parked container (the one
+   *                       released longest ago). Useful for leak
+   *                       detection and idle-lifetime distribution.
    *
    * Companion to the structured event stream (#5044):
    *   - Events answer "what did the pool DO recently?"
