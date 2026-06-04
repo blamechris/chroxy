@@ -4641,6 +4641,377 @@ export function handleStreamStart(
 }
 
 // ---------------------------------------------------------------------------
+// stream_delta — #4981
+//
+// The post-tool continuation-split (#4889), #4297 defensive reorder, single-
+// hop `_deltaIdRemaps` remap, mid-sentence gate (#4999/#5014), and mid-word
+// peel (#4975) logic was previously duplicated verbatim between the dashboard
+// (`handleStreamDelta`) and the app (`case 'stream_delta'`). Both maintain the
+// same module-local state (`pendingDeltas`, `deltaIdRemaps`,
+// `postPermissionSplits`, `replayingSessions`, the 100ms flush timer).
+//
+// `sharedStreamDelta` owns the platform-NEUTRAL algorithm. Platform-specific
+// side-effects stay at the call site, surfaced through `StreamDeltaContext`
+// callbacks:
+//   - dashboard's terminal-data write (`appendTerminalDelta`)
+//   - dashboard's #4297 empty-response-slot reorder + flat-messages fallbacks
+//     (the app has neither — it only ever operates on `sessionStates`)
+//
+// The two originals were NOT byte-identical: the dashboard additionally ran
+// the #4297 reorder pre-step and carried flat-`messages` fallbacks in the
+// defensive-remap and continuation-split branches. To preserve BOTH behaviours
+// exactly (pure refactor, no behaviour change), those divergent pieces are
+// supplied by the call site:
+//   - `appendTerminalDelta` — dashboard writes, app no-op
+//   - `reorderEmptyResponseSlot` — dashboard performs the #4297 shift, app no-op
+//   - `getSessionMessages` / `getFlatMessages` / `appendResponseSlot` /
+//     `peelSlotContent` — each resolves the effective target (session-state vs
+//     flat) the way that platform does, so the dashboard keeps its flat
+//     fallback and the app stays session-only.
+// ---------------------------------------------------------------------------
+
+/**
+ * A buffered (not-yet-flushed) delta entry. Mirrors the `pendingDeltas` value
+ * shape used by both call sites.
+ */
+export interface PendingDelta {
+  sessionId: string | null
+  delta: string
+}
+
+/**
+ * Platform surface for {@link sharedStreamDelta}. The shared function reads and
+ * mutates the four module-local collections directly (they are identical on
+ * both platforms) and delegates every store-touching or platform-divergent
+ * operation to a callback.
+ */
+export interface StreamDeltaContext {
+  /** The store's current active session id (`get().activeSessionId`). */
+  activeSessionId: string | null
+  /**
+   * Resolve the messages array for a target session. Returns the session's
+   * `sessionStates[id].messages` when present, else `null` so the shared
+   * function knows to fall through to the flat-messages path. Pass `null`/an
+   * unknown id to force the flat fallback.
+   */
+  getSessionMessages: (sessionId: string | null) => readonly ChatMessage[] | null
+  /**
+   * The flat (legacy / pre-session-bootstrap) `messages` array. The dashboard
+   * supplies the real array; the app — which has no flat fallback in this
+   * handler — returns an empty array so the flat branches are inert.
+   */
+  getFlatMessages: () => readonly ChatMessage[]
+  /** `pendingDeltas` buffer (shared, identical on both platforms). */
+  pendingDeltas: Map<string, PendingDelta>
+  /** Single-hop `_deltaIdRemaps` map (shared). */
+  deltaIdRemaps: Map<string, string>
+  /** `_postPermissionSplits` set (shared). */
+  postPermissionSplits: Set<string>
+  /** Per-session replay guard set (shared). */
+  replayingSessions: Set<string>
+  /**
+   * Forward the raw delta text to the terminal view. Dashboard-only side
+   * effect; the app passes a no-op. Called once at the top of the handler,
+   * before any remap resolution, exactly as the dashboard did inline.
+   */
+  appendTerminalDelta: (delta: string) => void
+  /**
+   * #4297 — move an empty (`content === ''`) response slot at `deltaId` to the
+   * end of the messages array on its first delta, so a turn-final summary
+   * renders below the tool groups it summarised. Dashboard implements the
+   * session-state + flat shift; the app passes a no-op (it never reordered).
+   */
+  reorderEmptyResponseSlot: (deltaId: string, capturedSessionId: string | null) => void
+  /**
+   * Append a fresh response slot (used by the `-post-` permission split, the
+   * defensive `-response` suffix, and the `-cont-` continuation split) and set
+   * `streamingMessageId` to its id. `onlyIfAbsent` mirrors the defensive
+   * branch's "lazy-create only when not already present" guard. A `null`
+   * `targetSessionId` selects the flat-messages path (dashboard only).
+   */
+  appendResponseSlot: (
+    targetSessionId: string | null,
+    slot: ChatMessage,
+    opts?: { onlyIfAbsent?: boolean },
+  ) => void
+  /**
+   * Peel `count` trailing characters off the flushed `content` of the response
+   * slot at `deltaId` in the resolved target. Used by the #4975 mid-word peel
+   * when the partial word lives in already-flushed content. A `null`
+   * `targetSessionId` selects the flat-messages path (dashboard only).
+   */
+  peelSlotContent: (
+    targetSessionId: string | null,
+    deltaId: string,
+    count: number,
+  ) => void
+  /**
+   * Schedule the 100ms `flushPendingDeltas` timer if one isn't already armed.
+   * The timer handle lives at the call site (module-local), so scheduling is
+   * delegated.
+   */
+  scheduleFlush: () => void
+}
+
+/**
+ * Shared `stream_delta` handler (#4981). Owns the platform-neutral hot path:
+ * the #4297 reorder dispatch, post-permission split, single-hop defensive
+ * remap, post-tool continuation split (#4889) with the mid-sentence gate
+ * (#4999/#5014) and mid-word peel (#4975), and the buffered append + 100ms
+ * flush scheduling. All store writes and platform-divergent fallbacks go
+ * through {@link StreamDeltaContext}.
+ */
+export function sharedStreamDelta(
+  msg: Record<string, unknown>,
+  ctx: StreamDeltaContext,
+): void {
+  // Capture the ORIGINAL incoming messageId before any remap resolution.
+  // The post-tool continuation split (#4889) writes its remap entry against
+  // this id (not against the resolved `deltaId`) so successive splits
+  // overwrite a single map entry instead of forming a chain — keeps
+  // `deltaIdRemaps` bounded and eliminates the need for chained lookup.
+  const originalMessageId = msg.messageId as string
+  let deltaId = originalMessageId
+  const capturedSessionId = (msg.sessionId as string) || ctx.activeSessionId
+
+  // Forward delta text to terminal view (dashboard-only; app no-op).
+  if (typeof msg.delta === 'string' && msg.delta.length > 0) {
+    ctx.appendTerminalDelta(msg.delta)
+  }
+
+  // #4297 — empty-response-slot reorder pre-step. Dashboard performs the shift;
+  // the app passes a no-op. Gated identically to the dashboard's inline guard.
+  if (typeof deltaId === 'string'
+      && !ctx.postPermissionSplits.has(deltaId)
+      && !ctx.deltaIdRemaps.has(deltaId)
+      && !ctx.pendingDeltas.has(deltaId)) {
+    ctx.reorderEmptyResponseSlot(deltaId, capturedSessionId)
+  }
+
+  // Permission boundary split: first delta after a split creates a new message.
+  if (ctx.postPermissionSplits.has(deltaId)) {
+    ctx.postPermissionSplits.delete(deltaId)
+    const newId = `${deltaId}-post-${Date.now()}`
+    ctx.deltaIdRemaps.set(deltaId, newId)
+    const newMsg: ChatMessage = {
+      id: newId,
+      type: 'response',
+      content: '',
+      timestamp: Date.now(),
+    }
+    // The two originals resolved the permission-split target DIFFERENTLY, so
+    // `appendResponseSlot` receives the raw captured id and each platform's
+    // callback applies its own resolution:
+    //   - dashboard: captured session when it has state, ELSE the flat
+    //     `messages` array (NO active-session fallback).
+    //   - app: captured session when it has state, ELSE the active session;
+    //     session-only (no flat fallback).
+    ctx.appendResponseSlot(capturedSessionId, newMsg)
+    deltaId = newId
+  } else if (ctx.deltaIdRemaps.has(deltaId)) {
+    deltaId = ctx.deltaIdRemaps.get(deltaId)!
+  } else {
+    // Defensive: server reuses messageId for tool_start and the post-tool
+    // stream_start. If stream_start was dropped or hasn't registered the
+    // remap yet (e.g., session not in store at the time), the delta would
+    // otherwise concatenate onto the tool_use bubble. Detect that here and
+    // route to a suffixed response id, lazy-creating the bubble.
+    //
+    // Resolve the effective target the same way both call sites did: prefer
+    // the captured session when it has state, else the active session; fall
+    // through to the flat messages when neither has session state (dashboard
+    // only — the app's `getSessionMessages`/`getFlatMessages` keep it inert).
+    const capturedMessages = capturedSessionId ? ctx.getSessionMessages(capturedSessionId) : null
+    const sessionMessages =
+      capturedMessages ||
+      (ctx.activeSessionId ? ctx.getSessionMessages(ctx.activeSessionId) : null) ||
+      null
+    const effectiveSessionId = capturedMessages ? capturedSessionId : ctx.activeSessionId
+    const resolvedMessages = sessionMessages ?? ctx.getFlatMessages()
+    const targetForSuffix = sessionMessages ? effectiveSessionId : null
+    const existing = resolvedMessages.find((m) => m.id === deltaId)
+    if (existing && existing.type !== 'response') {
+      const suffixed = `${deltaId}-response`
+      ctx.deltaIdRemaps.set(deltaId, suffixed)
+      if (!resolvedMessages.some((m) => m.id === suffixed)) {
+        ctx.appendResponseSlot(
+          targetForSuffix,
+          { id: suffixed, type: 'response', content: '', timestamp: Date.now() },
+          { onlyIfAbsent: true },
+        )
+      }
+      deltaId = suffixed
+    }
+  }
+
+  // #4889 — post-tool continuation split. The server reuses ONE messageId for
+  // an entire assistant turn even when text → tool → text → tool → text. The
+  // earlier branches only fire on the first delta / non-response slot;
+  // subsequent text chunks would otherwise concatenate into the same
+  // response.content with no separator — producing `…filing.Filing now.` and
+  // losing paragraph breaks.
+  //
+  // Detect the boundary by checking whether a tool_use was appended AFTER the
+  // currently-resolved response slot. If so, materialize a fresh continuation
+  // slot at the end (`<deltaId>-cont-<ts>`) and remap the ORIGINAL incoming
+  // messageId directly to the new slot (single-hop, never chained). Skipped
+  // while the session is replaying — replayed history is reassembled
+  // server-side and must not be re-split on the client.
+  {
+    const splitCapturedMessages = capturedSessionId ? ctx.getSessionMessages(capturedSessionId) : null
+    const splitSessionMessages =
+      splitCapturedMessages ||
+      (ctx.activeSessionId ? ctx.getSessionMessages(ctx.activeSessionId) : null) ||
+      null
+    const splitEffectiveId = splitCapturedMessages ? capturedSessionId : ctx.activeSessionId
+    const isReplaying = splitEffectiveId ? ctx.replayingSessions.has(splitEffectiveId) : false
+    if (!isReplaying) {
+      const splitMessages = splitSessionMessages ?? ctx.getFlatMessages()
+      // The continuation split writes through `appendResponseSlot`/
+      // `peelSlotContent`; pass the session id only when session state backs
+      // the resolved messages (else the flat path, mirroring both originals).
+      const splitTarget = splitSessionMessages ? splitEffectiveId : null
+      const slotIdx = splitMessages.findIndex((m) => m.id === deltaId)
+      if (slotIdx >= 0) {
+        const slot = splitMessages[slotIdx]!
+        // Buffered (not-yet-flushed) text counts as content for the split
+        // decision — otherwise a chunk that hasn't hit the 100ms flush yet
+        // would look empty and we'd append onto it.
+        const bufferedContent = ctx.pendingDeltas.get(deltaId)?.delta || ''
+        const hasContent = slot.type === 'response'
+          && (slot.content.length > 0 || bufferedContent.length > 0)
+        // Index-based scan instead of slice().some() — avoids allocating a
+        // tail array on every delta. This handler runs many times per turn and
+        // sessions can carry long histories, so this stays on the hot path
+        // lean.
+        let toolAfter = false
+        if (hasContent) {
+          for (let i = slotIdx + 1; i < splitMessages.length; i++) {
+            if (splitMessages[i]!.type === 'tool_use') {
+              toolAfter = true
+              break
+            }
+          }
+        }
+        // #4999 — mid-sentence fragmentation gate. The post-#4889 split only
+        // makes sense when the prior bubble's text reached a sentence boundary
+        // (the LLM finished a thought before invoking the tool); otherwise the
+        // tool interrupted mid-sentence and the post-tool delta is the same
+        // sentence continuing. Treat the prior slot as "sentence-complete"
+        // only when its trailing non-whitespace character is a sentence
+        // terminator (`.`, `!`, `?`) or a hard line break (`\n`). A bubble
+        // that ends with a word char, open paren, comma, colon, dash, etc.
+        // is mid-sentence — route the delta back to the existing slot so the
+        // sentence renders as one contiguous bubble (followed by the tool).
+        if (toolAfter) {
+          const priorFullForGate = slot.type === 'response' ? slot.content + bufferedContent : ''
+          // Trim trailing whitespace before inspecting the last char so e.g.
+          // `"...sentence.   "` still reads as sentence-complete.
+          const lastNonWs = priorFullForGate.replace(/\s+$/, '')
+          // Strip trailing closing punctuation/quotes that commonly follow a
+          // sentence terminator (`.")`, `."`, `!'`, `?)`, etc.) so the gate
+          // looks at the terminator itself, not the wrapper. #5014 — also
+          // strip CJK closing brackets (`」』）`) so a fullwidth-terminated
+          // sentence wrapped in CJK quotes still reads as sentence-complete.
+          const stripped = lastNonWs.replace(/[)\]}"'’”»›」』）]+$/, '')
+          const lastChar = stripped.charAt(stripped.length - 1)
+          // #5014 — recognize CJK fullwidth sentence terminators
+          // (`．` U+FF0E, `！` U+FF01, `？` U+FF1F) and the ideographic
+          // full stop (`。` U+3002) alongside ASCII.
+          const endsSentence =
+            lastChar === '.' ||
+            lastChar === '!' ||
+            lastChar === '?' ||
+            lastChar === '．' ||
+            lastChar === '！' ||
+            lastChar === '？' ||
+            lastChar === '。'
+          const endsHardBreak = /\n\s*$/.test(priorFullForGate)
+          if (!endsSentence && !endsHardBreak) {
+            toolAfter = false
+          }
+        }
+        if (toolAfter) {
+          // #4975 — mid-word peel. The LLM sometimes interrupts a text content
+          // block to call a tool, splitting a word across the boundary (e.g.
+          // `"...PR #3.Del"` → tool → `"egating..."`). The post-#4889 split
+          // would otherwise show "Del" in one bubble and "egating..." in
+          // another with the tool between. Detect the mid-word case (last char
+          // of the prior slot's full content is a word char AND the FIRST char
+          // of the incoming post-tool delta is also a word char — both sides
+          // of the boundary must be in a word, else the LLM emitted a normal
+          // word boundary and the peel would wrongly move a complete trailing
+          // word across the tool bubble) and peel the trailing partial word off
+          // the prior slot, seeding the continuation buffer with it. Result:
+          // the word reassembles in the continuation bubble.
+          const priorFull = slot.type === 'response' ? slot.content + bufferedContent : ''
+          const incomingDelta = msg.delta as string
+          const incomingStartsMidWord = /^[A-Za-z0-9_]/.test(incomingDelta)
+          const midWordMatch = incomingStartsMidWord ? priorFull.match(/[A-Za-z0-9_]+$/) : null
+          let priorTail = ''
+          if (midWordMatch && midWordMatch[0].length > 0) {
+            priorTail = midWordMatch[0]
+            // Peel the partial word off the prior slot. It may live in
+            // already-flushed `slot.content` and/or in the still-buffered
+            // `pendingDeltas[deltaId].delta` — strip from buffered first (it
+            // lives at the tail), then from flushed content if needed.
+            let remaining = priorTail.length
+            if (bufferedContent.length > 0) {
+              const peelFromBuf = Math.min(remaining, bufferedContent.length)
+              const newBuf = bufferedContent.slice(0, bufferedContent.length - peelFromBuf)
+              if (newBuf.length > 0) {
+                ctx.pendingDeltas.set(deltaId, {
+                  sessionId: capturedSessionId,
+                  delta: newBuf,
+                })
+              } else {
+                ctx.pendingDeltas.delete(deltaId)
+              }
+              remaining -= peelFromBuf
+            }
+            if (remaining > 0 && slot.type === 'response' && slot.content.length > 0) {
+              ctx.peelSlotContent(splitTarget, deltaId, remaining)
+            }
+          }
+          const contId = `${deltaId}-cont-${Date.now()}`
+          // Single-hop remap: write against the ORIGINAL incoming messageId so
+          // successive continuation splits overwrite this entry rather than
+          // building a chain. Keeps `deltaIdRemaps` size bounded by the count
+          // of distinct in-flight turn ids, and lets `stream_end`'s
+          // `deltaIdRemaps.delete(out.messageId)` clean up completely.
+          ctx.deltaIdRemaps.set(originalMessageId, contId)
+          const contMsg: ChatMessage = {
+            id: contId,
+            type: 'response',
+            content: '',
+            timestamp: Date.now(),
+          }
+          ctx.appendResponseSlot(splitTarget, contMsg)
+          deltaId = contId
+          // Seed the new continuation buffer with the peeled word so the first
+          // delta on `contId` carries the partial word as its prefix. The
+          // normal append below sees the existing buffer and concatenates
+          // correctly.
+          if (priorTail.length > 0) {
+            ctx.pendingDeltas.set(contId, {
+              sessionId: capturedSessionId,
+              delta: priorTail,
+            })
+          }
+        }
+      }
+    }
+  }
+
+  const existingDelta = ctx.pendingDeltas.get(deltaId)
+  ctx.pendingDeltas.set(deltaId, {
+    sessionId: capturedSessionId,
+    delta: (existingDelta?.delta || '') + (msg.delta as string),
+  })
+  ctx.scheduleFlush()
+}
+
+// ---------------------------------------------------------------------------
 // stream_end
 // ---------------------------------------------------------------------------
 

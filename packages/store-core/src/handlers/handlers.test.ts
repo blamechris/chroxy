@@ -98,8 +98,10 @@ import {
   handleToolInputDelta,
   MAX_TOOL_INPUT_PARTIAL_LEN,
   handleStreamStart,
+  sharedStreamDelta,
   handleStreamEnd,
 } from './index'
+import type { StreamDeltaContext, PendingDelta } from './index'
 import { nextMessageId } from '../utils'
 import type {
   ActiveTool,
@@ -7934,5 +7936,223 @@ describe('applyInterventionBuilder', () => {
     const { interventions, isFirst } = applyInterventionBuilder(builder, existing)
     expect(interventions).toBe(existing)
     expect(isFirst).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sharedStreamDelta (#4981) — platform-neutral hot-path logic
+//
+// These exercise the logic that previously lived (duplicated) inside the
+// dashboard `handleStreamDelta` and the app `case 'stream_delta'`: the
+// single-hop defensive remap, the post-tool continuation split (#4889) with
+// the #4999/#5014 mid-sentence gate, and the #4975 mid-word peel. A minimal
+// in-memory harness models a single-session store; the platform-divergent
+// hooks (terminal write, #4297 reorder, flat fallback) are no-ops here and
+// covered by the dashboard/app wrapper integration suites.
+// ---------------------------------------------------------------------------
+
+describe('sharedStreamDelta (#4981)', () => {
+  function makeHarness(sessionId: string) {
+    // Single session-state messages array + streamingMessageId.
+    let messages: ChatMessage[] = []
+    let streamingMessageId: string | null = null
+    const pendingDeltas = new Map<string, PendingDelta>()
+    const deltaIdRemaps = new Map<string, string>()
+    const postPermissionSplits = new Set<string>()
+    const replayingSessions = new Set<string>()
+
+    const ctx: StreamDeltaContext = {
+      activeSessionId: sessionId,
+      pendingDeltas,
+      deltaIdRemaps,
+      postPermissionSplits,
+      replayingSessions,
+      getSessionMessages: (id) => (id === sessionId ? messages : null),
+      getFlatMessages: () => [],
+      appendTerminalDelta: () => {},
+      reorderEmptyResponseSlot: () => {},
+      appendResponseSlot: (targetId, slot, opts) => {
+        if (targetId !== sessionId) return
+        if (opts?.onlyIfAbsent && messages.some((m) => m.id === slot.id)) return
+        streamingMessageId = slot.id
+        messages = [...messages, slot]
+      },
+      peelSlotContent: (targetId, id, count) => {
+        if (targetId !== sessionId) return
+        messages = messages.map((m) =>
+          m.id === id && m.type === 'response'
+            ? { ...m, content: m.content.slice(0, m.content.length - count) }
+            : m,
+        )
+      },
+      scheduleFlush: () => {},
+    }
+
+    // Emulate the 100ms flush: append each buffered delta onto its matching
+    // response slot's flushed content (the matched-id path of the real
+    // flushPendingDeltas).
+    function flush() {
+      for (const [id, { delta }] of pendingDeltas) {
+        messages = messages.map((m) =>
+          m.id === id && m.type === 'response'
+            ? { ...m, content: m.content + delta }
+            : m,
+        )
+      }
+      pendingDeltas.clear()
+    }
+
+    function send(msg: Record<string, unknown>) {
+      sharedStreamDelta({ sessionId, ...msg }, ctx)
+    }
+
+    function seedResponse(id: string, content = '') {
+      streamingMessageId = id
+      messages = [...messages, { id, type: 'response', content, timestamp: 1 }]
+    }
+    function seedTool(id: string) {
+      messages = [...messages, { id, type: 'tool_use', content: 'x', timestamp: 1 }]
+    }
+
+    return {
+      send,
+      flush,
+      seedResponse,
+      seedTool,
+      get messages() { return messages },
+      get streamingMessageId() { return streamingMessageId },
+      pendingDeltas,
+      deltaIdRemaps,
+      postPermissionSplits,
+      replayingSessions,
+    }
+  }
+
+  it('buffers the delta onto the same slot when no tool follows', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello ')
+    h.send({ messageId: 'resp-1', delta: 'world' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Hello world')
+  })
+
+  it('post-tool continuation split (#4889): sentence-terminated prior slot → fresh -cont- bubble', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Let me check chroxy before filing.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Filing now.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(2)
+    expect(responses[0]!.content).toBe('Let me check chroxy before filing.')
+    expect(responses[1]!.content).toBe('Filing now.')
+    expect(responses[1]!.id).toMatch(/^resp-1-cont-/)
+    // Single-hop remap recorded against the ORIGINAL incoming id.
+    expect(h.deltaIdRemaps.get('resp-1')).toBe(responses[1]!.id)
+  })
+
+  it('single-hop remap: a second post-tool delta reuses the existing remap (no chain)', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'First sentence.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
+    h.flush()
+    const firstCont = h.deltaIdRemaps.get('resp-1')!
+    h.seedTool('toolu_b')
+    h.send({ messageId: 'resp-1', delta: 'Third sentence.' })
+    h.flush()
+    const secondCont = h.deltaIdRemaps.get('resp-1')!
+    // The map still keys on the original id (single entry, overwritten).
+    expect(h.deltaIdRemaps.size).toBe(1)
+    expect(secondCont).not.toBe(firstCont)
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses.map((r) => r.content)).toEqual([
+      'First sentence.',
+      'Second sentence.',
+      'Third sentence.',
+    ])
+  })
+
+  it('mid-sentence gate (#4999): non-terminated prior slot → delta coalesces into same bubble', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Let me check the')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: ' issue list' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    // No split — one bubble.
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Let me check the issue list')
+    expect(h.deltaIdRemaps.has('resp-1')).toBe(false)
+  })
+
+  it('mid-sentence gate (#5014): CJK fullwidth terminator counts as sentence-complete → split', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', '调查问题。')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: '现在提交。' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(2)
+    expect(responses[1]!.id).toMatch(/^resp-1-cont-/)
+  })
+
+  it('mid-word inside a sentence (#4975/#4999): prior ends mid-word → gate coalesces into ONE bubble', () => {
+    const h = makeHarness('s1')
+    // Prior content ends with a word char (`...PR #3.Del` → last char `l`),
+    // so the #4999 mid-sentence gate routes the post-tool delta back to the
+    // existing slot. The word "Delegating" reassembles in a single bubble and
+    // the #4975 peel never needs to fire.
+    h.seedResponse('resp-1', 'Starting on PR #3.Del')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'egating the review.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Starting on PR #3.Delegating the review.')
+    expect(responses[0]!.content).toContain('Delegating')
+  })
+
+  it('mid-word inside a sentence with still-buffered prior (delta not yet flushed) also coalesces', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Starting on PR #3.')
+    // Buffer "Del" without flushing — counts as content for the split decision.
+    h.send({ messageId: 'resp-1', delta: 'Del' })
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'egating the review.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Starting on PR #3.Delegating the review.')
+  })
+
+  it('replay guard: no continuation split while the session is replaying', () => {
+    const h = makeHarness('s1')
+    h.replayingSessions.add('s1')
+    h.seedResponse('resp-1', 'First sentence.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    // Replayed history is reassembled server-side — the delta coalesces onto
+    // the existing slot instead of splitting into a fresh -cont- bubble.
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('First sentence.Second sentence.')
+    expect(h.deltaIdRemaps.has('resp-1')).toBe(false)
+  })
+
+  it('defensive remap: delta whose slot is a tool_use routes to a -response slot', () => {
+    const h = makeHarness('s1')
+    // A tool_use occupies the incoming id (server reused messageId).
+    h.seedTool('resp-collide')
+    h.send({ messageId: 'resp-collide', delta: 'hi' })
+    h.flush()
+    const suffixed = h.messages.find((m) => m.id === 'resp-collide-response')
+    expect(suffixed).toBeDefined()
+    expect(suffixed!.type).toBe('response')
+    expect(suffixed!.content).toBe('hi')
+    expect(h.deltaIdRemaps.get('resp-collide')).toBe('resp-collide-response')
   })
 })
