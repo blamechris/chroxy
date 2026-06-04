@@ -120,10 +120,17 @@ export function formatPartialCostLine(partial: ErrorPartialCost): string {
  * Rolls over to `M` when the K-rounded value would reach 1000 (n ≥ 999_500
  * rounds to 1000.0K) to avoid the "1000.0K" visual nonsense. Returns "0"
  * defensively for zero / negative / non-finite input.
+ *
+ * Non-integer input (possible via untyped wire data through
+ * `pickFiniteTokenCount`) is rounded to an integer FIRST, so the
+ * threshold checks below run on the same value that gets rendered —
+ * otherwise 999.6 would pass the `< 1000` branch yet render as "1000"
+ * with no `K` suffix.
  */
 export function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0'
-  if (n < 1000) return String(Math.round(n))
+  n = Math.round(n)
+  if (n < 1000) return String(n)
   if (n < 999_500) return `${(n / 1000).toFixed(1)}K`
   return `${(n / 1_000_000).toFixed(2)}M`
 }
@@ -151,7 +158,11 @@ export function formatTokens(n: number): string {
  */
 export function formatTokensCompact(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0'
-  if (n < 1000) return String(Math.round(n))
+  // Round non-integer wire data to an integer first so the threshold
+  // checks below run on the same value that gets rendered (mirrors
+  // `formatTokens`): otherwise 999.6 would pass `< 1000` yet render "1000".
+  n = Math.round(n)
+  if (n < 1000) return String(n)
   if (n < 999_500) return `${(n / 1000).toFixed(1)}k`
   // Round to one decimal first, then strip a trailing ".0" so whole
   // millions render as "1M" / "2M" / "1M" (rolled over from 999_500)

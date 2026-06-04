@@ -160,6 +160,15 @@ describe('formatTokens (#5058 / #5094)', () => {
     expect(formatTokens(NaN)).toBe('0')
     expect(formatTokens(Infinity)).toBe('0')
   })
+
+  // Copilot #5122: non-integer wire data must be rounded BEFORE the
+  // threshold checks so 999.6 doesn't slip through the "< 1000" branch and
+  // render "1000" with no K suffix.
+  it('rounds non-integer input before applying thresholds', () => {
+    expect(formatTokens(999.6)).toBe('1.0K')
+    expect(formatTokens(999.4)).toBe('999')
+    expect(formatTokens(1234.5)).toBe('1.2K')
+  })
 })
 
 describe('formatTokensCompact (#5065)', () => {
@@ -196,5 +205,11 @@ describe('formatTokensCompact (#5065)', () => {
     expect(formatTokensCompact(-1)).toBe('0')
     expect(formatTokensCompact(NaN)).toBe('0')
     expect(formatTokensCompact(Infinity)).toBe('0')
+  })
+
+  // Copilot #5122: round non-integer input before the threshold checks.
+  it('rounds non-integer input before applying thresholds', () => {
+    expect(formatTokensCompact(999.6)).toBe('1.0k')
+    expect(formatTokensCompact(999.4)).toBe('999')
   })
 })
