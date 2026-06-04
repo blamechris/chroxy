@@ -422,6 +422,26 @@ export async function startCliServer(config) {
     await logEnvironmentManagerReconnectResult(environmentManager, log)
   }
 
+  // #5081: boot-time garbage collection of leaked docker-byok compose stacks.
+  // A daemon crash / SIGKILL between `docker compose up` and `docker compose
+  // down` leaves the stack running with only an on-disk record (written by
+  // DockerByokSession on start). Sweep those orphans now — before any new
+  // session launches — so a crash can't leak stacks indefinitely. Entirely
+  // best-effort: a failure here (docker down, partial teardown) is logged and
+  // the offending entry stays on disk to be retried on the next boot.
+  try {
+    const { getSharedComposeStateStore } = await import('./byok-compose-state-shared.js')
+    const { sweepOrphanedComposeStacks } = await import('./byok-compose-state.js')
+    const store = getSharedComposeStateStore()
+    if (store.list().length > 0) {
+      const { DockerBackend } = await import('./environments/backends/docker.js')
+      const result = await sweepOrphanedComposeStacks({ store, backend: new DockerBackend() })
+      log.info(`docker-byok compose sweep: ${result.swept} orphaned stack(s) torn down, ${result.failed} deferred to next boot`)
+    }
+  } catch (err) {
+    log.warn(`docker-byok compose sweep failed: ${err.message}`)
+  }
+
   // #4509: resolve once so the SessionManager arg side and the startup log
   // line below can't drift apart, and any over-ceiling operator value emits
   // a single warning here at boot (not three on each tunable).

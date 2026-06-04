@@ -3390,6 +3390,119 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
     assert.equal(unlinks.length >= 1, true, 'tmpfile unlinked on start failure')
     assert.equal(session._composeEnvFile, null, 'env-file path cleared on failure')
   })
+
+  // #5081 — persist compose project IDs to disk so a daemon crash
+  // between `compose up` and `compose down` leaves an on-disk record the
+  // boot-time sweep can clean up.
+
+  function composeStateStoreStub() {
+    return {
+      records: [],
+      forgets: [],
+      record(entry) { this.records.push({ ...entry }) },
+      forget(projectId) { this.forgets.push(projectId) },
+      list() { return [...this.records] },
+    }
+  }
+
+  it('records the compose project id to the state store on start (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = composeBackendStub()
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(store.records.length, 1, 'expected exactly one record() call on start')
+    const entry = store.records[0]
+    assert.equal(entry.projectId, session._composeProject)
+    assert.equal(entry.composeFile, '/proj/docker-compose.yml')
+    assert.equal(entry.cwd, tmpHome)
+    await session.destroy()
+  })
+
+  it('forgets the compose project id from the state store on destroy (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = composeBackendStub()
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    const projectId = session._composeProject
+    await session.destroy()
+    assert.deepEqual(store.forgets, [projectId])
+  })
+
+  it('does not record() when compose start fails (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        const err = new Error('compose primary not running')
+        err.code = 'compose_primary_missing'
+        throw err
+      },
+      async destroyComposeEnvironment(opts) { this.destroyCalls.push(opts) },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session.on('error', () => {})
+    await session.start()
+    assert.equal(store.records.length, 0, 'record() must not run when compose up fails')
+  })
+
+  it('keeps the project id on disk when destroyComposeEnvironment throws so the next boot sweep retries (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        return { containerId: 'C', containerCliPath: '/x', services: [] }
+      },
+      async destroyComposeEnvironment() {
+        throw new Error('daemon gone')
+      },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    await session.destroy()
+    // forget() must NOT run when destroyComposeEnvironment throws: the
+    // on-disk paper trail has to survive so the next boot's sweep can
+    // retry the teardown.
+    assert.deepEqual(store.forgets, [])
+  })
 })
 
 // Force a tick so any background EventEmitter cleanup completes
