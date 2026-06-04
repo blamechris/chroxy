@@ -863,10 +863,10 @@ describe('CliSession stream-event handling', () => {
     // structured `error.subtype` payload (e.g. permission_denied,
     // usage_limit_exceeded) but never emit a stream_start. Without a
     // dedicated fallback the user sees nothing — same silent-disappear
-    // pattern that #5064 fixed for `/compact`. Surface this as a
-    // response bubble but mark it with `kind: 'error'` so downstream
-    // consumers can distinguish error text from a normal `data.result`
-    // reply.
+    // pattern that #5064 fixed for `/compact`. Surface this by emitting a
+    // `type: 'error'` message (→ `messageType: 'error'` on the wire) so
+    // downstream consumers render it as a distinct error bubble rather
+    // than a normal `data.result` reply.
     //
     // The `data.result` path in #5064 takes priority — only fall back
     // to error-subtype text when `data.result` is missing/empty, so we
@@ -886,7 +886,7 @@ describe('CliSession stream-event handling', () => {
       }
     }
 
-    it('emits a fallback response with kind=error when error.subtype text exists and no stream started', () => {
+    it('emits a fallback type=error message when error.subtype text exists and no stream started', () => {
       const session = createSession()
       const messages = []
       const streams = []
@@ -897,8 +897,8 @@ describe('CliSession stream-event handling', () => {
       session._handleEvent(errorSubtype('Permission denied: write to /etc/hosts'))
 
       assert.equal(messages.length, 1)
-      assert.equal(messages[0].type, 'response')
-      assert.equal(messages[0].kind, 'error')
+      assert.equal(messages[0].type, 'error')
+      assert.equal(messages[0].kind, undefined)
       assert.equal(messages[0].content, 'Permission denied: write to /etc/hosts')
       // No stream surfaced for this turn — pure fallback path.
       assert.equal(streams.length, 0)
@@ -1010,10 +1010,8 @@ describe('CliSession stream-event handling', () => {
       })
 
       // System events emit a `system`-typed message via their own
-      // handler, never the error-subtype fallback's `response` bubble.
-      const fallbackBubbles = messages.filter(
-        (m) => m.type === 'response' && m.kind === 'error'
-      )
+      // handler, never the error-subtype fallback's `error` bubble.
+      const fallbackBubbles = messages.filter((m) => m.type === 'error')
       assert.equal(fallbackBubbles.length, 0)
     })
 

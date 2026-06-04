@@ -1088,12 +1088,12 @@ export class CliSession extends BaseSession {
         // #5088 — Same silent-disappear pattern for error-subtype text.
         // Some result events carry human-readable text in `data.error.subtype`
         // (e.g. permission_denied, usage_limit_exceeded) without any
-        // streamed assistant content. Surface that text as a `response`
-        // bubble too, but tag it with `kind: 'error'` so downstream
-        // consumers can distinguish error text from a normal reply. The
-        // `data.result` path above takes priority — only fall back to
-        // error-subtype text when `data.result` was missing/empty so we
-        // never double-emit for the same turn.
+        // streamed assistant content. Surface that text by emitting a
+        // `type: 'error'` message (→ `messageType: 'error'` on the wire) so
+        // downstream consumers render it as a distinct error bubble rather
+        // than a normal reply. The `data.result` path above takes priority —
+        // only fall back to error-subtype text when `data.result` was
+        // missing/empty so we never double-emit for the same turn.
         if (!ctx?.hasStreamStarted && typeof data.result === 'string' && data.result.length > 0) {
           this.emit('message', {
             type: 'response',
@@ -1106,8 +1106,7 @@ export class CliSession extends BaseSession {
           data.error.subtype.length > 0
         ) {
           this.emit('message', {
-            type: 'response',
-            kind: 'error',
+            type: 'error',
             content: data.error.subtype,
             timestamp: Date.now(),
           })
