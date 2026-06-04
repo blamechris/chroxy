@@ -4799,11 +4799,13 @@ export function sharedStreamDelta(
       content: '',
       timestamp: Date.now(),
     }
-    // Both originals resolve the permission-split target as "captured session
-    // when it has state, else active session"; the dashboard additionally
-    // falls back to flat messages. `appendResponseSlot` receives the captured
-    // id and applies that platform's resolution (the dashboard re-derives the
-    // effective id / flat fallback inside its callback).
+    // The two originals resolved the permission-split target DIFFERENTLY, so
+    // `appendResponseSlot` receives the raw captured id and each platform's
+    // callback applies its own resolution:
+    //   - dashboard: captured session when it has state, ELSE the flat
+    //     `messages` array (NO active-session fallback).
+    //   - app: captured session when it has state, ELSE the active session;
+    //     session-only (no flat fallback).
     ctx.appendResponseSlot(capturedSessionId, newMsg)
     deltaId = newId
   } else if (ctx.deltaIdRemaps.has(deltaId)) {
