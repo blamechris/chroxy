@@ -1877,7 +1877,7 @@ export class SessionManager extends EventEmitter {
     if (!entry.cumulativeUsage) entry.cumulativeUsage = makeZeroCumulativeUsage()
     const u = resultData?.usage || {}
     const acc = entry.cumulativeUsage
-    // #5115: coerce to a finite number, defaulting to 0. Plain
+    // #5115: coerce each delta defensively before accumulating. Plain
     // `Number(x) || 0` does NOT reject Infinity (Infinity is truthy), so a
     // provider bug that reports Infinity tokens / cost would poison the
     // accumulator. Now that the usage gate lets `cost: null` / non-finite
@@ -1885,12 +1885,23 @@ export class SessionManager extends EventEmitter {
     // particular MUST drop a non-finite cost rather than add it — exactly
     // the cumulativeCost-poison guard called out in #5115's acceptance
     // criteria and #4088.
-    const finite = (x) => (Number.isFinite(x) ? x : 0)
-    acc.inputTokens += finite(Number(u.input_tokens))
-    acc.outputTokens += finite(Number(u.output_tokens))
-    acc.cacheReadTokens += finite(Number(u.cache_read_input_tokens))
-    acc.cacheCreationTokens += finite(Number(u.cache_creation_input_tokens))
-    acc.costUsd += finite(Number(resultData?.cost))
+    //
+    // Per-field coercion mirrors the restore-time clamp (restoreState's
+    // `nonNegFinite`) and CumulativeUsageSchema (@chroxy/protocol):
+    //   - Token fields are monotonic NON-NEGATIVE integer counters. A
+    //     negative provider delta (bug) would drive them below zero and
+    //     violate the schema's `.nonnegative()` contract, so drop any delta
+    //     that isn't a finite, >= 0 number.
+    //   - costUsd is finite but intentionally SIGNED — a refund / credit
+    //     adjustment turn (#4099) legitimately subtracts — so only reject
+    //     a non-finite cost.
+    const tokenDelta = (x) => (Number.isFinite(x) && x >= 0 ? x : 0)
+    const finiteCost = (x) => (Number.isFinite(x) ? x : 0)
+    acc.inputTokens += tokenDelta(Number(u.input_tokens))
+    acc.outputTokens += tokenDelta(Number(u.output_tokens))
+    acc.cacheReadTokens += tokenDelta(Number(u.cache_read_input_tokens))
+    acc.cacheCreationTokens += tokenDelta(Number(u.cache_creation_input_tokens))
+    acc.costUsd += finiteCost(Number(resultData?.cost))
     acc.turnsBilled += 1
     // Shallow-copy on emit so a subscriber that mutates the payload
     // can't corrupt the canonical accumulator (#4072 review-prep).

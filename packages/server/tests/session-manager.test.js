@@ -2922,6 +2922,28 @@ describe('SessionManager._trackUsage (#4072)', () => {
     assert.equal(got.costUsd, 0, 'Infinity cost must not poison cumulativeCost')
   })
 
+  it('clamps NEGATIVE token deltas to 0 (monotonic counter contract, #5115 review)', () => {
+    // Token fields are non-negative monotonic counters per
+    // CumulativeUsageSchema (@chroxy/protocol). A provider bug emitting a
+    // negative delta must NOT drive the running total below zero. costUsd
+    // stays signed (refund/credit turns subtract, #4099).
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', { usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 200 } })
+    // Provider bug: a turn reports negative tokens.
+    mgr._trackUsage('s1', {
+      usage: { input_tokens: -10, output_tokens: -5, cache_read_input_tokens: -1, cache_creation_input_tokens: -3 },
+      cost: -0.25,
+    })
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 100, 'negative input delta dropped, total holds')
+    assert.equal(got.outputTokens, 50, 'negative output delta dropped')
+    assert.equal(got.cacheReadTokens, 200, 'negative cache-read delta dropped')
+    assert.equal(got.cacheCreationTokens, 0, 'negative cache-creation delta dropped')
+    assert.ok(got.inputTokens >= 0 && got.outputTokens >= 0, 'counters never go negative')
+    // costUsd is the one signed field — the -0.25 refund IS applied.
+    assert.ok(Math.abs(got.costUsd - (-0.25)) < 1e-9, `signed costUsd applies the refund; got ${got.costUsd}`)
+  })
+
   it('does NOT accumulate when both `cost` and `usage.input_tokens` are non-finite (#4088 / #5115)', () => {
     // Neither gate passes: NaN cost (cost gate fails) and no finite
     // input_tokens (usage gate fails). Nothing is tracked, nothing emits.
