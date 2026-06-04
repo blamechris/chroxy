@@ -137,8 +137,19 @@ export class DockerBackend {
 
   /**
    * @param {string} containerId
-   * @param {{ cmd: string, env?: Object.<string,string>, envFile?: string, cwd?: string, timeout?: number }} opts
+   * @param {{ cmd: string, env?: Object.<string,string>, envFile?: string, cwd?: string, timeout?: number, user?: string, onData?: (chunk: string, stream: 'stdout'|'stderr') => void }} opts
    * @returns {Promise<{ stdout: string, stderr: string }>}
+   *
+   * opts.onData — OPTIONAL streaming callback (#5069). When provided, the
+   * command runs via a streaming `spawn` instead of the buffered `execFile`,
+   * and `onData(chunk, 'stdout'|'stderr')` is invoked with each decoded chunk
+   * as bytes arrive. This lets a caller surface progress for multi-minute
+   * setups (npm install, apt-get) instead of staring at a silent dashboard.
+   * The buffered last-N-KiB tail is STILL accumulated and attached to the
+   * rejected Error on failure (#5067 contract preserved), so streaming and
+   * the failure-tail capture coexist. When `onData` is absent the original
+   * buffered `execFile` path is used unchanged — every existing caller keeps
+   * its exact behaviour.
    *
    * opts.env — all key/value pairs are forwarded as `--env KEY=VAL` flags.
    * Entries whose value is null or undefined are skipped with a `log.warn`
@@ -173,7 +184,7 @@ export class DockerBackend {
    * (#5021) passes it for every tool dispatch so file ops respect the
    * `useradd` + `chown /workspace` setup done at container start.
    */
-  execInEnvironment(containerId, { cmd, env, envFile, cwd, timeout = 30_000, user } = {}) {
+  execInEnvironment(containerId, { cmd, env, envFile, cwd, timeout = 30_000, user, onData } = {}) {
     return new Promise((resolve, reject) => {
       const execArgs = ['exec']
 
@@ -209,6 +220,94 @@ export class DockerBackend {
       }
 
       execArgs.push(containerId, 'bash', '-c', cmd)
+
+      // #5069 — Streaming path. When the caller supplies `onData`, run the
+      // command via `spawn` so stdout/stderr surface incrementally as bytes
+      // arrive (long-running setup like `npm install` / `apt-get`). We still
+      // accumulate the full stdout/stderr so the resolved value and the
+      // failure-tail attached to the rejected Error (#5067) are identical to
+      // the buffered path. When `onData` is absent we keep the original
+      // `execFile` call untouched for every existing caller.
+      if (typeof onData === 'function') {
+        const child = this._spawn('docker', execArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+
+        let stdout = ''
+        let stderr = ''
+        let settled = false
+        let timedOut = false
+        let timer = null
+
+        const settle = (fn, arg) => {
+          if (settled) return
+          settled = true
+          if (timer) clearTimeout(timer)
+          fn(arg)
+        }
+
+        if (timeout && timeout > 0) {
+          timer = setTimeout(() => {
+            timedOut = true
+            // SIGTERM the docker exec wrapper so we don't leak the process
+            // on a stuck setup. Matches execFile's `timeout` semantics.
+            if (child && !child.killed) {
+              try { child.kill('SIGTERM') } catch { /* already gone */ }
+            }
+          }, timeout)
+          // Don't let the timeout keep the event loop alive on its own.
+          if (timer && typeof timer.unref === 'function') timer.unref()
+        }
+
+        if (child.stdout) {
+          child.stdout.setEncoding('utf-8')
+          child.stdout.on('data', (chunk) => {
+            stdout += chunk
+            // Never let an onData throw escape and orphan the child.
+            try { onData(chunk, 'stdout') } catch { /* listener error — ignore */ }
+          })
+        }
+        if (child.stderr) {
+          child.stderr.setEncoding('utf-8')
+          child.stderr.on('data', (chunk) => {
+            stderr += chunk
+            try { onData(chunk, 'stderr') } catch { /* listener error — ignore */ }
+          })
+        }
+
+        child.on('error', (err) => {
+          // spawn failure (docker binary missing, etc.) — surface with the
+          // same enriched-Error shape the buffered path uses.
+          const wrapped = new Error(stderr ? stderr.trim() : err.message)
+          wrapped.stdout = stdout
+          wrapped.stderr = stderr
+          if (err.code) wrapped.code = err.code
+          settle(reject, wrapped)
+        })
+
+        child.on('close', (code, signal) => {
+          if (timedOut) {
+            const err = new Error(`Command timed out after ${timeout}ms`)
+            err.killed = true
+            err.signal = signal || 'SIGTERM'
+            err.stdout = stdout
+            err.stderr = stderr
+            settle(reject, err)
+            return
+          }
+          if (code === 0) {
+            settle(resolve, { stdout, stderr })
+            return
+          }
+          // Non-zero exit — mirror the buffered-path enriched Error so the
+          // #5067 stdout/stderr capture is preserved for the failure event.
+          const wrapped = new Error(stderr ? stderr.trim() : `Command exited with code ${code}`)
+          wrapped.stdout = stdout
+          wrapped.stderr = stderr
+          if (code != null) wrapped.code = code
+          if (signal) wrapped.signal = signal
+          settle(reject, wrapped)
+        })
+        return
+      }
 
       this._execFile('docker', execArgs, { encoding: 'utf-8', timeout }, (err, stdout, stderr) => {
         if (err) {

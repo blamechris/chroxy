@@ -2359,6 +2359,205 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
 
     await session.destroy()
   })
+
+  // ─────────────────────────────────────────────────────────────────────
+  // #5069 — stream postCreateCommand output to the session log surface as
+  // bytes arrive (long-running setup feedback)
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Streaming-aware "fresh container" backend. Like freshContainerBackend
+   * but, for the postCreateCommand run (any cmd matching a key in
+   * `streamChunks`), it invokes `opts.onData(chunk, stream)` with each
+   * canned chunk in order BEFORE resolving — modelling the docker backend's
+   * spawn path firing 'data' events as bytes arrive. The marker probe /
+   * touch behaviour is identical so idempotency stays testable.
+   *
+   * `failAfterStream` (an Error) makes the matched command reject AFTER
+   * streaming the chunks, so we can assert that the buffered tail is still
+   * attached to the failure event even when output was streamed.
+   */
+  function streamingContainerBackend({ streamChunks = {}, failAfterStream = null } = {}) {
+    let markerPresent = false
+    const calls = []
+    return {
+      calls,
+      async execInEnvironment(containerId, opts) {
+        calls.push({ containerId, ...opts })
+        const cmd = opts.cmd || ''
+        if (cmd.includes('.chroxy-post-create')) {
+          if (cmd.startsWith('test -f ')) {
+            if (markerPresent) return { stdout: '', stderr: '' }
+            const err = new Error('exit 1')
+            err.code = 'exec_failed'
+            throw err
+          }
+          if (cmd.startsWith('touch ')) {
+            markerPresent = true
+            return { stdout: '', stderr: '' }
+          }
+        }
+        const matcher = Object.keys(streamChunks).find((needle) => cmd.includes(needle))
+        if (matcher) {
+          let stdout = ''
+          let stderr = ''
+          for (const [stream, chunk] of streamChunks[matcher]) {
+            if (stream === 'stdout') stdout += chunk
+            else stderr += chunk
+            if (typeof opts.onData === 'function') opts.onData(chunk, stream)
+          }
+          if (failAfterStream) {
+            const err = failAfterStream instanceof Error ? failAfterStream : new Error(failAfterStream)
+            err.stdout = stdout
+            err.stderr = stderr
+            throw err
+          }
+          return { stdout, stderr }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+  }
+
+  it('#5069: streams postCreateCommand output as setup_log events in arrival order', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_STREAM\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = streamingContainerBackend({
+      streamChunks: {
+        'npm install': [
+          ['stdout', 'npm WARN deprecated foo@1\n'],
+          ['stderr', 'fetching metadata...\n'],
+          ['stdout', 'added 42 packages in 3s\n'],
+        ],
+      },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+
+    const logs = []
+    session.on('setup_log', (e) => logs.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    assert.equal(logs.length, 3, 'expected one setup_log per streamed chunk')
+    assert.deepEqual(
+      logs.map((l) => [l.stream, l.chunk]),
+      [
+        ['stdout', 'npm WARN deprecated foo@1\n'],
+        ['stderr', 'fetching metadata...\n'],
+        ['stdout', 'added 42 packages in 3s\n'],
+      ],
+      'setup_log events must preserve arrival order and stream tagging',
+    )
+    assert.ok(logs.every((l) => l.phase === 'post_create'), 'every chunk tagged with phase post_create')
+
+    await session.destroy()
+  })
+
+  it('#5069: setup_log is declared in customEvents so it reaches ws-forwarding', () => {
+    // session-manager.js:_wireSessionEvents only bridges events listed in
+    // the constructor's customEvents to session_event listeners. Without
+    // this, setup_log would fire on the local EventEmitter and never reach
+    // the dashboard.
+    assert.ok(
+      DockerByokSession.customEvents.includes('setup_log'),
+      'setup_log must be in customEvents',
+    )
+    // Inherited BYOK events must still be present (extend, not replace).
+    assert.ok(DockerByokSession.customEvents.includes('tool_start'))
+    assert.ok(DockerByokSession.customEvents.includes('tool_result'))
+  })
+
+  it('#5069: a failed streamed postCreateCommand still attaches the buffered tail to the error event', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_STREAM_FAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const failErr = Object.assign(new Error('exit 1'), { code: 1 })
+    const backend = streamingContainerBackend({
+      streamChunks: {
+        'npm install': [
+          ['stdout', 'OUT: building native module\n'],
+          ['stderr', 'ERR: node-gyp rebuild failed\n'],
+        ],
+      },
+      failAfterStream: failErr,
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+
+    const logs = []
+    const errors = []
+    session.on('setup_log', (e) => logs.push(e))
+    session.on('error', (e) => errors.push(e))
+    await session.start()
+
+    // Streaming still happened before the failure.
+    assert.equal(logs.length, 2, 'chunks streamed before the failure')
+    // Failure event carries the buffered tail (#5067 preserved).
+    const pcErr = errors.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(pcErr, 'expected a post_create_command_failed error event')
+    assert.match(pcErr.stdout, /OUT: building native module/, 'buffered stdout tail attached')
+    assert.match(pcErr.stderr, /ERR: node-gyp rebuild failed/, 'buffered stderr tail attached')
+    assert.equal(session._containerReady, false, 'failed post-create must not mark ready')
+  })
+
+  it('#5069: cached marker skips the run — no setup_log when command already applied', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_STREAM_CACHED\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    // Marker probe resolves clean (marker present) → run path is skipped.
+    const calls = []
+    const backend = {
+      calls,
+      async execInEnvironment(containerId, opts) {
+        calls.push({ containerId, ...opts })
+        const cmd = opts.cmd || ''
+        if (cmd.startsWith('test -f ') && cmd.includes('.chroxy-post-create')) {
+          return { stdout: '', stderr: '' } // marker present
+        }
+        if (typeof opts.onData === 'function') opts.onData('should-not-stream', 'stdout')
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+
+    const logs = []
+    session.on('setup_log', (e) => logs.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    assert.equal(logs.length, 0, 'cached marker must skip the run — no streamed output')
+    const installRun = calls.find((c) => c.cmd === 'npm install')
+    assert.ok(!installRun, 'the postCreateCommand itself must not run when marker is present')
+
+    await session.destroy()
+  })
 })
 
 describe('docker-byok provider registration', () => {

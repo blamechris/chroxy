@@ -1096,6 +1096,153 @@ describe('DockerBackend.execInEnvironment()', () => {
     // Container ID must come after the flag — same ordering invariant as --env.
     assert.ok(execCall.args.indexOf('ctr-abc') > idx + 1)
   })
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5069 — streaming path: when opts.onData is supplied, run via spawn and
+  // surface stdout/stderr incrementally while still buffering for the result
+  // and the failure tail (#5067).
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Build a fake child + spawn spy. Tests drive child.stdout/stderr/exit
+  // by hand to simulate the docker exec process producing output over time.
+  function makeStreamingBackend() {
+    let lastSpawn = null
+    const fakeChild = new EventEmitter()
+    fakeChild.stdout = new PassThrough()
+    fakeChild.stderr = new PassThrough()
+    fakeChild.killed = false
+    fakeChild.kill = (sig) => { fakeChild.killed = true; fakeChild.lastSignal = sig }
+    function fakeSpawn(cmd, args, opts) {
+      lastSpawn = { cmd, args, opts }
+      return fakeChild
+    }
+    const backend = new DockerBackend({ _spawn: fakeSpawn })
+    return { backend, fakeChild, getLastSpawn: () => lastSpawn }
+  }
+
+  it('#5069: invokes onData with each chunk in arrival order and resolves with the full buffer', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const seen = []
+
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'npm install',
+      onData: (chunk, stream) => seen.push([stream, chunk]),
+    })
+
+    // Simulate output arriving over time, then a clean exit.
+    fakeChild.stdout.write('npm WARN foo\n')
+    fakeChild.stderr.write('fetching...\n')
+    fakeChild.stdout.write('added 42 packages\n')
+    // Let the stream 'data' events flush before closing.
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+
+    const result = await p
+    assert.deepEqual(seen, [
+      ['stdout', 'npm WARN foo\n'],
+      ['stderr', 'fetching...\n'],
+      ['stdout', 'added 42 packages\n'],
+    ], 'onData must fire per chunk in arrival order with the right stream tag')
+    assert.equal(result.stdout, 'npm WARN foo\nadded 42 packages\n', 'full stdout buffered')
+    assert.equal(result.stderr, 'fetching...\n', 'full stderr buffered')
+  })
+
+  it('#5069: uses spawn (not execFile) when onData is supplied', async () => {
+    const { backend, fakeChild, getLastSpawn } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'echo hi',
+      user: 'chroxy',
+      onData: () => {},
+    })
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+    await p
+
+    const spawnCall = getLastSpawn()
+    assert.ok(spawnCall, 'spawn must be used for the streaming path')
+    // Same argv shape as the buffered path: exec -u <user> ... bash -c <cmd>.
+    assert.deepEqual(spawnCall.args, ['exec', '-u', 'chroxy', 'ctr-abc', 'bash', '-c', 'echo hi'])
+  })
+
+  it('#5069: keeps the buffered execFile path when onData is absent (backward compat)', async () => {
+    const mockExec = createMockExecFile({ results: { exec: 'buffered\n' } })
+    const backend = new DockerBackend({
+      _execFile: mockExec,
+      _spawn: () => { throw new Error('spawn must NOT be called when onData is absent') },
+    })
+    const result = await backend.execInEnvironment('ctr-abc', { cmd: 'echo hi' })
+    assert.equal(result.stdout, 'buffered\n')
+    assert.ok(mockExec.calls.some(c => c.args[0] === 'exec'), 'execFile path must be used')
+  })
+
+  it('#5069: streamed failure still attaches the buffered stdout/stderr tail to the rejected Error', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const seen = []
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'broken-setup.sh',
+      onData: (chunk, stream) => seen.push([stream, chunk]),
+    })
+
+    fakeChild.stdout.write('OUT: building native module\n')
+    fakeChild.stderr.write('ERR: node-gyp rebuild failed\n')
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 1, null)
+
+    let caught
+    try {
+      await p
+      assert.fail('expected rejection on non-zero exit')
+    } catch (err) {
+      caught = err
+    }
+    // Streaming happened.
+    assert.equal(seen.length, 2)
+    // #5067 contract: both streams attached to the error.
+    assert.match(caught.stdout, /OUT: building native module/, 'stdout tail attached on failure')
+    assert.match(caught.stderr, /ERR: node-gyp rebuild failed/, 'stderr tail attached on failure')
+    // Message is stderr-first, mirroring the buffered path.
+    assert.match(caught.message, /ERR: node-gyp rebuild failed/)
+    assert.equal(caught.code, 1)
+  })
+
+  it('#5069: SIGTERMs the child and rejects on timeout (no leaked process)', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'hangs-forever',
+      timeout: 20,
+      onData: () => {},
+    })
+
+    let caught
+    try {
+      // The timer fires (20ms), SIGTERMs the child; the real docker exec
+      // would then close. Simulate that close after the kill.
+      await new Promise((r) => setTimeout(r, 40))
+      assert.ok(fakeChild.killed, 'child must be SIGTERM-killed on timeout')
+      assert.equal(fakeChild.lastSignal, 'SIGTERM')
+      fakeChild.emit('close', null, 'SIGTERM')
+      await p
+      assert.fail('expected rejection on timeout')
+    } catch (err) {
+      caught = err
+    }
+    assert.match(caught.message, /timed out after 20ms/)
+    assert.equal(caught.killed, true)
+  })
+
+  it('#5069: a throwing onData listener does not orphan the child or reject the run', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'echo hi',
+      onData: () => { throw new Error('listener boom') },
+    })
+    fakeChild.stdout.write('hello\n')
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+    // Listener throw is swallowed; the run still resolves with the buffer.
+    const result = await p
+    assert.equal(result.stdout, 'hello\n')
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -339,6 +339,22 @@ export class DockerByokSession extends ClaudeByokSession {
   }
 
   /**
+   * #5069 — surface streamed `postCreateCommand` output. `setup_log` is a
+   * transient event carrying one chunk of the container-setup command's
+   * stdout/stderr as it runs, so the dashboard / mobile client can show
+   * progress during a multi-minute `npm install` / `apt-get` instead of a
+   * silent session. session-manager.js:_wireSessionEvents reads
+   * `customEvents` to build the TRANSIENT_EVENTS set it bridges to
+   * `session_event` listeners; an event missing from this list fires on the
+   * local EventEmitter and never reaches ws-forwarding. We extend (rather
+   * than replace) the inherited BYOK set so tool_start / tool_result /
+   * tool_input_delta / agent_* keep flowing.
+   */
+  static get customEvents() {
+    return [...ClaudeByokSession.customEvents, 'setup_log']
+  }
+
+  /**
    * Preflight credentials block. Same shape as ClaudeByokSession — the
    * agent loop still runs on the host so the credential set / hint /
    * required-ness is identical to host-side BYOK. The container itself
@@ -1696,9 +1712,22 @@ export class DockerByokSession extends ClaudeByokSession {
     // Run the command. The backend's execInEnvironment forwards both
     // stdout and stderr and rejects on non-zero exit, so we don't need
     // to inspect an exit code here — a throw IS the failure path.
+    //
+    // #5069 — stream output to the session log surface as bytes arrive so
+    // the operator gets progress during a multi-minute setup instead of a
+    // silent dashboard. Each chunk becomes a transient `setup_log` event
+    // (forwarded via DockerByokSession.customEvents). The backend STILL
+    // accumulates stdout/stderr and attaches the last-N-KiB tail to the
+    // rejected Error on failure (#5067), so the failure-event payload is
+    // unchanged — streaming is purely additive.
     await this._execAsContainerUser({
       cmd: this._postCreateCommand,
       timeout: this._postCreateTimeoutMs,
+      onData: (chunk, stream) => {
+        // Defensive: never let a malformed chunk break the run loop.
+        if (typeof chunk !== 'string' || chunk.length === 0) return
+        this.emit('setup_log', { phase: 'post_create', stream, chunk })
+      },
     })
 
     // Stamp the marker so the next session that lands on this container
@@ -1815,12 +1844,16 @@ export class DockerByokSession extends ClaudeByokSession {
    * sessions don't need this: their `docker run --env ANTHROPIC_API_KEY`
    * already attached the key to the container env at launch time.
    */
-  _execAsContainerUser({ cmd, timeout = 30_000 }) {
+  _execAsContainerUser({ cmd, timeout = 30_000, onData } = {}) {
     return this._dockerBackend.execInEnvironment(this._containerId, {
       cmd,
       timeout,
       user: this._containerUser,
       envFile: this._composeEnvFile || undefined,
+      // #5069: forward an optional streaming callback. When absent the
+      // backend keeps the buffered `execFile` path, so every existing tool
+      // dispatch (Read/Write/Bash/...) is unchanged.
+      onData,
     })
   }
 
