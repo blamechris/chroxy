@@ -24,6 +24,25 @@
  * still drop the sidecar so the dashboard stops listing a ghost entry.
  * The caller learns about the rmi failure via the returned `imageRemoved`
  * flag.
+ *
+ * Reconciliation (#5075) closes the drift gap left by the snapshot/restore
+ * landings (#5100 / #5092 / #5098): a snapshot is the pair (image tag,
+ * sidecar JSON), and either side can outlive the other —
+ *
+ *   - User runs `docker rmi chroxy-byok-snap:foo` directly: the image is
+ *     gone but the sidecar lingers, so the dashboard lists a ghost entry
+ *     whose DELETE just re-fails. Also covers the existing best-effort
+ *     `imageRemoved: false` case in `deleteSnapshot` above — by the next
+ *     reconcile pass the image truly is gone, so we drop the sidecar.
+ *   - Sidecar corrupted or manually deleted: the image still sits on the
+ *     host eating disk. We log a warning so the operator can decide to
+ *     `docker rmi` it themselves, but we DO NOT auto-rm — a user may have
+ *     intentionally retagged something into the `chroxy-byok-snap` prefix.
+ *
+ * `reconcileOrphans()` is the surface for both. It is a pure function over
+ * an injected `listImages(): Promise<string[]>` callback (filtered to the
+ * `chroxy-byok-snap:` prefix at the docker shell level so we never touch
+ * an image outside our scope) and the on-disk sidecar directory.
  */
 
 import { readdirSync, readFileSync, existsSync, unlinkSync } from 'fs'
@@ -208,4 +227,108 @@ export async function deleteSnapshot(slug, { removeImage, dir } = {}) {
   }
 
   return { ok: true, tag: tag || '', imageRemoved }
+}
+
+/**
+ * Image-tag prefix every docker-byok snapshot is published under. The
+ * reconciler only ever reasons about images in this namespace so it can
+ * never touch (or even consider an orphan) an unrelated image on the host.
+ */
+const SNAPSHOT_TAG_PREFIX = 'chroxy-byok-snap:'
+
+/**
+ * @typedef {Object} ReconcileResult
+ * @property {number} sidecarsScanned          Count of valid (taggable) sidecars considered.
+ * @property {number} imagesScanned            Count of `chroxy-byok-snap:` images on the host.
+ * @property {string[]} orphanedSidecarsRemoved Slugs of sidecars unlinked (tag gone from daemon).
+ * @property {string[]} orphanedImagesLogged    Snapshot image tags with no sidecar (logged, NOT removed).
+ */
+
+/**
+ * Reconcile the two halves of a docker-byok snapshot — the image tag in
+ * the local daemon and the JSON sidecar on disk — and repair drift.
+ *
+ * Strategy (documented in the module header, #5075):
+ *
+ *   - sidecar WITHOUT a matching image tag  → the image was deleted out
+ *     from under us (`docker rmi` by hand, or a best-effort
+ *     `deleteSnapshot` that left `imageRemoved: false`). The sidecar is a
+ *     ghost the dashboard would re-list forever, so we UNLINK it.
+ *   - image tag WITHOUT a matching sidecar  → an image sits on the host
+ *     eating disk but nothing tracks it. We LOG it for the operator and
+ *     deliberately do NOT `docker rmi` — a user may have intentionally
+ *     retagged something into the `chroxy-byok-snap:` namespace, and a
+ *     reconciler must never destroy data it didn't create.
+ *
+ * `listImages` is treated as the source of truth for what exists in the
+ * daemon. If it rejects (daemon down, docker missing) we propagate the
+ * error and take NO destructive action — reconciling against a partial or
+ * empty image list would wrongly delete every live sidecar. This keeps the
+ * pass idempotent and safe to run on a schedule.
+ *
+ * Pairing is by exact image tag: a sidecar's `tag` field is matched against
+ * the set of `chroxy-byok-snap:`-prefixed tags returned by `listImages`.
+ * Non-snapshot images returned by `listImages` are filtered out up front so
+ * they neither count toward `imagesScanned` nor surface as orphans.
+ *
+ * @param {object} opts
+ * @param {() => Promise<string[]>} opts.listImages  Returns docker image tags (any namespace; filtered here).
+ * @param {string} [opts.dir]  Override the snapshots dir (tests).
+ * @returns {Promise<ReconcileResult>}
+ */
+export async function reconcileOrphans({ listImages, dir } = {}) {
+  if (typeof listImages !== 'function') {
+    throw new Error('reconcileOrphans: listImages callback required')
+  }
+
+  // Source of truth first. A rejection here is fatal BY DESIGN — we must
+  // never act on a partial/empty image list (it would nuke live sidecars).
+  const rawImages = await listImages()
+  const snapshotImages = (Array.isArray(rawImages) ? rawImages : []).filter(
+    (tag) => typeof tag === 'string' && tag.startsWith(SNAPSHOT_TAG_PREFIX),
+  )
+  const imageSet = new Set(snapshotImages)
+
+  // listSnapshots already skips unreadable/malformed/tag-less sidecars and
+  // hands back a slug per entry, so reconcile only ever reasons about
+  // sidecars it can pair by tag.
+  const snapshotsDir = dir || getSnapshotsDir()
+  const sidecars = listSnapshots({ dir: snapshotsDir })
+
+  const orphanedSidecarsRemoved = []
+  const trackedTags = new Set()
+
+  for (const entry of sidecars) {
+    trackedTags.add(entry.tag)
+    if (imageSet.has(entry.tag)) continue
+    // Sidecar's image is gone from the daemon — drop the ghost.
+    const filePath = join(snapshotsDir, `${entry.slug}.json`)
+    try {
+      unlinkSync(filePath)
+      orphanedSidecarsRemoved.push(entry.slug)
+      log.info(
+        `reconcileOrphans: removed orphaned sidecar ${entry.slug}.json (image ${entry.tag} no longer present)`,
+      )
+    } catch (err) {
+      log.warn(`reconcileOrphans: failed to unlink orphaned sidecar ${filePath}: ${err.message}`)
+    }
+  }
+
+  const orphanedImagesLogged = []
+  for (const tag of snapshotImages) {
+    if (trackedTags.has(tag)) continue
+    // Image with no sidecar — log only, never auto-rm.
+    orphanedImagesLogged.push(tag)
+    log.warn(
+      `reconcileOrphans: snapshot image ${tag} has no metadata sidecar; ` +
+        `leaving in place (run "docker rmi ${tag}" to reclaim disk if unwanted)`,
+    )
+  }
+
+  return {
+    sidecarsScanned: sidecars.length,
+    imagesScanned: snapshotImages.length,
+    orphanedSidecarsRemoved,
+    orphanedImagesLogged,
+  }
 }
