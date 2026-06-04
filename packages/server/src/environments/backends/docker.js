@@ -742,6 +742,17 @@ export class DockerBackend {
     })
   }
 
+  // #5124: `composeFile` may be a single path or an ARRAY of paths
+  // (devcontainer.json `dockerComposeFile` base + overrides). Normalise a
+  // lone string to a single-element array and drop non-string/empty entries
+  // so every call site emits `-f <file>` flags in declared order.
+  // Backward-compatible: existing single-file callers pass a string and get
+  // one `-f`.
+  _composeFileList(composeFile) {
+    const files = Array.isArray(composeFile) ? composeFile : [composeFile]
+    return files.filter((f) => typeof f === 'string' && f.length > 0)
+  }
+
   _composeUp(composeFile, project, cwd, envFile) {
     return new Promise((resolve, reject) => {
       // `docker compose --env-file <path>` (before the subcommand) sets the
@@ -751,9 +762,25 @@ export class DockerBackend {
       // compose file. The file is short-lived (tmpfile created + unlinked
       // by the caller) and lives at 0600 so the key never appears in `ps`
       // output. (#5079)
+      //
+      // #5124: compose merges a base + overrides via a repeated `-f` flag in
+      // DECLARED ORDER (later files override earlier ones), so we emit one
+      // `-f <file>` per entry rather than a single `-f`.
+      const files = this._composeFileList(composeFile)
+      // Fail fast on an empty/invalid file set rather than letting
+      // `docker compose up` silently fall back to a default compose file in
+      // cwd. The pre-#5124 single-`-f` path errored on an undefined file, so
+      // this preserves that fail-fast contract for the array path too.
+      if (files.length === 0) {
+        reject(new Error('docker compose up requires at least one compose file'))
+        return
+      }
       const args = ['compose']
       if (envFile) args.push('--env-file', envFile)
-      args.push('-f', composeFile, '-p', project, 'up', '-d')
+      for (const file of files) {
+        args.push('-f', file)
+      }
+      args.push('-p', project, 'up', '-d')
       this._execFile('docker', args, { encoding: 'utf-8', timeout: 120_000, cwd }, (err, _stdout, stderr) => {
         if (err) {
           reject(new Error(stderr ? stderr.trim() : err.message))
@@ -766,9 +793,14 @@ export class DockerBackend {
 
   _composeDown(composeFile, project, cwd) {
     return new Promise((resolve) => {
-      this._execFile('docker', [
-        'compose', '-f', composeFile, '-p', project, 'down', '--remove-orphans',
-      ], { encoding: 'utf-8', timeout: 30_000, cwd }, (err) => {
+      // #5124: tear the stack down with the SAME `-f` file set used to bring
+      // it up, in declared order, so the merged config resolves identically.
+      const args = ['compose']
+      for (const file of this._composeFileList(composeFile)) {
+        args.push('-f', file)
+      }
+      args.push('-p', project, 'down', '--remove-orphans')
+      this._execFile('docker', args, { encoding: 'utf-8', timeout: 30_000, cwd }, (err) => {
         if (err) log.warn(`docker compose down failed: ${err.message}`)
         resolve()
       })

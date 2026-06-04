@@ -342,6 +342,95 @@ describe('DockerBackend.createComposeEnvironment()', () => {
     assert.equal(upArgs.indexOf('--env-file'), -1, '--env-file must be absent when not requested')
   })
 
+  it('emits a `-f` flag per compose file in declared order when composeFile is an array (#5124)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upArgs = [...args]; cb(null, '', ''); return }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-overlay',
+      cwd: '/proj',
+      composeFile: ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'],
+      composeProject: 'chroxy-env-overlay',
+      containerUser: 'chroxy',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    // Each declared file becomes its own `-f <file>` token, and the base
+    // file MUST precede the override so compose's later-wins merge applies.
+    const fFlagFiles = upArgs.reduce((acc, tok, i) => {
+      if (tok === '-f') acc.push(upArgs[i + 1])
+      return acc
+    }, [])
+    assert.deepEqual(fFlagFiles, ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'])
+  })
+
+  it('emits a single `-f` flag when composeFile is a lone string (backward-compat, #5124)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upArgs = [...args]; cb(null, '', ''); return }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-single',
+      cwd: '/proj',
+      composeFile: '/proj/docker-compose.yml',
+      composeProject: 'chroxy-env-single',
+      containerUser: 'chroxy',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    const fFlagFiles = upArgs.reduce((acc, tok, i) => {
+      if (tok === '-f') acc.push(upArgs[i + 1])
+      return acc
+    }, [])
+    assert.deepEqual(fFlagFiles, ['/proj/docker-compose.yml'])
+  })
+
+  it('fails fast with a clear error when composeFile normalises to an empty set (#5124)', async () => {
+    let upCalled = false
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upCalled = true }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    // An array with no usable entries must not silently run `docker compose up`
+    // with zero `-f` flags (which would fall back to a default compose file).
+    await assert.rejects(
+      () => backend.createComposeEnvironment({
+        envId: 'env-empty',
+        cwd: '/proj',
+        composeFile: ['', null],
+        composeProject: 'chroxy-env-empty',
+        containerUser: 'chroxy',
+      }),
+      /requires at least one compose file/
+    )
+    assert.equal(upCalled, false, 'docker compose up must not run with an empty file set')
+  })
+
   it('calls compose down and re-throws when primary container not found', async () => {
     let downCalled = false
     function mockExec(_cmd, args, opts, cb) {
@@ -419,6 +508,26 @@ describe('DockerBackend.destroyComposeEnvironment()', () => {
     assert.ok(downCall, 'should call docker compose down')
     assert.ok(downCall.args.includes('--remove-orphans'))
     assert.ok(downCall.args.includes('chroxy-test-project'))
+  })
+
+  it('tears down with the SAME `-f` file set used to bring the stack up, in order (#5124)', async () => {
+    const mockExec = createMockExecFile()
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.destroyComposeEnvironment({
+      composeFile: ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'],
+      composeProject: 'chroxy-overlay-down',
+      cwd: '/proj',
+    })
+
+    const downCall = mockExec.calls.find(c => c.args[0] === 'compose' && c.args.includes('down'))
+    assert.ok(downCall, 'should call docker compose down')
+    const fFlagFiles = downCall.args.reduce((acc, tok, i) => {
+      if (tok === '-f') acc.push(downCall.args[i + 1])
+      return acc
+    }, [])
+    assert.deepEqual(fFlagFiles, ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'])
+    assert.ok(downCall.args.includes('--remove-orphans'))
   })
 
   it('resolves even when compose down fails (best-effort)', async () => {
