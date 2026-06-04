@@ -8,6 +8,8 @@ import { metrics } from './metrics.js'
 import { buildDiagnosticsSnapshot } from './diagnostics.js'
 import { getRateLimitKey } from './rate-limiter.js'
 import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
+import { isPoolEnabled } from './docker-byok-pool.js'
+import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 
 const log = createLogger('ws')
 
@@ -305,6 +307,44 @@ export function createHttpHandler(server) {
         log.warn(`DELETE /api/snapshots/${slug} failed: ${err.message}`)
         res.writeHead(500, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Failed to delete snapshot' }))
+      }
+      return
+    }
+
+    // docker-byok pool stats endpoint (#5053). Returns a rolling
+    // observability snapshot — hit/miss counters, hit rate,
+    // eviction-by-reason, the recent-evictions tail, and the live per-key
+    // parked buckets from pool.inspect(). Bearer-auth gated like every other
+    // /api route (primary token = full host authority; see
+    // docs/security/bearer-token-authority.md — this is read-only operational
+    // telemetry, no narrower scope needed).
+    //
+    // The pool is default-OFF (CHROXY_DOCKER_BYOK_POOL=1 to enable). When
+    // disabled we return a stable `{ enabled: false }` shape (still authed)
+    // so the dashboard can hide the panel without special-casing a 404.
+    //
+    // Test seams: `server._poolStatsEnabled` / `server._poolStats` override
+    // the env probe + aggregator so http-routes tests don't depend on
+    // process.env or a live pool.
+    if (req.method === 'GET' && snapPath === '/api/pool/stats') {
+      if (!server._validateBearerAuth(req, res)) return
+      const enabled = typeof server._poolStatsEnabled === 'boolean'
+        ? server._poolStatsEnabled
+        : isPoolEnabled(process.env)
+      if (!enabled) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ enabled: false }))
+        return
+      }
+      try {
+        const aggregator = server._poolStats ?? getSharedPoolStats()
+        const stats = aggregator.snapshot()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ enabled: true, ...stats }))
+      } catch (err) {
+        log.warn(`GET /api/pool/stats failed: ${err.message}`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Failed to read pool stats' }))
       }
       return
     }
