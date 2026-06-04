@@ -112,9 +112,19 @@ function parseLogTailBytes(url) {
  *   3. A lazily-loaded fresh `DockerBackend()` — env management is
  *      disabled but a snapshot DELETE still needs to call `docker rmi`.
  *      Imported dynamically so tunnel-only installs that never trigger
- *      this code path don't pay the module load.
+ *      this code path don't pay the module load. Cached across calls
+ *      (#5101) so batch cleanup doesn't re-open a docker socket per
+ *      DELETE. The cache only covers this fallback — the test seam and
+ *      the env-manager path both pre-empt it.
  */
-async function resolveRemoveImage(server) {
+let _snapshotBackendRemoveImage = null
+
+/** Reset the lazily-cached fallback DockerBackend closure (#5101). Test-only. */
+export function _resetSnapshotBackendCacheForTests() {
+  _snapshotBackendRemoveImage = null
+}
+
+export async function resolveRemoveImage(server) {
   if (typeof server._snapshotRemoveImage === 'function') {
     return server._snapshotRemoveImage
   }
@@ -122,9 +132,12 @@ async function resolveRemoveImage(server) {
   if (typeof fromEnvMgr === 'function') {
     return (tag) => server.environmentManager._backend.removeImage(tag)
   }
-  const { DockerBackend } = await import('./environments/backends/docker.js')
-  const backend = new DockerBackend()
-  return (tag) => backend.removeImage(tag)
+  if (!_snapshotBackendRemoveImage) {
+    const { DockerBackend } = await import('./environments/backends/docker.js')
+    const backend = new DockerBackend()
+    _snapshotBackendRemoveImage = (tag) => backend.removeImage(tag)
+  }
+  return _snapshotBackendRemoveImage
 }
 
 /**

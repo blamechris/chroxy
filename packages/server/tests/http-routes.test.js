@@ -5,7 +5,7 @@ import { once } from 'node:events'
 import { existsSync, renameSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
-import { createHttpHandler } from '../src/http-routes.js'
+import { createHttpHandler, resolveRemoveImage, _resetSnapshotBackendCacheForTests } from '../src/http-routes.js'
 
 // The QR endpoint falls back to reading ~/.chroxy/connection.json from disk.
 // If a Chroxy server is running (or left a stale file), the test gets 200 instead of 503.
@@ -400,6 +400,62 @@ describe('http-routes', () => {
       assert.equal(res.status, 403)
       // Unauthenticated delete must not touch disk.
       assert.equal(existsSync(join(workDir, 'snapshots', 'snap-protected.json')), true)
+    })
+
+    // #5101 — when env-management is disabled, resolveRemoveImage falls
+    // through to lazily constructing a DockerBackend. Caching that
+    // instance avoids re-opening a docker socket on every DELETE during
+    // batch cleanup. The test seam (`_snapshotRemoveImage`) and the
+    // env-manager path (`environmentManager._backend`) both pre-empt the
+    // cache, so they're unaffected.
+    describe('DockerBackend caching for DELETE (#5101)', () => {
+      beforeEach(() => {
+        _resetSnapshotBackendCacheForTests()
+      })
+
+      afterEach(() => {
+        _resetSnapshotBackendCacheForTests()
+      })
+
+      it('reuses the same DockerBackend instance across repeated calls', async () => {
+        // No _snapshotRemoveImage, no environmentManager — exercises the
+        // fallback path that constructs a fresh DockerBackend.
+        const mock = createMockServer()
+        const fnA = await resolveRemoveImage(mock)
+        const fnB = await resolveRemoveImage(mock)
+        const fnC = await resolveRemoveImage(mock)
+        // Same closure -> same captured backend instance.
+        assert.equal(fnA, fnB)
+        assert.equal(fnB, fnC)
+      })
+
+      it('does NOT cache when the test injection seam is present', async () => {
+        const seam = async () => {}
+        const mock = createMockServer({ _snapshotRemoveImage: seam })
+        const fn = await resolveRemoveImage(mock)
+        // Injection seam wins — returned callback is the seam itself,
+        // not a closure over a cached backend.
+        assert.equal(fn, seam)
+      })
+
+      it('does NOT cache when env-management is enabled', async () => {
+        const backend = { removeImage: async () => {} }
+        const mock = createMockServer({
+          environmentManager: { _backend: backend },
+        })
+        const fnA = await resolveRemoveImage(mock)
+        const fnB = await resolveRemoveImage(mock)
+        // Env-manager path returns a fresh closure each call but each
+        // closure delegates to the same backend the manager already owns.
+        // We just need to confirm the cached fallback is NOT involved —
+        // calling these should hit the env-manager's backend, not the
+        // cached singleton.
+        const calls = []
+        backend.removeImage = async (tag) => { calls.push(tag) }
+        await fnA('tag-a')
+        await fnB('tag-b')
+        assert.deepEqual(calls, ['tag-a', 'tag-b'])
+      })
     })
   })
 })
