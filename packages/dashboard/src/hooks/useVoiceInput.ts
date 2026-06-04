@@ -341,6 +341,19 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
         // gets locked into `finalTranscriptRef`; the tail of in-flight
         // interim results is appended live so the UI sees mid-utterance
         // updates.
+        //
+        // Segment join (issue #4733): Chrome / Safari Web Speech emit
+        // each utterance's `transcript` field without a leading space, so
+        // a naive `finalTranscriptRef.current += text` glues sequential
+        // utterances into run-on words ("hello worldhow are you" instead
+        // of "hello world how are you"). Insert a single space when both
+        // sides lack one and the buffer is non-empty. Safe under any
+        // implementation that already supplies leading spaces — the
+        // `text.startsWith(' ') || finalTranscriptRef.current.endsWith(' ')`
+        // guard short-circuits and we add nothing. Mirrors how
+        // InputBar.tsx's voice-merge effect (`!prefix.endsWith(' ') ? ' '
+        // : ''`) avoids doubled separators when stitching the dictation
+        // span into the composer value.
         let interim = ''
         let finalDelta = ''
         for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -348,8 +361,14 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
           if (!r) continue
           const text = r[0]?.transcript ?? ''
           if (r.isFinal) {
-            finalTranscriptRef.current += text
-            finalDelta += text
+            const needsSeparator =
+              finalTranscriptRef.current.length > 0 &&
+              !finalTranscriptRef.current.endsWith(' ') &&
+              text.length > 0 &&
+              !text.startsWith(' ')
+            const delta = (needsSeparator ? ' ' : '') + text
+            finalTranscriptRef.current += delta
+            finalDelta += delta
           } else {
             interim += text
           }

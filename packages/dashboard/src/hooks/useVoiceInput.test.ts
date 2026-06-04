@@ -279,6 +279,100 @@ describe('useVoiceInput', () => {
       expect(result.current.transcript).toBe('hello world')
     })
 
+    // #4733 — Chrome / Safari Web Speech routinely emit each utterance's
+    // transcript field without a leading space. A naive `+= text` glued
+    // them into run-on words ("hello worldhow are you"), which is the
+    // strongest source candidate for the 332-codepoint TUI prompt in
+    // #4733 that arrived with whitespace stripped mid-message (root
+    // cause not yet confirmed end-to-end). Verify the buffer inserts a
+    // single separator when neither side carries one — and stays
+    // idempotent when the legacy leading-space variant is mixed in.
+    it('inserts a separator between final segments that lack leading/trailing space (#4733)', async () => {
+      const { result } = renderHook(() => useVoiceInput())
+
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+      act(() => {
+        result.current.start()
+      })
+
+      // First utterance — a multi-word phrase with interior spaces preserved.
+      act(() => {
+        lastRecognition!.onresult?.({
+          resultIndex: 0,
+          results: [{ isFinal: true, 0: { transcript: 'Hello I am here' } }],
+        })
+      })
+      expect(result.current.transcript).toBe('Hello I am here')
+
+      // Second utterance — no leading space (the Chrome/Safari shape). Pre-
+      // fix this concatenated to "Hello I am hereWhat do we need to do".
+      act(() => {
+        lastRecognition!.onresult?.({
+          resultIndex: 1,
+          results: [
+            { isFinal: true, 0: { transcript: 'Hello I am here' } },
+            { isFinal: true, 0: { transcript: 'What do we need to do' } },
+          ],
+        })
+      })
+      expect(result.current.transcript).toBe('Hello I am here What do we need to do')
+
+      // Third utterance — already has a leading space (the legacy fixture
+      // shape). The separator helper must not double-space the join.
+      act(() => {
+        lastRecognition!.onresult?.({
+          resultIndex: 2,
+          results: [
+            { isFinal: true, 0: { transcript: 'Hello I am here' } },
+            { isFinal: true, 0: { transcript: 'What do we need to do' } },
+            { isFinal: true, 0: { transcript: ' next' } },
+          ],
+        })
+      })
+      expect(result.current.transcript).toBe('Hello I am here What do we need to do next')
+    })
+
+    // Sanity-check the no-segment-bleed path — interim results from a
+    // single utterance should keep landing as one token regardless of
+    // the separator helper. The helper only fires on isFinal, so this
+    // pins the interim render path against an off-by-one regression.
+    it('interim results inside one utterance render without injected spaces (#4733)', async () => {
+      const { result } = renderHook(() => useVoiceInput())
+
+      await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+      act(() => {
+        result.current.start()
+      })
+
+      act(() => {
+        lastRecognition!.onresult?.({
+          resultIndex: 0,
+          results: [{ isFinal: false, 0: { transcript: 'hello' } }],
+        })
+      })
+      expect(result.current.transcript).toBe('hello')
+
+      act(() => {
+        lastRecognition!.onresult?.({
+          resultIndex: 0,
+          results: [{ isFinal: false, 0: { transcript: 'hello there' } }],
+        })
+      })
+      expect(result.current.transcript).toBe('hello there')
+
+      // Finalise the utterance — first final segment, no separator needed
+      // because finalTranscriptRef is still empty when the helper runs.
+      act(() => {
+        lastRecognition!.onresult?.({
+          resultIndex: 0,
+          results: [{ isFinal: true, 0: { transcript: 'hello there' } }],
+        })
+      })
+      expect(result.current.transcript).toBe('hello there')
+    })
+
     it('surfaces NotAllowedError with a permission-specific message', async () => {
       const { result } = renderHook(() => useVoiceInput())
 
