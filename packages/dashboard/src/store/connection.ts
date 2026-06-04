@@ -61,6 +61,7 @@ import type {
   ChatMessage,
   ConnectionContext,
   ConnectionState,
+  InputSettings,
   ServerEntry,
   SessionInfo,
   SessionState,
@@ -73,6 +74,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import {
   setStore,
   wsSend,
@@ -108,6 +110,24 @@ import {
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
+import {
+  getWsCloseMessage,
+  getHealthCheckErrorMessage,
+  // #4853: runtime type-guard for `VoiceInputMode`. Used in
+  // `loadSavedConnection` below to validate the persisted
+  // localStorage blob — keyed off an exhaustive
+  // `Record<VoiceInputMode, true>` in store-core, so adding a new mode
+  // to the union cannot silently drop here the way a `===` chain would.
+  isVoiceInputMode,
+  // #4901: shared typed predicate for the AskUserQuestion freeform shape.
+  // Replaces the inline 5-condition check that previously duplicated the
+  // mobile store's detector (mobile migrated in #4875 / PR #4900). All
+  // three call sites (mobile store, mobile screen, dashboard store) now
+  // narrow off the same guard, and the `value is OtherFreeformAnswer`
+  // narrowing lets the post-detection `as { otherLabel, freeformText }`
+  // casts drop out.
+  isFreeformAnswer,
+} from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 import {
   loadPersistedState,
@@ -211,6 +231,11 @@ const EMPTY_ACTIVE_TOOLS: never[] = [];
 // #4307: stable empty reference for `pendingBackgroundShells` —
 // same `useShallow` stability rationale as the others above.
 const EMPTY_PENDING_BACKGROUND_SHELLS: never[] = [];
+// #4653: stable empty reference for `interventions` — same `useShallow`
+// stability rationale as the others above. SessionIntervention[] in the
+// type system; never[] here because the array is provably empty and
+// TypeScript widens `never[]` to any element type at the call site.
+const EMPTY_INTERVENTIONS: never[] = [];
 
 /** Delay before auto-reconnecting after an unexpected socket close (ms) */
 const AUTO_RECONNECT_DELAY = 1500;
@@ -378,6 +403,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverErrors: [],
   infoNotifications: [],
   sessionNotifications: [],
+  sessionNotFoundError: null,
   resolvedPermissions: {},
   serverPhase: null,
   tunnelProgress: null,
@@ -406,6 +432,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
+    voiceInputMode: 'continuous',
   },
   savedConnection: null,
   userDisconnected: false,
@@ -743,6 +770,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isIdle: true,
       lastClientActivityAt: null,
       health: 'healthy' as const,
+      // #4879: parity with the BaseSessionState shape; no Stop has been
+      // confirmed in the flat-state fallback (session_stopped only fires
+      // for known sessions once session_list has populated sessionStates).
+      stoppedAt: null,
+      stoppedCode: null,
       terminalRawBuffer: get().terminalRawBuffer,
       activeAgents: EMPTY_AGENTS,
       // #4308: parity with the BaseSessionState shape; no live tool tracking
@@ -766,6 +798,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #3899: no warning is ever surfaced in the flat-state fallback;
       // inactivity_warning only arrives once SessionStates is populated.
       inactivityWarning: null,
+      // #4653: no chroxy intervention is ever surfaced in the flat-state
+      // fallback — intervention events are routed by sessionId, which only
+      // populates after a session_list snapshot lands.
+      interventions: EMPTY_INTERVENTIONS,
     };
   },
 
@@ -779,8 +815,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const raw = localStorage.getItem(STORAGE_KEY_INPUT_SETTINGS);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed.chatEnterToSend === 'boolean' || typeof parsed.terminalEnterToSend === 'boolean') {
-          set((state) => ({ inputSettings: { ...state.inputSettings, ...parsed } }));
+        // Validated, narrowed merge so a stray key in localStorage can't
+        // shoehorn arbitrary state into the store. Each field is checked
+        // independently because the persisted blob may pre-date #4785 and
+        // not include `voiceInputMode`.
+        const next: Partial<InputSettings> = {};
+        if (typeof parsed.chatEnterToSend === 'boolean') next.chatEnterToSend = parsed.chatEnterToSend;
+        if (typeof parsed.terminalEnterToSend === 'boolean') next.terminalEnterToSend = parsed.terminalEnterToSend;
+        // #4853: runtime guard keyed off the same exhaustive
+        // `Record<VoiceInputMode, true>` map the dashboard `SettingsPanel`
+        // change handler uses (#4825). Replaces the previous hand-written
+        // `===` chain that silently dropped any new mode added to the union.
+        if (isVoiceInputMode(parsed.voiceInputMode)) {
+          next.voiceInputMode = parsed.voiceInputMode;
+        }
+        if (Object.keys(next).length > 0) {
+          set((state) => ({ inputSettings: { ...state.inputSettings, ...next } }));
         }
       }
     } catch {
@@ -918,9 +968,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       .catch((err) => {
         if (myAttemptId !== connectionAttemptId) return;
         console.log(`[ws] Health check failed: ${err.message}`);
-        const reason = err.name === 'AbortError' ? 'Server not responding'
-          : err.message?.startsWith('HTTP ') ? err.message
-          : 'Network error';
+        // #4771: shared mapping with the app — AbortError, HTTP 4xx
+        // (bad token), HTTP 5xx (server restart), other HTTP, and
+        // generic network errors all get distinct copy instead of
+        // collapsing 4xx/5xx into the raw status string.
+        const reason = getHealthCheckErrorMessage(err);
         set({ connectionError: reason });
         if (_retryCount < MAX_RETRIES) {
           const delay = withJitter(RETRY_DELAYS[_retryCount]!);
@@ -962,7 +1014,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     let reconnectScheduled = false;
     const scheduleReconnect = (
       reasonText: string,
-      errorMessage: string,
+      errorMessage: string | null,
       delayMs: number,
     ): void => {
       if (reconnectScheduled) return;
@@ -970,9 +1022,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (disconnectedAttemptId === myAttemptId) return;
       reconnectScheduled = true;
       console.log(`[ws] ${reasonText}, reconnecting...`);
+      // #4771: `errorMessage === null` means the close code was 1000
+      // (normal server-initiated close — see getWsCloseMessage). Match
+      // the mobile app's behaviour and skip updating connectionError so
+      // we don't show an "X" banner for a graceful close.
       set({
         connectionPhase: 'reconnecting',
-        connectionError: errorMessage,
+        ...(errorMessage !== null ? { connectionError: errorMessage } : {}),
         connectionRetryCount: 0,
       });
       setTimeout(() => {
@@ -1025,7 +1081,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       handleMessage(msg, socketCtx);
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event?: CloseEvent) => {
       stopHeartbeat();
 
       // Stale socket from a previous connection attempt — ignore
@@ -1075,7 +1131,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
-        scheduleReconnect('Connection lost', 'Connection lost', AUTO_RECONNECT_DELAY);
+        // #4771: surface close-code-specific copy via the shared mapping
+        // — e.g. a 4008 backpressure eviction now reads "Connection
+        // dropped — the server was overwhelmed, reconnecting" instead
+        // of a generic "Connection lost". `event` is defensively
+        // optional because legacy test harnesses invoke
+        // `socket.onclose()` with no argument; production browser /
+        // WebSocket implementations always pass a CloseEvent.
+        //
+        // `errorMessage` is forwarded as-is (including null) so a
+        // graceful 1000 close doesn't paint a spurious error banner —
+        // see the `errorMessage === null` branch in scheduleReconnect.
+        // When `event.code` is missing entirely (legacy test mocks),
+        // we fall back to the pre-refactor "Connection lost" copy so
+        // the existing `MockWebSocket` assertions still pass.
+        const code = event?.code;
+        const closeMsg = typeof code === 'number' ? getWsCloseMessage(code) : 'Connection lost';
+        scheduleReconnect(
+          typeof code === 'number' ? `Connection lost (code ${code})` : 'Connection lost',
+          closeMsg,
+          AUTO_RECONNECT_DELAY,
+        );
       } else if (disconnectedAttemptId === myAttemptId || get().userDisconnected) {
         set({ connectionPhase: 'disconnected' });
       } else if (get().connectionPhase !== 'reconnecting') {
@@ -1549,24 +1625,74 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
-  sendUserQuestionResponse: (answer: string | Record<string, string>, toolUseId?: string) => {
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
+    toolUseId?: string,
+  ) => {
     const { socket, activeSessionId, sessionStates } = get();
-    // #4604 Chunk B — split the wire payload by call shape:
+    // #4604 Chunk B / #4621 / #4651 / #4735 — split the wire payload by call shape:
     // - string `answer`: legacy single-question / free-text path. Wire
     //   shape stays `{ type, answer, toolUseId? }` so older servers
     //   keep working without schema migration.
-    // - Record `answer`: multi-question form (Chunk B). Populate the
-    //   `answers` field (protocol already supports it) AND a string
+    // - Record `answer`: multi-question form. Populate the `answers`
+    //   field (`UserQuestionResponseSchema` accepts
+    //   `Record<string, string | string[]>` per #4621) AND a string
     //   `answer` summary so a server running an older build that only
     //   reads `answer` falls through to its default-to-option-1 path
     //   (a noisy WARN in chroxy.log) instead of stalling the form.
-    const isMultiAnswer = typeof answer !== 'string'
-    const answerSummary = isMultiAnswer
-      ? Object.entries(answer as Record<string, string>).map(([q, v]) => `${q}: ${v}`).join(' | ')
-      : (answer as string);
-    const payload: Record<string, unknown> = { type: 'user_question_response', answer: answerSummary };
+    //   Multi-select values flow through as native arrays — the
+    //   summary helper flattens them to comma-joined labels so the
+    //   string-only `answer` field stays readable.
+    //
+    //   Delegate to `formatQuestionAnswerSummary` so the legacy
+    //   JSON-stringified array envelope (pre-#4621 wire: a single
+    //   value like `'["App","Tests"]'` for multi-select) is also
+    //   flattened here — otherwise the terminal echo + the required
+    //   string `answer` field can leak `["App","Tests"]` JSON syntax
+    //   when mixed-version rehydrated state replays an old answersMap.
+    //   The helper detects array-shaped values AND JSON-stringified
+    //   arrays and renders both the same way (comma-joined labels).
+    // - {otherLabel, freeformText} (#4651): single-question Other path.
+    //   `answer` carries the Other option's label so the server can
+    //   resolve it to a 1-indexed digit; `freeformText` carries the
+    //   typed text so the server can drive a two-stage TUI write
+    //   (digit → text-input prompt → freeform text + Enter). Older
+    //   servers that ignore `freeformText` fall through to the legacy
+    //   path and type the label literally — a clean degradation.
+    // Copilot review (#4753): tighten the freeform-shape detection to
+    // avoid misclassifying a multi-question Record whose question keys
+    // happen to be literally "freeformText" and "otherLabel" (rare, but
+    // possible if the model phrases a question that way). The freeform
+    // shape is an object with EXACTLY those two keys AND both string
+    // values — anything else falls through to the multi-question path.
+    //
+    // #4901: the shape check now lives in `@chroxy/store-core/freeform-answer`
+    // (single source of truth, mobile already migrated in #4875 / PR #4900).
+    // The `value is OtherFreeformAnswer` narrowing means the post-detection
+    // accesses (`answer.otherLabel`, `answer.freeformText`) no longer need
+    // `as { otherLabel: string; freeformText: string }` casts.
+    const freeform = isFreeformAnswer(answer);
+    const isMultiAnswer = !freeform && typeof answer !== 'string';
+    let answerSummary: string;
+    if (freeform) {
+      answerSummary = answer.freeformText;
+    } else {
+      // Delegate to the shared summary helper so multi-question Records
+      // (and the legacy JSON-stringified array envelope from #4621) both
+      // render consistently — comma-joined labels for multi-select, no
+      // leaked JSON syntax in the terminal echo or wire `answer` field.
+      answerSummary = formatQuestionAnswerSummary(
+        answer as string | Record<string, string | string[]>,
+      );
+    }
+    const payload: Record<string, unknown> = { type: 'user_question_response', answer: freeform
+      ? answer.otherLabel
+      : answerSummary };
     if (isMultiAnswer) {
       payload.answers = answer;
+    }
+    if (freeform) {
+      payload.freeformText = answer.freeformText;
     }
     if (toolUseId) payload.toolUseId = toolUseId;
     // #4296: echo the resolved answer to the terminal buffer so the Output
@@ -2026,10 +2152,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     if (sessionId === activeSessionId) return;
 
-    // Optimistically switch to cached state + dismiss notifications for target session
+    // #4982 — operator picked a live session, so the lost-id banner from
+    // the prior SESSION_NOT_FOUND is no longer relevant. Clear it here so
+    // a stale banner doesn't outlive the resolution.
+    if (get().sessionNotFoundError) set({ sessionNotFoundError: null });
+
+    // Optimistically switch to cached state + mark notifications for target
+    // session as read. #4890 — pre-widget we filtered the target session's
+    // alerts out entirely, but the new Slack-style widget needs the entries
+    // to persist as acknowledged history; the banners stack filters by
+    // `readAt === undefined` at render time so the visual behaviour
+    // (banners vanish on switch) is unchanged.
     const cached = sessionStates[sessionId];
-    const filteredNotifications = get().sessionNotifications.filter(
-      (n) => n.sessionId !== sessionId,
+    const switchReadStamp = Date.now();
+    const filteredNotifications = get().sessionNotifications.map((n) =>
+      n.sessionId === sessionId && n.readAt === undefined
+        ? { ...n, readAt: switchReadStamp }
+        : n,
     );
     if (cached) {
       set({
@@ -2051,6 +2190,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // switch_session WS message is processed.
       // Reset all session-scoped fields so the previous session's values don't bleed through
       // during the server round-trip.
+      //
+      // #4639: seed `isIdle` from the most-recent `session_list` snapshot
+      // (where the server reports `isBusy` per session) instead of hardcoding
+      // `true`. Without this, clicking a tab whose session is still in-flight
+      // on the server would silently drop the Working banner and the Stop
+      // button until the next server event lands.
+      const sessionInfo = get().sessions.find((s) => s.sessionId === sessionId);
+      const seedIsIdle = typeof sessionInfo?.isBusy === 'boolean' ? !sessionInfo.isBusy : true;
       set({
         activeSessionId: sessionId,
         messages: [],
@@ -2061,7 +2208,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         contextUsage: null,
         lastResultCost: null,
         lastResultDuration: null,
-        isIdle: true,
+        isIdle: seedIsIdle,
         sessionNotifications: filteredNotifications,
       });
     }
@@ -2231,7 +2378,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ logEntries: [] });
   },
 
-  addServerError: (message, action, severity) => {
+  addServerError: (message, action, severity, partialCostLine) => {
     const now = Date.now();
     const err = {
       id: nextMessageId('info'),
@@ -2248,6 +2395,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // MAX_TOOL_ROUNDS_REACHED) from destructive STREAM_ERROR / ABORT.
       // Defaults to 'error' when unset — existing call sites unchanged.
       ...(severity ? { severity } : {}),
+      // #5039: optional partial-cost sub-line surfaced under the main
+      // message when PR #5037 folded parent + Task subagent rounds onto
+      // the error envelope. Only attached when the caller has a
+      // non-empty pre-formatted line — undefined for every error path
+      // that doesn't carry partials so the toast renders message-only.
+      ...(partialCostLine ? { partialCostLine } : {}),
     };
     set((state) => ({
       serverErrors: [...state.serverErrors, err].slice(-10),
@@ -2288,6 +2441,47 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set((state) => ({
       sessionNotifications: state.sessionNotifications.filter((n) => n.id !== id),
     }));
+  },
+
+  // #4890 — Slack-style intervention notifications widget. `read` (a
+  // timestamp) is distinct from `dismiss` (removal). Reading means the
+  // operator explicitly acknowledged the alert — clicking a widget row,
+  // hitting the per-row "mark as read" button, "Mark all read", or
+  // switching to the alert's session via any session-switch path. Opening
+  // the widget panel by itself does NOT mark notifications read; only the
+  // explicit per-row / bulk / session-switch actions do. Once stamped, the
+  // alert stops counting toward the unread badge but remains in the
+  // widget's history list. Idempotent: a second mark-read keeps the first
+  // timestamp so re-opens don't masquerade as fresh acknowledges.
+  markSessionNotificationRead: (id: string) => {
+    set((state) => ({
+      sessionNotifications: state.sessionNotifications.map((n) =>
+        n.id === id && n.readAt === undefined
+          ? { ...n, readAt: Date.now() }
+          : n,
+      ),
+    }));
+  },
+
+  markAllSessionNotificationsRead: () => {
+    const now = Date.now();
+    set((state) => ({
+      sessionNotifications: state.sessionNotifications.map((n) =>
+        n.readAt === undefined ? { ...n, readAt: now } : n,
+      ),
+    }));
+  },
+
+  // #4982 — SessionNotFoundChip banner state setters. message-handler sets
+  // the value from `session_error{code:'SESSION_NOT_FOUND'}` (and also
+  // clears activeSessionId in the same set call to break the resend loop).
+  // Dismiss clears the banner; switchSession also clears it (see the
+  // explicit clear in switchSession below).
+  setSessionNotFoundError: (err) => {
+    set({ sessionNotFoundError: err });
+  },
+  dismissSessionNotFoundError: () => {
+    set({ sessionNotFoundError: null });
   },
 
   // Multi-server registry actions

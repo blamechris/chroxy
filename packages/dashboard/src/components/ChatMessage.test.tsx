@@ -238,6 +238,14 @@ describe('ChatMessage', () => {
     )
     expect(screen.getByTestId('chat-message-msg-error-ok')).toBeInTheDocument()
   })
+
+  // #4757 markdown overflow fix is CSS-only (components.css: max-width, min-width: 0,
+  // overflow-wrap: anywhere). jsdom does not measure layout so unit tests can't
+  // verify wrapping. Manual verification on each release; visual regression
+  // tracked separately as a future enhancement.
+  // Removed structural-only assertions per audit P3.3 (#4803): every assertion
+  // passed on the pre-PR commit, so the suite gave the illusion of regression
+  // protection without exercising the CSS rules that actually fix the bug.
 })
 
 describe('ToolBubble', () => {

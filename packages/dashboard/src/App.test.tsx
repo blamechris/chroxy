@@ -12,10 +12,40 @@ vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
 }))
 
+// #4796 — capture the options the App passes into useVoiceInput so we can
+// assert the store's `inputSettings.voiceInputMode` is threaded through.
+// This closes audit Tester #2 (the wiring chain had zero test coverage —
+// a store-selector typo or stale-closure bug would have silently broken
+// the user-facing setting with green CI).
+const voiceInputModeSpy = vi.fn<(opts: { mode?: 'continuous' | 'auto-pause' } | undefined) => void>()
+vi.mock('./hooks/useVoiceInput', () => ({
+  useVoiceInput: (opts?: { mode?: 'continuous' | 'auto-pause' }) => {
+    voiceInputModeSpy(opts)
+    return {
+      isRecording: false,
+      transcript: '',
+      error: null,
+      isAvailable: false,
+      engine: 'none' as const,
+      start: vi.fn(),
+      stop: vi.fn(),
+    }
+  },
+}))
+
 // #4673 — control the clipboard helper per-test so we can assert that the
 // "Copied!" check mark only fires when the helper actually wrote. Default
 // to a successful write so the unrelated render-smoke tests stay green.
-const clipboardWriteTextMock = vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true))
+// #4629 — also expose an `addServerErrorMock` so the failure-path test
+// can assert the dashboard surfaces a visible toast when the clipboard
+// write fails (the original bug was a silent no-op + misleading
+// "Copied!" tooltip). Both are declared via `vi.hoisted()` because
+// `vi.mock()` factories are hoisted to the top of the file before any
+// top-level `const`, so a plain const would hit a TDZ ReferenceError.
+const { clipboardWriteTextMock, addServerErrorMock } = vi.hoisted(() => ({
+  clipboardWriteTextMock: vi.fn<(text: string) => Promise<boolean>>(() => Promise.resolve(true)),
+  addServerErrorMock: vi.fn<(message: string, action?: unknown, severity?: unknown) => void>(),
+}))
 vi.mock('./utils/clipboard', () => ({
   writeText: (text: string) => clipboardWriteTextMock(text),
 }))
@@ -40,6 +70,30 @@ vi.mock('./components/MultiTerminalView', () => ({
   MultiTerminalView: (props: { className?: string }) => (
     <div data-testid="multi-terminal-view-mock" className={props.className} />
   ),
+}))
+
+// #4685 — PermissionPrompt reads `availableProviders` and calls
+// `isRuleEligibleProvider`, both of which need a richer store mock than the
+// App smoke harness provides. The #4685 gate tests below mount a permission
+// message (requestId + expiresAt + !answered) which would otherwise drive
+// the real PermissionPrompt to crash on the missing helper. Stub it here so
+// the gate tests stay focused on App-level derivation; PermissionPrompt has
+// its own dedicated suite in PermissionPrompt.test.tsx.
+vi.mock('./components/PermissionPrompt', () => ({
+  PermissionPrompt: (props: { requestId: string; tool: string }) => (
+    <div data-testid={`permission-prompt-mock-${props.requestId}`} data-tool={props.tool} />
+  ),
+}))
+
+// #4695 / #5062 — CreateSessionModal pulls multiple store-callback selectors
+// (setDirectoryListingCallback / requestDirectoryListing / …) that the
+// App-test store mock doesn't enumerate. Stubbing the modal lets the
+// New Session overflow-menu click assertion verify the `open` prop transition
+// without dragging in directory-browser store wiring. Production
+// behaviour is exercised by the CreateSessionModal*.test.tsx suites.
+vi.mock('./components/CreateSessionModal', () => ({
+  CreateSessionModal: (props: { open: boolean }) =>
+    props.open ? <div data-testid="create-session-modal-mock" /> : null,
 }))
 
 vi.mock('./components/StdinDisabledBanner', () => ({
@@ -114,7 +168,16 @@ vi.mock('./store/connection', () => {
     setModel: vi.fn(),
     setPermissionMode: vi.fn(),
     dismissServerError: vi.fn(),
+    // #4629 — surfaced when the clipboard write fails so the user sees a
+    // visible error instead of a silent no-op. Backed by the top-level
+    // `addServerErrorMock` so tests can assert on the call args directly.
+    addServerError: addServerErrorMock,
     dismissSessionNotification: vi.fn(),
+    // #4890 — Slack-style intervention notifications widget read/unread
+    // actions wired through the store. The widget consumes these
+    // selectors at render time so the mock state needs them present.
+    markSessionNotificationRead: vi.fn(),
+    markAllSessionNotificationsRead: vi.fn(),
     markPromptAnsweredByRequestId: vi.fn(),
     sessionNotifications: [],
     setTerminalWriteCallback: vi.fn(),
@@ -123,7 +186,7 @@ vi.mock('./store/connection', () => {
     fetchFileList: vi.fn(),
     fetchSlashCommands: vi.fn(),
     defaultProvider: 'claude-sdk',
-    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
+    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' },
     updateInputSettings: vi.fn(),
     conversationHistory: [],
     fetchConversationHistory: vi.fn(),
@@ -163,11 +226,17 @@ beforeEach(() => {
   // overrides don't bleed through.
   clipboardWriteTextMock.mockReset()
   clipboardWriteTextMock.mockResolvedValue(true)
+  // #4629 — reset between cases so the failure-path test only sees the
+  // calls it triggered.
+  addServerErrorMock.mockReset()
   // #4432 — reset the shared shortcut registry so per-test rebinds
   // don't bleed between cases. The registry persists overrides to
   // localStorage; clearing the key keeps loadOverrides() returning {}.
   try { localStorage.removeItem('chroxy_persist_shortcut_overrides_v1') } catch { /* jsdom always provides localStorage */ }
   __setSharedRegistryForTesting(createShortcutRegistry(DEFAULT_SHORTCUTS))
+  // #4796 — reset between cases so per-test mode assertions only see the
+  // current render's invocations.
+  voiceInputModeSpy.mockReset()
 })
 
 afterEach(cleanup)
@@ -245,6 +314,24 @@ describe('App', () => {
     expect(screen.getByText('Ctrl+Shift+D')).toBeInTheDocument()
     expect(screen.queryByText('Cmd+K')).not.toBeInTheDocument()
     expect(screen.queryByText('Cmd+Enter')).not.toBeInTheDocument()
+  })
+
+  // #4941 — the sidebar drag-to-reorder shortcut was previously invisible
+  // anywhere outside the source code. After landing the discoverability
+  // follow-up, opening the `?` cheat sheet shows the two reorder entries
+  // alongside their descriptions and a dedicated "Sidebar" section
+  // heading, so users can find them.
+  it('lists the sidebar reorder shortcuts in the cheat sheet under a Sidebar section (#4941)', () => {
+    render(<App />)
+    fireEvent.keyDown(window, { key: '?' })
+
+    expect(screen.getByText('Alt+ArrowUp')).toBeInTheDocument()
+    expect(screen.getByText('Alt+ArrowDown')).toBeInTheDocument()
+    expect(screen.getByText('Move sidebar row up (when focused)')).toBeInTheDocument()
+    expect(screen.getByText('Move sidebar row down (when focused)')).toBeInTheDocument()
+    // Confirm the entries render under the new "Sidebar" group (h3),
+    // not folded into another section.
+    expect(screen.getByRole('heading', { level: 3, name: 'Sidebar' })).toBeInTheDocument()
   })
 
   // #4432 — the cheat sheet's tab-switch row used to be derived from
@@ -1518,23 +1605,35 @@ describe('App', () => {
       }),
     }
 
+    // #4974 — Copy transcript moved into the header overflow menu. The
+    // helper opens the menu and returns the "Copy transcript" item so
+    // each test reads as: open → click → assert. We re-query the item
+    // after the click because the App rerenders the menu when
+    // `transcriptCopied` flips, which can rebind the DOM node.
+    const openOverflowAndGetCopyItem = () => {
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      return screen.getByTestId('header-overflow-item-copy-transcript')
+    }
+
     it('does NOT flash the check mark when the clipboard helper returns false', async () => {
       clipboardWriteTextMock.mockResolvedValue(false)
       stateOverrides = connectedWithMessages
       render(<App />)
 
-      const btn = screen.getByTestId('btn-copy-transcript')
+      const item = openOverflowAndGetCopyItem()
       // Title before click reflects the not-copied state (no "Copied!").
-      expect(btn.getAttribute('title')).not.toContain('Copied!')
+      expect(item.getAttribute('title')).not.toContain('Copied!')
 
-      fireEvent.click(btn)
+      fireEvent.click(item)
       await waitFor(() => {
         expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       })
 
       // Indicator must NOT flip — the OS clipboard was never written.
-      expect(btn.textContent).not.toContain('✓')
-      expect(btn.getAttribute('title')).not.toContain('Copied!')
+      // The menu closes after a click; re-open and re-read the item.
+      const after = openOverflowAndGetCopyItem()
+      expect(after.textContent).not.toContain('✓')
+      expect(after.getAttribute('title')).not.toContain('Copied!')
     })
 
     it('DOES flash the check mark when the clipboard helper returns true', async () => {
@@ -1542,14 +1641,572 @@ describe('App', () => {
       stateOverrides = connectedWithMessages
       render(<App />)
 
-      const btn = screen.getByTestId('btn-copy-transcript')
-      fireEvent.click(btn)
+      const item = openOverflowAndGetCopyItem()
+      fireEvent.click(item)
 
       await waitFor(() => {
-        expect(btn.textContent).toContain('✓')
+        expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
       })
-      expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
-      expect(btn.getAttribute('title')).toContain('Copied!')
+      // Re-open the menu — `transcriptCopied` flipped to true so the
+      // item now renders the check glyph + "Copied!" title.
+      const after = openOverflowAndGetCopyItem()
+      await waitFor(() => {
+        expect(after.textContent).toContain('✓')
+      })
+      expect(after.getAttribute('title')).toContain('Copied!')
+    })
+
+    // #4629 — the original bug was that a failed clipboard write would
+    // silently swallow the failure and the "Copied!" tooltip flashed
+    // anyway. PR #4676 (for #4673) fixed the misleading flash but the
+    // user still got zero feedback when the write fell through. The third
+    // acceptance criterion on #4629 explicitly calls this out: "If
+    // clipboard write fails, user sees an error (not a misleading
+    // 'Copied!' tooltip)". Surface a server-error toast so the user knows
+    // the OS clipboard wasn't actually written.
+    it('surfaces a server-error toast when the clipboard helper returns false (#4629)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(false)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const item = openOverflowAndGetCopyItem()
+      fireEvent.click(item)
+
+      await waitFor(() => {
+        expect(addServerErrorMock).toHaveBeenCalledTimes(1)
+      })
+      const firstCall = addServerErrorMock.mock.calls[0]
+      expect(firstCall).toBeDefined()
+      const [message, action, severity] = firstCall!
+      expect(message).toMatch(/clipboard/i)
+      // #4870 — a failed clipboard write is non-destructive (the user just
+      // needs to retry). Match the #4148 convention by tagging the toast
+      // as a 'warning' so it renders yellow rather than the red 'error'
+      // reserved for STREAM_ERROR / ABORT. The recovery `action` slot
+      // stays undefined because we have nothing meaningful to wire a
+      // one-click retry to from this call site.
+      expect(action).toBeUndefined()
+      expect(severity).toBe('warning')
+      // Must NOT also flash the success indicator (that was the #4673 bug;
+      // this test pins the negative too so a future regression on either
+      // axis is caught). Re-open the menu to read the current row state.
+      const after = openOverflowAndGetCopyItem()
+      expect(after.textContent).not.toContain('✓')
+    })
+
+    it('does NOT surface a server-error toast on a successful copy (#4629)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(true)
+      stateOverrides = connectedWithMessages
+      render(<App />)
+
+      const item = openOverflowAndGetCopyItem()
+      fireEvent.click(item)
+
+      // Wait for the clipboard write to resolve (state-only assertion —
+      // keeps the waitFor callback side-effect-free per RTL guidance;
+      // re-opening the menu inside the retry loop would toggle it open
+      // and closed on each tick and make the test non-deterministic).
+      await waitFor(() => {
+        expect(clipboardWriteTextMock).toHaveBeenCalledTimes(1)
+      })
+      // `transcriptCopied` flipped to true — re-open the menu and read
+      // the row's current glyph.
+      const after = openOverflowAndGetCopyItem()
+      expect(after.textContent).toContain('✓')
+      expect(addServerErrorMock).not.toHaveBeenCalled()
+    })
+  })
+
+  // #4871 — the sidebar context-menu's copyToClipboard callback (used for
+  // "Copy path" on session/repo rows and "Copy Conversation ID" on
+  // resumable rows) routed through `clipboardWriteText` but explicitly
+  // "fell through quietly" on failure — the same Tauri-WKWebView /
+  // non-secure-context failure modes that motivated #4629 left the user
+  // with zero feedback and a stale paste. PR #4857 fixed the
+  // handleCopyTranscript path; this is the sibling fix. The callback now
+  // surfaces a 'warning'-severity toast (per #4870 — a failed clipboard
+  // write is non-destructive, not red-error-worthy).
+  describe('sidebar copyToClipboard callback failure feedback (#4871)', () => {
+    const connectedWithRepoSession = {
+      connectionPhase: 'connected' as const,
+      sessions: [{
+        sessionId: 's1',
+        name: 'Alpha',
+        cwd: '/tmp/repo',
+        type: 'cli' as const,
+        hasTerminal: true,
+        model: null,
+        permissionMode: null,
+        isBusy: false,
+        createdAt: Date.now(),
+        conversationId: null,
+      }],
+      activeSessionId: 's1',
+    }
+
+    it('surfaces a warning-severity toast when the clipboard helper returns false', async () => {
+      clipboardWriteTextMock.mockResolvedValue(false)
+      stateOverrides = connectedWithRepoSession
+      render(<App />)
+
+      // Right-click the session row to open the sidebar context menu, then
+      // click "Copy path" — the same callback that wires "Copy Conversation
+      // ID" on resumable rows. The session-row path is easier to bootstrap
+      // (no conversationHistory fixture required).
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.contextMenu(row)
+      const menu = screen.getByRole('menu')
+      expect(menu).toBeInTheDocument()
+
+      const copyPath = within(menu).getByRole('menuitem', { name: /copy path/i })
+      fireEvent.click(copyPath)
+
+      await waitFor(() => {
+        expect(clipboardWriteTextMock).toHaveBeenCalledWith('/tmp/repo')
+      })
+      await waitFor(() => {
+        expect(addServerErrorMock).toHaveBeenCalledTimes(1)
+      })
+      const firstCall = addServerErrorMock.mock.calls[0]
+      expect(firstCall).toBeDefined()
+      const [message, action, severity] = firstCall!
+      expect(message).toMatch(/clipboard/i)
+      // Severity arg pinned to 'warning' (#4870 convention).
+      expect(action).toBeUndefined()
+      expect(severity).toBe('warning')
+    })
+
+    it('does NOT surface a toast on a successful copy (no green confirmation by design)', async () => {
+      clipboardWriteTextMock.mockResolvedValue(true)
+      stateOverrides = connectedWithRepoSession
+      render(<App />)
+
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.contextMenu(row)
+      const menu = screen.getByRole('menu')
+      const copyPath = within(menu).getByRole('menuitem', { name: /copy path/i })
+      fireEvent.click(copyPath)
+
+      await waitFor(() => {
+        expect(clipboardWriteTextMock).toHaveBeenCalledWith('/tmp/repo')
+      })
+      // Resolve the microtask so the .then() handler runs.
+      await Promise.resolve()
+      expect(addServerErrorMock).not.toHaveBeenCalled()
+    })
+  })
+
+  // #4796 — wiring guard for `useVoiceInput({ mode })`. Audit Tester #2
+  // flagged that the chain `SettingsPanel.tsx -> updateInputSettings ->
+  // inputSettings.voiceInputMode -> App.tsx selector -> useVoiceInput({ mode })`
+  // had zero test coverage. A store-selector typo (e.g. `inputSettings.mode`)
+  // or stale closure in `modeRef` would silently break the user-facing
+  // setting without any test failing — the bug would only show up in
+  // manual QA, which is what happened in #4796. These tests pin the
+  // store-to-hook contract.
+  describe('voice input mode wiring (#4796)', () => {
+    it('passes the store inputSettings.voiceInputMode through to useVoiceInput as the mode option', () => {
+      stateOverrides = {
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'auto-pause' as const },
+      }
+      render(<App />)
+      // The hook must be invoked with the exact mode persisted in the store.
+      // Use `mock.calls` rather than `toHaveBeenCalledWith` so we can spot
+      // any extra "mode" call from a strict-mode double render.
+      const modes = voiceInputModeSpy.mock.calls.map(c => c[0]?.mode)
+      expect(modes).toContain('auto-pause')
+    })
+
+    it('passes "continuous" when the store has the default voiceInputMode', () => {
+      stateOverrides = {
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' as const },
+      }
+      render(<App />)
+      const modes = voiceInputModeSpy.mock.calls.map(c => c[0]?.mode)
+      expect(modes).toContain('continuous')
+    })
+  })
+
+  // #4685 — App-level integration tests for the AskUserQuestion content
+  // gate. The component-level tests in QuestionPrompt.test.tsx prove the
+  // placeholder branch given a prop; these prove App.tsx ACTUALLY computes
+  // `pendingPermission=true` when the active session has both an unresolved
+  // `AskUserQuestion` permission_request AND a `user_question`-derived
+  // prompt message, and that the gate flips OFF on allow / STAYS ON on
+  // deny. A future change that renames `m.tool` or moves `requestId`
+  // placement on the permission ChatMessage would silently regress the
+  // fix — these tests pin the App-side derivation. Mirrors Copilot review
+  // comment #2 on #4860.
+  describe('AskUserQuestion content gate — App-level derivation (#4685)', () => {
+    const connectedState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    // Two messages mirror the TUI race in the wild: the permission hook's
+    // HTTP /permission broadcast creates a `permission_request` ChatMessage
+    // (tool='AskUserQuestion', requestId set), and the in-process
+    // user_question event creates a separate `prompt` ChatMessage carrying
+    // the model-supplied question text + options (no requestId).
+    const askUserQuestionMessages = [
+      {
+        id: 'perm-1',
+        type: 'prompt',
+        content: 'AskUserQuestion: pick your fighter',
+        tool: 'AskUserQuestion',
+        requestId: 'req-aq-1',
+        options: [
+          { label: 'Allow', value: 'allow' },
+          { label: 'Deny', value: 'deny' },
+        ],
+        expiresAt: Date.now() + 300_000,
+        timestamp: 1,
+      },
+      {
+        id: 'q-1',
+        type: 'prompt',
+        content: 'Pick your fighter',
+        options: [
+          { label: 'Ryu', value: 'ryu' },
+          { label: 'Ken', value: 'ken' },
+        ],
+        questions: [
+          { question: 'Pick your fighter', options: [{ label: 'Ryu', value: 'ryu' }, { label: 'Ken', value: 'ken' }] },
+        ],
+        timestamp: 2,
+      },
+    ]
+
+    it('renders the placeholder (and hides question content) when the AskUserQuestion permission_request is unresolved', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: {},
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      // Placeholder renders…
+      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // …and the model-supplied question + option labels are NOT in the
+      // chat pane (gate works end-to-end through App's derivation).
+      expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
+      expect(within(chatPane).queryByText('Ryu')).not.toBeInTheDocument()
+      expect(within(chatPane).queryByText('Ken')).not.toBeInTheDocument()
+    })
+
+    it('flips OFF the gate (reveals content) when the permission resolves to `allow`', () => {
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: { 'req-aq-1': 'allow' },
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      // Placeholder is gone…
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      // …and the actual question + options are visible.
+      expect(within(chatPane).getByText('Pick your fighter')).toBeInTheDocument()
+      expect(within(chatPane).getByText('Ryu')).toBeInTheDocument()
+      expect(within(chatPane).getByText('Ken')).toBeInTheDocument()
+    })
+
+    it('flips OFF the gate when the permission resolves to `allowSession`', () => {
+      // Same behaviour as `allow` — both are "user explicitly approved
+      // seeing the question content."
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: { 'req-aq-1': 'allowSession' },
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(within(chatPane).getByText('Pick your fighter')).toBeInTheDocument()
+    })
+
+    it('KEEPS the gate ON when the permission resolves to `deny` (#4685 Copilot review)', () => {
+      // Issue #4685 expected behavior: "(b) Question bubble renders only
+      // after the permission flow completes (and shows the redacted/denied
+      // state if user clicks Deny)". Pre-Copilot-review the gate flipped
+      // off on ANY resolved entry, surfacing the model-supplied question
+      // text + options after a denial — exactly defeating the gate. This
+      // test pins the deny-keeps-gate-on rule end-to-end through App's
+      // derivation.
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: askUserQuestionMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: { 'req-aq-1': 'deny' },
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      // Placeholder STILL renders — deny does not un-gate.
+      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // Question content stays hidden.
+      expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
+      expect(within(chatPane).queryByText('Ryu')).not.toBeInTheDocument()
+    })
+
+    it('KEEPS the gate ON when the cross-client permission_resolved set `m.answered = "deny"` on the permission message', () => {
+      // The cross-client path lives on the per-message `answered` field
+      // rather than the store's `resolvedPermissions` map (see
+      // message-handler.ts:1705 — handlePermissionResolved sets answered
+      // for the cross-client view, NOT resolvedPermissions). Mirror the
+      // resolvedPermissions deny test for the per-message branch.
+      const denyAnsweredMessages = [
+        { ...askUserQuestionMessages[0], answered: 'deny' as const, answeredAt: Date.now() },
+        askUserQuestionMessages[1],
+      ]
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: denyAnsweredMessages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: {},
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
+    })
+
+    it('does NOT activate the gate when there is no AskUserQuestion permission_request in the session', () => {
+      // Defensive: a `user_question` without a paired permission_request
+      // (e.g. SDK / CLI / BYOK / Codex / Gemini providers, which short-
+      // circuit AskUserQuestion in PermissionManager — no permission_request
+      // is ever broadcast) MUST render the QuestionPrompt content
+      // immediately. The gate is TUI-specific by construction and a no-op
+      // elsewhere; pin that here so a future change can't accidentally
+      // gate every provider's AskUserQuestion.
+      stateOverrides = {
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages: [askUserQuestionMessages[1]], // user_question only, no permission_request
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        resolvedPermissions: {},
+        viewMode: 'chat',
+      }
+      render(<App />)
+      const chatPane = screen.getByTestId('chat-pane')
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(within(chatPane).getByText('Pick your fighter')).toBeInTheDocument()
+    })
+  })
+
+  describe('header tooltips (#4630)', () => {
+    const connectedWithSession = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    // #4974 — Skills + Settings moved into the header overflow menu.
+    // The trigger itself stays in the chrome with title + aria-label;
+    // the underlying actions sit one click away inside the popover.
+    it('Skills row inside the overflow menu carries a title', () => {
+      stateOverrides = connectedWithSession
+      render(<App />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const item = screen.getByTestId('header-overflow-item-skills')
+      expect(item.getAttribute('title')).toBe('Skills')
+      expect(item.textContent).toMatch(/Skills/)
+    })
+
+    it('Settings row inside the overflow menu carries a Settings title', () => {
+      stateOverrides = connectedWithSession
+      render(<App />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const item = screen.getByTestId('header-overflow-item-settings')
+      expect(item.getAttribute('title')).toMatch(/Settings/)
+      expect(item.textContent).toMatch(/Settings/)
+    })
+
+    it('header overflow trigger itself exposes title + aria-label (chrome affordance)', () => {
+      stateOverrides = connectedWithSession
+      render(<App />)
+      const trigger = screen.getByTestId('header-overflow-trigger')
+      expect(trigger.getAttribute('title')).toBeTruthy()
+      expect(trigger.getAttribute('aria-label')).toBeTruthy()
+      expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
+    })
+
+    it('header status dot exposes both title and aria-label so it is discoverable', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      // The header's status-dot is rendered inside #header, distinct from
+      // the per-tab status-dot inside SessionBar.
+      const header = container.querySelector('#header')
+      const dot = header!.querySelector('.status-dot')
+      expect(dot, 'header status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('title'), 'status-dot needs title for browser hover').toBeTruthy()
+      expect(dot!.getAttribute('aria-label'), 'status-dot needs aria-label for SR').toBeTruthy()
+    })
+
+    // #4873 — header status dot must NOT carry role="status" / aria-live.
+    // The per-element live region announced every reconnect intermediate
+    // (connecting → reconnecting → connected → reconnecting…), spamming
+    // SR users. The page-level ConnectionAnnouncer (mounted in App)
+    // handles settled-state announcements instead.
+    it('header status dot does NOT carry role="status" (#4873)', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      const header = container.querySelector('#header')
+      const dot = header!.querySelector('.status-dot')
+      expect(dot, 'header status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('role'), 'status-dot must NOT be role=status').not.toBe('status')
+      expect(dot!.getAttribute('aria-live'), 'status-dot must not be a live region').toBeNull()
+    })
+
+    // #4873 — the page-level live region IS rendered, so SR users still
+    // get a settled-state announcement after the debounce window.
+    it('renders a page-level ConnectionAnnouncer live region (#4873)', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      const announcer = container.querySelector('[data-testid="connection-announcer"]')
+      expect(announcer, 'page-level connection announcer must exist').toBeTruthy()
+      expect(announcer!.getAttribute('role')).toBe('status')
+      expect(announcer!.getAttribute('aria-live')).toBe('polite')
+    })
+
+    it('version badge exposes both title and aria-label', () => {
+      stateOverrides = connectedWithSession
+      const { container } = render(<App />)
+      const badge = container.querySelector('.version-badge')
+      expect(badge, 'version-badge must exist').toBeTruthy()
+      expect(badge!.getAttribute('title'), 'version-badge needs title').toBeTruthy()
+      expect(badge!.getAttribute('aria-label'), 'version-badge needs aria-label').toBeTruthy()
+    })
+  })
+
+  // #4695 / #5062 — discoverable chrome-level "New Session" entry point.
+  //
+  // The per-project sidebar button (`sidebar-new-session-<path>`) and the
+  // command palette (`new-session` id) were the only two entry points
+  // before #4695 — neither discoverable to a first-time user scanning
+  // the dashboard chrome. #4695 added a standalone button in the
+  // `header-right` zone; #5062 then folded that button INTO the header
+  // overflow (⋯) menu so the right zone stops crowding the model
+  // selector. The discoverable entry now lives as the first row of the
+  // overflow menu, reusing the existing `handleNewSession` path
+  // (setShowCreateSession → CreateSessionModal). The tests pin:
+  //   1. The entry renders inside #header (always-visible chrome),
+  //      reached by opening the overflow (⋯) menu.
+  //   2. It has a visible "New Session" label and a title with the
+  //      Cmd+N shortcut hint.
+  //   3. Clicking it opens the Create Session modal (the modal renders
+  //      its overlay only when open=true, mirrored on Modal.tsx's
+  //      `if (!open) return null` guard).
+  //   4. The standalone `chrome-new-session` button no longer renders —
+  //      the affordance lives only inside the overflow menu now.
+  describe('New Session in header overflow menu (#5062)', () => {
+    const baseHeaderState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+    }
+
+    it('no longer renders the standalone chrome-new-session button (#5062)', () => {
+      stateOverrides = baseHeaderState
+      render(<App />)
+      expect(screen.queryByTestId('chrome-new-session')).not.toBeInTheDocument()
+    })
+
+    it('renders the New Session entry inside the header overflow menu', () => {
+      stateOverrides = baseHeaderState
+      const { container } = render(<App />)
+      const header = container.querySelector('#header')
+      expect(header, '#header must render').toBeTruthy()
+      const trigger = within(header as HTMLElement).getByTestId('header-overflow-trigger')
+      fireEvent.click(trigger)
+      const item = screen.getByTestId('header-overflow-item-new-session')
+      expect(item).toBeInTheDocument()
+      expect(item.textContent).toMatch(/New Session/)
+    })
+
+    it('exposes a title attribute containing the Cmd+N shortcut hint', () => {
+      stateOverrides = baseHeaderState
+      render(<App />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const item = screen.getByTestId('header-overflow-item-new-session')
+      // The HeaderOverflowMenu copies `item.title` straight onto the
+      // <li>'s `title` attribute — assert the shortcut hint survives.
+      // formatShortcutKeys() emits `Cmd+N` on macOS and `Ctrl+N`
+      // elsewhere, so match either modifier joined to `N` by a `+`. The
+      // earlier `/N/` was too loose — it would still pass if the
+      // modifier disappeared and the title read just "New session (N)".
+      expect(item.getAttribute('title')).toMatch(/New session/)
+      expect(item.getAttribute('title')).toMatch(/(Cmd|Ctrl)\+N/)
+    })
+
+    it('opens the Create Session modal on click', () => {
+      stateOverrides = baseHeaderState
+      render(<App />)
+      // Modal mock renders the testID node only when `open=true`.
+      expect(screen.queryByTestId('create-session-modal-mock')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      fireEvent.click(screen.getByTestId('header-overflow-item-new-session'))
+      expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
     })
   })
 })

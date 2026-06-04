@@ -507,6 +507,115 @@ describe('message queue internals', () => {
   });
 });
 
+// -- sendUserQuestionResponse: widened payload shapes (#4761) --
+
+describe('sendUserQuestionResponse wire payload (#4761)', () => {
+  beforeEach(() => {
+    useConnectionStore.setState({
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+  });
+
+  it('emits the legacy single-question wire shape for a string answer (back-compat)', () => {
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const result = useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu_single');
+
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu_single',
+    });
+    // No `answers` field on the single-question path — that's reserved
+    // for multi-question forms so older servers ignore it cleanly.
+    expect(sent[0]).not.toHaveProperty('answers');
+  });
+
+  it('forwards multi-question Record<string, string | string[]> verbatim and flattens arrays in the answer summary', () => {
+    // #4761 — mirror the dashboard's `sendUserQuestionResponse` widening
+    // (#4760). The widened wire (`UserQuestionResponseSchema`) accepts
+    // `string | string[]` per question. The mobile store should:
+    //   1. Populate `answers` with the map shape unchanged (arrays stay
+    //      arrays — the server normalizes downstream).
+    //   2. Populate the string-only `answer` field with a flattened
+    //      comma-joined summary so older servers reading only `answer`
+    //      still see a human-readable line (no leaked JSON syntax).
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const answersMap = {
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    };
+    const result = useConnectionStore.getState().sendUserQuestionResponse(answersMap, 'toolu_multi');
+
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu_multi');
+    // `answers` passes the map through unchanged — arrays stay arrays.
+    expect(payload.answers).toEqual({
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    });
+    expect(Array.isArray(payload.answers['Which targets?'])).toBe(true);
+    // Summary flattens arrays as comma-joined labels.
+    expect(payload.answer).toBe(
+      'Which release strategy?: Patch | Which targets?: App, Tests | Confirm?: Yes',
+    );
+  });
+
+  it('flattens legacy JSON-stringified array envelopes in the answer summary (back-compat)', () => {
+    // Pre-#4621 dashboards JSON-stringified multi-select arrays into a
+    // single string. If mixed-version rehydrated state replays such a
+    // payload through the widened store, the `answers` field should
+    // pass through unchanged BUT the `answer` summary should still
+    // flatten the JSON envelope so the terminal echo / older-server
+    // `answer` read stays readable.
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const legacyAnswersMap = {
+      'Which targets?': JSON.stringify(['App', 'Tests']),
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(legacyAnswersMap, 'toolu_legacy');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.answers).toEqual(legacyAnswersMap);
+    expect(payload.answer).toBe('Which targets?: App, Tests | Confirm?: Yes');
+    expect(payload.answer).not.toContain('["App"');
+  });
+
+  it('queues the multi-question payload when socket is not connected', () => {
+    useConnectionStore.setState({ socket: null });
+    const result = useConnectionStore
+      .getState()
+      .sendUserQuestionResponse({ 'Q?': ['A', 'B'] }, 'toolu_q');
+    expect(result).toBe('queued');
+  });
+});
+
 // -- Connected clients state --
 
 describe('connectedClients state', () => {
@@ -1808,5 +1917,101 @@ describe('inactivityWarning cleanup (#3899)', () => {
 
     const sessionsRefAfter = useConnectionStore.getState().sessionStates.s1;
     expect(sessionsRefAfter).toBe(sessionsRefBefore);
+  });
+});
+
+// -- sendUserQuestionResponse Other / freeform shape (#4755) --
+//
+// Pins the wire-payload serialization for the single-question Other path,
+// mirroring the dashboard's #4651 store test. When `answer` is the
+// `{otherLabel, freeformText}` object shape, the wire payload must be
+// `{type:'user_question_response', answer:<otherLabel>, freeformText:<typed>,
+// toolUseId?}` so the server can drive the two-stage TUI write (Other digit
+// → text-input prompt → freeform text + Enter). String answers must keep
+// the legacy `{type, answer, toolUseId?}` shape unchanged.
+
+describe('sendUserQuestionResponse Other / freeform shape (#4755)', () => {
+  function makeMockSocket(): { socket: WebSocket; sent: string[] } {
+    const sent: string[] = [];
+    const socket = {
+      readyState: 1,
+      send: (data: string) => sent.push(data),
+      close: () => {},
+      onclose: null,
+    } as unknown as WebSocket;
+    return { socket, sent };
+  }
+
+  afterEach(() => {
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('emits {answer:<otherLabel>, freeformText, toolUseId} for the freeform object shape', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'my custom answer' },
+      'toolu_other_freeform',
+    );
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'my custom answer',
+      toolUseId: 'toolu_other_freeform',
+    });
+  });
+
+  it('preserves a model-supplied custom Other label on the wire', () => {
+    // Defends against a future regression where we forget to thread
+    // `otherLabel` through and instead hard-code the literal "Other"
+    // string — the server's digit-lookup would then resolve to the wrong
+    // hotkey for any custom-label Other option.
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Something else', freeformText: 'typed' },
+      'toolu-x',
+    );
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Something else',
+      freeformText: 'typed',
+      toolUseId: 'toolu-x',
+    });
+  });
+
+  it('keeps the legacy {answer:<string>, toolUseId} shape for plain string answers', () => {
+    // Regular option taps + zero-options free-text answers (#1245) must
+    // keep flowing through the legacy string serializer — older servers
+    // that ignore `freeformText` must continue to receive a payload they
+    // understand verbatim.
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu-string');
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu-string',
+    });
+    // Critically, `freeformText` MUST be absent in the legacy shape so
+    // server-side schema validators / handlers don't misclassify a plain
+    // option tap as an Other / freeform send.
+    expect(JSON.parse(sent[0])).not.toHaveProperty('freeformText');
+  });
+
+  it('omits toolUseId from the wire payload when not provided', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'no-tooluse case' },
+    );
+    const payload = JSON.parse(sent[0]);
+    expect(payload).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'no-tooluse case',
+    });
+    expect(payload).not.toHaveProperty('toolUseId');
   });
 });

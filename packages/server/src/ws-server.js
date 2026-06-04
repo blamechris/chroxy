@@ -16,6 +16,7 @@ import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { handleAuthMessage, handlePairMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
+import { createDevicePreferences } from './device-preferences.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -78,6 +79,32 @@ export function resolveDiagnosticsRateLimit(overrideOpts) {
   }
   return { windowMs: 60_000, maxMessages: 12, burst: 4 }
 }
+
+/**
+ * Parse a duration value coming from a `CHROXY_DEVICE_PREFS_*_MS` env var.
+ * Accepts:
+ *   - a non-negative numeric string → that many milliseconds (fractional
+ *     values are floored, e.g. `"1.9"` → 1)
+ *   - `"0"` → 0 (the literal zero; callers decide what 0 means — the
+ *     device-preferences `prune()` treats `maxAgeMs === 0` as "no age
+ *     cap", so setting `CHROXY_DEVICE_PREFS_MAX_AGE_MS=0` disables the
+ *     hard age cap rather than evicting every entry)
+ *   - empty / null / non-numeric → fall back to `defaultMs`
+ *
+ * Negative numbers are silently coerced to the default so a typo can't
+ * disable the prune by making `now - updatedAt > -1` always true.
+ *
+ * @param {string|undefined|null} raw
+ * @param {number} defaultMs
+ * @returns {number}
+ */
+export function parseDevicePrefsDuration(raw, defaultMs) {
+  if (raw == null || raw === '') return defaultMs
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0) return defaultMs
+  return Math.floor(n)
+}
+
 const SERVER_VERSION = packageJson.version
 const log = createLogger('ws')
 
@@ -297,6 +324,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_switched', sessionId, name, cwd, conversationId? } — switched active session
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
+ *   { type: 'session_stopped', sessionId?, code? } — user-initiated Stop confirmation (#4756); CliSession emitted `stopped` after a clean SIGINT exit; pairs with the louder `session_error` crash toast
  *   { type: 'session_restore_failed', sessionId, name, provider, cwd?, model?, permissionMode?, errorCode, errorMessage, originalHistoryPreserved, historyLength? }
  *     — session in persisted state could not be restored (e.g. missing env var); history kept on disk for retry
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
@@ -309,6 +337,7 @@ function _isSecureRequest(req) {
  *   { type: 'plan_started' }                         — Claude entered plan mode (transient)
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
  *   { type: 'inactivity_warning', messageId, idleMs, prefab } — soft check-in prompt, session stays alive (#3899)
+ *   { type: 'multi_question_intervention', toolUseId, questionCount, reason, timestamp } — chroxy permission-hook denied a multi-question AskUserQuestion (#4653)
  *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable, sessionId? } — server-side error forwarded to app
@@ -358,6 +387,7 @@ function _isSecureRequest(req) {
  *   { type: 'rate_limited', message }                   — client rate-limited
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
+ *   { type: 'agent_event', sessionId, parentToolUseId, eventType, payload } — Task subagent intermediate wire event re-emit (#5016, transient; eventType is one of `tool_start` / `tool_input_delta` / `tool_result` / `stream_delta`)
  *   { type: 'background_work_changed', sessionId, pending } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`)
  *   { type: 'provider_list', providers }                — available providers
  *   { type: 'byok_credentials_status', requestId?, status, source, masked?, reason? } — BYOK credentials state for the dashboard (#4052)
@@ -433,7 +463,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -466,6 +496,57 @@ export class WsServer {
     this._clientSend = createClientSender(log)
     this._clientManager = new WsClientManager()
     this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects
+    // #4835: per-device active-session memory. Caller can inject a custom
+    // store (tests do this with a tmp file path); otherwise we construct
+    // the default disk-backed store rooted at $CHROXY_CONFIG_DIR /
+    // ~/.chroxy. The store is consumed by ws-history.sendPostAuthInfo on
+    // reconnect and updated by session-handlers.handleSwitchSession after
+    // every explicit switch.
+    this._devicePreferences = devicePreferences || createDevicePreferences()
+    // #4849: lazy startup prune. server-cli calls sessionManager.restoreState()
+    // before constructing the WsServer, so any device-pref entry whose
+    // activeSessionId is missing here is genuinely orphaned (a session
+    // destroyed in a previous run, or one rotated out by the user). The
+    // grace window guards against the rare path where restoreState
+    // intentionally skipped a session (e.g. corrupted state). prune is a
+    // no-op when the device list is empty, so the disk-I/O cost is zero
+    // for first-run installs and for users who never connected from
+    // ephemeral devices. Threshold env vars:
+    //   - CHROXY_DEVICE_PREFS_MAX_AGE_MS — hard age cap (default 90d)
+    //   - CHROXY_DEVICE_PREFS_STALE_GRACE_MS — stale-session grace (default 30d)
+    // Both can be set to 0 to disable. See #4849.
+    if (sessionManager && typeof this._devicePreferences.prune === 'function') {
+      try {
+        const maxAgeMs = parseDevicePrefsDuration(
+          process.env.CHROXY_DEVICE_PREFS_MAX_AGE_MS,
+          90 * 24 * 60 * 60 * 1000,
+        )
+        const staleGraceMs = parseDevicePrefsDuration(
+          process.env.CHROXY_DEVICE_PREFS_STALE_GRACE_MS,
+          30 * 24 * 60 * 60 * 1000,
+        )
+        // Only enable stale-session pruning when SessionManager actually
+        // exposes getSession. With optional chaining, `getSession?.(id)`
+        // silently returns undefined when the method is missing — every
+        // session would look "stale" and the prune would evict everything
+        // past the grace window. Belt-and-braces: when the predicate is
+        // omitted, prune() skips the stale-session arm and only the
+        // age-based cap (if any) applies.
+        const pruneOpts = {
+          maxAgeMs,
+          staleSessionGraceMs: staleGraceMs,
+        }
+        if (typeof sessionManager.getSession === 'function') {
+          pruneOpts.sessionExists = (id) => !!sessionManager.getSession(id)
+        }
+        this._devicePreferences.prune(pruneOpts)
+      } catch (err) {
+        // A prune failure must never block server startup — the next mutation
+        // will reload the file anyway, and the worst case is a slightly
+        // larger preferences file.
+        log.warn(`device-preferences startup prune failed: ${err.message}`)
+      }
+    }
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
@@ -504,6 +585,11 @@ export class WsServer {
       pushManager,
       pendingPermissions: this._pendingPermissions,
       permissionSessionMap: this._permissionSessionMap,
+      // #4798: same auto-subscribe helper used by ws-forwarding's dispatch
+      // path. Hook-originated HTTP permission requests also need to seed
+      // subscribedSessionIds on connected viewers so the settings-handler
+      // subscription guard accepts the legitimate response.
+      registerPermissionRoute: (requestId, sessionId) => self._registerPermissionRoute(requestId, sessionId),
       getSessionManager: () => self.sessionManager,
       // Pass pairingManager so the HTTP /permission-response fallback can
       // enforce session binding — see 2026-04-11 audit blocker 5.
@@ -563,6 +649,10 @@ export class WsServer {
       // provider registrations are reflected without restarting the server.
       get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
       get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+      // #4835: per-device active-session memory. handleSwitchSession writes
+      // here after every successful switch so the next reconnect can
+      // restore the same session.
+      get devicePreferences() { return self._devicePreferences },
     }
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)
@@ -597,6 +687,11 @@ export class WsServer {
       // the dashboard chip can hide instead of rendering against a
       // disabled timer).
       get streamStallTimeoutMs() { return self.config?.streamStallTimeoutMs ?? null },
+      // #4835: per-device active-session memory consulted during reconnect.
+      // sendPostAuthInfo treats this as optional, but production wiring
+      // always supplies the default disk-backed store from the WsServer
+      // constructor.
+      get devicePreferences() { return self._devicePreferences },
     }
     this._authCtx = {
       get clients() { return self.clients },
@@ -1188,6 +1283,18 @@ export class WsServer {
     // Broadcast structured log entries to dashboard clients.
     // Re-entrancy guard prevents infinite recursion when _broadcast() itself
     // logs (e.g. backpressure debug messages) and log level is set to debug.
+    //
+    // #4787 (P0 security): unscoped log entries (no entry.sessionId) MUST NOT
+    // fan out to bound clients (mobile pairings into a single per-task
+    // session) — pre-fix, server-side logs that lacked withSession() context
+    // leaked PTY hex dumps, toolUseIds, prompt sizes and attachment names from
+    // every session to every authenticated WS client. Most server logs are
+    // unscoped today (only a handful of call sites use withSession()), so the
+    // fall-through covered almost the entire log stream. Restrict unscoped
+    // entries to unbound clients (operator dashboards have boundSessionId ==
+    // null and legitimately want to see everything). The durable fix — a
+    // loggerForSession factory + lint to force per-call-site scoping — is
+    // tracked as a follow-up (#4792).
     let inLogBroadcast = false
     this._logListener = (entry) => {
       if (inLogBroadcast) return
@@ -1196,7 +1303,13 @@ export class WsServer {
         if (entry.sessionId) {
           this._broadcastToSession(entry.sessionId, { type: 'log_entry', ...entry })
         } else {
-          this._broadcast({ type: 'log_entry', ...entry })
+          // Use loose-equality null check so any non-null/undefined
+          // boundSessionId (including the unlikely empty string) is treated
+          // as bound — matches the comment above and the intent of #4787.
+          this._broadcast(
+            { type: 'log_entry', ...entry },
+            (client) => client.boundSessionId == null
+          )
         }
       } finally {
         inLogBroadcast = false
@@ -1213,6 +1326,20 @@ export class WsServer {
       pushManager: this.pushManager,
       permissionSessionMap: this._permissionSessionMap,
       questionSessionMap: this._questionSessionMap,
+      // #4788 Wave 2: hand the question-route registration through a helper so
+      // dispatch and routing-guard stay symmetric. When a question is
+      // registered for session S, every currently-connected client that's
+      // permitted to see broadcasts for S gets auto-subscribed to S — this
+      // mirrors _broadcastToSession's recipient filter so the new
+      // input-handlers guard naturally passes for legitimate viewers without
+      // re-opening the cross-session hijack vector (unconnected / future
+      // clients are still unable to answer).
+      registerQuestionRoute: (toolUseId, sessionId) => this._registerQuestionRoute(toolUseId, sessionId),
+      // #4798: symmetry with registerQuestionRoute — auto-subscribe eligible
+      // clients to the permission's session at dispatch time so the
+      // settings-handlers subscription guard naturally passes for legitimate
+      // viewers (including the "view A → switch to B → respond" flow).
+      registerPermissionRoute: (requestId, sessionId) => this._registerPermissionRoute(requestId, sessionId),
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
       broadcastSessionList: () => this._handlerCtx.broadcastSessionList(),
@@ -1378,6 +1505,78 @@ export class WsServer {
    */
   _broadcastToSession(sessionId, message, filter) {
     this._broadcaster._broadcastToSession(sessionId, message, filter)
+  }
+
+  /**
+   * #4788 Wave 2: register an AskUserQuestion route for `toolUseId` against
+   * `sessionId` AND auto-subscribe every currently-eligible authenticated
+   * client to `sessionId`. This keeps the input-handler's subscription guard
+   * (handlers/input-handlers.js — the "unbound client must be subscribed or
+   * active on the question's session" check) symmetric with
+   * `_broadcastToSession`'s default recipient filter: any client that was
+   * eligible to RECEIVE the question is now eligible to ANSWER it, even after
+   * a `switch_session` flips their `activeSessionId` away.
+   *
+   * Wave 1 closed a cross-session answer-hijack vector (#4788) by requiring
+   * unbound clients to be subscribed before routing a `user_question_response`.
+   * That broke the legitimate "view A → get question for A → switch to B →
+   * answer" flow because `switch_session` only adds the *new* target to
+   * `subscribedSessionIds`; the originating session A was in neither set.
+   * Auto-subscribing at dispatch time means the client that legitimately
+   * received the question keeps the membership it needs to answer it.
+   *
+   * Bound clients are filtered out so a client paired to session X can never
+   * be quietly subscribed to session Y. Unbound clients always get added —
+   * matching `_broadcastToSession`'s default filter (which only requires
+   * `activeSessionId === sessionId || subscribedSessionIds.has(sessionId)`,
+   * but auto-subscribe seeds the latter so the filter passes for everyone
+   * currently connected). Clients that connect AFTER dispatch are still
+   * unable to answer; that's the desired hijack-prevention property.
+   */
+  _registerQuestionRoute(toolUseId, sessionId) {
+    this._questionSessionMap.set(toolUseId, sessionId)
+    if (!sessionId) return
+    for (const [, client] of this.clients) {
+      if (!client.authenticated) continue
+      // Don't auto-subscribe a client bound to a *different* session — the
+      // bound binding is the security contract for that client.
+      if (client.boundSessionId && client.boundSessionId !== sessionId) continue
+      if (!client.subscribedSessionIds) continue
+      client.subscribedSessionIds.add(sessionId)
+    }
+  }
+
+  /**
+   * #4798 (P0 symmetry with #4788): register a permission route for
+   * `requestId` against `sessionId` AND auto-subscribe every currently-eligible
+   * authenticated client to `sessionId`. Mirrors `_registerQuestionRoute` — the
+   * settings-handler's permission_response subscription guard (the "unbound
+   * client must be subscribed or active on the permission's session" check)
+   * stays symmetric with `_broadcastToSession`'s default recipient filter:
+   * any client that was eligible to RECEIVE the permission request is now
+   * eligible to RESPOND to it, even after a `switch_session` flips their
+   * `activeSessionId` away.
+   *
+   * Without the auto-subscribe at dispatch, the Wave 1 guard would silently
+   * drop the legitimate "view A → get permission for A → switch to B →
+   * respond" flow because `switch_session` only adds the new target to
+   * `subscribedSessionIds`; the originating session A would be in neither
+   * set after the switch.
+   *
+   * Same bound-client filter as the question variant: clients paired to a
+   * different session never get quietly subscribed elsewhere. Clients that
+   * connect AFTER dispatch are still unable to respond — that's the desired
+   * hijack-prevention property.
+   */
+  _registerPermissionRoute(requestId, sessionId) {
+    this._permissionSessionMap.set(requestId, sessionId)
+    if (!sessionId) return
+    for (const [, client] of this.clients) {
+      if (!client.authenticated) continue
+      if (client.boundSessionId && client.boundSessionId !== sessionId) continue
+      if (!client.subscribedSessionIds) continue
+      client.subscribedSessionIds.add(sessionId)
+    }
   }
 
   /** Count unauthenticated connections for pre-auth limit enforcement */

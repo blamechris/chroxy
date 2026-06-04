@@ -15,8 +15,14 @@ import {
   buildQuietHoursTimezoneList,
   formatPlatform,
   formatRelativeTime,
+  // #4853: shared runtime guard for `VoiceInputMode` — replaces the
+  // inline `Record<VoiceInputMode, true>` literal previously rebuilt
+  // on every change-handler call.
+  isVoiceInputMode,
 } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
+import { isMacPlatform } from '../utils/platform'
+import { getTauriInvoke } from '../utils/tauri-bridge'
 import {
   getTunnelMode,
   setTunnelMode,
@@ -25,6 +31,7 @@ import {
   getAllowAutoPermissionMode,
   setAllowAutoPermissionMode,
 } from '../hooks/useTauriIPC'
+import { useDebouncedSetter } from '../hooks/useDebouncedSetter'
 
 /** Confirmation copy from issue #3077 — keep verbatim. */
 const AUTO_PERMISSION_CONFIRM_MESSAGE =
@@ -153,66 +160,91 @@ function QuietHoursEditor(props: {
     try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch { return 'UTC' }
   }, [])
 
-  // Draft state. Seeded from the snapshot so reopening the panel after a
-  // remote change reflects the broadcast snapshot, not stale edits.
-  const [enabled, setEnabled] = useState<boolean>(win != null)
-  const [start, setStart] = useState<string>(win?.start ?? '22:00')
-  const [end, setEnd] = useState<string>(win?.end ?? '07:00')
-  const [timezone, setTimezone] = useState<string>(win?.timezone ?? browserTz)
+  // #4570 / #4739: draft state + dirty-flag + parked-snapshot conflict
+  // UX live in `useDebouncedSetter` (manual mode — Save button gates the
+  // actual WS send; debounceMs=0 disables auto-flush). The draft shape
+  // bundles `enabled` with the three fields so the conflict equality
+  // check can asymmetrically map `enabled=false` to a `null` server
+  // snapshot. When the snapshot is null we keep the default field
+  // values so re-enabling doesn't blank them.
+  type Draft = { enabled: boolean; start: string; end: string; timezone: string }
+  const serverDraft: Draft = useMemo(() => ({
+    enabled: win != null,
+    start: win?.start ?? '22:00',
+    end: win?.end ?? '07:00',
+    timezone: win?.timezone ?? browserTz,
+  }), [win, browserTz])
 
-  // #4570: dirty flips on any edit and clears on save/disable/accept.
-  // The snapshot effect below reads dirty via a ref so we don't add it to
-  // the dependency array (which would re-run the effect when dirty changes
-  // and re-apply the snapshot we were trying to skip).
-  const [dirty, setDirty] = useState(false)
-  const dirtyRef = useRef(dirty)
-  useEffect(() => { dirtyRef.current = dirty }, [dirty])
+  // Conflict equality. Mirrors the original inline `matchesDraft` check:
+  //   - server win=null matches draft.enabled=false (fields ignored)
+  //   - server win={…} matches when all three fields AND enabled agree
+  const draftEquals = useCallback((server: Draft, draft: Draft): boolean => {
+    if (!server.enabled) return !draft.enabled
+    return (
+      draft.enabled &&
+      server.start === draft.start &&
+      server.end === draft.end &&
+      server.timezone === draft.timezone
+    )
+  }, [])
 
-  // #4570: when a snapshot lands while the draft is dirty AND its values
-  // diverge from the user's draft, we hold the snapshot here and render
-  // the conflict banner. Null = no pending conflict.
-  const [pendingSnapshot, setPendingSnapshot] = useState<
-    | { start: string; end: string; timezone: string }
-    | null
-    | undefined
-  >(undefined)
-
-  // Re-sync draft when the snapshot changes (e.g. another client saved a
-  // window or the user just hit Save and the broadcast came back). The
-  // dependency array intentionally captures the inner fields; comparing
-  // object identity wouldn't help since the message-handler always builds
-  // a fresh object.
+  // Manual mode — `setDraft` updates local state only; Save explicitly
+  // calls `flush()` so the dirty flag + parked-snapshot banner clear
+  // optimistically (rather than waiting for the server echo to arrive,
+  // which would leave the banner stuck if the WS write fails). The hook
+  // owns dirty, conflict, accept/discard, flush, and unmount-cancel
+  // semantics.
   //
-  // #4570: skip the apply when the editor is dirty AND the incoming
-  // snapshot diverges from the local draft. Park the snapshot so the user
-  // can resolve via the conflict banner.
-  useEffect(() => {
-    const isDirty = dirtyRef.current
-    const matchesDraft = win
-      ? (win.start === start && win.end === end && win.timezone === timezone && enabled)
-      : !enabled
-    if (isDirty && !matchesDraft) {
-      // Hold the snapshot for the user to resolve. We intentionally do NOT
-      // overwrite the draft fields.
-      setPendingSnapshot(win)
-      return
-    }
-    // Clean apply (or snapshot already matches draft — e.g. Save echo).
-    setEnabled(win != null)
-    if (win) {
-      setStart(win.start)
-      setEnd(win.end)
-      setTimezone(win.timezone)
-    }
-    setPendingSnapshot(undefined)
-    setDirty(false)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [win])
+  // `onFlush` translates the composite draft into the wire shape used by
+  // `onWindowChange`: when `enabled` is true we send the window; when
+  // false we send `null` (the server's "wipe quiet hours" sentinel). The
+  // toggle and first-time enable paths still call `onWindowChange`
+  // directly because they need to fire independent of the user's
+  // typed-but-not-yet-saved fields.
+  const {
+    draft,
+    setDraft,
+    conflict: pendingDraft,
+    acceptDraft: handleAcceptDraft,
+    discardDraft: handleDiscardDraftFromHook,
+    flush: flushDraft,
+  } = useDebouncedSetter<Draft>({
+    serverValue: serverDraft,
+    scopeKey: 'quiet-hours',
+    debounceMs: 0,
+    onFlush: (next) => {
+      if (next.enabled) {
+        onWindowChange({ start: next.start, end: next.end, timezone: next.timezone })
+      } else {
+        onWindowChange(null)
+      }
+    },
+    equals: draftEquals,
+  })
+
+  const { enabled, start, end, timezone } = draft
+
+  // Wrap discard so the parked snapshot is exposed back through the
+  // banner UX. The hook already replaces draft with the parked value
+  // and clears dirty.
+  // pendingSnapshot mirrors the original null-vs-undefined contract:
+  //   - undefined → no conflict (banner hidden)
+  //   - null      → server disabled the window mid-edit
+  //   - object    → server set a different window mid-edit
+  const pendingSnapshot: { start: string; end: string; timezone: string } | null | undefined =
+    pendingDraft === undefined
+      ? undefined
+      : pendingDraft.enabled
+        ? { start: pendingDraft.start, end: pendingDraft.end, timezone: pendingDraft.timezone }
+        : null
 
   const handleToggleEnable = useCallback((next: boolean) => {
-    setEnabled(next)
-    setDirty(false)
-    setPendingSnapshot(undefined)
+    // Side-effect handlers replace setDraft directly with `dirty=false`
+    // semantics: toggling enabled either disables (sends null) or
+    // first-time enables (sends current draft fields). Either way the
+    // user has committed, so we replicate the original behaviour by
+    // mirroring the server state immediately rather than parking it.
+    setDraft({ enabled: next, start, end, timezone })
     if (!next) {
       // Sending null on disable wipes the persisted window so the server
       // gate short-circuits. Draft fields stay in form state so the user
@@ -224,39 +256,36 @@ function QuietHoursEditor(props: {
       // immediately rather than an empty muted toggle.
       onWindowChange({ start, end, timezone })
     }
-  }, [win, start, end, timezone, onWindowChange])
+  }, [win, start, end, timezone, onWindowChange, setDraft])
 
   const handleSaveWindow = useCallback(() => {
-    setDirty(false)
-    setPendingSnapshot(undefined)
-    onWindowChange({ start, end, timezone })
-  }, [start, end, timezone, onWindowChange])
+    // `flushDraft` fires the hook's `onFlush` with the current draft
+    // (which delegates to `onWindowChange` for the enabled-true case)
+    // AND clears `dirty` + dismisses the parked-snapshot banner
+    // optimistically. Mirrors the pre-#4739 behaviour where Save
+    // explicitly called `setDirty(false)` + `setPendingSnapshot(undefined)`
+    // before dispatching the WS write, so a conflict banner that's
+    // visible at click-time disappears immediately rather than hanging
+    // around until the server echo arrives (or staying stuck forever if
+    // the WS write fails).
+    flushDraft()
+  }, [flushDraft])
 
-  // #4570: user keeps their local draft — discard the parked snapshot.
-  // The next divergent snapshot will surface the banner again.
-  const handleAcceptDraft = useCallback(() => {
-    setPendingSnapshot(undefined)
-  }, [])
-
-  // #4570: user takes the remote snapshot — overwrite draft + clear dirty.
   const handleDiscardDraft = useCallback(() => {
-    const snap = pendingSnapshot
-    if (snap === undefined) return
-    setEnabled(snap != null)
-    if (snap) {
-      setStart(snap.start)
-      setEnd(snap.end)
-      setTimezone(snap.timezone)
-    }
-    setDirty(false)
-    setPendingSnapshot(undefined)
-  }, [pendingSnapshot])
+    handleDiscardDraftFromHook()
+  }, [handleDiscardDraftFromHook])
 
-  // #4570: dirty-tracking wrappers around the field setters so every edit
-  // path flips the flag without sprinkling setDirty() through JSX.
-  const setStartDirty = useCallback((next: string) => { setStart(next); setDirty(true) }, [])
-  const setEndDirty = useCallback((next: string) => { setEnd(next); setDirty(true) }, [])
-  const setTimezoneDirty = useCallback((next: string) => { setTimezone(next); setDirty(true) }, [])
+  // Field setters delegate to setDraft so dirty + conflict tracking
+  // stay centralised in the hook.
+  const setStartDirty = useCallback((next: string) => {
+    setDraft({ enabled, start: next, end, timezone })
+  }, [setDraft, enabled, end, timezone])
+  const setEndDirty = useCallback((next: string) => {
+    setDraft({ enabled, start, end: next, timezone })
+  }, [setDraft, enabled, start, timezone])
+  const setTimezoneDirty = useCallback((next: string) => {
+    setDraft({ enabled, start, end, timezone: next })
+  }, [setDraft, enabled, start, end])
 
   const handleToggleBypass = useCallback((cat: string, next: boolean) => {
     const set = new Set(bypassCategories)
@@ -668,34 +697,57 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [allowAutoPerm, setAllowAutoPerm] = useState<boolean>(false)
   const [autoPermError, setAutoPermError] = useState<string | null>(null)
   const [autoPermDirty, setAutoPermDirty] = useState<boolean>(false)
-  const [autoPermSaving, setAutoPermSaving] = useState<boolean>(false)
-
-  // #4660: local-edit buffer for the per-session preamble text area.
-  // Decoupled from the server-confirmed `activeSessionSessionPreamble`
-  // so typing stays responsive while a 400ms debounce gates the actual
-  // WS send. The debounce timer ref survives re-renders without
-  // forcing a re-render of its own.
-  const [preambleDraft, setPreambleDraft] = useState<string>('')
-  const preambleDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // Mirror the server-confirmed value into the local draft whenever the
-  // active session changes (switching sessions) or the server broadcasts
-  // a new stored value (multi-client edit). Skip the mirror when the
-  // user is mid-edit — measured by whether the draft already matches a
-  // value we're about to flush — so a multi-client confirm doesn't
-  // overwrite half-typed text.
-  useEffect(() => {
-    const serverValue = typeof activeSessionSessionPreamble === 'string' ? activeSessionSessionPreamble : ''
-    if (preambleDebounceRef.current) return  // mid-edit; don't clobber
-    setPreambleDraft(serverValue)
-  }, [activeSessionId, activeSessionSessionPreamble])  // eslint-disable-line react-hooks/exhaustive-deps
-  // Clean up the pending debounce on unmount so we don't fire a stale
-  // WS send after the panel closes.
-  useEffect(() => () => {
-    if (preambleDebounceRef.current) {
-      clearTimeout(preambleDebounceRef.current)
-      preambleDebounceRef.current = null
+  // #4956 — Tooling reset hint state. The Tauri command runs `tccutil reset
+  // Microphone/SpeechRecognition com.chroxy.desktop`; we only surface the
+  // button on macOS-in-Tauri (other platforms have no TCC, and the browser
+  // can't shell out). Status feedback is intentionally inline (not a toast)
+  // so the user sees the outcome next to the button they pressed.
+  const [speechResetStatus, setSpeechResetStatus] = useState<
+    'idle' | 'running' | 'success' | 'error'
+  >('idle')
+  const [speechResetError, setSpeechResetError] = useState<string | null>(null)
+  const showSpeechResetButton = inTauri && isMacPlatform()
+  const handleResetSpeechPermissions = useCallback(async () => {
+    setSpeechResetStatus('running')
+    setSpeechResetError(null)
+    try {
+      const invoke = getTauriInvoke()
+      if (!invoke) {
+        throw new Error('Tauri invoke unavailable')
+      }
+      await invoke('reset_speech_permissions')
+      setSpeechResetStatus('success')
+    } catch (err) {
+      setSpeechResetStatus('error')
+      setSpeechResetError(err instanceof Error ? err.message : String(err))
     }
   }, [])
+  const [autoPermSaving, setAutoPermSaving] = useState<boolean>(false)
+
+  // #4660 / #4662 / #4739: per-session preamble text area. Local draft
+  // is decoupled from the server-confirmed `activeSessionSessionPreamble`
+  // so typing stays responsive while a 400ms debounce gates the actual
+  // WS send. The `useDebouncedSetter` hook (extracted in #4739)
+  // encapsulates the debounce timer, dirty-flag tracking, parked-snapshot
+  // conflict UX, session-switch cancel + re-hydrate, and unmount cleanup
+  // that previously lived inline here as ~100 lines of refs + effects.
+  //
+  // Scope key is the active session id so a mid-edit session switch
+  // cancels the pending debounce and re-hydrates to the new session's
+  // server value — without this, the timer would fire against the new
+  // session with session A's draft text (gap 1 of #4662).
+  const {
+    draft: preambleDraft,
+    setDraft: setPreambleDraft,
+    conflict: preambleConflict,
+    acceptDraft: handleAcceptPreambleDraft,
+    discardDraft: handleDiscardPreambleDraft,
+  } = useDebouncedSetter<string>({
+    serverValue: typeof activeSessionSessionPreamble === 'string' ? activeSessionSessionPreamble : '',
+    scopeKey: activeSessionId ?? null,
+    debounceMs: 400,
+    onFlush: setSessionPreamble,
+  })
 
   // #4559: shared copy for the inline "server disconnected" banner so the
   // BYOK and notifications sections stay in lockstep on phrasing. Mentions
@@ -712,6 +764,11 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     setAutoPermError(null)
     setAutoPermDirty(false)
     setAutoPermSaving(false)
+    // #4998 review — match the panel-scoped reset pattern used for
+    // tunnelError / autoPermError so a stale success/error hint from a
+    // previous open doesn't linger across reopens.
+    setSpeechResetStatus('idle')
+    setSpeechResetError(null)
     // Read saved setting (what user selected)
     getTunnelMode().then(mode => {
       if (mode) setTunnelModeState(mode)
@@ -912,6 +969,19 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     updateInputSettings({ chatEnterToSend: e.target.value === 'enter' })
   }, [updateInputSettings])
 
+  const handleVoiceInputModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    // #4853: validate against the shared `isVoiceInputMode` guard from
+    // store-core. The guard is keyed off an exhaustive
+    // `Record<VoiceInputMode, true>` map, so adding a new mode to the
+    // union without listing it there is a TS error — neither this site
+    // nor any other rehydrate/wire boundary can silently drop a new
+    // mode the way a hand-written `===` chain would (#4841 review
+    // feedback that landed in #4825 inline, now extracted in #4853).
+    if (isVoiceInputMode(e.target.value)) {
+      updateInputSettings({ voiceInputMode: e.target.value })
+    }
+  }, [updateInputSettings])
+
   useEffect(() => {
     if (!isOpen) return
     const handler = (e: KeyboardEvent) => {
@@ -1014,6 +1084,101 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 <option value="cmd-enter">Cmd/Ctrl+Enter</option>
               </select>
             </div>
+            {/* #4785: voice input behaviour. `continuous` keeps the mic
+                lit across silence gaps until the user clicks stop.
+                `auto-pause` is the pre-#4785 behaviour (Web Speech ends
+                on silence). Only affects the web engine; the Tauri
+                native engine has its own end-of-utterance semantics.
+                #4796: labels reworded — "Stop automatically on pause"
+                was ambiguous (silence? tab pause? network?). The new
+                wording calls out the trigger (silence) explicitly. */}
+            <div className="settings-field">
+              <label htmlFor="voice-input-mode">Voice input</label>
+              <select
+                id="voice-input-mode"
+                aria-label="Voice input mode"
+                aria-describedby="voice-input-mode-hint"
+                value={inputSettings.voiceInputMode}
+                onChange={handleVoiceInputModeChange}
+              >
+                <option value="continuous">Keep listening until I click stop</option>
+                <option value="auto-pause">Stop after silence (browser decides)</option>
+              </select>
+              {/* #4796: hint copy quotes the dropdown labels verbatim
+                  so users can map each sentence back to the option they
+                  selected. Earlier wording used "Continuous mode" /
+                  "Silence mode" shorthand which could read like a third
+                  mode and didn't match the dropdown labels. */}
+              <p
+                id="voice-input-mode-hint"
+                className="settings-hint"
+                data-testid="voice-input-mode-hint"
+              >
+                Click the mic button to start dictation and click again
+                to stop — the button is a toggle, not push-to-hold.
+                <strong> &ldquo;Keep listening until I click stop&rdquo;</strong>{' '}
+                holds the mic open through pauses and restarts recognition
+                automatically.{' '}
+                <strong>&ldquo;Stop after silence (browser decides)&rdquo;</strong>{' '}
+                lets the browser end recognition after a short silence
+                in your speech. Only applies to the browser speech
+                engine — the macOS native speech helper manages its own
+                end-of-utterance timing.
+              </p>
+            </div>
+            {/* #4956 — macOS-only reset for cached TCC denials. Surfaced
+                after #4954 shipped the helper-entitlement fix because end
+                users upgrading from a broken build (v0.9.40 and earlier)
+                still hit the old TCC denial against the prior codesign
+                hash. The Rust side runs `tccutil reset Microphone +
+                SpeechRecognition com.chroxy.desktop`; on next mic use macOS
+                re-prompts and the new entitled signature gets allowed.
+                Gated on inTauri + macOS so the button doesn't show as a
+                no-op on Linux/Windows or in browser. */}
+            {showSpeechResetButton && (
+              <div className="settings-field" data-testid="speech-reset-row">
+                <label htmlFor="speech-reset-button">Reset macOS speech permissions</label>
+                <button
+                  type="button"
+                  id="speech-reset-button"
+                  className="settings-secondary-button"
+                  onClick={handleResetSpeechPermissions}
+                  disabled={speechResetStatus === 'running'}
+                  data-testid="speech-reset-button"
+                >
+                  {speechResetStatus === 'running' ? 'Resetting…' : 'Reset now'}
+                </button>
+                {speechResetStatus === 'success' && (
+                  <p
+                    className="settings-hint"
+                    data-testid="speech-reset-success"
+                    role="status"
+                  >
+                    Speech permissions reset. Click the mic again — macOS will
+                    prompt for permission, and the new entitled helper
+                    signature will be allowed.
+                  </p>
+                )}
+                {speechResetStatus === 'error' && speechResetError && (
+                  <p
+                    className="settings-hint settings-error"
+                    data-testid="speech-reset-error"
+                    role="alert"
+                  >
+                    Reset failed: {speechResetError}
+                  </p>
+                )}
+                {speechResetStatus === 'idle' && (
+                  <p className="settings-hint">
+                    Use this if voice input still says &ldquo;permission
+                    denied&rdquo; after upgrading. Chroxy v0.9.40+ ships with a
+                    new helper signature; macOS may cache a denial for the old
+                    signature. Resets <code>Microphone</code> and{' '}
+                    <code>SpeechRecognition</code> for <code>com.chroxy.desktop</code>.
+                  </p>
+                )}
+              </div>
+            )}
           </section>
 
           {/* #3852: customizable keyboard-shortcut bindings. Lives next
@@ -1075,18 +1240,42 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                   <label htmlFor="session-preamble-input">
                     Always include this context in every message
                   </label>
+                  {/* #4662: conflict banner mirrors QuietHoursEditor
+                      (#4570). Renders when a divergent server snapshot
+                      arrives while the local draft is dirty. */}
+                  {preambleConflict !== undefined && (
+                    <div
+                      className="settings-hint session-preamble-conflict-banner"
+                      role="alert"
+                      data-testid="session-preamble-conflict-banner"
+                    >
+                      <p>
+                        Another client updated this session's preamble while
+                        you were editing. Keep your unsaved changes, or
+                        discard them and load the latest value?
+                      </p>
+                      <div className="settings-field">
+                        <button
+                          type="button"
+                          onClick={handleAcceptPreambleDraft}
+                          data-testid="session-preamble-conflict-accept"
+                        >
+                          Keep my edits
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDiscardPreambleDraft}
+                          data-testid="session-preamble-conflict-discard"
+                        >
+                          Discard and load latest
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <textarea
                     id="session-preamble-input"
                     value={preambleDraft}
-                    onChange={(e) => {
-                      const next = e.target.value
-                      setPreambleDraft(next)
-                      if (preambleDebounceRef.current) clearTimeout(preambleDebounceRef.current)
-                      preambleDebounceRef.current = setTimeout(() => {
-                        preambleDebounceRef.current = null
-                        setSessionPreamble(next)
-                      }, 400)
-                    }}
+                    onChange={(e) => setPreambleDraft(e.target.value)}
                     rows={4}
                     maxLength={4000}
                     placeholder="e.g. This is a Godot 4 project — prefer GDScript over C#. Always respond in concise bullet points."

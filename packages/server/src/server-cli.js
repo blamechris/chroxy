@@ -22,6 +22,7 @@ import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { registerDockerProvider, resolveProviderLabel } from './providers.js'
+import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { loadModelsCache, getModels } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
@@ -460,6 +461,13 @@ export async function startCliServer(config) {
     resultTimeoutMs: startupTimeouts.resultTimeoutMs,
     hardTimeoutMs: startupTimeouts.hardTimeoutMs,
     streamStallTimeoutMs: startupTimeouts.streamStallTimeoutMs,
+    // #4601: per-provider streamStallTimeoutMs override map. SessionManager
+    // sanitises each entry against the same range gate as the global value
+    // (`allowZero: true`, 5s-24h ceiling) — bogus entries are dropped (with
+    // a warn) and the affected session falls through to the global value.
+    // The unsanitised object is forwarded as-is so SessionManager owns the
+    // single source of truth for validation.
+    providerStreamStallTimeoutMs: config.providerStreamStallTimeoutMs || null,
     // #4482: per-MCP-call timeout (ms). null = byok-mcp-client default (30s).
     // Unlike streamStallTimeoutMs, 0 is not a meaningful disable — every
     // MCP tool would look broken — so non-positive falls back to null.
@@ -1007,6 +1015,20 @@ export async function startCliServer(config) {
       log.error(`Failed to serialize session state: ${err?.message || err}`)
     }
     sessionManager.destroyAll()
+    // #5042: drain the docker-byok across-session pool so the `sleep
+    // infinity` containers it holds don't outlive the server. Default-OFF
+    // (`isPoolEnabled` returns false unless `CHROXY_DOCKER_BYOK_POOL=1`),
+    // so this is a no-op for the common path. When the flag is on, the
+    // pool's `docker rm -f` calls run in parallel and we let them settle
+    // before `process.exit(0)` strands them.
+    if (isPoolEnabled(process.env)) {
+      try {
+        const pool = getSharedPool(process.env)
+        if (pool) await pool.shutdown()
+      } catch (err) {
+        log.error(`Failed to drain docker-byok pool: ${err?.message || err}`)
+      }
+    }
     wsServer.close()
     if (tunnel) await tunnel.stop()
     removeConnectionInfo()

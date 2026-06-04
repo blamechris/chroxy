@@ -11,8 +11,8 @@ import {
   isRunInBackgroundInput,
   parseBashOutputShellId,
 } from './background-shells.js'
-import { parseMcpToolName } from './mcp-tools.js'
-import { createLogger } from './logger.js'
+import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
+import { createLogger, loggerForSession } from './logger.js'
 import { PermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
@@ -179,6 +179,61 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Tries env vars first; falls back to the on-disk `claude login` OAuth
+   * probe so the dashboard reports ready when the user has logged in via
+   * subscription without exporting a key. Without the probe the dashboard
+   * would lie about ready=true after #3674.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ hasClaudeOAuthCreds: () => boolean }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      const identity = matched === 'ANTHROPIC_API_KEY'
+        ? 'Anthropic API'
+        : matched === 'CLAUDE_CODE_OAUTH_TOKEN'
+          ? 'Anthropic API (OAuth token)'
+          : 'Claude subscription'
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `${identity} (${matched} set)`,
+      }
+    }
+
+    if (helpers.hasClaudeOAuthCreds()) {
+      return {
+        ready: true,
+        source: 'oauth',
+        envVar: null,
+        envVars,
+        hint,
+        detail: 'Claude subscription (OAuth from `claude login`)',
+      }
+    }
+
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: hint || 'run `claude login` or set ANTHROPIC_API_KEY',
+      detail: `Not configured — ${hint || 'run \`claude login\` or set ANTHROPIC_API_KEY'}`,
+    }
+  }
+
+  /**
    * Minimal model list for the per-provider registry (#2956). The live
    * Agent SDK push (`supportedModels()`) replaces this at runtime; the
    * fallback ships only short aliases so the dropdown is never empty
@@ -252,6 +307,13 @@ export class SdkSession extends BaseSession {
 
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
+    // #4828: session-scoped logger, lazily bound on the SDK's first `init`
+    // message (where session_id becomes known). Pre-init log lines stay on
+    // the module-level `log` — same fallback pattern as ClaudeTuiSession.
+    // No reset on destroy/respawn (unlike CliSession): SdkSession lacks a
+    // _killAndRespawn path so session_id is stable for the instance
+    // lifetime; the binding stays valid until destroy() drops the instance.
+    this._log = null
     this._query = null
     this._thinkingLevel = null
     this._pendingInput = []
@@ -328,6 +390,18 @@ export class SdkSession extends BaseSession {
     // The per-call `error` event still fires on every refused sendMessage so
     // client UI feedback is unaffected.
     this._lastRefusedWarnTs = 0
+
+    // #4881: provider parity with CliSession's #4602 _intentionalStop flag.
+    // Set by `interrupt()` immediately before aborting the active SDK query
+    // generator, then consumed inside `_callQuery`'s try/catch/finally so a
+    // user-initiated Stop:
+    //   - suppresses the normal "Query error: AbortError" error emit, and
+    //   - emits a single transient `stopped` event (no `code` — SdkSession is
+    //     in-process, no child-process exit status to carry).
+    // Cleared on every consume path (close, error, destroy) so the flag never
+    // leaks past one turn — matches the single-use semantic CliSession pins
+    // in `_handleChildClose` (capture-and-clear up front).
+    this._intentionalStop = false
   }
 
   get sessionId() {
@@ -391,7 +465,9 @@ export class SdkSession extends BaseSession {
       const now = Date.now()
       const warnSuppressed = (now - this._lastRefusedWarnTs) < REFUSED_SENDMESSAGE_WARN_INTERVAL_MS
       if (!warnSuppressed) {
-        log.warn(
+        // #4828: session-scoped when init has fired (sendMessage typically
+        // arrives after init; first-message pre-init path falls back to `log`).
+        ;(this._log || log).warn(
           'Refusing sendMessage — stdin forwarding is disabled for this session; ' +
           'restart the session to recover'
         )
@@ -403,7 +479,8 @@ export class SdkSession extends BaseSession {
       // noisy, and pointless because none of them can be sent.
       if (this._pendingInput?.length) {
         if (!warnSuppressed) {
-          log.warn(
+          // #4828: session-scoped when init has fired.
+          ;(this._log || log).warn(
             `Discarding ${this._pendingInput.length} queued follow-up message(s) — ` +
             'stdin forwarding is disabled'
           )
@@ -422,7 +499,9 @@ export class SdkSession extends BaseSession {
       // Queue the message — it will be sent after the current turn completes
       if (!this._pendingInput) this._pendingInput = []
       this._pendingInput.push({ prompt, attachments, sendOptions })
-      log.info(`Queued follow-up message (${this._pendingInput.length} pending)`)
+      // #4828: session-scoped when init has fired (queue path requires an
+      // in-flight turn, so init is normally already in by this point).
+      ;(this._log || log).info(`Queued follow-up message (${this._pendingInput.length} pending)`)
       return
     }
 
@@ -521,9 +600,10 @@ export class SdkSession extends BaseSession {
       const existing = options.maxThinkingTokens ?? 0
       if (detectedKeyword.budget > existing) {
         options.maxThinkingTokens = detectedKeyword.budget
-        log.info(`Thinking keyword "${detectedKeyword.keyword}" detected — escalating maxThinkingTokens to ${detectedKeyword.budget} for this turn`)
+        // #4828: session-scoped when init has fired.
+        ;(this._log || log).info(`Thinking keyword "${detectedKeyword.keyword}" detected — escalating maxThinkingTokens to ${detectedKeyword.budget} for this turn`)
       } else {
-        log.debug(`Thinking keyword "${detectedKeyword.keyword}" detected but session already at higher budget (${existing}) — leaving unchanged`)
+        ;(this._log || log).debug(`Thinking keyword "${detectedKeyword.keyword}" detected but session already at higher budget (${existing}) — leaving unchanged`)
       }
     }
 
@@ -627,6 +707,10 @@ export class SdkSession extends BaseSession {
             if (msg.subtype === 'init') {
               this._sdkSessionId = msg.session_id
               this._sessionId = msg.session_id
+              // #4828: bind the session-scoped logger now that session_id
+              // is known. Subsequent log lines route through the WsServer
+              // log fan-out (#4787) to dashboards bound to this session.
+              this._log = loggerForSession('sdk', msg.session_id)
               // #3687: persist the actual model the SDK booted with so
               // sendSessionInfo (replay on reconnect / tab switch) reports
               // the truth instead of `null` when the user didn't specify a
@@ -634,7 +718,7 @@ export class SdkSession extends BaseSession {
               if (typeof msg.model === 'string' && msg.model) {
                 this.bootedModel = msg.model
               }
-              log.info(`Session initialized: ${msg.session_id} (model: ${msg.model})`)
+              ;(this._log || log).info(`Session initialized: ${msg.session_id} (model: ${msg.model})`)
               this.emit('ready', {
                 sessionId: msg.session_id,
                 model: msg.model,
@@ -643,7 +727,8 @@ export class SdkSession extends BaseSession {
               // Emit MCP server status if present (including empty list to clear stale state)
               if (Array.isArray(msg.mcp_servers)) {
                 if (msg.mcp_servers.length > 0) {
-                  log.info(`MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+                  // #4828: session-scoped (post-init).
+                  ;(this._log || log).info(`MCP servers: ${msg.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
                 }
                 this.emit('mcp_servers', { servers: msg.mcp_servers })
               }
@@ -653,7 +738,8 @@ export class SdkSession extends BaseSession {
               // Forward non-init system events (e.g. /usage, /cost, other
               // slash command responses) as system messages to the client
               const text = msg.message || msg.text || msg.subtype || 'System event'
-              log.info(`System event (${msg.subtype || 'unknown'}): ${typeof text === 'string' ? text.slice(0, 120) : text}`)
+              // #4828: session-scoped (non-init system event arrives after init).
+              ;(this._log || log).info(`System event (${msg.subtype || 'unknown'}): ${typeof text === 'string' ? text.slice(0, 120) : text}`)
               this.emit('message', {
                 type: 'system',
                 content: text,
@@ -677,23 +763,14 @@ export class SdkSession extends BaseSession {
                     this.emit('stream_start', { messageId })
                   }
                 } else if (blockType === 'tool_use') {
-                  // Reuse a single derived toolId for both fields so the wire
-                  // schema (`ServerToolStartSchema.toolUseId: z.string()`)
-                  // holds even on the defensive fallback path. Mirrors
-                  // cli-session.js.
-                  const toolId = event.content_block.id || `${messageId}-tool`
-                  const toolStartData = {
-                    messageId: toolId,
-                    toolUseId: toolId,
-                    tool: event.content_block.name,
-                    input: null,
-                  }
-                  const mcp = parseMcpToolName(event.content_block.name)
-                  if (mcp) toolStartData.serverName = mcp.serverName
+                  // Delegate to the shared parser so CliSession + SdkSession
+                  // emit identical tool_start payloads (see
+                  // claude-stream-parser.js for the toolId-derivation rules).
+                  const toolStartData = buildToolStartData(messageId, event.content_block)
                   this.emit('tool_start', toolStartData)
                   // #4628: defense-in-depth — track so _emitResult sweep
                   // catches any orphan if the API ever drops a tool_result.
-                  this._trackToolStart(toolId, event.content_block.name)
+                  this._trackToolStart(toolStartData.toolUseId, event.content_block.name)
                 }
                 break
               }
@@ -786,7 +863,8 @@ export class SdkSession extends BaseSession {
               if (missingIds.length > 0) {
                 const sampleId = missingIds[0]
                 const sampleKeys = Object.keys(msg.modelUsage[sampleId] || {})
-                log.debug(
+                // #4828: session-scoped (result handler runs strictly post-init).
+                ;(this._log || log).debug(
                   `modelUsage partial drift: contextWindow missing for modelIds=${JSON.stringify(missingIds)} sampleKeys=${JSON.stringify(sampleKeys)}`
                 )
               }
@@ -819,13 +897,38 @@ export class SdkSession extends BaseSession {
       if (streamState.hasStreamStarted) {
         this.emit('stream_end', { messageId })
       }
+      // #4881: capture-and-clear before any branch so the flag never leaks
+      // past this turn even when _destroying short-circuits the emits below.
+      // Mirrors CliSession._handleChildClose (#4602).
+      const wasIntentionalStop = this._intentionalStop
+      this._intentionalStop = false
       if (!this._destroying) {
-        log.error(`Query error: ${err.message}`)
-        this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
+        if (wasIntentionalStop) {
+          // #4881: user clicked Stop — interrupt() set the flag, the SDK
+          // generator threw an AbortError as a result. Skip the loud "Query
+          // error" surface and emit the quiet `stopped` event for parity
+          // with CliSession. No `code` because SDK runs in-process — there
+          // is no child-process exit status to carry.
+          ;(this._log || log).info('Query aborted after user stop')
+          this.emit('stopped', {})
+        } else {
+          // #4828: session-scoped when init has fired; falls back to module
+          // `log` for pre-init query failures (e.g. spawn refused).
+          ;(this._log || log).error(`Query error: ${err.message}`)
+          this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
+        }
       }
       this._clearMessageState()
     } finally {
       this._query = null
+      // #4881: safety-net clear of _intentionalStop. The catch block clears
+      // it on the throw path (AbortError after interrupt()), but if
+      // query.interrupt() races a `result` message arriving first, the
+      // for-await loop exits normally, skipping the catch. Without this
+      // clear, the flag would stay armed until the next turn's catch and
+      // mis-trigger a spurious `stopped` emit there. Idempotent — the
+      // catch path already cleared it on the throw path.
+      this._intentionalStop = false
       // Dequeue any follow-up messages that arrived while busy
       if (this._pendingInput?.length && !this._destroying) {
         // #3562: if the SidecarProcess latched stdin_disabled mid-turn (e.g.
@@ -838,7 +941,8 @@ export class SdkSession extends BaseSession {
         // the entry-gate drain (#3539/PR #3560), log a single warn, and
         // skip the recursion entirely.
         if (this._stdinForwardingDisabled) {
-          log.warn(
+          // #4828: session-scoped (finally block runs strictly post-init).
+          ;(this._log || log).warn(
             `Discarding ${this._pendingInput.length} queued follow-up message(s) after turn finish — ` +
             'stdin forwarding is disabled'
           )
@@ -846,7 +950,8 @@ export class SdkSession extends BaseSession {
           return
         }
         const next = this._pendingInput.shift()
-        log.info(`Dequeuing follow-up message (${this._pendingInput.length} remaining)`)
+        // #4828: session-scoped.
+        ;(this._log || log).info(`Dequeuing follow-up message (${this._pendingInput.length} remaining)`)
         // Use setImmediate/nextTick to avoid stack depth issues
         process.nextTick(() => {
           if (!this._destroying) {
@@ -961,10 +1066,13 @@ export class SdkSession extends BaseSession {
         `cumulative=${cumulative} bytes (${cumulativeHuman}) over ${dropCount} drops) — ` +
         'turn input was truncated; consumer may need to retry'
 
+      // #4828: session-scoped when init has fired; falls back to module
+      // `log` for stdin drops that occur pre-init (rare — SidecarProcess
+      // listener attach happens after spawn, before init normally arrives).
       if (escalate) {
-        log.error(message)
+        ;(this._log || log).error(message)
       } else {
-        log.warn(message)
+        ;(this._log || log).warn(message)
       }
 
       // #3544: surface the cumulative totals as a session-level event so
@@ -1008,7 +1116,9 @@ export class SdkSession extends BaseSession {
       // that cannot work.
       const message = 'Sidecar stdin forwarding is disabled — further writes will be ' +
         'silently dropped; restart this session to recover'
-      log.warn(message)
+      // #4828: session-scoped when known; falls back to module `log` for
+      // the rare pre-init case (same rationale as the stdin_dropped path).
+      ;(this._log || log).warn(message)
       // #3502: surface the disabled flag to paired clients via the session
       // `error` channel.  SessionManager._wireSessionEvents proxies `error`
       // into the unified `session_event` envelope, so dashboards and the
@@ -1036,7 +1146,8 @@ export class SdkSession extends BaseSession {
     // Guard against oversized tool inputs
     const inputStr = JSON.stringify(block.input || {})
     if (Buffer.byteLength(inputStr, 'utf8') > this._maxToolInput) {
-      log.warn(`Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
+      // #4828: session-scoped (tool_use only arrives after init).
+      ;(this._log || log).warn(`Tool input for ${block.name} exceeded ${this._maxToolInput} bytes, skipping`)
       this.emit('error', {
         message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${block.name} — tool use was skipped`,
       })
@@ -1062,18 +1173,31 @@ export class SdkSession extends BaseSession {
       this.clearBackgroundShell(bashOutputId)
     }
 
-    if (block.name === 'Task') {
-      const input = block.input || {}
-      const description = (typeof input.description === 'string'
-        ? input.description : 'Background task').slice(0, 200)
+    // Delegate Task / EnterPlanMode / ExitPlanMode interpretation to the
+    // shared parser so SdkSession and CliSession cannot drift on tool
+    // semantics. AskUserQuestion is intentionally skipped here — it flows
+    // through the canUseTool callback in _handleAskUserQuestion() and
+    // never reaches this code path.
+    const semantics = extractToolInputSemantics(block.name, block.input)
+    if (!semantics) return
+    if (semantics.kind === 'task') {
+      // #4778: when block.id is missing, mirror the synthesized fallback
+      // used by buildToolStartData (`${messageId}-tool`) so the
+      // agent_spawned toolUseId + _activeAgents key match the wire-emitted
+      // tool_start id. Without this, _activeAgents.set(undefined, ...)
+      // collides on undefined for any fallback-path Task spawn.
+      const toolUseId = block.id || `${messageId}-tool`
       const agentInfo = {
-        toolUseId: block.id,
-        description,
+        toolUseId,
+        description: semantics.payload.description,
         startedAt: Date.now(),
       }
-      this._activeAgents.set(block.id, agentInfo)
+      this._activeAgents.set(toolUseId, agentInfo)
       this.emit('agent_spawned', agentInfo)
     }
+    // EnterPlanMode / ExitPlanMode are not currently surfaced by SdkSession
+    // (plan-mode flow is CliSession-only today). Extracting via the shared
+    // parser leaves the door open without changing observable behavior.
   }
 
   /**
@@ -1142,7 +1266,8 @@ export class SdkSession extends BaseSession {
    */
   setModel(model) {
     if (!super.setModel(model)) return
-    log.info(`Model changed to ${this.model || 'default'}`)
+    // #4828: session-scoped when init has fired.
+    ;(this._log || log).info(`Model changed to ${this.model || 'default'}`)
   }
 
   setPermissionMode(mode) {
@@ -1156,7 +1281,8 @@ export class SdkSession extends BaseSession {
     if (mode === 'auto') {
       this._permissions.autoAllowPending()
     }
-    log.info(`Permission mode changed to ${mode}`)
+    // #4828: session-scoped when init has fired.
+    ;(this._log || log).info(`Permission mode changed to ${mode}`)
   }
 
   /**
@@ -1200,9 +1326,11 @@ export class SdkSession extends BaseSession {
     if (this._query && typeof this._query.setMaxThinkingTokens === 'function') {
       try {
         await this._query.setMaxThinkingTokens(budget)
-        log.info(`Thinking level set to ${level} (${budget ?? 'adaptive'} tokens)`)
+        // #4828: session-scoped (setThinkingLevel only takes effect with
+        // an active query — strictly post-init).
+        ;(this._log || log).info(`Thinking level set to ${level} (${budget ?? 'adaptive'} tokens)`)
       } catch (err) {
-        log.warn(`Failed to set thinking level: ${err.message}`)
+        ;(this._log || log).warn(`Failed to set thinking level: ${err.message}`)
       }
     }
 
@@ -1231,12 +1359,13 @@ export class SdkSession extends BaseSession {
       const sdkModels = await this._query.supportedModels()
       const converted = updateModels(sdkModels)
       if (converted && converted.length > 0) {
-        log.info(`Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
+        // #4828: session-scoped (called from init handler so _log is set).
+        ;(this._log || log).info(`Dynamic model list: ${converted.map(m => m.id).join(', ')}`)
         saveModelsCache()
         this.emit('models_updated', { models: converted })
       }
     } catch (err) {
-      log.warn(`Failed to fetch supported models: ${err.message}`)
+      ;(this._log || log).warn(`Failed to fetch supported models: ${err.message}`)
     }
   }
 
@@ -1246,11 +1375,18 @@ export class SdkSession extends BaseSession {
   async interrupt() {
     if (!this._query) return
 
-    log.info('Interrupting query')
+    // #4881: mark the imminent query teardown as user-initiated so the
+    // _callQuery catch block suppresses the AbortError-flavored "Query error"
+    // emit and instead surfaces a quiet `stopped` event. Cleared in the
+    // catch/finally (single-use, mirrors CliSession#4602).
+    this._intentionalStop = true
+
+    // #4828: session-scoped (interrupt() only meaningful with an active query).
+    ;(this._log || log).info('Interrupting query')
     try {
       await this._query.interrupt()
     } catch (err) {
-      log.warn(`Interrupt error: ${err.message}`)
+      ;(this._log || log).warn(`Interrupt error: ${err.message}`)
     }
   }
 
@@ -1273,7 +1409,8 @@ export class SdkSession extends BaseSession {
     if (!this._isBusy) return
     const idleMs = this._resultTimeoutMs
     const friendly = formatIdleDuration(idleMs)
-    log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
+    // #4828: session-scoped (inactivity warning fires from active turn).
+    ;(this._log || log).info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
     this.emit('inactivity_warning', {
       messageId,
       idleMs,
@@ -1294,7 +1431,8 @@ export class SdkSession extends BaseSession {
   _handleHardTimeout(messageId, hasStreamStarted) {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._hardTimeoutMs)
-    log.warn(`Hard-cap timeout (${friendly} inactivity) — force-clearing busy state`)
+    // #4828: session-scoped (hard-cap fires from active turn).
+    ;(this._log || log).warn(`Hard-cap timeout (${friendly} inactivity) — force-clearing busy state`)
     if (hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }
@@ -1334,7 +1472,8 @@ export class SdkSession extends BaseSession {
   _handleStreamStall(messageId, hasStreamStarted) {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._streamStallTimeoutMs)
-    log.warn(
+    // #4828: session-scoped (stall fires from active turn).
+    ;(this._log || log).warn(
       `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
     )
     if (hasStreamStarted) {
@@ -1373,13 +1512,15 @@ export class SdkSession extends BaseSession {
       if (typeof q.interrupt === 'function') {
         const p = q.interrupt()
         if (p && typeof p.catch === 'function') {
-          p.catch((err) => log.warn(`Query interrupt (timeout) failed: ${err.message}`))
+          // #4828: session-scoped (abort runs strictly post-init).
+          p.catch((err) => (this._log || log).warn(`Query interrupt (timeout) failed: ${err.message}`))
         }
       } else if (typeof q.return === 'function') {
         q.return()
       }
     } catch (err) {
-      log.warn(`Query abort (timeout) failed: ${err.message}`)
+      // #4828: session-scoped.
+      ;(this._log || log).warn(`Query abort (timeout) failed: ${err.message}`)
     }
   }
 
@@ -1445,6 +1586,9 @@ export class SdkSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._pendingInput = []
+    // #4881: clear so a teardown after interrupt() never leaks the flag past
+    // this session instance. Mirrors CliSession.destroy() (#4602).
+    this._intentionalStop = false
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
@@ -1464,7 +1608,8 @@ export class SdkSession extends BaseSession {
     // Interrupt active query
     if (this._query) {
       this._query.interrupt().catch((err) => {
-        log.warn(`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
+        // #4828: session-scoped when init has fired.
+        ;(this._log || log).warn(`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
       })
       this._query = null
     }

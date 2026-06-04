@@ -81,7 +81,7 @@ import type {
   SessionInfo,
   SessionState,
 } from './types';
-import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter, formatQuestionAnswerSummary } from './utils';
 import {
   setStore,
   wsSend,
@@ -121,6 +121,24 @@ import {
   isVisibleAppState,
 } from './message-handler';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
+import {
+  getWsCloseMessage,
+  getHealthCheckErrorMessage,
+  // #4875: shared typed predicate for the AskUserQuestion freeform shape.
+  // Replaces the inline 5-condition check that previously diverged from
+  // the looser SessionScreen variant; both call sites now narrow off the
+  // same guard.
+  isFreeformAnswer,
+  // #4872: shared runtime type-guard for `VoiceInputMode`. The mobile
+  // rehydrate path below (`loadSavedConnection`) used to spread the
+  // SecureStore blob in unchecked, gated only on `chatEnterToSend` /
+  // `terminalEnterToSend` being booleans, so a stale or tampered
+  // `voiceInputMode` (`'push-to-talk'`, `null`, `42`) flowed through
+  // to `useSpeechRecognition({ mode })`. Now gated by the same guard
+  // the dashboard uses (#4853).
+  isVoiceInputMode,
+} from '@chroxy/store-core';
+import type { InputSettings } from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -150,50 +168,13 @@ const AUTO_RECONNECT_DELAY = 1500;
 /** Delay before reconnecting after a WebSocket error (ms) */
 const ERROR_RECONNECT_DELAY = 2000;
 
-/**
- * Map a WebSocket close code to a user-readable error message.
- *
- * Only codes the server actually sends are given specific messages:
- *   1008 — ws-auth.js: key exchange failure (encryption setup failed)
- *   4008 — ws-broadcaster.js / ws-client-sender.js: backpressure eviction
- *   1006 — abnormal closure / network drop (never sent explicitly; set by browser/RN)
- *   1000 — normal close initiated by the server (no error to show)
- *
- * All other codes fall through to a generic message.
- */
-export function getWsCloseMessage(code: number): string | null {
-  switch (code) {
-    case 1000:
-      // Normal close — no error to surface
-      return null;
-    case 1006:
-      // Abnormal closure — network drop, tunnel outage, etc.
-      return 'Connection lost — check your network';
-    case 1008:
-      // Policy violation — server couldn't complete key exchange (E2E encryption)
-      return 'Encryption failed — check that your app is up to date';
-    case 4008:
-      // Server-side backpressure eviction — client was too slow to consume messages
-      return 'Connection dropped — the server was overwhelmed, reconnecting';
-    default:
-      return 'Connection failed — check your network and server status';
-  }
-}
-
-/**
- * Map an HTTP health check failure to a user-readable error message.
- *
- *   AbortError     — fetch timed out (server not responding)
- *   HTTP 4xx/5xx   — server returned an error status
- *   Network error  — no network / tunnel down
- */
-export function getHealthCheckErrorMessage(err: { name?: string; message?: string }): string {
-  if (err.name === 'AbortError') return 'Server not responding — check your network';
-  if (err.message?.startsWith('HTTP 4')) return 'Server rejected the connection — check your token';
-  if (err.message?.startsWith('HTTP 5')) return 'Server error — the server may be restarting';
-  if (err.message?.startsWith('HTTP ')) return `Server unreachable (${err.message})`;
-  return 'Could not reach server — check your network';
-}
+// #4771: getWsCloseMessage and getHealthCheckErrorMessage are now
+// defined in `packages/store-core/src/ws-errors.ts` and exported from
+// the package public entrypoint (`@chroxy/store-core`) so the mobile
+// app and dashboard share a single tested mapping. Re-exported here
+// for backward compatibility with existing imports from
+// `app/src/store/connection`.
+export { getWsCloseMessage, getHealthCheckErrorMessage } from '@chroxy/store-core';
 
 export const selectShowSession = (s: ConnectionState): boolean =>
   useConnectionLifecycleStore.getState().connectionPhase !== 'disconnected' || s.viewingCachedSession;
@@ -345,6 +326,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   inputSettings: {
     chatEnterToSend: true,
     terminalEnterToSend: false,
+    // #4785: mobile voice path lives in useSpeechRecognition (expo-speech-recognition),
+    // which has its own end-of-utterance semantics. Field is type-satisfied here so
+    // the shared @chroxy/store-core InputSettings stays a single shape across app +
+    // dashboard; wiring it to mobile behaviour is tracked separately.
+    voiceInputMode: 'continuous',
   },
   viewingCachedSession: false,
   viewMode: 'chat',
@@ -608,8 +594,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const raw = await SecureStore.getItemAsync(STORAGE_KEY_INPUT_SETTINGS);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (typeof parsed.chatEnterToSend === 'boolean' || typeof parsed.terminalEnterToSend === 'boolean') {
-          set((state) => ({ inputSettings: { ...state.inputSettings, ...parsed } }));
+        // #4872: validated, narrowed merge — mirrors the dashboard
+        // rehydrate path (#4853). A stray key in SecureStore (stale blob
+        // from an older mode-name, tampered storage, future variant) can
+        // no longer shoehorn arbitrary state into `inputSettings`. Each
+        // field is checked independently because the persisted blob may
+        // pre-date `voiceInputMode` (#4785) and contain only the boolean
+        // toggles.
+        const next: Partial<InputSettings> = {};
+        if (typeof parsed.chatEnterToSend === 'boolean') next.chatEnterToSend = parsed.chatEnterToSend;
+        if (typeof parsed.terminalEnterToSend === 'boolean') next.terminalEnterToSend = parsed.terminalEnterToSend;
+        // #4872: runtime guard keyed off the same exhaustive
+        // `Record<VoiceInputMode, true>` map the dashboard uses. Adding a
+        // new variant to the `VoiceInputMode` union without listing it
+        // there is a TS error, so the guard cannot silently drop a new
+        // mode the way a hand-written `===` chain would.
+        if (isVoiceInputMode(parsed.voiceInputMode)) {
+          next.voiceInputMode = parsed.voiceInputMode;
+        }
+        if (Object.keys(next).length > 0) {
+          set((state) => ({ inputSettings: { ...state.inputSettings, ...next } }));
         }
       }
     } catch {
@@ -1225,9 +1229,44 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return result;
   },
 
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => {
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
+    toolUseId?: string,
+  ) => {
     const { socket } = get();
-    const payload: Record<string, string> = { type: 'user_question_response', answer };
+    // Three shapes (#4761 multi-question + #4755 Other/freeform parity):
+    // - string: legacy single-question / free-text. Wire shape stays
+    //   `{ type, answer, toolUseId? }` so older servers keep working.
+    // - { otherLabel, freeformText }: single-question Other freeform
+    //   path (#4755, mirrors dashboard #4651). Wire `{answer: otherLabel,
+    //   freeformText: typedText}` so the server can drive the two-stage
+    //   TUI write (Other digit → text-input prompt → freeform text + Enter).
+    // - Record<string, string | string[]>: multi-question form (#4761,
+    //   mirrors dashboard #4760). Populate `answers` per
+    //   UserQuestionResponseSchema AND a string `answer` summary so older
+    //   servers reading only `answer` fall through readably.
+    //
+    // Freeform shape detection is tight (exactly the two named keys, both
+    // strings) so a multi-question Record whose keys happen to be those
+    // names doesn't get misrouted into the freeform branch. The guard
+    // lives in `@chroxy/store-core/freeform-answer` so the dashboard
+    // store, the mobile screen layer, and this site all narrow off one
+    // shared predicate (#4875).
+    const freeform = isFreeformAnswer(answer);
+    const isMultiAnswer = !freeform && typeof answer !== 'string';
+    const payload: Record<string, unknown> = {
+      type: 'user_question_response',
+      answer: freeform
+        ? answer.otherLabel
+        : isMultiAnswer
+          ? formatQuestionAnswerSummary(answer as Record<string, string | string[]>)
+          : (answer as string),
+    };
+    if (freeform) {
+      payload.freeformText = answer.freeformText;
+    } else if (isMultiAnswer) {
+      payload.answers = answer;
+    }
     if (toolUseId) payload.toolUseId = toolUseId;
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);

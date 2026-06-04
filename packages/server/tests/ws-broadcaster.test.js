@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { WsBroadcaster } from '../src/ws-broadcaster.js'
+import { metrics } from '../src/metrics.js'
 
 /** Create a fake WebSocket with configurable readyState and bufferedAmount */
 function createFakeWs({ readyState = 1, bufferedAmount = 0 } = {}) {
@@ -197,6 +198,39 @@ describe('WsBroadcaster', () => {
       assert.equal(sent.length, 1)
       assert.equal(sent[0].ws, ws2)
     })
+
+    it('does not throw when a client is missing subscribedSessionIds (#4799)', () => {
+      // Defensive: a client could lack `subscribedSessionIds` (legacy fixture,
+      // future refactor, code bug). The default filter must not throw —
+      // otherwise the broadcast loop aborts mid-iteration and other clients
+      // miss the message.
+      const wsBroken = createFakeWs()
+      const wsOk = createFakeWs()
+      const brokenClient = createFakeClient({ id: 'broken', activeSessionId: 'other' })
+      brokenClient.subscribedSessionIds = undefined
+      clients.set(wsBroken, brokenClient)
+      clients.set(wsOk, createFakeClient({ id: 'ok', activeSessionId: 'sess-1' }))
+
+      assert.doesNotThrow(() => {
+        broadcaster._broadcastToSession('sess-1', { type: 'data' })
+      })
+
+      // The healthy client on the matching activeSessionId still receives it.
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].ws, wsOk)
+    })
+
+    it('still delivers to a client whose activeSessionId matches even with no subscribedSessionIds (#4799)', () => {
+      const ws = createFakeWs()
+      const client = createFakeClient({ id: 'c1', activeSessionId: 'sess-1' })
+      client.subscribedSessionIds = undefined
+      clients.set(ws, client)
+
+      broadcaster._broadcastToSession('sess-1', { type: 'data' })
+
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].ws, ws)
+    })
   })
 
   describe('_broadcastClientJoined()', () => {
@@ -352,6 +386,192 @@ describe('WsBroadcaster', () => {
 
       assert.equal(sent.length, 0)
       assert.equal(client1._backpressureDrops, 1)
+    })
+  })
+
+  describe('backpressure metrics (#4772)', () => {
+    beforeEach(() => {
+      metrics.reset()
+    })
+
+    it('increments backpressure.drops when _broadcast drops a message', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      clients.set(ws1, createFakeClient({ id: 'c1' }))
+
+      broadcaster._broadcast({ type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+    })
+
+    it('increments backpressure.disconnects when _broadcast closes after maxDrops', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100, backpressureMaxDrops: 3 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      const client1 = createFakeClient({ id: 'c1' })
+      client1._backpressureDrops = 2
+      clients.set(ws1, client1)
+
+      broadcaster._broadcast({ type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+      assert.equal(metrics.get('backpressure.disconnects'), 1)
+      assert.equal(ws1.closed, true)
+    })
+
+    it('increments backpressure.drops when _broadcastToSession drops a message', () => {
+      // Latent bug fixed by #4772: session-scoped broadcasts previously
+      // bypassed metrics entirely, so backpressure on per-session traffic
+      // (where most data flows) never showed up in observability.
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      clients.set(ws1, createFakeClient({ id: 'c1', activeSessionId: 'sess-1' }))
+
+      broadcaster._broadcastToSession('sess-1', { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+    })
+
+    it('increments backpressure.disconnects when _broadcastToSession closes after maxDrops', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100, backpressureMaxDrops: 3 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      const client1 = createFakeClient({ id: 'c1', activeSessionId: 'sess-1' })
+      client1._backpressureDrops = 2
+      clients.set(ws1, client1)
+
+      broadcaster._broadcastToSession('sess-1', { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+      assert.equal(metrics.get('backpressure.disconnects'), 1)
+      assert.equal(ws1.closed, true)
+    })
+
+    it('increments backpressure.drops when _broadcastClientJoined drops a message', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const wsNew = createFakeWs()
+      const wsOther = createFakeWs({ bufferedAmount: 200 })
+      const newClient = createFakeClient({ id: 'new' })
+      clients.set(wsNew, newClient)
+      clients.set(wsOther, createFakeClient({ id: 'c1' }))
+
+      broadcaster._broadcastClientJoined(newClient, wsNew)
+
+      assert.equal(sent.length, 0, 'backpressured peer receives nothing')
+      assert.equal(metrics.get('backpressure.drops'), 1)
+    })
+
+    it('does not increment metrics on successful sends', () => {
+      const ws1 = createFakeWs()
+      clients.set(ws1, createFakeClient({ id: 'c1', activeSessionId: 'sess-1' }))
+
+      broadcaster.broadcast({ type: 'test' })
+      broadcaster._broadcastToSession('sess-1', { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 0)
+      assert.equal(metrics.get('backpressure.disconnects'), 0)
+    })
+  })
+
+  describe('backpressure eviction dedupe (#4834)', () => {
+    beforeEach(() => {
+      metrics.reset()
+    })
+
+    it('closes the client EXACTLY ONCE across N broadcasts after maxDrops', () => {
+      // Once a slow client crosses maxDrops, ws.close() is called. ws.close()
+      // is async — subsequent broadcasts in the same synchronous chain still
+      // see bufferedAmount > threshold and would otherwise re-fire close +
+      // re-increment backpressure.disconnects. Dedupe via sticky _evicted.
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      // Make close() count invocations
+      let closeCount = 0
+      const originalClose = ws1.close
+      ws1.close = (code, reason) => { closeCount++; originalClose.call(ws1, code, reason) }
+      const client1 = createFakeClient({ id: 'c1' })
+      clients.set(ws1, client1)
+
+      // 10 broadcasts. First 3 drop and trigger close. Remaining 7 should
+      // NOT re-call close or re-increment backpressure.disconnects.
+      for (let i = 0; i < 10; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(closeCount, 1, 'ws.close called exactly once')
+      assert.equal(metrics.get('backpressure.disconnects'), 1, 'disconnect metric incremented exactly once')
+    })
+
+    it('sets sticky client._evicted flag on first eviction', () => {
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      const client1 = createFakeClient({ id: 'c1' })
+      clients.set(ws1, client1)
+
+      // Trigger maxDrops worth of broadcasts
+      for (let i = 0; i < 5; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(client1._evicted, true, 'client marked evicted')
+    })
+
+    it('eviction dedupe is per-client (a separate client object still evicts)', () => {
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+
+      const wsA = createFakeWs({ bufferedAmount: 200 })
+      const clientA = createFakeClient({ id: 'cA' })
+      const wsB = createFakeWs({ bufferedAmount: 200 })
+      const clientB = createFakeClient({ id: 'cB' })
+      clients.set(wsA, clientA)
+      clients.set(wsB, clientB)
+
+      for (let i = 0; i < 10; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(wsA.closed, true, 'client A closed')
+      assert.equal(wsB.closed, true, 'client B closed')
+      assert.equal(metrics.get('backpressure.disconnects'), 2, 'one disconnect per client')
+    })
+  })
+
+  describe('_broadcastClientJoined() backpressure', () => {
+    it('skips peers in backpressure and increments their drop counter', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const wsNew = createFakeWs()
+      const wsBackpressured = createFakeWs({ bufferedAmount: 200 })
+      const wsHealthy = createFakeWs()
+      const newClient = createFakeClient({ id: 'new' })
+      const backClient = createFakeClient({ id: 'back' })
+      clients.set(wsNew, newClient)
+      clients.set(wsBackpressured, backClient)
+      clients.set(wsHealthy, createFakeClient({ id: 'healthy' }))
+
+      broadcaster._broadcastClientJoined(newClient, wsNew)
+
+      assert.equal(sent.length, 1, 'only healthy peer receives the message')
+      assert.equal(sent[0].ws, wsHealthy)
+      assert.equal(backClient._backpressureDrops, 1)
+    })
+
+    it('closes peer after maxDrops while delivering to healthy peers', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100, backpressureMaxDrops: 3 })
+      const wsNew = createFakeWs()
+      const wsBackpressured = createFakeWs({ bufferedAmount: 200 })
+      const backClient = createFakeClient({ id: 'back' })
+      backClient._backpressureDrops = 2
+      clients.set(wsNew, createFakeClient({ id: 'new' }))
+      clients.set(wsBackpressured, backClient)
+
+      broadcaster._broadcastClientJoined(clients.get(wsNew), wsNew)
+
+      assert.equal(wsBackpressured.closed, true)
+      assert.equal(wsBackpressured.closeCode, 4008)
     })
   })
 })

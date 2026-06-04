@@ -65,7 +65,10 @@ describe('Provider Registry', () => {
     assert.ok(cliEntry)
     assert.equal(cliEntry.capabilities.permissions, true)
     assert.equal(cliEntry.capabilities.inProcessPermissions, false)
-    assert.equal(cliEntry.capabilities.resume, false)
+    // #4887 — claude CLI supports `--resume <id>`; CliSession now wires
+    // `_sessionId` into the spawn argv on respawn / restore so the model
+    // retains conversation context. Persistence layer round-trips the id.
+    assert.equal(cliEntry.capabilities.resume, true)
 
     const sdkEntry = list.find(p => p.name === 'claude-sdk')
     assert.ok(sdkEntry)
@@ -712,6 +715,145 @@ describe('Docker Provider Naming (#2475)', () => {
     const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
     assert.equal(DockerSdkSession.capabilities.containerized, true)
   })
+
+  // #4780: the docker providers used to inherit the host-CLI preflight
+  // credentials block from their parent, which suggested the user "run
+  // `claude login`". Inside a container that command cannot work — the
+  // container has no ~/.claude state and the host Keychain is invisible.
+  // The only path is forwarding `ANTHROPIC_API_KEY` from the host.
+  describe('container auth hints (#4780)', () => {
+    const ENV_KEYS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']
+    const saved = {}
+    function clearKeys() {
+      for (const k of ENV_KEYS) {
+        saved[k] = process.env[k]
+        delete process.env[k]
+      }
+    }
+    function restoreKeys() {
+      for (const k of ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+
+    it('docker-cli preflight hint does NOT mention `claude login`', async () => {
+      const { DockerSession } = await import('../src/docker-session.js')
+      const credSpec = DockerSession.preflight.credentials
+      assert.ok(credSpec, 'docker-cli must declare a preflight credentials block')
+      assert.doesNotMatch(credSpec.hint, /claude login/i,
+        `claude login is futile inside a container — hint was: ${credSpec.hint}`)
+      assert.match(credSpec.hint, /ANTHROPIC_API_KEY/,
+        'hint must point the user at the env var path')
+    })
+
+    it('docker-sdk preflight hint does NOT mention `claude login`', async () => {
+      const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+      const credSpec = DockerSdkSession.preflight.credentials
+      assert.ok(credSpec, 'docker-sdk must declare a preflight credentials block')
+      assert.doesNotMatch(credSpec.hint, /claude login/i,
+        `claude login is futile inside a container — hint was: ${credSpec.hint}`)
+      assert.match(credSpec.hint, /ANTHROPIC_API_KEY/,
+        'hint must point the user at the env var path')
+    })
+
+    it('docker-cli resolveAuth(no env) returns hint without `claude login`', async () => {
+      try {
+        clearKeys()
+        const { DockerSession } = await import('../src/docker-session.js')
+        const auth = DockerSession.resolveAuth(process.env)
+        assert.equal(auth.ready, false)
+        assert.doesNotMatch(auth.hint, /claude login/i,
+          `docker-cli hint must not tell users to claude login — got: ${auth.hint}`)
+        assert.doesNotMatch(auth.detail, /claude login/i,
+          `docker-cli detail must not tell users to claude login — got: ${auth.detail}`)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-sdk resolveAuth(no env) returns hint without `claude login`', async () => {
+      try {
+        clearKeys()
+        const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+        const auth = DockerSdkSession.resolveAuth(process.env, {})
+        assert.equal(auth.ready, false)
+        assert.doesNotMatch(auth.hint, /claude login/i,
+          `docker-sdk hint must not tell users to claude login — got: ${auth.hint}`)
+        assert.doesNotMatch(auth.detail, /claude login/i,
+          `docker-sdk detail must not tell users to claude login — got: ${auth.detail}`)
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-cli envVars match what _startContainer actually forwards (only ANTHROPIC_API_KEY)', async () => {
+      const { DockerSession } = await import('../src/docker-session.js')
+      // _startContainer only pushes --env ANTHROPIC_API_KEY=... — declaring
+      // CLAUDE_CODE_OAUTH_TOKEN here would lie: a user who set only the OAuth
+      // token would see ready=true but the container would still be unauthed.
+      assert.deepEqual(DockerSession.preflight.credentials.envVars, ['ANTHROPIC_API_KEY'])
+    })
+
+    it('docker-sdk envVars match what _startContainer actually forwards (only ANTHROPIC_API_KEY)', async () => {
+      const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+      assert.deepEqual(DockerSdkSession.preflight.credentials.envVars, ['ANTHROPIC_API_KEY'])
+    })
+
+    it('docker-cli resolveAuth ignores CLAUDE_CODE_OAUTH_TOKEN (not forwarded into container)', async () => {
+      try {
+        clearKeys()
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-fake-oauth'
+        const { DockerSession } = await import('../src/docker-session.js')
+        const auth = DockerSession.resolveAuth(process.env)
+        assert.equal(auth.ready, false,
+          'OAuth token alone must not satisfy docker-cli — _startContainer only forwards ANTHROPIC_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-sdk resolveAuth ignores CLAUDE_CODE_OAUTH_TOKEN (not forwarded into container)', async () => {
+      try {
+        clearKeys()
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-fake-oauth'
+        const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+        const auth = DockerSdkSession.resolveAuth(process.env, {})
+        assert.equal(auth.ready, false,
+          'OAuth token alone must not satisfy docker-sdk — _startContainer only forwards ANTHROPIC_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('docker-cli resolveAuth is ready when ANTHROPIC_API_KEY is set on the host', async () => {
+      try {
+        clearKeys()
+        process.env.ANTHROPIC_API_KEY = 'sk-test'
+        const { DockerSession } = await import('../src/docker-session.js')
+        const auth = DockerSession.resolveAuth(process.env)
+        assert.equal(auth.ready, true)
+        assert.equal(auth.source, 'env')
+        assert.equal(auth.envVar, 'ANTHROPIC_API_KEY')
+      } finally {
+        restoreKeys()
+      }
+    })
+
+    it('host CliSession still uses the original `claude login` hint (regression guard)', () => {
+      // The fix is scoped to docker providers — the host CLI provider must
+      // keep mentioning `claude login` because on the host that IS the path.
+      const credSpec = CliSession.preflight.credentials
+      assert.match(credSpec.hint, /claude login/,
+        'host CLI provider must still mention claude login — it works on the host')
+    })
+
+    it('host SdkSession still uses the original `claude login` hint (regression guard)', () => {
+      const credSpec = SdkSession.preflight.credentials
+      assert.match(credSpec.hint, /claude login/,
+        'host SDK provider must still mention claude login — it works on the host')
+    })
+  })
 })
 
 describe('Provider Capabilities', () => {
@@ -722,7 +864,10 @@ describe('Provider Capabilities', () => {
     assert.equal(caps.modelSwitch, true)
     assert.equal(caps.permissionModeSwitch, true)
     assert.equal(caps.planMode, true)
-    assert.equal(caps.resume, false)
+    // #4887 — CliSession wires `_sessionId` into the spawn argv as
+    // `--resume <id>` on respawn / restore so the model retains
+    // conversation context. Capability flag flipped from false → true.
+    assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
   })
 

@@ -223,6 +223,18 @@ jobs:
         working-directory: packages/desktop
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg -c "$TAURI_CONFIG_OVERRIDE"
 
+      - name: Verify .app entitlements (#4801 regression guard)
+        shell: bash
+        working-directory: packages/desktop
+        run: |
+          APP_PATH="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 2 -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found under src-tauri/target/universal-apple-darwin/release/bundle/macos" >&2
+            exit 1
+          fi
+          echo "Verifying entitlements on $APP_PATH"
+          bash scripts/verify-entitlements.sh "$APP_PATH"
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -348,6 +360,34 @@ jobs:
           name: chroxy-windows
           path: artifacts/
 
+      - name: Merge Tauri updater feeds
+        shell: bash
+        run: |
+          # Each desktop job emits its own latest.json with only the
+          # platforms it built (darwin-* from macOS, windows-* from
+          # Windows). Tauri's auto-updater expects a single feed with all
+          # `platforms` entries merged, so combine them into one file
+          # before attaching to the release.
+          #
+          # When updater signing is disabled for a job (no
+          # TAURI_SIGNING_PRIVATE_KEY), that job won't have produced a
+          # latest.json; the merge script tolerates missing inputs and
+          # exits non-zero only if NO inputs contributed platforms.
+          mkdir -p artifacts/updater
+          # Newline-separated list — safe because no path in artifacts/ can
+          # contain a newline (download-artifact preserves the on-runner
+          # paths, all of which are inside the workflow workspace).
+          FEEDS=$(find artifacts -type f -name latest.json -not -path 'artifacts/updater/*' | sort)
+          if [ -z "$FEEDS" ]; then
+            echo "::notice::No latest.json fragments found — auto-updater feed will not be published this release"
+            exit 0
+          fi
+          echo "Merging updater feeds:"
+          printf '  %s\n' "$FEEDS"
+          # shellcheck disable=SC2086 # intentional word-splitting to expand FEEDS into argv
+          node scripts/merge-updater-feeds.mjs --output artifacts/updater/latest.json $FEEDS
+          cat artifacts/updater/latest.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
@@ -358,6 +398,6 @@ jobs:
             artifacts/**/*.msi.zip
             artifacts/**/*.tar.gz
             artifacts/**/*.sig
-            artifacts/**/latest.json
+            artifacts/updater/latest.json
           draft: false
           prerelease: false

@@ -134,6 +134,33 @@ export const ServerMessageSchema = z.object({
   options: z.any().optional(),
   timestamp: z.number(),
   code: z.string().max(64).optional(),
+  // #4947 / #5006: only set on `messageType: 'error'` envelopes whose
+  // `code` is one of the two resume-failure codes emitted by CliSession's
+  // `_handleChildClose` resume-failure path:
+  //   - `'resume_unknown'` (server PR #4944) — recoverable; CliSession has
+  //     already auto-fallen-back to a fresh conversation.
+  //   - `'resume_unknown_exhausted'` (server PR #5004) — terminal; the
+  //     post-fallback retry ALSO matched the unknown-resume pattern, the
+  //     server has stopped auto-respawning, and the user must start a
+  //     fresh session manually.
+  // Carries the conversation id chroxy passed to `claude --resume <id>`
+  // before the CLI rejected it; dashboards surface it under the affordance
+  // for operator correlation against the persisted state file
+  // (`resumeConversationId` in `~/.chroxy/session-state.json`). Optional +
+  // length-capped so a malformed producer can't pollute the wire with
+  // megabyte payloads.
+  attemptedResumeId: z.string().max(256).optional(),
+  // #5067: captured stdout/stderr from a failed docker-byok
+  // postCreateCommand. Only set on `messageType: 'error'` envelopes
+  // whose `code` is `'post_create_command_failed'`; the session layer
+  // (docker-byok-session.js) tail-caps each stream to 4 KiB before
+  // emitting, and event-normalizer.js re-caps at 8 KiB at the wire
+  // boundary. The 8192 ceiling here is the wire-schema bound;
+  // producers (the session layer) apply a tighter cap. Optional so
+  // existing error envelopes (resume_unknown, generic crashes) stay
+  // shape-compatible.
+  stdout: z.string().max(8192).optional(),
+  stderr: z.string().max(8192).optional(),
 })
 
 export const ServerToolStartSchema = z.object({
@@ -300,6 +327,36 @@ export const ServerAgentCompletedSchema = z.object({
 })
 
 /**
+ * #5016 — Task subagent intermediate progress event.
+ *
+ * Carries a re-emit of a Task subagent's intermediate wire event
+ * (`tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`)
+ * tagged with the parent Task tool_use id so the dashboard can render
+ * the child's progress as nested sub-bubbles inside the parent's Task
+ * tool_call bubble.
+ *
+ * `parentToolUseId` — the id of the parent's `Task` tool_use block
+ *   (same id used for `agent_spawned` / `agent_completed`). Consumers
+ *   key the nested sub-bubble container off this id.
+ * `eventType` — the child's original event name (e.g. `'tool_start'`).
+ *   Consumers switch on this to render the wire event in the same
+ *   shape they would for a top-level event.
+ * `payload` — the verbatim child event payload. Fields are best-effort;
+ *   renderers MUST treat absence as a no-op.
+ *
+ * Nested Task: when a Task subagent itself dispatches a Task, the
+ * grand-child's events are forwarded up the chain re-tagged with the
+ * IMMEDIATE parent's `toolUseId`. The dashboard sees a flat stream
+ * — nested-nested rendering is intentionally not in v2.
+ */
+export const ServerAgentEventSchema = z.object({
+  type: z.literal('agent_event'),
+  parentToolUseId: z.string(),
+  eventType: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+})
+
+/**
  * #4307 — one entry per backgrounded `Bash` shell the session is still
  * waiting on. Pushed when the agent dispatches a `Bash` tool call with
  * `run_in_background: true` (the matching tool_result carries the
@@ -373,6 +430,35 @@ export const ServerInactivityWarningSchema = z.object({
   // correct floor — never zero, never negative, never NaN/Infinity.
   idleMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS),
   prefab: z.string(),
+})
+
+// #4653: chroxy-side intervention surfaced to the user. Currently only the
+// multi-question AskUserQuestion deny shipped in #4648 fires this event.
+// The dashboard / mobile app append a SessionIntervention entry to the
+// targeted session's interventions ring and render a FooterBar counter
+// chip + (first-time only) inline system ChatMessage so users can tell
+// chroxy intervened — without this surface the deny is invisible.
+//
+// `reason` is a discriminator that lets future intervention kinds land
+// without a wire version bump (sibling-deny from #4668 would extend the
+// enum here). `questionCount >= 2` because the permission-hook only
+// denies multi-question forms — single-question is the happy path.
+export const ServerMultiQuestionInterventionSchema = z.object({
+  type: z.literal('multi_question_intervention'),
+  // Stable id of the tool_use the hook denied. Dashboard dedups by this
+  // so a stuck model re-emitting the same payload doesn't inflate the
+  // counter falsely (the #4666 / #4668 failure mode).
+  toolUseId: z.string(),
+  // Question count from the denied AskUserQuestion form. Hook only fires
+  // for length > 1, so the floor is 2 — defence-in-depth against a server
+  // bug that would otherwise inject a "0 questions" entry into the UI.
+  questionCount: z.number().int().min(2).finite(),
+  reason: z.literal('multi_question'),
+  // Server wall-clock when the deny happened. Allowed to be 0 (epoch) so
+  // a clock-skewed dev environment doesn't bounce the event off the wire,
+  // but typical values are 1.7e12+ (post-2023). The client renders relative
+  // ("3s ago") from this.
+  timestamp: z.number().int().min(0).finite(),
 })
 
 export const ServerMcpServersSchema = z.object({
@@ -524,6 +610,32 @@ export const ServerSessionRestoreFailedSchema = z.object({
   errorMessage: z.string(),
   originalHistoryPreserved: z.boolean(),
   historyLength: z.number().optional(),
+})
+
+/**
+ * #4756: user-initiated Stop confirmation broadcast. CliSession emits a
+ * `stopped` event from `_handleChildClose` when the child process exits
+ * cleanly after a Stop click (interrupt() set `_intentionalStop`). The
+ * SessionManager + ws-forwarding paths surface it as this `session_stopped`
+ * wire message so clients can render a quiet "Session stopped." confirmation
+ * — distinct from `session_error` (crash) which fires for unexpected exits
+ * that trigger the auto-respawn path.
+ *
+ * `sessionId` is injected by `_broadcastToSession` on the multi-session
+ * path, so it's optional on the schema for consumers that construct the
+ * message without it pre-broadcast (matches the `cost_update` / `session_usage`
+ * pattern). The legacy-cli path doesn't carry a sessionId at all.
+ *
+ * `code` is the child process exit code (number). Typically 0 on a clean
+ * SIGINT exit, but kept on the wire so clients can render the numeric code
+ * for non-zero exits (e.g. 143 = SIGTERM). Optional because future providers
+ * that adopt the `stopped` event for parity (see #4756 follow-up) may not
+ * have a meaningful exit code (e.g. in-process SDK session).
+ */
+export const ServerSessionStoppedSchema = z.object({
+  type: z.literal('session_stopped'),
+  sessionId: z.string().optional(),
+  code: z.number().int().optional(),
 })
 
 // #3404 audit (F1+F5): per-provider auth/billing summary so clients can
@@ -1073,6 +1185,8 @@ export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchem
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
 export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>
 export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>
+// #4756: typed alias for the user-initiated Stop confirmation broadcast.
+export type ServerSessionStoppedMessage = z.infer<typeof ServerSessionStoppedSchema>
 export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>

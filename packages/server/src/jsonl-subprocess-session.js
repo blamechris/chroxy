@@ -118,6 +118,12 @@ export class JsonlSubprocessSession extends BaseSession {
     // BaseSession option, plumb it through here too or Codex / Gemini
     // silently fall back to the default.
     hardTimeoutMs,
+    // #4790: per-provider stream-stall recovery timeout. PR #4745 wired
+    // SessionManager → providerOpts.streamStallTimeoutMs but this
+    // destructure dropped it, so Codex / Gemini sessions silently fell
+    // back to BaseSession's 5min default — exactly the trap documented
+    // in [[feedback_jsonl_subprocess_middle_layer]] landing again.
+    streamStallTimeoutMs,
     resumeSessionId,
   } = {}) {
     super({
@@ -139,6 +145,7 @@ export class JsonlSubprocessSession extends BaseSession {
       sessionPreamble,
       resultTimeoutMs,
       hardTimeoutMs,
+      streamStallTimeoutMs,
     })
     // #3865: accept resumeSessionId from constructor so SessionManager's
     // serializeState/restoreState path carries a captured Codex thread_id
@@ -151,6 +158,19 @@ export class JsonlSubprocessSession extends BaseSession {
     // Skills MVP (#2957) — providers without a system-prompt flag (Codex,
     // Gemini) prepend skills text to the first user message only.
     this._skillsPrepended = false
+    // #4881: provider parity with CliSession's #4602 _intentionalStop flag.
+    // Set by `interrupt()` immediately before SIGINT-ing the child, then
+    // consumed inside `proc.on('close')` so a user-initiated Stop:
+    //   - suppresses the loud "{provider} process exited with code N" error
+    //     emit (SIGINT exits the JSONL subprocess with code 130 or null
+    //     depending on the CLI), and
+    //   - emits a single transient `stopped` event with the exit `code` so
+    //     the dashboard/mobile UX can render the same quiet confirmation
+    //     surface PR #4868 wired for CliSession.
+    // Single-use: cleared on every close path (close, destroy) so the flag
+    // never leaks past one sendMessage cycle. Matches CliSession's
+    // capture-and-clear discipline in `_handleChildClose`.
+    this._intentionalStop = false
   }
 
   start() {
@@ -168,6 +188,9 @@ export class JsonlSubprocessSession extends BaseSession {
     this._destroying = true
     this._processReady = false
     this._isBusy = false
+    // #4881: clear so a teardown after interrupt() never leaks the flag past
+    // this session instance. Mirrors CliSession.destroy() (#4602).
+    this._intentionalStop = false
     if (this._process) {
       try {
         this._process.kill('SIGTERM')
@@ -178,11 +201,15 @@ export class JsonlSubprocessSession extends BaseSession {
   }
 
   interrupt() {
-    if (this._process) {
-      try {
-        this._process.kill('SIGINT')
-      } catch { /* already dead */ }
-    }
+    if (!this._process) return
+    // #4881: mark the imminent child exit as user-initiated so the
+    // proc.on('close') handler suppresses the "exited with code N" error and
+    // instead emits a quiet `stopped` event with the exit code. Cleared in
+    // the close handler (single-use, mirrors CliSession #4602).
+    this._intentionalStop = true
+    try {
+      this._process.kill('SIGINT')
+    } catch { /* already dead */ }
   }
 
   setPermissionMode(_mode) {
@@ -374,12 +401,24 @@ export class JsonlSubprocessSession extends BaseSession {
     proc.on('close', (code) => {
       this._process = null
       this._isBusy = false
+      // #4881: capture-and-clear BEFORE the _destroying short-circuit so the
+      // flag never leaks past a close even when destroy() fires first.
+      // Mirrors CliSession._handleChildClose (#4602).
+      const wasIntentionalStop = this._intentionalStop
+      this._intentionalStop = false
       if (this._destroying) return
       if (ctx.didStreamStart) {
         this.emit('stream_end', { messageId: ctx.messageId })
         ctx.didStreamStart = false
       }
-      if (code !== 0 && code !== null) {
+      if (wasIntentionalStop) {
+        // #4881: user clicked Stop — interrupt() set the flag, SIGINT brought
+        // the child down. Skip the loud "{provider} process exited with code
+        // N" error surface and emit the quiet `stopped` event for parity
+        // with CliSession (#4868). SIGINT typically exits with 130 or null
+        // depending on the CLI; both are user-initiated and not crashes.
+        this.emit('stopped', { code })
+      } else if (code !== 0 && code !== null) {
         // Prefer high-signal stderr; fall back to raw so the user always
         // sees *some* explanation when the child died.
         const sourceBuf = stderrBuf || rawStderrBuf

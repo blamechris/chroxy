@@ -5,7 +5,15 @@
  *          query_permission_audit, list_providers, set_permission_rules
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
-import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import {
+  ALLOWED_PERMISSION_MODE_IDS,
+  resolveSession,
+  resolveSessionOrError,
+  requireSessionMethod,
+  sendError,
+  sendSessionError,
+  buildSessionTokenMismatchPayload,
+} from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
 import {
   getAnthropicApiKeyStatus,
@@ -14,7 +22,11 @@ import {
 } from '../byok-credentials.js'
 import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
+import {
+  PER_SESSION_SETTINGS,
+  buildPerSessionSettingHandler,
+} from '../per-session-settings.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
 // These are safe file-operation tools that don't execute code or make network requests.
@@ -87,7 +99,12 @@ function handleSetModel(ws, client, msg, ctx) {
     const providerAllowed = getProviderAllowedModels(entry.provider)
     if (providerAllowed) {
       if (!providerAllowed.includes(msg.model)) {
-        log.warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        // #4828: session-scoped — modelSessionId identifies the affected
+        // session. Legacy single-session adapters may surface an empty
+        // sessionId, so fall back to the module-level `log` rather than
+        // throwing inside loggerForSession (matches the input-handlers
+        // pattern from #4823).
+        ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
         sendError(
           ws,
           msg?.requestId,
@@ -96,7 +113,8 @@ function handleSetModel(ws, client, msg, ctx) {
         )
         return
       }
-      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      // #4828: session-scoped (single-session fallback as above).
+      ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
       // broadcast them verbatim. toShortModelId() is a Claude-specific
@@ -111,7 +129,8 @@ function handleSetModel(ws, client, msg, ctx) {
 
   if (ALLOWED_MODEL_IDS.has(msg.model)) {
     if (entry) {
-      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      // #4828: session-scoped (single-session fallback).
+      ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
@@ -142,7 +161,8 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
           // Unknown provider — allow through (fail open for forward-compat).
         }
         if (ProviderClass && ProviderClass.capabilities?.permissionModeSwitch === false) {
-          log.warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
+          // #4828: session-scoped (single-session fallback).
+          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
           sendError(
             ws,
             msg?.requestId,
@@ -154,7 +174,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       }
 
       if (msg.mode === 'plan' && !entry.session.constructor.capabilities?.planMode) {
-        ctx.send(ws, { type: 'session_error', message: 'This provider does not support plan mode' })
+        sendSessionError(ws, ctx, 'This provider does not support plan mode')
         return
       }
       // Auto permission mode is the ultimate privilege escalation in
@@ -185,20 +205,24 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       //    escalate. Only the primary API token can flip to auto.
       if (msg.mode === 'auto') {
         if (client.boundSessionId) {
-          log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
+          // #4828: session-scoped to the bound session — that's the
+          // session the rejection belongs to.
+          loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_FORBIDDEN_BOUND_CLIENT',
             'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.')
           return
         }
         if (ctx.config?.allowAutoPermissionMode !== true) {
-          log.warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
+          // #4828: session-scoped (single-session fallback).
+          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_DISABLED_BY_CONFIG',
             'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.')
           return
         }
       }
       if (msg.mode === 'auto' && !msg.confirmed) {
-        log.info(`Auto mode requested by ${client.id}, awaiting confirmation`)
+        // #4828: session-scoped (single-session fallback).
+        ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).info(`Auto mode requested by ${client.id}, awaiting confirmation`)
         ctx.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',
@@ -206,10 +230,12 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         })
       } else {
         const previousMode = entry.session.permissionMode || 'unknown'
+        // #4828: session-scoped (single-session fallback).
+        const _pmLog = permModeSessionId ? loggerForSession('ws', permModeSessionId) : log
         if (msg.mode === 'auto') {
-          log.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
+          _pmLog.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
         } else {
-          log.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
+          _pmLog.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
         }
         // BaseSession exposes the mode on the public `permissionMode` field.
         // The earlier `_permissionMode` read was a typo that always resolved
@@ -226,7 +252,8 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         // leaving the user staring at fresh prompts in supposed bypass mode.
         const actualMode = entry.session.permissionMode
         if (actualMode !== msg.mode) {
-          log.warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
+          // #4828: session-scoped (single-session fallback).
+          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
           sendError(ws, msg?.requestId, 'PERMISSION_MODE_NOT_APPLIED',
             `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`)
           return
@@ -294,7 +321,9 @@ function handlePermissionResponse(ws, client, msg, ctx) {
         (ageMs !== null && ageMs > 30_000) ||
         (createdAt && clientConnectedAt && clientConnectedAt > createdAt)
       )
-      log.warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
+      // #4828: session-scoped to the bound session — the reject belongs
+      // to the OWNER of `boundSessionId`, not the mismatched `originSessionId`.
+      loggerForSession('ws', client.boundSessionId).warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
         requestId,
         decision,
         clientId: client.id,
@@ -321,6 +350,33 @@ function handlePermissionResponse(ws, client, msg, ctx) {
           message: 'Not authorized to respond to this permission request',
         }),
       })
+      return
+    }
+  }
+
+  // #4798 (audit P0 symmetry with #4788): for UNBOUND clients, require the
+  // originSessionId to match the client's active or subscribed sessions
+  // before routing the decision. Without this, an unbound dashboard tab
+  // could approve/deny a permission for any session by replaying a known
+  // requestId — arguably MORE dangerous than the question hijack vector
+  // (#4788) because permission decisions gate file writes / shell exec.
+  // Mirrors the default filter used by _broadcastToSession (ws-broadcaster.js:106)
+  // so the set of clients permitted to RESPOND to a permission is the same
+  // set that could legitimately have RECEIVED it. Leaves the mapping
+  // intact so the legitimate subscribed client can still respond.
+  //
+  // Paired with the WsServer-side `_registerPermissionRoute` helper which
+  // auto-subscribes eligible clients at dispatch time — that keeps the
+  // legitimate "view A → get permission for A → switch to B → respond"
+  // flow working after this guard lands.
+  if (!client.boundSessionId && originSessionId) {
+    const subscribed = originSessionId === client.activeSessionId
+      || (client.subscribedSessionIds && client.subscribedSessionIds.has(originSessionId))
+    if (!subscribed) {
+      // #4828: session-scoped — the permission belongs to `originSessionId`
+      // when known. Fall back to module-level `log` when the request had
+      // no mapping AND the client isn't bound (legacy / unknown route).
+      ;(originSessionId ? loggerForSession('ws', originSessionId) : log).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
       return
     }
   }
@@ -613,17 +669,13 @@ function handleListSkills(ws, client, msg, ctx) {
  */
 function handleSkillActivate(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_activate requires a non-empty `skillName`' })
+    sendSessionError(ws, ctx, 'skill_activate requires a non-empty `skillName`')
     return
   }
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-  if (typeof entry.session.activateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
+  if (!requireSessionMethod(ws, ctx, entry, 'activateSkill', 'This provider does not support skill activation')) {
     return
   }
   // #3246: subprocess providers (CliSession, CodexSession,
@@ -660,17 +712,13 @@ function handleSkillActivate(ws, client, msg, ctx) {
  */
 function handleSkillDeactivate(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_deactivate requires a non-empty `skillName`' })
+    sendSessionError(ws, ctx, 'skill_deactivate requires a non-empty `skillName`')
     return
   }
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-  if (typeof entry.session.deactivateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill toggling' })
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
+  if (!requireSessionMethod(ws, ctx, entry, 'deactivateSkill', 'This provider does not support skill toggling')) {
     return
   }
   // #3246: same capability gate as activate — subprocess providers
@@ -724,15 +772,12 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
  */
 function handleSkillTrustAccept(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_trust_accept requires a non-empty `skillName`' })
+    sendSessionError(ws, ctx, 'skill_trust_accept requires a non-empty `skillName`')
     return
   }
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
   // #3252: getter-with-optional-chaining keeps mock sessions (which
   // don't define the method) compatible while still surfacing TRUST_NOT_ENABLED
@@ -807,7 +852,8 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
     try {
       trustStore.flush()
     } catch (err) {
-      log.warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
+      // #4828: session-scoped — `sessionId` is in scope (L772 above).
+      loggerForSession('ws', sessionId).warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
       sendError(
         ws,
         msg?.requestId,
@@ -940,11 +986,8 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
   const trustStore = entry?.session?.getTrustStore?.() ?? null
   if (!trustStore || typeof trustStore.grantCommunityTrust !== 'function') {
@@ -1049,7 +1092,8 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
   try {
     trustStore.grantCommunityTrust(msg.author, { realPath: resolvedPath })
   } catch (err) {
-    log.warn(`skill_trust_grant: flush failed (${err && err.message ? err.message : err})`)
+    // #4828: session-scoped — `sessionId` is in scope earlier in the handler.
+    loggerForSession('ws', sessionId).warn(`skill_trust_grant: flush failed (${err && err.message ? err.message : err})`)
     sendError(
       ws,
       msg?.requestId,
@@ -1085,19 +1129,15 @@ const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
   const level = typeof msg.level === 'string' ? msg.level.trim() : ''
   if (!VALID_THINKING_LEVELS.has(level)) {
-    ctx.send(ws, { type: 'session_error', message: `Invalid thinking level: ${level}` })
+    sendSessionError(ws, ctx, `Invalid thinking level: ${level}`)
     return
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setThinkingLevel !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support thinking level control' })
+  if (!requireSessionMethod(ws, ctx, entry, 'setThinkingLevel', 'This provider does not support thinking level control')) {
     return
   }
 
@@ -1105,69 +1145,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
     await entry.session.setThinkingLevel(level)
     ctx.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to set thinking level: ${err.message}` })
-  }
-}
-
-/**
- * #3185 — toggle the per-session promptEvaluator flag. Strict-boolean
- * payload validation, idempotent (no-op when value unchanged so the
- * dashboard can re-send the current value without churning state-file
- * writes), and broadcast on actual change so multi-client UIs stay in
- * sync.
- *
- * Persistence is an immediate `serializeState()` flush rather than the
- * debounced `schedulePersist` other handlers use. Toggles are operator
- * actions — rare enough that the synchronous write is free, and a crash
- * within the debounce window would otherwise silently lose the change.
- */
-function handleSetPromptEvaluator(ws, client, msg, ctx) {
-  if (typeof msg.value !== 'boolean') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_prompt_evaluator requires a boolean `value`',
-    })
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  if (typeof entry.session.setPromptEvaluator !== 'function') {
-    // Defensive — every shipping provider extends BaseSession which adds
-    // the setter. A custom provider that bypasses BaseSession would land
-    // here; refuse rather than silently dropping the toggle.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluator toggling' })
-    return
-  }
-
-  const changed = entry.session.setPromptEvaluator(msg.value)
-  if (!changed) {
-    // Either invalid input (already validated above so unreachable) or
-    // a redundant set. Either way: no broadcast, no persist — the
-    // dashboard already shows the current value.
-    return
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'prompt_evaluator_changed',
-    sessionId,
-    value: entry.session.promptEvaluator,
-  })
-
-  // Persist immediately rather than waiting for the debounced
-  // schedulePersist — toggles are rare enough that the extra write is
-  // free, and a crash within the debounce window would otherwise
-  // silently lose the change. Keep best-effort: failures here log but
-  // don't surface to the client (the in-memory state is correct).
-  try {
-    ctx.sessionManager?.serializeState?.()
-  } catch (err) {
-    log.warn(`Failed to persist promptEvaluator toggle for ${sessionId}: ${err?.message || err}`)
+    sendSessionError(ws, ctx, `Failed to set thinking level: ${err.message}`)
   }
 }
 
@@ -1191,23 +1169,16 @@ function handleSetPromptEvaluator(ws, client, msg, ctx) {
 function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // Accept string or null. Anything else is a malformed payload.
   if (msg.value !== null && typeof msg.value !== 'string') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_prompt_evaluator_skip_pattern requires a string `value` (or null/empty to clear)',
-    })
+    sendSessionError(ws, ctx, 'set_prompt_evaluator_skip_pattern requires a string `value` (or null/empty to clear)')
     return
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setPromptEvaluatorSkipPattern !== 'function') {
+  if (!requireSessionMethod(ws, ctx, entry, 'setPromptEvaluatorSkipPattern', 'This provider does not support promptEvaluatorSkipPattern')) {
     // Defensive — mirrors the parallel path in handleSetPromptEvaluator.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluatorSkipPattern' })
     return
   }
 
@@ -1219,10 +1190,7 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
     try {
       new RegExp(msg.value, 'i')
     } catch (err) {
-      ctx.send(ws, {
-        type: 'session_error',
-        message: `Invalid pattern: ${err.message || 'malformed regex'}`,
-      })
+      sendSessionError(ws, ctx, `Invalid pattern: ${err.message || 'malformed regex'}`)
       return
     }
   }
@@ -1248,122 +1216,8 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   try {
     ctx.sessionManager?.serializeState?.()
   } catch (err) {
-    log.warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
-  }
-}
-
-/**
- * #3805 — toggle the per-session Chroxy context hint flag. Mirrors the
- * #3185 promptEvaluator handler: strict-boolean payload validation,
- * idempotent (no-op when value unchanged so the dashboard can re-send
- * the current value without churning state-file writes), and broadcast
- * on actual change so multi-client UIs stay in sync.
- *
- * Persistence is an immediate `serializeState()` flush rather than the
- * debounced `schedulePersist` other handlers use. Toggles are operator
- * actions — rare enough that the synchronous write is free, and a crash
- * within the debounce window would otherwise silently lose the change.
- */
-function handleSetChroxyContextHint(ws, client, msg, ctx) {
-  if (typeof msg.value !== 'boolean') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_chroxy_context_hint requires a boolean `value`',
-    })
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  if (typeof entry.session.setChroxyContextHint !== 'function') {
-    // Defensive — every shipping provider extends BaseSession which adds
-    // the setter. A custom provider that bypasses BaseSession would land
-    // here; refuse rather than silently dropping the toggle.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support chroxyContextHint toggling' })
-    return
-  }
-
-  const changed = entry.session.setChroxyContextHint(msg.value)
-  if (!changed) {
-    // Either invalid input (already validated above so unreachable) or a
-    // redundant set. Either way: no broadcast, no persist.
-    return
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'chroxy_context_hint_changed',
-    sessionId,
-    value: entry.session.chroxyContextHint,
-  })
-
-  try {
-    ctx.sessionManager?.serializeState?.()
-  } catch (err) {
-    log.warn(`Failed to persist chroxyContextHint toggle for ${sessionId}: ${err?.message || err}`)
-  }
-}
-
-/**
- * #4660 — set the per-session preamble (free-text context prepended to the
- * system prompt every turn). Mirrors the #3805 chroxyContextHint handler:
- * string-typed payload validation, idempotent (no-op when the trimmed value
- * matches what's already stored so the dashboard can re-emit on every
- * keystroke without churning state-file writes), and broadcast on actual
- * change so multi-client UIs stay in sync.
- *
- * Persistence is an immediate `serializeState()` flush rather than the
- * debounced `schedulePersist` other handlers use — same justification as
- * #3805: per-session settings are infrequent operator actions where the
- * sync write is free, and a crash within the debounce window would
- * otherwise silently lose the change.
- */
-function handleSetSessionPreamble(ws, client, msg, ctx) {
-  if (typeof msg.value !== 'string') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_session_preamble requires a string `value`',
-    })
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  if (typeof entry.session.setSessionPreamble !== 'function') {
-    // Defensive — every shipping provider extends BaseSession which adds
-    // the setter. A custom provider that bypasses BaseSession would land
-    // here; refuse rather than silently dropping the update.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support sessionPreamble' })
-    return
-  }
-
-  const changed = entry.session.setSessionPreamble(msg.value)
-  if (!changed) {
-    // No actual change (either redundant set, type-rejected at the setter,
-    // or a string that trims to the same stored value). No broadcast,
-    // no persist.
-    return
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'session_preamble_changed',
-    sessionId,
-    value: entry.session.sessionPreamble,
-  })
-
-  try {
-    ctx.sessionManager?.serializeState?.()
-  } catch (err) {
-    log.warn(`Failed to persist sessionPreamble for ${sessionId}: ${err?.message || err}`)
+    // #4828: session-scoped.
+    loggerForSession('ws', sessionId).warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
   }
 }
 
@@ -1373,7 +1227,7 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   // Validate: must be an array
   if (!Array.isArray(rules)) {
     log.warn(`Rejected invalid permission rules from ${client.id}: not an array`)
-    ctx.send(ws, { type: 'session_error', message: 'rules must be an array' })
+    sendSessionError(ws, ctx, 'rules must be an array')
     return
   }
 
@@ -1381,36 +1235,32 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i]
     if (!rule || typeof rule !== 'object') {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: not an object` })
+      sendSessionError(ws, ctx, `rules[${i}]: not an object`)
       return
     }
     if (typeof rule.tool !== 'string' || !rule.tool.trim()) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: missing tool name` })
+      sendSessionError(ws, ctx, `rules[${i}]: missing tool name`)
       return
     }
     if (rule.decision !== 'allow' && rule.decision !== 'deny') {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: decision must be 'allow' or 'deny'` })
+      sendSessionError(ws, ctx, `rules[${i}]: decision must be 'allow' or 'deny'`)
       return
     }
     if (NEVER_AUTO_ALLOW.has(rule.tool)) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' cannot be auto-allowed` })
+      sendSessionError(ws, ctx, `rules[${i}]: tool '${rule.tool}' cannot be auto-allowed`)
       return
     }
     if (!ELIGIBLE_TOOLS.has(rule.tool)) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules` })
+      sendSessionError(ws, ctx, `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules`)
       return
     }
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setPermissionRules !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support permission rules' })
+  if (!requireSessionMethod(ws, ctx, entry, 'setPermissionRules', 'This provider does not support permission rules')) {
     return
   }
 
@@ -1428,7 +1278,20 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   // Broadcast updated rules to all session clients
   const currentRules = entry.session.getPermissionRules ? entry.session.getPermissionRules() : rules
   ctx.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
-  log.info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
+  // #4828: session-scoped.
+  loggerForSession('ws', sessionId).info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
+}
+
+// #4664: assemble the per-session-setting WS handlers from the registry.
+// Each setting's `requestType` (e.g. `'set_prompt_evaluator'`) is the
+// message-type key the dispatcher looks up; the factory-built handler
+// covers payload validation, session resolution, setter invocation,
+// broadcast, and immediate persist with the same shape every existing
+// hand-written handler used. Adding a new setting means appending one
+// entry to PER_SESSION_SETTINGS — no new handler boilerplate.
+const perSessionSettingHandlers = {}
+for (const settingDef of PER_SESSION_SETTINGS) {
+  perSessionSettingHandlers[settingDef.requestType] = buildPerSessionSettingHandler(settingDef)
 }
 
 export const settingsHandlers = {
@@ -1440,10 +1303,13 @@ export const settingsHandlers = {
   list_skills: handleListSkills,
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
-  set_prompt_evaluator: handleSetPromptEvaluator,
+  // promptEvaluatorSkipPattern keeps its bespoke handler because the
+  // payload shape (string-or-null + pre-validation regex compile to
+  // surface a distinct error code) doesn't fit the boolean/string
+  // factory. The other three per-session settings come from the
+  // registry above.
   set_prompt_evaluator_skip_pattern: handleSetPromptEvaluatorSkipPattern,
-  set_chroxy_context_hint: handleSetChroxyContextHint,
-  set_session_preamble: handleSetSessionPreamble,
+  ...perSessionSettingHandlers,
   skill_activate: handleSkillActivate,
   skill_deactivate: handleSkillDeactivate,
   skill_trust_accept: handleSkillTrustAccept,

@@ -399,6 +399,98 @@ export function resolveSession(ctx, msg, client) {
 }
 
 /**
+ * Send a `session_error` envelope to a WebSocket client (#4773, #4809).
+ *
+ * All `ctx.send(ws, { type: 'session_error', message })` sites across the
+ * handler modules build the same two-field payload by hand. Centralising the
+ * shape here means a future schema tweak (adding `code`, `recoverable`,
+ * `sessionId`, etc.) lands in one place instead of being scattered across
+ * every handler. As of #4809 only ~11 deliberate-soft-fallback sites remain
+ * in src/handlers/ — every one of them carries an extra field beyond
+ * `message` (the `input_conflict` category, the SESSION_TOKEN_MISMATCH
+ * `buildSessionTokenMismatchPayload` spread, or the create-session `code`
+ * field) so they cannot use this helper without extending its signature.
+ *
+ * Routed through `ctx.send` rather than `ws.send` so it stays compatible
+ * with the existing handler tests (which monkey-patch `ctx.send` and
+ * inspect the captured payloads). In production both surfaces ultimately
+ * call `ws.send(JSON.stringify(msg))` via WsServer._send, so behaviour is
+ * identical.
+ *
+ * @param {WebSocket} ws - Target WebSocket connection
+ * @param {object} ctx - Handler context with `send(ws, msg)`
+ * @param {string} message - Human-readable, user-facing error message
+ */
+export function sendSessionError(ws, ctx, message) {
+  if (!ws || !ctx || typeof ctx.send !== 'function') return
+  ctx.send(ws, { type: 'session_error', message })
+}
+
+/**
+ * Resolve a session and emit a canonical "No active session" error on miss (#4773).
+ *
+ * Wraps the 13-times-verbatim handler pattern:
+ *
+ *   const entry = resolveSession(ctx, msg, client)
+ *   if (!entry) {
+ *     ctx.send(ws, { type: 'session_error', message: 'No active session' })
+ *     return
+ *   }
+ *
+ * Returning `null` on miss (after emitting the envelope) preserves the
+ * existing call-site idiom — callers stay `if (!entry) return`. On a hit
+ * the helper is a pure pass-through to `resolveSession`, including its
+ * session-token-binding enforcement (a bound client asking for a different
+ * session resolves to `null` and triggers the same error envelope, matching
+ * the pre-refactor behaviour).
+ *
+ * @param {WebSocket} ws - Target WebSocket connection for the error envelope
+ * @param {object} ctx - Handler context with sessionManager + send
+ * @param {object} msg - Incoming WebSocket message
+ * @param {object} client - Connected client state
+ * @returns {object|null} Session entry on hit, null after emitting on miss
+ */
+export function resolveSessionOrError(ws, ctx, msg, client) {
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendSessionError(ws, ctx, 'No active session')
+    return null
+  }
+  return entry
+}
+
+/**
+ * Capability-gate the bound session's provider before invoking a method (#4773).
+ *
+ * Wraps the 6-times-repeated handler pattern:
+ *
+ *   if (typeof entry.session.setX !== 'function') {
+ *     ctx.send(ws, { type: 'session_error',
+ *       message: 'This provider does not support X' })
+ *     return
+ *   }
+ *
+ * Returns `true` when the method is callable so the caller can proceed,
+ * `false` (after emitting the `session_error` envelope) otherwise. The
+ * helper also defends against a missing `entry` / `entry.session` so call
+ * sites don't need a second null-check before reaching the gate.
+ *
+ * @param {WebSocket} ws - Target WebSocket connection for the error envelope
+ * @param {object} ctx - Handler context with `send(ws, msg)`
+ * @param {object|null} entry - Session entry from resolveSession[OrError]
+ * @param {string} method - Method name to probe on entry.session
+ * @param {string} message - Human-readable capability-gate error message
+ * @returns {boolean} true if method is callable, false after emitting on miss
+ */
+export function requireSessionMethod(ws, ctx, entry, method, message) {
+  if (!entry || !entry.session || typeof entry.session[method] !== 'function') {
+    sendSessionError(ws, ctx, message)
+    return false
+  }
+  return true
+}
+
+/**
  * Send a structured error response to a WebSocket client.
  * Use in handler catch blocks so the client can clear loading state
  * and surface a user-facing message instead of silently spinning.

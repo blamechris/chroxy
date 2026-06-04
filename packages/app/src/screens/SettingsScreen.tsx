@@ -35,6 +35,7 @@ import {
   formatPlatform,
   formatRelativeTime,
 } from '@chroxy/store-core';
+import type { VoiceInputMode } from '@chroxy/store-core';
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
@@ -89,6 +90,25 @@ function isValidHHMM(s: string): boolean {
   return h <= 23 && m <= 59;
 }
 
+/**
+ * #4807: voice input mode picker options. Mirrors the dashboard
+ * `SettingsPanel` select (`packages/dashboard/src/components/SettingsPanel.tsx`)
+ * and the shared `InputSettings.voiceInputMode` field. The mode union
+ * itself is consolidated in `@chroxy/store-core` (#4825).
+ */
+const VOICE_INPUT_MODES: { value: VoiceInputMode; label: string; hint: string }[] = [
+  {
+    value: 'continuous',
+    label: 'Continuous',
+    hint: 'Mic stays open until you tap stop.',
+  },
+  {
+    value: 'auto-pause',
+    label: 'Auto-pause',
+    hint: 'Mic stops automatically on silence.',
+  },
+];
+
 const SPEECH_LANGUAGES = [
   { tag: 'en-US', label: 'English (US)' },
   { tag: 'en-GB', label: 'English (UK)' },
@@ -131,6 +151,7 @@ export function SettingsScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [speechLang, setSpeechLangState] = useState<string>('en-US');
   const [showLangPicker, setShowLangPicker] = useState(false);
+  const [showVoiceModePicker, setShowVoiceModePicker] = useState(false);
   const [biometricAvail, setBiometricAvail] = useState(false);
   const [biometricOn, setBiometricOn] = useState(false);
   // #4559: surfaces "server disconnected" when a notification-prefs Switch
@@ -760,6 +781,14 @@ export function SettingsScreen() {
           <Text style={styles.rowLabel}>Speech Language</Text>
           <Text style={styles.rowValue}>{currentLangLabel}</Text>
         </TouchableOpacity>
+        <View style={styles.separator} />
+        <TouchableOpacity style={styles.row} onPress={() => setShowVoiceModePicker(true)}>
+          <Text style={styles.rowLabel}>Voice Input Mode</Text>
+          <Text style={styles.rowValue}>
+            {VOICE_INPUT_MODES.find((m) => m.value === inputSettings.voiceInputMode)?.label
+              ?? inputSettings.voiceInputMode}
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {/* ABOUT */}
@@ -893,6 +922,49 @@ export function SettingsScreen() {
               ))}
             </ScrollView>
             <TouchableOpacity style={[styles.sheetOption, styles.sheetCancel]} onPress={() => setShowLangPicker(false)}>
+              <Text style={[styles.sheetOptionText, styles.sheetCancelText]}>Cancel</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Voice input mode picker (#4807) */}
+      <Modal
+        visible={showVoiceModePicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowVoiceModePicker(false)}
+      >
+        <Pressable style={styles.sheetOverlay} onPress={() => setShowVoiceModePicker(false)}>
+          <Pressable
+            style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <Text style={styles.sheetTitle}>Voice Input Mode</Text>
+            <ScrollView style={styles.sheetList} bounces={false}>
+              {VOICE_INPUT_MODES.map((opt) => {
+                const active = opt.value === inputSettings.voiceInputMode;
+                return (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={[styles.sheetOption, active && styles.sheetOptionActive]}
+                    onPress={() => {
+                      updateInputSettings({ voiceInputMode: opt.value });
+                      setShowVoiceModePicker(false);
+                    }}
+                  >
+                    <Text style={[styles.sheetOptionText, active && styles.sheetOptionTextActive]}>
+                      {opt.label}
+                    </Text>
+                    <Text style={styles.sheetOptionTag}>{opt.hint}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <TouchableOpacity
+              style={[styles.sheetOption, styles.sheetCancel]}
+              onPress={() => setShowVoiceModePicker(false)}
+            >
               <Text style={[styles.sheetOptionText, styles.sheetCancelText]}>Cancel</Text>
             </TouchableOpacity>
           </Pressable>

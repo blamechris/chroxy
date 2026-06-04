@@ -10,9 +10,10 @@
  * the SDK consumes them as Anthropic API tool definitions.
  *
  * Deferred to follow-up issues (see #4047 epic):
- *   - Task (subagent) — #4049
  *   - MCP — #4048
  */
+
+import { SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
 
 /**
  * Valid TodoWrite status values. Single source of truth — the JSON-schema
@@ -21,6 +22,37 @@
  */
 export const TODO_STATUS_LIST = Object.freeze(['pending', 'in_progress', 'completed'])
 export const TODO_STATUSES = new Set(TODO_STATUS_LIST)
+
+/**
+ * Permissiveness ranking for the Task tool's per-launch `permission_mode`
+ * override (#5017). Lower number = more restrictive; higher = more permissive.
+ *
+ *   plan        (0) — system prompt asks the model to plan before acting;
+ *                     every tool call still gates on user approval through
+ *                     PermissionManager (the byok provider has
+ *                     `planMode: false` and PermissionManager does not
+ *                     special-case 'plan', so the gating is identical to
+ *                     'approve' from the executor's point of view — the
+ *                     restrictiveness comes from the prompt + approval gate,
+ *                     not a server-side write-tool block).
+ *   approve     (1) — default; every tool call gates on user approval.
+ *   acceptEdits (2) — Read/Write/Edit/NotebookEdit/Glob/Grep auto-approved.
+ *   auto        (3) — every tool call auto-approved (skip-permissions).
+ *
+ * The Task tool refuses to launch a subagent under a mode strictly more
+ * permissive than the parent's. Equal-or-stricter is allowed.
+ *
+ * Kept here (next to the schema enum) so the JSON-schema property, the
+ * runtime validator in byok-session, and the test matrix all read from
+ * one source of truth.
+ */
+export const TASK_PERMISSION_MODE_LIST = Object.freeze(['plan', 'approve', 'acceptEdits', 'auto'])
+export const TASK_PERMISSION_MODE_RANK = Object.freeze({
+  plan: 0,
+  approve: 1,
+  acceptEdits: 2,
+  auto: 3,
+})
 
 export const BUILTIN_TOOLS = [
   {
@@ -151,6 +183,63 @@ export const BUILTIN_TOOLS = [
         },
       },
       required: ['todos'],
+    },
+  },
+  {
+    name: 'Task',
+    description:
+      'Spawn a focused sub-agent (subagent) to handle a delegated piece of work. The ' +
+      'sub-agent runs as a fresh ClaudeByokSession with its own isolated message history, ' +
+      'inheriting this session\'s permission mode and cwd by default. Use it to: research a topic ' +
+      'without polluting the parent context, run multi-step work in a focused scope, or delegate ' +
+      'a task that needs its own tool budget. The sub-agent\'s final assistant text is returned ' +
+      'as the tool_result — intermediate tool calls happen inside the child and are NOT ' +
+      'surfaced to the parent (only `agent_spawned` / `agent_completed` events fire). ' +
+      'Token cost is accumulated into the parent turn\'s `result.cost` so accounting stays ' +
+      'attributed to the user-facing session. ' +
+      'Cancellation: interrupting the parent cascades to the child via a shared AbortSignal. ' +
+      'Optional `permission_mode` overrides the inherited mode for this single launch, but ' +
+      'is constrained to be at-most-as-permissive as the parent (ranking: plan < approve < ' +
+      'acceptEdits < auto). Requesting a stricter mode is allowed; requesting a more ' +
+      'permissive mode is rejected with an is_error tool_result. ' +
+      'MCP tools: by default the sub-agent inherits the parent\'s MCP fleet (same ' +
+      '`mcp__<server>__<tool>` set as this turn), at zero extra spawn cost. Pass ' +
+      '`inherit_mcp: false` to launch a sub-agent with built-in tools only (no MCP). ' +
+      'Subagent profiles (#5018): pass `subagent_type` to bias the child toward a focused role. ' +
+      `Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}. Each profile carries a tailored ` +
+      'system prompt and may restrict the child\'s tool set (e.g. code-reviewer is read-only). ' +
+      'Unknown subagent_type values fall back to the v1 default (no profile applied) and emit ' +
+      'a warn log on the server so the delegation stays forward-compatible.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        description: {
+          type: 'string',
+          description: 'Short (3-5 word) description of the task. Surfaced as the sub-agent label in the UI.',
+        },
+        prompt: {
+          type: 'string',
+          description: 'Full task prompt sent to the sub-agent as its initial user message.',
+        },
+        subagent_type: {
+          type: 'string',
+          enum: [...SUBAGENT_PROFILE_NAMES],
+          description:
+            'Optional subagent profile id. When set, the runner applies the profile\'s system prompt '
+            + `and tool-set restriction to the child. Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}. `
+            + 'Unknown values fall back to v1 default (no profile applied) with a server-side warn log.',
+        },
+        permission_mode: {
+          type: 'string',
+          enum: [...TASK_PERMISSION_MODE_LIST],
+          description: 'Optional per-launch permission mode for the subagent. Must be at-most-as-permissive as the parent (plan < approve < acceptEdits < auto). When omitted, the subagent inherits the parent\'s mode.',
+        },
+        inherit_mcp: {
+          type: 'boolean',
+          description: 'When true (the default), the sub-agent inherits the parent\'s MCP fleet so nested tool use can call the same mcp__<server>__<tool> tools the parent sees — at zero extra spawn cost. Pass false to run the sub-agent with built-in tools only (no MCP).',
+        },
+      },
+      required: ['description', 'prompt'],
     },
   },
   {

@@ -92,3 +92,25 @@ name: All E2E flows
 # multi-question payload without bailing. Extends once mobile
 # renderer iterates all N questions.
 - runFlow: ask-user-question-multi.yaml
+
+# Flow 19: AskUserQuestion Other → freeform send-path (#4877 / #4755)
+# — exercises the third (deferred) acceptance criterion of #4755:
+# tapping the synthesized Other sentinel, typing a freeform answer,
+# and pressing Send. Pins the PR #4864 mobile parity with the
+# dashboard's `{answer:<otherLabel>, freeformText, toolUseId}` wire
+# shape end-to-end on a real RN runtime (testIDs `approval-freetext-input`
+# / `approval-freetext-send`).
+- runFlow: ask-question-other-freeform.yaml
+
+# Flow 20: ChatView mixed multi-question form (#4762) — sibling to
+# ask-user-question-multi.yaml that exercises the *mixed* wire shape
+# (single-select + multi-select + with-Other) the dashboard's
+# MultiQuestionForm (#4735 / #4760) handles. Today MessageBubble
+# renders Q[0] only; flow asserts Q[0]'s render (including the
+# model-supplied 'Other' label on Q[0]) + the answered round-trip,
+# and pins handleUserQuestion accepts the mixed payload (Q[1]
+# multi-select branch + Q[2] synthetic-Other branch) without
+# bailing on `firstNormalized == null`. Extends with
+# `question-prompt-multi` / `question-multi-submit` + summary-chip
+# assertions once the mobile multi-question renderer lands.
+- runFlow: chat-multi-question.yaml

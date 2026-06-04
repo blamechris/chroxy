@@ -39,6 +39,64 @@ export class DockerSdkSession extends SdkSession {
     return { ...SdkSession.capabilities, containerized: true }
   }
 
+  /**
+   * Preflight credentials block — overrides SdkSession's host-side spec (#4780).
+   *
+   * Mirror of DockerSession.preflight — see that class for the full rationale.
+   * The container has no ~/.claude state and the host Keychain is invisible,
+   * so `claude login` is futile inside the container. Only `ANTHROPIC_API_KEY`
+   * gets forwarded (see `_startContainer` and `DockerBackend.FORWARDED_ENV_KEYS`),
+   * so it is the only env var we advertise here — listing CLAUDE_CODE_OAUTH_TOKEN
+   * would falsely report ready when the container would still be unauthed.
+   */
+  static get preflight() {
+    const parent = SdkSession.preflight
+    return {
+      ...parent,
+      credentials: {
+        envVars: ['ANTHROPIC_API_KEY'],
+        hint: 'set ANTHROPIC_API_KEY on the host so it is forwarded into the container (no OAuth fallback inside the container — the container has no ~/.claude state)',
+        optional: true,
+      },
+    }
+  }
+
+  /**
+   * Resolve runtime auth state for the dashboard (#4769, #4780).
+   *
+   * Mirror of DockerSession.resolveAuth — overrides SdkSession's OAuth
+   * fallback because the container has no ~/.claude state, so env var is
+   * the only valid path. See DockerSession for the full rationale.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `Anthropic API (forwarded to container) (${matched} set)`,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint,
+      detail: 'Not configured — set ANTHROPIC_API_KEY on the host (forwarded into the container at run time). No OAuth fallback inside the container — the container has no ~/.claude state.',
+    }
+  }
+
   constructor(opts = {}) {
     super(opts)
     const containerId = opts.containerId?.trim() || null

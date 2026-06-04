@@ -28,6 +28,7 @@ const APP_COMMANDS: &[&str] = &[
     "voice_available",
     "start_voice_input",
     "stop_voice_input",
+    "reset_speech_permissions",
     "tile_window",
     "read_clipboard_image",
     "reveal_in_finder",
@@ -128,6 +129,18 @@ fn main() {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            // #4953: the helper-entitlements plist participates in the sign
+            // step now, so its mtime must invalidate the cache — otherwise
+            // edits to the plist (e.g. adding new entitlements) silently
+            // ship under the old signature on a warm cache.
+            let helper_ent_path = format!("{}/entitlements-helper.plist", manifest_dir);
+            println!("cargo:rerun-if-changed={}", helper_ent_path);
+            let helper_ent_mtime = std::fs::metadata(&helper_ent_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             // `swiftc --version` writes the full toolchain banner (Swift release
             // + Xcode build id on Apple toolchains) to stdout. If swiftc is
             // missing or the call fails, fall back to "unknown" so we still
@@ -143,9 +156,14 @@ fn main() {
                     None
                 })
                 .unwrap_or_else(|| "unknown".to_string());
+            // BUMP THE v<N> PREFIX whenever the key schema (fields/format) changes
+            // — otherwise warm on-disk caches with the old schema match the new
+            // key by coincidence and ship a stale binary. Add a field → bump.
+            // Reorder fields → bump. Change the separator → bump.
             let cache_key = format!(
-                "v3\nsrc_mtime={}\nidentity={}\nkeychain={}\nswiftc={}\n",
+                "v4\nsrc_mtime={}\nidentity={}\nkeychain={}\nswiftc={}\nhelper_ent_mtime={}\n",
                 src_mtime_secs, identity_for_cache, keychain_for_cache, swiftc_version,
+                helper_ent_mtime,
             );
 
             let cached = std::path::Path::new(&swift_out).exists()
@@ -188,10 +206,22 @@ fn main() {
                         // ambiguity in CI if login.keychain remains on the
                         // search path alongside the temp signing keychain.
                         let keychain = std::env::var("APPLE_KEYCHAIN_PATH").ok();
+                        // Helper-scoped entitlements (#4953). TCC binds
+                        // microphone access per-binary, so the parent app's
+                        // com.apple.security.device.audio-input does NOT
+                        // propagate to this subprocess — the helper needs its
+                        // own audio-input entitlement embedded at sign time.
+                        // Without --entitlements, the helper signs with empty
+                        // entitlements and AVAudioEngine init is denied
+                        // silently. #4801 / #4812 only patched the parent.
+                        let helper_entitlements = format!(
+                            "{}/entitlements-helper.plist", manifest_dir,
+                        );
                         let mut args: Vec<&str> = vec![
                             "--force",
                             "--options", "runtime",
                             "--timestamp",
+                            "--entitlements", &helper_entitlements,
                             "--sign", &identity,
                         ];
                         if let Some(ref kc) = keychain {

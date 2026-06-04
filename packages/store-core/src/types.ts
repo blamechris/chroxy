@@ -86,6 +86,28 @@ export interface ChatMessage {
    * Undefined for legacy errors that carry no code.
    */
   code?: string;
+  /**
+   * #4947 / #5006: only set on `type: 'error'` bubbles whose `code` is one
+   * of the two resume-failure codes emitted by CliSession's
+   * `_handleChildClose` resume-failure path:
+   *   - `'resume_unknown'` (server PR #4944) — recoverable: the CLI
+   *     rejected `--resume <id>` and chroxy has already auto-fallen-back
+   *     to a fresh conversation.
+   *   - `'resume_unknown_exhausted'` (server PR #5004) — terminal: the
+   *     post-fallback retry ALSO matched the unknown-resume pattern; the
+   *     server has stopped auto-respawning and the user must start a
+   *     fresh session manually.
+   *
+   * Carries the conversation id chroxy passed to `claude --resume <id>`
+   * before the CLI rejected it. The dashboard / mobile
+   * `ResumeUnknownChip` surfaces this as small mono-spaced subtext under
+   * the headline so operators investigating a recurring resume failure
+   * can correlate against the persisted state file
+   * (`resumeConversationId` in `~/.chroxy/session-state.json`) without
+   * grepping logs. Undefined for every other error code and for
+   * pre-#4944 servers that don't emit the field.
+   */
+  attemptedResumeId?: string;
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
   /**
@@ -135,6 +157,34 @@ export interface ChatMessage {
    * the banner from the cached metadata.
    */
   evaluator?: EvaluatorRewriteMeta;
+  /**
+   * #5016 — Task subagent child progress, attached to the parent's
+   * `tool_use` (Task) bubble. Each entry is one wire event the child
+   * emitted (re-emitted by the parent as `agent_event` and routed back
+   * to the parent bubble by `handleAgentEvent`). Renderers iterate this
+   * list to surface nested sub-bubbles inside the Task tool_call.
+   *
+   * Only set on `type: 'tool_use'` bubbles whose `toolUseId` matches a
+   * Task tool_use whose subagent emitted at least one progress event.
+   * Undefined for all other bubbles and for Task tool_use bubbles whose
+   * child finished without intermediate output (rare — child went
+   * straight from spawn to final text in one shot).
+   */
+  childAgentEvents?: ChildAgentEvent[];
+}
+
+/**
+ * #5016 — One nested wire event emitted by a Task subagent. Kept
+ * shape-loose because the underlying payload mirrors the server's
+ * `tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`
+ * event shapes, and a strict union here would duplicate that surface.
+ * Renderers switch on `type` and access the fields they recognise.
+ */
+export interface ChildAgentEvent {
+  /** Wire event name (`'tool_start'`, `'tool_result'`, `'tool_input_delta'`, `'stream_delta'`). */
+  type: string;
+  /** Verbatim payload from the child's event (shape depends on `type`). */
+  payload: Record<string, unknown>;
 }
 
 export interface SavedConnection {
@@ -149,9 +199,71 @@ export interface ContextUsage {
   cacheRead: number;
 }
 
+/**
+ * Voice input behaviour. `'continuous'` keeps the mic open across silence
+ * gaps until the user explicitly clicks stop (the hook restarts Web Speech
+ * recognition on each silence-triggered `onend`). `'auto-pause'` lets the
+ * browser auto-stop on silence — the previous behaviour, kept for users who
+ * prefer it (#4785). Defaults to `'continuous'` so new users get the
+ * click-to-start / click-to-stop experience by default.
+ *
+ * #4825: consolidated here so the mobile `useSpeechRecognition` hook, the
+ * dashboard `useVoiceInput` hook, the dashboard `SettingsPanel` change
+ * handler, and the mobile `SettingsScreen` picker all share one declaration.
+ *
+ * Compile-time enforcement is only as strong as the consuming pattern: sites
+ * that exhaustively key a `Record<VoiceInputMode, …>` (e.g. the dashboard
+ * `SettingsPanel` change handler, the mobile `SettingsScreen` picker tuple
+ * typed as `{ value: VoiceInputMode; … }[]`) will be flagged by TS when the
+ * union widens. Sites that validate untrusted runtime input (localStorage
+ * rehydrate, SecureStore rehydrate, wire payloads) MUST use the
+ * {@link isVoiceInputMode} guard below — it is keyed off the same exhaustive
+ * `Record<VoiceInputMode, true>` map, so widening the union to a new mode
+ * without updating that map is a TS error (missing property). Canonical
+ * rehydrate-path consumers:
+ * - `packages/dashboard/src/store/connection.ts` — localStorage (#4853)
+ * - `packages/app/src/store/connection.ts` — SecureStore (#4872)
+ */
+export type VoiceInputMode = 'continuous' | 'auto-pause';
+
+/**
+ * #4853 — exhaustive `Record<VoiceInputMode, true>` map driving
+ * {@link isVoiceInputMode}. Adding a new variant to the `VoiceInputMode`
+ * union without listing it here is a TS error (missing property), so the
+ * guard cannot silently drop a new mode the way a hand-written `===`
+ * chain would. The same pattern is used inline by the dashboard
+ * `SettingsPanel` change handler (#4825); the guard centralises it for
+ * every other validation site (localStorage rehydrate, wire payload
+ * validation, etc.) so they all share one source of truth.
+ *
+ * Module-scope `const` rather than a closure-local literal so the
+ * underlying object identity is stable and the V8 hidden class doesn't
+ * thrash on hot rehydrate paths.
+ */
+const VOICE_INPUT_MODES: Record<VoiceInputMode, true> = {
+  continuous: true,
+  'auto-pause': true,
+};
+
+/**
+ * #4853 — runtime type-guard for `VoiceInputMode`. Returns `true` only
+ * when `value` is exactly one of the union members declared above; every
+ * non-string input (undefined, null, number, object, array) returns
+ * `false` without throwing. Use at boundary sites that accept untrusted
+ * input — localStorage rehydrate, JSON.parse of a wire payload, etc.
+ *
+ * The narrowing predicate (`value is VoiceInputMode`) lets callers
+ * assign directly without an unsafe cast once the guard passes.
+ */
+export function isVoiceInputMode(value: unknown): value is VoiceInputMode {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(VOICE_INPUT_MODES, value);
+}
+
 export interface InputSettings {
   chatEnterToSend: boolean;
   terminalEnterToSend: boolean;
+  voiceInputMode: VoiceInputMode;
 }
 
 /** Default context window size (tokens) used when model metadata doesn't specify one. */
@@ -389,6 +501,16 @@ export interface ServerError {
    * existing callers continue to render as red error toasts.
    */
   severity?: 'error' | 'warning';
+  /**
+   * #5039: optional partial-cost sub-line surfaced when PR #5037 folded
+   * any parent + Task subagent rounds onto an error envelope before the
+   * error fired. Rendered as a small secondary text under the main
+   * toast message; absent for every error path that didn't carry a
+   * usable partial snapshot. Pre-formatted (via
+   * `formatPartialCostLine`) so the dashboard and mobile surfaces can
+   * share copy without re-implementing the cost/token formatting.
+   */
+  partialCostLine?: string;
 }
 
 export interface DevPreview {
@@ -537,6 +659,29 @@ export interface InactivityWarning {
 }
 
 /**
+ * #4653 — one entry per chroxy-side intervention surfaced to the user.
+ *
+ * Currently only `multi_question` (the permission-hook deny for multi-question
+ * AskUserQuestion forms shipped in #4648). The shape is intentionally
+ * extensible so future intervention kinds (e.g. sibling-deny from #4668,
+ * stream-stall auto-recovery from #4475) can land here without a wire
+ * version bump.
+ *
+ * - `kind`: discriminator the renderer switches on for icon + copy
+ * - `toolUseId`: stable id of the original tool_use; the dashboard dedups
+ *   repeats by this so a stuck model re-emitting the same payload doesn't
+ *   inflate the counter falsely
+ * - `count`: secondary detail (e.g. number of questions in the denied form)
+ * - `timestamp`: server wall-clock when the deny happened
+ */
+export interface SessionIntervention {
+  kind: 'multi_question';
+  toolUseId: string;
+  count: number;
+  timestamp: number;
+}
+
+/**
  * Base session state shared by both the mobile app and web dashboard.
  *
  * Each consumer extends this with platform-specific fields:
@@ -579,6 +724,34 @@ export interface BaseSessionState {
    */
   lastClientActivityAt: number | null;
   health: SessionHealth;
+  /**
+   * #4879 — quiet "user-initiated Stop" confirmation marker. Set by the
+   * `session_stopped` handler (which receives the server-broadcast wire
+   * message wired in #4868) to `Date.now()` when the child process exits
+   * cleanly after the user tapped Stop. Null at all other times.
+   *
+   * Distinct from `health: 'crashed'` (loud unexpected-exit error UX) and
+   * from `claudeReady: false` (transient between-turns idle). Renderers
+   * use this to surface a calm, informational status strip ("Session
+   * stopped." / "Session stopped. (exit N)") that the operator can choose
+   * to act on — typically by sending another message (which clears
+   * `stoppedAt` on the next `claude_ready`) or by deleting the session.
+   *
+   * Cleared when a fresh `claude_ready` arrives for the same session
+   * (server restarted the child after the next user input) — the call
+   * sites in app/dashboard message-handler clear it alongside the
+   * `claudeReady: true` patch returned from `handleClaudeReady`.
+   */
+  stoppedAt: number | null;
+  /**
+   * #4879 — child process exit code reported by the server alongside
+   * `session_stopped`. Null when the wire message omitted it (e.g.
+   * future in-process providers per the #4756 follow-up) or when the
+   * session is not currently in the stopped state (`stoppedAt == null`).
+   * Renderers surface a non-zero code as a small "(exit N)" suffix; code
+   * 0 is the common clean-exit case and renders bare.
+   */
+  stoppedCode: number | null;
   activeAgents: AgentInfo[];
   /**
    * #4308 — in-flight tool calls for this session, in arrival order. See
@@ -622,4 +795,21 @@ export interface BaseSessionState {
   // user replies, and on `socket.onclose` since the server does not
   // replay `inactivity_warning` on reconnect.
   inactivityWarning: InactivityWarning | null;
+  /**
+   * #4653 — chroxy-side interventions surfaced to the user for this session.
+   * Append-only ring (max ~50 entries — see {@link MAX_SESSION_INTERVENTIONS}).
+   * Empty array when no intervention has fired; never `null` so the renderer's
+   * `.length` check is safe.
+   *
+   * Currently driven only by `multi_question_intervention` (the permission-hook
+   * deny for multi-question AskUserQuestion shipped in #4648); future
+   * intervention kinds (sibling-deny #4668, stream-stall auto-recovery #4475)
+   * append entries with their own discriminator without a wire version bump.
+   *
+   * NOT persisted across reconnects — the server does not replay intervention
+   * events, so the array resets on a fresh session_list snapshot. This is
+   * acceptable: the counter is a "what just happened" affordance, not an
+   * audit log.
+   */
+  interventions: SessionIntervention[];
 }

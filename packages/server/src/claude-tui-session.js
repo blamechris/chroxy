@@ -6,8 +6,9 @@ import { fileURLToPath } from 'url'
 import { BaseSession } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
-import { createLogger } from './logger.js'
+import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
+import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import {
   parseBackgroundShellId,
@@ -100,6 +101,53 @@ const CLAUDE = resolveBinary('claude', [
 // _isBusy + _pendingUserAnswer and emit ASK_USER_QUESTION_STALL so the
 // dashboard can prompt the user to retry. Root cause is fixed in Chunk B.
 const ASK_USER_QUESTION_WATCHDOG_MS = 30 * 1000
+
+// #4651 — settle delay between the "Other" digit write and the freeform
+// text write. After we press the Other digit, claude TUI swaps from the
+// option-select menu to a text-input prompt. Writing the freeform text
+// too quickly races that swap (the keystrokes land at the menu and jump-
+// nav fires — same footgun as #4288). 150 ms covers the observed local-
+// loop swap time with comfortable margin; tune via the empirical
+// recording in scripts/tui-form-recorder.mjs if dogfood reveals a wedge.
+const OTHER_FREEFORM_SETTLE_MS = 150
+
+// #4651 — additional watchdog window granted after the Other digit lands
+// so the freeform text write + claude TUI's text-input acknowledgement
+// have time to complete. Without this, the existing 30s ASK_USER_QUESTION
+// watchdog can fire mid-freeform-write on a slow PTY (laggy tunnel,
+// emoji-heavy text) and tear down a turn that's actively progressing.
+const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
+
+// #4635 — settle delay between the final single-select question's auto-
+// advance digit and the Submit `'1'` keystroke. Mixed multi-question
+// forms (with at least one multi-select) work fine because the explicit
+// `'\t'` after each multi-select gives claude TUI a settled commit signal
+// that fully renders the next screen before our next keystroke. But on a
+// pure all-single-select form the LAST digit auto-advances to the Submit
+// screen, and the 1ms per-char throttle writes the Submit `'1'` faster
+// than claude TUI can render the Submit screen — so the `'1'` lands on
+// the still-rendering last-question screen, gets swallowed, and the form
+// never submits. The 30s ASK_USER_QUESTION watchdog then fires.
+//
+// 150 ms mirrors the empirically-validated OTHER_FREEFORM_SETTLE_MS used
+// for the option-menu → text-input prompt swap (#4651) — same render-
+// settling motivation, same observed magnitude. Only inserted when the
+// final question in the sequence is single-select; mixed forms keep the
+// pre-#4635 timing-free path (Tab's commit signal makes Submit settle
+// naturally and the existing empirical recording pins the Tab + '1' run).
+//
+// #4882 (open) — this constant + the trailing `\r` below are still
+// "best-effort defensive" rather than empirically confirmed. The recorder
+// script `scripts/tui-form-recorder.mjs` (repo root) was originally only run
+// against a MIXED multi-question form (#4604 Chunk B). A fresh recorder pass
+// against a pure all-single-select N-question prompt is needed to:
+//   - confirm 150ms is the right magnitude (or tune down/up)
+//   - confirm the Submit screen accepts `'1'` (vs needing `'\r'`, vs auto-
+//     submitting after the last digit with NO Submit screen)
+// Until that happens, the 30s ASK_USER_QUESTION watchdog is the safety net
+// for any remaining wedge. See issue #4882 for the empirical reconcile
+// tracking and the prior all-single-select wedge analysis (#4635, #4867).
+const MULTI_QUESTION_SUBMIT_SETTLE_MS = 150
 
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
 // block headless spawn. The dialog is interactive-only — without this, the
@@ -278,6 +326,28 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * claude-tui explicitly deletes ANTHROPIC_API_KEY from the spawn env and
+   * routes via OAuth/Keychain — the interactive TUI under a PTY bypasses
+   * programmatic credit metering. Marked ready up front; the on-disk OAuth
+   * probe can't see Keychain credentials.
+   *
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth() {
+    const envVars = this.preflight.credentials.envVars
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint: 'run `claude login` if not yet authed',
+      detail: 'Claude subscription (interactive TUI under PTY — bypasses programmatic credit metering)',
+    }
+  }
+
   static getFallbackModels() {
     return FALLBACK_MODELS
   }
@@ -293,7 +363,23 @@ export class ClaudeTuiSession extends BaseSession {
     return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
   }
 
-  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, skipPermissions } = {}) {
+  /**
+   * #4653: provider-specific events the SessionManager should forward as
+   * transient `session_event`s. `multi_question_intervention` fires from
+   * `_emitToolHookEvent` whenever PreToolUse sees an AskUserQuestion whose
+   * `questions[]` has length > 1 — i.e. the EXACT condition the bash
+   * permission-hook (`packages/server/hooks/permission-hook.sh`, #4648)
+   * denies on. The dashboard renders an inline notice + a session-footer
+   * counter so the user knows chroxy intercepted the multi-question form.
+   * Without this surface the user wonders if the model is being clever
+   * (asking one at a time naturally) or if chroxy is intervening — see
+   * the v0.9.24 dogfood feedback captured on #4653.
+   */
+  static get customEvents() {
+    return ['multi_question_intervention']
+  }
+
+  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, firstOutputTimeoutMs, skipPermissions } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
 
     this._port = port || null
@@ -310,6 +396,13 @@ export class ClaudeTuiSession extends BaseSession {
     // uses so the existing permission HTTP route routes us with no changes.
     this._hookSecret = this._port ? randomBytes(32).toString('hex') : null
     this._sessionId = null   // upstream claude conversation uuid, assigned at start()
+    // #4792: session-scoped logger. Assigned in start() once _sessionId is
+    // generated. Until then, code paths that need to log MUST fall back to
+    // the module-level `log` (e.g. trust pre-write failure, sink dir create
+    // failure). Per-session log lines (sendMessage, respondToQuestion,
+    // attachment materialization) prefer `this._log` so the WsServer log
+    // listener can route them to the right bound client (#4787, #4793).
+    this._log = null
     this._sinkDir = null     // created on start, removed on destroy
     this._term = null        // persistent PTY for the session's lifetime
     this._settingsPath = null
@@ -360,6 +453,36 @@ export class ClaudeTuiSession extends BaseSession {
     // _onAskUserQuestionStall clears busy state + emits an error so the
     // session is recoverable. Cleared on PostToolUse + destroy().
     this._askUserQuestionWatchdog = null
+    // #4884: forensic timing for the defensive trailing '\r' added in
+    // #4867 / #4886 — record the wall-clock at which Submit-'1' is written
+    // to the PTY for each multi-question form, keyed by toolUseId. On the
+    // matching PostToolUse we log the delta at INFO so live mixed-form
+    // submissions generate evidence that the trailing '\r' (which lands
+    // ~1ms after Submit-'1' on the mixed path) is harmless. Map (not
+    // single field) to mirror _pendingUserAnswers — parallel AskUserQuestion
+    // tool_use blocks in one turn each get an independent submit-time entry.
+    // Entries are pruned when the matching PostToolUse fires OR when the
+    // teardown / watchdog stall path clears the form.
+    this._multiQuestionSubmitAt = new Map()
+    // #4732: effective pre-first-output timeout in ms. Distinct from
+    // _streamStallTimeoutMs (#4638) — that watchdog only re-arms BETWEEN
+    // hook events, so a turn where claude TUI accepts the prompt write
+    // but never emits ANY hook (stuck Anthropic API call, frozen dialog
+    // screen) had no recoverable watchdog short of the 2h hard cap. This
+    // timer arms at _armResultTimeout() time and disarms on the first
+    // consumed hook event. 0 disables; non-finite, negative, or above
+    // the 24h ceiling falls back to FIRST_OUTPUT_TIMEOUT_MS (90s).
+    this._firstOutputTimeoutMs =
+      isOperatorTimeoutInRange(firstOutputTimeoutMs, { allowZero: true, name: 'firstOutputTimeoutMs', log })
+        ? firstOutputTimeoutMs
+        : ClaudeTuiSession.FIRST_OUTPUT_TIMEOUT_MS
+    this._firstOutputTimeout = null
+    this._firstOutputArmedAt = 0
+    // #4732: per-turn latch — flipped true by `_clearFirstOutputWatchdog`
+    // so subsequent `_armResultTimeout` re-arms (one per consumed hook)
+    // don't re-arm the first-output timer. Reset to false on each new
+    // turn via `_resetFirstOutputWatchdogForTurn` (sendMessage entry path).
+    this._firstOutputDisarmed = false
   }
 
   /**
@@ -374,16 +497,23 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * Back-compat setter: writing `_pendingUserAnswer = null` (the pattern
-   * used at every turn-teardown site) clears the entire Map. Writing an
-   * entry sets it in the Map keyed by its toolUseId AND updates the
-   * "most recent" pointer. Pre-#4668 callers don't need to change.
+   * Back-compat setter: writing an entry sets it in the Map keyed by its
+   * toolUseId AND updates the "most recent" pointer. Pre-#4668 callers
+   * that wrote `_pendingUserAnswer = { ... }` don't need to change.
+   *
+   * #4802: the previous null-branch behaviour (`= null` → Map.clear()) is
+   * removed. Implicit clear-all at every teardown site silently wiped
+   * sibling AskUserQuestion entries that still had answers in flight
+   * (see `_pendingUserAnswers_clearAll` for the audit + the per-callsite
+   * rationale). Writing null now throws so the regression is loud — each
+   * callsite must pick `_pendingUserAnswers_clearAll()` (intentional
+   * turn-level wipe with documented reason) or
+   * `_clearPendingAnswerByToolUseId(tid)` (surgical, the watchdog path)
+   * explicitly.
    */
   set _pendingUserAnswer(entry) {
     if (entry === null || entry === undefined) {
-      this._pendingUserAnswers.clear()
-      this._lastPendingAnswerToolUseId = null
-      return
+      throw new Error('_pendingUserAnswer = null/undefined forbidden (#4802) — use _pendingUserAnswers_clearAll() or _clearPendingAnswerByToolUseId(tid) so the destructive intent is visible at the call site')
     }
     const toolUseId = entry.toolUseId
     if (toolUseId) {
@@ -392,10 +522,38 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * #4802: explicit clear-all for the turn-level teardown sites that
+   * unambiguously kill the PTY for the current turn (Ctrl-C via
+   * `_teardownTurn` / `interrupt()`, or SIGTERM via `destroy()`). After
+   * any of those, even a surviving Map entry can't be served — claude
+   * TUI is no longer waiting on its prompt — so wiping the slot keeps
+   * a late `respondToQuestion` from writing into a torn-down form.
+   *
+   * NOT used by `_finishTurnError` (no Ctrl-C, sibling answers may still
+   * be valid for the brief race window — see audit P1.2) nor by the
+   * AskUserQuestion stall watchdog (knows the exact `toolUseId` that
+   * stalled, so it calls `_clearPendingAnswerByToolUseId` instead per
+   * #4691).
+   */
+  _pendingUserAnswers_clearAll() {
+    this._pendingUserAnswers.clear()
+    this._lastPendingAnswerToolUseId = null
+    // #4884: parallel cleanup so stale submit-timing entries don't leak
+    // when a teardown path wipes the pending answers (the forensic log
+    // only fires when PostToolUse arrives; if teardown won the race, the
+    // submit-time entry would otherwise sit there until destroy()).
+    if (this._multiQuestionSubmitAt) this._multiQuestionSubmitAt.clear()
+  }
+
   /** Internal: drop a specific pending answer entry (PostToolUse cleanup). */
   _clearPendingAnswerByToolUseId(toolUseId) {
     if (!toolUseId) return
     this._pendingUserAnswers.delete(toolUseId)
+    // #4884: parallel cleanup of the submit-timing entry for the same
+    // toolUseId. Idempotent — no-op when the entry was already consumed
+    // by PostToolUse's delta log.
+    if (this._multiQuestionSubmitAt) this._multiQuestionSubmitAt.delete(toolUseId)
     if (this._lastPendingAnswerToolUseId === toolUseId) {
       // Advance the "most recent" pointer to whichever entry was set most
       // recently after the one we just removed (insertion-order via Map
@@ -441,6 +599,16 @@ export class ClaudeTuiSession extends BaseSession {
   // surface for emoji-only prompts, decompose to UTF-8 bytes (or
   // graphemes) before the loop (#4274).
   static get PROMPT_CHAR_DELAY_MS() { return 1 }
+
+  // #4732: default pre-first-output silence timeout (ms). Fires once at
+  // turn start when claude TUI accepts the prompt write but emits no
+  // hook events for this long — see _firstOutputTimeoutMs JSDoc + the
+  // describe block in claude-tui-session.test.js for the why. Sized at
+  // 90s: wide enough to cover slow first-token latency (cold model,
+  // big context, slow Anthropic backend) but tight enough that the
+  // dashboard chip surfaces within a minute or two of a real stall so
+  // the user can retry without waiting for the 2h hard cap.
+  static get FIRST_OUTPUT_TIMEOUT_MS() { return 90 * 1000 }
 
   // #4276: per-char throttling is O(N) blocking latency. For huge
   // prompts (pasted file contents, JSON dumps) the cumulative cost
@@ -526,6 +694,13 @@ export class ClaudeTuiSession extends BaseSession {
     // Generate the upstream session uuid here so the JSONL path is
     // predictable + so claude resumes the same conversation across turns.
     this._sessionId = randomUUID()
+    // #4792: now that the session id exists, bind the per-instance logger
+    // so subsequent log lines carry sessionId and route correctly through
+    // the WsServer log fan-out (#4787). Anything that logs before this
+    // point uses the module-level `log` (unscoped) and only reaches
+    // unbound dashboard clients — that is the desired behaviour for
+    // pre-start setup failures.
+    this._log = loggerForSession('claude-tui-session', this._sessionId)
 
     // #4044: skipPermissions wins over port — when the user opts in to
     // unmediated TUI behaviour, the hook installation + sidecar write must
@@ -856,7 +1031,11 @@ export class ClaudeTuiSession extends BaseSession {
     // accumulated on _activeTurn and emitted in the summary line at
     // turn finish (success or error). Together they let us reconstruct
     // where the wedge actually sits without re-instrumenting the file.
-    log.info(`sendMessage start (msg=${messageId} sessionId=${this._sessionId} bytes=${Buffer.byteLength(prompt || '', 'utf8')} attachments=${attachments?.length || 0})`)
+    // #4792: prefer the session-bound logger so the entry routes to the
+    // correct bound dashboard client. Falls back to module-level `log`
+    // only if start() hasn't run (defensive — sendMessage on an unstarted
+    // session is a misuse, but the fallback keeps the diagnostic alive).
+    ;(this._log || log).info(`sendMessage start (msg=${messageId} sessionId=${this._sessionId} bytes=${Buffer.byteLength(prompt || '', 'utf8')} attachments=${attachments?.length || 0})`)
 
     // #4012: TUI can't accept inline multimodal blocks the way SDK/CLI
     // do, but it CAN read files via the Read tool. Materialize each
@@ -892,10 +1071,12 @@ export class ClaudeTuiSession extends BaseSession {
           // distinct warn lines so ops can grep for either degradation:
           //   - regular truncation: some files dropped from the list
           //   - bareFallback: even one entry exceeded the cap (worst)
+          // #4792: same session-scoped logger fallback as sendMessage start.
+          const slog = this._log || log
           if (suffixResult.bareFallback) {
-            log.warn(`TUI attachment suffix bare-fallback fired (msg=${messageId} count=${files.length} cap=${suffixResult.cap}B) — all file paths omitted from prompt suffix; agent will only see the size-cap marker. Pathological path-generation regression?`)
+            slog.warn(`TUI attachment suffix bare-fallback fired (msg=${messageId} count=${files.length} cap=${suffixResult.cap}B) — all file paths omitted from prompt suffix; agent will only see the size-cap marker. Pathological path-generation regression?`)
           } else if (suffixResult.truncated) {
-            log.warn(`TUI attachment suffix truncated (msg=${messageId} suffixBytes=${suffixResult.byteLength} cap=${suffixResult.cap}B omitted=${suffixResult.omitted} of=${files.length})`)
+            slog.warn(`TUI attachment suffix truncated (msg=${messageId} suffixBytes=${suffixResult.byteLength} cap=${suffixResult.cap}B omitted=${suffixResult.omitted} of=${files.length})`)
           }
         }
       } catch (err) {
@@ -949,6 +1130,13 @@ export class ClaudeTuiSession extends BaseSession {
       this._finishTurnError('Turn aborted before prompt write', messageId)
       return
     }
+
+    // #4732: reset the per-turn pre-first-output watchdog latch so the
+    // upcoming `_armResultTimeout` call arms a fresh first-output timer
+    // for this turn (the latch was set true when the PREVIOUS turn
+    // consumed its first hook). Must happen BEFORE `_armResultTimeout`
+    // below — that helper checks the latch.
+    this._resetFirstOutputWatchdogForTurn()
 
     try {
       // #4269: claude TUI's paste detector triggers on byte-arrival rate,
@@ -1034,6 +1222,13 @@ export class ClaudeTuiSession extends BaseSession {
       // that's actively producing tool events doesn't trip the soft
       // inactivity warning (#3920).
       if (this._consumedFiles.size > sizeBefore && this._isBusy) {
+        // #4732: a consumed hook file = first output observed for this
+        // turn. Disarm the pre-first-output watchdog BEFORE the
+        // re-arm below — `_armResultTimeout` would otherwise re-arm
+        // it, defeating the disarm and giving the watchdog a fresh
+        // window after every hook. The inter-stream `_streamStallTimeout`
+        // continues to re-arm on each consumed event as before.
+        this._clearFirstOutputWatchdog()
         this._armResultTimeout()
       }
     }
@@ -1118,10 +1313,16 @@ export class ClaudeTuiSession extends BaseSession {
     // path, matching the one _finishTurnError emits on error paths so
     // every turn lands one grep-able line regardless of outcome.
     this._logSendMessageSummary('success')
-    // Clear inactivity timers — turn done, nothing to backstop (#3920, #4638).
+    // Clear inactivity timers — turn done, nothing to backstop (#3920, #4638, #4732).
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: clear the pre-first-output watchdog. By the success path we
+    // already saw at least one hook (the Stop hook), so it should be
+    // disarmed via _clearFirstOutputWatchdog already — but the same
+    // belt-and-braces clear the other timers get above also applies here
+    // so a freak ordering can't leak a live handle past turn-end.
+    this._clearFirstOutputWatchdog()
     // #4022: drop the per-turn attachment dir now that the Stop hook
     // has fired and the response has streamed back. The Read-tool
     // results are already in the model's context window, so the bytes
@@ -1259,13 +1460,83 @@ export class ClaudeTuiSession extends BaseSession {
       return finish('paste', true)
     }
 
+    // #4805: single-line throttled path used to feed `freeformText`
+    // verbatim into _term.write — no defense against C0 control bytes
+    // or ANSI escape sequences embedded in the input. The newline
+    // bracketed-paste branch above (#4678) already strips embedded
+    // `\x1b[201~` markers and explicitly cites attacker-controlled MCP
+    // tool results as the threat model; the single-line branch has the
+    // same input shape and applies the parallel defense.
+    //
+    // Stripped (in this order, since the first match wins):
+    //   - ANSI CSI: ESC [ <params 0x30-0x3f> <intermediates 0x20-0x2f>
+    //     <final 0x40-0x7e> — the full ECMA-48 grammar including
+    //     DEC-private sequences `?`/`<`/`=`/`>`/`:` (W2 #4805)
+    //   - String controls: ESC ] / P / X / ^ / _ <payload> (BEL | ESC \)
+    //     — covers OSC (title-set), DCS (sixel/ReGIS/termcap),
+    //     SOS / PM / APC (W2 #4805 — original regex covered OSC only)
+    //   - Stray two-byte ESC + final-byte sequences: RIS `\x1b c`,
+    //     DECSC/DECRC `\x1b 7`/`8`, IND/RI/NEL/HTS `\x1b D`/`M`/`E`/`H`,
+    //     keypad-mode `\x1b =`/`>` — `\x1b.?` catch-all (W2 #4805)
+    //   - C0 control bytes \x00-\x08 + \x0b-\x1f + \x7f — the range
+    //     now includes \x1b so any unmatched lone ESC is stripped
+    //     (W2 #4805 closed the 0x1b char-class gap). Excludes \t (a
+    //     normal printable whitespace a user may paste); \r/\n never
+    //     reach this path (the multi-line branch handles them).
+    // Note: the sequence-matching alternations come BEFORE the
+    // C0 class so a full escape is matched as one unit. If the
+    // lone-byte class came first the regex would peel off the \x1b
+    // introducer and leave the [<final> bytes as printable garbage.
+    // Known damage paths covered:
+    //   - \x03 (Ctrl-C) aborts the active TUI form
+    //   - OSC \x1b]0;...\x07 rewrites the window title on some hosts
+    //   - DEC-private CSI (\x1b[?25l hide-cursor, \x1b[?1049h alt-
+    //     screen, \x1b[?1000h / \x1b[?1006h mouse-tracking) desync
+    //     the TUI input state machine — the recurring wedge symptom
+    //     class
+    //   - RIS \x1b c full-terminal-reset clears the scrollback
+    //   - APC payloads (iTerm2 proprietary commands)
+    const stripped = []
+    text = text.replace(
+      // eslint-disable-next-line no-control-regex
+      /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\)|\x1b.?|[\x00-\x08\x0b-\x1f\x7f]/g,
+      (match) => {
+        stripped.push(match)
+        return ''
+      },
+    )
+    if (stripped.length > 0) {
+      // Bounded hex preview (first 32 stripped bytes total) gives an
+      // incident-response footprint without blowing the log on a
+      // malicious flood. Sequences are concatenated then truncated so
+      // each warn line carries the same payload shape regardless of
+      // how many distinct sequences were stripped.
+      const totalBytes = stripped.reduce((n, s) => n + Buffer.byteLength(s, 'utf8'), 0)
+      const sampleHex = Buffer.from(stripped.join(''), 'utf8').slice(0, 32).toString('hex')
+      const truncated = totalBytes > 32 ? ',…' : ''
+      log.warn(`writePtyText (msg=${this._activeTurn?.messageId ?? 'none'}) stripped ${totalBytes} control/escape bytes from single-line input (sample=${sampleHex}${truncated}) (#4805)`)
+    }
+    // After stripping, an all-control-byte prompt can collapse to an
+    // empty body. Mirror the multi-line branch's `body.length === 0`
+    // guard (:1358): abort the turn cleanly rather than write a bare
+    // \r submit to the TUI — the caller sees a finished turn (no
+    // message ever leaves chroxy) instead of chroxy claiming to have
+    // sent and waiting forever for a reply.
+    if (text.length === 0) {
+      onAbort?.()
+      return finish('throttled-empty', false)
+    }
+    // Re-compute counts now that the body may have shrunk so the bulk-
+    // path threshold check + finish() bookkeeping stay accurate.
+    const sanitizedCodePointCount = [...text].length
+
     this._term.write('\x1b[?2004l')
     try {
       // #4276: huge prompts bypass the throttle. Code-point count
       // (counted once at function entry) keeps the threshold
       // consistent with how the loop iterates — an emoji-only 5000-
       // char string [...].length is 5000, not 10000.
-      if (codePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
+      if (sanitizedCodePointCount > ClaudeTuiSession.MAX_THROTTLED_CHARS) {
         // Re-check the turn lifecycle exactly once before the bulk
         // write — same shape as the loop's per-iter guards, so a
         // caller that aborted between scheduling and execution doesn't
@@ -1399,7 +1670,9 @@ export class ClaudeTuiSession extends BaseSession {
         // multi-question wedge condition is greppable. The bug was
         // diagnosed via /tmp/.../pre-*.json spelunking — never again.
         const questionCount = questions.length
-        log.info(`AskUserQuestion pending: tool=${toolUseId} questions=${questionCount} options.q1=${options.length}`)
+        // #4828: session-scoped — runs strictly post-start when `this._log`
+        // is cached. Falls back to module-level `log` only defensively.
+        ;(this._log || log).info(`AskUserQuestion pending: tool=${toolUseId} questions=${questionCount} options.q1=${options.length}`)
         if (questionCount > 1) {
           // #4604 Chunk B note: kept the historical "not yet supported"
           // wording so existing test guards (regex on this string) keep
@@ -1409,7 +1682,23 @@ export class ClaudeTuiSession extends BaseSession {
           // back-compat default-to-option-1 fallback in respondToQuestion
           // means even old dashboards no longer wedge the session, just
           // pick defaults the user can re-prompt past.
-          log.warn(`AskUserQuestion has ${questionCount} questions — multi-question forms are not yet supported (see #4604). Only question 1 will be answered.`)
+          // #4828: session-scoped.
+          ;(this._log || log).warn(`AskUserQuestion has ${questionCount} questions — multi-question forms are not yet supported (see #4604). Only question 1 will be answered.`)
+          // #4653: surface the deny to the user. The bash permission-hook
+          // returns `permissionDecision: deny` for this exact payload
+          // shape (questions.length > 1), so this server-side mirror
+          // event reports the same decision through the WS wire. Without
+          // it, the deny is invisible — the user wonders if the model is
+          // being clever (asking one at a time naturally) or if chroxy
+          // intervened. Per-toolUseId so the dashboard can dedup repeats
+          // when claude TUI re-emits the same multi-q payload (a known
+          // failure mode pre-#4668).
+          this.emit('multi_question_intervention', {
+            toolUseId,
+            questionCount,
+            reason: 'multi_question',
+            timestamp: Date.now(),
+          })
         }
         this.emit('user_question', { toolUseId, questions })
       }
@@ -1435,6 +1724,22 @@ export class ClaudeTuiSession extends BaseSession {
     // above stores the pending entry under THAT synthesized id. Gating
     // cleanup on `payload.tool_use_id` would skip the clear for those
     // builds and leak Map entries indefinitely.
+    // #4884: forensic timing for the defensive trailing '\r' (#4867 / #4886).
+    // If this PostToolUse matches a multi-question form we just drove,
+    // log the wall-clock from Submit-'1' write to PostToolUse arrival at
+    // INFO. The trailing '\r' is sent ~1ms after Submit-'1' (per-char
+    // throttle), so any "spurious empty-prompt activity" theory shows up
+    // as an outlier-large delta. After ~10 captured submissions show
+    // clean numbers, this log line can be downgraded to DEBUG. MUST run
+    // before _clearPendingAnswerByToolUseId below — that helper also
+    // clears _multiQuestionSubmitAt in lockstep with _pendingUserAnswers,
+    // so the timestamp would be gone by the time we read it.
+    if (toolName === 'AskUserQuestion' && toolUseId && this._multiQuestionSubmitAt.has(toolUseId)) {
+      const submitAt = this._multiQuestionSubmitAt.get(toolUseId)
+      this._multiQuestionSubmitAt.delete(toolUseId)
+      const deltaMs = Date.now() - submitAt
+      ;(this._log || log).info(`AskUserQuestion multi-question: Submit→PostToolUse=${deltaMs}ms (tool=${toolUseId}) — forensic for #4884 trailing-'\\r' verification`)
+    }
     if (toolName === 'AskUserQuestion' && toolUseId) {
       this._clearPendingAnswerByToolUseId(toolUseId)
     }
@@ -1556,6 +1861,10 @@ export class ClaudeTuiSession extends BaseSession {
     // aborts before the stall window doesn't fire a stale stream_stall
     // error into the dashboard mid-recovery.
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: clear the pre-first-output watchdog for the same reason —
+    // an aborted/failed turn must not surface a stale first-output stall
+    // into the dashboard mid-recovery.
+    this._clearFirstOutputWatchdog()
     // #4010: balance the early stream_start with stream_end + result so the
     // dashboard's busy state clears (event-normalizer.js:215 synthesizes
     // agent_idle from result). Without this, an aborted/failed TUI turn
@@ -1586,12 +1895,23 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
-    // #4286: symmetry with interrupt() / destroy(). A turn failing or
-    // timing out while AskUserQuestion is pending must clear the answer
-    // slot — otherwise a late user_question_response (e.g. the user
-    // clicked the QuestionPrompt right as the hard timeout fired) would
-    // attempt a PTY write that no longer matches a live turn.
-    this._pendingUserAnswer = null
+    // #4286 / #4802: deliberately do NOT call
+    // `_pendingUserAnswers_clearAll()` here. The original #4286 fix
+    // wiped the single-field slot to keep late user_question_response
+    // events from writing into a dead turn — but post-#4668 the field is
+    // a Map, and the audit (P1.2 #4802) flagged that the implicit wipe
+    // collapsed sibling AskUserQuestion entries that still had legitimate
+    // answers in flight. `_finishTurnError` runs on PTY-exit / Stop-hook
+    // timeout / prompt-write failure paths that do NOT issue Ctrl-C, so
+    // a parallel sibling's response that's already on the wire (#4668
+    // retry-as-singles shape) can still validly consume its entry. Late
+    // arrivals after the PTY has truly stopped responding will no-op in
+    // `respondToQuestion` (write throws / TUI ignores) — far better than
+    // silently dropping the legitimate response and re-creating the
+    // #4668 wedge. The other turn-ending sites
+    // (`_teardownTurn` / `interrupt()` / `destroy()`) still call
+    // `_pendingUserAnswers_clearAll()` because they DO issue Ctrl-C or
+    // kill the PTY outright.
     this._clearAskUserQuestionLock()
     // #4604: same symmetry for the stall watchdog. The guard in
     // _onAskUserQuestionStall (`!_pendingUserAnswer && !_isBusy`) would
@@ -1662,6 +1982,76 @@ export class ClaudeTuiSession extends BaseSession {
         this._handleStreamStall()
       }, this._streamStallTimeoutMs)
     }
+    // #4732: first-output watchdog. Independent from the inter-stream
+    // stall timer above — that one only re-arms BETWEEN hook events, so
+    // a turn where claude TUI accepts the prompt and emits zero hooks
+    // gets no protection from it. The first-output timer arms once per
+    // turn here, disarms on the first consumed hook event via
+    // `_clearFirstOutputWatchdog()`, and on fire calls
+    // `_handleFirstOutputTimeout` which routes through `_teardownTurn`
+    // with the stream_stall error code so the dashboard chip surfaces
+    // through the same wire path. 0 disables.
+    this._armFirstOutputWatchdog()
+  }
+
+  /**
+   * #4732: arm (or re-arm) the pre-first-output silence watchdog.
+   * No-op when `_firstOutputTimeoutMs` is 0 (operator opt-out) or
+   * when `_firstOutputDisarmed` is true (a hook event was already
+   * consumed this turn — re-arming would defeat the disarm). Always
+   * clears any existing handle before re-arming so back-to-back
+   * `_armResultTimeout` calls produce exactly one live timer.
+   *
+   * Called from `_armResultTimeout()`. The matching disarm helper
+   * (`_clearFirstOutputWatchdog`) is called from the hook-drain loop
+   * on first consumed event and from every teardown path (success,
+   * error, hard timeout, stream stall, AskUserQuestion stall,
+   * destroy) so a late fire cannot land on an idle session.
+   */
+  _armFirstOutputWatchdog() {
+    if (this._firstOutputTimeout) {
+      clearTimeout(this._firstOutputTimeout)
+      this._firstOutputTimeout = null
+    }
+    if (this._firstOutputTimeoutMs <= 0) return
+    if (this._firstOutputDisarmed) return
+    this._firstOutputArmedAt = Date.now()
+    this._firstOutputTimeout = setTimeout(() => {
+      this._firstOutputTimeout = null
+      this._handleFirstOutputTimeout()
+    }, this._firstOutputTimeoutMs)
+  }
+
+  /**
+   * #4732: disarm the pre-first-output silence watchdog without
+   * affecting the inter-stream stall timer. Called from the hook-drain
+   * loop the first time any hook file is consumed, and from every
+   * teardown path so a late fire cannot land on a torn-down session.
+   * Idempotent and safe to call when the timer was never armed.
+   *
+   * Sets the per-turn `_firstOutputDisarmed` latch so subsequent
+   * `_armResultTimeout` calls (one per consumed hook) don't re-arm
+   * the watchdog. The latch is reset to false in `sendMessage` at
+   * turn start via `_resetFirstOutputWatchdogForTurn` so the NEXT
+   * turn gets a fresh arm cycle.
+   */
+  _clearFirstOutputWatchdog() {
+    if (this._firstOutputTimeout) {
+      clearTimeout(this._firstOutputTimeout)
+      this._firstOutputTimeout = null
+    }
+    this._firstOutputDisarmed = true
+  }
+
+  /**
+   * #4732: reset the per-turn `_firstOutputDisarmed` latch so the
+   * next turn's `_armResultTimeout` call arms the watchdog fresh.
+   * Called from `sendMessage` immediately before the prompt write so
+   * a long-lived session with many turns gets first-output protection
+   * on every turn (not just the first).
+   */
+  _resetFirstOutputWatchdogForTurn() {
+    this._firstOutputDisarmed = false
   }
 
   _handleInactivityWarning() {
@@ -1742,6 +2132,55 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #4732: pre-first-output silence watchdog handler. Fires once per
+   * turn when claude TUI accepts the prompt write (writePtyText
+   * completed=true) but emits NO hook events for
+   * `_firstOutputTimeoutMs`. Distinct from `_handleStreamStall` —
+   * that one fires on silence BETWEEN hook events, this one fires on
+   * silence BEFORE the first one.
+   *
+   * Live failure that motivated this (v0.9.32 dogfooding, #4732):
+   * `writePtyText completed=true` at T+0; 200s of `hookPoll
+   * heartbeat … consumed=0 stopFound=no` with no recovery. claude TUI
+   * subprocess had 2.71s CPU after 4 min wall — consistent with a
+   * stuck Anthropic API call. User clicked Stop manually.
+   *
+   * Reuses the `stream_stall` error code so the dashboard's existing
+   * recovery chip surfaces without provider-specific wiring. The
+   * distinct teardown reason `'first_output_timeout'` keeps the two
+   * stall flavors distinguishable in post-mortem logs / metrics.
+   */
+  _handleFirstOutputTimeout() {
+    if (!this._isBusy) return
+    // #4642: mirror the invariant check the other teardown sites
+    // (`_finishTurnError`, `_handleHardTimeout`, `_handleStreamStall`,
+    // `_onAskUserQuestionStall`) emit so a future regression that
+    // breaks the `_isBusy ↔ _currentMessageId` construction contract
+    // surfaces from THIS path too.
+    this._assertBusyHasMessageId('_handleFirstOutputTimeout')
+    const elapsedMs = this._firstOutputArmedAt > 0
+      ? Date.now() - this._firstOutputArmedAt
+      : this._firstOutputTimeoutMs
+    const friendly = formatIdleDuration(this._firstOutputTimeoutMs)
+    log.warn(`first-output watchdog fired (elapsedMs=${elapsedMs}) — claude TUI did not respond`)
+    const duration = this._activeTurn
+      ? Date.now() - this._activeTurn.startedAt
+      : this._firstOutputTimeoutMs
+    // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
+    // before error, gate stream_end on messageId) so the dashboard sees
+    // the same fan-out it already handles for the inter-stream stall.
+    this._teardownTurn('first_output_timeout', {
+      duration,
+      errorPayload: {
+        code: 'stream_stall',
+        message: `No response from claude TUI within ${friendly}. Try sending again.`,
+      },
+      errorBeforeResult: false,
+      gateStreamEndOnMessageId: true,
+    })
+  }
+
+  /**
    * #4641: shared per-turn teardown for the timeout/stall recovery paths
    * (`_handleHardTimeout`, `_handleStreamStall`). Centralises the cleanup
    * sequence so the next #4286/#4604-class symmetry fix only needs to
@@ -1782,6 +2221,14 @@ export class ClaudeTuiSession extends BaseSession {
     gateStreamEndOnMessageId = true,
   } = {}) {
     const messageId = this._currentMessageId
+    // #4682: per-turn summary log so the wedge-mode teardown paths
+    // (hard_timeout, stream_stall) land the same grep-able
+    // `sendMessage done` line as the success and _finishTurnError paths.
+    // Placed before any state mutation so the helper sees populated
+    // turn fields (messageId, startedAt, waitForPrompt*, write*).
+    // PR #4681 added the summary helper for the wedge investigation;
+    // missing it on the stream-stall path defeated the whole point.
+    this._logSendMessageSummary(reason)
     // 1. Best-effort Ctrl-C into the PTY.
     if (this._term) {
       try { this._term.write('\x03') } catch { /* ignore */ }
@@ -1799,13 +2246,24 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
-    // 4. AskUserQuestion-related slot/lock/watchdog symmetry.
-    this._pendingUserAnswer = null
+    // 4. AskUserQuestion-related slot/lock/watchdog symmetry. #4802:
+    //    explicit `_pendingUserAnswers_clearAll()` (was an implicit
+    //    `_pendingUserAnswer = null` via the back-compat setter). Safe
+    //    here because _teardownTurn always issues Ctrl-C above
+    //    (step 1), so the TUI has dropped its current AskUserQuestion
+    //    form — any sibling pending entry can no longer be served and
+    //    leaving it would just risk a late respondToQuestion writing
+    //    stale keystrokes into whatever form the next turn brings up.
+    this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
     if (this._askUserQuestionWatchdog) {
       clearTimeout(this._askUserQuestionWatchdog)
       this._askUserQuestionWatchdog = null
     }
+    // #4732: clear the pre-first-output watchdog so a teardown via
+    // `_handleHardTimeout` / `_handleStreamStall` / `_handleFirstOutputTimeout`
+    // can never leak a live handle that would re-fire on a torn-down turn.
+    this._clearFirstOutputWatchdog()
     // 5. Error + result emit, in the order the caller requests. The two
     // existing callers disagree (hard-timeout: error first; stream-stall:
     // result first), and that asymmetry is preserved exactly.
@@ -1882,9 +2340,14 @@ export class ClaudeTuiSession extends BaseSession {
       // sendMessage() works normally. Matches _handleHardTimeout.
       try { this._term.write('\x03') } catch { /* ignore */ }
     }
-    // #4278: also drop any pending AskUserQuestion so a subsequent
+    // #4278 / #4802: drop any pending AskUserQuestion so a subsequent
     // user_question_response can't write into a torn-down context.
-    this._pendingUserAnswer = null
+    // Explicit `_pendingUserAnswers_clearAll()` (was an implicit
+    // `_pendingUserAnswer = null` → Map.clear() via the back-compat
+    // setter). Safe here: interrupt() writes Ctrl-C to the PTY above,
+    // so the TUI is no longer waiting on any AskUserQuestion form —
+    // every sibling pending entry is now equally stale.
+    this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
     // #4604: cancel the stall watchdog too. interrupt() does NOT clear
     // _isBusy directly (Ctrl-C surfaces async via _finishTurn*), so without
@@ -1894,6 +2357,12 @@ export class ClaudeTuiSession extends BaseSession {
       clearTimeout(this._askUserQuestionWatchdog)
       this._askUserQuestionWatchdog = null
     }
+    // #4732: same reasoning for the pre-first-output watchdog. interrupt()
+    // doesn't synchronously flip _isBusy=false, so without this clear the
+    // watchdog could fire in the 150ms poll-loop window before
+    // _finishTurnError runs and emit a spurious stream_stall for a
+    // session the user has already interrupted.
+    this._clearFirstOutputWatchdog()
   }
 
   /**
@@ -1930,10 +2399,24 @@ export class ClaudeTuiSession extends BaseSession {
    *
    * No-op when no pending answer.
    *
-   * @param {string} text — the chosen answer (single-question path); ignored on the multi-question path when answersMap is populated
-   * @param {object} [answersMap] — `{ [questionText]: string | string[] }`; required for multi-question forms (Chunk B)
+   * @param {string} text — the chosen answer (single-question path); on the
+   *   Other / freeform path (#4651) this is the Other option's label, used
+   *   to resolve the 1-indexed TUI digit. Ignored on the multi-question
+   *   path when answersMap is populated.
+   * @param {object} [answersMap] — `{ [questionText]: string | string[] }`;
+   *   required for multi-question forms (Chunk B).
+   * @param {string} [toolUseId] — #4668: target the specific pending entry
+   *   to answer when multiple AskUserQuestion tool_uses are in flight in
+   *   the same turn. When omitted, falls back to the most-recently-set
+   *   pending entry via the back-compat getter.
+   * @param {object} [opts] — extra options.
+   * @param {string} [opts.freeformText] — #4651 single-question Other path:
+   *   when set, the session writes the Other digit (resolved from `text`),
+   *   waits ~150 ms for claude TUI's option-menu → text-input prompt swap,
+   *   then writes `freeformText` + Enter. Dropped when the chosen option
+   *   doesn't exist or sits beyond the single-digit hotkey range.
    */
-  respondToQuestion(text, answersMap, toolUseId) {
+  respondToQuestion(text, answersMap, toolUseId, opts) {
     // #4668: route to the specific pending entry the dashboard answered
     // for. Pre-#4668 chroxy stored a single pending answer in a field
     // and respondToQuestion always read THAT field — so when claude TUI
@@ -1943,6 +2426,16 @@ export class ClaudeTuiSession extends BaseSession {
     // it up in the Map; if not (legacy clients), fall back to the most-
     // recently-set entry via the back-compat getter so behaviour matches
     // pre-#4668 for the single-pending case.
+    //
+    // #4651: `opts.freeformText` triggers the Other / freeform path —
+    // server resolves the chosen option label to its 1-indexed digit,
+    // writes the digit to open claude TUI's text-input prompt, waits
+    // ~150 ms for the prompt swap, then writes the freeform text + Enter
+    // to submit. Mutually exclusive with answersMap (multi-question
+    // Other is out of scope per #4648).
+    const freeformText = (opts && typeof opts.freeformText === 'string' && opts.freeformText.length > 0)
+      ? opts.freeformText
+      : null
     let entry = null
     if (toolUseId && this._pendingUserAnswers.has(toolUseId)) {
       entry = this._pendingUserAnswers.get(toolUseId)
@@ -1952,7 +2445,8 @@ export class ClaudeTuiSession extends BaseSession {
       // cleared the Map (watchdog fire, user gave up + the late answer
       // came in). Log + drop rather than write keystrokes into whatever
       // form happens to be currently rendered.
-      log.warn(`respondToQuestion: dashboard sent toolUseId=${toolUseId} but no matching pending entry (Map.size=${this._pendingUserAnswers.size} keys=${[...this._pendingUserAnswers.keys()].join(',')}) — dropping`)
+      // #4828: session-scoped — respondToQuestion runs strictly post-start.
+      ;(this._log || log).warn(`respondToQuestion: dashboard sent toolUseId=${toolUseId} but no matching pending entry (Map.size=${this._pendingUserAnswers.size} keys=${[...this._pendingUserAnswers.keys()].join(',')}) — dropping`)
       return
     } else {
       // Legacy / unidentified path: route to the most-recent entry via
@@ -1965,14 +2459,16 @@ export class ClaudeTuiSession extends BaseSession {
       // most-recent entry by insertion order, which may not be what
       // the user intended. Loud log so the wedge symptom is greppable.
       if (!toolUseId && this._pendingUserAnswers.size > 1) {
-        log.warn(`respondToQuestion: dashboard omitted toolUseId but ${this._pendingUserAnswers.size} pending entries exist (keys=${[...this._pendingUserAnswers.keys()].join(',')}) — falling back to most-recent which may misroute`)
+        // #4828: session-scoped.
+        ;(this._log || log).warn(`respondToQuestion: dashboard omitted toolUseId but ${this._pendingUserAnswers.size} pending entries exist (keys=${[...this._pendingUserAnswers.keys()].join(',')}) — falling back to most-recent which may misroute`)
       }
       entry = this._pendingUserAnswer
     }
     const prevToolUseId = entry?.toolUseId || null
     const pendingQuestions = entry?.questions || []
     const answersMapKeyCount = answersMap && typeof answersMap === 'object' ? Object.keys(answersMap).length : 0
-    log.info(`respondToQuestion: tool=${prevToolUseId || '?'} dashboardToolUseId=${toolUseId || 'none'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${entry?.options?.length || 0} pendingMapSize=${this._pendingUserAnswers.size}`)
+    // #4828: session-scoped.
+    ;(this._log || log).info(`respondToQuestion: tool=${prevToolUseId || '?'} dashboardToolUseId=${toolUseId || 'none'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${entry?.options?.length || 0} pendingMapSize=${this._pendingUserAnswers.size}`)
     if (!entry) return
     // Single-question / free-text path requires a non-empty `text`. The
     // multi-question path is driven from answersMap (text is ignored when
@@ -2003,17 +2499,24 @@ export class ClaudeTuiSession extends BaseSession {
     // `_activeTurn`). Subsequent answers in the same turn emit a compact
     // one-line skip notice carrying the tool ids so a log reader can still
     // grep all answer-write events without scanning past 200+ hex lines.
+    // #4792: PTY tail hex dumps are the highest-volume, most-sensitive
+    // unscoped log lines pre-fix — they emit literal terminal bytes
+    // (user prompts, answer text, attachment names) on every
+    // respondToQuestion. Routing them through the session-bound logger
+    // makes the audit story clean: only operators bound to this session
+    // (or unbound) see the dump (#4787 fan-out filter).
+    const slog = this._log || log
     const turn = this._activeTurn
     if (turn && !turn.hexDumpEmitted) {
-      log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
+      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
       turn.hexDumpEmitted = true
     } else if (turn) {
-      log.info(`respondToQuestion PTY tail hex dump skipped (tool=${prevToolUseId || '?'}) — already emitted for turn msg=${turn.messageId || '?'}`)
+      slog.info(`respondToQuestion PTY tail hex dump skipped (tool=${prevToolUseId || '?'}) — already emitted for turn msg=${turn.messageId || '?'}`)
     } else {
       // No active turn (defensive — tests that drive respondToQuestion
       // directly without sendMessage(), late watchdog teardown races).
       // Emit the dump so the diagnostic is still useful in those paths.
-      log.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
+      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._outputTailHexDump()}`)
     }
 
     const armWatchdog = () => {
@@ -2037,6 +2540,86 @@ export class ClaudeTuiSession extends BaseSession {
     // single-q path is text-driven, not answersMap-driven.
     if (questions.length <= 1) {
       if (text.length === 0) return
+
+      // #4651 — Other / freeform path. The dashboard picked the "Other"
+      // option AND typed freeform text. claude TUI accepts this as a
+      // two-stage flow: press the Other digit (swaps the option-select
+      // menu to a text-input prompt), wait for the swap, then type the
+      // freeform text + Enter. Resolve the chosen label → digit via the
+      // same 1-indexed lookup as the happy path. When the chosen option
+      // doesn't exist (or sits beyond the single-digit hotkey range),
+      // drop the answer — blindly writing the freeform text at the
+      // digit menu is the #4288 jump-nav footgun and the dashboard
+      // shouldn't have been able to send freeformText for an
+      // AskUserQuestion without an Other option in the first place.
+      if (freeformText) {
+        if (!Array.isArray(options) || options.length === 0) {
+          // #4828: session-scoped.
+          ;(this._log || log).warn(`respondToQuestion: freeformText supplied for question with no options (tool=${prevToolUseId || '?'}) — dropping`)
+          return
+        }
+        const otherIdx = options.findIndex((o) => o && o.label === text)
+        if (otherIdx < 0 || otherIdx >= 9) {
+          // #4828: session-scoped.
+          ;(this._log || log).warn(`respondToQuestion: freeformText supplied but chosen option "${text}" not found (or beyond single-digit hotkey range) in pending options for tool=${prevToolUseId || '?'} — dropping`)
+          return
+        }
+        const otherDigit = String(otherIdx + 1)
+        // Stage 1: write the digit. _writePtyTextThrottled appends \r —
+        // for the option-select menu the trailing \r commits the digit
+        // (same shape as the happy single-select path).
+        // Stage 2: after OTHER_FREEFORM_SETTLE_MS, write the freeform
+        // text + \r via the same throttled writer. claude TUI's text-
+        // input prompt accepts typed input directly (no jump-nav),
+        // and the trailing \r submits.
+        const tag = prevToolUseId || '?'
+        ;(async () => {
+          // #4808: destroy() can run during ANY of the awaits below
+          // (stage-1 write, settle pause, stage-2 write). Without a
+          // guard after each await the IIFE keeps running and:
+          //   - re-arms `_askUserQuestionWatchdog` past destroy(),
+          //     leaking a 30s timer that pins `this` in its closure
+          //     even though `_onAskUserQuestionStall`'s _destroying
+          //     guard silences the eventual emit
+          //   - calls `_writePtyTextThrottled(freeformText)` against
+          //     a `_term` that destroy() set to null, throwing inside
+          //     the inner write loop
+          // Bail out at every await boundary instead.
+          const stage1ok = await this._writePtyTextThrottled(otherDigit).catch((err) => {
+            // #4828: session-scoped.
+            ;(this._log || log).warn(`respondToQuestion Other-digit PTY write failed: ${err.message} (tool=${tag})`)
+            return false
+          })
+          if (this._destroying) return
+          if (!stage1ok) return
+          await new Promise((resolve) => setTimeout(resolve, OTHER_FREEFORM_SETTLE_MS))
+          if (this._destroying) return
+          // Belt-and-braces: destroy() sets _destroying before nulling
+          // _term in the same synchronous frame, so the guard above
+          // already covers the destroy() race. This null-check is
+          // cheap insurance against a future path that releases _term
+          // without flipping _destroying (e.g. a PTY-exit handler) —
+          // skip the re-arm AND the stage-2 write together so the
+          // watchdog never fires for a session that no longer has a
+          // PTY behind it.
+          if (!this._term) return
+          // Re-arm the watchdog so the freeform write phase has a fresh
+          // OTHER_FREEFORM_WATCHDOG_MS window — the stage-1 arm already
+          // counted the settle delay against the original 30s budget.
+          if (this._askUserQuestionWatchdog) clearTimeout(this._askUserQuestionWatchdog)
+          this._askUserQuestionWatchdog = setTimeout(() => {
+            this._askUserQuestionWatchdog = null
+            this._onAskUserQuestionStall(prevToolUseId)
+          }, OTHER_FREEFORM_WATCHDOG_MS)
+          await this._writePtyTextThrottled(freeformText).catch((err) => {
+            // #4828: session-scoped.
+            ;(this._log || log).warn(`respondToQuestion Other-freeform PTY write failed: ${err.message} (tool=${tag})`)
+          })
+        })()
+        armWatchdog()
+        return
+      }
+
       // #4290: if the chosen label matches one of the structured options
       // exactly, write the 1-indexed TUI shortcut (e.g. "2") instead of
       // the label text. v0.9.3 wrote the raw label and claude TUI's
@@ -2050,13 +2633,37 @@ export class ClaudeTuiSession extends BaseSession {
       let writeText = text
       if (Array.isArray(options) && options.length > 0) {
         const matchIdx = options.findIndex((o) => o && o.label === text)
-        // #4292: single-digit guard (1..9). Multi-digit hotkeys (10+) are
-        // NOT assumed to work on claude TUI's prompt — most single-
-        // keystroke menus commit on the first digit and the second char
-        // would either be a spurious next-prompt input or get dropped.
-        // Falling through to the label-text path for 10+ options
-        // preserves v0.9.3 behavior (broken in the same mode-jump way)
-        // without silently sending a hotkey we can't trust.
+        // #4292 + #4746 + #4848: single-digit hotkey covers indices 0..8.
+        // For matched picks at idx >= 9 we drive the form via arrow-key
+        // navigation instead of the hotkey alphabet — Down arrow (`\x1b[B`)
+        // N times moves the cursor from the top option (idx 0) to the
+        // target idx, and Enter (`\r`) commits the highlighted option
+        // (#4848). Pre-#4848 this path tore the turn down with a
+        // structured ASK_USER_QUESTION_TOO_MANY_OPTIONS error (#4746)
+        // because the empirical multi-digit keystroke for option 10+
+        // was unrecorded; arrow-key navigation was always one of the two
+        // candidate paths the recorder script (scripts/tui-form-recorder.mjs)
+        // called out and is the more conservative bet (single-keystroke
+        // menus that auto-commit on the first digit can't be driven via
+        // multi-digit chord like '1','0'; arrow keys are the standard
+        // claude TUI navigation primitive used elsewhere in its form
+        // pickers). The recorder script's authoritative note is preserved
+        // as the open assumption — re-run the recorder pass against a
+        // 10+ option AskUserQuestion to confirm arrow nav is the right
+        // path; if not, switch to whichever empirical sequence pins.
+        //
+        // Scoped to MATCHED picks at idx >= 9. An unmatched label still
+        // falls through to typing the literal text (the v0.9.3 / pre-#4292
+        // path) so the Other / freeform back-compat case is preserved.
+        if (matchIdx >= 9) {
+          const total = options.length
+          ;(this._log || log).info(`AskUserQuestion single-question: question has ${total} options and the user picked option ${matchIdx + 1} ("${(text || '').slice(0, 40)}") — driving via arrow-key navigation (#4848) (tool=${prevToolUseId || '?'})`)
+          this._writePtyArrowNavSequence(matchIdx).catch((err) => {
+            ;(this._log || log).warn(`respondToQuestion arrow-nav PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+          })
+          armWatchdog()
+          return
+        }
         if (matchIdx >= 0 && matchIdx < 9) {
           writeText = String(matchIdx + 1)
         }
@@ -2065,7 +2672,8 @@ export class ClaudeTuiSession extends BaseSession {
       // but the caller (handleUserQuestionResponse) is sync. Errors here
       // are non-fatal; worst case the user re-sends the answer.
       this._writePtyTextThrottled(writeText).catch((err) => {
-        log.warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+        // #4828: session-scoped.
+        ;(this._log || log).warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
       })
       armWatchdog()
       return
@@ -2078,7 +2686,83 @@ export class ClaudeTuiSession extends BaseSession {
     const map = (answersMap && typeof answersMap === 'object') ? answersMap : {}
     const haveMap = Object.keys(map).length > 0
     if (!haveMap) {
-      log.warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
+      // #4828: session-scoped.
+      ;(this._log || log).warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
+    }
+
+    // #4625 + #4848 — claude TUI's single-digit hotkey alphabet ('1'..'9')
+    // covers options at indices 0..8 only. When a question has 10+ options
+    // AND the user explicitly picked one at index ≥ 9, we have no
+    // representable digit keystroke. Pre-#4625 the driver silently
+    // defaulted such picks to option 1; #4625 surfaced a structured
+    // ASK_USER_QUESTION_TOO_MANY_OPTIONS error before any PTY write so
+    // the dashboard could prompt for a re-ask. #4848 splits this by
+    // question kind:
+    //   - single-select questions with an explicit pick at idx >= 9:
+    //     driven natively via arrow-key navigation in the assembled
+    //     sequence below (each Down arrow lands the cursor on the next
+    //     option, Enter commits + advances to the next question — same
+    //     mechanism the single-question path now uses).
+    //   - multi-select questions with a toggle at idx >= 9: KEEP the
+    //     structured ASK_USER_QUESTION_TOO_MANY_OPTIONS error. multi-
+    //     select form navigation (arrow + Space to toggle + return-to-
+    //     start) is empirically unrecorded; mixing arrow nav with the
+    //     digit hotkeys for in-range toggles in the same question would
+    //     leave the cursor in an unknown state without a tested return-
+    //     to-anchor primitive. Reserve the too-many error for this case.
+    //
+    // Bail BEFORE any PTY write so the form stays in its initial state
+    // when the error fires (claude TUI's watchdog or the user's Ctrl-C
+    // unsticks it). 10+ option questions with no per-question answer
+    // still fall back to option 1 (back-compat for old clients).
+    if (haveMap) {
+      const unrepresentableMultiSelect = []
+      for (const q of questions) {
+        const opts = Array.isArray(q.options) ? q.options : []
+        if (opts.length <= 9) continue
+        if (!q.multiSelect) continue // single-select 10+ now driven via arrow nav
+        const raw = map[q.question]
+        // Gather every label the user toggled for this multi-select.
+        // MUST mirror resolveQuestionKeystrokes' multi-select parsing —
+        // array → JSON-encoded array → comma-joined list — so an
+        // unrepresentable toggle sent via the comma-joined fallback
+        // (e.g. "a,k") isn't accidentally treated as a single 3-char
+        // label and missed (Copilot review feedback on #4625).
+        let labels = []
+        if (Array.isArray(raw)) {
+          labels = raw.filter((s) => typeof s === 'string')
+        } else if (typeof raw === 'string' && raw.length > 0) {
+          let parsed = null
+          try { parsed = JSON.parse(raw) } catch { parsed = null }
+          if (Array.isArray(parsed)) {
+            labels = parsed.filter((s) => typeof s === 'string')
+          } else {
+            labels = raw.split(',').map((s) => s.trim()).filter(Boolean)
+          }
+        }
+        for (const label of labels) {
+          const idx = opts.findIndex((o) => o && o.label === label)
+          if (idx >= 9) unrepresentableMultiSelect.push({ question: q.question, label, index: idx, total: opts.length })
+        }
+      }
+      if (unrepresentableMultiSelect.length > 0) {
+        const first = unrepresentableMultiSelect[0]
+        ;(this._log || log).warn(`AskUserQuestion multi-question: multi-select question has ${first.total} options and the user toggled option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet AND beyond the arrow-nav single-select fallback (#4848 deliberately scopes arrow-nav to single-select only) — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS (tool=${prevToolUseId || '?'})`)
+        // Full AskUserQuestion teardown: synth tool_result + Ctrl-C the
+        // TUI + clear inactivity timers + stream_end + _emitResult +
+        // error (in that order). Without the full teardown the dashboard
+        // would leave the Working banner + Stop button up and the
+        // "Running AskUserQuestion · Ns" pill ticking even though
+        // chroxy gave up before writing any keystrokes (#4625 hands the
+        // form's resolution back to the user via the error toast).
+        this._teardownAskUserQuestion(prevToolUseId, {
+          synthResult: `AskUserQuestion failed: multi-select question has ${first.total} options and you toggled option ${first.index + 1}, beyond the 9 the claude TUI multi-select form can drive (#4848).`,
+          emitResultReason: 'ask_user_question_too_many_options',
+          errorCode: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
+          errorMessage: `Couldn't answer: a multi-select question has ${first.total} options and you toggled option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive for multi-select. Re-prompt the agent to ask with 9 or fewer options for that question.`,
+        })
+        return
+      }
     }
 
     /** Resolve a single label to its 1-indexed digit; null if no usable digit. */
@@ -2089,16 +2773,26 @@ export class ClaudeTuiSession extends BaseSession {
       return null
     }
 
-    /** Resolve a single question's answer entry to an array of digits to write. */
-    const resolveQuestionDigits = (q, rawAnswer) => {
+    /**
+     * Resolve a single question's answer entry to an array of keystroke
+     * tokens to write. Tokens are arbitrary-length strings — usually a
+     * single digit ('1'..'9') or Tab/Enter, but for #4848 a single-select
+     * answer at idx >= 9 expands to a multi-token arrow-nav sequence
+     * (`'\x1b[B'` × idx + `'\r'`). The writer (`_writePtyMultiQuestionSequence`)
+     * doesn't care about token length — it writes each entry as one
+     * `term.write` call with a throttle pause after.
+     */
+    const resolveQuestionKeystrokes = (q, rawAnswer) => {
       const opts = Array.isArray(q.options) ? q.options : []
       const defaultDigit = opts.length > 0 ? '1' : null
 
       if (q.multiSelect) {
         // multi-select expects 0+ choices. Accept array, JSON-encoded
         // array string, or comma-joined list — the wire schema is
-        // string-only (Record<string,string>) so the dashboard encodes
-        // multi-selects as JSON.
+        // `Record<string, string | string[]>` post-#4735 so newer
+        // dashboard / app builds send the native array form; pre-#4735
+        // builds JSON-stringified the array into a single string for
+        // back-compat. Both shapes resolve here.
         let labels = []
         if (Array.isArray(rawAnswer)) {
           labels = rawAnswer.filter((s) => typeof s === 'string')
@@ -2118,50 +2812,134 @@ export class ClaudeTuiSession extends BaseSession {
         for (const label of labels) {
           const d = labelToDigit(q, label)
           if (d) digits.push(d)
+          // Multi-select 10+ toggles already pre-screened above and
+          // surfaced as ASK_USER_QUESTION_TOO_MANY_OPTIONS — anything
+          // unrepresentable here means the dashboard sent something we
+          // couldn't match (defaulted handling below).
         }
         if (digits.length === 0 && defaultDigit) {
-          log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (multi-select) — defaulting to option 1`)
+          // #4828: session-scoped (closure runs inside respondToQuestion, post-start).
+          ;(this._log || log).warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (multi-select) — defaulting to option 1`)
           digits.push(defaultDigit)
         }
         return digits
       }
 
-      // single-select — exactly one digit
+      // single-select — exactly one keystroke token.
+      let pickedLabel = null
       if (typeof rawAnswer === 'string' && rawAnswer.length > 0) {
-        const d = labelToDigit(q, rawAnswer)
-        if (d) return [d]
+        pickedLabel = rawAnswer
       } else if (Array.isArray(rawAnswer) && typeof rawAnswer[0] === 'string') {
-        const d = labelToDigit(q, rawAnswer[0])
-        if (d) return [d]
+        pickedLabel = rawAnswer[0]
+      }
+      if (pickedLabel !== null) {
+        const idx = opts.findIndex((o) => o && o.label === pickedLabel)
+        if (idx >= 0 && idx < 9) return [String(idx + 1)]
+        if (idx >= 9) {
+          // #4848 — option at idx >= 9 in a single-select question.
+          // Drive via arrow-key navigation: idx Down arrows from the
+          // top option (cursor starts at idx 0) followed by Enter to
+          // commit + advance to the next question. The arrow sequence
+          // and the Enter are emitted as two distinct keystroke tokens
+          // so the throttle pauses BETWEEN them (claude TUI's paste
+          // detector treats a single 11-byte burst as a paste). Each
+          // arrow is 3 bytes ('\x1b[B'); 10 arrows = 30 bytes is still
+          // well under any reasonable paste threshold, but stay safe.
+          log.info(`AskUserQuestion multi-question: single-select pick at idx=${idx} (option ${idx + 1}) in q="${(q.question || '').slice(0, 40)}" → arrow-nav (#4848)`)
+          const tokens = []
+          for (let i = 0; i < idx; i++) tokens.push('\x1b[B')
+          tokens.push('\r')
+          return tokens
+        }
       }
       if (defaultDigit) {
-        if (haveMap) log.warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (single-select) — defaulting to option 1`)
+        // #4828: session-scoped (closure runs inside respondToQuestion, post-start).
+        if (haveMap) (this._log || log).warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (single-select) — defaulting to option 1`)
         return [defaultDigit]
       }
       return []
     }
 
     // Assemble the inner keystroke sequence (no paste-mode toggles —
-    // _writePtyMultiQuestionSequence wraps the whole thing).
+    // _writePtyMultiQuestionSequence wraps the whole thing). The sequence
+    // is a mixed array of strings (chars to write) and numbers (ms to
+    // sleep) — the writer dispatches on type.
     const sequence = []
     for (const q of questions) {
       const rawAnswer = map[q.question]
-      const digits = resolveQuestionDigits(q, rawAnswer)
-      for (const d of digits) sequence.push(d)
+      const keystrokes = resolveQuestionKeystrokes(q, rawAnswer)
+      for (const k of keystrokes) sequence.push(k)
       if (q.multiSelect) {
         // Multi-select needs an explicit advance keystroke; single-select
-        // auto-advances on digit (verified empirically).
+        // auto-advances on digit OR on Enter after arrow-nav (verified
+        // empirically for digit; arrow-nav variant pinned by #4848).
         sequence.push('\t')
       }
     }
+    // #4635 — when the LAST question is single-select, insert a settling
+    // delay before the Submit keystroke. The last digit auto-advances to
+    // the Submit screen, but the 1ms per-char throttle races claude TUI's
+    // render of that screen so the trailing '1' lands on the still-
+    // rendering last-question screen and gets swallowed (the wedge the
+    // issue documents). Mixed forms ending in multi-select don't need
+    // this — the explicit '\t' already settles the form.
+    // #4883 — tighten the lastIsSingleSelect detection so an unexpected TUI
+    // question shape surfaces in logs instead of silently picking a branch.
+    // Today's TUI omits `multiSelect` on single-select questions and sets it
+    // to `true` on multi-select; any other shape (string, null, number, a
+    // hypothetical future field rename) is treated as "assume single-select
+    // for settle purposes" — but we log a WARN so the shape drift is visible.
+    //
+    // The "drift" check uses `'multiSelect' in lastQuestion` rather than
+    // `!== undefined` so it also catches the in-code pathological case
+    // `{ multiSelect: undefined }` (Copilot review on #4902): the key is
+    // present but the value isn't boolean — that's still drift worth
+    // surfacing, since wire-deserialized shapes can't produce that pattern
+    // (JSON.stringify drops undefined-valued keys) but in-code shapes can.
+    const lastQuestion = questions.length > 0 ? questions[questions.length - 1] : null
+    if (lastQuestion && 'multiSelect' in lastQuestion && typeof lastQuestion.multiSelect !== 'boolean') {
+      ;(this._log || log).warn(`AskUserQuestion multi-question: last question has non-boolean multiSelect=${JSON.stringify(lastQuestion.multiSelect)} (q="${(lastQuestion.question || '').slice(0, 40)}") — assuming single-select for settle (#4883)`)
+    }
+    const lastIsSingleSelect = !!(lastQuestion && lastQuestion.multiSelect !== true)
+    if (lastIsSingleSelect) {
+      sequence.push(MULTI_QUESTION_SUBMIT_SETTLE_MS)
+    }
     // Focus lands on `❯ 1. Submit answers / 2. Cancel` after the last
     // question — press 1 to confirm submission.
+    // #4884: tag the Submit position with a marker object so
+    // _writePtyMultiQuestionSequence can record the wall-clock at the
+    // point the writer reaches Submit (immediately before the `'1'` is
+    // written to the PTY, after any preceding settle has elapsed). Used
+    // by _emitToolHookEvent's PostToolUse handler to log the
+    // Submit→PostToolUse delta — the marker timestamp is the lower bound
+    // for when '1' actually leaves the writer (within
+    // PROMPT_CHAR_DELAY_MS of the actual write).
+    if (prevToolUseId) {
+      sequence.push({ type: 'mark', label: 'submit', toolUseId: prevToolUseId })
+    }
     sequence.push('1')
+    // #4635 — defensive trailing Enter. The empirical mixed-form recording
+    // pinned `'1'` as immediate-submit (no Enter needed); on the mixed
+    // path the trailing `\r` is harmless (same reasoning as the single-q
+    // path's redundant Enter pinned in #4290). On the all-single-select
+    // path it's a belt-and-braces defense in case claude TUI's Submit
+    // screen for that shape requires an explicit commit keystroke — which
+    // is one of the live-debugged hypotheses for the wedge (Option B in
+    // the issue). Costs nothing on the path that already works; potentially
+    // saves the path that doesn't.
+    // #4884: per the issue, mixed-form (single + multi mix) live verification
+    // of the trailing `\r` was deferred — the #4290 single-q precedent
+    // applies, but mixed multi-question is a different TUI state. The
+    // Submit-mark above + PostToolUse delta log give forensic evidence
+    // that the trailing `\r` lands harmlessly on every mixed-form submit.
+    sequence.push('\r')
 
-    log.info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${sequence.length} haveAnswersMap=${haveMap}`)
+    const keystrokeCount = sequence.filter((x) => typeof x === 'string').length
+    ;(this._log || log).info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${keystrokeCount} haveAnswersMap=${haveMap}`)
 
     this._writePtyMultiQuestionSequence(sequence).catch((err) => {
-      log.warn(`respondToQuestion multi-question PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+      // #4828: session-scoped.
+      ;(this._log || log).warn(`respondToQuestion multi-question PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
     })
     armWatchdog()
   }
@@ -2177,20 +2955,94 @@ export class ClaudeTuiSession extends BaseSession {
    * driver supplies its own navigation keys (Tab between multi-select
    * questions, '1' at Submit).
    *
-   * @param {string[]} sequence — array of one-char strings to write in order
+   * #4635 — sequence entries may be either strings (chars to write) or
+   * numbers (ms to sleep). Numeric entries let the driver insert a
+   * render-settling pause between keystrokes (e.g. the Submit screen
+   * needs a beat after the last single-select auto-advance — see
+   * MULTI_QUESTION_SUBMIT_SETTLE_MS).
+   *
+   * #4884 — sequence entries may also be `{ type: 'mark', label, toolUseId }`
+   * marker objects. Markers are not written to the PTY; they record the
+   * wall-clock at the point the writer reaches them (after any preceding
+   * settle has elapsed but BEFORE the next byte is written) into
+   * `_multiQuestionSubmitAt`. PostToolUse for that toolUseId logs the
+   * delta — forensic evidence the defensive trailing '\r' lands harmlessly.
+   *
+   * @param {Array<string|number|{type:'mark',label:string,toolUseId:string}>} sequence — strings to write, numbers to sleep, marker objects to timestamp
    * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
    */
   async _writePtyMultiQuestionSequence(sequence) {
     if (!this._term) return false
     this._term.write('\x1b[?2004l')
     try {
-      for (const ch of sequence) {
+      for (const item of sequence) {
         if (this._activeTurn?.aborted || this._ptyExited) return false
-        this._term.write(ch)
+        if (typeof item === 'number') {
+          if (item > 0) await new Promise((resolve) => setTimeout(resolve, item))
+          continue
+        }
+        if (item && typeof item === 'object' && item.type === 'mark') {
+          // #4884 — record submit-time marker for the PostToolUse delta log.
+          if (item.label === 'submit' && item.toolUseId) {
+            this._multiQuestionSubmitAt.set(item.toolUseId, Date.now())
+          }
+          continue
+        }
+        this._term.write(item)
         if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
           await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
         }
       }
+      return true
+    } finally {
+      try { this._term.write('\x1b[?2004h') } catch {}
+    }
+  }
+
+  /**
+   * Write an arrow-key navigation sequence for the single-question
+   * AskUserQuestion form when the user picked an option beyond the
+   * single-digit hotkey range (idx >= 9). Emits `targetIdx` Down arrow
+   * keystrokes (`\x1b[B`, 3 bytes each) — claude TUI's form cursor
+   * starts at idx 0, so `targetIdx` downs land on the picked option —
+   * followed by Enter (`\r`) to commit (#4848).
+   *
+   * Wrapped in bracketed-paste-disable / re-enable exactly once (same
+   * defense as _writePtyTextThrottled and _writePtyMultiQuestionSequence).
+   * A PROMPT_CHAR_DELAY_MS pause runs BETWEEN each Down-arrow write so
+   * claude TUI's paste detector doesn't reject the burst. The trailing
+   * Enter (`\r`) and the bracketed-paste re-enable write fire
+   * immediately after the final delay — no extra pause separates them
+   * from the last arrow (the arrival rate at that point is already well
+   * under any reasonable paste threshold). Each arrow is one `_term.write`
+   * call (3 bytes); 10 arrows ≈ 30 bytes total form-byte payload.
+   *
+   * **Open assumption (#4848):** the empirical recorder pass against a
+   * 10+ option AskUserQuestion was not run before this PR — arrow-key
+   * navigation is the conservative bet (recorder script
+   * scripts/tui-form-recorder.mjs called it out as the most likely
+   * working path; multi-digit chord '1','0' was ruled out because the
+   * digit hotkey auto-commits on the first keystroke). Re-run the
+   * recorder against a 12-option AskUserQuestion and pick option 11 to
+   * confirm; if the working sequence differs, replace this writer.
+   *
+   * @param {number} targetIdx — 0-indexed option to land on
+   * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
+   */
+  async _writePtyArrowNavSequence(targetIdx) {
+    if (!this._term) return false
+    if (typeof targetIdx !== 'number' || targetIdx < 0) return false
+    this._term.write('\x1b[?2004l')
+    try {
+      for (let i = 0; i < targetIdx; i++) {
+        if (this._activeTurn?.aborted || this._ptyExited) return false
+        this._term.write('\x1b[B')
+        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
+          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
+        }
+      }
+      if (this._activeTurn?.aborted || this._ptyExited) return false
+      this._term.write('\r')
       return true
     } finally {
       try { this._term.write('\x1b[?2004h') } catch {}
@@ -2240,24 +3092,75 @@ export class ClaudeTuiSession extends BaseSession {
     if (!this._pendingUserAnswer && !this._isBusy) return
 
     this._assertBusyHasMessageId('_onAskUserQuestionStall')
-    log.warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
+    // #4828: session-scoped — stall watchdog fires strictly post-start.
+    ;(this._log || log).warn(`AskUserQuestion stall: tool=${toolUseId} — claude TUI never emitted PostToolUse after answer write (${ASK_USER_QUESTION_WATCHDOG_MS}ms). Likely a multi-question form (#4604). Tearing down turn so the session is recoverable.`)
 
+    this._teardownAskUserQuestion(toolUseId, {
+      synthResult: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
+      emitResultReason: 'ask_user_question_stall',
+      errorCode: 'ASK_USER_QUESTION_STALL',
+      // #4648: dropped the "likely a multi-question form" jargon. The
+      // permission-hook deny path (also #4648) prevents most multi-question
+      // forms from reaching this code path at all, and for the cases that
+      // slip through, the user doesn't care about chroxy internals — they
+      // care about how to recover. The new copy is action-oriented.
+      errorMessage: 'Couldn\'t deliver your answers. Tap Retry to resend your original request.',
+    })
+  }
+
+  /**
+   * Shared teardown for AskUserQuestion failure modes. Used by both the
+   * 30s post-write stall watchdog (#4604) and the up-front
+   * too-many-options detector (#4625). Mirrors the end-to-end teardown
+   * order pinned in #4645: synthetic tool_result → Ctrl-C the TUI →
+   * clear inactivity timers → null active turn / busy state →
+   * stream_end + _emitResult → error event last. The caller supplies the
+   * synth result text, _emitResult reason tag, and error code/message so
+   * the same teardown serves both call sites.
+   *
+   * Splitting this out (vs the original inline form in
+   * _onAskUserQuestionStall) is intentional: #4625's too-many-options
+   * path needs the full teardown so the dashboard's Working banner +
+   * Stop button + activeTools entry all clear immediately, but the
+   * trigger and copy differ from the 30s stall path. Inlining the
+   * teardown twice risked drift; folding both into _teardownTurn would
+   * widen the helper's surface (synth tool_result + 3-timer clear +
+   * toolUseId-carrying error don't generalise to the other teardown
+   * sites), so a dedicated AskUserQuestion teardown helper earns its
+   * keep.
+   */
+  _teardownAskUserQuestion(toolUseId, { synthResult, emitResultReason, errorCode, errorMessage }) {
     const messageId = this._currentMessageId
     const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
 
-    this._pendingUserAnswer = null
+    // #4691: surgical clear — drop ONLY the entry for the tool that
+    // timed out. The other teardown sites (_finishTurnError, hard
+    // timeout via _teardownTurn, interrupt, destroy) end the whole
+    // turn, so wiping the whole Map there is correct. The watchdog is
+    // different: it knows the exact toolUseId that wedged (passed to
+    // setTimeout in respondToQuestion) and the rest of the turn is
+    // still live — sibling AskUserQuestion entries armed by parallel
+    // PreToolUse blocks can still see a PostToolUse arrive. Falling
+    // back to `_pendingUserAnswer = null` here would re-trigger the
+    // back-compat setter → `_pendingUserAnswers.clear()` and wipe
+    // those siblings under their own still-live turns, re-introducing
+    // the #4668-class state-shape mismatch (dashboard cleared the
+    // QuestionPrompt UI when it sent the answer, but the server-side
+    // Map is empty — a late retry-as-singles answer with toolUseId B
+    // would hit the "no matching pending entry — dropping" path and
+    // wedge the next form silently).
+    this._clearPendingAnswerByToolUseId(toolUseId)
     this._clearAskUserQuestionLock()
     // #4616: emit a synthetic tool_result FIRST so the dashboard's
     // activeTools entry for this AskUserQuestion is cleared. Without it
     // the footer "Running AskUserQuestion · Ns" pill keeps ticking
-    // forever even though _isBusy is clear and the user sees the
-    // ASK_USER_QUESTION_STALL error toast. The handler ignores any
-    // fields beyond {toolUseId, result, truncated, images} (see
-    // store-core handleToolResult); pairing-by-toolUseId is what drives
-    // the activeTools removal in store-core handlers.
+    // forever even though _isBusy is clear and the user sees the error
+    // toast. The handler ignores any fields beyond {toolUseId, result,
+    // truncated, images} (see store-core handleToolResult); pairing-by-
+    // toolUseId is what drives the activeTools removal in store-core handlers.
     this.emit('tool_result', {
       toolUseId,
-      result: 'AskUserQuestion stalled — no response from claude TUI within 30s. Likely a multi-question form (#4604).',
+      result: synthResult,
       truncated: false,
     })
     // #4628: matching tool_start resolved — drop from the in-flight map.
@@ -2271,16 +3174,20 @@ export class ClaudeTuiSession extends BaseSession {
       try { this._term.write('\x03') } catch { /* ignore */ }
     }
 
-    // Clear all three inactivity timers — turn is over, nothing to
+    // Clear all four inactivity timers — turn is over, nothing to
     // backstop, leaving them armed would fire stale callbacks on a
     // session that's already idle.
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: pre-first-output watchdog. AskUserQuestion only fires
+    // mid-turn (post-stream_start), so the first-output watchdog has
+    // typically been disarmed already, but clear it explicitly so a
+    // pathological race can't leak a live handle past the stall.
+    this._clearFirstOutputWatchdog()
 
-    // #4022: drop per-turn attachment dir on stall (same as the other
-    // teardown paths) so a stalled turn doesn't leak materialized files
-    // until destroy().
+    // #4022: drop per-turn attachment dir (same as the other teardown
+    // paths) so a failed turn doesn't leak materialized files until destroy().
     this._cleanupTurnAttachments(this._activeTurn)
     this._activeTurn = null
     this._isBusy = false
@@ -2296,16 +3203,11 @@ export class ClaudeTuiSession extends BaseSession {
     if (messageId) this.emit('stream_end', { messageId })
     this._emitResult(
       { cost: null, duration, usage: null, sessionId: this._sessionId },
-      'ask_user_question_stall',
+      emitResultReason,
     )
     this.emit('error', {
-      code: 'ASK_USER_QUESTION_STALL',
-      // #4648: dropped the "likely a multi-question form" jargon. The
-      // permission-hook deny path (also #4648) prevents most multi-question
-      // forms from reaching this code path at all, and for the cases that
-      // slip through, the user doesn't care about chroxy internals — they
-      // care about how to recover. The new copy is action-oriented.
-      message: 'Couldn\'t deliver your answers. Tap Retry to resend your original request.',
+      code: errorCode,
+      message: errorMessage,
       toolUseId,
     })
   }
@@ -2315,9 +3217,13 @@ export class ClaudeTuiSession extends BaseSession {
     this._processReady = false
     this._isBusy = false
     this._activeTurn = null
-    // #4278: drop any pending AskUserQuestion so a late
-    // user_question_response can't write into a dead PTY.
-    this._pendingUserAnswer = null
+    // #4278 / #4802: drop any pending AskUserQuestion so a late
+    // user_question_response can't write into a dead PTY. Explicit
+    // `_pendingUserAnswers_clearAll()` (was an implicit
+    // `_pendingUserAnswer = null` → Map.clear() via the back-compat
+    // setter). Unambiguous here: destroy() SIGTERMs the PTY below and
+    // nulls `_term`, so every pending entry is permanently unservable.
+    this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
     if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
@@ -2325,6 +3231,10 @@ export class ClaudeTuiSession extends BaseSession {
     // a late fire could land in _handleStreamStall after _term is null,
     // skipping the Ctrl-C path but still emitting events into a dead session.
     if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // #4732: same reasoning for the pre-first-output watchdog — a late
+    // fire post-destroy must not emit a stream_stall error into a torn-
+    // down listener set or write Ctrl-C into a killed PTY.
+    this._clearFirstOutputWatchdog()
     // #4604: cancel the AskUserQuestion stall watchdog so it can't fire
     // a stale ASK_USER_QUESTION_STALL event into a torn-down listener.
     if (this._askUserQuestionWatchdog) {

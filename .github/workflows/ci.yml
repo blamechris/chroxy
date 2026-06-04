@@ -44,6 +44,122 @@ jobs:
           path: packages/server/coverage/
           retention-days: 14
 
+  changes:
+    name: Detect Changed Paths
+    # Lightweight ubuntu job that classifies which paths a PR touches so
+    # downstream jobs can self-gate. Today this only feeds the Windows
+    # platform-tests job (#5002) — `windows-latest` is billed at a 5x
+    # multiplier vs `ubuntu-24.04`, so we only fire it on PRs that touch
+    # the files it actually covers. Pushes to `main` skip this job and
+    # always run the Windows suite (see `server-tests-windows.if`).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request'
+    # `dorny/paths-filter` calls the GitHub REST API (`listFiles`) to read the
+    # PR's changed-file list on `pull_request` events. The workflow-level
+    # `permissions: contents: read` block at the top of this file zeros out
+    # every other scope, so we have to re-grant `pull-requests: read` at the
+    # job level — without it, the API call fails with "Resource not accessible
+    # by integration" on fork PRs and (potentially) any future GitHub change
+    # that tightens the implicit same-repo grant. Same-repo PRs happen to work
+    # today via the implicit token grant, but the explicit permission is what
+    # the action documents and what survives a fork PR.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      platform: ${{ steps.filter.outputs.platform }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - id: filter
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        with:
+          filters: |
+            platform:
+              # Source — the production Windows code path lives in
+              # platform.js today, but glob with `platform*` so a future
+              # `platform-windows.js` / `platform-posix.js` split still
+              # triggers the Windows job without an edit here.
+              - 'packages/server/src/platform*.js'
+              # Tests — both the cross-platform suite (exercises the
+              # Windows branch via `_isWindowsOverride`) and the
+              # Windows-only suite. Glob covers any future
+              # platform-*.test.js additions.
+              - 'packages/server/tests/platform*.test.js'
+              # Workflow itself — so edits to this gating logic always
+              # exercise the gated job on the same PR.
+              - '.github/workflows/ci.yml'
+
+  server-tests-windows:
+    name: Server Platform Tests (Windows)
+    # Real Windows runner coverage for `writeFileRestricted`'s Windows
+    # code path (#4927). The cross-platform tests in `platform.test.js`
+    # already exercise the Windows branch on POSIX runners via the
+    # `_isWindowsOverride` option, but a handful of edge cases — ACL
+    # inheritance from the per-user storage directory, native
+    # `MoveFileExW` atomicity, and behaviour under real Windows fs.renameSync
+    # error codes — can ONLY be validated on `windows-latest`. The
+    # additional Windows-specific suite lives in `platform-windows.test.js`.
+    #
+    # Scope is deliberately narrow: we run ONLY the platform suites
+    # (not the full server test set), because (a) GitHub-hosted Windows
+    # runners are slow and cost more, and (b) much of the server suite
+    # depends on node-pty / POSIX signals / shell scripts that don't have
+    # a Windows analogue. The full POSIX suite continues to run on
+    # `ubuntu-24.04` in the `server-tests` job above.
+    #
+    # Trigger gate (#5002): `windows-latest` is 5x the per-minute cost
+    # of `ubuntu-24.04`. To avoid paying that on every PR push:
+    #   * On `push` to `main` we ALWAYS run — catches transitive breakage
+    #     from PRs that merged without touching platform.js but broke
+    #     something the Windows suite covers.
+    #   * On `pull_request` we only run when the `changes` job flagged
+    #     a platform-related edit. Filter scope (see `changes` above) is
+    #     deliberately a touch broader than just `platform.js` to cover
+    #     the foreseeable refactor that splits the file in two.
+    needs: changes
+    # `always()` is required because the `changes` job is gated to
+    # `pull_request` and gets skipped on `push` events. Without it,
+    # the default `needs:` semantics ("skip downstream when any
+    # dependency is skipped") would also skip this job on pushes to
+    # `main`, which is the exact opposite of what we want.
+    if: |
+      always() &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' && needs.changes.result == 'success' && needs.changes.outputs.platform == 'true'))
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/server
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      - name: Run platform tests (cross-platform + Windows-only)
+        # Invoke node's built-in test runner directly with the two platform
+        # test files. Mirrors the flags from `npm test` (sandbox guard via
+        # `--import ./tests/_setup.mjs`, `--experimental-test-module-mocks`)
+        # but scopes to the platform suite to keep the Windows job fast.
+        # `c8` is intentionally omitted — we don't need coverage from the
+        # Windows runner; the ubuntu job is the source of truth there.
+        run: node --import ./tests/_setup.mjs --experimental-test-module-mocks --test --test-force-exit ./tests/platform.test.js ./tests/platform-windows.test.js
+
   server-lint:
     name: Server Lint
     runs-on: ubuntu-24.04
@@ -93,6 +209,39 @@ jobs:
             echo "OK — every new SessionManager(...) in tests passes stateFilePath"
           else
             echo "::error::Tests instantiated SessionManager without stateFilePath. See packages/server/scripts/lint-tests-state-file-path.sh."
+            exit 1
+          fi
+
+      - name: Check session subclasses forward every BaseSession opt
+        run: |
+          # Issue #4797 — every provider session class that extends
+          # BaseSession (or JsonlSubprocessSession) must destructure AND
+          # forward every BaseSession constructor opt via super({ ... }).
+          # The "middle-layer trap" documented in project memory as
+          # feedback_jsonl_subprocess_middle_layer.md has bitten three times
+          # (#3224, #3231, #4790). This lint blocks the next recurrence at
+          # PR time instead of catching it in production.
+          if scripts/lint-session-opt-forwarding.sh; then
+            echo "OK — every session subclass forwards every BaseSession opt"
+          else
+            echo "::error::A provider session class drops a BaseSession opt on its way to super(). See packages/server/scripts/lint-session-opt-forwarding.sh."
+            exit 1
+          fi
+
+      - name: Check session-aware modules use loggerForSession
+        run: |
+          # Issue #4792 — durable follow-up to #4787 / #4793. Session-aware
+          # modules (claude-tui-session.js, handlers/input-handlers.js, ...)
+          # MUST import `loggerForSession` from logger.js so per-session log
+          # lines carry sessionId. Without it the WsServer log fan-out
+          # (#4787 defensive filter) silently drops the entry from bound
+          # dashboard clients — operators lose useful diagnostics.
+          # The lint is ratcheted by file; see scripts/lint-logger-session-scoping.mjs
+          # for the enforced set.
+          if scripts/lint-logger-session-scoping.sh; then
+            echo "OK — enforced modules use loggerForSession"
+          else
+            echo "::error::A session-aware module dropped its loggerForSession import or introduced a bare createLogger. See packages/server/scripts/lint-logger-session-scoping.sh."
             exit 1
           fi
 
@@ -427,6 +576,10 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Run verify-entitlements.sh tests (#4801)
+        working-directory: packages/desktop
+        run: bash scripts/verify-entitlements.test.sh
+
   scripts-tests:
     name: Scripts Tests
     runs-on: ubuntu-24.04
@@ -440,3 +593,6 @@ jobs:
 
       - name: Run bump-version.sh tests
         run: bash scripts/__tests__/bump-version.test.sh
+
+      - name: Run flush-and-exit.mjs tests
+        run: node scripts/__tests__/flush-and-exit.test.mjs

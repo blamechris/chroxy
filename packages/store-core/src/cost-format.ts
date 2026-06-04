@@ -35,6 +35,89 @@ export function formatCostBadge(costUsd: number): string {
 }
 
 /**
+ * #5039: error-path partial-cost snapshot folded onto a server `error`
+ * event when the failed turn ran any parent rounds + Task subagent
+ * calls before the error fired. Shape returned by `handleError` and
+ * consumed by `formatPartialCostLine` below — see PR #5037 wire side
+ * and #5038 cumulative-tracker fold.
+ */
+export interface ErrorPartialCost {
+  costUsd: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+}
+
+/**
+ * #5039: human-readable one-liner for the error-path partial cost.
+ *
+ *   `"This turn cost $0.087 (1.2K in · 3.4K out)"`
+ *
+ * Used as a sub-line under the main error message on the dashboard
+ * toast (`<span data-testid="toast-partial-cost-*">`) and appended to
+ * the mobile `Alert.alert` body. Single source of truth so the two
+ * surfaces can't drift apart in copy/format.
+ *
+ * Falls back to a cost-only string when the usage object was empty (a
+ * subscription-billed provider that only produced a cost). Token counts
+ * use the same K/M abbreviation as `SidebarTokenView.formatTokenCount`
+ * — kept inline here to keep cost-format dependency-free.
+ */
+export function formatPartialCostLine(partial: ErrorPartialCost): string {
+  const cost = formatCostBadge(partial.costUsd)
+  const inTokens = partial.inputTokens
+  const outTokens = partial.outputTokens
+  if (inTokens <= 0 && outTokens <= 0) {
+    return `This turn cost ${cost}`
+  }
+  return `This turn cost ${cost} (${formatTokens(inTokens)} in · ${formatTokens(outTokens)} out)`
+}
+
+/** Token-count abbreviation mirroring `SidebarTokenView.formatTokenCount`. */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n < 1000) return String(n)
+  if (n < 999_500) return `${(n / 1000).toFixed(1)}K`
+  return `${(n / 1_000_000).toFixed(2)}M`
+}
+
+/**
+ * #5065: compact lowercase token formatter for the header status-line
+ * `used / total tokens` label.
+ *
+ *   formatTokensCompact(0)         → "0"
+ *   formatTokensCompact(999)       → "999"
+ *   formatTokensCompact(1_000)     → "1.0k"
+ *   formatTokensCompact(30_000)    → "30.0k"
+ *   formatTokensCompact(999_500)   → "1M"   (rolls to M before "1000.0k")
+ *   formatTokensCompact(1_000_000) → "1M"
+ *   formatTokensCompact(1_500_000) → "1.5M"
+ *
+ * Whole-million values drop the trailing ".0" so the common context-window
+ * sizes (200k / 1M / 2M) render as the marketing label users recognise
+ * rather than "1.0M". Uses lowercase `k` / uppercase `M` to match the
+ * existing `formatContext` helper in App.tsx that already produces "30k
+ * tokens" — keeping the header label visually consistent with the chip.
+ *
+ * Non-finite or non-positive input returns "0" defensively so a corrupted
+ * upstream payload can't poison the renderer with "NaN" / "Infinity".
+ */
+export function formatTokensCompact(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n < 1000) return String(Math.round(n))
+  if (n < 999_500) return `${(n / 1000).toFixed(1)}k`
+  // Round to one decimal first, then strip a trailing ".0" so whole
+  // millions render as "1M" / "2M" / "1M" (rolled over from 999_500)
+  // rather than the visually noisy "1.0M". One decimal is enough
+  // resolution for a status-line chip — sub-100k differences inside a
+  // multi-million window aren't legible there anyway.
+  const m = n / 1_000_000
+  const rounded = m.toFixed(1)
+  return rounded.endsWith('.0') ? `${rounded.slice(0, -2)}M` : `${rounded}M`
+}
+
+/**
  * Build the multi-line breakdown shown in the dashboard's native browser
  * tooltip (the cost-badge hover popover) — one string, six rows separated
  * by newlines, suitable for a `<span title={...}>` attribute.

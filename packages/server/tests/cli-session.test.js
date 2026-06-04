@@ -1410,20 +1410,23 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
   })
 
   // Snapshot the fields SessionManager.serializeState() would write for a
-  // CliSession entry. Note CliSession has no `resumeSessionId` — claude
-  // -p does not support resume — so `sdkSessionId` always serializes as
-  // null for this provider. Keep in sync with session-manager.test.js.
+  // CliSession entry. As of #4887, CliSession exposes a `resumeSessionId`
+  // getter (mirrored from `_sessionId`) and SessionManager.serializeState
+  // persists it under `sdkSessionId` — the cross-provider name for the
+  // resume token. The restore path forwards it back into the constructor
+  // so the next start() passes `--resume <id>` and the model retains the
+  // prior conversation. Keep in sync with session-manager.test.js.
   function snapshotForPersistence(session, { name, cwd }) {
     return {
       name,
       cwd,
       model: session.model,
       permissionMode: session.permissionMode,
-      sdkSessionId: null,
+      sdkSessionId: session.resumeSessionId,
     }
   }
 
-  it('happy path: create → snapshot → write → read → restore → asserts metadata equality', () => {
+  it('happy path: create → snapshot → write → read → restore → asserts metadata + resume id round-trip (#4887)', () => {
     // Step 1: build a session with non-default metadata so the restore
     // side has to actually hydrate every field.
     const original = createSession({
@@ -1431,8 +1434,8 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
       permissionMode: 'auto',
     })
     // Simulate the session having booted and recorded a CLI session id.
-    // SessionManager does not persist `_sessionId` for claude-cli (it
-    // can't be resumed), so we don't include it in the snapshot.
+    // #4887 — claude CLI supports `--resume`, so we now persist this id
+    // under `sdkSessionId` and re-seed it on restore.
     original._sessionId = 'cli-session-abc-123'
 
     // Step 2: snapshot + write atomically.
@@ -1447,7 +1450,8 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
     // Step 3: destroy the original.
     original.destroy()
 
-    // Step 4: read back and reconstruct.
+    // Step 4: read back and reconstruct (mirroring what SessionManager's
+    // restoreState does: forward `sdkSessionId` as `resumeSessionId`).
     const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
     assert.equal(parsed.version, 1)
     assert.equal(parsed.sessions.length, 1)
@@ -1456,19 +1460,21 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
     const restored = createSession({
       model: persisted.model,
       permissionMode: persisted.permissionMode,
+      resumeSessionId: persisted.sdkSessionId,
     })
 
-    // Step 5: every persisted field is back. `sdkSessionId` is null by
-    // design (claude-cli cannot resume), so we DON'T assert that
-    // _sessionId came back — it must start null on a fresh CLI process.
+    // Step 5: every persisted field is back, including the resume id so
+    // the next start() can pass `--resume` and avoid the #4887 cold-start.
     assert.equal(restored.model, 'claude-sonnet-4-6',
       'model must round-trip — dashboard renders this on the session header')
     assert.equal(restored.permissionMode, 'auto',
       'permissionMode must round-trip — controls every permission-hook prompt')
-    assert.equal(restored._sessionId, null,
-      'CliSession cannot resume — restored session must start with a null _sessionId until the new claude -p boots and emits system.init')
-    assert.equal(persisted.sdkSessionId, null,
-      'claude-cli MUST serialize sdkSessionId as null — the provider has no resume capability and persisting a value would mislead the SDK code path')
+    assert.equal(persisted.sdkSessionId, 'cli-session-abc-123',
+      'claude-cli MUST serialize sdkSessionId now that the provider supports --resume; #4887 depends on this id surviving the disk hop')
+    assert.equal(restored._sessionId, 'cli-session-abc-123',
+      'restored session must adopt the persisted resume id so start() passes --resume and the model re-attaches to the prior conversation')
+    assert.equal(restored.resumeSessionId, 'cli-session-abc-123',
+      'getter mirrors _sessionId — same source of truth')
 
     restored.destroy()
   })
@@ -1522,24 +1528,22 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
     fresh.destroy()
   })
 
-  it('mismatched session id: persisted sessionId is silently ignored because claude-cli cannot resume', () => {
-    // Operator hand-edits the state file (or schema drift): an entry
-    // smuggles a `sdkSessionId` value through for a claude-cli session,
-    // even though the provider declares `resume: false` in capabilities
-    // (cli-session.js:88). The restoration path must NOT plumb it
-    // through to the new session — that would mislead any downstream
-    // code that branches on `sessionId !== null` meaning "resumable".
+  it('persisted resume id flows back into the new CliSession constructor (#4887)', () => {
+    // #4887 — claude CLI supports `--resume <id>`, so when SessionManager
+    // restores a CliSession after a server restart, the persisted
+    // `sdkSessionId` MUST be forwarded as `resumeSessionId` and adopted
+    // by the new instance. Without this, the next start() omits the
+    // `--resume` flag and the model wakes up cold mid-conversation —
+    // the regression #4887 was filed for.
     const state = {
       version: 1,
       timestamp: Date.now(),
       sessions: [{
-        name: 'Stale',
+        name: 'Restored',
         cwd: '/tmp',
         model: null,
         permissionMode: 'approve',
-        // Mismatch: claude-cli does NOT support resume, but this id is in
-        // the state file (operator edit / pre-#3502 schema drift).
-        sdkSessionId: 'cli-stale-9999',
+        sdkSessionId: 'cli-resume-9999',
       }],
     }
     writeFileSync(stateFile, JSON.stringify(state))
@@ -1547,25 +1551,20 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
     const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
     const persisted = parsed.sessions[0]
 
-    // The contract: CliSession constructor must NOT accept any
-    // resume-style option (it has no `resumeSessionId` parameter — see
-    // the constructor signature in cli-session.js). Even if we tried to
-    // forward the id, it would land in destructuring slack and never
-    // touch `_sessionId`.
     const fresh = createSession({
       model: persisted.model,
       permissionMode: persisted.permissionMode,
-      // Defensive: even if a future caller accidentally forwarded this,
-      // the constructor must ignore it.
       resumeSessionId: persisted.sdkSessionId,
     })
 
-    assert.equal(fresh._sessionId, null,
-      'CliSession must not adopt a persisted session id — provider declares resume:false in capabilities')
-    assert.equal(fresh.sessionId, null,
-      'public accessor must also report null — restored sessions wait for the new claude -p to emit system.init')
-    assert.equal(CliSession.capabilities.resume, false,
-      'capability flag must remain false — pins the "no resume" provider contract that this test depends on')
+    assert.equal(fresh._sessionId, 'cli-resume-9999',
+      'CliSession constructor MUST adopt the persisted resume id so start() can pass --resume and recover the prior transcript (#4887)')
+    assert.equal(fresh.sessionId, 'cli-resume-9999',
+      'public accessor reflects the adopted id')
+    assert.equal(fresh.resumeSessionId, 'cli-resume-9999',
+      'resumeSessionId getter mirrors _sessionId — single source of truth used by SessionManager.serializeState on the next persist tick')
+    assert.equal(CliSession.capabilities.resume, true,
+      'capability flag is true now that the provider wires --resume into the spawn argv (#4887)')
 
     fresh.destroy()
   })

@@ -407,6 +407,66 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(result.success, 'Should accept reason=crash (emitted on uncaughtException)')
   })
 
+  // #4756 — `session_stopped` is the user-initiated Stop confirmation
+  // broadcast. Both the multi-session shape (sessionId + numeric code) and
+  // the legacy-cli shape (no sessionId) must parse. Future provider
+  // adoption (per the issue's #4 follow-up) may also omit `code` when the
+  // provider doesn't have a child-process exit status to report.
+  it('validates session_stopped with multi-session shape (#4756)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+      code: 0,
+    })
+    assert.ok(result.success, 'Should accept session_stopped with sessionId + code')
+    assert.equal(result.data.sessionId, 'sess-abc')
+    assert.equal(result.data.code, 0)
+  })
+
+  it('accepts session_stopped without sessionId (legacy-cli path)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      code: 143,
+    })
+    assert.ok(result.success, 'legacy-cli session_stopped omits sessionId')
+    assert.equal(result.data.code, 143)
+  })
+
+  it('accepts session_stopped without code (future provider parity)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+    })
+    assert.ok(result.success, 'code is optional for providers without an exit status')
+  })
+
+  it('rejects session_stopped with non-numeric code', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+      code: 'not-a-number',
+    })
+    assert.equal(result.success, false, 'code must be a number when present')
+  })
+
+  // Distinct from the non-numeric case above: this asserts the `.int()`
+  // constraint specifically. A float (1.5) is a number but not an integer,
+  // so it should fail the integer-only schema and the normalizer's
+  // `Number.isInteger` guard.
+  it('rejects session_stopped with non-integer code (float)', async () => {
+    const { ServerSessionStoppedSchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionStoppedSchema.safeParse({
+      type: 'session_stopped',
+      sessionId: 'sess-abc',
+      code: 1.5,
+    })
+    assert.equal(result.success, false, 'code must be an integer when present (z.number().int())')
+  })
+
   it('validates encrypted envelope', async () => {
     const { EncryptedEnvelopeSchema } = await import('../src/schemas/client.ts')
     const result = EncryptedEnvelopeSchema.safeParse({
@@ -1636,6 +1696,78 @@ describe('@chroxy/protocol schemas', () => {
     it('ByokClearCredentialsSchema accepts type only', async () => {
       const { ByokClearCredentialsSchema } = await import('../src/schemas/client.ts')
       assert.ok(ByokClearCredentialsSchema.safeParse({ type: 'byok_clear_credentials' }).success)
+    })
+  })
+
+  // #4735 — per-question answer wire format. Values may be either a
+  // string (single-select / free-form) or string[] (multi-select). The
+  // back-compat string-only shape must still validate; the new array
+  // shape must validate too.
+  describe('UserQuestionResponseSchema per-question answer values (#4735)', () => {
+    it('accepts string answers (back-compat single-select / free-form)', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'Patch',
+        answers: { 'Which release strategy?': 'Patch', 'Confirm?': 'Yes' },
+      })
+      assert.ok(result.success, JSON.stringify(result))
+    })
+
+    it('accepts string[] answers (multi-select native array)', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'App, Tests',
+        answers: { 'Which targets?': ['App', 'Tests'] },
+      })
+      assert.ok(result.success, JSON.stringify(result))
+    })
+
+    it('accepts mixed string and string[] across questions', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'summary',
+        answers: {
+          'Which release strategy?': 'Patch',
+          'Which targets?': ['App', 'Tests'],
+          'Confirm?': 'Yes',
+        },
+      })
+      assert.ok(result.success, JSON.stringify(result))
+    })
+
+    it('rejects non-string array entries', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'x',
+        answers: { 'q?': [1, 2, 3] },
+      })
+      assert.ok(!result.success)
+    })
+
+    it('caps multi-select array length at 100', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const big = Array.from({ length: 101 }, (_, i) => `opt${i}`)
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'x',
+        answers: { 'q?': big },
+      })
+      assert.ok(!result.success)
+    })
+
+    it('caps individual array entries at 100k chars', async () => {
+      const { UserQuestionResponseSchema } = await import('../src/schemas/client.ts')
+      const huge = 'x'.repeat(100_001)
+      const result = UserQuestionResponseSchema.safeParse({
+        type: 'user_question_response',
+        answer: 'x',
+        answers: { 'q?': [huge] },
+      })
+      assert.ok(!result.success)
     })
   })
 })

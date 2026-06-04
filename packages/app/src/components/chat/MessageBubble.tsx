@@ -9,6 +9,12 @@ import {
   LayoutAnimation,
 } from 'react-native';
 import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
+// #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
+// so the mobile store, the mobile screen, and (eventually) the dashboard
+// can converge on a single declaration paired with the shared
+// `isFreeformAnswer` guard. Re-exported below for the existing call sites
+// (SessionScreen, ChatView, MessageBubble's own onSelectOption signature).
+import type { OtherFreeformAnswer } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -17,10 +23,36 @@ import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permis
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
 import { StreamStallChip } from '../StreamStallChip';
+import { ResumeUnknownChip } from '../ResumeUnknownChip';
+
+/**
+ * #4755 — single-question Other / freeform answer payload (mobile parity
+ * with the dashboard's `OtherFreeformAnswer`, see #4651 / PR #4753).
+ *
+ * When the user picks the synthesized "Other" option (`OTHER_OPTION_VALUE`)
+ * and types freeform text, the bubble emits this object shape instead of
+ * the typed string. SessionScreen forwards it to `sendUserQuestionResponse`,
+ * which serializes `{answer: <otherLabel>, freeformText: <typed>}` on the
+ * wire so the server can drive a two-stage TUI write (Other digit → text-
+ * input prompt → freeform text + Enter) — sidestepping claude TUI's
+ * single-character jump-nav (#4288) that would otherwise wedge the menu.
+ *
+ * The legacy string path is preserved for regular option taps and zero-
+ * options free-text-only AskUserQuestions (#1245) so older servers that
+ * ignore `freeformText` keep working unchanged.
+ */
+// #4875: the interface itself lives in `@chroxy/store-core/freeform-answer`
+// (single source of truth, paired with the `isFreeformAnswer` guard); re-
+// exported here for downstream importers (ChatView, SessionScreen) that
+// already pull `SelectOptionValue` from this file. Keeping the re-export
+// avoids churning every existing call site for the type alias.
+export type { OtherFreeformAnswer };
+
+export type SelectOptionValue = string | OtherFreeformAnswer;
 
 export function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall }: {
   message: ChatMessage;
-  onSelectOption?: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
+  onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -43,6 +75,14 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
   // #3746: free-text mode when user picks the synthetic "Other" option
   const [otherActive, setOtherActive] = useState(false);
   const [otherText, setOtherText] = useState('');
+  // #4755 — when the user clicks the Other option button, stash the option's
+  // label so we can emit it alongside the freeform text. The server resolves
+  // the label to its 1-indexed TUI digit, writes that digit BEFORE the
+  // freeform text so the TUI's text-input prompt is open when the text
+  // lands. Default 'Other' covers the synthesized-sentinel case (#3746)
+  // where options[*].value === OTHER_OPTION_VALUE but no real option
+  // carries that label. Mirrors `QuestionPrompt` in the dashboard (#4651).
+  const [otherLabel, setOtherLabel] = useState<string>('Other');
   // #3753: mirror the dashboard's submittedRef — guarantee one-shot send
   // even if the user rapid-taps Send / hits Enter before the store
   // round-trip flips `message.answered`. Reset when the prompt is
@@ -134,6 +174,35 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
     );
   }
 
+  // #4971 / #5006: dedicated chip for the two resume-failure error codes:
+  //   - `error{code: 'resume_unknown'}` (server PR #4944, dashboard #4947,
+  //     mobile #4971) — RECOVERABLE. CliSession has already auto-fallen-
+  //     back to a fresh conversation by the time this lands; chip renders
+  //     the polite "starting fresh" headline.
+  //   - `error{code: 'resume_unknown_exhausted'}` (server PR #5004) —
+  //     TERMINAL. The post-fallback retry ALSO failed; chip renders the
+  //     "auto-recovery exhausted, start a new session manually" headline
+  //     so the user knows auto-recovery has given up.
+  // Both variants surface `attemptedResumeId` as subtext for operator
+  // correlation against `~/.chroxy/session-state.json.resumeConversationId`.
+  if (
+    isError &&
+    (message.code === 'resume_unknown' || message.code === 'resume_unknown_exhausted')
+  ) {
+    return (
+      <ResumeUnknownChip
+        variant={message.code === 'resume_unknown_exhausted' ? 'exhausted' : 'recoverable'}
+        // #4971 review: pass the raw content through (no `.trim()`) so
+        // any meaningful trailing context / newlines the server includes
+        // (e.g. wrapped CLI stderr) survive end-to-end into the chip's
+        // `accessibilityHint`. Matches the dashboard call site, which
+        // forwards `message.content` verbatim.
+        errorText={message.content ?? ''}
+        attemptedResumeId={message.attemptedResumeId}
+      />
+    );
+  }
+
   if (showAsPill) {
     return (
       <PermissionPill
@@ -221,6 +290,13 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
                 disabled={isDisabled}
                 onPress={() => {
                   if (opt.value === OTHER_OPTION_VALUE) {
+                    // #4755 — capture the label of the option the user
+                    // actually clicked so the freeform payload carries the
+                    // right label for the server's digit lookup. Synthetic
+                    // sentinel options use the label 'Other'; model-supplied
+                    // custom labels (rare) preserve their text. Mirrors the
+                    // dashboard's QuestionPrompt (#4651).
+                    setOtherLabel(opt.label || 'Other');
                     setOtherActive(true);
                     return;
                   }
@@ -252,23 +328,45 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
             placeholder="Type your response…"
             placeholderTextColor={COLORS.textSecondary}
             style={styles.promptFreetextInput}
+            // #4755 — testID anchors the freeform input for both unit
+            // tests and Maestro flows. Pairs with `approval-freetext-send`
+            // on the Send button so flows can drive Other-mode end-to-end.
+            testID="approval-freetext-input"
             autoFocus
             onSubmitEditing={() => {
               const trimmed = otherText.trim();
               if (!trimmed || submittedRef.current) return;
               submittedRef.current = true;
-              onSelectOption?.(trimmed, message.id, message.requestId, message.toolUseId);
+              // #4755 — when the user reached this input by clicking the
+              // synthesized "Other" option (otherActive true), emit the
+              // structured `{otherLabel, freeformText}` payload so the
+              // server can drive the two-stage TUI write. When otherActive
+              // is false the user is in the zero-options free-text-only
+              // path (#1245) — keep emitting a plain string so the
+              // server's existing free-text handler continues to work
+              // unchanged. Mirrors dashboard handleSubmit (#4651).
+              const payload: SelectOptionValue = otherActive
+                ? { otherLabel, freeformText: trimmed }
+                : trimmed;
+              onSelectOption?.(payload, message.id, message.requestId, message.toolUseId);
             }}
             returnKeyType="send"
           />
           <TouchableOpacity
             style={[styles.promptFreetextSend, !otherText.trim() && styles.promptOptionDisabled]}
             disabled={!otherText.trim()}
+            // #4755 — see input testID comment above.
+            testID="approval-freetext-send"
             onPress={() => {
               const trimmed = otherText.trim();
               if (!trimmed || submittedRef.current) return;
               submittedRef.current = true;
-              onSelectOption?.(trimmed, message.id, message.requestId, message.toolUseId);
+              // #4755 — see onSubmitEditing comment above. Both paths
+              // (Enter key + Send button tap) must emit the same shape.
+              const payload: SelectOptionValue = otherActive
+                ? { otherLabel, freeformText: trimmed }
+                : trimmed;
+              onSelectOption?.(payload, message.id, message.requestId, message.toolUseId);
             }}
           >
             <Text style={styles.promptFreetextSendText}>Send</Text>

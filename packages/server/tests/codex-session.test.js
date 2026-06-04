@@ -265,6 +265,28 @@ describe('CodexSession', () => {
       assert.equal(session._resultTimeoutMs, 30 * 60 * 1000)
     })
 
+    // #4790: Leaf constructor must forward streamStallTimeoutMs through every
+    // layer (CodexSession → JsonlSubprocessSession → BaseSession). PR #4745
+    // wired per-provider overrides through SessionManager — Codex was the
+    // motivating case — but each middle layer dropped the key from its
+    // destructure list. The existing CapturingProvider-based test in
+    // session-manager.test.js missed this because CapturingProvider has no
+    // middle layer.
+    it('forwards streamStallTimeoutMs to BaseSession (#4790)', () => {
+      const session = new CodexSession({ cwd: '/tmp', streamStallTimeoutMs: 900_000 })
+      assert.equal(session._streamStallTimeoutMs, 900_000)
+    })
+
+    it('defaults _streamStallTimeoutMs to 5 min when omitted (#4790)', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      assert.equal(session._streamStallTimeoutMs, 5 * 60 * 1000)
+    })
+
+    it('forwards streamStallTimeoutMs: 0 (explicit disable) to BaseSession (#4790)', () => {
+      const session = new CodexSession({ cwd: '/tmp', streamStallTimeoutMs: 0 })
+      assert.equal(session._streamStallTimeoutMs, 0)
+    })
+
     // -------------------------------------------------------------------
     // #3225: JsonlSubprocessSession's constructor previously dropped
     // `provider` and `activeManualSkills` (and the budget overrides). The

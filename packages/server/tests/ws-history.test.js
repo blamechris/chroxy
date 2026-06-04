@@ -1091,6 +1091,390 @@ describe('replayHistory', () => {
   })
 })
 
+// #4833 — replayHistory must pause when ws.bufferedAmount exceeds the
+// backpressure threshold so a session with large tool_result payloads doesn't
+// trip the post-send eviction (1MB) in ws-client-sender.js. Pre-fix, every
+// chunk fires via setImmediate without consulting bufferedAmount; in the
+// reported scenario the per-chunk burst pushes the socket buffer over 1MB
+// and the dashboard sees a 4008 close → "Reconnecting…" loop.
+describe('replayHistory — bufferedAmount backpressure drain (#4833)', () => {
+  /**
+   * Build a fake ws whose `bufferedAmount` mirrors what the real WS would
+   * report between event-loop turns. `send` adds the byte length of the
+   * payload (mimicking the OS-level send queue when the socket is slow),
+   * and tests can call `drain(n)` to subtract bytes as the simulated peer
+   * acknowledges. `readyState` defaults to OPEN.
+   */
+  function makeBackpressuredWs(readyState = 1) {
+    const rawSent = []
+    const ws = {
+      readyState,
+      bufferedAmount: 0,
+      send(data) {
+        // Mirror the real ws.send: bufferedAmount grows by the wire size of
+        // each payload that hasn't yet been flushed to the network.
+        const bytes = Buffer.byteLength(typeof data === 'string' ? data : JSON.stringify(data))
+        ws.bufferedAmount += bytes
+        rawSent.push(data)
+      },
+      close: createSpy(),
+      _rawSent: rawSent,
+      drain(bytes) {
+        ws.bufferedAmount = Math.max(0, ws.bufferedAmount - bytes)
+      },
+      drainAll() {
+        ws.bufferedAmount = 0
+      },
+    }
+    return ws
+  }
+
+  /**
+   * Build a ctx whose `send` writes to the real ws.send so bufferedAmount
+   * tracks the actual byte stream during replay. Mirrors the production
+   * createClientSender path that goes through ws.send, just without the
+   * encryption / post-send eviction logic (those live in ws-client-sender
+   * and are out of scope for the replayHistory loop).
+   */
+  function makeCtxWithRealSend(overrides = {}) {
+    const sends = []
+    const ctx = makeCtx({
+      send: (ws, msg) => {
+        sends.push(msg)
+        if (ws.readyState === 1) ws.send(JSON.stringify(msg))
+      },
+      ...overrides,
+    })
+    // Re-spy nothing: replace the helper sends array with our own tracker.
+    ctx._sends = sends
+    return ctx
+  }
+
+  it('pauses chunk scheduling once bufferedAmount exceeds the 256KB threshold', async () => {
+    // 30 entries × ~200KB payload = 6MB total. Pre-fix, the first
+    // setImmediate-scheduled chunk would push 4MB onto the socket before
+    // yielding, blowing past the 1MB eviction line. Post-fix, we should
+    // stop after the first chunk fills the buffer and wait for drain.
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+
+    // Yield the loop a few times — without the fix, every setImmediate
+    // would drain another 20-entry chunk and push bufferedAmount well past
+    // 1MB. With the fix, the loop must stall on bufferedAmount > 256KB and
+    // wait for drain (we never drain here, so it never advances).
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    // Sanity: at least the history_replay_start and a partial chunk made it.
+    const startMsg = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.ok(startMsg, 'history_replay_start must always be sent first')
+
+    const replayed = ctx._sends.filter(m => m.type === 'tool_result').length
+    assert.ok(replayed < ENTRY_COUNT,
+      `expected replay to stall before sending all ${ENTRY_COUNT} entries when buffer never drains; got ${replayed}`)
+
+    // The end marker must NOT have been sent yet because the loop is stalled.
+    const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+    assert.equal(endMsg, undefined,
+      'history_replay_end should not be sent while bufferedAmount stays above threshold')
+
+    // Mark the ws CLOSED so scheduleAfterDrain's pending 20ms poll exits on
+    // its next tick instead of leaking a setTimeout into later tests in this
+    // file (#4845 review feedback).
+    ws.readyState = 3
+  })
+
+  it('keeps bufferedAmount under the 1MB eviction line during a fat-payload replay', async () => {
+    // Same scenario as above but with a draining peer. The fix should keep
+    // bufferedAmount under 1MB at every observation point throughout the
+    // replay — the 1MB EVICT_THRESHOLD in ws-client-sender.js would 4008
+    // the client otherwise (#4833 reproduction path).
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const EVICT_THRESHOLD = 1024 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    // Background drain: every 5ms, the simulated peer acknowledges 512KB.
+    // That's well under the per-chunk burst the pre-fix code would emit,
+    // so the only way to stay under 1MB is for the replay loop to actually
+    // pause when bufferedAmount climbs.
+    let maxObserved = 0
+    const drainTimer = setInterval(() => {
+      // Snapshot before drain so we measure the peak bufferedAmount, not
+      // the moment-after-drain trough.
+      if (ws.bufferedAmount > maxObserved) maxObserved = ws.bufferedAmount
+      ws.drain(512 * 1024)
+    }, 5)
+
+    try {
+      replayHistory(ctx, ws, 'sess-1')
+
+      // Wait for the replay to finish (history_replay_end) or time out.
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline) {
+        if (ws.bufferedAmount > maxObserved) maxObserved = ws.bufferedAmount
+        if (ctx._sends.some(m => m.type === 'history_replay_end')) break
+        await new Promise(r => setTimeout(r, 10))
+      }
+
+      const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+      assert.ok(endMsg, 'replay must eventually complete when peer drains')
+
+      const replayed = ctx._sends.filter(m => m.type === 'tool_result').length
+      assert.equal(replayed, ENTRY_COUNT, 'every history entry must be replayed')
+
+      assert.ok(maxObserved < EVICT_THRESHOLD,
+        `bufferedAmount peaked at ${maxObserved} bytes; must stay under ${EVICT_THRESHOLD} (1MB) to avoid client eviction`)
+    } finally {
+      clearInterval(drainTimer)
+    }
+  })
+
+  it('pauses on chunk entry when bufferedAmount is already over the threshold', async () => {
+    // #4845 review feedback: even with the mid-chunk break + post-chunk
+    // scheduleAfterDrain, the very first sendChunk(0) call previously sent
+    // its first entry unconditionally — so if the socket was already
+    // congested from the preceding sendPostAuthInfo / session_switched
+    // burst, one fat tool_result still landed on top of a near-eviction
+    // buffer and could tip past 1MB. The chunk-entry gate must defer the
+    // chunk if bufferedAmount > threshold at entry, without sending any
+    // history payload first.
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    // Pre-seed the socket buffer well past the 256KB pause threshold to
+    // simulate carry-over from an earlier burst (e.g. post-auth payloads,
+    // session_switched info).
+    ws.bufferedAmount = 512 * 1024
+
+    replayHistory(ctx, ws, 'sess-1')
+
+    // Let the loop turn a few times — without the chunk-entry gate, the
+    // first sendChunk(0) call would still emit at least one history entry
+    // before any drain logic ran. With the gate, only the
+    // history_replay_start (which is sent *before* sendChunk(0)) should
+    // have been emitted.
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    const startMsg = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.ok(startMsg, 'history_replay_start is always sent before the gate')
+
+    const replayed = ctx._sends.filter(m => m.type === 'tool_result').length
+    assert.equal(replayed, 0,
+      `chunk-entry gate must defer all history sends while bufferedAmount > threshold; got ${replayed} sent`)
+
+    const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+    assert.equal(endMsg, undefined, 'replay must not complete while gated')
+
+    // Cleanup: close ws so the polled scheduleAfterDrain exits.
+    ws.readyState = 3
+  })
+
+  it('bails out gracefully when ws closes while paused on backpressure', async () => {
+    // Edge case: the drain loop must abort if the client disconnects while
+    // we're waiting for bufferedAmount to fall. Otherwise we'd keep polling
+    // and eventually send to a closed socket (or leak a setTimeout).
+    const ENTRY_COUNT = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const history = Array.from({ length: ENTRY_COUNT }, (_, i) => ({
+      type: 'tool_result',
+      toolUseId: `toolu_${i}`,
+      content: bigText,
+    }))
+
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => false
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    replayHistory(ctx, ws, 'sess-1')
+
+    // Let the first chunk go out and the loop stall on bufferedAmount.
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    const sentBeforeClose = ctx._sends.length
+    ws.readyState = 3 // CLOSED
+
+    // Drain the buffer so the polled check would otherwise resume the loop,
+    // and wait long enough for the next poll tick (>20ms).
+    ws.drainAll()
+    await new Promise(r => setTimeout(r, 60))
+
+    // The loop must have bailed; no end marker, no extra sends.
+    const endMsg = ctx._sends.find(m => m.type === 'history_replay_end')
+    assert.equal(endMsg, undefined, 'replay must not send end marker after ws closes')
+    assert.equal(ctx._sends.length, sentBeforeClose,
+      'no additional messages should be sent after ws closes while paused')
+  })
+})
+
+// #4833 — flushPostAuthQueue has the same chunking shape and must apply the
+// same drain logic so a large queued burst (e.g. encryption-required handshake
+// stacking auth_ok + session_list + session_switched + history) doesn't trip
+// the same 1MB eviction.
+describe('flushPostAuthQueue — bufferedAmount backpressure drain (#4833)', () => {
+  function makeBackpressuredWs(readyState = 1) {
+    const rawSent = []
+    const ws = {
+      readyState,
+      bufferedAmount: 0,
+      send(data) {
+        const bytes = Buffer.byteLength(typeof data === 'string' ? data : JSON.stringify(data))
+        ws.bufferedAmount += bytes
+        rawSent.push(data)
+      },
+      close: createSpy(),
+      _rawSent: rawSent,
+      drain(bytes) {
+        ws.bufferedAmount = Math.max(0, ws.bufferedAmount - bytes)
+      },
+    }
+    return ws
+  }
+
+  function makeCtxWithRealSend(overrides = {}) {
+    const sends = []
+    const ctx = makeCtx({
+      send: (ws, msg) => {
+        sends.push(msg)
+        if (ws.readyState === 1) ws.send(JSON.stringify(msg))
+      },
+      ...overrides,
+    })
+    ctx._sends = sends
+    return ctx
+  }
+
+  it('pauses queue draining once bufferedAmount exceeds the threshold', async () => {
+    const QUEUE_LEN = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const queue = Array.from({ length: QUEUE_LEN }, (_, i) => ({
+      type: 'fat_msg',
+      idx: i,
+      data: bigText,
+    }))
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend()
+    registerClient(ctx, ws)
+
+    flushPostAuthQueue(ctx, ws, queue)
+
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    const sent = ctx._sends.filter(m => m.type === 'fat_msg').length
+    assert.ok(sent < QUEUE_LEN,
+      `expected flush to stall before sending all ${QUEUE_LEN} queued messages; got ${sent}`)
+
+    // Mark the ws CLOSED so scheduleAfterDrain's pending 20ms poll exits on
+    // its next tick instead of leaking a setTimeout into later tests in this
+    // file (#4845 review feedback).
+    ws.readyState = 3
+  })
+
+  it('defers chunk entry when bufferedAmount is already over the threshold', async () => {
+    // #4845 review feedback: drainChunk(0) previously sent its first message
+    // unconditionally — so a fat queued message landing on an already-
+    // congested socket could still push past the 1MB eviction line before
+    // the mid-chunk break ran. The chunk-entry gate must defer the chunk
+    // (and keep _flushing = true so ws-client-sender's _flushOverflow keeps
+    // buffering) until bufferedAmount falls below the pause threshold.
+    const QUEUE_LEN = 30
+    const PAYLOAD_BYTES = 200 * 1024
+    const bigText = 'x'.repeat(PAYLOAD_BYTES)
+    const queue = Array.from({ length: QUEUE_LEN }, (_, i) => ({
+      type: 'fat_msg',
+      idx: i,
+      data: bigText,
+    }))
+
+    const ws = makeBackpressuredWs()
+    const ctx = makeCtxWithRealSend()
+    registerClient(ctx, ws)
+
+    // Pre-seed the socket buffer past the pause threshold.
+    ws.bufferedAmount = 512 * 1024
+
+    flushPostAuthQueue(ctx, ws, queue)
+
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setImmediate(r))
+    }
+
+    const sent = ctx._sends.filter(m => m.type === 'fat_msg').length
+    assert.equal(sent, 0,
+      `chunk-entry gate must defer all queued sends while bufferedAmount > threshold; got ${sent} sent`)
+
+    const client = ctx.clients.get(ws)
+    assert.equal(client?._flushing, true,
+      'chunk-entry gate must keep _flushing = true so ws-client-sender buffers overflow')
+
+    ws.readyState = 3
+  })
+})
+
 // ── flushPostAuthQueue ─────────────────────────────────────────────────────
 
 describe('flushPostAuthQueue', () => {
@@ -1317,3 +1701,261 @@ describe('sendPostAuthInfo — provider-scoped available_models (#2956)', () => 
     }
   })
 })
+
+// #4835: per-deviceId active-session restore on reconnect.
+//
+// Before this fix, every reconnect snapped the client back to
+// `defaultSessionId || firstSessionId` — meaning a tunnel hiccup, eviction,
+// or restart silently lost the user's currently-viewed session. Combined
+// with #4833 (backpressure eviction on large-history sessions) it created
+// an unbreakable trap: every attempt to view the big session got bounced
+// back to the small session, with no way out short of restarting chroxy.
+//
+// The fix wires an injectable `devicePreferences` store through ctx that
+// `sendPostAuthInfo` consults BEFORE falling back to defaultSessionId.
+// `boundSessionId` clients (paired with a specific session) continue to
+// fail-closed — the preference is ignored when the client is bound.
+describe('sendPostAuthInfo — per-device active session restore (#4835)', () => {
+  function inMemoryDevicePrefs(initial = {}) {
+    // Test-double: same shape as the production createDevicePreferences()
+    // store but no disk I/O. Real disk-backed version is exercised in
+    // tests/device-preferences.test.js.
+    const store = new Map(Object.entries(initial))
+    return {
+      getActiveSessionId: (deviceId) => store.get(deviceId) || null,
+      setActiveSessionId: (deviceId, sessionId) => { store.set(deviceId, sessionId) },
+      clear: (deviceId) => { store.delete(deviceId) },
+      _dump: () => Object.fromEntries(store),
+    }
+  }
+
+  it('restores the persisted active session over defaultSessionId / firstSessionId', () => {
+    // Three sessions; defaultSessionId points at sess-default. Device "laptop"
+    // previously switched to sess-big and we want that restored on reconnect.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-default', name: 'Default', cwd: '/d' },
+      { id: 'sess-big', name: 'Ltl', cwd: '/big' },
+      { id: 'sess-other', name: 'Other', cwd: '/o' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'laptop': 'sess-big' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: 'Laptop', deviceType: 'desktop', platform: 'darwin' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    assert.equal(client.activeSessionId, 'sess-big',
+      'persisted preference must win over defaultSessionId')
+    const switchMsg = ctx._sends.find(m => m.type === 'session_switched')
+    assert.ok(switchMsg, 'session_switched not sent')
+    assert.equal(switchMsg.sessionId, 'sess-big')
+    assert.equal(switchMsg.name, 'Ltl')
+  })
+
+  it('falls back to firstSessionId when the deviceId has no recorded preference', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-first', name: 'First', cwd: '/first' },
+      { id: 'sess-other', name: 'Other', cwd: '/other' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs() // empty
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null, // exercise the firstSessionId fallback
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'unknown-device', deviceName: null, deviceType: 'unknown', platform: 'unknown' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-first',
+      'unknown device must fall back to firstSessionId, not null')
+  })
+
+  it('falls back to firstSessionId when the persisted session no longer exists', () => {
+    // Persisted preference points at sess-deleted, which is not in the
+    // manager (session was destroyed between connects). Must NOT throw,
+    // must fall back cleanly to firstSessionId.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-alive', name: 'Alive', cwd: '/alive' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'laptop': 'sess-deleted' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'linux' },
+    })
+
+    assert.doesNotThrow(() => sendPostAuthInfo(ctx, ws))
+    assert.equal(client.activeSessionId, 'sess-alive',
+      'stale preference must fall back to firstSessionId without throwing')
+  })
+
+  it('falls back to defaultSessionId when the persisted session no longer exists', () => {
+    // Same as above but with a defaultSessionId set — the defaultSessionId
+    // should win over firstSessionId when the stale persisted pref is
+    // discarded.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-first', name: 'First', cwd: '/first' },
+      { id: 'sess-default', name: 'Default', cwd: '/default' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'laptop': 'sess-gone' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'linux' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-default',
+      'stale persisted pref must yield to defaultSessionId')
+  })
+
+  it('bound clients ignore the persisted preference (fail-closed wins)', () => {
+    // boundSessionId clients must only ever see their bound session, even
+    // if a stale per-device preference exists. This is the security
+    // invariant from the original ws-history.js bound-session branch.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-bound', name: 'Bound', cwd: '/bound' },
+      { id: 'sess-other', name: 'Other', cwd: '/other' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'paired-phone': 'sess-other' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      boundSessionId: 'sess-bound',
+      deviceInfo: { deviceId: 'paired-phone', deviceName: null, deviceType: 'phone', platform: 'ios' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-bound',
+      'bound clients must ignore the per-device preference')
+  })
+
+  it('bound clients fail closed when bound session is gone (preference is ignored)', () => {
+    // Even more pointed: bound session no longer exists, but a valid
+    // per-device pref points at a still-existing session. The bound
+    // client must NOT inherit that preference — it must clear active
+    // session to null (existing fail-closed behavior).
+    const { manager } = createMockSessionManager([
+      { id: 'sess-still-there', name: 'Still', cwd: '/s' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'paired-phone': 'sess-still-there' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-still-there',
+      devicePreferences: devicePrefs,
+    })
+    const client = registerClient(ctx, ws, {
+      boundSessionId: 'sess-bound-but-gone',
+      deviceInfo: { deviceId: 'paired-phone', deviceName: null, deviceType: 'phone', platform: 'ios' },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, null,
+      'missing bound session must clear active session even when a valid preference exists')
+  })
+
+  it('two deviceIds maintain independent active sessions (laptop + phone do not share)', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-A', name: 'Alpha', cwd: '/a' },
+      { id: 'sess-B', name: 'Beta', cwd: '/b' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({
+      'laptop': 'sess-A',
+      'phone': 'sess-B',
+    })
+
+    // Connect laptop
+    const laptopWs = makeFakeWs()
+    const laptopCtx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const laptop = registerClient(laptopCtx, laptopWs, {
+      id: 'laptop-client',
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'darwin' },
+    })
+    sendPostAuthInfo(laptopCtx, laptopWs)
+    assert.equal(laptop.activeSessionId, 'sess-A')
+
+    // Connect phone (same in-memory devicePrefs store)
+    const phoneWs = makeFakeWs()
+    const phoneCtx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: null,
+      devicePreferences: devicePrefs,
+    })
+    const phone = registerClient(phoneCtx, phoneWs, {
+      id: 'phone-client',
+      deviceInfo: { deviceId: 'phone', deviceName: null, deviceType: 'phone', platform: 'ios' },
+    })
+    sendPostAuthInfo(phoneCtx, phoneWs)
+    assert.equal(phone.activeSessionId, 'sess-B')
+  })
+
+  it('clients with no deviceInfo (older clients) keep the legacy defaultSessionId behavior', () => {
+    // Backward compat: pre-deviceId clients shouldn't crash or stall — they
+    // should land on defaultSessionId / firstSessionId, exactly as today.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-default', name: 'Default', cwd: '/d' },
+      { id: 'sess-other', name: 'Other', cwd: '/o' },
+    ])
+    const devicePrefs = inMemoryDevicePrefs({ 'some-device': 'sess-other' })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      devicePreferences: devicePrefs,
+    })
+    // No deviceInfo on the client
+    const client = registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.activeSessionId, 'sess-default',
+      'a deviceId-less client must not inherit anyone else\'s preference')
+  })
+
+  it('works without devicePreferences on ctx (backward compat with older callers)', () => {
+    // ctx.devicePreferences is optional — older wirings (e.g. in-progress
+    // refactors, test harnesses) that don't supply it must keep the
+    // existing default/first behavior, not crash.
+    const { manager } = createMockSessionManager([
+      { id: 'sess-default', name: 'Default', cwd: '/d' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-default',
+      // devicePreferences deliberately absent
+    })
+    const client = registerClient(ctx, ws, {
+      deviceInfo: { deviceId: 'laptop', deviceName: null, deviceType: 'desktop', platform: 'darwin' },
+    })
+
+    assert.doesNotThrow(() => sendPostAuthInfo(ctx, ws))
+    assert.equal(client.activeSessionId, 'sess-default')
+  })
+})
+

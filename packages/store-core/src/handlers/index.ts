@@ -29,13 +29,18 @@ import type {
   SearchResult,
   ServerError,
   SessionInfo,
+  SessionIntervention,
   ToolResultImage,
   WebTask,
 } from '../types'
-import { nextMessageId, stripAnsi } from '../utils'
+import { MAX_SESSION_INTERVENTIONS, nextMessageId, stripAnsi } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
 import { isReplayDuplicate } from '../replay-dedup'
 import { resolveStreamId } from '../stream-id'
+// #5039: ErrorPartialCost surfaced on the optional `partialCost` slot of
+// `handleError`'s return shape so dashboard + app can render the
+// PR #5037 partial-cost sub-line under the error toast.
+import type { ErrorPartialCost } from '../cost-format'
 // Centralised client-side error-category detection (#3151).
 import { isRateLimitMessage } from '@chroxy/protocol'
 // Established Zod-handler pattern (#3138).
@@ -225,9 +230,21 @@ export function handleConfirmPermissionMode(
 // claude_ready
 // ---------------------------------------------------------------------------
 
-/** State patch for `claude_ready`. */
-export function handleClaudeReady(): { claudeReady: true } {
-  return { claudeReady: true }
+/**
+ * State patch for `claude_ready`.
+ *
+ * `stoppedAt`/`stoppedCode` are reset to null here so the quiet "Session
+ * stopped." status strip introduced for #4879 clears the moment the
+ * server reports the child is ready again (typically because the user
+ * sent another message after tapping Stop). This is purely additive for
+ * sessions that were never stopped — both fields stay null end-to-end.
+ */
+export function handleClaudeReady(): {
+  claudeReady: true
+  stoppedAt: null
+  stoppedCode: null
+} {
+  return { claudeReady: true, stoppedAt: null, stoppedCode: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +487,135 @@ export function handleInactivityWarning(
 }
 
 // ---------------------------------------------------------------------------
+// multi_question_intervention (#4653)
+//
+// Server fires this event when ClaudeTuiSession's PreToolUse handler sees a
+// multi-question AskUserQuestion — i.e. the exact condition the permission-
+// hook bash script (#4648) denies on. The dashboard renders a per-session
+// counter + a first-time inline notice so the user can tell chroxy intervened
+// (rather than wondering why the model is suddenly being polite).
+//
+// Builder shape (not a flat patch): the new array is computed from the
+// existing one — dedup-by-toolUseId so a stuck model re-emitting the same
+// multi-q payload doesn't inflate the counter falsely, and ring-cap at
+// MAX_SESSION_INTERVENTIONS so long-running sessions don't accumulate memory.
+// ---------------------------------------------------------------------------
+
+/** Builder result for handlers whose patch depends on existing intervention state. */
+export interface SessionInterventionBuilder {
+  /** Session ID the patch targets (may be null if no session context). */
+  sessionId: string | null
+  /**
+   * `true` when this intervention is the FIRST one in this session (the caller
+   * uses it to gate a one-time inline notice / system ChatMessage — repeat
+   * denials should just bump the counter, not re-spam the chat). Always `false`
+   * when the toolUseId duplicates an existing entry (no append happens).
+   */
+  isFirst: boolean
+  /** Apply the builder to the session's current interventions list. */
+  applyTo: (current: SessionIntervention[]) => { interventions: SessionIntervention[] }
+}
+
+/**
+ * Parse a `multi_question_intervention` session_event payload (wire shape
+ * `{ toolUseId, questionCount, reason: 'multi_question', timestamp }` — see
+ * `ClaudeTuiSession._emitToolHookEvent` in packages/server) and produce a
+ * builder that appends a {@link SessionIntervention} entry to the targeted
+ * session's `interventions` array.
+ *
+ * Returns null when the payload is malformed (missing/non-string toolUseId,
+ * non-finite questionCount). Callers should leave existing state alone — the
+ * counter just doesn't tick, no fallback "unknown intervention" entry is
+ * inserted (those would lie about what happened).
+ *
+ * Dedup-by-toolUseId: the caller's `applyTo` returns the existing array
+ * unchanged when an entry with the same `toolUseId` is already present (the
+ * known-stuck-model re-emit pattern from #4666 / #4668). When that happens
+ * `isFirst` is also false even on the very first event the session sees, so
+ * the inline-notice gate stays consistent with what's actually appended.
+ *
+ * Ring-cap at MAX_SESSION_INTERVENTIONS: when the new array would exceed the
+ * cap, the oldest entry is dropped (`.slice(-MAX)` — FIFO).
+ */
+export function handleMultiQuestionIntervention(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionInterventionBuilder | null {
+  const toolUseIdRaw = msg.toolUseId
+  if (typeof toolUseIdRaw !== 'string' || toolUseIdRaw.length === 0) return null
+
+  const countRaw = msg.questionCount
+  // `questionCount` from the server is always >= 2 (the permission-hook
+  // only denies multi-question forms — single-q is the happy path). Mirror
+  // the protocol Zod schema (`ServerMultiQuestionInterventionSchema`) here
+  // as defence in depth: floor BEFORE the threshold check so 1.9 doesn't
+  // sneak past as 1, then drop anything < 2 so a malformed payload doesn't
+  // render "0 questions" or "1 question" in the counter UI (both would lie
+  // about what happened — the hook only fires for >= 2).
+  if (typeof countRaw !== 'number' || !Number.isFinite(countRaw)) {
+    return null
+  }
+  const count = Math.floor(countRaw)
+  if (count < 2) return null
+
+  const tsRaw = msg.timestamp
+  // Mirror the protocol schema's `timestamp >= 0` bound — epoch 0 is
+  // explicitly allowed so a clock-skewed dev environment doesn't bounce
+  // the event off the wire. Only fall back to Date.now() when the payload
+  // is missing or non-numeric, NOT when timestamp is legitimately 0.
+  const timestamp =
+    typeof tsRaw === 'number' && Number.isFinite(tsRaw) && tsRaw >= 0
+      ? Math.floor(tsRaw)
+      : Date.now()
+
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    isFirst: false, // recomputed by applyTo based on the current list
+    applyTo: (current) => {
+      const dup = current.some((iv) => iv.toolUseId === toolUseIdRaw)
+      if (dup) {
+        // Stuck-model re-emit — return the array unchanged so the counter
+        // stays accurate and React's referential-equality skips a re-render.
+        return { interventions: current }
+      }
+      const entry: SessionIntervention = {
+        kind: 'multi_question',
+        toolUseId: toolUseIdRaw,
+        count,
+        timestamp,
+      }
+      const next = [...current, entry]
+      // Ring-cap from the OLDEST side — newest entry always stays so the
+      // user sees the most recent intervention reflected in the counter.
+      const capped = next.length > MAX_SESSION_INTERVENTIONS
+        ? next.slice(-MAX_SESSION_INTERVENTIONS)
+        : next
+      return { interventions: capped }
+    },
+  }
+}
+
+/**
+ * #4653 helper — runs the builder against a current array and returns BOTH
+ * the new array AND whether this intervention was the session's first (i.e.
+ * the previous array was empty AND this call actually appended an entry).
+ * Lets the call site gate a one-time inline notice without re-walking the
+ * dedup state itself.
+ */
+export function applyInterventionBuilder(
+  builder: SessionInterventionBuilder,
+  current: SessionIntervention[],
+): { interventions: SessionIntervention[]; isFirst: boolean } {
+  const wasEmpty = current.length === 0
+  const result = builder.applyTo(current)
+  const actuallyAppended = result.interventions.length > current.length
+  return {
+    interventions: result.interventions,
+    isFirst: wasEmpty && actuallyAppended,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // dev_preview / dev_preview_stopped
 //
 // These handlers are stateful in a way the others aren't: the new devPreviews
@@ -543,16 +689,31 @@ export function handleDevPreviewStopped(
 // ---------------------------------------------------------------------------
 
 /**
- * Server modes the WS protocol can advertise.
+ * Server mode advertised by the WS protocol.
  *
- * Both clients accept `'cli'`; only the dashboard surfaces `'terminal'` (the
- * mobile app currently treats `'terminal'` as null because there is no
- * terminal view). The shared handler returns the validated raw value; the
- * call site decides whether to narrow further.
+ * Historically the server could in principle have run in a `'terminal'`
+ * (PTY/tmux) mode, but the wire protocol only ever emits `'cli'` — the
+ * `ServerAuthOkSchema` is a `z.literal('cli')` and the server hardcodes
+ * `this.serverMode = 'cli'` (see #4810). The shared handler validates the
+ * field and returns null for any non-`'cli'` value so the call site can
+ * surface a hardened "unknown server" branch.
  */
-export type ServerMode = 'cli' | 'terminal'
+export type ServerMode = 'cli'
 
-const VALID_SERVER_MODES: readonly ServerMode[] = ['cli', 'terminal']
+const VALID_SERVER_MODES: readonly ServerMode[] = ['cli']
+
+/**
+ * Validated `webFeatures` map advertised by the server. Each flag is a hard
+ * boolean — the parser coerces missing/malformed values to `false` so a
+ * misshapen wire message can't accidentally light up a feature gate. Both
+ * clients fall back to `{ available: false, remote: false, teleport: false }`
+ * when the field is absent so consumer call sites get a uniform shape.
+ */
+export interface AuthOkWebFeatures {
+  available: boolean
+  remote: boolean
+  teleport: boolean
+}
 
 /**
  * Typed payload extracted from an `auth_ok` message.
@@ -564,19 +725,16 @@ const VALID_SERVER_MODES: readonly ServerMode[] = ['cli', 'terminal']
  * setup; the dashboard owns lastConnectedUrl tracking) and out of scope for
  * the data-extraction seam.
  *
- * Intentionally NOT extracted into the shared payload:
- *   - `clientId` + `connectedClients` (validation requires the
- *     `ConnectedClient` type which lives at the consumer level)
- *   - `webFeatures` (small but app/dashboard call sites already build it
- *     with platform-specific defaults)
- *   - `encryption` flag and `sessionToken` (only the app uses sessionToken
- *     for the pairing flow; encryption gates a side effect, not state)
- *
- * Tightening any of these would be a behaviour change — see the parent
- * #2661 plan.
+ * #4766 — fields below were previously decoded inline in both clients,
+ * which let `streamStallTimeoutMs` silently drop on mobile (StreamStallChip
+ * couldn't humanise the headline phrase). The parser now owns the full
+ * wire-shape decode; consumers assemble their platform-specific state
+ * patches around the shared payload. The connected-clients roster is
+ * parsed separately in `parseConnectedClients` (sibling helper) so the
+ * roster shape doesn't bloat `AuthOkPayload`.
  */
 export interface AuthOkPayload {
-  /** Validated server mode (`'cli'`, `'terminal'`, or null). */
+  /** Validated server mode (`'cli'`, or null when unknown). */
   serverMode: ServerMode | null
   /** Raw `cwd` string (NOT trimmed — empty string preserved). */
   sessionCwd: string | null
@@ -590,6 +748,49 @@ export interface AuthOkPayload {
   serverCommit: string | null
   /** Validated integer >= 1, else null. */
   protocolVersion: number | null
+  /**
+   * #3760 — server-advertised inactivity timeout in ms. Validated positive
+   * finite number, else null (older servers omit the field; consumers fall
+   * back to their built-in reference timeout).
+   */
+  resultTimeoutMs: number | null
+  /**
+   * #4497 / #4477 — server-advertised stream-stall window in ms. 0 is the
+   * protocol's explicit "disabled" sentinel and is treated as absent so the
+   * chip falls back to the generic phrase. Was previously dropped on mobile
+   * (#4766 latent bug — fixed by unifying the parser).
+   */
+  streamStallTimeoutMs: number | null
+  /** Raw encryption directive from the server (`'required'` or other). */
+  encryption: string | null
+  /**
+   * `sessionToken` issued via the pairing flow. Only the mobile app currently
+   * consumes this; the dashboard ignores it. Exposed in the shared payload so
+   * the wire-shape decode lives in one place.
+   */
+  sessionToken: string | null
+  /** Self-identifying clientId issued by the server, null when missing/malformed. */
+  myClientId: string | null
+  /** Validated webFeatures flags with hardened defaults — never null. */
+  webFeatures: AuthOkWebFeatures
+  /**
+   * #4560 / #3272 — server-advertised capability map. Keys are feature names,
+   * values are strict booleans (`true` only when the wire value was literally
+   * `true`). Empty object when the field is absent so consumers can blindly
+   * spread it into state without an existence check.
+   */
+  serverCapabilities: Record<string, boolean>
+}
+
+const DEFAULT_WEB_FEATURES: AuthOkWebFeatures = {
+  available: false,
+  remote: false,
+  teleport: false,
+}
+
+/** Validated positive finite number, else null. Used for both timeout fields. */
+function parsePositiveFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 }
 
 /** Extract typed server-context fields from an `auth_ok` message. */
@@ -602,6 +803,34 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     protoRaw >= 1
       ? protoRaw
       : null
+
+  // webFeatures: object → boolean-coerced subset; otherwise hardened defaults.
+  const webFeaturesRaw = msg.webFeatures
+  const webFeatures: AuthOkWebFeatures =
+    webFeaturesRaw && typeof webFeaturesRaw === 'object' && !Array.isArray(webFeaturesRaw)
+      ? {
+          available: !!(webFeaturesRaw as Record<string, unknown>).available,
+          remote: !!(webFeaturesRaw as Record<string, unknown>).remote,
+          teleport: !!(webFeaturesRaw as Record<string, unknown>).teleport,
+        }
+      : { ...DEFAULT_WEB_FEATURES }
+
+  // capabilities: object → strict-true boolean map; absent/non-object → {}.
+  // Skip prototype-pollution-prone keys (`__proto__`, `constructor`,
+  // `prototype`) so a malformed server payload can't mutate Object.prototype
+  // even though both consumers spread the map into Zustand state (which
+  // doesn't re-walk the prototype chain at runtime, but defence-in-depth is
+  // cheap here). Capability gates are fail-closed elsewhere — dropping a
+  // dangerous key just leaves the gate unset, which is the safe default.
+  const capabilitiesRaw = msg.capabilities
+  const serverCapabilities: Record<string, boolean> = {}
+  if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
+    for (const [k, v] of Object.entries(capabilitiesRaw)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+      serverCapabilities[k] = v === true
+    }
+  }
+
   return {
     serverMode: parseEnumField(msg, 'serverMode', VALID_SERVER_MODES),
     sessionCwd: parseRawStringField(msg, 'cwd'),
@@ -610,7 +839,58 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     latestVersion: parseRawStringField(msg, 'latestVersion'),
     serverCommit: parseRawStringField(msg, 'serverCommit'),
     protocolVersion,
+    resultTimeoutMs: parsePositiveFiniteNumber(msg.resultTimeoutMs),
+    streamStallTimeoutMs: parsePositiveFiniteNumber(msg.streamStallTimeoutMs),
+    encryption: parseRawStringField(msg, 'encryption'),
+    sessionToken: parseRawStringField(msg, 'sessionToken'),
+    myClientId: parseRawStringField(msg, 'clientId'),
+    webFeatures,
+    serverCapabilities,
   }
+}
+
+/**
+ * Parse the `connectedClients` array from an `auth_ok` message, marking the
+ * caller's own entry via `myClientId`.
+ *
+ * Behaviour-preserving — matches the inline `filter().map()` block previously
+ * duplicated across app and dashboard (#4766):
+ *   - drops entries that aren't objects or lack a string `clientId`
+ *   - narrows `deviceType` to the validated enum, falling back to `'unknown'`
+ *   - falls back `deviceName` to null and `platform` to `'unknown'` for
+ *     missing/non-string values
+ *   - sets `isSelf: true` only when the entry's clientId matches `myClientId`
+ *
+ * Returns `[]` when `rawClients` isn't an array — call sites no longer need
+ * the `Array.isArray` guard.
+ */
+export function parseConnectedClients(
+  rawClients: unknown,
+  myClientId: string | null,
+): ConnectedClient[] {
+  if (!Array.isArray(rawClients)) return []
+  return rawClients
+    .filter(
+      (c: unknown): c is { clientId: string } =>
+        !!c &&
+        typeof c === 'object' &&
+        typeof (c as Record<string, unknown>).clientId === 'string',
+    )
+    .map((c) => {
+      const entry = c as Record<string, unknown>
+      const deviceType: ConnectedClient['deviceType'] = VALID_DEVICE_TYPES.has(
+        entry.deviceType as ConnectedClient['deviceType'],
+      )
+        ? (entry.deviceType as ConnectedClient['deviceType'])
+        : 'unknown'
+      return {
+        clientId: c.clientId,
+        deviceName: typeof entry.deviceName === 'string' ? entry.deviceName : null,
+        deviceType,
+        platform: typeof entry.platform === 'string' ? entry.platform : 'unknown',
+        isSelf: c.clientId === myClientId,
+      }
+    })
 }
 
 /**
@@ -645,9 +925,9 @@ export function handleKeyExchangeOk(msg: Record<string, unknown>): { publicKey: 
  * Extract and validate the mode enum from a `server_mode` message.
  *
  * Returns null for unknown modes; the call site is expected to surface an
- * "Invalid Server Mode" alert (matches dashboard's prior inline behaviour;
- * the app currently ignores `'terminal'` and sets null, which the call site
- * can re-narrow if needed).
+ * "Invalid Server Mode" alert (matches dashboard's prior inline behaviour).
+ * The wire protocol only emits `'cli'` (#4810) — any other value is treated
+ * as null.
  */
 export function handleServerMode(msg: Record<string, unknown>): { mode: ServerMode | null } {
   return { mode: parseEnumField(msg, 'mode', VALID_SERVER_MODES) }
@@ -768,6 +1048,19 @@ export function handleError(msg: Record<string, unknown>): {
    * surface loudly instead of silently degrading).
    */
   fatal: boolean | undefined
+  /**
+   * #5039: optional partial-cost snapshot from PR #5037. When the
+   * error fired AFTER any parent rounds + subagent Task calls had
+   * already billed, byok-session folds those totals onto the error
+   * envelope (`usage` / `cost`) so the user can see what the failed
+   * turn cost. Only populated when `cost` is a finite non-negative
+   * number — undefined / NaN / Infinity / negative / non-number all
+   * resolve to null, matching the strict-finite gate that
+   * `_trackUsage` applies on the success path (#5038). Tokens default
+   * to 0 when missing/non-finite so a subscription-billed provider
+   * (cost present, usage absent) still surfaces a cost-only line.
+   */
+  partialCost: ErrorPartialCost | null
 } {
   const code = typeof msg.code === 'string' ? msg.code : 'UNKNOWN'
   const rawMessage =
@@ -777,6 +1070,24 @@ export function handleError(msg: Record<string, unknown>): {
   // Strict boolean check — a typo (e.g. fatal: 'false' string) must NOT
   // degrade to a warning toast. Treat anything non-boolean as undefined.
   const fatal = typeof msg.fatal === 'boolean' ? msg.fatal : undefined
+  // #5039: parse optional partial usage + cost (PR #5037 wire shape).
+  // `cost` is the gate — null/undefined/NaN/Infinity/non-number/negative
+  // all mean "no usable partial info", matching the strict-finite check
+  // on the success-path `_trackUsage` fold (#5038). Tokens are
+  // best-effort: any field that isn't a finite non-negative number
+  // falls to 0 so a single bogus counter can't poison the rest of the
+  // display.
+  const rawCost = msg.cost
+  const partialCost: ErrorPartialCost | null =
+    typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0
+      ? {
+          costUsd: rawCost,
+          inputTokens: pickFiniteTokenCount(msg.usage, 'input_tokens'),
+          outputTokens: pickFiniteTokenCount(msg.usage, 'output_tokens'),
+          cacheReadTokens: pickFiniteTokenCount(msg.usage, 'cache_read_input_tokens'),
+          cacheCreationTokens: pickFiniteTokenCount(msg.usage, 'cache_creation_input_tokens'),
+        }
+      : null
   // `systemMessage` was dropped from the return shape (#3112) — neither
   // call site (`dashboard:store/message-handler.ts:case 'error'`,
   // `app:store/message-handler.ts:case 'error'`) consumed it.
@@ -785,7 +1096,20 @@ export function handleError(msg: Record<string, unknown>): {
     message,
     requestId,
     fatal,
+    partialCost,
   }
+}
+
+/**
+ * #5039: best-effort extract of a single token-count field from the
+ * untyped server `error.usage` payload. Non-object/null usage and any
+ * non-finite / negative numeric falls to 0 — see `handleError` JSDoc
+ * for the contract.
+ */
+function pickFiniteTokenCount(rawUsage: unknown, key: string): number {
+  if (rawUsage == null || typeof rawUsage !== 'object') return 0
+  const v = (rawUsage as Record<string, unknown>)[key]
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0
 }
 
 // ---------------------------------------------------------------------------
@@ -830,12 +1154,28 @@ export function handleSessionError(
   boundSessionName: string | null
   message: string | null
   sessionPatch: SessionPatch | null
+  /**
+   * #4982 — server-supplied id of the session the client addressed before
+   * the server rejected it as stale (most commonly `SESSION_NOT_FOUND`
+   * after `session-manager.restoreState()` regenerated all ids on a
+   * daemon restart). Surfaced so the dashboard SessionNotFoundChip can
+   * confirm to the operator which id was lost. Only forwarded when the
+   * wire payload carries it as a non-empty string; otherwise null.
+   */
+  attemptedSessionId: string | null
 } {
   const category = typeof msg.category === 'string' ? msg.category : null
   const code = typeof msg.code === 'string' ? msg.code : null
   const boundSessionName =
     typeof msg.boundSessionName === 'string' && msg.boundSessionName.length > 0
       ? msg.boundSessionName
+      : null
+  // #4982 — only forward when present + a non-empty string. Defense in
+  // depth against malformed wire payloads (matches the attemptedResumeId
+  // trimming/guard branch in handleMessage).
+  const attemptedSessionId =
+    typeof msg.attemptedSessionId === 'string' && msg.attemptedSessionId.trim().length > 0
+      ? msg.attemptedSessionId.trim()
       : null
 
   if (category === 'crash') {
@@ -848,6 +1188,7 @@ export function handleSessionError(
         sessionId: resolveSessionId(msg, activeSessionId),
         patch: { health: 'crashed' },
       },
+      attemptedSessionId,
     }
   }
 
@@ -867,6 +1208,60 @@ export function handleSessionError(
     boundSessionName,
     message,
     sessionPatch: null,
+    attemptedSessionId,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// session_stopped (#4879)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a `session_stopped` message into a `SessionPatch` that flips the
+ * target session into the quiet "stopped" UX state.
+ *
+ * The server emits `session_stopped` when `CliSession` exits cleanly after
+ * a user-initiated Stop (wire path wired in #4868 — CliSession `stopped` →
+ * SessionManager → ws-forwarding → ServerSessionStoppedSchema). This is a
+ * positive confirmation distinct from `session_error` (which flips
+ * `health: 'crashed'` and surfaces a loud red banner): the operator
+ * tapped Stop, the child process did indeed stop.
+ *
+ * The patch sets `stoppedAt` to `now()` so renderers can show a calm
+ * informational status strip ("Session stopped." / with optional
+ * "(exit N)" suffix for non-zero exits). `stoppedCode` carries the child
+ * process exit code when the server reported one — null otherwise. Both
+ * fields are cleared (back to null) by `handleClaudeReady`'s patch when
+ * the server restarts the child after the operator's next input.
+ *
+ * The caller is responsible for applying the patch to its store. No
+ * notification / toast side effects are baked in here; surfaces vary by
+ * platform (dashboard: info toast via `addInfoNotification` per #4878;
+ * mobile app: inline status strip in `SessionScreen` per #4879). The
+ * `now` parameter is injected so tests can pin the timestamp without
+ * touching `Date.now()`.
+ */
+export function handleSessionStopped(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  now: () => number = Date.now,
+): SessionPatch {
+  // `code` is optional on the wire (ServerSessionStoppedSchema declares it
+  // as `z.number().int()`). Mirror that integer constraint here so a
+  // buggy producer can't poison `stoppedCode` with a fractional value
+  // (e.g. rendering "exit 1.5") or with NaN / Infinity. `Number.isInteger`
+  // already excludes all three failure modes; matches the existing
+  // protocol-int validation pattern used elsewhere in this file (see
+  // `protoRaw` around line 798). Preserve 0 explicitly — it's the common
+  // clean-SIGINT-exit case and is a meaningful signal, not a "missing"
+  // value.
+  const code = typeof msg.code === 'number' && Number.isInteger(msg.code) ? msg.code : null
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: {
+      stoppedAt: now(),
+      stoppedCode: code,
+    },
   }
 }
 
@@ -1056,6 +1451,263 @@ export function handlePrimaryChanged(msg: Record<string, unknown>): PrimaryChang
 export function handleSessionList(msg: Record<string, unknown>): SessionInfo[] | null {
   if (!Array.isArray(msg.sessions)) return null
   return msg.sessions as unknown as SessionInfo[]
+}
+
+/**
+ * Default (and maximum) chunk size for `subscribe_sessions` messages
+ * produced by {@link buildSessionListPatches}. Matches the protocol-level
+ * `SubscribeSessionsSchema` `.max(20)` bound (client→server message — the
+ * server validates incoming `subscribe_sessions` payloads against this
+ * cap). Consumers may pass a SMALLER override via the optional
+ * `subscribeChunkSize` parameter; {@link chunkSubscribeSessionIds} clamps
+ * larger / non-integer / non-positive values to this constant so a buggy
+ * caller can never produce payloads the server will reject.
+ *
+ * Co-located here (rather than per-consumer) so the app and dashboard
+ * can't drift out of sync — see #4767 acceptance criteria.
+ */
+export const SESSION_LIST_SUBSCRIBE_CHUNK_SIZE = 20
+
+/**
+ * Per-session patch maps + derived bookkeeping produced by
+ * {@link buildSessionListPatches}. See that function's doc-comment for the
+ * full call-site recipe.
+ */
+export interface SessionListPatches {
+  /** Parsed sessions array (same reference returned by {@link handleSessionList}). */
+  sessionList: SessionInfo[]
+  /**
+   * Session ids present in `prevSessionStateIds` but missing from the new
+   * snapshot. Consumers GC persisted state + `sessionStates[id]` for these,
+   * and decide their own "active session was removed" fallback policy.
+   */
+  removedIds: string[]
+  /**
+   * Session ids in the new snapshot that are NOT in `prevSessionStateIds`.
+   * Consumers seed `sessionStates[id]` for these (typically with their
+   * platform-specific `createEmptySessionState()`); the dashboard's
+   * `isBusy → isIdle` seed (#4639) stays at the call site because it
+   * mutates the consumer's own state shape.
+   */
+  newSessionIds: string[]
+  /**
+   * `sessionId → conversationId` for every session whose snapshot has a
+   * non-null `conversationId`. Consumers gate on `sessionStates[id]` and
+   * call `updateSession(id, ss => ss.conversationId !== cid ? { conversationId: cid } : {})`.
+   */
+  conversationIdPatches: Map<string, string>
+  /**
+   * `sessionId → CumulativeUsage snapshot` for every session whose
+   * snapshot has a non-undefined `cumulativeUsage` (#4073 / #4074).
+   * Consumers gate on `sessionStates[id]` and use
+   * {@link cumulativeUsageEquals} to short-circuit no-op patches.
+   */
+  cumulativeUsagePatches: Map<string, CumulativeUsage>
+  /**
+   * `sessionId → PendingBackgroundShellsBuilder` for every session in the
+   * snapshot — defaults to an empty `pending` list when the snapshot omits
+   * the field (#4307 wire compat). Consumers gate on `sessionStates[id]`
+   * and call `builder.applyTo(current)`; the builder's reference-equality
+   * short-circuit suppresses no-op re-renders.
+   */
+  backgroundShellBuilders: Map<string, PendingBackgroundShellsBuilder>
+  /**
+   * Non-active session ids chunked into `subscribe_sessions` payloads. Each
+   * chunk's length <= `SESSION_LIST_SUBSCRIBE_CHUNK_SIZE` (default 20 — the
+   * server schema's max ids per message). Consumers iterate and send one
+   * `subscribe_sessions` message per chunk; empty array means nothing to send.
+   *
+   * Consumers that don't auto-subscribe (currently the dashboard) ignore this
+   * field; it's surfaced here so both clients can adopt the same chunking
+   * logic without re-duplicating it later (#4767).
+   */
+  subscribeChunks: string[][]
+}
+
+/**
+ * Reference-comparison-friendly equality check for two
+ * {@link CumulativeUsage} snapshots. Returns `true` when both are non-null
+ * and all six tracked fields (`inputTokens`, `outputTokens`,
+ * `cacheReadTokens`, `cacheCreationTokens`, `costUsd`, `turnsBilled`) match.
+ *
+ * Two nulls return `false` — there is no current snapshot to short-circuit
+ * against, so the caller would apply the (also-null) candidate as a no-op
+ * write anyway. The pre-existing inline checks both gated on
+ * `current && ...`, so this preserves that exact behaviour.
+ *
+ * Centralised here so both consumers stay in sync if the
+ * {@link CumulativeUsage} shape grows a new field (#4767 AC).
+ */
+export function cumulativeUsageEquals(
+  a: CumulativeUsage | null | undefined,
+  b: CumulativeUsage | null | undefined,
+): boolean {
+  if (!a || !b) return false
+  return (
+    a.inputTokens === b.inputTokens &&
+    a.outputTokens === b.outputTokens &&
+    a.cacheReadTokens === b.cacheReadTokens &&
+    a.cacheCreationTokens === b.cacheCreationTokens &&
+    a.costUsd === b.costUsd &&
+    a.turnsBilled === b.turnsBilled
+  )
+}
+
+/**
+ * Build the per-session patch maps + derived bookkeeping a `session_list`
+ * consumer needs to apply the snapshot. Centralises the GC + new-session
+ * seeding + conversationId sync + #4073/#4074 cumulativeUsage seeding +
+ * #4307 pendingBackgroundShells seeding + `subscribe_sessions` chunking
+ * logic that previously lived inline in both the app and dashboard
+ * `case 'session_list'` branches (#4767).
+ *
+ * Returns `null` when {@link handleSessionList} rejects the message —
+ * consumers `break` out of the case in that path, preserving prior
+ * behaviour.
+ *
+ * Behaviour preservation contract:
+ * - `removedIds` filters `prevSessionStateIds` by membership in the new id
+ *   set — identical to both prior inline computations
+ *   (app L1209-1211 / dashboard L2140-2142).
+ * - `newSessionIds` lists ids in the new snapshot that aren't already in
+ *   `prevSessionStateIds`, in snapshot order. Mirrors both prior
+ *   `for (const s of sessionList) if (!newStates[s.sessionId]) ...` loops
+ *   (app L1236-1241 / dashboard L2206-2213).
+ * - `conversationIdPatches` includes every session with a truthy
+ *   `conversationId` — the consumer's `ss.conversationId !== cid` short-
+ *   circuit stays at the call site (existing `updateSession` callback).
+ * - `cumulativeUsagePatches` includes every session whose snapshot has a
+ *   non-undefined `cumulativeUsage` field — same gate as the prior inline
+ *   `if (s.cumulativeUsage && ...)` (app L1258 / dashboard L2246). Use
+ *   {@link cumulativeUsageEquals} at the call site for the six-field
+ *   no-op short-circuit (centralised here per #4767 AC).
+ * - `backgroundShellBuilders` always includes every session (per the
+ *   #4307 wire contract: omitted = []); each builder's `applyTo` does the
+ *   per-shell reference-equality short-circuit. The consumer still gates
+ *   on `sessionStates[id]` to skip sessions it hasn't seeded yet, matching
+ *   both prior inline `if (!get().sessionStates[s.sessionId]) continue;`
+ *   guards (app L1283 / dashboard L2275).
+ * - `subscribeChunks` filters out `activeSessionId` then chunks by
+ *   `SESSION_LIST_SUBSCRIBE_CHUNK_SIZE`. Matches app L1308-1318. When
+ *   nothing to subscribe (empty list or only active id present), the
+ *   array is empty so consumers can iterate without an outer guard.
+ *
+ * Consumer-specific behaviour stays at the call site:
+ * - The app's `loadLastConversationId()` auto-resume on empty list +
+ *   reconnect (L1196-1207).
+ * - The dashboard's `activeModel` lookup against `availableModels`
+ *   (L2188-2197) and `isBusy → isIdle` resync (#4639, L2223-2230).
+ * - Both consumers' `clearPersistedSession(prevId)` call per removed id.
+ * - The app's `persistLastConversationId(activeConversationId)` after seeding.
+ * - The dashboard's "active session removed → copy flat fields into the
+ *   top-level patch" recovery (L2159-2180) — this touches consumer-
+ *   specific top-level state slots so it stays in the consumer's `set()`.
+ */
+export function buildSessionListPatches(
+  msg: Record<string, unknown>,
+  prevSessionStateIds: readonly string[],
+  activeSessionId: string | null,
+  subscribeChunkSize: number = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
+): SessionListPatches | null {
+  const sessionList = handleSessionList(msg)
+  if (!sessionList) return null
+
+  const newIdSet = new Set<string>()
+  for (const s of sessionList) {
+    if (s && typeof s.sessionId === 'string') newIdSet.add(s.sessionId)
+  }
+
+  const prevIdSet = new Set(prevSessionStateIds)
+
+  const removedIds: string[] = []
+  for (const prev of prevSessionStateIds) {
+    if (!newIdSet.has(prev)) removedIds.push(prev)
+  }
+
+  const newSessionIds: string[] = []
+  const conversationIdPatches = new Map<string, string>()
+  const cumulativeUsagePatches = new Map<string, CumulativeUsage>()
+  const backgroundShellBuilders = new Map<string, PendingBackgroundShellsBuilder>()
+
+  for (const s of sessionList) {
+    if (!s || typeof s.sessionId !== 'string') continue
+    const sid = s.sessionId
+    if (!prevIdSet.has(sid)) newSessionIds.push(sid)
+    if (s.conversationId) conversationIdPatches.set(sid, s.conversationId)
+    if (s.cumulativeUsage) cumulativeUsagePatches.set(sid, s.cumulativeUsage)
+    backgroundShellBuilders.set(
+      sid,
+      handleBackgroundWorkChanged(
+        { sessionId: sid, pending: s.pendingBackgroundShells ?? [] },
+        activeSessionId,
+      ),
+    )
+  }
+
+  const subscribeChunks = chunkSubscribeSessionIds(sessionList, activeSessionId, subscribeChunkSize)
+
+  return {
+    sessionList,
+    removedIds,
+    newSessionIds,
+    conversationIdPatches,
+    cumulativeUsagePatches,
+    backgroundShellBuilders,
+    subscribeChunks,
+  }
+}
+
+/**
+ * Filter out `activeSessionId` from `sessionList` and chunk the remaining
+ * ids into `subscribe_sessions`-bound payloads.
+ *
+ * Extracted from {@link buildSessionListPatches} so consumers whose active
+ * session changes after the initial patch computation (e.g. the active
+ * session was removed and the consumer fell back to the first surviving
+ * id) can recompute the chunks against the final active id without
+ * re-running the full patch builder.
+ *
+ * Returns `[]` when there are no non-active ids to subscribe (empty
+ * sessionList, or list contains only the active session). Defensive
+ * against malformed entries (missing/non-string sessionId — skipped).
+ *
+ * `subscribeChunkSize` is normalised to an integer in
+ * `[1, SESSION_LIST_SUBSCRIBE_CHUNK_SIZE]`:
+ * - Non-integers (e.g. `0.5`, `2.5`) would cause `i += chunkSize` to walk
+ *   off the grid and `slice(i, i + chunkSize)` to coerce via truncation,
+ *   producing duplicated / skipped ids — `Math.floor` removes the
+ *   fractional part defensively.
+ * - Values `<= 0` or non-numeric fall back to the default constant.
+ * - Values `> SESSION_LIST_SUBSCRIBE_CHUNK_SIZE` are clamped down so a
+ *   buggy caller can never emit a chunk the server's
+ *   `SubscribeSessionsSchema.max(20)` would reject.
+ */
+export function chunkSubscribeSessionIds(
+  sessionList: SessionInfo[],
+  activeSessionId: string | null,
+  subscribeChunkSize: number = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
+): string[][] {
+  const requested =
+    typeof subscribeChunkSize === 'number' &&
+    Number.isFinite(subscribeChunkSize) &&
+    subscribeChunkSize > 0
+      ? Math.floor(subscribeChunkSize)
+      : SESSION_LIST_SUBSCRIBE_CHUNK_SIZE
+  // Floor may produce 0 if 0 < value < 1 (e.g. 0.5) — fall back to default.
+  const normalised = requested >= 1 ? requested : SESSION_LIST_SUBSCRIBE_CHUNK_SIZE
+  // Clamp to the protocol-enforced cap so callers can't produce
+  // payloads that violate SubscribeSessionsSchema.max(20).
+  const chunkSize = Math.min(normalised, SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)
+  const ids: string[] = []
+  for (const s of sessionList) {
+    if (!s || typeof s.sessionId !== 'string') continue
+    if (s.sessionId !== activeSessionId) ids.push(s.sessionId)
+  }
+  const chunks: string[][] = []
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    chunks.push(ids.slice(i, i + chunkSize))
+  }
+  return chunks
 }
 
 // ---------------------------------------------------------------------------
@@ -2271,6 +2923,93 @@ export function handleAgentCompleted(
 }
 
 // ---------------------------------------------------------------------------
+// #5016 — agent_event (Task subagent nested progress)
+//
+// Server forwards each child wire event (tool_start / tool_result /
+// tool_input_delta / stream_delta) as `agent_event{parentToolUseId,
+// eventType, payload}`. This handler resolves the target session and
+// returns a builder that appends the event to the parent Task `tool_use`
+// bubble's `childAgentEvents[]`. Renderers iterate the list to surface
+// nested sub-bubbles inside the Task tool_call.
+//
+// Coalescing: `stream_delta` events are appended verbatim — the
+// renderer concatenates contiguous deltas per messageId. We don't
+// coalesce in the handler because the child's stream may carry
+// multiple distinct `messageId`s across rounds within one Task, and
+// the renderer is the source of truth for grouping by id.
+// ---------------------------------------------------------------------------
+
+/** Builder result for `agent_event` — patch depends on the existing message list. */
+export interface AgentEventBuilder {
+  sessionId: string | null
+  /**
+   * Apply the builder to the session's current chat-message list.
+   * Returns the same reference when no matching parent bubble is
+   * present (event arrives before the Task tool_use is registered —
+   * extremely rare given the server's ordering guarantee that
+   * tool_start fires before any nested agent_event, but defended
+   * for robustness against test stubs and replay paths).
+   */
+  applyTo: (current: ChatMessage[]) => ChatMessage[]
+}
+
+/**
+ * Resolve target session and produce a builder that appends one nested
+ * child wire event to the parent Task tool_use bubble's
+ * `childAgentEvents[]`.
+ *
+ * Missing / non-string `parentToolUseId` is a no-op (returns same
+ * reference). Missing / non-string `eventType` is also a no-op — the
+ * downstream renderer keys on `type`, and a bubble with `type: ''`
+ * would render nothing useful while still bloating state.
+ *
+ * `payload` is normalised to `{}` when missing / non-object so the
+ * `ChildAgentEvent.payload` field stays a stable plain object shape.
+ * Arrays and primitives are rejected (treated as `{}`) — payloads
+ * from the server are always objects.
+ *
+ * No-op when the parent bubble is absent: the event is dropped on the
+ * floor. We deliberately do NOT buffer pending events for a parent
+ * that hasn't arrived yet — the server's ordering guarantees that the
+ * parent's `tool_start` (which creates the bubble) fires before any
+ * nested `agent_event` carrying its `toolUseId`. If that invariant
+ * breaks in future, the symptom is a missing sub-bubble (visible to
+ * users), not data corruption.
+ */
+export function handleAgentEvent(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): AgentEventBuilder {
+  const parentToolUseId = typeof msg.parentToolUseId === 'string'
+    ? msg.parentToolUseId
+    : null
+  const eventType = typeof msg.eventType === 'string' && msg.eventType
+    ? msg.eventType
+    : null
+  const rawPayload = msg.payload
+  const payload: Record<string, unknown> =
+    rawPayload !== null
+    && typeof rawPayload === 'object'
+    && !Array.isArray(rawPayload)
+      ? (rawPayload as Record<string, unknown>)
+      : {}
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    applyTo: (current) => {
+      if (!parentToolUseId || !eventType) return current
+      let mutated = false
+      const next = current.map((m) => {
+        if (m.type !== 'tool_use' || m.toolUseId !== parentToolUseId) return m
+        mutated = true
+        const nextEvents = [...(m.childAgentEvents || []), { type: eventType, payload }]
+        return { ...m, childAgentEvents: nextEvents }
+      })
+      return mutated ? next : current
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // #4307 — background_work_changed
 //
 // Snapshot-replacement: each event carries the full pending list for the
@@ -3330,6 +4069,46 @@ export function handleMessage(
     // (defensive against malformed payloads) is dropped to keep junk off
     // the store.
     ...(typeof msg.code === 'string' ? { code: msg.code } : {}),
+    // #4947: preserve `attemptedResumeId` for `error{code:'resume_unknown'}`
+    // bubbles (server PR #4944). The dashboard ResumeUnknownChip surfaces
+    // it as subtext for operator correlation against the persisted state
+    // file. Pre-#4944 servers omit the field entirely and the ChatMessage
+    // simply stays `attemptedResumeId: undefined`.
+    //
+    // #5006: also accept the terminal-escalation code
+    // `resume_unknown_exhausted` (server PR #5004). When the post-fallback
+    // retry ALSO matches the unknown-resume pattern, the server stops
+    // auto-respawning and emits this distinct code so the chip can switch
+    // to an "auto-recovery exhausted, start a fresh session manually"
+    // affordance. event-normalizer.js already forwards `attemptedResumeId`
+    // for the new code; without widening this gate the field would be
+    // silently stripped at the store boundary and the chip would degrade
+    // to "headline only" — defeating the operator-correlation feature.
+    //
+    // Hardening (from PR #4967 Copilot review):
+    //   1. Gate strictly on `msgType === 'error'` AND one of the two
+    //      resume-failure codes — the field is documented as only valid on
+    //      those envelopes, so a buggy producer attaching it to other types
+    //      (or other error codes) shouldn't pollute the store with
+    //      out-of-contract data.
+    //   2. Trim whitespace and treat whitespace-only as missing — matches
+    //      the chip's render-time guard so the store and the renderer
+    //      agree.
+    //   3. Enforce the same 256-char cap the wire schema declares
+    //      (`ServerMessageSchema.attemptedResumeId`). Defense in depth
+    //      against a malformed wire-bypassing path (e.g. localStorage
+    //      replay of a corrupted message) — silently truncate rather than
+    //      drop so the truncated id still helps operator triage.
+    ...(msgType === 'error' &&
+    typeof msg.code === 'string' &&
+    (msg.code === 'resume_unknown' || msg.code === 'resume_unknown_exhausted') &&
+    typeof msg.attemptedResumeId === 'string'
+      ? (() => {
+          const trimmed = msg.attemptedResumeId.trim()
+          if (trimmed.length === 0) return {}
+          return { attemptedResumeId: trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed }
+        })()
+      : {}),
   }
 
   // Surface rate-limit / usage-limit / quota / overloaded errors prominently (#616).

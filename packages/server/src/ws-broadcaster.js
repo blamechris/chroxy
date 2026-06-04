@@ -57,23 +57,51 @@ export class WsBroadcaster {
     this._broadcast(message, (client) => (client.protocolVersion ?? 0) >= minProtocolVersion)
   }
 
+  /**
+   * Deliver `message` to a single client respecting backpressure.
+   *
+   * Returns true if the message was sent, false if it was dropped (or the
+   * connection was closed). Callers must have already filtered by
+   * `authenticated` / `readyState` / custom filters — this helper only owns
+   * the backpressure decision + drop-counter + metrics + close-on-maxDrops.
+   *
+   * Centralizing this here (#4772) fixes a latent observability bug:
+   * `_broadcastToSession` and `_broadcastClientJoined` previously had
+   * copy-pasted backpressure loops that silently bypassed
+   * `backpressure.drops` / `backpressure.disconnects` metrics.
+   */
+  _sendOneWithBackpressure(ws, client, message) {
+    // #4834: short-circuit if this client has already been evicted. ws.close()
+    // is async, so callers iterating the client map in the same tick (e.g.
+    // multiple broadcasts) would otherwise keep re-tripping the close path
+    // and re-incrementing backpressure.disconnects for a single real close.
+    if (client._evicted) {
+      return false
+    }
+    if (ws.bufferedAmount > this._backpressureThreshold) {
+      client._backpressureDrops = (client._backpressureDrops || 0) + 1
+      metrics.inc('backpressure.drops')
+      log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
+      if (client._backpressureDrops >= this._backpressureMaxDrops) {
+        // #4834: sticky _evicted flag prevents log spam + metric over-counting
+        // while ws.close() is in flight.
+        client._evicted = true
+        log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
+        metrics.inc('backpressure.disconnects')
+        ws.close(4008, 'Backpressure: too many dropped messages')
+      }
+      return false
+    }
+    client._backpressureDrops = 0
+    this._sendFn(ws, message)
+    return true
+  }
+
   /** Broadcast a message to all authenticated clients matching a filter */
   _broadcast(message, filter = () => true) {
     for (const [ws, client] of this._clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
-        if (ws.bufferedAmount > this._backpressureThreshold) {
-          client._backpressureDrops = (client._backpressureDrops || 0) + 1
-          metrics.inc('backpressure.drops')
-          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
-          if (client._backpressureDrops >= this._backpressureMaxDrops) {
-            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
-            metrics.inc('backpressure.disconnects')
-            ws.close(4008, 'Backpressure: too many dropped messages')
-          }
-          continue
-        }
-        client._backpressureDrops = 0
-        this._sendFn(ws, message)
+        this._sendOneWithBackpressure(ws, client, message)
       }
     }
   }
@@ -81,25 +109,32 @@ export class WsBroadcaster {
   /**
    * Broadcast a session-scoped message to clients viewing that session.
    * Tags the message with `sessionId` so clients can route it to the correct
-   * session state. By default only delivers to clients whose activeSessionId
-   * matches — prevents cross-session info leakage and bandwidth waste.
+   * session state. By default delivers to clients whose `activeSessionId`
+   * matches OR who have explicitly subscribed via `subscribedSessionIds` —
+   * prevents cross-session info leakage and bandwidth waste while still
+   * supporting multi-session subscribers (e.g. dashboard tabs).
    * Pass a custom filter to override the default recipient selection when needed.
+   *
+   * #4799: Guards against a client missing `subscribedSessionIds`. Clients
+   * should always be initialized with `new Set()` (see ws-server.js client
+   * registration), but a missing field would otherwise throw mid-iteration
+   * and abort the broadcast for every later client in the loop. If we
+   * encounter an authenticated client without the Set, log a one-shot
+   * warning to surface the real bug — the broadcast itself stays alive.
    */
-  _broadcastToSession(sessionId, message, filter = (client) => client.activeSessionId === sessionId || client.subscribedSessionIds.has(sessionId)) {
+  _broadcastToSession(sessionId, message, filter = (client) => {
+    if (client.activeSessionId === sessionId) return true
+    if (client.subscribedSessionIds) return client.subscribedSessionIds.has(sessionId)
+    if (client.authenticated && !client._missingSubscribedSessionIdsWarned) {
+      log.warn(`Client ${client.id} is authenticated but has no subscribedSessionIds Set — falling back to activeSessionId match only (sessionId=${sessionId}, messageType=${message?.type || 'unknown'})`)
+      client._missingSubscribedSessionIdsWarned = true
+    }
+    return false
+  }) {
     const tagged = { ...message, sessionId }
     for (const [ws, client] of this._clients) {
       if (client.authenticated && filter(client) && ws.readyState === 1) {
-        if (ws.bufferedAmount > this._backpressureThreshold) {
-          client._backpressureDrops = (client._backpressureDrops || 0) + 1
-          log.warn(`Backpressure: skipping ${message.type || 'unknown'} for client ${client.id} (buffered: ${ws.bufferedAmount}, drops: ${client._backpressureDrops})`)
-          if (client._backpressureDrops >= this._backpressureMaxDrops) {
-            log.warn(`Backpressure: closing client ${client.id} after ${client._backpressureDrops} consecutive drops — client will reconnect`)
-            ws.close(4008, 'Backpressure: too many dropped messages')
-          }
-          continue
-        }
-        client._backpressureDrops = 0
-        this._sendFn(ws, tagged)
+        this._sendOneWithBackpressure(ws, client, tagged)
       }
     }
   }
@@ -118,7 +153,7 @@ export class WsBroadcaster {
     }
     for (const [ws, client] of this._clients) {
       if (ws !== excludeWs && client.authenticated && ws.readyState === 1) {
-        this._sendFn(ws, message)
+        this._sendOneWithBackpressure(ws, client, message)
       }
     }
   }

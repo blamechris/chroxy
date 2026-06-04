@@ -76,9 +76,9 @@ export class DockerBackend {
    * @returns {Promise<{ containerId: string, containerCliPath: string, services: Array }>}
    */
   async createComposeEnvironment(opts) {
-    const { cwd, composeFile, composeProject, containerUser, primaryService } = opts
+    const { cwd, composeFile, composeProject, containerUser, primaryService, envFile } = opts
 
-    await this._composeUp(composeFile, composeProject, cwd)
+    await this._composeUp(composeFile, composeProject, cwd, envFile)
 
     let containerId
     try {
@@ -137,7 +137,7 @@ export class DockerBackend {
 
   /**
    * @param {string} containerId
-   * @param {{ cmd: string, env?: Object.<string,string>, cwd?: string, timeout?: number }} opts
+   * @param {{ cmd: string, env?: Object.<string,string>, envFile?: string, cwd?: string, timeout?: number }} opts
    * @returns {Promise<{ stdout: string, stderr: string }>}
    *
    * opts.env — all key/value pairs are forwarded as `--env KEY=VAL` flags.
@@ -151,16 +151,49 @@ export class DockerBackend {
    * object constructed by the caller. The caller is responsible for passing only
    * the vars required for the command. process.env is never consulted.
    *
+   * opts.envFile — forwarded as `--env-file <path>`. Useful for secrets that
+   * must not appear in `ps` output (`docker exec --env KEY=secret` exposes
+   * the value in the process listing). The file format follows Docker's own
+   * env file spec: one `KEY=VALUE` pair per line, no quoting required.
+   * Callers are responsible for creating the file with 0600 permissions and
+   * unlinking it when no longer needed. docker-byok (#5079) uses this to
+   * forward `ANTHROPIC_API_KEY` into compose-managed containers without
+   * exposing the key in argv.
+   *
    * opts.cwd — forwarded as `--workdir <cwd>`.  The path must already be an
    * absolute path *inside* the container; callers are responsible for remapping
    * host paths to container paths if necessary.
+   *
+   * opts.user — forwarded as `-u <user>` so the command runs as a non-root
+   * container user. Validated against the same POSIX username regex as
+   * `streamCliInEnvironment` to refuse shell-injection payloads. Optional
+   * for backward compatibility (docker-sdk's CLI bootstrap path runs as
+   * root for `npm install -g`, then `streamCliInEnvironment` switches to
+   * the non-root user for the long-lived Claude process). docker-byok
+   * (#5021) passes it for every tool dispatch so file ops respect the
+   * `useradd` + `chown /workspace` setup done at container start.
    */
-  execInEnvironment(containerId, { cmd, env, cwd, timeout = 30_000 }) {
+  execInEnvironment(containerId, { cmd, env, envFile, cwd, timeout = 30_000, user } = {}) {
     return new Promise((resolve, reject) => {
       const execArgs = ['exec']
 
+      if (user) {
+        // POSIX username pattern — same regex as docker-sdk-session.js
+        // and docker-byok-session.js. Refuse anything weirder so a
+        // caller-supplied string can't smuggle a flag.
+        if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) {
+          reject(new Error(`Invalid user "${user}" — must match POSIX username rules`))
+          return
+        }
+        execArgs.push('-u', user)
+      }
+
       if (cwd) {
         execArgs.push('--workdir', cwd)
+      }
+
+      if (envFile) {
+        execArgs.push('--env-file', envFile)
       }
 
       if (env) {
@@ -178,8 +211,32 @@ export class DockerBackend {
       execArgs.push(containerId, 'bash', '-c', cmd)
 
       this._execFile('docker', execArgs, { encoding: 'utf-8', timeout }, (err, stdout, stderr) => {
-        if (err) reject(new Error(stderr ? stderr.trim() : err.message))
-        else resolve({ stdout: stdout || '', stderr: stderr || '' })
+        if (err) {
+          // #5067 — Preserve both captured streams on failure. The error
+          // message stays stderr-first (existing callers rely on that
+          // shape for log lines), but we attach raw `stdout` / `stderr`
+          // properties so the caller can surface BOTH streams in a
+          // user-facing error event without re-running the command.
+          //
+          // npm install, repo bootstrap scripts, and apt-get commonly
+          // print the actually-useful diagnostic on stdout; dropping it
+          // here turned every post-create failure into a guess-and-retry.
+          //
+          // Falls through to err.message when stderr is empty, matching
+          // the pre-#5067 behaviour for stderr-silent commands. The
+          // post-create caller in docker-byok-session.js applies its own
+          // POST_CREATE_OUTPUT_CAP_BYTES truncation before serialising
+          // into the error event payload.
+          const wrapped = new Error(stderr ? stderr.trim() : err.message)
+          wrapped.stdout = stdout || ''
+          wrapped.stderr = stderr || ''
+          if (err.code) wrapped.code = err.code
+          if (err.signal) wrapped.signal = err.signal
+          if (typeof err.killed === 'boolean') wrapped.killed = err.killed
+          reject(wrapped)
+        } else {
+          resolve({ stdout: stdout || '', stderr: stderr || '' })
+        }
       })
     })
   }
@@ -525,11 +582,19 @@ export class DockerBackend {
     })
   }
 
-  _composeUp(composeFile, project, cwd) {
+  _composeUp(composeFile, project, cwd, envFile) {
     return new Promise((resolve, reject) => {
-      this._execFile('docker', [
-        'compose', '-f', composeFile, '-p', project, 'up', '-d',
-      ], { encoding: 'utf-8', timeout: 120_000, cwd }, (err, _stdout, stderr) => {
+      // `docker compose --env-file <path>` (before the subcommand) sets the
+      // env used for compose-file interpolation, so a compose service that
+      // declares `environment: [ANTHROPIC_API_KEY]` or `${ANTHROPIC_API_KEY}`
+      // picks the value up without the operator having to hand-edit their
+      // compose file. The file is short-lived (tmpfile created + unlinked
+      // by the caller) and lives at 0600 so the key never appears in `ps`
+      // output. (#5079)
+      const args = ['compose']
+      if (envFile) args.push('--env-file', envFile)
+      args.push('-f', composeFile, '-p', project, 'up', '-d')
+      this._execFile('docker', args, { encoding: 'utf-8', timeout: 120_000, cwd }, (err, _stdout, stderr) => {
         if (err) {
           reject(new Error(stderr ? stderr.trim() : err.message))
           return

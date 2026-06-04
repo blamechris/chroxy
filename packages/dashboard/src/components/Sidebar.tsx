@@ -17,6 +17,9 @@ import {
   persistSidebarPanelView,
   persistSidebarPanelCollapsed,
 } from '../store/persistence'
+import { moveItem, orderToIds } from '../utils/reorderById'
+import { useShortcutRegistry } from '../shortcuts/useShortcutRegistry'
+import { formatBindingForAria } from '../shortcuts/registry'
 
 export interface ActiveSessionNode {
   sessionId: string
@@ -86,6 +89,13 @@ export interface SidebarProps {
   initialPanelHeight?: number
   initialPanelView?: string | null
   initialPanelCollapsed?: boolean
+  // #4832 — drag-to-reorder callbacks. The sidebar fires these with the
+  // FULL post-move id arrays (not deltas) so the parent can persist the
+  // new order in a single `localStorage.setItem`. Both are optional so
+  // tests + callers that don't care about reordering don't have to wire
+  // them up.
+  onReorderRepos?: (orderedRepoPaths: string[]) => void
+  onReorderSessions?: (repoPath: string, orderedSessionIds: string[]) => void
 }
 
 function abbreviateTunnel(url: string): string {
@@ -121,10 +131,25 @@ export function Sidebar({
   initialPanelHeight = 200,
   initialPanelView = null,
   initialPanelCollapsed = false,
+  onReorderRepos,
+  onReorderSessions,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [focusedIndex, setFocusedIndex] = useState(0)
   const treeRef = useRef<HTMLDivElement>(null)
+  // #4972 — Sidebar reorder ladder now consults the registry so a user
+  // rebind in Settings actually changes runtime behaviour. The aria-
+  // keyshortcuts attribute also reads from the registry so screen
+  // readers announce the effective binding instead of the hardcoded
+  // default. The hook re-renders on every binding change.
+  //
+  // `aria-keyshortcuts` is platform-neutral per WAI-ARIA 1.2: it uses
+  // spec modifier names ("Meta", "Control") not UI labels ("Cmd",
+  // "Ctrl"), and multiple alternative combos are space-separated.
+  const shortcutRegistry = useShortcutRegistry()
+  const reorderUpBinding = shortcutRegistry.getBinding('sidebar.reorder.up')
+  const reorderDownBinding = shortcutRegistry.getBinding('sidebar.reorder.down')
+  const reorderAriaKeyshortcuts = `${formatBindingForAria(reorderUpBinding)} ${formatBindingForAria(reorderDownBinding)}`
 
   // #4303 — sidebar panel slot state. Initialized from localStorage via
   // props so SSR / tests stay deterministic. Each setter mirrors to
@@ -163,6 +188,251 @@ export function Sidebar({
     setCollapsed(prev => ({ ...prev, [path]: !prev[path] }))
   }, [])
 
+  // Hoisted above the #4832 drag handlers below so their useCallback
+  // dependency arrays (which reference filteredRepos) sit outside the TDZ.
+  const filteredRepos = filter
+    ? repos
+        .map(r => {
+          const lf = filter.toLowerCase()
+          const matchesRepoName = r.name.toLowerCase().includes(lf)
+          const filteredActive = r.activeSessions.filter(s =>
+            s.name.toLowerCase().includes(lf),
+          )
+          const filteredResumable = r.resumableSessions.filter(s =>
+            (s.preview ?? '').toLowerCase().includes(lf),
+          )
+          const hasMatchingChild = filteredActive.length > 0 || filteredResumable.length > 0
+          if (!matchesRepoName && !hasMatchingChild) return null
+          return {
+            ...r,
+            activeSessions: matchesRepoName ? r.activeSessions : filteredActive,
+            resumableSessions: matchesRepoName ? r.resumableSessions : filteredResumable,
+          }
+        })
+        .filter((r): r is RepoNode => r !== null)
+    : repos
+
+  // #4832 — drag-to-reorder state. We track the dragged item identity and
+  // the current drop target separately:
+  //
+  //   - `dragRepo` / `dragSession` carry the id of the item currently being
+  //     dragged. Set in `onDragStart`, cleared in `onDragEnd`. Used to
+  //     filter `onDragOver` events so we ignore drags that started on a
+  //     mismatched scope (e.g. a session row should not respond to a repo
+  //     drag, and vice versa).
+  //   - `dragOverRepo` / `dragOverSession` carry the id of the row the
+  //     cursor is currently hovering during a drag, plus a 'before' /
+  //     'after' position derived from the cursor's vertical midpoint. This
+  //     drives the drop-indicator CSS class on the target row.
+  //
+  // Cross-group session drags are disallowed (sessions are pinned to their
+  // owning repo by metadata, per the issue's "out of scope" notes), so the
+  // session drop handlers only respond when the drag started inside the
+  // same repo.
+  const [dragRepo, setDragRepo] = useState<string | null>(null)
+  const [dragOverRepo, setDragOverRepo] = useState<{ path: string; position: 'before' | 'after' } | null>(null)
+  const [dragSession, setDragSession] = useState<{ repoPath: string; sessionId: string } | null>(null)
+  const [dragOverSession, setDragOverSession] = useState<{ repoPath: string; sessionId: string; position: 'before' | 'after' } | null>(null)
+
+  /**
+   * Decide whether the cursor is above or below the row's vertical midpoint.
+   * Used to render a single thin drop-indicator line at the top OR bottom
+   * edge — the more conventional pattern than a thick highlight, and matches
+   * VS Code / Linear.
+   */
+  const dropPosition = useCallback((event: React.DragEvent<HTMLElement>): 'before' | 'after' => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const midY = rect.top + rect.height / 2
+    return event.clientY < midY ? 'before' : 'after'
+  }, [])
+
+  const handleRepoDragStart = useCallback((path: string) => (event: React.DragEvent<HTMLElement>) => {
+    if (!onReorderRepos) return
+    // dataTransfer payload — required by Firefox for the drag to fire at
+    // all. Setting effectAllowed='move' shows the move cursor.
+    event.dataTransfer.effectAllowed = 'move'
+    try { event.dataTransfer.setData('text/plain', path) } catch { /* SSR / jsdom no-op */ }
+    setDragRepo(path)
+  }, [onReorderRepos])
+
+  const handleRepoDragOver = useCallback((path: string) => (event: React.DragEvent<HTMLElement>) => {
+    if (!onReorderRepos || dragRepo === null) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    const pos = dropPosition(event)
+    setDragOverRepo(prev => prev && prev.path === path && prev.position === pos ? prev : { path, position: pos })
+  }, [onReorderRepos, dragRepo, dropPosition])
+
+  const handleRepoDragLeave = useCallback((path: string) => () => {
+    setDragOverRepo(prev => prev && prev.path === path ? null : prev)
+  }, [])
+
+  const handleRepoDrop = useCallback((targetPath: string) => (event: React.DragEvent<HTMLElement>) => {
+    if (!onReorderRepos || dragRepo === null) return
+    event.preventDefault()
+    const pos = dropPosition(event)
+    setDragRepo(null)
+    setDragOverRepo(null)
+    if (dragRepo === targetPath) return
+    const paths = filteredRepos.map(r => r.path)
+    const fromIdx = paths.indexOf(dragRepo)
+    const targetIdx = paths.indexOf(targetPath)
+    if (fromIdx < 0 || targetIdx < 0) return
+    // 'after' means the dragged item lands AFTER target; convert to splice
+    // index. If we're moving forward and dropping after, the post-removal
+    // target index doesn't need a +1 bump (splice removes first), so we
+    // just use the target index when 'before' and target+1 when 'after',
+    // then let moveItem normalize.
+    let toIdx = pos === 'before' ? targetIdx : targetIdx + 1
+    if (fromIdx < toIdx) toIdx -= 1
+    const next = moveItem(paths, fromIdx, toIdx)
+    onReorderRepos(next)
+  }, [onReorderRepos, dragRepo, dropPosition, filteredRepos])
+
+  const handleRepoDragEnd = useCallback(() => {
+    setDragRepo(null)
+    setDragOverRepo(null)
+  }, [])
+
+  const handleSessionDragStart = useCallback(
+    (repoPath: string, sessionId: string) => (event: React.DragEvent<HTMLElement>) => {
+      if (!onReorderSessions) return
+      event.dataTransfer.effectAllowed = 'move'
+      try { event.dataTransfer.setData('text/plain', sessionId) } catch { /* jsdom no-op */ }
+      // stopPropagation so the parent repo treeitem's drag handlers don't
+      // also fire (the outer treeitem is the drop target for repo
+      // reordering — a session drag started inside it would otherwise be
+      // mistaken for a repo drag).
+      event.stopPropagation()
+      setDragSession({ repoPath, sessionId })
+    },
+    [onReorderSessions],
+  )
+
+  const handleSessionDragOver = useCallback(
+    (repoPath: string, sessionId: string) => (event: React.DragEvent<HTMLElement>) => {
+      if (!onReorderSessions || dragSession === null) return
+      // Only respond to drags that started in the same repo — cross-group
+      // moves are out of scope (per the issue).
+      if (dragSession.repoPath !== repoPath) return
+      event.preventDefault()
+      event.stopPropagation()
+      event.dataTransfer.dropEffect = 'move'
+      const pos = dropPosition(event)
+      setDragOverSession(prev =>
+        prev && prev.sessionId === sessionId && prev.position === pos && prev.repoPath === repoPath
+          ? prev
+          : { repoPath, sessionId, position: pos },
+      )
+    },
+    [onReorderSessions, dragSession, dropPosition],
+  )
+
+  const handleSessionDragLeave = useCallback(
+    (sessionId: string) => () => {
+      setDragOverSession(prev => prev && prev.sessionId === sessionId ? null : prev)
+    },
+    [],
+  )
+
+  const handleSessionDrop = useCallback(
+    (repoPath: string, targetSessionId: string) => (event: React.DragEvent<HTMLElement>) => {
+      if (!onReorderSessions || dragSession === null) return
+      if (dragSession.repoPath !== repoPath) return
+      event.preventDefault()
+      event.stopPropagation()
+      const pos = dropPosition(event)
+      const dragged = dragSession.sessionId
+      setDragSession(null)
+      setDragOverSession(null)
+      if (dragged === targetSessionId) return
+      const repo = filteredRepos.find(r => r.path === repoPath)
+      if (!repo) return
+      const ids = orderToIds(repo.activeSessions, s => s.sessionId)
+      const fromIdx = ids.indexOf(dragged)
+      const targetIdx = ids.indexOf(targetSessionId)
+      if (fromIdx < 0 || targetIdx < 0) return
+      let toIdx = pos === 'before' ? targetIdx : targetIdx + 1
+      if (fromIdx < toIdx) toIdx -= 1
+      const next = moveItem(ids, fromIdx, toIdx)
+      onReorderSessions(repoPath, next)
+    },
+    [onReorderSessions, dragSession, dropPosition, filteredRepos],
+  )
+
+  const handleSessionDragEnd = useCallback(() => {
+    setDragSession(null)
+    setDragOverSession(null)
+  }, [])
+
+  /**
+   * Keyboard reordering — Alt+ArrowUp / Alt+ArrowDown. The Alt modifier
+   * avoids clobbering plain ArrowUp/ArrowDown (which the WAI-ARIA tree
+   * pattern uses for focus traversal — see handleTreeKeyDown below).
+   *
+   * Repo rows reorder the top-level repo list; session rows reorder
+   * within their owning repo. Returns true when the key was handled so
+   * the row handler can stopPropagation + preventDefault, blocking the
+   * tree-level handler from also processing the same keypress.
+   */
+  const handleRepoReorderKey = useCallback(
+    (path: string) => (event: React.KeyboardEvent<HTMLElement>): boolean => {
+      if (!onReorderRepos) return false
+      // Mirror the drag guard (`draggable={... && !filter}`) — reordering
+      // from a filtered view would persist an order derived from the
+      // visible subset, silently shuffling hidden repos relative to each
+      // other. Disable the keyboard reorder shortcut while filtering too.
+      if (filter) return false
+      // #4972 — match via registry so a user rebind in Settings actually
+      // changes the runtime keys. The direction is derived from the
+      // matched id, not from event.key, so a rebind like cmd+j/cmd+k
+      // works as well as the default alt+arrowup/down.
+      // matchEvent's KeyEventLike is structural; React's KeyboardEvent
+      // satisfies it directly (no DOM cast needed).
+      const matched = shortcutRegistry.matchEvent(event, 'global')
+      const dir = matched === 'sidebar.reorder.up' ? -1
+        : matched === 'sidebar.reorder.down' ? 1
+        : 0
+      if (dir === 0) return false
+      const paths = filteredRepos.map(r => r.path)
+      const idx = paths.indexOf(path)
+      if (idx < 0) return false
+      const target = idx + dir
+      if (target < 0 || target >= paths.length) return true // swallow, no-op at edges
+      const next = moveItem(paths, idx, target)
+      onReorderRepos(next)
+      return true
+    },
+    [onReorderRepos, filteredRepos, filter, shortcutRegistry],
+  )
+
+  const handleSessionReorderKey = useCallback(
+    (repoPath: string, sessionId: string) => (event: React.KeyboardEvent<HTMLElement>): boolean => {
+      if (!onReorderSessions) return false
+      // Same rationale as handleRepoReorderKey: filtered subset would
+      // produce a partial persisted order.
+      if (filter) return false
+      // #4972 — match via registry; see handleRepoReorderKey rationale.
+      // React KeyboardEvent structurally satisfies KeyEventLike.
+      const matched = shortcutRegistry.matchEvent(event, 'global')
+      const dir = matched === 'sidebar.reorder.up' ? -1
+        : matched === 'sidebar.reorder.down' ? 1
+        : 0
+      if (dir === 0) return false
+      const repo = filteredRepos.find(r => r.path === repoPath)
+      if (!repo) return false
+      const ids = orderToIds(repo.activeSessions, s => s.sessionId)
+      const idx = ids.indexOf(sessionId)
+      if (idx < 0) return false
+      const target = idx + dir
+      if (target < 0 || target >= ids.length) return true
+      const next = moveItem(ids, idx, target)
+      onReorderSessions(repoPath, next)
+      return true
+    },
+    [onReorderSessions, filteredRepos, filter, shortcutRegistry],
+  )
+
   // Resize handle drag logic
   const isDragging = useRef(false)
   const startX = useRef(0)
@@ -190,28 +460,6 @@ export function Sidebar({
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
   }, [width, onWidthChange])
-
-  const filteredRepos = filter
-    ? repos
-        .map(r => {
-          const lf = filter.toLowerCase()
-          const matchesRepoName = r.name.toLowerCase().includes(lf)
-          const filteredActive = r.activeSessions.filter(s =>
-            s.name.toLowerCase().includes(lf),
-          )
-          const filteredResumable = r.resumableSessions.filter(s =>
-            (s.preview ?? '').toLowerCase().includes(lf),
-          )
-          const hasMatchingChild = filteredActive.length > 0 || filteredResumable.length > 0
-          if (!matchesRepoName && !hasMatchingChild) return null
-          return {
-            ...r,
-            activeSessions: matchesRepoName ? r.activeSessions : filteredActive,
-            resumableSessions: matchesRepoName ? r.resumableSessions : filteredResumable,
-          }
-        })
-        .filter((r): r is RepoNode => r !== null)
-    : repos
 
   // Get all visible treeitem elements for keyboard navigation
   const getVisibleItems = useCallback((): HTMLElement[] => {
@@ -396,13 +644,34 @@ export function Sidebar({
           <div className="sidebar-tree" role="tree" aria-label="Repository sessions" ref={treeRef} onKeyDown={handleTreeKeyDown}>
             {filteredRepos.map(repo => {
               const isCollapsed = filter ? false : (collapsed[repo.path] ?? false)
+              const repoDragOver = dragOverRepo?.path === repo.path ? dragOverRepo.position : null
+              const repoClass = `sidebar-repo${dragRepo === repo.path ? ' dragging' : ''}${repoDragOver ? ` drop-${repoDragOver}` : ''}`
               return (
                 <div
                   key={repo.path}
-                  className="sidebar-repo"
+                  className={repoClass}
                   role="treeitem"
                   aria-expanded={!isCollapsed}
+                  // #4832: only enable drag when reorder is wired AND no
+                  // filter is applied. Reordering during an active filter is
+                  // ambiguous (the on-screen list is a subset of the real
+                  // order) and would persist a confusing order; gate it off.
+                  draggable={!!onReorderRepos && !filter}
+                  data-testid={`sidebar-repo-${repo.path}`}
+                  data-drop-position={repoDragOver ?? undefined}
                   tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}
+                  // #4941: surface the Alt+ArrowUp/Down keyboard reorder
+                  // shortcut for screen readers and assistive tech. Only
+                  // set when reorder is actually wired (callback present
+                  // AND no filter active) so the announced shortcut
+                  // doesn't lie when the row isn't actually reorderable.
+                  // The space-separated multi-combo format follows the
+                  // WAI-ARIA spec.
+                  //
+                  // #4972: built from the registry's effective binding so a
+                  // user rebind in Settings flows through to the SR
+                  // announcement, not just the cheat sheet.
+                  aria-keyshortcuts={!!onReorderRepos && !filter ? reorderAriaKeyshortcuts : undefined}
                   // #4372: bind onContextMenu on the outer treeitem (not the
                   // inner .sidebar-repo-header) so that App's handler can
                   // call `event.currentTarget.focus()` on a focusable element.
@@ -417,7 +686,22 @@ export function Sidebar({
                   // ContextMenu key or Shift+F10. invokeContextMenuFromKey
                   // is a no-op for any other key, so this does not
                   // interfere with the tree-level arrow nav.
-                  onKeyDown={e => invokeContextMenuFromKey(e, { type: 'repo', path: repo.path })}
+                  // #4832: Alt+ArrowUp/Down keyboard reorder is checked
+                  // first; when handled it stops propagation so the
+                  // tree-level arrow-nav handler doesn't ALSO move focus.
+                  onKeyDown={e => {
+                    if (handleRepoReorderKey(repo.path)(e)) {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      return
+                    }
+                    invokeContextMenuFromKey(e, { type: 'repo', path: repo.path })
+                  }}
+                  onDragStart={handleRepoDragStart(repo.path)}
+                  onDragOver={handleRepoDragOver(repo.path)}
+                  onDragLeave={handleRepoDragLeave(repo.path)}
+                  onDrop={handleRepoDrop(repo.path)}
+                  onDragEnd={handleRepoDragEnd}
                 >
                   <div
                     className={`sidebar-repo-header${!repo.exists ? ' missing' : ''}`}
@@ -453,14 +737,27 @@ export function Sidebar({
                           : status === 'stale'
                             ? 'Session stale — idle for 1 hour or more'
                             : 'Session idle — ready for input'
+                        const isDraggingThis = dragSession?.sessionId === session.sessionId
+                        const sessionDragOver = dragOverSession?.sessionId === session.sessionId ? dragOverSession.position : null
+                        const sessionItemClass = `sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}${isDraggingThis ? ' dragging' : ''}${sessionDragOver ? ` drop-${sessionDragOver}` : ''}`
                         return (
                           <div
                             key={session.sessionId}
                             role="treeitem"
                             aria-selected={activeSessionId === session.sessionId}
                             tabIndex={visibleIds.indexOf(`session:${session.sessionId}`) === focusedIndex ? 0 : -1}
-                            className={`sidebar-session-item${activeSessionId === session.sessionId ? ' active' : ''}`}
+                            className={sessionItemClass}
                             data-testid={`session-item-${session.sessionId}`}
+                            // #4832: same filter guard as repo rows — order
+                            // changes during a filter would persist a
+                            // confusing partial ordering.
+                            draggable={!!onReorderSessions && !filter}
+                            data-drop-position={sessionDragOver ?? undefined}
+                            // #4941: see the matching repo-row attribute
+                            // above — same rationale (discoverability for
+                            // assistive tech, only set when the shortcut
+                            // is functionally wired on this row).
+                            aria-keyshortcuts={!!onReorderSessions && !filter ? reorderAriaKeyshortcuts : undefined}
                             onClick={() => onSessionClick(session.sessionId)}
                             onContextMenu={e => {
                               // #4372: stopPropagation so the right-click
@@ -478,7 +775,24 @@ export function Sidebar({
                             // Shift+F10). stopPropagation inside the helper
                             // keeps the event from also reaching the outer
                             // repo treeitem's onKeyDown.
-                            onKeyDown={e => invokeContextMenuFromKey(e, { type: 'session', sessionId: session.sessionId })}
+                            // #4832: Alt+ArrowUp/Down keyboard reorder runs
+                            // first; when handled, stopPropagation +
+                            // preventDefault block both the parent repo
+                            // treeitem's reorder handler AND the
+                            // tree-level focus traversal.
+                            onKeyDown={e => {
+                              if (handleSessionReorderKey(repo.path, session.sessionId)(e)) {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                return
+                              }
+                              invokeContextMenuFromKey(e, { type: 'session', sessionId: session.sessionId })
+                            }}
+                            onDragStart={handleSessionDragStart(repo.path, session.sessionId)}
+                            onDragOver={handleSessionDragOver(repo.path, session.sessionId)}
+                            onDragLeave={handleSessionDragLeave(session.sessionId)}
+                            onDrop={handleSessionDrop(repo.path, session.sessionId)}
+                            onDragEnd={handleSessionDragEnd}
                           >
                             <span className={`sidebar-session-dot status-${status}`} title={statusTitle} />
                             <span className="sidebar-session-name">{session.name}</span>
@@ -537,6 +851,19 @@ export function Sidebar({
                           tabIndex={visibleIds.indexOf(`resumable:${conv.conversationId}`) === focusedIndex ? 0 : -1}
                           className="sidebar-resumable-item"
                           data-testid={`resumable-item-${conv.conversationId}`}
+                          // #4939: resumable rows sit inside the outer
+                          // .sidebar-repo treeitem which becomes
+                          // draggable=true once onReorderRepos is wired.
+                          // HTML5 drag-and-drop bubbles, so without an
+                          // explicit guard here a click-and-drag on this
+                          // row would start the PARENT repo's drag
+                          // (visual + reorder side-effect both wrong).
+                          // draggable=false marks this child as a drag
+                          // source no-op, and stopPropagation on
+                          // dragstart prevents the event reaching the
+                          // outer repo's handleRepoDragStart.
+                          draggable={false}
+                          onDragStart={e => e.stopPropagation()}
                           onClick={() => onResumeSession(conv.conversationId)}
                           onContextMenu={e => {
                             // #4372: stopPropagation so the right-click does

@@ -5,7 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
-import { assertForwardingPattern } from './helpers/provider-forwarding.js'
+import { assertForwardingPattern, captureProviderOpts } from './helpers/provider-forwarding.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -1187,6 +1187,91 @@ describe('SessionManager.restoreState', () => {
     assert.equal(failed[0].provider, 'gemini-cli')
     assert.equal(failed[0].needsAttention, true)
     assert.ok(failed[0].errorMessage)
+
+    mgr.destroyAll()
+  })
+
+  // #4983 — restoreState preserves persisted IDs so the dashboard's
+  // localStorage-cached activeSessionId still resolves after a daemon
+  // restart. Inverts the original #4935 test, which asserted the
+  // opposite (`restored sessions get fresh IDs`) — that contract was
+  // the root cause of the wedge investigated in #4935, and #4979
+  // shipped a visibility safety net (SESSION_NOT_FOUND). This PR is the
+  // deeper fix: preserve the ID so the safety net never has to fire on
+  // a same-host daemon restart.
+  it('restoreState reuses persisted session IDs so dashboard lookups survive a daemon restart (#4983)', () => {
+    const stateFile1 = join(tempDir, 'state-v1.json')
+
+    // Persisted IDs in valid 32-char lower-case hex (matches the format
+    // createSession emits via randomBytes(16).toString('hex')). Pre-#4983
+    // versions of this test used placeholder strings that wouldn't match
+    // the validation regex; real state files always carry the canonical
+    // hex shape.
+    const persistedIdA = 'a'.repeat(32)
+    const persistedIdB = 'b'.repeat(32)
+    writeFileSync(stateFile1, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { id: persistedIdA, name: 'Rah6', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        { id: persistedIdB, name: 'No-it-all', cwd: '/tmp', model: null, permissionMode: 'auto', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr2 = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile1 })
+    const firstNewId = mgr2.restoreState()
+    assert.ok(firstNewId, 'restoreState should return the first restored session ID')
+
+    // The whole point of #4983: persisted IDs survive intact.
+    assert.equal(firstNewId, persistedIdA,
+      'restored session ID must match the persisted ID so dashboard\'s cached activeSessionId resolves')
+    const sessions = mgr2.listSessions()
+    assert.equal(sessions.length, 2, 'both sessions should restore')
+    const ids = sessions.map(s => s.sessionId)
+    assert.ok(ids.includes(persistedIdA), `expected ${persistedIdA} in restored ids: ${ids.join(', ')}`)
+    assert.ok(ids.includes(persistedIdB), `expected ${persistedIdB} in restored ids: ${ids.join(', ')}`)
+
+    // The actual #4935 wedge scenario: dashboard input addressed to the
+    // pre-restart ID now resolves, instead of triggering SESSION_NOT_FOUND.
+    assert.ok(mgr2.getSession(persistedIdA), 'lookup by persisted ID must succeed — no resend loop')
+    assert.ok(mgr2.getSession(persistedIdB))
+
+    mgr2.destroyAll()
+  })
+
+  // #4983 — defense-in-depth: a malformed persisted ID (wrong length,
+  // non-hex chars, etc.) must fall back to a fresh random ID instead of
+  // throwing or polluting the session map. Future state-file corruption
+  // (downgrade-then-upgrade, manual edits, etc.) must not wedge boot.
+  it('restoreState falls back to a fresh ID when the persisted id is malformed (#4983)', () => {
+    const stateFile1 = join(tempDir, 'state-malformed.json')
+    writeFileSync(stateFile1, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        // Too short
+        { id: 'deadbeef', name: 'short', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Wrong charset (uppercase + dashes)
+        { id: 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE', name: 'uuid-style', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Valid 32-char hex — must still survive intact
+        { id: 'c'.repeat(32), name: 'ok', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile1 })
+    mgr.restoreState()
+
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 3, 'all three sessions should restore even with malformed ids')
+    const validHex = /^[a-f0-9]{32}$/
+    for (const s of sessions) {
+      assert.match(s.sessionId, validHex, `session id ${s.sessionId} must be valid hex (corrupted persisted ids reassigned)`)
+    }
+    // Valid id survived; malformed ones reassigned to a new random hex.
+    const ids = sessions.map(s => s.sessionId)
+    assert.ok(ids.includes('c'.repeat(32)), 'the well-formed persisted id must survive intact')
+    assert.equal(mgr.getSession('deadbeef'), null, 'malformed short id must not be looked-up-able')
+    assert.equal(mgr.getSession('AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'), null, 'uppercase/dash id must not be looked-up-able')
 
     mgr.destroyAll()
   })
@@ -3173,6 +3258,136 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
     assert.equal(mgr.getSessionCost('s1'), 0)
     assert.equal(costUpdates.length, 0)
   })
+
+  // -------------------------------------------------------------------------
+  // #5038: fold error-path partial usage + cost into the cumulative tracker
+  // -------------------------------------------------------------------------
+  //
+  // PR #5037 surfaces partial `usage` + `cost` on the session `error` event
+  // payload (ABORT and STREAM_ERROR) so the user can see what a failed turn
+  // cost. But the cumulative tracker was gated on `event === 'result'`, so
+  // the partial spend on a failed turn was silently dropped from
+  // cumulativeUsage / sessionCost / budget gates. This pins the widened
+  // gate so the user-billed tokens on a failed turn DO show up in cumulative
+  // totals and budget gates fire as expected.
+
+  it('folds partial cost on STREAM_ERROR into cumulative session cost (#5038)', () => {
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    // Mirror the PR #5037 error envelope shape — `usage` + `cost` are
+    // spread flat onto the error payload (not nested under `partials`).
+    session.emit('error', {
+      messageId: 'msg_err',
+      message: 'upstream blew up',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 100, output_tokens: 50 },
+      cost: 0.025,
+    })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.025) < 1e-9,
+      `getSessionCost must include error-path cost; got ${mgr.getSessionCost('s1')}`)
+    assert.equal(costUpdates.length, 1, 'error event with finite cost must emit cost_update')
+    assert.ok(Math.abs(costUpdates[0].data.sessionCost - 0.025) < 1e-9)
+  })
+
+  it('folds partial cost on ABORT into cumulative session cost (#5038)', () => {
+    // The ABORT path (user-initiated interrupt) is the other error path
+    // that carries partials — pin it too so a refactor that only handles
+    // STREAM_ERROR doesn't half-fix the bug.
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('error', {
+      messageId: 'msg_abort',
+      message: 'Interrupted by user',
+      code: 'ABORT',
+      usage: { input_tokens: 30, output_tokens: 10 },
+      cost: 0.0075,
+    })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.0075) < 1e-9)
+    assert.equal(costUpdates.length, 1, 'ABORT with finite cost must emit cost_update')
+  })
+
+  it('error-path partial cost accumulates token usage into cumulativeUsage (#5038)', () => {
+    const { mgr, session } = makeWired()
+    const usageEvents = captureSessionEvents(mgr, 'session_usage')
+    session.emit('error', {
+      messageId: 'msg_err',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 50 },
+      cost: 0.005,
+    })
+    assert.equal(usageEvents.length, 1, 'session_usage must fire for error-path priced turn')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 200)
+    assert.equal(got.outputTokens, 80)
+    assert.equal(got.cacheReadTokens, 50)
+    assert.equal(got.turnsBilled, 1,
+      'an errored turn counts as a billed turn (the user was charged for it)')
+    assert.ok(Math.abs(got.costUsd - 0.005) < 1e-9)
+  })
+
+  it('error-path partial cost can trigger budget_warning (#5038)', () => {
+    // $1 budget; a single failed turn that cost $0.85 must STILL trip the
+    // 80% warning — otherwise the user can blow past the warning threshold
+    // by chaining errored turns and never see the alert.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('error', {
+      messageId: 'm',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 1 },
+      cost: 0.85,
+    })
+    assert.equal(warnings.length, 1, 'budget_warning must fire on error-path spend')
+    assert.equal(warnings[0].data.percent, 85)
+  })
+
+  it('error-path partial cost can trigger budget_exceeded (#5038)', () => {
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const exceeded = captureSessionEvents(mgr, 'budget_exceeded')
+    session.emit('error', {
+      messageId: 'm',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 1 },
+      cost: 1.05,
+    })
+    assert.equal(exceeded.length, 1, 'budget_exceeded must fire on error-path spend')
+    assert.equal(exceeded[0].data.percent, 105)
+  })
+
+  it('error event without `cost` does NOT tick the tracker (subscription / pre-#5037 shape) (#5038)', () => {
+    // Pre-#5037 errors carried only { code, message }. Subscription-only
+    // providers (cost: null) also emit errors with no cost. Neither must
+    // tick the cumulative tracker.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    const usageEvents = captureSessionEvents(mgr, 'session_usage')
+    session.emit('error', { messageId: 'm', message: 'boom', code: 'STREAM_ERROR' })
+    session.emit('error', { messageId: 'm', message: 'boom', code: 'ABORT', cost: null, usage: null })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+    assert.equal(usageEvents.length, 0)
+  })
+
+  it('error event with NaN / Infinity `cost` does NOT poison cumulative totals (#5038)', () => {
+    // Same defensive gate as the result path (#4088) — NaN / Infinity
+    // would poison cumulativeUsage and trigger spurious budget events.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('error', {
+      messageId: 'm', message: 'boom', code: 'STREAM_ERROR',
+      cost: NaN, usage: { input_tokens: 999 },
+    })
+    session.emit('error', {
+      messageId: 'm', message: 'boom', code: 'STREAM_ERROR',
+      cost: Infinity, usage: { input_tokens: 999 },
+    })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 0)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -3386,6 +3601,102 @@ describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
   })
 })
 
+// #4601: per-provider override map for streamStallTimeoutMs. When a session is
+// created for a provider listed in the map, that provider's override wins over
+// the global streamStallTimeoutMs. When the provider isn't listed (or the map
+// is empty / unset) the global value (or BaseSession default) applies — no
+// regression to existing single-knob behaviour.
+describe('SessionManager providerStreamStallTimeoutMs forwarding (#4601)', () => {
+  it('forwards the per-provider override for the resolved provider', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 900_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      900_000,
+      'per-provider override should win for the resolved provider',
+    )
+  })
+
+  it('per-provider override wins over the global streamStallTimeoutMs', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 600_000 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      600_000,
+      'per-provider override should beat the global value when both are set',
+    )
+  })
+
+  it('falls back to the global streamStallTimeoutMs when the provider has no override entry', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { codex: 900_000 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      300_000,
+      'a provider with no entry in the map should still inherit the global value',
+    )
+  })
+
+  it('omits streamStallTimeoutMs from providerOpts when neither per-provider nor global is set', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { codex: 900_000 },
+    })
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(opts, 'streamStallTimeoutMs'),
+      false,
+      'an unmatched provider with no global value should leave streamStallTimeoutMs unset (BaseSession default applies)',
+    )
+  })
+
+  it('forwards 0 as an explicit per-provider disable (matches global semantics)', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 0 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      0,
+      '0 must flow through verbatim — it explicitly disables stream-stall recovery for this provider',
+    )
+  })
+
+  it('ignores out-of-range per-provider entries and falls through to the global value', async () => {
+    const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': MAX_SANE_DURATION_MS + 1 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      300_000,
+      'an over-ceiling per-provider entry must fall back to the global value rather than silently producing a >24h timer',
+    )
+  })
+})
+
 // #4509 + #4517: SessionManager's four operator-facing timeouts
 // (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs /
 // mcpToolCallTimeoutMs) are clamped to the shared MAX_SANE_DURATION_MS (24h)
@@ -3443,4 +3754,91 @@ describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)',
         `the exact boundary is INCLUSIVE — clamping it would surprise operators who tuned the dial to exactly 24h`)
     })
   }
+})
+
+// #4756 — `stopped` event proxying.
+//
+// CliSession emits `stopped` after `_handleChildClose` confirms a clean
+// SIGINT exit (gated on `_intentionalStop`). PR #4750 added the emit but
+// neither the SessionManager event proxy nor the ws-forwarding broadcaster
+// included it, so no consumer ever saw the confirmation. This block locks
+// in the session-event proxy half of the wiring — the ws-forwarding +
+// normalizer half is covered in ws-forwarding.test.js and
+// event-normalizer.test.js's "stopped event (#4756)" describes.
+describe('_wireSessionEvents — stopped event proxy (#4756)', () => {
+  it('proxies session.emit("stopped") to mgr session_event with event="stopped"', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    const events = []
+    mgr.on('session_event', (evt) => events.push(evt))
+
+    session.emit('stopped', { code: 0 })
+
+    const stoppedEvents = events.filter(e => e.event === 'stopped')
+    assert.equal(stoppedEvents.length, 1, 'expected exactly one stopped session_event')
+    assert.equal(stoppedEvents[0].sessionId, 's1')
+    assert.deepEqual(stoppedEvents[0].data, { code: 0 })
+  })
+
+  it('forwards the numeric exit code on the data payload (e.g. 143 = SIGTERM)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    const events = []
+    mgr.on('session_event', (evt) => { if (evt.event === 'stopped') events.push(evt) })
+
+    session.emit('stopped', { code: 143 })
+
+    assert.equal(events.length, 1)
+    assert.equal(events[0].data.code, 143, 'code field must reach the wire layer for diagnostic UX')
+  })
+
+  it('treats stopped as transient — not recorded into history (no replay on reconnect)', () => {
+    // History replay re-fires PROXIED_EVENTS to a reconnecting client.
+    // `stopped` is informational (the user just clicked Stop a moment
+    // ago) — replaying it would surface a misleading "Session stopped."
+    // toast minutes later when the user reconnects. Keep it transient,
+    // mirroring the `permission_request` / `inactivity_warning` policy.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+
+    session.emit('stopped', { code: 0 })
+
+    const history = mgr.getHistory('s1') || []
+    const recordedStopped = history.filter(h => h.event === 'stopped')
+    assert.equal(recordedStopped.length, 0, 'stopped must not be persisted to history')
+  })
+
+  it('does not touchActivity for stopped (lifecycle signal, not user input)', () => {
+    // The idle-timeout machinery ticks on `message` / `stream_start` /
+    // `tool_start` / `result` / `user_question` only. A `stopped` event
+    // is the OPPOSITE of activity — the user just ended the turn — so
+    // resetting the idle timer would defer destruction of an already-
+    // stopped session, opposite of the intent.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    // Pin lastActivity to a known past timestamp and assert it doesn't move.
+    const beforeTs = Date.now() - 60_000
+    mgr._sessionLastActivityAt.set('s1', beforeTs)
+
+    session.emit('stopped', { code: 0 })
+
+    const after = mgr._sessionLastActivityAt.get('s1')
+    assert.equal(after, beforeTs, 'stopped must not reset lastActivity')
+  })
 })

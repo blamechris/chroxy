@@ -145,6 +145,24 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #5016: nested-sub-bubble support — a Task subagent's intermediate
+  // wire event (tool_start / tool_result / tool_input_delta /
+  // stream_delta) re-emitted by the parent under `agent_event` so the
+  // dashboard renders it inside the parent's Task tool_call bubble.
+  // `parentToolUseId` is the parent's tool_use id (same key used by
+  // agent_spawned / agent_completed). `eventType` is the child's
+  // original event name. `payload` is the verbatim child event payload.
+  agent_event: (data) => ({
+    messages: [{
+      msg: {
+        type: 'agent_event',
+        parentToolUseId: data.parentToolUseId,
+        eventType: data.type,
+        payload: data.payload ?? {},
+      },
+    }],
+  }),
+
   // #4307: pending-background-shells snapshot changed for a session.
   // BaseSession emits this on both push (run_in_background tool_result
   // observed) and clear (BashOutput tool_use observed). Full snapshot
@@ -246,6 +264,22 @@ Object.assign(EVENT_MAP, {
         messageId: data.messageId,
         idleMs: data.idleMs,
         prefab: data.prefab,
+      },
+    }],
+  }),
+
+  // #4653: chroxy-side multi-question AskUserQuestion deny — surfaces the
+  // permission-hook's silent intervention (#4648) as a user-visible event.
+  // Forwarded only to subscribers of THIS session: the counter is per-
+  // session and a deny on session A shouldn't tick the chip on session B.
+  multi_question_intervention: (data) => ({
+    messages: [{
+      msg: {
+        type: 'multi_question_intervention',
+        toolUseId: data.toolUseId,
+        questionCount: data.questionCount,
+        reason: data.reason,
+        timestamp: data.timestamp,
       },
     }],
   }),
@@ -385,6 +419,95 @@ Object.assign(EVENT_MAP, {
       timestamp: Date.now(),
     }
     if (data.code) msg.code = data.code
+    // #4947: forward `attemptedResumeId` when CliSession's resume-failure
+    // path tagged the error envelope (see cli-session.js
+    // `_handleChildClose` — emits `error{code:'resume_unknown',
+    // attemptedResumeId, message}` from server PR #4944). The dashboard
+    // ResumeUnknownChip surfaces this id as subtext so operators can
+    // correlate against `~/.chroxy/session-state.json.resumeConversationId`
+    // without grepping logs.
+    //
+    // #4948: also forward on `resume_unknown_exhausted` — the terminal
+    // escalation code emitted when the post-fallback retry ALSO matches the
+    // unknown-resume pattern. Same operator-correlation rationale; the
+    // dashboard renders a distinct "auto-recovery exhausted" affordance but
+    // still wants to surface the attempted id as subtext.
+    //
+    // Hardening (from PR #4967 Copilot review):
+    //   1. Gate strictly on the two resume-failure codes so a buggy producer
+    //      can't sneak the field onto unrelated error envelopes.
+    //   2. Trim whitespace and treat whitespace-only as missing — same UX
+    //      guard the chip's render-time check already applies, but enforced
+    //      at the wire boundary so downstream consumers (mobile app, future
+    //      log/console viewers) see a consistent "present or absent, never
+    //      present-but-empty" shape.
+    //   3. Enforce the same 256-char cap the wire schema declares
+    //      (`ServerMessageSchema.attemptedResumeId`). The server doesn't
+    //      validate outgoing messages against ServerMessageSchema before
+    //      send, so without this guard a misbehaving producer could ship a
+    //      megabyte payload that the dashboard accepts (lax client parse)
+    //      but trips Zod-validating consumers. Silently truncate rather
+    //      than drop — the truncated id still helps operator triage.
+    if (
+      (data.code === 'resume_unknown' || data.code === 'resume_unknown_exhausted') &&
+      typeof data.attemptedResumeId === 'string'
+    ) {
+      const trimmed = data.attemptedResumeId.trim()
+      if (trimmed.length > 0) {
+        msg.attemptedResumeId = trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed
+      }
+    }
+    // #5067: forward captured `stdout` / `stderr` on docker-byok
+    // postCreateCommand failures so the operator can diagnose without
+    // re-running the broken setup. The session layer
+    // (docker-byok-session.js) already tail-caps each stream to
+    // POST_CREATE_OUTPUT_CAP_BYTES (4 KiB) before emitting; we re-cap at
+    // the wire boundary at 8 KiB per stream as a belt-and-suspenders
+    // bound (matches ServerMessageSchema.{stdout,stderr}.max(8192)) so a
+    // misbehaving producer can't ship a megabyte payload that the
+    // dashboard accepts but trips Zod-validating consumers. Gated
+    // strictly on the post-create-failure code so a buggy producer can't
+    // sneak the fields onto unrelated error envelopes — same hardening
+    // pattern as the resume_unknown gate above. Empty-string and
+    // non-string both treated as "absent" so receivers see a consistent
+    // "present or absent, never present-but-empty" shape.
+    if (data.code === 'post_create_command_failed') {
+      if (typeof data.stdout === 'string' && data.stdout.length > 0) {
+        msg.stdout = data.stdout.length > 8192 ? data.stdout.slice(0, 8192) : data.stdout
+      }
+      if (typeof data.stderr === 'string' && data.stderr.length > 0) {
+        msg.stderr = data.stderr.length > 8192 ? data.stderr.slice(0, 8192) : data.stderr
+      }
+    }
+    return { messages: [{ msg }] }
+  },
+
+  // #4756: user-initiated Stop confirmation. CliSession emits `stopped`
+  // when the child process exits cleanly after `interrupt()` set the
+  // `_intentionalStop` flag (see cli-session.js `_handleChildClose`). This
+  // pairs with `error` — `error` is the louder "crashed unexpectedly,
+  // restarting" toast that the auto-respawn path triggers, while
+  // `session_stopped` is the quiet "you asked, it stopped" confirmation.
+  // Clients should treat it as informational, NOT an error condition.
+  // `code` is the exit status from the child; typically 0 on clean SIGINT
+  // exit but kept on the wire so clients can render the numeric code for
+  // diagnostic purposes if non-zero (e.g. SIGTERM = 143). Gated on
+  // `Number.isInteger` (not bare `typeof === 'number'`) so NaN / Infinity
+  // / floats from a defensive provider can't reach the wire — the schema
+  // is `z.number().int()`, so non-integers would fail client-side parsing.
+  // `sessionId` is OMITTED on the legacy-cli path where ctx.sessionId is
+  // null, matching the `claude_ready` / `error` legacy-cli convention so
+  // receivers treat the message as "applies to the connected legacy CLI"
+  // rather than seeing `sessionId: null`. On the multi-session path the
+  // field is also injected by `_broadcastToSession`, so this guard
+  // additionally protects against accidental `sessionId: null` if the
+  // upstream ctx ever degrades.
+  stopped: (data, ctx) => {
+    const msg = { type: 'session_stopped' }
+    if (typeof ctx.sessionId === 'string' && ctx.sessionId.length > 0) {
+      msg.sessionId = ctx.sessionId
+    }
+    if (Number.isInteger(data?.code)) msg.code = data.code
     return { messages: [{ msg }] }
   },
 

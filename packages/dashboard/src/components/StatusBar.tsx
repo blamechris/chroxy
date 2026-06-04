@@ -1,6 +1,7 @@
 /**
  * StatusBar — cost, context, busy indicator, agent badges.
  */
+import { formatTokensCompact } from '@chroxy/store-core'
 import { getProviderInfo } from '../lib/provider-labels'
 import {
   costTooltip,
@@ -17,6 +18,13 @@ export interface StatusBarProps {
   inputTokens?: number
   /** #4205: raw output tokens for the most-recent turn (drives the tooltip breakdown). */
   outputTokens?: number
+  /**
+   * #5065: model context window in tokens. Combined with `inputTokens +
+   * outputTokens` to render the `used / total tokens` meter alongside the
+   * percent text. Hidden entirely when missing so the meter doesn't show
+   * an empty bar when no session/model is active.
+   */
+  contextWindow?: number
   isBusy?: boolean
   agentCount?: number
   provider?: string
@@ -27,8 +35,18 @@ export interface StatusBarProps {
 // miss / get auto-reformatted).
 const NBSP = '\u00A0'
 
+/**
+ * #5065: thresholds for the header context meter — kept in sync with the
+ * FooterBar pair (`FOOTER_COMPACT_SUGGEST_THRESHOLD` / `FOOTER_OVER_BUDGET_THRESHOLD`)
+ * so the two surfaces flip colour at the same point. Re-declared here
+ * rather than imported to avoid a back-edge dependency from the header
+ * component into the footer component.
+ */
+export const STATUS_COMPACT_SUGGEST_THRESHOLD = 80
+export const STATUS_OVER_BUDGET_THRESHOLD = 100
+
 export function StatusBar({
-  cost, context, contextPercent, inputTokens, outputTokens,
+  cost, context, contextPercent, inputTokens, outputTokens, contextWindow,
   isBusy, agentCount, provider,
 }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
@@ -45,6 +63,30 @@ export function StatusBar({
     outputTokens,
   })
   const agentTip = agentCountTooltip(agentCount)
+
+  // #5065: compute the `used / total tokens` label + bar when we have
+  // BOTH the raw token counts AND the model's context window. Without
+  // the window we'd be guessing, and the existing context chip text
+  // already covers the no-window case (it falls back to the raw count
+  // without a meter). Render is gated on `usedTokens > 0` so an idle
+  // session — no turns yet — doesn't show an empty `0 / 1M` bar.
+  const usedTokens = (inputTokens ?? 0) + (outputTokens ?? 0)
+  const showMeter = usedTokens > 0
+    && contextWindow != null
+    && contextWindow > 0
+    && contextPercent != null
+  const meterPercent = contextPercent ?? 0
+  // Cap fill at 100% — a bar wider than its container is just visual
+  // noise. The numeric label is what tells the user "you're over".
+  const meterFillWidth = Math.min(meterPercent, 100)
+  const meterClass = meterPercent >= STATUS_OVER_BUDGET_THRESHOLD
+    ? ' high over-budget'
+    : meterPercent >= STATUS_COMPACT_SUGGEST_THRESHOLD
+      ? ' high'
+      : meterPercent >= 50
+        ? ' medium'
+        : ''
+
   return (
     <div className="status-bar" data-testid="status-bar">
       {isBusy && (
@@ -68,13 +110,45 @@ export function StatusBar({
       >
         {cost != null ? `$${cost.toFixed(4)}` : NBSP}
       </span>
-      <span
-        className="status-context"
-        title={contextTip}
-        aria-label={contextTip}
-      >
-        {context || NBSP}
-      </span>
+      {showMeter ? (
+        <span
+          className="status-context-meter"
+          data-testid="status-context-meter"
+          title={contextTip}
+          aria-label={contextTip}
+        >
+          <span
+            className={`status-context-bar${meterClass}`}
+            role="progressbar"
+            aria-label="Context window usage"
+            aria-valuenow={Math.min(Math.round(meterPercent), 100)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <span
+              className="status-context-fill"
+              style={{ width: `${meterFillWidth}%` }}
+            />
+          </span>
+          <span
+            className="status-context-label"
+            data-testid="status-context-label"
+          >
+            {formatTokensCompact(usedTokens)}
+            {' / '}
+            {formatTokensCompact(contextWindow)}
+            {' tokens'}
+          </span>
+        </span>
+      ) : (
+        <span
+          className="status-context"
+          title={contextTip}
+          aria-label={contextTip}
+        >
+          {context || NBSP}
+        </span>
+      )}
       {agentCount != null && agentCount > 0 && (
         <span
           className="agent-badge"

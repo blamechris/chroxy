@@ -24,6 +24,9 @@ describe('createEmptyBaseSessionState', () => {
       isIdle: true,
       lastClientActivityAt: null,
       health: 'healthy',
+      // #4879: quiet "Stop confirmed" marker — null until session_stopped lands
+      stoppedAt: null,
+      stoppedCode: null,
       activeAgents: [],
       activeTools: [],
       // #4307: empty array on init — populated by background_work_changed
@@ -37,6 +40,9 @@ describe('createEmptyBaseSessionState', () => {
       mcpServers: [],
       devPreviews: [],
       inactivityWarning: null,
+      // #4653: chroxy-side intervention ring — empty array on init,
+      // populated by multi_question_intervention events.
+      interventions: [],
     })
   })
 
@@ -52,6 +58,9 @@ describe('createEmptyBaseSessionState', () => {
     expect(a.planAllowedPrompts).not.toBe(b.planAllowedPrompts)
     expect(a.mcpServers).not.toBe(b.mcpServers)
     expect(a.devPreviews).not.toBe(b.devPreviews)
+    // #4653: interventions ring is per-session — each fresh state must
+    // get its own array so a deny on session A doesn't bleed into session B.
+    expect(a.interventions).not.toBe(b.interventions)
   })
 
   it('satisfies the BaseSessionState type', () => {

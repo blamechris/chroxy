@@ -157,4 +157,53 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
   },
   // Cmd+1 .. Cmd+9 tab-switch entries — one per digit.
   ...tabSwitchShortcuts,
+  // -- #4941: sidebar reorder discoverability ----------------------
+  // These two entries describe the keyboard reorder shortcut on
+  // draggable sidebar rows (#4832). Default is Alt+ArrowUp/Down.
+  //
+  // #4972 — Sidebar.tsx now consults `registry.matchEvent(e, 'global')`
+  // when checking these shortcuts, so a user rebind in Settings flows
+  // through to runtime behaviour AND the row's aria-keyshortcuts SR
+  // announcement. The discoverability surfaces (`?` cheat sheet,
+  // Settings rebind list) and the runtime handler now share one source
+  // of truth.
+  {
+    id: 'sidebar.reorder.up',
+    defaultBinding: 'alt+arrowup',
+    description: 'Move sidebar row up (when focused)',
+    category: 'sidebar',
+    scope: 'global',
+  },
+  {
+    id: 'sidebar.reorder.down',
+    defaultBinding: 'alt+arrowdown',
+    description: 'Move sidebar row down (when focused)',
+    category: 'sidebar',
+    scope: 'global',
+  },
+  // #4949 — SessionBar keyboard reorder ladder. Shipped in #4945 but
+  // was undiscoverable: no cheat-sheet entry, no tooltip. The ladder
+  // is owned by SessionBar.tsx itself (focused-tab keydown handler),
+  // so this entry exists purely so users can find it in the `?`
+  // overlay and the Settings UI.
+  //
+  // Scope is `sessionbar` (not `global`) on purpose — the global
+  // dispatcher unconditionally calls preventDefault() on any matched
+  // id, which would break Shift+Space everywhere outside text inputs.
+  // The `sessionbar` scope is only consumed by the registry's
+  // list()/cheat-sheet path, never by matchEvent.
+  //
+  // #4970 — for the same reason (SessionBar.tsx hardcodes the keys),
+  // this entry is intentionally non-rebindable in Settings today.
+  // ShortcutsSection inspects `scope === 'sessionbar'` and disables the
+  // Edit/Reset buttons so a user-issued rebind cannot silently fail.
+  // When the SessionBar keydown handler is migrated to consult
+  // `registry.matchEvent(e, 'sessionbar')`, drop the read-only guard.
+  {
+    id: 'session.reorder.lift',
+    defaultBinding: 'shift+space',
+    description: 'Lift session tab for keyboard reorder (Arrow Left/Right to move, Enter/Escape to commit/cancel)',
+    category: 'session',
+    scope: 'sessionbar',
+  },
 ]

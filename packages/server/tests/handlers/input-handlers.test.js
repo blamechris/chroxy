@@ -69,6 +69,65 @@ describe('input-handlers', () => {
       assert.match(ctx._sent[0].message, /No active session/)
     })
 
+    // #4935 — visibility for the silent post-restart wedge. A stale `sessionId`
+    // on the wire (the dashboard's persisted activeSessionId points at a
+    // pre-restart session ID that no longer exists post-restore) used to
+    // produce a generic `session_error` envelope with no `code` field — the
+    // dashboard's toast fired with a useless "Session not found: <id>" string
+    // and no machine-readable signal to clear the stale local ID. Now the
+    // envelope carries `code: 'SESSION_NOT_FOUND'` + `attemptedSessionId` so
+    // the dashboard can branch on it and prompt the user to pick another
+    // session (mirrors the existing `code: 'resume_unknown'` affordance from
+    // #4947). The handler also logs at INFO level so chroxy.log shows the
+    // mismatch — pre-#4935, the log line for this path was DEBUG-only.
+    it('sends structured SESSION_NOT_FOUND when sessionId references a non-existent session (#4935)', () => {
+      const ctx = makeCtx()
+      const client = makeClient({ activeSessionId: null })
+      inputHandlers.input(
+        makeWs(),
+        client,
+        { data: 'hello', sessionId: 'deadbeef-stale-session-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1, 'exactly one error envelope should be emitted')
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_NOT_FOUND',
+        'envelope must include code:SESSION_NOT_FOUND so dashboard can branch')
+      assert.equal(ctx._sent[0].attemptedSessionId, 'deadbeef-stale-session-id',
+        'envelope must echo the stale sessionId so dashboard can clear its local state')
+      assert.match(ctx._sent[0].message, /Session not found: deadbeef-stale-session-id/)
+    })
+
+    // #4935 Copilot review feedback — disambiguate bound-session mismatch from
+    // truly-missing sessions. `resolveSession()` returns null for both cases;
+    // emitting SESSION_NOT_FOUND for an authorization failure would let a
+    // dashboard consumer keyed on SESSION_NOT_FOUND clear its local state
+    // (and ID-binding) when the user is in fact bound to a *different* session
+    // they're allowed to touch. The canonical SESSION_TOKEN_MISMATCH envelope
+    // (#2912) belongs here instead.
+    it('sends SESSION_TOKEN_MISMATCH (not SESSION_NOT_FOUND) when client is bound to a different session (#4935 review)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('bound-id', { session, name: 'BoundSession', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      // Client is bound to bound-id but addresses a different sessionId.
+      const client = makeClient({ boundSessionId: 'bound-id' })
+      inputHandlers.input(
+        makeWs(),
+        client,
+        { data: 'hello', sessionId: 'some-other-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH',
+        'binding mismatch must emit SESSION_TOKEN_MISMATCH, not SESSION_NOT_FOUND')
+      assert.equal(ctx._sent[0].boundSessionId, 'bound-id')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundSession')
+      assert.equal(ctx._sent[0].attemptedSessionId, undefined,
+        'binding-mismatch envelope must not carry SESSION_NOT_FOUND fields')
+    })
+
     it('sends session_error for invalid attachment type', () => {
       const sessions = new Map()
       const session = createMockSession()
@@ -214,6 +273,373 @@ describe('input-handlers', () => {
           `reserved id must be rejected and replaced by a server-generated uin-… (got ${msgId})`)
       }
     })
+
+    // #4733 — interior-whitespace preservation invariant. The original
+    // repro showed a typed prompt with ~24 spaces stripped between the
+    // dashboard composer and what the model actually received. The first
+    // wire-level boundary on the server is `inputHandlers.input` — if
+    // interior whitespace doesn't survive THIS step, no downstream fix
+    // would help. These tests pin the count-preservation contract:
+    //   - whitespace count of the forwarded `sendMessage` argument
+    //     equals the whitespace count of the inbound `data` modulo the
+    //     leading/trailing `trim()` (`data?.trim()` is leading+trailing
+    //     only).
+    //   - interior spaces, tabs, and embedded newlines all survive.
+    // If a future change adds an interior-whitespace normalization (e.g.
+    // a `replace(/\s+/g, ' ')` for "cleanliness"), one of these will fire.
+    describe('interior-whitespace preservation (#4733)', () => {
+      function countInteriorWhitespace(s) {
+        const trimmed = s.trim()
+        let n = 0
+        for (const ch of trimmed) if (/\s/.test(ch)) n += 1
+        return n
+      }
+
+      it('preserves every interior space in a typed multi-sentence prompt', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        // Mirrors the shape of the #4733 repro: ~360 char prompt with
+        // ~60 interior whitespace chars across multiple sentences.
+        const prompt =
+          'Hello I am in chroxy in a tui session. What do we need to do to start working on this? ' +
+          'Please note any issues I surface regarding chroxy (the interface governing this TUI session) ' +
+          'please file them in my chroxy repo.'
+        const expectedWs = countInteriorWhitespace(prompt)
+        assert.ok(expectedWs >= 30, 'sanity: test prompt has lots of interior whitespace')
+
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        assert.equal(session.sendMessage.callCount, 1, 'message must forward to session')
+        const forwarded = session.sendMessage.lastCall[0]
+        assert.equal(forwarded, prompt, 'forwarded prompt must equal inbound prompt verbatim (no transform)')
+        assert.equal(
+          countInteriorWhitespace(forwarded),
+          expectedWs,
+          `interior whitespace count must survive — typed input must NOT be stripped to run-on words`,
+        )
+      })
+
+      it('preserves consecutive spaces (no double-space collapse)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const prompt = 'a  b   c    d'
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        assert.equal(session.sendMessage.lastCall[0], prompt,
+          'multiple-space runs must NOT be collapsed to single spaces')
+      })
+
+      it('preserves tabs and interior newlines (Shift+Enter drafts)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const prompt = 'line one\nline\ttwo\nline three'
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        assert.equal(session.sendMessage.lastCall[0], prompt,
+          'tabs and embedded newlines must pass through verbatim')
+      })
+
+      it('strips only leading + trailing whitespace, NOT interior', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const prompt = '   hello world   foo bar   '
+        inputHandlers.input(makeWs(), client, { data: prompt }, ctx)
+
+        // The handler's `trimmed = text?.trim()` is leading+trailing
+        // only; interior runs must survive intact. The forwarded text
+        // is the trimmed form (when no evaluator is configured, which
+        // is the default).
+        assert.equal(session.sendMessage.lastCall[0], 'hello world   foo bar',
+          'trim removes leading/trailing only; interior runs intact')
+      })
+    })
+
+    // #4930 — pin the auto-checkpoint UX contract that became a load-bearing
+    // side-effect of #4928. Before #4928 (PR that wired claude CLI --resume),
+    // `CliSession.resumeSessionId` was always undefined, so the
+    //
+    //   if (entry.session.resumeSessionId) { ctx.checkpointManager.createCheckpoint(...) }
+    //
+    // branch at input-handlers.js:244 was a permanent no-op for the
+    // claude-cli provider — only SDK sessions ever auto-checkpointed.
+    //
+    // After #4928, CliSession exposes a real `resumeSessionId` once the CLI
+    // emits `system.init` (or once `restoreState` re-seeds it from disk).
+    // That flipped the auto-checkpoint branch live for every CLI session,
+    // every user message, with no test pinning the surface contract. This
+    // suite documents and pins:
+    //
+    //   1. Gate on `resumeSessionId` — first-ever message (no init yet) MUST
+    //      skip the checkpoint, otherwise we'd try to snapshot before the
+    //      session even has a conversation id (would crash or persist a
+    //      checkpoint pointing at `undefined`).
+    //   2. Once `resumeSessionId` is set, EVERY subsequent user message
+    //      fires `createCheckpoint` with the correct shape (sessionId, the
+    //      resume id, cwd, a description sliced from the user's text, and
+    //      the current history count for the messageCount field).
+    //   3. CLI sessions and SDK sessions go through the SAME branch — the
+    //      checkpoint manager is provider-agnostic, and #4928 doesn't add
+    //      a provider-specific guard. This test pins that no implicit
+    //      provider filter was sneaked in alongside #4928.
+    //   4. The auto-checkpoint is FIRE-AND-FORGET: a `createCheckpoint`
+    //      rejection MUST NOT block, throw, or surface to the user. The
+    //      handler swallows the error with `.catch(log.warn)`; without
+    //      this contract a transient git failure inside the snapshot
+    //      subsystem would also block the typed message from reaching
+    //      the model.
+    //   5. Rejection paths in the handler (empty input, budget paused,
+    //      cross-client input_conflict) MUST NOT trigger the checkpoint —
+    //      otherwise a session that's busy or paused would still churn
+    //      git snapshots on every keystroke.
+    //   6. Checkpoint MUST fire BEFORE the message reaches the session
+    //      (`sendMessage`). The whole point of auto-checkpoint is to
+    //      snapshot pre-turn state so the user can rewind to before
+    //      they sent THIS message. If a future refactor moves the
+    //      checkpoint after the forward, rewinding would land on the
+    //      wrong side of the turn boundary.
+    describe('auto-checkpoint side-effect (#4930 / pinned from #4928)', () => {
+      it('does NOT call createCheckpoint when resumeSessionId is undefined (pre-init / first-ever message)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        // CliSession before its first system.init: resumeSessionId is
+        // undefined (not yet seeded). Mirrors the pre-#4928 baseline AND
+        // the brand-new-session shape post-#4928.
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'first message ever on this session' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'no resume id yet → MUST skip checkpoint (would otherwise snapshot with undefined conversation id)')
+        assert.equal(session.sendMessage.callCount, 1,
+          'message still forwards — checkpoint gate is independent of message delivery')
+      })
+
+      it('calls createCheckpoint with the expected payload on every subsequent message (post-init)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        // Simulate post-init state: claude CLI has emitted system.init and
+        // CliSession has stamped the id. Auto-checkpoint should now fire
+        // on every user message.
+        session.resumeSessionId = 'cli-init-abc-123'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.getHistoryCount = createSpy(() => 4)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'second message after init' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1,
+          'post-init message MUST auto-checkpoint — this is the #4930 side-effect')
+        const [args] = ctx.checkpointManager.createCheckpoint.lastCall
+        assert.equal(args.sessionId, 's1', 'sessionId must be the chroxy session id (not the resume id)')
+        assert.equal(args.resumeSessionId, 'cli-init-abc-123',
+          'resumeSessionId must be threaded into the checkpoint so rewind can re-attach to this conversation')
+        assert.equal(args.cwd, '/work', 'cwd must come from the session entry — git snapshot needs the worktree root')
+        assert.equal(args.description, 'second message after init',
+          'description must be sliced from the user text (≤100 chars) for the rewind UI label')
+        assert.equal(args.messageCount, 4,
+          'messageCount comes from sessionManager.getHistoryCount — rewind UI surfaces "at message N"')
+      })
+
+      it('truncates the description to the first 100 chars of the user text', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-xyz'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        const longText = 'A'.repeat(250)
+        inputHandlers.input(makeWs(), client, { data: longText }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1)
+        const [args] = ctx.checkpointManager.createCheckpoint.lastCall
+        assert.equal(args.description.length, 100,
+          'description MUST be capped at 100 chars — the rewind UI label has a fixed width')
+        assert.equal(args.description, 'A'.repeat(100))
+      })
+
+      it('fires auto-checkpoint for every user message after init (the #4930 frequency concern)', () => {
+        // This is the test that PINS what the issue asks about: "Is the
+        // per-message checkpoint frequency acceptable?" — at the contract
+        // level the answer is "yes, every message after init triggers one
+        // checkpoint". If a future PR introduces throttling, this test
+        // MUST be updated explicitly (so the throttle decision is visible
+        // in the diff), not silently passed by.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-multi-msg'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        for (let i = 0; i < 5; i++) {
+          inputHandlers.input(makeWs(), client, { data: `message #${i + 1}` }, ctx)
+        }
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 5,
+          'exactly one checkpoint per user message — change this only if throttling is intentionally added')
+        // Each call uses the same resume id (the conversation id is stable
+        // across the session's lifetime) — the cumulative message count is
+        // what advances.
+        for (let i = 0; i < 5; i++) {
+          assert.equal(ctx.checkpointManager.createCheckpoint.calls[i][0].resumeSessionId, 'cli-init-multi-msg',
+            `call #${i + 1} must carry the same resume id — branching only happens on rewind`)
+        }
+      })
+
+      it('fires for CLI-shaped sessions the same way it fires for SDK-shaped sessions (#4928 made CLI symmetric)', () => {
+        // Verify there is no implicit provider filter — the handler treats
+        // any session with a truthy resumeSessionId the same. This is the
+        // exact symmetry #4928 introduced and the #4930 issue asks us to
+        // confirm is sane.
+        const sessions = new Map()
+        const cliSession = createMockSession()
+        cliSession.resumeSessionId = 'cli-conv-uuid'
+        const sdkSession = createMockSession()
+        sdkSession.resumeSessionId = 'sdk-conv-uuid'
+        sessions.set('s-cli', { session: cliSession, name: 'CLI', cwd: '/work/cli' })
+        sessions.set('s-sdk', { session: sdkSession, name: 'SDK', cwd: '/work/sdk' })
+        const ctx = makeCtx(sessions)
+
+        const cliClient = makeClient({ id: 'c-cli', activeSessionId: 's-cli' })
+        const sdkClient = makeClient({ id: 'c-sdk', activeSessionId: 's-sdk' })
+
+        inputHandlers.input(makeWs(), cliClient, { data: 'hi from cli' }, ctx)
+        inputHandlers.input(makeWs(), sdkClient, { data: 'hi from sdk' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 2,
+          'both providers must take the same auto-checkpoint branch')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[0][0].resumeSessionId, 'cli-conv-uuid')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[0][0].cwd, '/work/cli',
+          'CLI session checkpoint carries its own cwd')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[1][0].resumeSessionId, 'sdk-conv-uuid')
+        assert.equal(ctx.checkpointManager.createCheckpoint.calls[1][0].cwd, '/work/sdk',
+          'SDK session checkpoint carries its own cwd')
+      })
+
+      it('swallows createCheckpoint rejection without blocking message delivery or surfacing an error', async () => {
+        // Auto-checkpoint is best-effort: a git/IO failure on the snapshot
+        // path MUST NOT block the user's message from reaching the model
+        // and MUST NOT raise to the dashboard. The handler attaches a
+        // `.catch(log.warn)` to the promise — verify the user-visible
+        // surface stays clean even when the checkpoint manager rejects.
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-failing-cp'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.checkpointManager.createCheckpoint = createSpy(async () => {
+          throw new Error('simulated git snapshot failure')
+        })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'message with failing checkpoint' }, ctx)
+
+        // Let the .catch() handler run.
+        await new Promise((r) => setImmediate(r))
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1,
+          'checkpoint MUST be attempted even though it will reject')
+        assert.equal(session.sendMessage.callCount, 1,
+          'message MUST still reach the session — checkpoint failure is non-blocking')
+        const errors = ctx._sent.filter((m) => m.type === 'session_error')
+        assert.equal(errors.length, 0,
+          'checkpoint failure MUST NOT surface as a session_error to the user (best-effort contract)')
+      })
+
+      it('does NOT fire auto-checkpoint when input is empty / whitespace-only', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-empty-input'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: '   ' }, ctx)
+        inputHandlers.input(makeWs(), client, { data: '' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'empty/whitespace-only input returns early — must not churn a checkpoint per stray keystroke')
+        assert.equal(session.sendMessage.callCount, 0,
+          'sanity: message itself did not forward')
+      })
+
+      it('does NOT fire auto-checkpoint when the session is budget-paused (rejection path)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-budget-paused'
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.sessionManager.isBudgetPaused = createSpy(() => true)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'message hits budget pause' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'budget-paused session must skip checkpoint — the message will not reach the model so no snapshot point is meaningful')
+        const errors = ctx._sent.filter((m) => m.type === 'session_error')
+        assert.equal(errors.length, 1, 'sanity: budget-exceeded error still surfaced')
+      })
+
+      it('does NOT fire auto-checkpoint when input_conflict rejects the message (busy with another client)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-busy'
+        session.isRunning = true
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.primaryClients.set('s1', 'other-client')
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'cross-client conflict draft' }, ctx)
+
+        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+          'rejected-by-input-conflict message must NOT churn a checkpoint — the message never reaches the session')
+        const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
+        assert.equal(conflicts.length, 1, 'sanity: the input_conflict error path fired')
+      })
+
+      it('fires the checkpoint BEFORE the message is forwarded to the session (pre-turn snapshot)', () => {
+        // The whole point of auto-checkpoint is "snapshot the state JUST
+        // before this turn". If a future refactor moves the checkpoint
+        // after sendMessage, rewinding to this checkpoint would land on
+        // the wrong side of the turn boundary (post-response state, not
+        // pre-prompt). Pin the ordering.
+        const sessions = new Map()
+        const order = []
+        const session = createMockSession()
+        session.resumeSessionId = 'cli-init-order'
+        session.sendMessage = createSpy(() => { order.push('sendMessage') })
+        sessions.set('s1', { session, name: 'S', cwd: '/work' })
+        const ctx = makeCtx(sessions)
+        ctx.checkpointManager.createCheckpoint = createSpy(async () => { order.push('createCheckpoint') })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        inputHandlers.input(makeWs(), client, { data: 'turn boundary test' }, ctx)
+
+        assert.deepEqual(order, ['createCheckpoint', 'sendMessage'],
+          'createCheckpoint MUST be invoked before sendMessage — checkpoint captures pre-turn state')
+      })
+    })
   })
 
   describe('interrupt', () => {
@@ -234,6 +660,49 @@ describe('input-handlers', () => {
       // Should not throw
       inputHandlers.interrupt(makeWs(), makeClient(), {}, ctx)
       assert.equal(ctx._sent.length, 0)
+    })
+
+    // #4935 — when the client explicitly addresses a stale sessionId (post-
+    // daemon-restart, the dashboard's persisted activeSessionId points at a
+    // pre-restart session ID), interrupt used to drop silently. Now we mirror
+    // the input-handler structured-error response so the dashboard can clear
+    // its local state and surface an actionable hint. (The no-sessionId case
+    // above stays silent: nothing to clear, no actionable signal.)
+    it('sends structured SESSION_NOT_FOUND when sessionId is stale (#4935)', () => {
+      const ctx = makeCtx()
+      inputHandlers.interrupt(
+        makeWs(),
+        makeClient(),
+        { sessionId: 'deadbeef-stale-session-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_NOT_FOUND')
+      assert.equal(ctx._sent[0].attemptedSessionId, 'deadbeef-stale-session-id')
+    })
+
+    // #4935 Copilot review feedback — same disambiguation as handleInput:
+    // bound-session mismatch on an interrupt is an authorization failure,
+    // not a stale-ID drop.
+    it('sends SESSION_TOKEN_MISMATCH (not SESSION_NOT_FOUND) when client is bound to a different session (#4935 review)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('bound-id', { session, name: 'BoundSession', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ boundSessionId: 'bound-id' })
+      inputHandlers.interrupt(
+        makeWs(),
+        client,
+        { sessionId: 'some-other-id' },
+        ctx,
+      )
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx._sent[0].boundSessionId, 'bound-id')
+      assert.equal(ctx._sent[0].boundSessionName, 'BoundSession')
+      assert.equal(ctx._sent[0].attemptedSessionId, undefined)
     })
   })
 
@@ -326,6 +795,241 @@ describe('input-handlers', () => {
 
       assert.equal(session.respondToQuestion.callCount, 1)
       assert.equal(session.respondToQuestion.lastCall[0], 'yes')
+    })
+
+    // #4651 — forward freeformText as a 4th positional `opts` arg when the
+    // wire message carries it. Sessions that don't care about freeform
+    // (cli-session, sdk-session) ignore the trailing arg; claude-tui-session
+    // reads opts.freeformText to drive the two-stage Other-path write.
+    it('forwards freeformText as opts.freeformText', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.user_question_response(makeWs(), client, {
+        answer: 'Other',
+        freeformText: 'typed text',
+        toolUseId: 'tool-1',
+      }, ctx)
+
+      assert.equal(session.respondToQuestion.callCount, 1)
+      assert.deepStrictEqual(session.respondToQuestion.lastCall, ['Other', undefined, 'tool-1', { freeformText: 'typed text' }])
+    })
+
+    it('omits opts entirely when freeformText is empty', () => {
+      // Empty-string freeformText must not get treated as present — the
+      // server should fall through to the legacy single-write path.
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.user_question_response(makeWs(), client, {
+        answer: 'Patch',
+        freeformText: '',
+        toolUseId: 'tool-2',
+      }, ctx)
+
+      assert.equal(session.respondToQuestion.callCount, 1)
+      assert.deepStrictEqual(session.respondToQuestion.lastCall, ['Patch', undefined, 'tool-2', undefined])
+    })
+
+    // #4788 (audit P0.2): UNBOUND clients (boundSessionId === null) must be
+    // subscribed to or actively viewing the session that owns the toolUseId
+    // before the handler routes their answer. Without this guard, any unbound
+    // dashboard tab can hijack another session's pending AskUserQuestion by
+    // replaying a leaked toolUseId — combined with the related toolUseId log
+    // leak (#4787), an attacker (or just a typo'd cross-tab click) can land
+    // an answer on a session they never opened. Mirrors the default filter
+    // in _broadcastToSession (ws-broadcaster.js:106).
+    describe('subscription guard for unbound clients (#4788)', () => {
+      it('drops an unbound client\'s answer when the questionSessionId is neither active nor subscribed', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // The leaked toolUseId belongs to session s1.
+        ctx.questionSessionMap.set('tool-leak', 's1')
+        // Attacker tab: unbound, actively viewing s2, NOT subscribed to s1.
+        const attacker = makeClient({
+          id: 'attacker',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s2']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), attacker, {
+          answer: 'malicious',
+          toolUseId: 'tool-leak',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'unbound client without subscription/active match must NOT route the answer')
+        assert.equal(sessionB.respondToQuestion.callCount, 0,
+          'and must not bleed onto the attacker\'s own session either')
+        assert.equal(ctx.questionSessionMap.get('tool-leak'), 's1',
+          'mapping must stay intact so the legitimate client can still respond')
+      })
+
+      it('routes the answer when the unbound client\'s activeSessionId matches the questionSessionId', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-ok-active', 's1')
+        const client = makeClient({
+          id: 'legit-active',
+          boundSessionId: null,
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(),
+        })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'yes',
+          toolUseId: 'tool-ok-active',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 1,
+          'unbound client with matching activeSessionId must route normally')
+        assert.equal(sessionA.respondToQuestion.lastCall[0], 'yes')
+        assert.equal(ctx.questionSessionMap.has('tool-ok-active'), false,
+          'mapping must be consumed when the answer is routed')
+      })
+
+      it('routes the answer when the unbound client is subscribed to the questionSessionId (even if active session differs)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-ok-subscribed', 's1')
+        // Multi-session dashboard pattern: active tab is s2, but s1 is
+        // subscribed (sidebar / background tab keeping the wire open).
+        const client = makeClient({
+          id: 'legit-subscribed',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'approve',
+          toolUseId: 'tool-ok-subscribed',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 1,
+          'subscribed unbound client must route normally — matches _broadcastToSession filter')
+        assert.equal(sessionA.respondToQuestion.lastCall[0], 'approve')
+      })
+
+      it('leaves the bound-client guard unchanged (different code path)', () => {
+        // The existing bound-client guard already early-returns when the
+        // bound session doesn't match the questionSessionId. This test pins
+        // that the new subscription guard doesn't accidentally relax it.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-x', 's1')
+        const boundElsewhere = makeClient({
+          id: 'bound-other',
+          boundSessionId: 's2',
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(['s1']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), boundElsewhere, {
+          answer: 'sneaky',
+          toolUseId: 'tool-x',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'bound-client guard takes precedence — boundSessionId mismatch always wins')
+        assert.equal(ctx.questionSessionMap.get('tool-x'), 's1',
+          'mapping preserved when the bound-elsewhere client is rejected')
+      })
+
+      // #4788 Wave 2 regression: mirrors the ws-server-permissions integration
+      // test for the legitimate "view A → get question for A → switch to B →
+      // answer" flow. In production, the WsServer-side _registerQuestionRoute
+      // helper auto-subscribes the originating viewer to the question's
+      // session at dispatch time, so the unbound subscription guard above
+      // still passes after the client switches activeSessionId away. This
+      // pins the input-handler half of that contract: given the production-
+      // shaped client state (subscribedSessionIds carries the question's
+      // session because dispatch auto-subscribed), the answer routes to the
+      // originating session even though the client's active session is now
+      // somewhere else. Without this the Wave 1 guard would silently drop a
+      // legitimate after-switch answer (caught CI on ws-server-permissions
+      // test "routes user_question_response to the originating session,
+      // not activeSessionId").
+      it('routes the answer after switch_session when dispatch auto-subscribed the client to the originating session (#4788 Wave 2)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // Production: when the question for s1 dispatched, the WsServer-side
+        // helper called questionSessionMap.set('tool-after-switch', 's1')
+        // AND subscribedSessionIds.add('s1') for this client.
+        ctx.questionSessionMap.set('tool-after-switch', 's1')
+        // The user then tapped "switch to session B" — session-handlers.js
+        // adds 's2' to subscribedSessionIds and sets activeSessionId='s2',
+        // but leaves the prior 's1' subscription intact (only unsubscribe
+        // explicitly removes).
+        const client = makeClient({
+          id: 'viewer-after-switch',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'approve-after-switch',
+          toolUseId: 'tool-after-switch',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 1,
+          'after-switch answer must route to the originating session A')
+        assert.equal(sessionA.respondToQuestion.lastCall[0], 'approve-after-switch')
+        assert.equal(sessionB.respondToQuestion.callCount, 0,
+          'must not bleed onto the now-active session B')
+        assert.equal(ctx.questionSessionMap.has('tool-after-switch'), false,
+          'mapping consumed on successful route')
+      })
+
+      it('tolerates a missing subscribedSessionIds set (defensive — old client shapes)', () => {
+        // The handler must not throw if subscribedSessionIds is undefined
+        // (e.g. a test fixture or legacy client struct). It should simply
+        // fall through to the activeSessionId check.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.questionSessionMap.set('tool-y', 's1')
+        const client = makeClient({
+          id: 'no-subscribed-set',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          // subscribedSessionIds intentionally omitted
+        })
+
+        // Should not throw, and should drop the answer (no match).
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'x',
+          toolUseId: 'tool-y',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'undefined subscribedSessionIds + non-matching active must drop')
+      })
     })
   })
 

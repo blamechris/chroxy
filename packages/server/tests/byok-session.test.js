@@ -6,6 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { BUILTIN_TOOLS } from '../src/byok-tools.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
 
@@ -54,6 +55,9 @@ function captureEvents(session) {
     // the dashboard tool-call bubble can live-preview the model's
     // evolving tool input (especially valuable for Bash early-abort).
     'tool_input_delta',
+    // #4049: Task tool spawns a subagent and emits agent_spawned /
+    // agent_completed so the dashboard's active-agents badge ticks.
+    'agent_spawned', 'agent_completed',
   ]
   for (const name of known) {
     session.on(name, (payload) => captured.push({ name, payload }))
@@ -3174,6 +3178,1067 @@ describe('ClaudeByokSession', () => {
         assert.match(toolResultBlock.content, /outside workspace/i)
         await session.destroy()
       })
+    })
+  })
+
+  describe('Task tool dispatch (#4049)', () => {
+    /**
+     * Build a parent that emits a single Task tool_use on round 1, then
+     * end_turn on round 2. The child session's _client.messages.stream
+     * is stubbed by the caller via `childStreamImpl(messages, round)`
+     * so each test can shape the subagent's behaviour independently.
+     */
+    function setupParentEmittingTaskOnce(session, { taskInput, childStreamImpl }) {
+      let parentRound = 0
+      let childRound = 0
+      session._client = {
+        messages: {
+          stream: ({ messages }) => {
+            parentRound += 1
+            if (parentRound === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_task_1', name: 'Task', input: taskInput }],
+                  usage: { input_tokens: 5, output_tokens: 5 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'parent done' }], usage: { input_tokens: 2, output_tokens: 2 } },
+            )
+          },
+        },
+      }
+      // _executeTaskTool creates a fresh child session and shares this
+      // parent's client. To make the child's stream stub deterministic
+      // we install a wrapper around _executeTaskTool that injects the
+      // child's _client BEFORE the child runs.
+      const origExecuteTaskTool = session._executeTaskTool.bind(session)
+      session._executeTaskTool = function (args) {
+        // Wrap the parent's _client.messages.stream so when the child
+        // calls it, we return the per-round child stream. The child
+        // shares the parent's client at the time of construction, but
+        // we can swap individual call-time behavior by monkey-patching
+        // the messages object the child holds. Simpler: replace the
+        // parent's stream impl with a router that dispatches based on
+        // whether the active session is the parent or the child via a
+        // counter.
+        return origExecuteTaskTool.call(this, args)
+      }
+      // Replace parent client.messages.stream with a router that
+      // returns the parent stream on the first 2 calls (round 1 + 2)
+      // and the child stream impl on subsequent calls.
+      const parentStreamFactory = session._client.messages.stream
+      let totalCalls = 0
+      session._client.messages.stream = (...streamArgs) => {
+        totalCalls += 1
+        // Parent emits exactly 1 stream call BEFORE the Task dispatches
+        // (round 1 producing the tool_use), then exactly 1 stream call
+        // AFTER (round 2 with the tool_result). The child fires its
+        // own stream calls in between. We detect the child by checking
+        // the active subagent count — if any child is live, this call
+        // belongs to that child.
+        if (session._subagentSessions.size > 0) {
+          childRound += 1
+          return childStreamImpl(streamArgs[0]?.messages || [], childRound)
+        }
+        return parentStreamFactory(...streamArgs)
+      }
+    }
+
+    it('happy path: spawns child, captures its text, emits agent_spawned + agent_completed', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      const captured = captureEvents(session)
+      setupParentEmittingTaskOnce(session, {
+        taskInput: { description: 'summarize doc', prompt: 'Summarize /tmp/foo.txt' },
+        childStreamImpl: () => fakeStream(
+          [
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Summary: ' } },
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'looks good.' } },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          ],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Summary: looks good.' }], usage: { input_tokens: 100, output_tokens: 30 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('please research')
+
+      // agent_spawned must fire BEFORE agent_completed and carry the
+      // tool_use id + description (#4049 acceptance).
+      const spawned = captured.find((e) => e.name === 'agent_spawned')
+      const completed = captured.find((e) => e.name === 'agent_completed')
+      assert.ok(spawned, 'agent_spawned must fire')
+      assert.equal(spawned.payload.toolUseId, 'tu_task_1')
+      assert.equal(spawned.payload.description, 'summarize doc')
+      assert.equal(typeof spawned.payload.startedAt, 'number')
+      assert.ok(completed, 'agent_completed must fire')
+      assert.equal(completed.payload.toolUseId, 'tu_task_1')
+
+      // tool_result for Task must carry the child's stitched text and
+      // is_error: false on the happy path.
+      const toolResults = captured.filter((e) => e.name === 'tool_result')
+      const taskResult = toolResults.find((e) => e.payload.toolUseId === 'tu_task_1')
+      assert.ok(taskResult, 'tool_result for the Task block must fire')
+      assert.match(taskResult.payload.result, /Summary: looks good/)
+      assert.equal(taskResult.payload.isError, false)
+
+      await session.destroy()
+    })
+
+    it('attributes child usage + cost into the parent turn result', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      session.setPermissionMode('auto')
+      const captured = captureEvents(session)
+      setupParentEmittingTaskOnce(session, {
+        taskInput: { description: 'delegate', prompt: 'do the thing' },
+        childStreamImpl: () => fakeStream(
+          [],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'child output' }], usage: { input_tokens: 1000, output_tokens: 500 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('delegate please')
+      const result = captured.find((e) => e.name === 'result')
+      assert.ok(result)
+      // Parent's own rounds: round 1 (5in/5out) + round 2 (2in/2out) = 7in/7out
+      // Child: 1000in/500out
+      // Total: 1007in/507out
+      assert.equal(result.payload.usage.input_tokens, 1007, 'child input tokens fold into parent total')
+      assert.equal(result.payload.usage.output_tokens, 507, 'child output tokens fold into parent total')
+      // Cost (Opus 4.7): (1007 * 15 + 507 * 75) / 1e6
+      const expectedCost = (1007 * 15 + 507 * 75) / 1e6
+      assert.ok(Math.abs(result.payload.cost - expectedCost) < 1e-9,
+        `expected cost ~= ${expectedCost}, got ${result.payload.cost}`)
+      await session.destroy()
+    })
+
+    it('surfaces subagent cost on parent error-path turns (#5020)', async () => {
+      // Pin the #5020 contract: when the parent's overall turn errors AFTER
+      // a subagent already ran, the user is still billed for the child's
+      // API calls — those must surface in the parent's STREAM_ERROR event
+      // payload so the user can see what the failed turn cost.
+      //
+      // Pre-#5020: error event carried only { code, message } — child cost
+      // was silently dropped at _finishTurn reset.
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      session.setPermissionMode('auto')
+      const captured = captureEvents(session)
+      let parentRound = 0
+      let childInFlight = false
+      session._client = {
+        messages: {
+          stream: () => {
+            // If a child session is live, return the child's stream.
+            if (childInFlight) {
+              return fakeStream(
+                [],
+                {
+                  stop_reason: 'end_turn',
+                  content: [{ type: 'text', text: 'child finished' }],
+                  usage: { input_tokens: 2000, output_tokens: 800 },
+                },
+              )
+            }
+            parentRound += 1
+            if (parentRound === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_task_err', name: 'Task', input: { description: 'd', prompt: 'do work' } }],
+                  usage: { input_tokens: 10, output_tokens: 10 },
+                },
+              )
+            }
+            // Parent's round 2 (after child has run) — throw to drive the
+            // STREAM_ERROR path. This is the bug surface: the child's
+            // usage is already in _subagentUsageThisTurn but the catch
+            // block never folds it in before _finishTurn resets.
+            throw new Error('upstream blew up on round 2')
+          },
+        },
+      }
+      // Wrap _executeTaskTool to flip the childInFlight flag while the
+      // child's stream runs (the child shares the parent's client).
+      const origExecute = session._executeTaskTool.bind(session)
+      session._executeTaskTool = async function (args) {
+        childInFlight = true
+        try { return await origExecute(args) }
+        finally { childInFlight = false }
+      }
+      await session.start()
+      await session.sendMessage('delegate then fail')
+
+      const errs = captured.filter((e) => e.name === 'error')
+      const streamErr = errs.find((e) => e.payload?.code === 'STREAM_ERROR')
+      assert.ok(streamErr, 'STREAM_ERROR must fire on parent round-2 failure')
+      // The parent's round-1 usage (10in/10out) + child's usage
+      // (2000in/800out) MUST be surfaced on the error event so the user
+      // sees what the failed turn cost. Round 2 never completed so its
+      // usage is 0 (no finalMessage to read from).
+      assert.ok(streamErr.payload.usage, 'STREAM_ERROR must carry partial usage')
+      assert.equal(streamErr.payload.usage.input_tokens, 2010,
+        'parent round-1 input + child input fold into error event')
+      assert.equal(streamErr.payload.usage.output_tokens, 810,
+        'parent round-1 output + child output fold into error event')
+      // Cost (Opus 4.7): (2010 * 15 + 810 * 75) / 1e6
+      const expectedCost = (2010 * 15 + 810 * 75) / 1e6
+      assert.ok(typeof streamErr.payload.cost === 'number',
+        'STREAM_ERROR must carry partial cost')
+      assert.ok(Math.abs(streamErr.payload.cost - expectedCost) < 1e-9,
+        `expected partial cost ~= ${expectedCost}, got ${streamErr.payload.cost}`)
+      // No result event fires on the error path — usage/cost surface
+      // exclusively via the error event.
+      assert.equal(captured.filter((e) => e.name === 'result').length, 0,
+        'no result event on error path')
+      // Accumulators must reset for the next turn (existing #4049 contract).
+      assert.equal(session._subagentCostThisTurn, 0,
+        'subagent cost accumulator resets after the failed turn')
+      assert.equal(session._subagentUsageThisTurn.input_tokens, 0,
+        'subagent usage accumulator resets after the failed turn')
+      await session.destroy()
+    })
+
+    it('parent interrupt cascades to child subagent', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let childInterruptCalled = 0
+      let childInstance = null
+      // Patch the child constructor so we can record interrupt() calls.
+      const origExecute = session._executeTaskTool.bind(session)
+      session._executeTaskTool = async function (args) {
+        // Wrap interrupt() on the next child that gets registered. We
+        // can't override before _executeTaskTool constructs the child,
+        // so install a one-shot watcher on _subagentSessions.set.
+        const origSet = this._subagentSessions.set.bind(this._subagentSessions)
+        this._subagentSessions.set = (k, v) => {
+          childInstance = v
+          const origInterrupt = v.interrupt.bind(v)
+          v.interrupt = function () {
+            childInterruptCalled += 1
+            return origInterrupt()
+          }
+          return origSet(k, v)
+        }
+        try {
+          return await origExecute(args)
+        } finally {
+          this._subagentSessions.set = origSet
+        }
+      }
+      // Child stream that hangs until aborted — we trigger interrupt()
+      // on the parent and expect the child to receive an interrupt() call.
+      setupParentEmittingTaskOnce(session, {
+        taskInput: { description: 'long', prompt: 'long work' },
+        childStreamImpl: () => ({
+          async *[Symbol.asyncIterator]() {
+            // Yield once then wait on a long timeout that the abort
+            // signal will tear down.
+            yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'starting...' } }
+            await new Promise((resolve, reject) => {
+              const t = setTimeout(resolve, 60_000)
+              // When child.interrupt() fires, the child's abort
+              // controller aborts and the SDK's APIUserAbortError
+              // surfaces via finalMessage. We approximate by clearing
+              // the timeout on the child's abort controller.
+              childInstance?._abortController?.signal.addEventListener('abort', () => {
+                clearTimeout(t)
+                reject(new APIUserAbortError())
+              }, { once: true })
+            })
+          },
+          async finalMessage() {
+            return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'partial' }], usage: {} }
+          },
+        }),
+      })
+      await session.start()
+      const turn = session.sendMessage('do long task')
+      // #5015 review: wait deterministically for the child to spawn
+      // (agent_spawned fires AFTER _subagentSessions.set + before the
+      // child's sendMessage). A fixed sleep races on loaded CI runners
+      // — if interrupt fires before the spawn, the cascade has nothing
+      // to iterate and the child runs the full 60s timeout.
+      await new Promise((resolve) => {
+        if (session._subagentSessions.size > 0) return resolve()
+        session.once('agent_spawned', resolve)
+      })
+      session.interrupt()
+      await turn
+      assert.ok(childInterruptCalled > 0, 'parent.interrupt() must cascade to child.interrupt()')
+      await session.destroy()
+    })
+
+    it('rejects Task with empty prompt as is_error tool_result', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      const captured = captureEvents(session)
+      // Parent emits Task with empty prompt — we should short-circuit
+      // BEFORE spawning a child (no agent_spawned).
+      let parentRound = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            parentRound += 1
+            if (parentRound === 1) {
+              return fakeStream(
+                [],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_bad', name: 'Task', input: { description: 'd', prompt: '' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream([], { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: {} })
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('delegate')
+      const spawned = captured.find((e) => e.name === 'agent_spawned')
+      assert.equal(spawned, undefined, 'agent_spawned must NOT fire when prompt is empty')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_bad')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /prompt/i)
+      await session.destroy()
+    })
+
+    it('child error surfaces as is_error tool_result without crashing the parent', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      const captured = captureEvents(session)
+      setupParentEmittingTaskOnce(session, {
+        taskInput: { description: 'flaky', prompt: 'do something flaky' },
+        childStreamImpl: () => {
+          throw Object.assign(new Error('upstream 500'), { status: 500 })
+        },
+      })
+      await session.start()
+      await session.sendMessage('delegate')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_task_1')
+      assert.ok(taskResult, 'tool_result must fire even when child errored')
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /Subagent failed|upstream 500/i)
+      // Parent's own result MUST still fire — the child's error doesn't
+      // kill the parent turn.
+      const result = captured.find((e) => e.name === 'result')
+      assert.ok(result, 'parent result must still fire after child error')
+      // agent_completed fires regardless of success/failure so the
+      // dashboard's active-agents badge clears.
+      const completed = captured.find((e) => e.name === 'agent_completed')
+      assert.ok(completed)
+      await session.destroy()
+    })
+
+    it('Task tool dispatch path is reached via _executeToolBlock (not executeBuiltinTool)', async () => {
+      // The Task tool MUST be routed before executeBuiltinTool — otherwise
+      // it would land in the Unknown-tool fallback which would return an
+      // is_error tool_result with the BUILTIN_TOOL_NAMES enumeration.
+      // This test pins the routing by stubbing _executeTaskTool and
+      // asserting it gets called.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let taskCalled = false
+      session._executeTaskTool = async ({ toolUseId }) => {
+        taskCalled = true
+        return { content: 'routed ok', isError: false }
+      }
+      const toolResult = await runOneToolRound(session, {
+        id: 'tu_route', name: 'Task', input: { description: 'd', prompt: 'p' },
+      })
+      assert.equal(taskCalled, true, '_executeTaskTool must run for the Task tool')
+      assert.ok(toolResult)
+      assert.equal(toolResult.is_error, false)
+      assert.equal(toolResult.content, 'routed ok')
+      await session.destroy()
+    })
+
+    /**
+     * Helper for the #5017 override tests: wires the parent to emit a
+     * single Task tool_use carrying `taskInput`, intercepts the child
+     * registration to capture its permissionMode, and returns
+     * { childMode, taskResult } after the parent turn completes.
+     *
+     * The parent's permission gate is stubbed to always allow regardless
+     * of parentMode — these tests focus on the per-launch override
+     * semantics inside _executeTaskTool, not on whether the parent gates
+     * Task in approve/acceptEdits/plan modes. Without this stub, parent
+     * modes other than 'auto' block on the permission_request emit
+     * waiting for a UI response that never arrives in unit tests.
+     */
+    async function runTaskWithPermissionOverride({ parentMode, permissionMode }) {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode(parentMode)
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = captureEvents(session)
+      const taskInput = { description: 'd', prompt: 'p' }
+      if (permissionMode !== undefined) taskInput.permission_mode = permissionMode
+      let childMode = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        // Snapshot the child's permission mode at the moment it gets
+        // registered — this is AFTER _executeTaskTool assigns
+        // child.permissionMode and BEFORE any further setup.
+        childMode = v.permissionMode
+        // Force-allow the child's permission gate too — defensive,
+        // since the child stream in this helper never emits tool_use,
+        // but if a future change adds child tool_use deltas they
+        // shouldn't block.
+        v._gateToolBlock = async () => ({ behavior: 'allow' })
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput,
+        childStreamImpl: () => fakeStream(
+          [
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'child ok' } },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          ],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'child ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('delegate')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_task_1')
+      await session.destroy()
+      return { childMode, taskResult, captured }
+    }
+
+    it('Task `permission_mode` omitted: child inherits parent mode (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        // omitted
+      })
+      assert.equal(childMode, 'auto', 'child must inherit parent permissionMode when override omitted')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false,
+        `expected tool_result not to be is_error, got: ${taskResult.payload.result}`)
+    })
+
+    it('Task `permission_mode` downgrade allowed (parent auto → child approve) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        permissionMode: 'approve',
+      })
+      assert.equal(childMode, 'approve', 'child must take the override when downgrading')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `permission_mode` downgrade to plan allowed (parent acceptEdits → child plan) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'acceptEdits',
+        permissionMode: 'plan',
+      })
+      assert.equal(childMode, 'plan')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `permission_mode` equal-to-parent allowed (parent approve → child approve) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'approve',
+        permissionMode: 'approve',
+      })
+      assert.equal(childMode, 'approve')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `permission_mode` upgrade rejected (parent approve → child auto) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'approve',
+        permissionMode: 'auto',
+      })
+      assert.equal(childMode, null, 'no child must be spawned when override is rejected')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /permissive/i,
+        'rejection message must explain the at-most-as-permissive rule')
+    })
+
+    it('Task `permission_mode` upgrade rejected (parent plan → child approve) (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'plan',
+        permissionMode: 'approve',
+      })
+      assert.equal(childMode, null)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /permissive/i)
+    })
+
+    it('Task `permission_mode` invalid value rejected (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        permissionMode: 'sudo',
+      })
+      assert.equal(childMode, null, 'no child spawned for invalid mode')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /invalid.*permission_mode|allowed values/i)
+    })
+
+    it('Task `permission_mode` non-string value rejected (#5017)', async () => {
+      const { childMode, taskResult } = await runTaskWithPermissionOverride({
+        parentMode: 'auto',
+        permissionMode: 7,
+      })
+      assert.equal(childMode, null)
+      assert.equal(taskResult.payload.isError, true)
+      assert.match(taskResult.payload.result, /invalid.*permission_mode|allowed values/i)
+    })
+
+    it('Task `permission_mode` downgrade-allowed / upgrade-rejected matrix is exhaustive (#5017)', async () => {
+      // Verify every (parent, child) pair against the ranking
+      // plan < approve < acceptEdits < auto.
+      const modes = ['plan', 'approve', 'acceptEdits', 'auto']
+      const rank = { plan: 0, approve: 1, acceptEdits: 2, auto: 3 }
+      for (const parent of modes) {
+        for (const requested of modes) {
+          const expectedAllowed = rank[requested] <= rank[parent]
+          const { childMode, taskResult } = await runTaskWithPermissionOverride({
+            parentMode: parent,
+            permissionMode: requested,
+          })
+          if (expectedAllowed) {
+            assert.equal(childMode, requested,
+              `parent=${parent} requested=${requested}: child should be ${requested} but was ${childMode}`)
+            assert.equal(taskResult.payload.isError, false,
+              `parent=${parent} requested=${requested}: should be allowed`)
+          } else {
+            assert.equal(childMode, null,
+              `parent=${parent} requested=${requested}: must reject (no child spawned)`)
+            assert.equal(taskResult.payload.isError, true,
+              `parent=${parent} requested=${requested}: must be is_error`)
+          }
+        }
+      }
+    })
+
+    /**
+     * #5019: subagent MCP inheritance helpers.
+     *
+     * The Task subagent should — by default — borrow the parent's
+     * already-running MCP fleet so nested tool use can call the same
+     * `mcp__<server>__<tool>` set the parent sees, at zero extra
+     * spawn cost. The child must NOT own the fleet (destroy() on the
+     * child must leave the parent's MCP children alive). An explicit
+     * `inherit_mcp: false` on the Task input reverts to the pre-#5019
+     * behaviour of running the subagent with built-in tools only.
+     */
+    function captureChildFromTaskCall(session, taskInput, opts = {}) {
+      // Snapshot the child the moment _executeTaskTool registers it.
+      // Tests inspect _mcpFleet / _ownsMcpFleet on this reference, and
+      // we ALSO snapshot the field values at registration time because
+      // the Task tool's finally block calls child.destroy() before
+      // sendMessage resolves — destroy() nulls _mcpFleet, so reading
+      // these fields off the captured child after-the-fact always sees
+      // the post-destroy state. The snapshot lets tests assert what the
+      // child looked like while it was actually running, AND we expose
+      // a tools snapshot so _buildTools() can be exercised pre-destroy.
+      let capturedChild = null
+      let snapshot = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        capturedChild = v
+        snapshot = {
+          mcpFleet: v._mcpFleet,
+          ownsMcpFleet: v._ownsMcpFleet,
+          tools: v._buildTools(),
+        }
+        // Force-allow the child's permission gate — Task subagents
+        // run their own permission flow on tool_use blocks, but the
+        // dummy child stream below never emits one. This matches the
+        // pattern used by runTaskWithPermissionOverride.
+        v._gateToolBlock = async () => ({ behavior: 'allow' })
+        // #5019 leak test: optional hook so a test can intercept the
+        // child's destroy() and observe whether fleet.destroy() ran.
+        if (opts.onChildRegistered) opts.onChildRegistered(v)
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput,
+        childStreamImpl: () => fakeStream(
+          [
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          ],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      return () => ({ child: capturedChild, snapshot })
+    }
+
+    it('Task subagent inherits parent MCP fleet by default (#5019)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      // Simulate a running parent MCP fleet. The exact shape doesn't
+      // matter for inheritance — the child should just point at the
+      // same object reference.
+      const parentFleet = {
+        anthropicTools: [{ name: 'mcp__stub__echo' }],
+        async destroy() { /* noop */ },
+      }
+      session._mcpFleet = parentFleet
+      const getChild = captureChildFromTaskCall(session, { description: 'd', prompt: 'p' })
+      await session.start()
+      await session.sendMessage('go')
+      const { child, snapshot } = getChild()
+      assert.ok(child, 'subagent must be registered')
+      // Snapshot taken at registration time — child.destroy() in the
+      // Task tool's finally block nulls _mcpFleet by the time
+      // sendMessage resolves, but the registration-time snapshot
+      // captures what the child looked like while it was running.
+      assert.strictEqual(snapshot.mcpFleet, parentFleet,
+        'child must share the parent fleet reference (no per-spawn child-process cost)')
+      assert.equal(snapshot.ownsMcpFleet, false,
+        'child must NOT own the borrowed fleet — destroy() will leave it alive')
+      // _buildTools() output captured pre-destroy proves the child
+      // surfaces the parent's MCP tools to the model on its next turn.
+      const mcpToolNames = snapshot.tools.filter((t) => t.name.startsWith('mcp__')).map((t) => t.name)
+      assert.deepEqual(mcpToolNames, ['mcp__stub__echo'],
+        'child must expose the parent fleet\'s mcp__ tools to its model')
+      await session.destroy()
+    })
+
+    it('Task subagent destroy() does NOT tear down the parent MCP fleet (#5019)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      let fleetDestroyed = false
+      const parentFleet = {
+        anthropicTools: [],
+        async destroy() { fleetDestroyed = true },
+      }
+      session._mcpFleet = parentFleet
+      // The Task tool's finally block calls child.destroy() after the
+      // child's result event fires. If we incorrectly let the child
+      // own the fleet, this destroy would invoke parentFleet.destroy()
+      // mid-parent-turn — killing every MCP child for any sibling Task
+      // still in flight.
+      const getChild = captureChildFromTaskCall(session, { description: 'd', prompt: 'p' })
+      await session.start()
+      await session.sendMessage('go')
+      const { child } = getChild()
+      assert.ok(child)
+      // child.destroy() has already run inside _executeTaskTool's
+      // finally block by the time sendMessage resolves. Assert the
+      // fleet survived.
+      assert.equal(fleetDestroyed, false,
+        'child.destroy() MUST NOT call parentFleet.destroy() — parent owns the fleet')
+      // Now destroy the parent explicitly — fleet must run exactly
+      // once, from the owning session's teardown.
+      await session.destroy()
+      assert.equal(fleetDestroyed, true,
+        'parent destroy must tear down its own fleet')
+    })
+
+    it('Task `inherit_mcp: false` runs the subagent without MCP (#5019)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      const parentFleet = {
+        anthropicTools: [{ name: 'mcp__stub__echo' }],
+        async destroy() { /* noop */ },
+      }
+      session._mcpFleet = parentFleet
+      const getChild = captureChildFromTaskCall(session, {
+        description: 'd',
+        prompt: 'p',
+        inherit_mcp: false,
+      })
+      await session.start()
+      await session.sendMessage('go')
+      const { child, snapshot } = getChild()
+      assert.ok(child, 'subagent must still be registered when inherit_mcp:false')
+      assert.equal(snapshot.mcpFleet, null,
+        'inherit_mcp:false must skip fleet inheritance — child runs without MCP')
+      assert.equal(snapshot.ownsMcpFleet, true,
+        'an MCP-less child keeps the default ownership flag (no borrowing happened)')
+      const mcpToolNames = snapshot.tools.filter((t) => t.name.startsWith('mcp__'))
+      assert.equal(mcpToolNames.length, 0,
+        'inherit_mcp:false child must not expose any mcp__ tools')
+      await session.destroy()
+    })
+
+    it('Task subagent skips inheritance when the parent has no fleet (#5019)', async () => {
+      // No MCP config → no parent fleet → child gets nothing to
+      // borrow. Should not throw, should not flip _ownsMcpFleet, and
+      // _buildTools() should fall through to BUILTIN_TOOLS only.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      assert.equal(session._mcpFleet, null, 'precondition: parent has no fleet')
+      const getChild = captureChildFromTaskCall(session, { description: 'd', prompt: 'p' })
+      await session.start()
+      await session.sendMessage('go')
+      const { child, snapshot } = getChild()
+      assert.ok(child)
+      assert.equal(snapshot.mcpFleet, null, 'no fleet to inherit')
+      assert.equal(snapshot.ownsMcpFleet, true, 'ownership flag stays at default when no borrow happens')
+      await session.destroy()
+    })
+
+    it('Task `inherit_mcp` non-boolean value rejected (#5019)', async () => {
+      // Strings, numbers, null — anything non-boolean must be rejected
+      // with an is_error tool_result rather than silently coerced.
+      // The model needs a crisp signal so it can fix its tool_use.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = captureEvents(session)
+      let childSpawned = false
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        childSpawned = true
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput: { description: 'd', prompt: 'p', inherit_mcp: 'yes' },
+        childStreamImpl: () => fakeStream(
+          [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: '' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('go')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_task_1')
+      assert.ok(taskResult, 'a tool_result must be emitted even on rejection')
+      assert.equal(taskResult.payload.isError, true,
+        'non-boolean inherit_mcp must produce is_error tool_result')
+      assert.match(taskResult.payload.result, /inherit_mcp/i,
+        'rejection message must name the offending field')
+      assert.equal(childSpawned, false,
+        'no subagent must be spawned when inherit_mcp is invalid')
+      // #5019 review: the rejection must run BEFORE agent_spawned is
+      // emitted and BEFORE _activeAgents is populated — otherwise the
+      // dashboard's active-agents badge would show a phantom entry that
+      // never clears. Mirrors the placement of the permission_mode
+      // typecheck (#5017). Pins the early-return cleanliness.
+      const spawnEvents = captured.filter((e) => e.name === 'agent_spawned')
+      assert.equal(spawnEvents.length, 0,
+        'agent_spawned must NOT be emitted when inherit_mcp rejection fires')
+      assert.equal(session._activeAgents.size, 0,
+        '_activeAgents must stay empty on inherit_mcp rejection — no phantom badge entry')
+      await session.destroy()
+    })
+
+    it('Task input_schema declares inherit_mcp as a boolean (#5019)', () => {
+      // Protocol-surface assertion: the Task tool advertises its
+      // inherit_mcp affordance so the model can discover it. This
+      // guards against accidental schema regressions.
+      const taskTool = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+      assert.ok(taskTool, 'BUILTIN_TOOLS must include the Task tool')
+      const prop = taskTool.input_schema.properties.inherit_mcp
+      assert.ok(prop, 'Task input_schema must expose inherit_mcp')
+      assert.equal(prop.type, 'boolean', 'inherit_mcp must be typed as boolean')
+      assert.match(prop.description, /default|MCP/i,
+        'description must mention the default behaviour')
+    })
+
+    /**
+     * #5018: subagent_type profile registry. When the id is known, the
+     * profile's systemPrompt is applied to the child's sessionPreamble
+     * (via setSessionPreamble so the same cap as user-authored preambles
+     * applies) and the profile's toolSet (when restricted) limits which
+     * BUILTIN_TOOLS the child sees in its `_buildTools()` output. When
+     * the id is unknown or malformed, the runner warns and falls back to
+     * the v1 default (no profile applied) per the issue's acceptance
+     * criteria — the spawn still succeeds so a future model that requests
+     * a profile this server doesn't know about stays forward-compatible.
+     *
+     * Helper shape mirrors runTaskWithPermissionOverride above: stub
+     * the parent's gate to always-allow so the tests focus on the
+     * subagent_type semantics inside _executeTaskTool.
+     */
+    async function runTaskWithSubagentType({ subagentType }) {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = captureEvents(session)
+      const taskInput = { description: 'd', prompt: 'p' }
+      if (subagentType !== undefined) taskInput.subagent_type = subagentType
+      let childSnapshot = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        // Snapshot the child's state at registration time — this is AFTER
+        // _executeTaskTool applies the profile and BEFORE any further
+        // setup. We capture sessionPreamble (where the profile's
+        // systemPrompt rides) and the result of _buildTools() so the
+        // assertions can verify both wirings.
+        childSnapshot = {
+          sessionPreamble: v.sessionPreamble,
+          tools: v._buildTools().map((t) => t.name),
+          allowedBuiltinToolNames: v._allowedBuiltinToolNames
+            ? [...v._allowedBuiltinToolNames]
+            : null,
+        }
+        v._gateToolBlock = async () => ({ behavior: 'allow' })
+        return origSet(k, v)
+      }
+      setupParentEmittingTaskOnce(session, {
+        taskInput,
+        childStreamImpl: () => fakeStream(
+          [
+            { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'child ok' } },
+            { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+          ],
+          { stop_reason: 'end_turn', content: [{ type: 'text', text: 'child ok' }], usage: { input_tokens: 1, output_tokens: 1 } },
+        ),
+      })
+      await session.start()
+      await session.sendMessage('delegate')
+      const taskResult = captured.find((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_task_1')
+      const spawned = captured.find((e) => e.name === 'agent_spawned')
+      await session.destroy()
+      return { childSnapshot, taskResult, spawned, captured }
+    }
+
+    it('Task `subagent_type` omitted: no profile applied (default v1 behaviour) (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({})
+      assert.ok(childSnapshot, 'child must spawn')
+      assert.equal(childSnapshot.sessionPreamble, '',
+        'no profile applied → child sessionPreamble stays empty (no override)')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null,
+        'no profile applied → no tool filter registered on the child')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type: "general-purpose"` applies the profile systemPrompt (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: 'general-purpose',
+      })
+      assert.ok(childSnapshot, 'child must spawn')
+      assert.ok(childSnapshot.sessionPreamble.length > 0,
+        'profile systemPrompt must be applied to the child as sessionPreamble')
+      assert.match(childSnapshot.sessionPreamble, /sub-?agent/i,
+        'general-purpose systemPrompt should reference subagent role')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type: "general-purpose"` keeps the full toolSet (no filter) (#5018)', async () => {
+      const { childSnapshot } = await runTaskWithSubagentType({
+        subagentType: 'general-purpose',
+      })
+      assert.ok(childSnapshot)
+      // general-purpose has toolSet: 'all' → no filter installed, and the
+      // tool list includes every built-in (BUILTIN_TOOLS).
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null,
+        'toolSet === "all" must NOT install a filter on the child')
+      assert.ok(childSnapshot.tools.includes('Read'))
+      assert.ok(childSnapshot.tools.includes('Write'))
+      assert.ok(childSnapshot.tools.includes('Bash'))
+      assert.ok(childSnapshot.tools.includes('Task'),
+        'general-purpose child can recursively spawn Task subagents')
+    })
+
+    it('Task `subagent_type: "code-reviewer"` restricts the child toolSet to Read/Grep/Glob (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: 'code-reviewer',
+      })
+      assert.ok(childSnapshot)
+      // code-reviewer profile carries toolSet: ['Read', 'Grep', 'Glob'] —
+      // the child must NOT see Write/Edit/Bash so the reviewer can't
+      // accidentally mutate the workspace.
+      assert.ok(Array.isArray(childSnapshot.allowedBuiltinToolNames))
+      assert.ok(childSnapshot.tools.includes('Read'))
+      assert.ok(childSnapshot.tools.includes('Grep'))
+      assert.ok(childSnapshot.tools.includes('Glob'))
+      assert.ok(!childSnapshot.tools.includes('Write'),
+        'code-reviewer must NOT see Write (read-only role)')
+      assert.ok(!childSnapshot.tools.includes('Edit'),
+        'code-reviewer must NOT see Edit (read-only role)')
+      assert.ok(!childSnapshot.tools.includes('Bash'),
+        'code-reviewer must NOT see Bash (read-only role)')
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type` unknown value falls back to v1 default with no profile (#5018)', async () => {
+      const { childSnapshot, taskResult, spawned } = await runTaskWithSubagentType({
+        subagentType: 'totally-not-a-real-profile',
+      })
+      // Per #5018 acceptance criteria: unknown subagent_type falls back to
+      // v1 behaviour (no profile applied) and warns. The child IS spawned,
+      // the tool_result is success, and the child has no profile-driven
+      // preamble or tool filter.
+      assert.ok(childSnapshot,
+        'child must spawn even when subagent_type is unknown (warn + fall back)')
+      assert.ok(spawned,
+        'agent_spawned must fire for the spawn (only profile application is skipped)')
+      assert.equal(childSnapshot.sessionPreamble, '',
+        'unknown profile id must NOT apply any preamble (v1 default)')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null,
+        'unknown profile id must NOT install a tool filter (v1 default)')
+      assert.ok(taskResult)
+      assert.equal(taskResult.payload.isError, false,
+        'unknown subagent_type must NOT fail the tool call (forward-compat)')
+    })
+
+    it('Task `subagent_type` non-string value falls back to v1 default (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: 7,
+      })
+      // Non-string ids are treated as unknown: warn + fall back, do not
+      // fail the tool call (the schema enum is the model-facing guardrail;
+      // the runtime stays forgiving).
+      assert.ok(childSnapshot)
+      assert.equal(childSnapshot.sessionPreamble, '')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null)
+      assert.equal(taskResult.payload.isError, false)
+    })
+
+    it('Task `subagent_type` empty string falls back to v1 default (#5018)', async () => {
+      const { childSnapshot, taskResult } = await runTaskWithSubagentType({
+        subagentType: '',
+      })
+      // Empty string is not a valid profile id but is treated as the
+      // unknown path — warn + fall back, do not fail the tool call.
+      assert.ok(childSnapshot)
+      assert.equal(childSnapshot.sessionPreamble, '')
+      assert.equal(childSnapshot.allowedBuiltinToolNames, null)
+      assert.equal(taskResult.payload.isError, false)
+    })
+  })
+
+  describe('Task subagent nested progress events (#5016)', () => {
+    /**
+     * Build a parent that emits a single Task tool_use. Once the child
+     * is registered we manually drive its EventEmitter via the captured
+     * reference so we can simulate the child emitting tool_start /
+     * tool_input_delta / tool_result / stream_delta without having to
+     * stand up a second full agent loop. The parent's `_executeTaskTool`
+     * subscribes to those child events and re-emits `agent_event` —
+     * which is what these tests exercise.
+     */
+    async function runTaskAndDriveChild(driveChild) {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      // Force-allow any parent permission check (mirrors the override
+      // tests). These cases focus on event forwarding inside
+      // _executeTaskTool; permission gating is exercised elsewhere.
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      const captured = []
+      session.on('agent_event', (e) => captured.push(e))
+      session.on('agent_spawned', (e) => captured.push({ ...e, _name: 'agent_spawned' }))
+      session.on('agent_completed', (e) => captured.push({ ...e, _name: 'agent_completed' }))
+      // Replace the child-construction step so we can grab the child
+      // reference + control its `sendMessage` to deterministically emit
+      // a sequence of intermediate events, then resolve.
+      let childRef = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        childRef = v
+        // Stub child.sendMessage to drive the simulated child events,
+        // then emit `result` (which causes _executeTaskTool's done
+        // promise to resolve and finalise the parent's tool_result).
+        v.sendMessage = async () => {
+          await driveChild(v)
+          v.emit('result', {
+            messageId: 'cm_1',
+            usage: { input_tokens: 10, output_tokens: 20 },
+            cost: 0,
+          })
+          v.emit('stream_end', { messageId: 'cm_1' })
+          v._isBusy = false
+        }
+        return origSet(k, v)
+      }
+      // Stub parent's client to emit Task once then end-turn.
+      let parentRound = 0
+      session._client = {
+        messages: {
+          stream: () => {
+            parentRound += 1
+            if (parentRound === 1) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_task_5016', name: 'Task', input: { description: 'd', prompt: 'p' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('go')
+      await session.destroy()
+      return { captured, childRef }
+    }
+
+    it('re-emits child tool_start/tool_input_delta/tool_result as agent_event tagged with parentToolUseId', async () => {
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('tool_start', { messageId: 'cm_1', toolUseId: 'tu_child_read', tool: 'Read', input: { file_path: '/tmp/x.txt' } })
+        child.emit('tool_input_delta', { messageId: 'cm_1', toolUseId: 'tu_child_read', partialJson: '{"file_path":' })
+        child.emit('tool_input_delta', { messageId: 'cm_1', toolUseId: 'tu_child_read', partialJson: '"/tmp/x.txt"}' })
+        child.emit('tool_result', { messageId: 'cm_1', toolUseId: 'tu_child_read', result: 'hello\nfrom child', isError: false })
+      })
+      const events = captured.filter((e) => e.parentToolUseId)
+      assert.ok(events.length >= 4, `expected >=4 agent_events, got ${events.length}`)
+      // Each event carries the parent's toolUseId, the child's wire
+      // event name, and the verbatim child payload.
+      assert.ok(events.every((e) => e.parentToolUseId === 'tu_task_5016'),
+        'every agent_event must carry the parent toolUseId')
+      const toolStart = events.find((e) => e.type === 'tool_start')
+      assert.ok(toolStart)
+      assert.equal(toolStart.payload.toolUseId, 'tu_child_read')
+      assert.equal(toolStart.payload.tool, 'Read')
+      const toolResult = events.find((e) => e.type === 'tool_result')
+      assert.ok(toolResult)
+      assert.equal(toolResult.payload.toolUseId, 'tu_child_read')
+      assert.equal(toolResult.payload.result, 'hello\nfrom child')
+      const deltas = events.filter((e) => e.type === 'tool_input_delta')
+      assert.equal(deltas.length, 2)
+      assert.equal(deltas[0].payload.partialJson, '{"file_path":')
+      assert.equal(deltas[1].payload.partialJson, '"/tmp/x.txt"}')
+    })
+
+    it('re-emits child stream_delta as agent_event so dashboard sees child assistant text', async () => {
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('stream_delta', { messageId: 'cm_1', delta: 'Hello ' })
+        child.emit('stream_delta', { messageId: 'cm_1', delta: 'world.' })
+      })
+      const deltas = captured.filter((e) => e.type === 'stream_delta')
+      assert.equal(deltas.length, 2, 'both stream_delta chunks must be re-emitted')
+      assert.equal(deltas[0].parentToolUseId, 'tu_task_5016')
+      assert.equal(deltas[0].payload.delta, 'Hello ')
+      assert.equal(deltas[1].payload.delta, 'world.')
+    })
+
+    it('nested Task: grand-child agent_event is re-tagged with the outermost parent toolUseId', async () => {
+      // The child's `agent_event` listener forwards grand-child progress
+      // up the chain re-tagged with THIS parent's toolUseId. Simulate
+      // by emitting a synthetic `agent_event` on the child as if the
+      // child itself had dispatched a Task.
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('agent_event', {
+          parentToolUseId: 'tu_grandchild_task',
+          type: 'tool_start',
+          payload: { messageId: 'gc_1', toolUseId: 'tu_gc_read', tool: 'Read', input: {} },
+        })
+      })
+      const forwarded = captured.find((e) => e.type === 'tool_start' && e.payload.toolUseId === 'tu_gc_read')
+      assert.ok(forwarded, 'grand-child tool_start must be forwarded')
+      assert.equal(forwarded.parentToolUseId, 'tu_task_5016',
+        'grand-child events must re-tag with the OUTERMOST parent toolUseId')
+      // The original grand-child parentToolUseId (immediate parent = the
+      // child Task) is preserved on payload.parentToolUseId so
+      // depth-aware consumers can reconstruct the chain.
+      assert.equal(forwarded.payload.parentToolUseId, 'tu_grandchild_task',
+        'grand-child events must preserve the immediate parent toolUseId on payload')
+    })
+
+    it('agent_event listed in customEvents so SessionManager forwards it as a transient event', () => {
+      assert.ok(ClaudeByokSession.customEvents.includes('agent_event'),
+        'agent_event must be in customEvents for ws-forwarding to pick it up')
     })
   })
 

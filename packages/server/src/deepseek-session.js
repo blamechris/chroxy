@@ -78,6 +78,46 @@ export class DeepSeekSession extends ClaudeByokSession {
     }
   }
 
+  /**
+   * Resolve runtime auth state for the dashboard (#4769). Mirrors the BYOK
+   * flow: DEEPSEEK_API_KEY env OR `deepseekApiKey` field in
+   * ~/.chroxy/credentials.json. Both surface as source: 'env' so the
+   * dashboard's SettingsPanel tone legend renders the right chip; `detail`
+   * disambiguates which path supplied the key.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ cachedResolveCredentialFile: Function }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+    const resolved = helpers.cachedResolveCredentialFile(
+      'deepseek',
+      env.DEEPSEEK_API_KEY,
+      resolveDeepSeekApiKey,
+    )
+    if (resolved.key) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: resolved.source === 'env' ? 'DEEPSEEK_API_KEY' : null,
+        envVars,
+        hint: '',
+        detail: `DeepSeek API (${resolved.source === 'env' ? 'DEEPSEEK_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `DeepSeek API (${resolved.reason})`,
+    }
+  }
+
   static getFallbackModels() {
     return DEEPSEEK_MODELS
   }

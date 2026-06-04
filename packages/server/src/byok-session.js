@@ -31,10 +31,11 @@ import {
 } from './models.js'
 import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
 import { translateSdkEvent } from './byok-event-translator.js'
-import { BUILTIN_TOOLS } from './byok-tools.js'
+import { BUILTIN_TOOLS, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
 import { loadClaudeMcpConfig, toMcpServerMetadata } from './byok-mcp-config.js'
 import { MCPFleet, MCP_TOOL_PREFIX } from './byok-mcp-fleet.js'
+import { getSubagentProfile, SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
 
 const log = createLogger('byok-session')
 
@@ -110,7 +111,23 @@ export class ClaudeByokSession extends BaseSession {
     // build the TRANSIENT_EVENTS set it bridges to `session_event`
     // listeners; without it the emit fires on the local EventEmitter
     // and never reaches ws-forwarding.
-    return ['tool_start', 'tool_result', 'tool_input_delta']
+    //
+    // #4049: agent_spawned / agent_completed are part of the built-in
+    // transient set in session-manager.js (so they already flow without
+    // being listed), but pin them here so the capability matrix /
+    // dashboard introspection reflect that this provider emits them
+    // when the Task tool dispatches a subagent.
+    //
+    // #5016: `agent_event` carries the child Task subagent's intermediate
+    // wire events (tool_start / tool_input_delta / tool_result /
+    // stream_delta) tagged with the parent `toolUseId` so the dashboard
+    // can render the child's progress as nested sub-bubbles under the
+    // parent's Task tool_call. The child's `result` is intentionally NOT
+    // forwarded — usage/cost folds into the parent's per-turn
+    // accumulator and the final summary text becomes the parent's
+    // Task tool_result content; replaying it as a nested event would
+    // double-render the same content.
+    return ['tool_start', 'tool_result', 'tool_input_delta', 'agent_spawned', 'agent_completed', 'agent_event']
   }
 
   /**
@@ -126,6 +143,48 @@ export class ClaudeByokSession extends BaseSession {
         hint: `set ANTHROPIC_API_KEY or save it in ${join(homedir(), '.chroxy', 'credentials.json')} (mode 0600)`,
         optional: false,
       },
+    }
+  }
+
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * BYOK checks ANTHROPIC_API_KEY env AND the ~/.chroxy/credentials.json
+   * file (mode 0600 enforced by the resolver). Both paths surface as
+   * source: 'env' because the dashboard's SettingsPanel tone legend only
+   * knows about 'oauth'|'env'|'missing'|'none' (SettingsPanel.tsx:316-320);
+   * the `detail` string disambiguates which path supplied the key.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ cachedResolveCredentialFile: Function }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+    const resolved = helpers.cachedResolveCredentialFile(
+      'byok',
+      env.ANTHROPIC_API_KEY,
+      resolveAnthropicApiKey,
+    )
+    if (resolved.key) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: resolved.source === 'env' ? 'ANTHROPIC_API_KEY' : null,
+        envVars,
+        hint: '',
+        detail: `Anthropic API (${resolved.source === 'env' ? 'ANTHROPIC_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint,
+      detail: `Anthropic API (${resolved.reason})`,
     }
   }
 
@@ -245,6 +304,32 @@ export class ClaudeByokSession extends BaseSession {
     // toolUseId, so we maintain a separate Set on the session.
     this._pendingPermissionToolUseIds = new Set()
 
+    // #4049: active subagent sessions spawned by the Task tool, keyed by
+    // toolUseId. interrupt() iterates this map to cascade the abort
+    // signal to every child; destroy() does the same to tear down each
+    // child's resources (PermissionManager, listeners, MCP fleet) so a
+    // long-running parent with many delegated tasks doesn't leak state.
+    // Each subagent is itself a full ClaudeByokSession and owns its own
+    // _subagentSessions map — nested Task → Task is naturally supported.
+    this._subagentSessions = new Map()
+
+    // #4049: per-turn accumulators for subagent (Task tool) usage + cost.
+    // Folded into the parent's result.usage / result.cost just before
+    // the result event fires so cost attribution stays on the user-
+    // facing session (acceptance criteria: "child tokens attributed to
+    // the parent session"). Reset in _finishTurn() on every exit path
+    // — success, error, abort — so a stale parent's totals can never
+    // leak into a future turn.
+    this._subagentUsageThisTurn = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    this._subagentCostThisTurn = 0
+
+    // #5018: per-session built-in tool allowlist. Set by _executeTaskTool
+    // ONLY on child sessions spawned with a `subagent_type` profile that
+    // carries a restricted `toolSet`. When null (the default / unrestricted
+    // case), `_buildTools()` short-circuits the filter so non-subagent
+    // sessions and general-purpose subagents pay no observable cost.
+    this._allowedBuiltinToolNames = null
+
     // #4076: MCP config discovery. Parses ~/.claude.json (or an
     // override) for the `mcpServers` block. Parse-only at this stage —
     // no child spawn, no tool wiring — those land in #4077/#4078/#4079.
@@ -265,6 +350,13 @@ export class ClaudeByokSession extends BaseSession {
     // #4077: MCPFleet is lazy — created in start() only if servers exist.
     // Held here so destroy() can tear down even if start() never ran.
     this._mcpFleet = null
+    // #5019: when a Task subagent borrows the parent's MCP fleet (the
+    // default behaviour for nested tool use — avoids per-spawn MCP
+    // child-process startup cost), it points _mcpFleet at the parent's
+    // already-running fleet and flips this flag to false. destroy() then
+    // skips fleet.destroy() so the parent's MCP children aren't killed
+    // when the subagent finishes. The parent always owns its own fleet.
+    this._ownsMcpFleet = true
     // #4482: per-call MCP tools/call timeout (ms). null = use byok-mcp-client's
     // DEFAULT_TOOL_CALL_TIMEOUT_MS (30s) via the destructured default in
     // MCPFleet.callTool. Forwarded from session-manager via providerOpts →
@@ -753,6 +845,17 @@ export class ClaudeByokSession extends BaseSession {
         }
       }
 
+      // #4049: fold any subagent (Task tool) usage + cost into the
+      // user-facing turn totals. Cost accounting must attribute the
+      // child's API spend to the parent session so the user sees a
+      // single number for "what did this turn cost?" rather than
+      // having delegated work disappear from accounting.
+      turnUsage.input_tokens += this._subagentUsageThisTurn.input_tokens
+      turnUsage.output_tokens += this._subagentUsageThisTurn.output_tokens
+      turnUsage.cache_read_input_tokens += this._subagentUsageThisTurn.cache_read_input_tokens
+      turnUsage.cache_creation_input_tokens += this._subagentUsageThisTurn.cache_creation_input_tokens
+      turnCost += this._subagentCostThisTurn
+
       this.emit('stream_end', { messageId })
       this.emit('result', {
         sessionId: null,
@@ -784,8 +887,23 @@ export class ClaudeByokSession extends BaseSession {
       if (this._history.length > historyLengthBeforeSend) {
         this._history.length = historyLengthBeforeSend
       }
+      // #5020: fold any subagent (Task tool) usage + cost into the
+      // partial turn totals BEFORE the error fires so the user sees
+      // what the failed turn cost. Without this fold the child's
+      // tokens are silently dropped at _finishTurn reset even though
+      // the user is still billed for them. Mirrors the success-path
+      // fold above; the partial totals reflect every completed parent
+      // round + every completed child API call before the failure.
+      turnUsage.input_tokens += this._subagentUsageThisTurn.input_tokens
+      turnUsage.output_tokens += this._subagentUsageThisTurn.output_tokens
+      turnUsage.cache_read_input_tokens += this._subagentUsageThisTurn.cache_read_input_tokens
+      turnUsage.cache_creation_input_tokens += this._subagentUsageThisTurn.cache_creation_input_tokens
+      turnCost += this._subagentCostThisTurn
       this.emit('stream_end', { messageId })
-      this._emitTurnError(messageId, err, 'STREAM_ERROR')
+      this._emitTurnError(messageId, err, 'STREAM_ERROR', {
+        usage: turnUsage,
+        cost: turnCost,
+      })
     } finally {
       // #4080: per-turn isolation guarantee. The per-round clear after
       // finalMessage() above runs on the success path; an iteration or
@@ -996,21 +1114,38 @@ export class ClaudeByokSession extends BaseSession {
       }
     }
 
-    // Execute locally. MCP tools (mcp__<server>__<tool>) route through
-    // the fleet to the right child process via stdio JSON-RPC; everything
-    // else runs in-process (Read/Write/Bash/etc).
+    // Execute locally. Three dispatch paths:
+    //   1. Task (#4049) — recursive subagent. Spawns a fresh
+    //      ClaudeByokSession with isolated history but shared client +
+    //      cwd + permission mode, emits agent_spawned / agent_completed
+    //      events, and folds the child's cost/usage back into the
+    //      parent's turn totals.
+    //   2. MCP tools (mcp__<server>__<tool>) — route through the fleet
+    //      to the right child process via stdio JSON-RPC.
+    //   3. Built-in tools (Read/Write/Bash/etc) — route through
+    //      `_dispatchBuiltinTool` which by default runs in-process.
+    //      Subclasses (e.g. DockerByokSession, #4053) override
+    //      `_dispatchBuiltinTool` to redirect execution into an isolated
+    //      environment without touching this loop.
     const effectiveInput = resolvedDecision.updatedInput || input
-    const { content, isError } = toolName.startsWith(MCP_TOOL_PREFIX)
-      ? await this._dispatchMcpTool(toolName, effectiveInput)
-      : await executeBuiltinTool({
-          toolName,
-          input: effectiveInput,
-          cwd: this.cwd,
-          cwdRealCache: this._cwdRealCache,
-          cwdCacheTtl: CWD_CACHE_TTL_MS,
-          signal,
-          todoStore: this._todos,
-        })
+    let dispatchResult
+    if (toolName === 'Task') {
+      dispatchResult = await this._executeTaskTool({
+        toolUseId,
+        input: effectiveInput,
+        messageId,
+        signal,
+      })
+    } else if (toolName.startsWith(MCP_TOOL_PREFIX)) {
+      dispatchResult = await this._dispatchMcpTool(toolName, effectiveInput)
+    } else {
+      dispatchResult = await this._dispatchBuiltinTool({
+        toolName,
+        input: effectiveInput,
+        signal,
+      })
+    }
+    const { content, isError } = dispatchResult
 
     this.emit('tool_result', {
       messageId,
@@ -1025,6 +1160,446 @@ export class ClaudeByokSession extends BaseSession {
       content,
       is_error: isError,
     }
+  }
+
+  /**
+   * #4049: dispatch the Task tool by spawning a child ClaudeByokSession.
+   *
+   * Design (v1 minimum protocol surface):
+   *   - Child inherits the parent's cwd, model, permission mode, and
+   *     Anthropic SDK client — same API key authenticates both, no
+   *     second resolveCredentials() pass.
+   *   - Child gets a FRESH _history (the subagent doesn't see the
+   *     parent's conversation — that's the point of delegating to a
+   *     focused scope). The prompt arrives as its first user message.
+   *   - Child's intermediate tool calls are silent on the wire — the
+   *     parent only sees `agent_spawned` (when the child starts) and
+   *     `agent_completed` (when it returns). Surfacing per-child tool
+   *     streams as sub-bubbles is a deliberate v2 follow-up (the issue
+   *     calls it out as "optional"). Keeping v1 silent matches how
+   *     sdk-session.js surfaces Task today.
+   *   - Cost + usage from the child fold into _subagentUsageThisTurn /
+   *     _subagentCostThisTurn, which sendMessage() adds to the user-
+   *     facing result.cost before emitting (acceptance criteria:
+   *     "child tokens attributed to the parent session").
+   *   - Cancellation cascade: the parent's AbortSignal triggers
+   *     child.interrupt() via the interrupt() override that iterates
+   *     _subagentSessions. A signal that aborts mid-flight also fires
+   *     the local onAbort listener so the cascade happens even on a
+   *     micro-race between the abort and the child's sendMessage.
+   *
+   * Per-launch permission-mode override (#5017):
+   *   The model may pass an optional `permission_mode` field on the Task
+   *   input. When set, it overrides the inherited mode for this one
+   *   launch — but only if it is at-most-as-permissive as the parent
+   *   (plan < approve < acceptEdits < auto). Requesting a stricter mode
+   *   is allowed; requesting a more permissive mode is rejected with
+   *   an is_error tool_result.
+   *
+   * Deferred (per scope note):
+   *   - Sub-bubble UI / mid-flight tool surfacing for the child
+   *   - subagent_type profile registry — the field is accepted in the
+   *     schema for forward-compat but the runner ignores it in v1
+   *
+   * @returns {Promise<{content: string, isError: boolean}>}
+   */
+  async _executeTaskTool({ toolUseId, input, messageId, signal }) {
+    void messageId
+    const description = typeof input?.description === 'string'
+      ? input.description.slice(0, 200)
+      : 'Background task'
+    const prompt = typeof input?.prompt === 'string' ? input.prompt : ''
+    if (!prompt) {
+      return {
+        content: 'Task tool requires a non-empty `prompt` field describing the work for the subagent.',
+        isError: true,
+      }
+    }
+    // #5017: per-launch permission_mode override. When omitted, the child
+    // inherits the parent's mode (existing v1 behaviour). When set, the
+    // value must be a known mode AND at-most-as-permissive as the parent
+    // (plan < approve < acceptEdits < auto) — a subagent must not be able
+    // to escalate beyond the policy the user picked for the parent.
+    let childPermissionMode = this.permissionMode
+    if (input?.permission_mode !== undefined) {
+      const requested = input.permission_mode
+      if (typeof requested !== 'string' || !TASK_PERMISSION_MODE_LIST.includes(requested)) {
+        return {
+          content: `Task tool: invalid \`permission_mode\` "${requested}". Allowed values: ${TASK_PERMISSION_MODE_LIST.join(', ')}.`,
+          isError: true,
+        }
+      }
+      const parentRank = TASK_PERMISSION_MODE_RANK[this.permissionMode]
+      const requestedRank = TASK_PERMISSION_MODE_RANK[requested]
+      // parentRank can be undefined if the parent's mode is somehow
+      // off-list (shouldn't happen — base-session validates — but defend
+      // anyway). Treat that as "no override allowed".
+      if (parentRank === undefined || requestedRank > parentRank) {
+        return {
+          content: `Task tool: \`permission_mode\` "${requested}" is more permissive than the parent's mode "${this.permissionMode}". Subagents must be at-most-as-permissive as the parent.`,
+          isError: true,
+        }
+      }
+      childPermissionMode = requested
+    }
+    // #5019: validate inherit_mcp type BEFORE the agent_spawned emit /
+    // _activeAgents.set so a non-boolean value (string "true", number 1,
+    // null — anything `typeof !== 'boolean'`) returns an is_error result
+    // without leaving a phantom entry in _activeAgents or emitting an
+    // unbalanced agent_spawned. The dashboard's active-agents badge would
+    // otherwise show a spawn that never clears. Mirrors the placement of
+    // the permission_mode validation above. The model gets a crisp signal
+    // naming the offending field rather than us silently coercing to one
+    // of the two paths.
+    let inheritMcp = true
+    if (input?.inherit_mcp !== undefined) {
+      if (typeof input.inherit_mcp !== 'boolean') {
+        return {
+          content: `Task tool: invalid \`inherit_mcp\` value (got ${typeof input.inherit_mcp}). Must be a boolean.`,
+          isError: true,
+        }
+      }
+      inheritMcp = input.inherit_mcp
+    }
+    // #5018: subagent_type profile lookup. When the model passes a
+    // `subagent_type`, look it up in the registry and apply the profile
+    // (systemPrompt + toolSet) to the child before its first sendMessage.
+    // Unknown values fall back to v1 behaviour (no profile applied) and
+    // emit a warn log per the issue's acceptance criteria — keeps the
+    // delegation forward-compatible with a future model that requests a
+    // profile id this server doesn't yet know about, rather than failing
+    // the entire tool call. When omitted, no profile is applied and the
+    // v1 default behaviour stands.
+    let subagentProfile = null
+    if (input?.subagent_type !== undefined) {
+      subagentProfile = getSubagentProfile(input.subagent_type)
+      if (!subagentProfile) {
+        const got = typeof input.subagent_type === 'string'
+          ? `"${input.subagent_type}"`
+          : String(input.subagent_type)
+        log.warn(
+          `Task tool: unknown subagent_type ${got}; falling back to v1 default (no profile applied). `
+          + `Available profiles: ${SUBAGENT_PROFILE_NAMES.join(', ')}.`,
+        )
+      }
+    }
+    if (signal?.aborted) {
+      return { content: 'Interrupted by user before subagent spawned', isError: true }
+    }
+    // Emit agent_spawned BEFORE creating the child so the dashboard's
+    // active-agents badge updates immediately. Same shape as
+    // sdk-session.js's emit on _handleToolUseBlock (`toolUseId`,
+    // `description`, `startedAt`). The toolUseId matches the parent
+    // turn's tool_use block id so the dashboard correlates the spawn
+    // with the open tool_call bubble.
+    const startedAt = Date.now()
+    const agentInfo = { toolUseId, description, startedAt }
+    this._activeAgents.set(toolUseId, agentInfo)
+    this.emit('agent_spawned', agentInfo)
+
+    // Build a child session. Reuse this session's already-resolved
+    // client so the API key resolution + Anthropic constructor only
+    // ran once. mcpConfigPath: null skips MCP-config DISCOVERY in the
+    // child — the child does not parse a second copy of ~/.claude.json
+    // and does not spawn its own fleet. Whether the child gets MCP tools
+    // is controlled by the fleet-sharing block below (#5019), not by
+    // the constructor.
+    //
+    // #5019: by default the child borrows the parent's already-running
+    // MCP fleet — this gives nested Task subagents access to the same
+    // mcp__<server>__<tool> set the parent sees, at zero extra spawn
+    // cost (the parent's MCP children are reused). The child does NOT
+    // own the fleet, so destroy() won't kill the parent's MCP children
+    // when the subagent finishes. Per-call permission gating still
+    // runs through the child's own PermissionManager — only the fleet
+    // (process pool + tool catalogue) is shared.
+    //
+    // The model can opt out per-launch by passing `inherit_mcp: false`
+    // on the Task input — useful when the subagent's prompt should be
+    // strictly scoped to built-in tools or when an MCP server is known
+    // to be misbehaving and the user wants to isolate it from the
+    // delegated work. `inherit_mcp` defaults to true when omitted.
+    //
+    // #5015 review: wrap construction + init in try/catch. If the
+    // ClaudeByokSession ctor or any of the field assignments throws
+    // (unlikely today but a future refactor could add an init step
+    // that does), the parent has already emitted agent_spawned and
+    // populated _activeAgents — we MUST balance that with a matching
+    // agent_completed + _activeAgents delete + matching error tool_result
+    // so the dashboard badge clears and we don't leak the entry.
+    let child
+    try {
+      const ClaudeByokSessionCtor = this.constructor
+      child = new ClaudeByokSessionCtor({
+        cwd: this.cwd,
+        model: this.model || this._defaultModel,
+        mcpConfigPath: null,
+      })
+      // Skip start()'s credential resolution — share the parent's client
+      // so the child uses the same API key path. Also avoids a duplicate
+      // credentials.json read which could rate-limit on disk for parallel
+      // fan-outs.
+      child._client = this._client
+      child._apiKeySource = this._apiKeySource
+      child._processReady = true
+      // #5019: share the parent's MCP fleet (default) unless the model
+      // explicitly opted out via `inherit_mcp: false`. Borrowed fleets
+      // MUST set _ownsMcpFleet = false so the child's destroy() doesn't
+      // tear down the parent's MCP children.
+      if (inheritMcp && this._mcpFleet) {
+        child._mcpFleet = this._mcpFleet
+        child._ownsMcpFleet = false
+      }
+      // Inherit permission mode so the subagent runs under the same
+      // gating policy as the parent — a user who set `auto` doesn't
+      // want the child to start prompting again, and a user in
+      // `approve` mode expects to gate the child's tools too. When the
+      // model passes a `permission_mode` override on the Task input
+      // (#5017), we use that instead — already validated above to be
+      // at-most-as-permissive as the parent. Direct assignment (vs
+      // setPermissionMode) is safe here: the child is fresh, not busy,
+      // and has no pending permissions to flush.
+      child.permissionMode = childPermissionMode
+      // #5018: apply the subagent profile (validated above). Route the
+      // systemPrompt through setSessionPreamble so the profile follows
+      // the same trim + SESSION_PREAMBLE_MAX_LENGTH cap as user-authored
+      // preambles — keeps the system-prompt size bounded and predictable
+      // even if a future profile prompt grows. The profile's systemPrompt
+      // rides in the same slot _buildSystemPrompt() reads, so the existing
+      // skills/chroxy-hint ordering still composes. When the toolSet is
+      // restricted to a name list, install the filter on the child so its
+      // `_buildTools()` only emits the allowed built-ins; `toolSet: 'all'`
+      // leaves the filter unset so the child sees the full BUILTIN_TOOLS
+      // array.
+      if (subagentProfile) {
+        child.setSessionPreamble(subagentProfile.systemPrompt)
+        if (subagentProfile.toolSet !== 'all') {
+          child._allowedBuiltinToolNames = new Set(subagentProfile.toolSet)
+        }
+      }
+      this._subagentSessions.set(toolUseId, child)
+    } catch (ctorErr) {
+      // Balance the agent_spawned emit + _activeAgents.set above so the
+      // dashboard badge clears and the entry doesn't leak forever.
+      this._activeAgents.delete(toolUseId)
+      this.emit('agent_completed', { toolUseId })
+      log.warn(`subagent construction failed: ${ctorErr?.message || ctorErr}`)
+      return {
+        content: `Subagent construction failed: ${ctorErr?.message || ctorErr}`,
+        isError: true,
+      }
+    }
+
+    // Collect the child's stream_delta text into a buffer that becomes
+    // the tool_result content. usage / cost are taken from the child's
+    // single `result` event (the agent loop's per-round usage already
+    // folds into the child's own result.usage).
+    const textChunks = []
+    let childCost = 0
+    const childUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    let childError = null
+    let resolveDone
+    const done = new Promise((r) => { resolveDone = r })
+
+    child.on('stream_delta', (e) => {
+      if (typeof e?.delta === 'string') textChunks.push(e.delta)
+      // #5016: forward the child's stream_delta to the parent so the
+      // dashboard can render its assistant text as a nested sub-bubble.
+      this._emitAgentEvent(toolUseId, 'stream_delta', e)
+    })
+    child.on('result', (e) => {
+      const u = e?.usage || {}
+      childUsage.input_tokens = Number(u.input_tokens) || 0
+      childUsage.output_tokens = Number(u.output_tokens) || 0
+      childUsage.cache_read_input_tokens = Number(u.cache_read_input_tokens) || 0
+      childUsage.cache_creation_input_tokens = Number(u.cache_creation_input_tokens) || 0
+      childCost = Number(e?.cost) || 0
+      resolveDone()
+    })
+    child.on('error', (e) => {
+      // First error wins — capture the message but DON'T resolve yet,
+      // wait for the eventual stream_end so usage still folds in.
+      if (!childError) childError = e?.message || 'subagent failed'
+    })
+    child.on('stream_end', () => {
+      // Belt-and-braces: if `result` never fires (provider error,
+      // abort, or stream-init throw), stream_end still resolves the
+      // promise so this method doesn't hang the parent's tool loop.
+      resolveDone()
+    })
+    // #5016: forward the child's per-tool wire events to the parent as
+    // `agent_event` carrying the parent toolUseId so the dashboard
+    // groups them under the Task tool_call bubble. Cost / usage are
+    // intentionally NOT replayed here (they fold once via the parent's
+    // own per-turn accumulators above — no double-counting).
+    child.on('tool_start', (e) => {
+      this._emitAgentEvent(toolUseId, 'tool_start', e)
+    })
+    child.on('tool_input_delta', (e) => {
+      this._emitAgentEvent(toolUseId, 'tool_input_delta', e)
+    })
+    child.on('tool_result', (e) => {
+      this._emitAgentEvent(toolUseId, 'tool_result', e)
+    })
+    // #5016: when the child itself dispatches a Task (grand-child),
+    // its own `agent_event` fires on the child. Forward those too,
+    // re-tagged with THIS parent's toolUseId so the dashboard groups
+    // all descendants under the outermost Task bubble. The original
+    // (grand-child) `parentToolUseId` is preserved on the payload's
+    // `parentToolUseId` for downstream renderers that may want to
+    // distinguish depth — we merge it INTO the forwarded payload so
+    // consumers can read `payload.parentToolUseId` to recover the
+    // immediate-parent (grand-child Task) id. Without this merge the
+    // grand-child's id is lost on the way up; the comment claimed
+    // preservation but the original implementation dropped it.
+    // A non-string `e?.type` would re-emit as `'agent_event'` which
+    // the consumer reducer doesn't recognise — skip those so noise
+    // doesn't reach the wire.
+    child.on('agent_event', (e) => {
+      if (typeof e?.type !== 'string') return
+      const basePayload = (e?.payload && typeof e.payload === 'object' && !Array.isArray(e.payload))
+        ? e.payload
+        : {}
+      const mergedPayload = e?.parentToolUseId
+        ? { ...basePayload, parentToolUseId: e.parentToolUseId }
+        : basePayload
+      this._emitAgentEvent(toolUseId, e.type, mergedPayload)
+    })
+
+    // Register a cascade hook on the parent's signal — interrupt()
+    // already iterates _subagentSessions, but this listener also
+    // catches the micro-race when the signal aborts between the
+    // top-of-function check and child.sendMessage's first await.
+    const onAbort = () => { try { child.interrupt() } catch { /* noop */ } }
+    if (signal) {
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    }
+
+    // #5015 review: second abort check immediately before sendMessage.
+    // Closes the micro-race where the signal aborts AFTER the top-of-
+    // function `signal?.aborted` check but BEFORE the child flips
+    // _isBusy=true. In that window, the `onAbort` listener fires
+    // child.interrupt() which no-ops (`if (!this._isBusy) return`) —
+    // sendMessage would then proceed and burn tokens after Stop.
+    // Short-circuit with an interrupted result so cancellation is
+    // honored even when the abort lands during this narrow gap.
+    if (signal?.aborted) {
+      if (signal) signal.removeEventListener?.('abort', onAbort)
+      this._subagentSessions.delete(toolUseId)
+      try { await child.destroy() } catch (err) {
+        log.warn(`subagent destroy on pre-send abort failed: ${err?.message || err}`)
+      }
+      this._activeAgents.delete(toolUseId)
+      this.emit('agent_completed', { toolUseId })
+      return { content: 'Interrupted by user before subagent started', isError: true }
+    }
+    try {
+      await child.sendMessage(prompt)
+      await done
+    } finally {
+      if (signal) signal.removeEventListener?.('abort', onAbort)
+      // Drop the child from _subagentSessions before destroy() so a
+      // racing interrupt() during teardown doesn't try to abort an
+      // already-half-destroyed child.
+      this._subagentSessions.delete(toolUseId)
+      try { await child.destroy() } catch (err) {
+        log.warn(`subagent destroy on Task completion failed: ${err?.message || err}`)
+      }
+      this._activeAgents.delete(toolUseId)
+      this.emit('agent_completed', { toolUseId })
+    }
+
+    // Fold child usage + cost into the parent's per-turn accumulators
+    // so the user-facing result.cost includes every API call this
+    // turn caused (acceptance criteria #4049).
+    this._subagentUsageThisTurn.input_tokens += childUsage.input_tokens
+    this._subagentUsageThisTurn.output_tokens += childUsage.output_tokens
+    this._subagentUsageThisTurn.cache_read_input_tokens += childUsage.cache_read_input_tokens
+    this._subagentUsageThisTurn.cache_creation_input_tokens += childUsage.cache_creation_input_tokens
+    this._subagentCostThisTurn += childCost
+
+    if (childError) {
+      // Surface the child's error as the tool_result content so the
+      // parent model can see what went wrong and decide whether to
+      // retry / re-prompt / abandon.
+      return { content: `Subagent failed: ${childError}`, isError: true }
+    }
+    const summary = textChunks.join('').trim()
+    if (!summary) {
+      return {
+        content: 'Subagent finished without producing any output text.',
+        isError: true,
+      }
+    }
+    return { content: summary, isError: false }
+  }
+
+  /**
+   * #5016: re-emit a Task subagent's intermediate wire event under the
+   * parent's `agent_event` channel so the dashboard can render nested
+   * sub-bubbles inside the parent's Task tool_call.
+   *
+   * `parentToolUseId` is the toolUseId of the parent's Task tool_use
+   * block (the same id used for `agent_spawned` / `agent_completed`) —
+   * the consumer keys the nested sub-bubble container off this id.
+   *
+   * `type` is the child's original event name (`tool_start`,
+   * `tool_input_delta`, `tool_result`, `stream_delta`). The dashboard
+   * switches on this to render the child's wire event in the same
+   * shape it would for a top-level event.
+   *
+   * `payload` is the original child event payload, passed through
+   * verbatim. Renderers MUST treat fields as best-effort (some payloads
+   * carry messageId / toolUseId, others carry delta text only).
+   *
+   * Nested-Task support: when a Task subagent itself dispatches a Task,
+   * the grand-child's events arrive as `agent_event` on the child
+   * (because each session's `_emitAgentEvent` re-emits to itself), and
+   * we surface them on the parent under the parent's toolUseId. This
+   * means the dashboard sees a flat stream tagged with the IMMEDIATE
+   * parent's id — nested-nested rendering is intentionally not in v2.
+   *
+   * @param {string} parentToolUseId
+   * @param {string} type
+   * @param {object} payload
+   */
+  _emitAgentEvent(parentToolUseId, type, payload) {
+    this.emit('agent_event', {
+      parentToolUseId,
+      type,
+      payload: payload ?? {},
+    })
+  }
+
+  /**
+   * Dispatch one built-in tool (Read/Write/Edit/Bash/Glob/Grep/WebFetch/
+   * TodoWrite) to the local executor. Returns `{ content, isError }` —
+   * the shape `_executeToolBlock` threads into the next round's
+   * tool_result content block.
+   *
+   * Subclass seam (#4053): `DockerByokSession` overrides this to
+   * redirect tool execution into an isolated Docker container while the
+   * outer agent loop — model streaming, permission gating, MCP dispatch,
+   * cost accounting — stays unchanged. The base implementation runs the
+   * tool in-process on the host, which is what the host-side
+   * `claude-byok` provider has always done.
+   *
+   * @param {object} args
+   * @param {string} args.toolName  Tool name from the model's tool_use block
+   * @param {object} args.input     Already-parsed JSON input from the model
+   * @param {AbortSignal} [args.signal]  Per-turn abort signal
+   */
+  async _dispatchBuiltinTool({ toolName, input, signal }) {
+    return executeBuiltinTool({
+      toolName,
+      input,
+      cwd: this.cwd,
+      cwdRealCache: this._cwdRealCache,
+      cwdCacheTtl: CWD_CACHE_TTL_MS,
+      signal,
+      todoStore: this._todos,
+    })
   }
 
   /**
@@ -1084,7 +1659,7 @@ export class ClaudeByokSession extends BaseSession {
     }
   }
 
-  _emitTurnError(messageId, err, fallbackCode) {
+  _emitTurnError(messageId, err, fallbackCode, partials) {
     // #4057: SDK v0.81+ throws `APIUserAbortError` (not the generic
     // `AbortError`) when an in-flight messages.stream sees its signal
     // aborted. Primary check is `instanceof` — the SDK class itself
@@ -1094,6 +1669,15 @@ export class ClaudeByokSession extends BaseSession {
     // (the SDK's own internal abort helper uses this convention). The
     // signal.aborted fallback catches paths where the SDK swallowed
     // the original error and re-threw something we don't recognise.
+    //
+    // #5020: `partials` carries the parent's completed-round usage +
+    // cost (already folded with any subagent Task tool spend). Surface
+    // it on every error path — ABORT and STREAM_ERROR alike — so the
+    // user can see what the failed turn cost. The error envelope schema
+    // is `.passthrough()` (ServerErrorEnvelopeSchema, protocol/server.ts)
+    // so additional fields propagate without a wire-side schema change.
+    // Optional / undefined-safe: pre-#5020 call sites pass nothing and
+    // the fields are simply absent on the event payload.
     const aborted =
       err instanceof APIUserAbortError ||
       err?.name === 'AbortError' ||
@@ -1103,24 +1687,45 @@ export class ClaudeByokSession extends BaseSession {
         messageId,
         message: 'Interrupted by user',
         code: 'ABORT',
+        ...(partials ? { usage: partials.usage, cost: partials.cost } : {}),
       })
       return
     }
     const code = err?.status ? `HTTP_${err.status}` : (err?.code || fallbackCode)
     const message = err?.message || String(err)
-    this.emit('error', { messageId, message, code })
+    this.emit('error', {
+      messageId,
+      message,
+      code,
+      ...(partials ? { usage: partials.usage, cost: partials.cost } : {}),
+    })
   }
 
   _finishTurn() {
     this._isBusy = false
     this._currentMessageId = null
     this._abortController = null
+    // #4049: reset the subagent accumulators so the next turn starts
+    // clean — even on error / abort paths where the result event never
+    // fired and the fold-in step above was skipped.
+    this._subagentUsageThisTurn = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    this._subagentCostThisTurn = 0
   }
 
   interrupt() {
     if (!this._isBusy) return
     if (this._abortController) {
       this._abortController.abort()
+    }
+    // #4049: cascade the interrupt to any active subagent sessions.
+    // Each child has its own AbortController — interrupt() short-
+    // circuits its in-flight stream so it returns promptly, which lets
+    // _executeTaskTool's awaited promise resolve and the parent's
+    // outer agent loop can finish the user-facing result event.
+    for (const child of this._subagentSessions.values()) {
+      try { child.interrupt() } catch (err) {
+        log.warn(`subagent interrupt failed: ${err?.message || err}`)
+      }
     }
   }
 
@@ -1153,10 +1758,23 @@ export class ClaudeByokSession extends BaseSession {
   // turn rather than cached because the cost is trivial and the fleet's
   // READY-state filter is the source of truth for which servers are
   // contributing right now.
+  //
+  // #5018: when this session is a subagent that was spawned with a
+  // restricted profile, `_allowedBuiltinToolNames` is a Set of the
+  // allowed built-in tool names. Filter BUILTIN_TOOLS down to just
+  // those — MCP tools pass through unchanged in v1 (gating MCP per
+  // profile is a follow-up; the immediate value of a restricted
+  // profile like code-reviewer is preventing accidental Write/Edit/Bash,
+  // and MCP tools are off by default in subagents anyway). Unrestricted
+  // (or non-subagent) sessions skip the filter entirely so this stays
+  // a zero-cost path for the common case.
   _buildTools() {
-    if (!this._mcpFleet) return BUILTIN_TOOLS
+    const builtins = this._allowedBuiltinToolNames
+      ? BUILTIN_TOOLS.filter((t) => this._allowedBuiltinToolNames.has(t.name))
+      : BUILTIN_TOOLS
+    if (!this._mcpFleet) return builtins
     const mcp = this._mcpFleet.anthropicTools
-    return mcp.length === 0 ? BUILTIN_TOOLS : [...BUILTIN_TOOLS, ...mcp]
+    return mcp.length === 0 ? builtins : [...builtins, ...mcp]
   }
 
   async destroy() {
@@ -1188,15 +1806,37 @@ export class ClaudeByokSession extends BaseSession {
     // reference (test capture, future export) would keep them alive.
     this._streamingIndexToToolUseId.clear()
     this._pendingPermissionToolUseIds.clear()
+    // #4049: tear down any active subagent sessions. interrupt() (run
+    // at the top of destroy()) already cascaded the abort signal; this
+    // step also drops each child's PermissionManager, MCP fleet, and
+    // EventEmitter listeners so a long-running parent that fanned-out
+    // a series of Task subagents doesn't leak per-child resources.
+    if (this._subagentSessions.size > 0) {
+      const children = [...this._subagentSessions.values()]
+      this._subagentSessions.clear()
+      for (const child of children) {
+        try { await child.destroy() } catch (err) {
+          log.warn(`subagent destroy failed: ${err?.message || err}`)
+        }
+      }
+    }
     this._client = null
     // #4077: tear down MCP children with SIGTERM → SIGKILL grace.
     // Awaits up to FLEET_KILL_GRACE_MS (2s) + 500ms safety margin so a
     // hung child cannot stall destroy() indefinitely.
+    //
+    // #5019: only the owning session tears the fleet down. A Task subagent
+    // that borrowed the parent's fleet (_ownsMcpFleet === false) just
+    // drops its reference — destroying the parent's MCP children mid-flight
+    // would kill MCP tool access for the parent and any sibling subagents.
     if (this._mcpFleet) {
       const fleet = this._mcpFleet
+      const owns = this._ownsMcpFleet
       this._mcpFleet = null
-      try { await fleet.destroy() } catch (err) {
-        log.warn(`MCP fleet teardown failed: ${err?.message || err}`)
+      if (owns) {
+        try { await fleet.destroy() } catch (err) {
+          log.warn(`MCP fleet teardown failed: ${err?.message || err}`)
+        }
       }
     }
     this.removeAllListeners()

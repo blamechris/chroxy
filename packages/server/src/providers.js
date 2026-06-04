@@ -13,9 +13,6 @@
  * interrupt/setModel/setPermissionMode plus a static `capabilities` getter.
  * See sdk-session.js or cli-session.js for a worked example.
  */
-import { existsSync, readFileSync, statSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { ClaudeTuiSession } from './claude-tui-session.js'
@@ -24,8 +21,13 @@ import { DeepSeekSession } from './deepseek-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
-import { resolveAnthropicApiKey } from './byok-credentials.js'
-import { resolveDeepSeekApiKey } from './deepseek-credentials.js'
+import {
+  hasClaudeOAuthCreds,
+  hasCodexOAuthCreds,
+  hasGeminiOAuthCreds,
+  cachedResolveCredentialFile,
+  resetCachesForTest,
+} from './auth-probes.js'
 
 const PROVIDERS = {
   'claude-cli': CliSession,
@@ -193,36 +195,36 @@ export function listProviders() {
 }
 
 /**
- * Resolve the auth/billing state for a single provider.
- *
- * The Claude CLI provider (and its docker-cli variant) explicitly strips
- * `ANTHROPIC_API_KEY` before spawning the binary — see spawn-env.js's
- * `claude` denylist — so it always bills the claude.ai subscription
- * regardless of whether the env var is present. Other providers route to
- * whichever credential they find first.
- *
- * Returns:
- *   ready    : boolean — false only when required creds are missing
- *   source   : 'env' | 'oauth' | 'none'
- *   envVar   : matched env var name (null when source !== 'env')
- *   envVars  : env var candidates checked
- *   hint     : human-readable fix hint
- *   detail   : human-readable summary including billing identity
- *
- * @param {string} name
- * @param {Function} ProviderClass
+ * Helpers passed to each provider's `static resolveAuth(env, helpers)` call.
+ * Bundles the shared OAuth probes and credential-file resolver cache so the
+ * provider doesn't have to import them directly — keeps the contract small
+ * and the surface easy to mock in tests (#4769).
  */
-function getProviderAuthInfo(name, ProviderClass) {
+const AUTH_HELPERS = Object.freeze({
+  hasClaudeOAuthCreds,
+  hasCodexOAuthCreds,
+  hasGeminiOAuthCreds,
+  cachedResolveCredentialFile,
+})
+
+/**
+ * Generic fallback auth resolver for providers that don't declare their own
+ * `static resolveAuth`. Returns the same shape — `{ ready, source, envVar,
+ * envVars, hint, detail }` — using only the preflight credentials spec.
+ *
+ * Behaviour matches what the pre-#4769 dispatcher did when none of the
+ * provider-specific branches fired:
+ *   - No `credentials` block in preflight → ready (opt-out for custom providers)
+ *   - An env var is set → source: 'env'
+ *   - `optional: true` with no env var → not-ready with the spec hint
+ *   - Required env var missing → not-ready with the spec hint
+ *
+ * Provider-specific behaviour (OAuth probes, file resolvers, container
+ * overrides) lives on the provider classes — see `ProviderClass.resolveAuth`.
+ */
+function genericResolveAuth(ProviderClass, env) {
   const spec = ProviderClass.preflight
   const credSpec = spec?.credentials
-  const envVars = (credSpec && Array.isArray(credSpec.envVars)) ? credSpec.envVars : []
-  const optional = !!credSpec?.optional
-  const hint = credSpec?.hint || (envVars.length ? `set ${envVars.join(' or ')}` : '')
-
-  // Providers that opt out of preflight credentials checking (custom/external
-  // providers, or any class that doesn't declare a `credentials` block) have
-  // no env-var requirement we can verify — treat as ready so the UI doesn't
-  // disable a working provider just because it skipped declaring preflight.
   if (!credSpec) {
     return {
       ready: true,
@@ -233,108 +235,9 @@ function getProviderAuthInfo(name, ProviderClass) {
       detail: 'No credential check declared by this provider',
     }
   }
-
-  // Bare claude-cli on the host always bills subscription: spawn-env.js's
-  // `claude` denylist strips ANTHROPIC_API_KEY before the subprocess starts,
-  // and the CLI auths via the host's ~/.claude OAuth state.
-  // claude-tui follows the same pattern — it explicitly deletes
-  // ANTHROPIC_API_KEY from the spawn env and routes via OAuth/Keychain so
-  // the round-trip bills as a subscription. The OAuth-creds probe doesn't
-  // see Keychain credentials, so we mark these providers ready up-front.
-  // Note: docker-cli is NOT in this set — see container-provider handling below.
-  const isHostClaudeCli = name === 'claude-cli' || name === 'claude-tui'
-
-  // Container providers (docker-cli / docker-sdk) explicitly forward
-  // process.env.ANTHROPIC_API_KEY to the container at `docker run` time
-  // (see docker-session.js _startContainer + docker-sdk-session.js _startContainer).
-  // Inside the container there is no ~/.claude OAuth state, so the env var
-  // is the only auth path — no OAuth fallback even though the host-side
-  // preflight marks credentials as optional.
-  const isContainerProvider = name === 'docker-cli' || name === 'docker-sdk'
-
-  if (isHostClaudeCli) {
-    const detail = name === 'claude-tui'
-      ? 'Claude subscription (interactive TUI under PTY — bypasses programmatic credit metering)'
-      : 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)'
-    return {
-      ready: true,
-      source: 'oauth',
-      envVar: null,
-      envVars,
-      hint: 'run `claude login` if not yet authed',
-      detail,
-    }
-  }
-
-  // BYOK provider checks env var AND the ~/.chroxy/credentials.json file
-  // fallback (mode 0600 enforced). Both paths are semantically "API key
-  // auth" from the dashboard's perspective — the SettingsPanel legend
-  // only knows about 'oauth' | 'env' | 'missing' | 'none' tones (see
-  // SettingsPanel.tsx:316-320), so we return 'env' for both env-var and
-  // file paths. The `detail` string carries the diagnostic of *which*
-  // file/var supplied the key.
-  if (name === 'claude-byok') {
-    const resolved = _cachedResolveCredentialFile(
-      'byok',
-      process.env.ANTHROPIC_API_KEY,
-      resolveAnthropicApiKey,
-    )
-    if (resolved.key) {
-      return {
-        ready: true,
-        source: 'env',
-        envVar: resolved.source === 'env' ? 'ANTHROPIC_API_KEY' : null,
-        envVars,
-        hint: '',
-        detail: `Anthropic API (${resolved.source === 'env' ? 'ANTHROPIC_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
-      }
-    }
-    return {
-      ready: false,
-      source: 'none',
-      envVar: null,
-      envVars,
-      hint,
-      detail: `Anthropic API (${resolved.reason})`,
-    }
-  }
-
-  // DeepSeek mirrors the BYOK branch (#4656): env-var OR
-  // ~/.chroxy/credentials.json `deepseekApiKey` field. Both surface as
-  // source: 'env' so SettingsPanel's tone legend maps cleanly; the
-  // `detail` string disambiguates which path supplied the key. Without
-  // this dedicated branch the generic env-var match below would return
-  // ready:false whenever the user stored the key in credentials.json
-  // rather than exporting DEEPSEEK_API_KEY.
-  if (name === 'deepseek') {
-    const resolved = _cachedResolveCredentialFile(
-      'deepseek',
-      process.env.DEEPSEEK_API_KEY,
-      resolveDeepSeekApiKey,
-    )
-    if (resolved.key) {
-      return {
-        ready: true,
-        source: 'env',
-        envVar: resolved.source === 'env' ? 'DEEPSEEK_API_KEY' : null,
-        envVars,
-        hint: '',
-        detail: `DeepSeek API (${resolved.source === 'env' ? 'DEEPSEEK_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
-      }
-    }
-    return {
-      ready: false,
-      source: 'none',
-      envVar: null,
-      envVars,
-      hint,
-      detail: `DeepSeek API (${resolved.reason})`,
-    }
-  }
-
-  // Look for any matching env var.
-  const matched = envVars.find(v => process.env[v])
-
+  const envVars = Array.isArray(credSpec.envVars) ? credSpec.envVars : []
+  const hint = credSpec.hint || (envVars.length ? `set ${envVars.join(' or ')}` : '')
+  const matched = envVars.find(v => env[v])
   if (matched) {
     return {
       ready: true,
@@ -342,432 +245,55 @@ function getProviderAuthInfo(name, ProviderClass) {
       envVar: matched,
       envVars,
       hint: '',
-      detail: `${describeBillingIdentity(name, matched)} (${matched} set)`,
+      detail: `External provider (${matched} set)`,
     }
-  }
-
-  // Container providers can't reach host OAuth state — required-only.
-  if (isContainerProvider) {
-    return {
-      ready: false,
-      source: 'none',
-      envVar: null,
-      envVars,
-      hint: hint || 'set ANTHROPIC_API_KEY (forwarded to the container at run time)',
-      detail: 'Not configured — container providers need ANTHROPIC_API_KEY on the host (no OAuth fallback inside the container)',
-    }
-  }
-
-  // #4301: Codex and Gemini CLIs authenticate via their own `login` flows
-  // and cache OAuth tokens under `~/.codex/auth.json` / `~/.gemini/...`.
-  // The Codex CLI also runs fine when `OPENAI_API_KEY` is null in that file
-  // because the `tokens` block carries the access/refresh tokens. The
-  // env-var-only preflight misreported these providers as "credentials
-  // missing" whenever users authed via the CLI instead of exporting a key.
-  if (name === 'codex' && _hasCodexOAuthCreds()) {
-    return {
-      ready: true,
-      source: 'oauth',
-      envVar: null,
-      envVars,
-      hint,
-      detail: `${describeBillingIdentity(name, null)} (OAuth from \`codex login\`)`,
-    }
-  }
-  if (name === 'gemini' && _hasGeminiOAuthCreds()) {
-    return {
-      ready: true,
-      source: 'oauth',
-      envVar: null,
-      envVars,
-      hint,
-      detail: `${describeBillingIdentity(name, null)} (OAuth from \`gemini login\`)`,
-    }
-  }
-
-  // No env var matched — optional creds (host claude-sdk) can fall back to
-  // an OAuth subscription cached on disk by `claude login`. Earlier code
-  // optimistically reported ready=true here, but #3674 caught that this
-  // misleads users who never ran `claude login`: their session creation
-  // would fail at runtime while the UI showed the chip enabled. We now
-  // best-effort probe the on-disk auth state and only claim ready when at
-  // least one known credential file is present.
-  if (optional) {
-    if (_hasClaudeOAuthCreds()) {
-      return {
-        ready: true,
-        source: 'oauth',
-        envVar: null,
-        envVars,
-        hint,
-        detail: `${describeBillingIdentity(name, null)} (OAuth from \`claude login\`)`,
-      }
-    }
-    return {
-      ready: false,
-      source: 'none',
-      envVar: null,
-      envVars,
-      hint: hint || 'run `claude login` or set ANTHROPIC_API_KEY',
-      detail: `Not configured — ${hint || 'run \`claude login\` or set ANTHROPIC_API_KEY'}`,
-    }
-  }
-
-  // Required creds missing — provider can't run.
-  // #4301: codex/gemini also support an OAuth login flow, so the hint should
-  // mention both paths so the user doesn't think the env var is the only fix.
-  let resolvedHint = hint
-  if (name === 'codex') {
-    resolvedHint = hint
-      ? `${hint} or run \`codex login\``
-      : 'run `codex login` or set OPENAI_API_KEY'
-  } else if (name === 'gemini') {
-    resolvedHint = hint
-      ? `${hint} or run \`gemini login\``
-      : 'run `gemini login` or set GEMINI_API_KEY'
   }
   return {
     ready: false,
     source: 'none',
     envVar: null,
     envVars,
-    hint: resolvedHint,
-    detail: envVars.length
-      ? `Not configured — ${resolvedHint}`
-      : 'Not configured',
+    hint,
+    detail: envVars.length ? `Not configured — ${hint}` : 'Not configured',
   }
 }
 
 /**
- * Best-effort probe for `claude login` OAuth state on disk (#3674).
+ * Resolve the auth/billing state for a single provider (#4769 dispatcher).
  *
- * Different versions of the Claude Agent SDK and Claude Code CLI cache
- * subscription credentials in different files; we cover the three known
- * locations and return true if any of them looks plausibly populated:
+ * Each provider class owns its own `static resolveAuth(env, helpers)` method
+ * — see e.g. CliSession, SdkSession, CodexSession. This dispatcher is now
+ * just a thin shim that hands the active env + shared helpers to the
+ * provider, with a generic fallback for custom/external providers that
+ * haven't (yet) declared `resolveAuth`.
  *
- *   1. `~/.claude/auth.json`            — current SDK auth file
- *   2. `~/.claude/.credentials.json`    — older Claude Code CLI keystore
- *   3. `~/.claude.json`                 — global config; contains a
- *                                          `claudeAiOauth` block when the
- *                                          user has logged in via subscription
+ * Returns:
+ *   ready    : boolean — false only when required creds are missing
+ *   source   : 'env' | 'oauth' | 'none'
+ *   envVar   : matched env var name (null when source !== 'env')
+ *   envVars  : env var candidates checked
+ *   hint     : human-readable fix hint
+ *   detail   : human-readable summary including billing identity
  *
- * The check is deliberately conservative: file presence (or the presence
- * of the OAuth key inside `~/.claude.json`) is enough — we don't validate
- * tokens or expiry. False positives are possible if the files are stale,
- * but the alternative (false negatives) is what #3674 was filed to fix.
- *
- * Override paths for tests / atypical installs:
- *   - `CHROXY_CLAUDE_HOME`   — overrides the directory for the first two
- *                              file checks AND the default location of
- *                              `.claude.json` (one level up from this dir).
- *   - `CHROXY_CLAUDE_CONFIG` — overrides the global `.claude.json` path
- *                              directly. Wins over the `CHROXY_CLAUDE_HOME`-
- *                              derived default when both are set.
- *
- * @returns {boolean}
+ * @param {string} _name - Provider id (unused — kept for caller back-compat)
+ * @param {Function} ProviderClass
  */
-function _probeClaudeOAuthCreds() {
-  try {
-    const claudeHome = process.env.CHROXY_CLAUDE_HOME || join(homedir(), '.claude')
-    if (existsSync(join(claudeHome, 'auth.json'))) return true
-    if (existsSync(join(claudeHome, '.credentials.json'))) return true
-    // Global config file lives one level up; some installs only have this.
-    const globalConfig = process.env.CHROXY_CLAUDE_CONFIG
-      || (process.env.CHROXY_CLAUDE_HOME
-            ? join(process.env.CHROXY_CLAUDE_HOME, '..', '.claude.json')
-            : join(homedir(), '.claude.json'))
-    if (existsSync(globalConfig)) {
-      try {
-        const parsed = JSON.parse(readFileSync(globalConfig, 'utf-8'))
-        if (parsed && typeof parsed === 'object' && parsed.claudeAiOauth) {
-          return true
-        }
-      } catch {
-        // Malformed JSON — treat as absent.
-      }
-    }
-  } catch {
-    // Any unexpected fs error → behave as if no creds, so the UI surfaces
-    // the missing-creds state instead of silently misreporting ready.
+function getProviderAuthInfo(_name, ProviderClass) {
+  if (typeof ProviderClass.resolveAuth === 'function') {
+    return ProviderClass.resolveAuth(process.env, AUTH_HELPERS)
   }
-  return false
+  return genericResolveAuth(ProviderClass, process.env)
 }
 
 /**
- * Best-effort probe for `codex login` OAuth state on disk (#4301).
- *
- * The Codex CLI caches its login tokens in `~/.codex/auth.json`. The file is
- * always present after a `codex login` run; what matters for "user is authed"
- * is the `tokens` block being populated. The Codex CLI itself works fine
- * even when the file's `OPENAI_API_KEY` field is `null` because the OAuth
- * tokens carry the credential round-trip.
- *
- * Override path for tests / atypical installs:
- *   - `CHROXY_CODEX_HOME` — overrides the directory used to locate auth.json
- *
- * @returns {boolean}
- */
-function _probeCodexOAuthCreds() {
-  try {
-    const codexHome = process.env.CHROXY_CODEX_HOME || join(homedir(), '.codex')
-    const authPath = join(codexHome, 'auth.json')
-    if (!existsSync(authPath)) return false
-    try {
-      const parsed = JSON.parse(readFileSync(authPath, 'utf-8'))
-      if (!parsed || typeof parsed !== 'object') return false
-      // Either: populated `tokens` block (OAuth login), or a real string
-      // OPENAI_API_KEY embedded in the file (CLI also accepts this).
-      if (parsed.tokens && typeof parsed.tokens === 'object') {
-        const t = parsed.tokens
-        if (typeof t.access_token === 'string' && t.access_token.length > 0) return true
-        if (typeof t.refresh_token === 'string' && t.refresh_token.length > 0) return true
-        if (typeof t.id_token === 'string' && t.id_token.length > 0) return true
-      }
-      if (typeof parsed.OPENAI_API_KEY === 'string' && parsed.OPENAI_API_KEY.length > 0) {
-        return true
-      }
-    } catch {
-      // Malformed JSON — treat as absent.
-    }
-  } catch {
-    // Any unexpected fs error → behave as if no creds.
-  }
-  return false
-}
-
-/**
- * Best-effort probe for `gemini login` OAuth state on disk (#4301).
- *
- * The Gemini CLI caches OAuth state under `~/.gemini/`. The exact filename
- * has shifted between CLI versions; we cover the names observed in the
- * wild and treat presence of any of them as evidence of a completed login:
- *
- *   - `~/.gemini/oauth_creds.json`     — typical for `gemini login`
- *   - `~/.gemini/google_accounts.json` — older variant
- *
- * Override path for tests / atypical installs:
- *   - `CHROXY_GEMINI_HOME` — overrides the directory used for the lookups
- *
- * @returns {boolean}
- */
-function _probeGeminiOAuthCreds() {
-  try {
-    const geminiHome = process.env.CHROXY_GEMINI_HOME || join(homedir(), '.gemini')
-    if (existsSync(join(geminiHome, 'oauth_creds.json'))) return true
-    if (existsSync(join(geminiHome, 'google_accounts.json'))) return true
-  } catch {
-    // Any unexpected fs error → behave as if no creds.
-  }
-  return false
-}
-
-/**
- * 5s TTL cache around the on-disk creds probes (#3678).
- *
- * `listProviders()` is called from `handleListProviders` on every dashboard
- * `list_providers` WS request and once per `auth_ok` from `ws-history.js`.
- * Each call performs several `existsSync` + optional small `readFileSync` +
- * `JSON.parse`. The cache is keyed on the override env vars so a test (or a
- * runtime tweak) that changes any of the `CHROXY_*_HOME` variables naturally
- * invalidates the previous result.
- *
- * Per-provider entries so a mutation under one provider's home doesn't blow
- * away the cached result for another (#4301 added codex + gemini).
- */
-let _credsCache = {
-  claude: { value: null, expiresAt: 0, key: null },
-  codex: { value: null, expiresAt: 0, key: null },
-  gemini: { value: null, expiresAt: 0, key: null },
-}
-
-function _cachedProbe(slot, key, probe) {
-  const now = Date.now()
-  const entry = _credsCache[slot]
-  if (entry.key === key && entry.expiresAt > now) {
-    return entry.value
-  }
-  const value = probe()
-  _credsCache[slot] = { value, expiresAt: now + 5_000, key }
-  return value
-}
-
-function _hasClaudeOAuthCreds() {
-  const key = `${process.env.CHROXY_CLAUDE_HOME ?? ''}|${process.env.CHROXY_CLAUDE_CONFIG ?? ''}`
-  return _cachedProbe('claude', key, _probeClaudeOAuthCreds)
-}
-
-function _hasCodexOAuthCreds() {
-  const key = `${process.env.CHROXY_CODEX_HOME ?? ''}`
-  return _cachedProbe('codex', key, _probeCodexOAuthCreds)
-}
-
-function _hasGeminiOAuthCreds() {
-  const key = `${process.env.CHROXY_GEMINI_HOME ?? ''}`
-  return _cachedProbe('gemini', key, _probeGeminiOAuthCreds)
-}
-
-/**
- * mtime+size keyed cache for the BYOK + DeepSeek credential file reads (#4658).
- *
- * Unlike the OAuth probes above — which use a 5s TTL because the underlying
- * `claude login` / `codex login` / `gemini login` state spans multiple files
- * and parse paths — the BYOK + DeepSeek resolvers read a single well-known
- * file (`~/.chroxy/credentials.json`) and the auth signal is just "is this
- * file present, mode-0600, and does it still contain the relevant field?".
- *
- * That lets us cache on `{mtimeMs, size}` instead of a clock-based TTL:
- *   - Same env var + file unchanged → reuse cached resolver result without
- *     re-reading + JSON.parsing the file
- *   - File mtime or size changed → re-read and refresh the cache
- *   - File deleted (stat fails) → drop the cache, let resolver re-derive
- *     the "missing" reason from scratch
- *
- * Caching is keyed per slot (`byok`, `deepseek`) so a write to credentials.json
- * for one provider doesn't blow away the other's cached result. The env-var
- * value is folded into the key so an env mutation (set/unset/change) naturally
- * invalidates — the resolvers short-circuit on a populated env var without
- * touching the file, so caching that path safely avoids the stat too.
- *
- * Lives in providers.js (not in *-credentials.js) intentionally — the rest of
- * the codebase calls `resolveAnthropicApiKey()` / `resolveDeepSeekApiKey()`
- * directly (byok-session.js / deepseek-session.js for the actual API call)
- * and those paths must NOT be cached: a session start happens once and needs
- * the live file. Only the dashboard-poll path through `listProviders()` is hot
- * enough to justify the cache.
- */
-let _credFileCache = {
-  byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
-  deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
-}
-
-// Env-var names per slot, used for the canonical "not set and file does not
-// exist" reason when we short-circuit the ENOENT case (#4728 review). Kept
-// here rather than passed in so the wrapper signature stays minimal.
-const _SLOT_ENV_VAR = {
-  byok: 'ANTHROPIC_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-}
-
-/**
- * Cache wrapper around a credential-file resolver. The resolver itself does
- * the file read; this helper short-circuits to the cached resolver result when
- * the env var is unchanged AND either (env-var path was taken last time) or
- * (the file's stat-mtime+size+mode still matches what we cached).
- *
- * `mode` participates in the key because the underlying resolvers refuse any
- * file mode more permissive than 0o600 as a security boundary
- * (byok-credentials.js / deepseek-credentials.js). `chmod 0644` does NOT
- * update mtime or size on POSIX, so without mode in the key the cache would
- * keep returning ready=true with the key after the user runs chmod — the
- * dashboard would lag the resolver's actual rejection until the next file
- * write. Including `mode` makes the dashboard match resolver behaviour.
- *
- * @param {'byok' | 'deepseek'} slot
- * @param {string | undefined} envValue - current value of the relevant env var
- * @param {() => object} resolve - the underlying *-credentials resolver
- * @returns {object} resolver result
- */
-function _cachedResolveCredentialFile(slot, envValue, resolve) {
-  const entry = _credFileCache[slot]
-  const credPath = join(homedir(), '.chroxy', 'credentials.json')
-
-  // Env var precedence: when it's set the resolver never touches the file, so
-  // the cache hit just needs the env value to match.
-  if (typeof envValue === 'string' && envValue.length > 0) {
-    if (entry.envValue === envValue && entry.path === null && entry.result) {
-      return entry.result
-    }
-    const result = resolve()
-    _credFileCache[slot] = { envValue, path: null, mtimeMs: null, size: null, mode: null, result }
-    return result
-  }
-
-  // No env var → resolver consults the file. Stat first; if the file is gone
-  // or the stat throws, drop any cached entry. ENOENT is the hot "user never
-  // configured BYOK" case — short-circuit and synthesize the resolver's
-  // missing-reason string directly so we don't pay for a second statSync()
-  // inside the resolver (#4728 review). Any other stat error falls through
-  // to the resolver so its richer error message wins (e.g. EACCES surfaces
-  // "unable to stat ... permission denied").
-  let stat
-  try {
-    stat = statSync(credPath)
-  } catch (err) {
-    _credFileCache[slot] = { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null }
-    if (err.code === 'ENOENT') {
-      return {
-        key: null,
-        source: 'none',
-        reason: `${_SLOT_ENV_VAR[slot]} not set and ${credPath} does not exist`,
-      }
-    }
-    return resolve()
-  }
-
-  // Cache key includes credPath so an HOME change invalidates even if the
-  // new file coincidentally has the same mtime+size+mode as the cached old
-  // one, and includes the low 9 mode bits so a chmod 0644 (which doesn't
-  // touch mtime) flips the cached result to match the resolver's refusal.
-  const mode = stat.mode & 0o777
-  if (
-    entry.envValue === null
-    && entry.path === credPath
-    && entry.mtimeMs === stat.mtimeMs
-    && entry.size === stat.size
-    && entry.mode === mode
-    && entry.result
-  ) {
-    return entry.result
-  }
-
-  const result = resolve()
-  _credFileCache[slot] = {
-    envValue: null,
-    path: credPath,
-    mtimeMs: stat.mtimeMs,
-    size: stat.size,
-    mode,
-    result,
-  }
-  return result
-}
-
-/**
- * Test-only hook to drop the cached creds-probe results so suites that mutate
- * the override env vars (or write/delete files under any `CHROXY_*_HOME`
- * without changing the env-var values) start from a clean slate. Production
- * code should never call this — the natural env-var-keyed invalidation plus
- * the 5s TTL is what users see.
+ * Test-only hook (back-compat re-export from #4769 extraction): drop the
+ * cached creds-probe results so suites that mutate the `CHROXY_*_HOME`
+ * overrides or write/delete files under them start from a clean slate.
+ * Now delegates to `auth-probes.js#resetCachesForTest()`. Production code
+ * should never call this.
  */
 export function _resetCredsCacheForTest() {
-  _credsCache = {
-    claude: { value: null, expiresAt: 0, key: null },
-    codex: { value: null, expiresAt: 0, key: null },
-    gemini: { value: null, expiresAt: 0, key: null },
-  }
-  _credFileCache = {
-    byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
-    deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
-  }
-}
-
-function describeBillingIdentity(name, envVar) {
-  // Claude SDK family + ANTHROPIC_API_KEY → API; else OAuth fallback → subscription.
-  if (name === 'claude-sdk') {
-    if (envVar === 'ANTHROPIC_API_KEY') return 'Anthropic API'
-    if (envVar === 'CLAUDE_CODE_OAUTH_TOKEN') return 'Anthropic API (OAuth token)'
-    return 'Claude subscription'
-  }
-  // Container providers always bill API (no in-container OAuth fallback).
-  if (name === 'docker-cli' || name === 'docker-sdk') {
-    if (envVar === 'ANTHROPIC_API_KEY') return 'Anthropic API (forwarded to container)'
-    if (envVar === 'CLAUDE_CODE_OAUTH_TOKEN') return 'Anthropic API (OAuth token forwarded to container)'
-    return 'Anthropic API (forwarded to container)'
-  }
-  if (name === 'codex') return 'OpenAI API'
-  if (name === 'gemini') return 'Google API'
-  if (name === 'deepseek') return 'DeepSeek API'
-  return 'External provider'
+  resetCachesForTest()
 }
 
 /**
@@ -801,8 +327,17 @@ export async function registerDockerProvider(config) {
   const { DockerSdkSession } = await import('./docker-sdk-session.js')
   registerProvider('docker-sdk', DockerSdkSession)
 
+  // #4053: docker-byok — runs the BYOK agent loop on the host, tool
+  // execution inside the container. Same gating story as the other
+  // docker-* providers: only registered when environments are enabled
+  // AND `docker info` succeeded above. The provider's own start()
+  // does a second `docker info` preflight per session because the
+  // daemon can go down between server boot and session create.
+  const { DockerByokSession } = await import('./docker-byok-session.js')
+  registerProvider('docker-byok', DockerByokSession)
+
   // Backward compatibility: 'docker' maps to 'docker-cli' (hidden from listProviders)
   registerProvider('docker', DockerSession, { alias: true })
 
-  log.info('Docker providers registered (docker-cli, docker-sdk)')
+  log.info('Docker providers registered (docker-cli, docker-sdk, docker-byok)')
 }

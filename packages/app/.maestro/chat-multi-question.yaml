@@ -1,0 +1,181 @@
+appId: com.blamechris.chroxy
+name: ChatView mixed multi-question AskUserQuestion form (#4762)
+---
+
+# #4762 — Mobile Maestro coverage for the mixed multi-question
+# AskUserQuestion wire payload. Sibling to ask-user-question-multi.yaml
+# (which pins the all-single-select 4-question shape #4604 Chunk B).
+# This flow exercises the *mixed* wire shape #4735 / #4760 wired into
+# the dashboard's MultiQuestionForm:
+#
+#   - Q[0]: single-select with model-supplied 'Other' label
+#   - Q[1]: multi-select (`multiSelect: true`)
+#   - Q[2]: single-select with synthetic 'Other' sentinel
+#
+# Trigger: 'show-multi-question' user input → mock-server.mjs emits a
+# `user_question` envelope with the 3-question mixed shape. Fixture
+# seeding pattern is documented in CLAUDE.md → "Fixture Seeding for
+# Structured Renderers".
+#
+# Coverage today (MessageBubble only renders Q[0]):
+#
+#   - Pins the wire→render path for the mixed payload: a regression in
+#     handleUserQuestion's normalizeQuestion that mishandled
+#     multi-select or the model-supplied Other label on a sibling
+#     question would either (a) drop the whole `user_question`
+#     envelope at the `firstNormalized == null` guard or (b) corrupt
+#     Q[0]'s options. The `approval-question-0` wait + the
+#     `approval-button-approve` / `approval-button-deny` /
+#     `approval-button-Other` assertions catch both.
+#   - Pins the model-supplied 'Other' branch on Q[0] — Q[0]'s third
+#     option uses the model-supplied 'Other' label (not the synthetic
+#     OTHER_OPTION_VALUE sentinel), so the testID resolves to
+#     `approval-button-Other` (value === label). A regression in
+#     normalizeQuestion that double-appended the sentinel would
+#     surface as `approval-button-__chroxy_other__` instead.
+#   - Pins the answered round-trip — taps Approve on Q[0] and asserts
+#     the bubble flips to answered state (options remain in tree,
+#     `approval-card-<id>` still resolves).
+#
+# Out of scope until the mobile multi-question renderer lands:
+#
+#   - The dashboard-equivalent `question-prompt-multi` /
+#     `question-multi-submit` testIDs (per the #4762 acceptance
+#     criteria) come from `packages/dashboard/src/components/
+#     QuestionPrompt.tsx`'s `MultiQuestionForm` — the mobile
+#     `MessageBubble` doesn't yet have a sibling React Native
+#     component. When that component lands the flow extends to:
+#       - Wait for `id: question-prompt-multi`
+#       - Tap `id: question-multi-option-0-approve` for Q[0]
+#       - Tap `id: question-multi-option-1-app` / `-server` for Q[1]
+#         (multi-select — multiple taps add to the array)
+#       - Tap `id: question-multi-option-2-auto-rollback` for Q[2]
+#       - Tap `id: question-multi-submit`
+#       - Assert post-answer summary chip shows the comma-joined
+#         multi-select labels (`Q2 — which areas to verify?: app, server`)
+#         per #4716 / #4735 readability.
+#   - For now the post-answer state pin is via the single-option
+#     `approval-button-<value>` route on Q[0] only.
+#
+# Tested devices: portrait iPhone (iOS 17+). Mirrors
+# ask-user-question.yaml / ask-user-question-multi.yaml. Requires the
+# dev client + mock server on port 9876:
+#
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Self-contained (no `runFlow: setup/...`) because the existing setup/
+# flows target Expo Go (appId host.exp.Exponent), whereas this needs
+# the chroxy dev client (com.blamechris.chroxy).
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Ensure Chat tab.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that makes the mock server emit the mixed
+# 3-question multi-question payload (single-select + multi-select +
+# with-Other).
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-multi-question"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Wait for Q[0]'s prompt to render — same selector as the single-
+# question flow because the mobile MessageBubble currently renders
+# Q[0] of every multi-question payload.
+- extendedWaitUntil:
+    visible:
+      id: "approval-question-0"
+    timeout: 10000
+
+- takeScreenshot: chat-multi-question-prompt-rendered
+
+# Assert Q[0]'s options + Q[0]'s question text rendered.
+#   - 'approve' / 'deny' are the canonical lowercase labels (value ===
+#     label, see normalizeQuestion).
+#   - 'Other' is the model-supplied Other on Q[0] — testID resolves to
+#     `approval-button-Other` because the model-supplied label takes
+#     precedence over the synthetic OTHER_OPTION_VALUE sentinel.
+#   - 'Q1 — deploy to production?' pins the wire→render path for the
+#     question text field on the mixed payload.
+- assertVisible:
+    id: "approval-button-approve"
+- assertVisible:
+    id: "approval-button-deny"
+- assertVisible:
+    id: "approval-button-Other"
+- assertVisible: "Q1 — deploy to production?"
+
+# Tap Approve to round-trip the answered state on Q[0]. The mobile
+# `sendUserQuestionResponse` (widened in #4761 / PR #4859) accepts
+# both the legacy single-question string and the multi-question
+# `Record<string, string | string[]>` shape; Q[0]-only tap exercises
+# the string branch.
+- tapOn:
+    id: "approval-button-approve"
+- waitForAnimationToEnd
+
+- takeScreenshot: chat-multi-question-answered
+
+# Buttons remain in the tree post-answer (only their interactivity
+# changes). The answered state on Q[0] is the only pin we can make
+# today — extending to per-question post-answer summary chip lands
+# with the mobile MultiQuestionForm renderer (see header).
+- assertVisible:
+    id: "approval-button-approve"
+- assertVisible:
+    id: "approval-button-deny"

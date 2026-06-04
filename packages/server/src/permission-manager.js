@@ -361,7 +361,15 @@ export class PermissionManager extends EventEmitter {
     // downstream synchronous work runs.
     this.emit('permission_resolved', { toolUseId, reason: 'answered' })
 
-    // Build structured answers map: SDK expects { [questionText]: selectedLabel }
+    // Build structured answers map: SDK expects { [questionText]: selectedLabel }.
+    // Per @anthropic-ai/claude-agent-sdk sdk-tools.d.ts (AskUserQuestionOutput.answers,
+    // ~line 2696) the contract is explicit: each value is a plain string,
+    // and multi-select answers are comma-separated. So this layer
+    // normalizes the dashboard's wire shape (native string | string[] post-
+    // #4731, or legacy JSON-stringified arrays from #4604 Chunk B
+    // dashboards) into that canonical string-per-question shape before
+    // resolving the canUseTool Promise — otherwise the model would receive
+    // raw JSON literals like '["A","B"]' as the user's answer text (#4731).
     const answers = {}
     const questions = input.questions || []
     const questionKeys = new Set(questions.map(q => q.question))
@@ -369,7 +377,7 @@ export class PermissionManager extends EventEmitter {
       // Per-question answers provided by the client — only copy known question keys
       for (const key of Object.keys(answersMap)) {
         if (questionKeys.has(key)) {
-          answers[key] = answersMap[key]
+          answers[key] = normalizeAnswerValue(answersMap[key])
         }
       }
     } else if (questions.length > 0) {
@@ -607,4 +615,50 @@ export class PermissionManager extends EventEmitter {
       _fallbackLog.warn(msg)
     }
   }
+}
+
+/**
+ * #4731 — coerce a dashboard-supplied per-question answer value into the
+ * SDK's canonical string shape. The SDK's `AskUserQuestionOutput.answers`
+ * (see `@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts:2696`) types every
+ * value as a plain string with multi-select answers comma-separated.
+ *
+ * Accepted inputs:
+ *   - Array of labels (post-#4731 wire shape from updated dashboards) →
+ *     joined as `"A, B, C"`.
+ *   - JSON-stringified array (`'["A","B"]'` — the legacy #4604 Chunk B
+ *     dashboard JSON.stringifies multi-select arrays to fit the original
+ *     `Record<string,string>` schema) → parsed then joined.
+ *   - Plain string (single-select, freeform, or model-side "Other"
+ *     sentinel) → passed through unchanged.
+ *
+ * Anything else (null, undefined, object, number) coerces to the empty
+ * string — the SDK then receives a null-equivalent answer and the model
+ * surfaces "no preference" semantics, which is safer than throwing and
+ * stalling the canUseTool Promise.
+ */
+function normalizeAnswerValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v ?? '')).join(', ')
+  }
+  if (typeof value === 'string') {
+    // Detect the legacy JSON-stringified-array shape. Bare strings (e.g.
+    // `"Red"`) never look like JSON arrays, so this gate is tight enough
+    // that no plain-string answer is accidentally parsed. The try/catch
+    // means a string that merely starts with `[` but isn't valid JSON
+    // (e.g. someone literally answered `"[note]"`) falls through to the
+    // pass-through return below — no data loss.
+    if (value.length >= 2 && value.startsWith('[') && value.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(value)
+        if (Array.isArray(parsed)) {
+          return parsed.map((v) => String(v ?? '')).join(', ')
+        }
+      } catch {
+        // not JSON — fall through
+      }
+    }
+    return value
+  }
+  return ''
 }

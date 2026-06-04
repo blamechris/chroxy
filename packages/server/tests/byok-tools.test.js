@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES } from '../src/byok-tools.js'
+import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } from '../src/byok-tools.js'
+import { SUBAGENT_PROFILE_NAMES } from '../src/byok-subagent-profiles.js'
 
 /**
  * BUILTIN_TOOLS is the array passed verbatim into the SDK's
@@ -9,9 +10,9 @@ import { BUILTIN_TOOLS, BUILTIN_TOOL_NAMES, TODO_STATUS_LIST, TODO_STATUSES } fr
  */
 
 describe('BUILTIN_TOOLS', () => {
-  it('exposes the documented toolset (PR 2 v1 + WebFetch #4050 + TodoWrite #4051)', () => {
+  it('exposes the documented toolset (PR 2 v1 + WebFetch #4050 + TodoWrite #4051 + Task #4049)', () => {
     const names = BUILTIN_TOOLS.map((t) => t.name).sort()
-    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'TodoWrite', 'WebFetch', 'Write'])
+    assert.deepEqual(names, ['Bash', 'Edit', 'Glob', 'Grep', 'Read', 'Task', 'TodoWrite', 'WebFetch', 'Write'])
   })
 
   it('every tool has a name, description, and input_schema', () => {
@@ -97,5 +98,76 @@ describe('BUILTIN_TOOLS', () => {
       assert.ok(TODO_STATUSES.has(status), `TODO_STATUSES Set must include ${status}`)
     }
     assert.equal(TODO_STATUSES.size, TODO_STATUS_LIST.length)
+  })
+
+  it('Task requires description and prompt (#4049)', () => {
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.ok(task, 'Task must be registered')
+    assert.deepEqual(task.input_schema.required.sort(), ['description', 'prompt'])
+    // subagent_type is forward-compat but optional in v1.
+    assert.equal(task.input_schema.properties.subagent_type?.type, 'string')
+  })
+
+  it('Task description discloses subagent semantics + cancellation cascade (#4049)', () => {
+    // Pin the contract so a future rewording can't strip the
+    // user-facing guarantees (focused scope, isolated history,
+    // cancellation cascade, cost attribution).
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.match(task.description, /sub-?agent|subagent/i)
+    assert.match(task.description, /isolated|focused|fresh/i)
+    assert.match(task.description, /cancel|interrupt|abort/i)
+    assert.match(task.description, /cost|token/i)
+  })
+
+  it('BUILTIN_TOOL_NAMES contains Task (#4049)', () => {
+    assert.ok(BUILTIN_TOOL_NAMES.has('Task'),
+      'Task must be in BUILTIN_TOOL_NAMES so the executor catches misrouted dispatches')
+  })
+
+  it('Task input_schema exposes optional `permission_mode` enum (#5017)', () => {
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    const prop = task.input_schema.properties.permission_mode
+    assert.ok(prop, 'permission_mode property must exist on Task input_schema')
+    assert.equal(prop.type, 'string')
+    assert.deepEqual([...prop.enum].sort(), [...TASK_PERMISSION_MODE_LIST].sort())
+    // Must remain optional — required list is only description + prompt.
+    assert.ok(!task.input_schema.required.includes('permission_mode'),
+      'permission_mode must NOT be in required')
+  })
+
+  it('Task description discloses the per-launch permission_mode override + at-most-as-permissive rule (#5017)', () => {
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.match(task.description, /permission_mode/, 'description must name the override field')
+    assert.match(task.description, /permissive|stricter|at-most/i,
+      'description must disclose the at-most-as-permissive rule')
+  })
+
+  it('Task description enumerates the subagent_type profile names (#5018)', () => {
+    // The model can only request a subagent profile it knows exists.
+    // Pin the description so it surfaces every available profile id from
+    // the SUBAGENT_PROFILES registry — a future profile addition that
+    // forgets to update this string would fail loudly here.
+    const task = BUILTIN_TOOLS.find((t) => t.name === 'Task')
+    assert.match(task.description, /subagent_type/,
+      'description must name the subagent_type field')
+    for (const profileName of SUBAGENT_PROFILE_NAMES) {
+      assert.ok(task.description.includes(profileName),
+        `Task description must enumerate profile id "${profileName}"`)
+    }
+  })
+
+  it('TASK_PERMISSION_MODE_RANK orders modes by permissiveness (#5017)', () => {
+    // Lower number = more restrictive. The strict ordering pins the
+    // contract that drives _executeTaskTool's validation:
+    // plan < approve < acceptEdits < auto.
+    assert.equal(TASK_PERMISSION_MODE_LIST.length, 4)
+    assert.ok(TASK_PERMISSION_MODE_RANK.plan < TASK_PERMISSION_MODE_RANK.approve)
+    assert.ok(TASK_PERMISSION_MODE_RANK.approve < TASK_PERMISSION_MODE_RANK.acceptEdits)
+    assert.ok(TASK_PERMISSION_MODE_RANK.acceptEdits < TASK_PERMISSION_MODE_RANK.auto)
+    // Every list entry must have a rank.
+    for (const mode of TASK_PERMISSION_MODE_LIST) {
+      assert.equal(typeof TASK_PERMISSION_MODE_RANK[mode], 'number',
+        `${mode} must have a rank`)
+    }
   })
 })

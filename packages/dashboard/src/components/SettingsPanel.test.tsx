@@ -50,7 +50,7 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     setTheme: mockSetTheme,
     defaultProvider: 'claude-sdk',
     setDefaultProvider: vi.fn(),
-    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false },
+    inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' },
     updateInputSettings: mockUpdateInputSettings,
     availableProviders: [],
     // Per-session promptEvaluator toggle defaults — overridden by the
@@ -616,6 +616,204 @@ describe('SettingsPanel', () => {
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
       expect(input.maxLength).toBe(4000)
+    })
+
+    // #4662: cross-session debounce safety + multi-client conflict UX.
+    // Mirrors the QuietHoursEditor pattern (#4570): a pending debounce
+    // closes over the typed text but reads activeSessionId at fire-time
+    // — switching sessions mid-debounce would leak draft A onto session
+    // B. A divergent server broadcast mid-edit was also silently
+    // overwriting the local draft.
+    describe('cross-session debounce safety + multi-client conflict UX (#4662)', () => {
+      it('cancels a pending debounce when activeSessionId changes mid-edit', () => {
+        vi.useFakeTimers()
+        try {
+          const setSessionPreamble = vi.fn()
+          setMockState({
+            activeSessionId: 'sess-A',
+            sessions: [
+              { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: '' },
+              { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: '' },
+            ],
+            setSessionPreamble,
+          })
+          const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+          fireEvent.change(input, { target: { value: 'session A draft' } })
+          // Switch active session within the debounce window.
+          vi.advanceTimersByTime(100)
+          setMockState({
+            activeSessionId: 'sess-B',
+            sessions: [
+              { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: '' },
+              { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: '' },
+            ],
+            setSessionPreamble,
+          })
+          rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          // Drain past the original debounce window — nothing should fire.
+          vi.advanceTimersByTime(500)
+          expect(setSessionPreamble).not.toHaveBeenCalled()
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('hydrates the text area to the new session value after a switch (no stale draft)', () => {
+        setMockState({
+          activeSessionId: 'sess-A',
+          sessions: [
+            { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: 'A value' },
+            { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: 'B value' },
+          ],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(input.value).toBe('A value')
+        fireEvent.change(input, { target: { value: 'A draft' } })
+        // Switch sessions before the debounce fires.
+        setMockState({
+          activeSessionId: 'sess-B',
+          sessions: [
+            { sessionId: 'sess-A', name: 'A', cwd: '/tmp', sessionPreamble: 'A value' },
+            { sessionId: 'sess-B', name: 'B', cwd: '/tmp', sessionPreamble: 'B value' },
+          ],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('B value')
+      })
+
+      it('surfaces a conflict banner when a divergent snapshot lands mid-edit', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'original' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const input = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        fireEvent.change(input, { target: { value: 'my local draft' } })
+        // Divergent snapshot arrives from another client.
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'other client value' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        expect(screen.getByTestId('session-preamble-conflict-banner')).toBeInTheDocument()
+        expect(screen.getByTestId('session-preamble-conflict-accept')).toBeInTheDocument()
+        expect(screen.getByTestId('session-preamble-conflict-discard')).toBeInTheDocument()
+        // Local draft is preserved while the banner is up.
+        const afterInput = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(afterInput.value).toBe('my local draft')
+      })
+
+      it('clicking discard replaces the draft with the snapshot and clears the banner', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'original' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'my draft' } })
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'other client' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('session-preamble-conflict-discard'))
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('other client')
+        expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+      })
+
+      it('clicking accept keeps the local draft and clears the banner', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'original' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'my draft' } })
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'other client' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        fireEvent.click(screen.getByTestId('session-preamble-conflict-accept'))
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('my draft')
+        expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+      })
+
+      it('a snapshot matching the local draft does not surface the banner (own echo)', () => {
+        vi.useFakeTimers()
+        try {
+          const setSessionPreamble = vi.fn()
+          setMockState({
+            activeSessionId: 'sess-1',
+            sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: '' }],
+            setSessionPreamble,
+          })
+          const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'echo me' } })
+          vi.advanceTimersByTime(401)
+          expect(setSessionPreamble).toHaveBeenCalledWith('echo me')
+          // Server echoes the same value back.
+          setMockState({
+            activeSessionId: 'sess-1',
+            sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'echo me' }],
+            setSessionPreamble,
+          })
+          rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('accepts snapshot updates normally when the editor is clean', () => {
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'initial' }],
+          setSessionPreamble: vi.fn(),
+        })
+        const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        // No edits — a fresh snapshot replaces the draft.
+        setMockState({
+          activeSessionId: 'sess-1',
+          sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: 'from server' }],
+          setSessionPreamble: vi.fn(),
+        })
+        rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+        const after = screen.getByTestId('session-preamble-input') as HTMLTextAreaElement
+        expect(after.value).toBe('from server')
+        expect(screen.queryByTestId('session-preamble-conflict-banner')).toBeNull()
+      })
+
+      it('cancels a pending debounce on unmount', () => {
+        vi.useFakeTimers()
+        try {
+          const setSessionPreamble = vi.fn()
+          setMockState({
+            activeSessionId: 'sess-1',
+            sessions: [{ sessionId: 'sess-1', name: 'Test', cwd: '/tmp', sessionPreamble: '' }],
+            setSessionPreamble,
+          })
+          const { unmount } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+          fireEvent.change(screen.getByTestId('session-preamble-input'), { target: { value: 'half-typed' } })
+          vi.advanceTimersByTime(100)
+          unmount()
+          vi.advanceTimersByTime(500)
+          expect(setSessionPreamble).not.toHaveBeenCalled()
+        } finally {
+          vi.useRealTimers()
+        }
+      })
     })
   })
 
@@ -1945,6 +2143,167 @@ describe('SettingsPanel', () => {
       setMockState({ notificationPrefs: null, serverCapabilities: {} })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.getByTestId('notification-prefs-not-supported')).toBeInTheDocument()
+    })
+  })
+
+  // #4796 — voice input mode settings: confirm the user-facing labels are
+  // present (avoids ambiguous wording like "Stop automatically on pause"),
+  // that the persisted value drives the rendered select, that changing the
+  // select round-trips through `updateInputSettings` (the persistence
+  // wiring that closes the audit Tester #2 gap), and that the explanatory
+  // hint row is rendered alongside the control.
+  describe('Voice input mode (#4796)', () => {
+    it('renders the voice input select with the persisted value from store', () => {
+      setMockState({
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'auto-pause' },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode') as HTMLSelectElement
+      expect(select.value).toBe('auto-pause')
+    })
+
+    it('uses user-facing labels — no ambiguous "Stop on pause" wording', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode')
+      const optionTexts = Array.from(select.querySelectorAll('option')).map(o => o.textContent ?? '')
+      // Continuous mode label must explicitly mention "click stop" so the
+      // user knows the mic stays lit between silences.
+      expect(optionTexts.some(t => /click stop/i.test(t))).toBe(true)
+      // Auto-pause label must explain what triggers the stop — "silence"
+      // rather than the older, ambiguous "pause" wording.
+      expect(optionTexts.some(t => /silence/i.test(t))).toBe(true)
+      // Regression guard: the old confusing label must not survive.
+      expect(optionTexts.every(t => !/Stop automatically on pause/i.test(t))).toBe(true)
+    })
+
+    it('persists the mode change via updateInputSettings when user picks auto-pause', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode')
+      fireEvent.change(select, { target: { value: 'auto-pause' } })
+      expect(mockUpdateInputSettings).toHaveBeenCalledWith({ voiceInputMode: 'auto-pause' })
+    })
+
+    it('persists the mode change via updateInputSettings when user picks continuous', () => {
+      setMockState({
+        inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'auto-pause' },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode')
+      fireEvent.change(select, { target: { value: 'continuous' } })
+      expect(mockUpdateInputSettings).toHaveBeenCalledWith({ voiceInputMode: 'continuous' })
+    })
+
+    it('renders the explanatory hint row beneath the voice input control', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      expect(hint).toBeInTheDocument()
+      // The hint should explain BOTH modes and call out the browser-only
+      // caveat so users on the macOS native engine know it doesn't apply.
+      expect(hint.textContent ?? '').toMatch(/silence/i)
+    })
+
+    // #4796 review feedback (Copilot): the hint must be programmatically
+    // linked to the select via aria-describedby so screen readers announce
+    // it on focus. Without this the explanation is accessibility-invisible
+    // even though the dashboard already uses the pattern in
+    // CreateSessionModal.tsx (aria-describedby="permission-mode-hint").
+    it('links the voice input select to the hint via aria-describedby for screen readers', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Voice input mode') as HTMLSelectElement
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      // The select's aria-describedby must point at the hint's id, and the
+      // hint must actually carry that id — otherwise assistive tech can't
+      // resolve the reference. Both halves of the contract are asserted.
+      const describedBy = select.getAttribute('aria-describedby')
+      expect(describedBy).toBe('voice-input-mode-hint')
+      expect(hint.id).toBe('voice-input-mode-hint')
+    })
+
+    // #4796 review feedback (Copilot): the hint copy must reference the
+    // actual dropdown option labels rather than coining shorthand names
+    // ("Silence mode", "Continuous mode") that could read like a third
+    // mode. Regression guard against re-introducing the bare shorthand.
+    it('hint copy quotes the dropdown option labels verbatim, not shorthand mode names', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const hint = screen.getByTestId('voice-input-mode-hint')
+      const text = hint.textContent ?? ''
+      // Both option labels must appear verbatim somewhere in the hint so
+      // the user can map each sentence back to the dropdown choice.
+      expect(text).toMatch(/Keep listening until I click stop/)
+      expect(text).toMatch(/Stop after silence \(browser decides\)/)
+    })
+  })
+
+  // #4956 — Reset macOS speech permissions affordance. Gated on
+  // inTauri && macOS so the button doesn't show as a no-op on Linux/
+  // Windows or in browser (where there's no shell to invoke tccutil).
+  describe('Reset macOS speech permissions (#4956)', () => {
+    const tauriInvoke = vi.fn()
+    const setTauriEnv = (mac: boolean, tauri: boolean) => {
+      Object.defineProperty(window.navigator, 'userAgent', {
+        configurable: true,
+        value: mac
+          ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Test'
+          : 'Mozilla/5.0 (X11; Linux x86_64) Test',
+      })
+      if (tauri) {
+        ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+          invoke: tauriInvoke,
+        }
+      } else {
+        delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+      }
+    }
+
+    afterEach(() => {
+      tauriInvoke.mockReset()
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    })
+
+    it('does NOT render the reset row in the browser (non-Tauri)', () => {
+      setTauriEnv(true, false) // macOS UA but not Tauri
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('speech-reset-row')).toBeNull()
+    })
+
+    it('does NOT render the reset row on Linux even when running in Tauri', () => {
+      setTauriEnv(false, true)
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.queryByTestId('speech-reset-row')).toBeNull()
+    })
+
+    it('renders the reset row with an idle hint on macOS-in-Tauri', () => {
+      setTauriEnv(true, true)
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(screen.getByTestId('speech-reset-row')).toBeInTheDocument()
+      expect(screen.getByTestId('speech-reset-button')).toHaveTextContent('Reset now')
+      // Idle hint mentions both reset targets so an operator triaging knows
+      // what the button is about to do.
+      const row = screen.getByTestId('speech-reset-row')
+      expect(row.textContent).toContain('Microphone')
+      expect(row.textContent).toContain('SpeechRecognition')
+      expect(row.textContent).toContain('com.chroxy.desktop')
+    })
+
+    it('invokes the reset_speech_permissions Tauri command and surfaces a success hint', async () => {
+      setTauriEnv(true, true)
+      tauriInvoke.mockResolvedValue(undefined)
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('speech-reset-button'))
+      // findByTestId waits for the success hint to mount, replacing the
+      // earlier `setTimeout(..., 0)` flush which was flaky across runtimes
+      // (#4998 review).
+      await screen.findByTestId('speech-reset-success')
+      expect(tauriInvoke).toHaveBeenCalledWith('reset_speech_permissions')
+    })
+
+    it('surfaces an error hint when the Tauri command rejects', async () => {
+      setTauriEnv(true, true)
+      tauriInvoke.mockRejectedValue(new Error('tccutil reset Microphone exited with status 1'))
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('speech-reset-button'))
+      const errEl = await screen.findByTestId('speech-reset-error')
+      expect(errEl.textContent).toContain('tccutil reset Microphone exited with status 1')
     })
   })
 })

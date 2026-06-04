@@ -415,14 +415,59 @@ export const NotificationPrefsSetSchema = z.object({
   prefs: NotificationPrefsPatchSchema,
 }).passthrough()
 
+/**
+ * #4735 / #4731 / #4621 — per-question answer wire format.
+ *
+ * `answers` is a map keyed by question text. Values are either:
+ * - `string` — single-select label or a free-form ("Other"/text) answer
+ * - `string[]` — multi-select labels (one entry per selected option)
+ *
+ * Pre-#4621 clients JSON-stringified multi-select arrays into a single
+ * string so the wire shape `Record<string, string>` was preserved; the
+ * widened union accepts the native array form so newer dashboard / app
+ * builds can submit multi-select answers without the JSON envelope. The
+ * server-side consumers (`PermissionManager.respondToQuestion`,
+ * `ClaudeTuiSession.respondToQuestion`) already accept both shapes —
+ * see `resolveQuestionDigits` in `claude-tui-session.js` for the TUI
+ * path that handles the array variant directly.
+ *
+ * The server normalizes arrays to the SDK's canonical comma-separated
+ * format inside `PermissionManager.respondToQuestion` (the SDK's
+ * `AskUserQuestionOutput.answers` is typed `{ [questionText]: string }`
+ * and the spec is explicit: "multi-select answers are comma-separated").
+ * Older dashboards' JSON-stringified array payloads are unwrapped on the
+ * same path, so all variants converge before reaching the SDK.
+ *
+ * Bounds:
+ *   - Array max length: 100 entries per question (mirrors the per-answer-
+ *     map cap; chroxy never sees forms past 4 options in practice, so
+ *     this is a generous safety margin).
+ *   - Per-array-entry char cap: 10_000. Multi-select values are option
+ *     labels (short by construction) — capping at 10_000 chars keeps the
+ *     per-answer worst case bounded at ~1MB without the legacy
+ *     100_000-char cap on the string path, which exists to cover the
+ *     JSON-stringified-array shape sent by pre-#4621 dashboards (and is
+ *     itself bounded by the top-level CHROXY_MAX_PAYLOAD).
+ */
+const UserQuestionAnswerValueSchema = z.union([
+  z.string().max(100_000),
+  z.array(z.string().max(10_000)).max(100),
+])
+
 export const UserQuestionResponseSchema = z.object({
   type: z.literal('user_question_response'),
   answer: z.string().max(100_000),
-  answers: z.record(z.string(), z.string().max(100_000)).refine(
+  answers: z.record(z.string(), UserQuestionAnswerValueSchema).refine(
     (obj) => Object.keys(obj).length <= 100,
     { message: 'Too many answers (max 100)' }
   ).optional(),
   toolUseId: z.string().max(256).optional(),
+  // #4651 — single-question "Other" / freeform path. When set, the server
+  // resolves the chosen option (`answer`) to its 1-indexed digit, writes
+  // the digit to open claude TUI's text-input prompt, then writes
+  // `freeformText` + Enter to submit. Mutually exclusive with `answers`
+  // (multi-question forms are out of scope per #4648 / #4651).
+  freeformText: z.string().max(100_000).optional(),
 })
 
 export const ListDirectorySchema = z.object({

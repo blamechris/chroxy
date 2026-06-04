@@ -19,9 +19,12 @@ import {
   handlePlanStarted,
   handlePlanReady,
   handleInactivityWarning,
+  handleMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,
+  parseConnectedClients,
   handleAuthFail,
   handleKeyExchangeOk,
   handleServerMode,
@@ -30,6 +33,7 @@ import {
   handleCheckpointRestored,
   handleError,
   handleSessionError,
+  handleSessionStopped,
   handleLogEntry,
   handleClientJoined,
   handleClientLeft,
@@ -45,6 +49,10 @@ import {
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
   handleSessionList,
+  buildSessionListPatches,
+  cumulativeUsageEquals,
+  chunkSubscribeSessionIds,
+  SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext,
   handleSessionTimeout,
   handleSessionRestoreFailed,
@@ -65,6 +73,7 @@ import {
   handleGitCommitResult,
   handleAgentSpawned,
   handleAgentCompleted,
+  handleAgentEvent,
   handleBackgroundWorkChanged,
   handleEnvironmentList,
   handleEnvironmentError,
@@ -99,6 +108,7 @@ import type {
   Checkpoint,
   ConnectedClient,
   ConversationSummary,
+  CumulativeUsage,
   DevPreview,
   ModelInfo,
   PendingBackgroundShell,
@@ -348,8 +358,17 @@ describe('handleConfirmPermissionMode', () => {
 // handleClaudeReady
 // ---------------------------------------------------------------------------
 describe('handleClaudeReady', () => {
-  it('returns claudeReady: true', () => {
-    expect(handleClaudeReady()).toEqual({ claudeReady: true })
+  it('returns claudeReady: true and clears stoppedAt/stoppedCode (#4879)', () => {
+    // #4879 — clearing the stopped marker on claude_ready is what makes
+    // the quiet "Session stopped." inline strip auto-dismiss when the
+    // server restarts the child after the operator's next input. Both
+    // new fields collapse to null end-to-end for sessions that were
+    // never stopped, so the patch is safe to broadcast unconditionally.
+    expect(handleClaudeReady()).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+    })
   })
 })
 
@@ -851,6 +870,127 @@ describe('handleError', () => {
     expect(handleError({ fatal: 0 as unknown as boolean }).fatal).toBeUndefined()
     expect(handleError({ fatal: null as unknown as boolean }).fatal).toBeUndefined()
   })
+
+  // #5039 — partial-cost passthrough. PR #5037 added optional usage + cost
+  // fields to the server's error envelope when the failed turn folded any
+  // parent + Task subagent rounds before the error fired. The dashboard
+  // toast and mobile alert use the parsed snapshot to render a "this turn
+  // cost $X" sub-line; the parser is the single source of truth for the
+  // strict-finite gate that decides whether the snapshot is usable.
+  describe('partialCost (#5039 — PR #5037 wire passthrough)', () => {
+    it('parses cost + usage into the partialCost slot when both present', () => {
+      const result = handleError({
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.0875,
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 3400,
+          cache_read_input_tokens: 500,
+          cache_creation_input_tokens: 100,
+        },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.0875,
+        inputTokens: 1200,
+        outputTokens: 3400,
+        cacheReadTokens: 500,
+        cacheCreationTokens: 100,
+      })
+    })
+
+    it('keeps partialCost when usage is missing (subscription-billed provider)', () => {
+      // Subscription-billed providers can produce a cost without a usage
+      // breakdown — keep the cost surfaced so the user still sees the
+      // failed-turn spend even when the token counters are unavailable.
+      const result = handleError({
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.05,
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.05,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('falls back to null when cost is missing (pre-#5037 wire shape)', () => {
+      // Pre-PR #5037 servers don't carry partials; the parser must
+      // surface null so consumers can branch on presence without
+      // re-implementing the gate.
+      expect(handleError({ code: 'STREAM_ERROR', message: 'x' }).partialCost).toBeNull()
+    })
+
+    it('rejects NaN / Infinity / negative / non-number cost (matches _trackUsage gate)', () => {
+      // Server-side _trackUsage (#5038) only accumulates Number.isFinite
+      // costs — mirror that gate here so a provider bug can't poison
+      // the partial-cost display either.
+      expect(handleError({ cost: NaN }).partialCost).toBeNull()
+      expect(handleError({ cost: Infinity }).partialCost).toBeNull()
+      expect(handleError({ cost: -0.01 }).partialCost).toBeNull()
+      expect(handleError({ cost: '0.05' as unknown as number }).partialCost).toBeNull()
+      expect(handleError({ cost: null as unknown as number }).partialCost).toBeNull()
+    })
+
+    it('zeroes individual non-finite token fields without losing other counters', () => {
+      // Best-effort token parse: a single bad counter (NaN, negative,
+      // non-number) drops just that field — the rest of the breakdown
+      // still surfaces. Without this, a provider that emits one bogus
+      // counter would null the whole partial snapshot.
+      const result = handleError({
+        cost: 0.02,
+        usage: {
+          input_tokens: 1000,
+          output_tokens: NaN,
+          cache_read_input_tokens: -5,
+          cache_creation_input_tokens: 'x',
+        },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.02,
+        inputTokens: 1000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('treats non-object usage as empty (zero tokens, cost still surfaced)', () => {
+      // A wire-side typo (`usage: 'oops'`) must not poison the cost
+      // surface — fall back to zero counters and still render the cost.
+      const result = handleError({
+        cost: 0.03,
+        usage: 'oops' as unknown as Record<string, number>,
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.03,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('accepts cost: 0 (free / cache-only turn) and surfaces the snapshot', () => {
+      // A 100%-cached turn can still fold a non-zero usage breakdown
+      // without billing — the user benefits from seeing those tokens
+      // even if the cost is $0.
+      const result = handleError({
+        cost: 0,
+        usage: { input_tokens: 50, output_tokens: 0, cache_read_input_tokens: 1000 },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0,
+        inputTokens: 50,
+        outputTokens: 0,
+        cacheReadTokens: 1000,
+        cacheCreationTokens: 0,
+      })
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -945,6 +1085,73 @@ describe('handleSessionError', () => {
     )
     expect(result.message).toBe('Not authorized')
     expect(result.boundSessionName).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionStopped (#4879)
+// ---------------------------------------------------------------------------
+describe('handleSessionStopped', () => {
+  const fixedNow = () => 1_700_000_000_000
+
+  it('builds a patch targeting the explicit sessionId with the stopped marker + code', () => {
+    const result = handleSessionStopped(
+      { sessionId: 'sess-1', code: 143 },
+      'active-1',
+      fixedNow,
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: { stoppedAt: 1_700_000_000_000, stoppedCode: 143 },
+    })
+  })
+
+  it('falls back to active session when sessionId is missing', () => {
+    const result = handleSessionStopped({ code: 0 }, 'active-1', fixedNow)
+    expect(result.sessionId).toBe('active-1')
+    expect(result.patch).toEqual({ stoppedAt: 1_700_000_000_000, stoppedCode: 0 })
+  })
+
+  it('preserves code 0 explicitly (clean SIGINT exit is a meaningful signal)', () => {
+    const result = handleSessionStopped({ sessionId: 's', code: 0 }, null, fixedNow)
+    expect(result.patch.stoppedCode).toBe(0)
+  })
+
+  it('returns stoppedCode: null when code is missing on the wire', () => {
+    const result = handleSessionStopped({ sessionId: 's' }, null, fixedNow)
+    expect(result.patch.stoppedCode).toBeNull()
+    expect(result.patch.stoppedAt).toBe(1_700_000_000_000)
+  })
+
+  it('returns stoppedCode: null when code is non-integer (defensive)', () => {
+    // ServerSessionStoppedSchema enforces integer at the protocol layer
+    // (`z.number().int()`), but the handler is also called from
+    // untrusted/test paths — collapse anything non-integer to null
+    // rather than poisoning stoppedCode with a string, NaN, Infinity,
+    // or a fractional value (which would render "exit 1.5" in the UI).
+    expect(handleSessionStopped({ code: 'not a number' }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: null }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: NaN }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: Infinity }, null, fixedNow).patch.stoppedCode).toBeNull()
+    // Fractional values get the same treatment — the schema is `int()`,
+    // not `finite()`, so a buggy producer sending 1.5 must NOT render.
+    expect(handleSessionStopped({ code: 1.5 }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: -0.1 }, null, fixedNow).patch.stoppedCode).toBeNull()
+  })
+
+  it('returns sessionId: null when no sessionId on msg AND no active session (broadcast guard semantics handled by caller)', () => {
+    const result = handleSessionStopped({ code: 0 }, null, fixedNow)
+    expect(result.sessionId).toBeNull()
+  })
+
+  it('defaults `now` to Date.now when not injected', () => {
+    const before = Date.now()
+    const result = handleSessionStopped({ sessionId: 's' }, null)
+    const after = Date.now()
+    const stoppedAt = result.patch.stoppedAt as number
+    expect(typeof stoppedAt).toBe('number')
+    expect(stoppedAt).toBeGreaterThanOrEqual(before)
+    expect(stoppedAt).toBeLessThanOrEqual(after)
   })
 })
 
@@ -1181,6 +1388,13 @@ describe('handleAuthOk', () => {
       latestVersion: '0.6.13',
       serverCommit: 'abc123',
       protocolVersion: 2,
+      resultTimeoutMs: 45 * 60 * 1000,
+      streamStallTimeoutMs: 5 * 60 * 1000,
+      encryption: 'required',
+      sessionToken: 'tok-abc',
+      clientId: 'client-1',
+      webFeatures: { available: true, remote: false, teleport: true },
+      capabilities: { notificationPrefs: true, somethingElse: false },
     })
     expect(result).toEqual({
       serverMode: 'cli',
@@ -1190,14 +1404,20 @@ describe('handleAuthOk', () => {
       latestVersion: '0.6.13',
       serverCommit: 'abc123',
       protocolVersion: 2,
+      resultTimeoutMs: 45 * 60 * 1000,
+      streamStallTimeoutMs: 5 * 60 * 1000,
+      encryption: 'required',
+      sessionToken: 'tok-abc',
+      myClientId: 'client-1',
+      webFeatures: { available: true, remote: false, teleport: true },
+      serverCapabilities: { notificationPrefs: true, somethingElse: false },
     })
   })
 
-  it('accepts terminal as serverMode', () => {
-    expect(handleAuthOk({ serverMode: 'terminal' }).serverMode).toBe('terminal')
-  })
-
   it('rejects unknown serverMode values', () => {
+    // #4810: 'terminal' was previously accepted but the wire protocol only
+    // emits 'cli'; the unreachable branch is now treated as unknown.
+    expect(handleAuthOk({ serverMode: 'terminal' }).serverMode).toBeNull()
     expect(handleAuthOk({ serverMode: 'bogus' }).serverMode).toBeNull()
     expect(handleAuthOk({ serverMode: 42 }).serverMode).toBeNull()
     expect(handleAuthOk({}).serverMode).toBeNull()
@@ -1239,7 +1459,163 @@ describe('handleAuthOk', () => {
     expect(handleAuthOk({ protocolVersion: 5 }).protocolVersion).toBe(5)
   })
 
-  it('returns all-null payload for an empty message', () => {
+  // #3760 — resultTimeoutMs guard (positive finite number, else null).
+  describe('resultTimeoutMs', () => {
+    it('passes through positive finite numbers', () => {
+      expect(handleAuthOk({ resultTimeoutMs: 1 }).resultTimeoutMs).toBe(1)
+      expect(handleAuthOk({ resultTimeoutMs: 45 * 60 * 1000 }).resultTimeoutMs).toBe(45 * 60 * 1000)
+    })
+
+    it('rejects 0, negative, non-finite, or non-number values', () => {
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '20m', null, undefined, {}]) {
+        expect(handleAuthOk({ resultTimeoutMs: bad }).resultTimeoutMs).toBeNull()
+      }
+    })
+
+    it('returns null when the field is omitted', () => {
+      expect(handleAuthOk({}).resultTimeoutMs).toBeNull()
+    })
+  })
+
+  // #4497 / #4477 — streamStallTimeoutMs guard. 0 is the protocol's "disabled"
+  // sentinel so it must be treated the same as absent (chip falls back to the
+  // generic phrase). This was the latent #4766 bug on mobile.
+  describe('streamStallTimeoutMs', () => {
+    it('passes through positive finite numbers', () => {
+      expect(handleAuthOk({ streamStallTimeoutMs: 5 * 60 * 1000 }).streamStallTimeoutMs).toBe(
+        5 * 60 * 1000,
+      )
+    })
+
+    it('rejects 0, negative, non-finite, or non-number values', () => {
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '5m', null, undefined, []]) {
+        expect(handleAuthOk({ streamStallTimeoutMs: bad }).streamStallTimeoutMs).toBeNull()
+      }
+    })
+
+    it('returns null when the field is omitted', () => {
+      expect(handleAuthOk({}).streamStallTimeoutMs).toBeNull()
+    })
+  })
+
+  describe('encryption', () => {
+    it('passes through string values verbatim', () => {
+      expect(handleAuthOk({ encryption: 'required' }).encryption).toBe('required')
+      expect(handleAuthOk({ encryption: 'optional' }).encryption).toBe('optional')
+    })
+
+    it('returns null for missing or non-string values', () => {
+      expect(handleAuthOk({}).encryption).toBeNull()
+      expect(handleAuthOk({ encryption: true }).encryption).toBeNull()
+      expect(handleAuthOk({ encryption: 42 }).encryption).toBeNull()
+    })
+  })
+
+  describe('sessionToken', () => {
+    it('extracts string sessionToken (pairing flow)', () => {
+      expect(handleAuthOk({ sessionToken: 'tok-xyz' }).sessionToken).toBe('tok-xyz')
+    })
+
+    it('returns null when missing or non-string', () => {
+      expect(handleAuthOk({}).sessionToken).toBeNull()
+      expect(handleAuthOk({ sessionToken: 42 }).sessionToken).toBeNull()
+    })
+  })
+
+  describe('myClientId', () => {
+    it('extracts clientId as myClientId', () => {
+      expect(handleAuthOk({ clientId: 'client-1' }).myClientId).toBe('client-1')
+    })
+
+    it('returns null when missing or non-string', () => {
+      expect(handleAuthOk({}).myClientId).toBeNull()
+      expect(handleAuthOk({ clientId: 42 }).myClientId).toBeNull()
+    })
+  })
+
+  describe('webFeatures', () => {
+    it('coerces wire flags to hard booleans', () => {
+      const wf = handleAuthOk({
+        webFeatures: { available: 1, remote: 'yes', teleport: 0 },
+      }).webFeatures
+      expect(wf).toEqual({ available: true, remote: true, teleport: false })
+    })
+
+    it('defaults to all-false when the field is missing', () => {
+      expect(handleAuthOk({}).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+    })
+
+    it('defaults to all-false when the field is non-object or an array', () => {
+      expect(handleAuthOk({ webFeatures: null }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+      expect(handleAuthOk({ webFeatures: [] }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+      expect(handleAuthOk({ webFeatures: 'true' }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+    })
+
+    it('does not share the default object across calls (mutation safety)', () => {
+      const a = handleAuthOk({}).webFeatures
+      a.available = true
+      const b = handleAuthOk({}).webFeatures
+      expect(b.available).toBe(false)
+    })
+  })
+
+  describe('serverCapabilities', () => {
+    it('only stores strict-true values (fail-closed)', () => {
+      const caps = handleAuthOk({
+        capabilities: {
+          notificationPrefs: true,
+          taggedOnly: 'true',
+          falsy: false,
+          numeric: 1,
+        },
+      }).serverCapabilities
+      expect(caps).toEqual({
+        notificationPrefs: true,
+        taggedOnly: false,
+        falsy: false,
+        numeric: false,
+      })
+    })
+
+    it('returns empty object when missing or malformed', () => {
+      expect(handleAuthOk({}).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: null }).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: [] }).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: 'cap' }).serverCapabilities).toEqual({})
+    })
+
+    // Defence-in-depth (#4781 Copilot review): server-supplied keys are
+    // untrusted; refuse `__proto__`/`constructor`/`prototype` so a malformed
+    // payload can't mutate Object.prototype. JSON.parse'd payloads with
+    // these keys become own properties enumerable by Object.entries.
+    it('refuses prototype-pollution keys (__proto__, constructor, prototype)', () => {
+      const polluted = JSON.parse(
+        '{"__proto__": true, "constructor": true, "prototype": true, "ok": true}',
+      )
+      const caps = handleAuthOk({ capabilities: polluted }).serverCapabilities
+      expect(caps).toEqual({ ok: true })
+      // Object.prototype must be unchanged after parsing the payload.
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    })
+  })
+
+  it('returns the hardened defaults payload for an empty message', () => {
     expect(handleAuthOk({})).toEqual({
       serverMode: null,
       sessionCwd: null,
@@ -1248,7 +1624,107 @@ describe('handleAuthOk', () => {
       latestVersion: null,
       serverCommit: null,
       protocolVersion: null,
+      resultTimeoutMs: null,
+      streamStallTimeoutMs: null,
+      encryption: null,
+      sessionToken: null,
+      myClientId: null,
+      webFeatures: { available: false, remote: false, teleport: false },
+      serverCapabilities: {},
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseConnectedClients (#4766)
+// ---------------------------------------------------------------------------
+describe('parseConnectedClients', () => {
+  it('parses a well-formed roster and marks self via myClientId', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'client-1', deviceName: 'Dashboard', deviceType: 'desktop', platform: 'macos' },
+        { clientId: 'client-2', deviceName: 'Phone', deviceType: 'phone', platform: 'ios' },
+      ],
+      'client-1',
+    )
+    expect(result).toEqual([
+      {
+        clientId: 'client-1',
+        deviceName: 'Dashboard',
+        deviceType: 'desktop',
+        platform: 'macos',
+        isSelf: true,
+      },
+      {
+        clientId: 'client-2',
+        deviceName: 'Phone',
+        deviceType: 'phone',
+        platform: 'ios',
+        isSelf: false,
+      },
+    ])
+  })
+
+  it('marks no entries as self when myClientId is null', () => {
+    const result = parseConnectedClients(
+      [{ clientId: 'a', deviceType: 'phone', platform: 'ios' }],
+      null,
+    )
+    expect(result[0].isSelf).toBe(false)
+  })
+
+  it('returns [] when rawClients is not an array', () => {
+    expect(parseConnectedClients(undefined, 'c1')).toEqual([])
+    expect(parseConnectedClients(null, 'c1')).toEqual([])
+    expect(parseConnectedClients('clients', 'c1')).toEqual([])
+    expect(parseConnectedClients({ clientId: 'oops' }, 'c1')).toEqual([])
+  })
+
+  it('drops entries missing a string clientId', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'good', deviceType: 'desktop', platform: 'macos' },
+        { clientId: 42, deviceType: 'desktop' },
+        { deviceType: 'desktop' },
+        null,
+        'not-an-object',
+      ],
+      'good',
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].clientId).toBe('good')
+  })
+
+  it('falls back deviceType to "unknown" for malformed/unknown values', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'a', deviceType: 'space-station' },
+        { clientId: 'b', deviceType: 42 },
+        { clientId: 'c' },
+      ],
+      null,
+    )
+    expect(result.map((c) => c.deviceType)).toEqual(['unknown', 'unknown', 'unknown'])
+  })
+
+  it('falls back deviceName=null and platform="unknown" when missing/non-string', () => {
+    const result = parseConnectedClients(
+      [{ clientId: 'a' }, { clientId: 'b', deviceName: 42, platform: false }],
+      null,
+    )
+    expect(result[0].deviceName).toBeNull()
+    expect(result[0].platform).toBe('unknown')
+    expect(result[1].deviceName).toBeNull()
+    expect(result[1].platform).toBe('unknown')
+  })
+
+  it('accepts every valid deviceType variant', () => {
+    const variants = ['phone', 'tablet', 'desktop', 'unknown'] as const
+    const result = parseConnectedClients(
+      variants.map((dt, i) => ({ clientId: `c${i}`, deviceType: dt })),
+      null,
+    )
+    expect(result.map((c) => c.deviceType)).toEqual([...variants])
   })
 })
 
@@ -1305,11 +1781,10 @@ describe('handleServerMode', () => {
     expect(handleServerMode({ mode: 'cli' })).toEqual({ mode: 'cli' })
   })
 
-  it('extracts terminal mode', () => {
-    expect(handleServerMode({ mode: 'terminal' })).toEqual({ mode: 'terminal' })
-  })
-
   it('returns null for unknown mode (caller surfaces an alert)', () => {
+    // #4810: 'terminal' was previously accepted but is now treated as unknown
+    // since the wire protocol only emits 'cli'.
+    expect(handleServerMode({ mode: 'terminal' })).toEqual({ mode: null })
     expect(handleServerMode({ mode: 'bogus' })).toEqual({ mode: null })
     expect(handleServerMode({ mode: 42 })).toEqual({ mode: null })
     expect(handleServerMode({})).toEqual({ mode: null })
@@ -1613,6 +2088,295 @@ describe('handleSessionList', () => {
   it('returns empty array verbatim (auto-resume gate stays at call site)', () => {
     const empty: SessionInfo[] = []
     expect(handleSessionList({ sessions: empty })).toBe(empty)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// cumulativeUsageEquals
+// ---------------------------------------------------------------------------
+describe('cumulativeUsageEquals', () => {
+  const base: CumulativeUsage = {
+    inputTokens: 100,
+    outputTokens: 50,
+    cacheReadTokens: 10,
+    cacheCreationTokens: 5,
+    costUsd: 0.12,
+    turnsBilled: 3,
+  }
+
+  it('returns true when both snapshots match across all six fields', () => {
+    expect(cumulativeUsageEquals(base, { ...base })).toBe(true)
+  })
+
+  it('returns false when any single field differs', () => {
+    expect(cumulativeUsageEquals(base, { ...base, inputTokens: 101 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, outputTokens: 51 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, cacheReadTokens: 11 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, cacheCreationTokens: 6 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, costUsd: 0.13 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, turnsBilled: 4 })).toBe(false)
+  })
+
+  it('returns false when either side is null or undefined', () => {
+    // Preserves the prior inline `current && ...` guard — null `current`
+    // falls through and the candidate snapshot is applied as a no-op write.
+    expect(cumulativeUsageEquals(null, base)).toBe(false)
+    expect(cumulativeUsageEquals(base, null)).toBe(false)
+    expect(cumulativeUsageEquals(null, null)).toBe(false)
+    expect(cumulativeUsageEquals(undefined, base)).toBe(false)
+    expect(cumulativeUsageEquals(base, undefined)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildSessionListPatches (#4767)
+// ---------------------------------------------------------------------------
+describe('buildSessionListPatches', () => {
+  const makeSession = (
+    sessionId: string,
+    overrides: Partial<SessionInfo> = {},
+  ): SessionInfo => ({
+    sessionId,
+    name: sessionId,
+    cwd: '/tmp',
+    type: 'cli',
+    hasTerminal: false,
+    model: null,
+    permissionMode: null,
+    isBusy: false,
+    createdAt: 1000,
+    conversationId: null,
+    ...overrides,
+  })
+
+  it('returns null when handleSessionList rejects the message', () => {
+    expect(buildSessionListPatches({}, [], null)).toBeNull()
+    expect(buildSessionListPatches({ sessions: 'nope' }, [], null)).toBeNull()
+  })
+
+  it('exposes the parsed sessionList by reference', () => {
+    const sessions = [makeSession('s1')]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out).not.toBeNull()
+    expect(out!.sessionList).toBe(sessions)
+  })
+
+  it('computes removedIds for sessions that dropped out of the snapshot', () => {
+    const sessions = [makeSession('s2'), makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s1', 's2', 's3', 's4'], null)
+    expect(out!.removedIds).toEqual(['s1', 's4'])
+  })
+
+  it('preserves prevSessionStateIds order in removedIds (matches both prior inline loops)', () => {
+    const sessions = [makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s1', 's2', 's3', 's4'], null)
+    expect(out!.removedIds).toEqual(['s1', 's2', 's4'])
+  })
+
+  it('returns empty removedIds when nothing was removed', () => {
+    const sessions = [makeSession('s1'), makeSession('s2')]
+    const out = buildSessionListPatches({ sessions }, ['s1'], null)
+    expect(out!.removedIds).toEqual([])
+  })
+
+  it('lists new sessions not present in prevSessionStateIds in snapshot order', () => {
+    const sessions = [makeSession('s1'), makeSession('s2'), makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s2'], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's3'])
+  })
+
+  it('handles fully fresh state (empty prev, all sessions new)', () => {
+    const sessions = [makeSession('s1'), makeSession('s2')]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's2'])
+    expect(out!.removedIds).toEqual([])
+  })
+
+  it('skips malformed entries without sessionId (fail-soft)', () => {
+    // Behaviour-preserving: the prior inline loops dereference s.sessionId
+    // directly. Skipping silently here keeps the helper defensive against
+    // hypothetical future server bugs that the prior code would have
+    // crashed on.
+    const sessions = [
+      makeSession('s1'),
+      null as unknown as SessionInfo,
+      { foo: 'bar' } as unknown as SessionInfo,
+      makeSession('s2'),
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's2'])
+    expect(out!.backgroundShellBuilders.size).toBe(2)
+  })
+
+  it('emits conversationIdPatches for every session with a truthy conversationId', () => {
+    const sessions = [
+      makeSession('s1', { conversationId: 'conv-1' }),
+      makeSession('s2', { conversationId: null }),
+      makeSession('s3', { conversationId: 'conv-3' }),
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.conversationIdPatches.get('s1')).toBe('conv-1')
+    expect(out!.conversationIdPatches.has('s2')).toBe(false)
+    expect(out!.conversationIdPatches.get('s3')).toBe('conv-3')
+  })
+
+  it('emits cumulativeUsagePatches for every session with a defined cumulativeUsage snapshot', () => {
+    const usage: CumulativeUsage = {
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 3,
+      cacheCreationTokens: 4,
+      costUsd: 0.5,
+      turnsBilled: 6,
+    }
+    const sessions = [
+      makeSession('s1', { cumulativeUsage: usage }),
+      makeSession('s2'), // no cumulativeUsage field
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.cumulativeUsagePatches.get('s1')).toBe(usage)
+    expect(out!.cumulativeUsagePatches.has('s2')).toBe(false)
+  })
+
+  it('emits backgroundShellBuilders for every session (default empty pending list)', () => {
+    const sessions = [
+      makeSession('s1', {
+        pendingBackgroundShells: [
+          { shellId: 'sh1', command: 'sleep 1', startedAt: 1000 },
+        ],
+      }),
+      makeSession('s2'), // omitted field → empty list
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.backgroundShellBuilders.size).toBe(2)
+    const s1Builder = out!.backgroundShellBuilders.get('s1')!
+    expect(s1Builder.sessionId).toBe('s1')
+    const s1Applied = s1Builder.applyTo([])
+    expect(s1Applied).toEqual([
+      { shellId: 'sh1', command: 'sleep 1', startedAt: 1000 },
+    ])
+    const s2Builder = out!.backgroundShellBuilders.get('s2')!
+    // Empty pending list → applyTo on empty current returns existing
+    // empty array (reference-equality short-circuit).
+    const empty: PendingBackgroundShell[] = []
+    expect(s2Builder.applyTo(empty)).toBe(empty)
+  })
+
+  it('chunks non-active session ids into subscribeChunks of SESSION_LIST_SUBSCRIBE_CHUNK_SIZE', () => {
+    // Active id is excluded; remaining ids are sliced into batches.
+    const total = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE + 5 // active + (chunk_size + 4) non-active
+    const sessions = Array.from({ length: total }, (_, i) =>
+      makeSession(`s${i + 1}`),
+    )
+    const out = buildSessionListPatches({ sessions }, [], 's1')
+    expect(out!.subscribeChunks).toHaveLength(2)
+    expect(out!.subscribeChunks[0]).toHaveLength(SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)
+    expect(out!.subscribeChunks[1]).toHaveLength(4)
+    // Active id must not appear in any chunk.
+    const flat = out!.subscribeChunks.flat()
+    expect(flat).not.toContain('s1')
+  })
+
+  it('returns empty subscribeChunks when no non-active ids remain', () => {
+    const sessions = [makeSession('s1')]
+    const out = buildSessionListPatches({ sessions }, [], 's1')
+    expect(out!.subscribeChunks).toEqual([])
+  })
+
+  it('returns empty subscribeChunks when sessionList is empty (auto-resume path)', () => {
+    const out = buildSessionListPatches({ sessions: [] }, ['s1', 's2'], 's1')
+    expect(out!.sessionList).toEqual([])
+    expect(out!.removedIds).toEqual(['s1', 's2'])
+    expect(out!.subscribeChunks).toEqual([])
+  })
+
+  it('respects custom subscribeChunkSize, falls back to default on invalid input', () => {
+    const sessions = Array.from({ length: 7 }, (_, i) => makeSession(`s${i + 1}`))
+    const out = buildSessionListPatches({ sessions }, [], 's1', 3)
+    // 6 non-active ids / chunk_size 3 → 2 full chunks
+    expect(out!.subscribeChunks.map((c) => c.length)).toEqual([3, 3])
+    // Invalid sizes fall back to the constant default (would all fit in one chunk here).
+    const out2 = buildSessionListPatches({ sessions }, [], 's1', 0)
+    expect(out2!.subscribeChunks).toHaveLength(1)
+    expect(out2!.subscribeChunks[0]).toHaveLength(6)
+  })
+
+  it('chunkSubscribeSessionIds: filters out active id and chunks by size', () => {
+    const sessions = Array.from({ length: 7 }, (_, i) =>
+      makeSession(`s${i + 1}`),
+    )
+    expect(chunkSubscribeSessionIds(sessions, 's1', 3).map((c) => c.length)).toEqual([3, 3])
+    // No active filter when activeSessionId is null.
+    expect(chunkSubscribeSessionIds(sessions, null, 3).map((c) => c.length)).toEqual([3, 3, 1])
+    // Empty when only the active id is present.
+    expect(chunkSubscribeSessionIds([makeSession('s1')], 's1')).toEqual([])
+    // Skips malformed entries fail-soft.
+    const malformed = [
+      makeSession('s1'),
+      null as unknown as SessionInfo,
+      makeSession('s2'),
+    ]
+    expect(chunkSubscribeSessionIds(malformed, 's1')).toEqual([['s2']])
+  })
+
+  it('chunkSubscribeSessionIds: clamps chunk size to SESSION_LIST_SUBSCRIBE_CHUNK_SIZE', () => {
+    // 25 non-active sessions; caller requests chunk of 100 → clamped to 20
+    // so the server's SubscribeSessionsSchema.max(20) never sees a bigger chunk.
+    const sessions = Array.from({ length: 26 }, (_, i) => makeSession(`s${i + 1}`))
+    const chunks = chunkSubscribeSessionIds(sessions, 's1', 100)
+    expect(chunks.map((c) => c.length)).toEqual([SESSION_LIST_SUBSCRIBE_CHUNK_SIZE, 5])
+    // Exact match: requesting the cap explicitly behaves the same as the default.
+    expect(chunkSubscribeSessionIds(sessions, 's1', SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)).toEqual(
+      chunkSubscribeSessionIds(sessions, 's1'),
+    )
+  })
+
+  it('chunkSubscribeSessionIds: coerces non-integer chunk sizes via Math.floor', () => {
+    // 7 non-active ids; chunk 2.5 → floor(2.5) = 2 → ceil(7/2) = 4 chunks
+    const sessions = Array.from({ length: 8 }, (_, i) => makeSession(`s${i + 1}`))
+    const chunks = chunkSubscribeSessionIds(sessions, 's1', 2.5)
+    expect(chunks.map((c) => c.length)).toEqual([2, 2, 2, 1])
+    // No element duplicated and no element skipped.
+    expect(chunks.flat()).toEqual(['s2', 's3', 's4', 's5', 's6', 's7', 's8'])
+  })
+
+  it('chunkSubscribeSessionIds: rejects invalid chunk sizes (≤0, NaN, ∞, sub-1 floats)', () => {
+    const sessions = Array.from({ length: 6 }, (_, i) => makeSession(`s${i + 1}`))
+    // 0, negative, NaN, Infinity all fall back to the default constant.
+    for (const bad of [0, -1, NaN, Infinity, -Infinity]) {
+      const chunks = chunkSubscribeSessionIds(sessions, 's1', bad)
+      expect(chunks).toHaveLength(1)
+      expect(chunks[0]).toHaveLength(5) // 6 sessions - 1 active = 5 ids
+    }
+    // 0.5 → floor → 0 → fallback to default.
+    const subOne = chunkSubscribeSessionIds(sessions, 's1', 0.5)
+    expect(subOne).toHaveLength(1)
+    expect(subOne[0]).toHaveLength(5)
+  })
+
+  it('includes the active session in cumulativeUsage / conversationId / backgroundShell maps', () => {
+    // The subscribeChunks filter excludes the active id, but the patch
+    // maps must include it — both clients update the active session's
+    // sessionStates entry the same way as any other.
+    const sessions = [
+      makeSession('s1', {
+        conversationId: 'conv-1',
+        cumulativeUsage: {
+          inputTokens: 1,
+          outputTokens: 2,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0,
+          turnsBilled: 1,
+        },
+      }),
+    ]
+    const out = buildSessionListPatches({ sessions }, ['s1'], 's1')
+    expect(out!.conversationIdPatches.get('s1')).toBe('conv-1')
+    expect(out!.cumulativeUsagePatches.has('s1')).toBe(true)
+    expect(out!.backgroundShellBuilders.has('s1')).toBe(true)
+    // s1 is active → excluded from subscribe chunks.
+    expect(out!.subscribeChunks).toEqual([])
   })
 })
 
@@ -3215,6 +3979,140 @@ describe('handleAgentCompleted', () => {
       'tu-1',
       'tu-3',
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5016 — handleAgentEvent (Task subagent nested progress)
+// ---------------------------------------------------------------------------
+describe('handleAgentEvent (#5016)', () => {
+  const mkTaskBubble = (toolUseId: string): ChatMessage => ({
+    id: 'm-' + toolUseId,
+    type: 'tool_use',
+    content: '',
+    tool: 'Task',
+    toolUseId,
+    timestamp: 1000,
+  })
+
+  it('appends a child event to the parent Task tool_use bubble', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-1')]
+    const builder = handleAgentEvent(
+      {
+        sessionId: 'sess-1',
+        parentToolUseId: 'tu-task-1',
+        eventType: 'tool_start',
+        payload: { toolUseId: 'tu-child-1', tool: 'Read', input: { file_path: '/a' } },
+      },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    const next = builder.applyTo(existing)
+    expect(next).not.toBe(existing)
+    expect(next[0]?.childAgentEvents).toEqual([
+      { type: 'tool_start', payload: { toolUseId: 'tu-child-1', tool: 'Read', input: { file_path: '/a' } } },
+    ])
+  })
+
+  it('accumulates multiple child events in order on the same bubble', () => {
+    let messages: ChatMessage[] = [mkTaskBubble('tu-task-2')]
+    const events: { eventType: string; payload: Record<string, unknown> }[] = [
+      { eventType: 'tool_start', payload: { toolUseId: 'c1', tool: 'Read' } },
+      { eventType: 'tool_input_delta', payload: { toolUseId: 'c1', partialJson: '{"x":' } },
+      { eventType: 'tool_result', payload: { toolUseId: 'c1', result: 'hello' } },
+    ]
+    for (const ev of events) {
+      const builder = handleAgentEvent(
+        { parentToolUseId: 'tu-task-2', ...ev },
+        'active-1',
+      )
+      messages = builder.applyTo(messages)
+    }
+    expect(messages[0]?.childAgentEvents).toHaveLength(3)
+    expect(messages[0]?.childAgentEvents?.map((e) => e.type)).toEqual([
+      'tool_start',
+      'tool_input_delta',
+      'tool_result',
+    ])
+  })
+
+  it('returns the same array reference when parentToolUseId is missing', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-3')]
+    const builder = handleAgentEvent(
+      { eventType: 'tool_start', payload: {} },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('returns the same array reference when eventType is missing/empty', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-4')]
+    const builder = handleAgentEvent(
+      { parentToolUseId: 'tu-task-4', payload: {} },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('returns the same array reference when no matching parent bubble exists', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-5')]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-NOT-PRESENT',
+        eventType: 'tool_start',
+        payload: { toolUseId: 'c1' },
+      },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('ignores bubbles whose type is not tool_use even when toolUseId matches', () => {
+    const existing: ChatMessage[] = [
+      // A `response` bubble that happens to carry the same id —
+      // shouldn't be mutated.
+      {
+        id: 'm-decoy',
+        type: 'response',
+        content: 'parent text',
+        toolUseId: 'tu-task-6',
+        timestamp: 100,
+      },
+      mkTaskBubble('tu-task-6'),
+    ]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-6',
+        eventType: 'stream_delta',
+        payload: { delta: 'hi' },
+      },
+      'active-1',
+    )
+    const next = builder.applyTo(existing)
+    // Only the tool_use bubble is patched.
+    expect(next[0]).toBe(existing[0])
+    expect(next[1]?.childAgentEvents).toHaveLength(1)
+  })
+
+  it('normalises non-object payload to {}', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-7')]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-7',
+        eventType: 'stream_delta',
+        payload: null,
+      },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)[0]?.childAgentEvents?.[0]?.payload).toEqual({})
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleAgentEvent(
+      { parentToolUseId: 'x', eventType: 'tool_start', payload: {} },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('active-1')
   })
 })
 
@@ -4998,6 +5896,253 @@ describe('handleMessage', () => {
     }
   })
 
+  // #4947: server PR #4944 emits `error{code:'resume_unknown',
+  // attemptedResumeId, message}` when the claude CLI rejects a `--resume
+  // <id>` because the conversation id is unknown locally. The dashboard
+  // ResumeUnknownChip surfaces `attemptedResumeId` as subtext so operators
+  // can correlate against the persisted state file. Without preserving the
+  // field on the ChatMessage here, the chip would degrade to "headline
+  // only" and the (Optional) acceptance-criterion subtext would never
+  // render in practice.
+  describe('attemptedResumeId preservation (#4947)', () => {
+    it('preserves a string attemptedResumeId on the ChatMessage', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'Previous Claude conversation could not be resumed',
+          code: 'resume_unknown',
+          attemptedResumeId: 'abc123-def456-7890',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.code).toBe('resume_unknown')
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123-def456-7890')
+      }
+    })
+
+    it('leaves attemptedResumeId undefined when the wire field is missing', () => {
+      // Pre-#4944 servers and every non-resume_unknown error envelope omit
+      // the field entirely. ChatMessage simply stays undefined and the
+      // chip's hasId guard hides the subtext slot.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'something else',
+          code: 'stream_stall',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('coerces a non-string attemptedResumeId to undefined (defense in depth)', () => {
+      // Same hardening as `code: 42` above. A malformed producer must not
+      // populate the chat-message field with garbage that the chip will
+      // then render verbatim.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: 42,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('coerces an empty-string attemptedResumeId to undefined', () => {
+      // Empty string is treated as missing — the chip's render guard
+      // already treats whitespace-only as absent, but normalising at the
+      // store boundary means downstream consumers (mobile app, future
+      // log/console viewers) see the same shape: present or absent, never
+      // present-but-empty.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    // PR #4967 Copilot review hardening: gating + trim + 256-char cap.
+    it('drops attemptedResumeId when messageType is not error (out-of-contract gating)', () => {
+      // Documented as set only on `type === 'error'`; a buggy producer
+      // attaching it to e.g. a `response` envelope must not pollute the
+      // store with out-of-contract data.
+      const out = handleMessage(
+        {
+          messageType: 'response',
+          content: 'hello',
+          code: 'resume_unknown',
+          attemptedResumeId: 'abc123',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('drops attemptedResumeId when code is not resume_unknown (out-of-contract gating)', () => {
+      // Only the resume-unknown error path documents this field; other
+      // error codes attaching it (drift or producer bug) shouldn't make
+      // it into the store.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'stream_stall',
+          attemptedResumeId: 'abc123',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('trims whitespace from attemptedResumeId before storing', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '  abc123  ',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123')
+      }
+    })
+
+    it('drops attemptedResumeId when only whitespace', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '   \t  ',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('truncates attemptedResumeId to 256 chars (matches wire schema cap)', () => {
+      const oversized = 'a'.repeat(500)
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: oversized,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('a'.repeat(256))
+      }
+    })
+
+    // #5006: server PR #5004 introduced the terminal-escalation code
+    // `resume_unknown_exhausted` emitted when the post-fallback retry ALSO
+    // matches the unknown-resume pattern. event-normalizer.js already
+    // forwards `attemptedResumeId` for the new code; the store-core gate
+    // must mirror that or the field is silently stripped before reaching
+    // the dashboard / mobile chip. These tests pin the widened gate.
+    it('#5006 — preserves attemptedResumeId on resume_unknown_exhausted (terminal escalation)', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content:
+            'Auto-recovery exhausted: Claude CLI rejected the resumed conversation id and a fresh-start retry also failed.',
+          code: 'resume_unknown_exhausted',
+          attemptedResumeId: 'abc123-def456-7890',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.code).toBe('resume_unknown_exhausted')
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123-def456-7890')
+      }
+    })
+
+    it('#5006 — trims and truncates attemptedResumeId on resume_unknown_exhausted (same hardening as resume_unknown)', () => {
+      const oversized = '   ' + 'a'.repeat(500) + '   '
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown_exhausted',
+          attemptedResumeId: oversized,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('a'.repeat(256))
+      }
+    })
+  })
+
   it('skips user_input outside replay (live echo handled elsewhere)', () => {
     const out = handleMessage(
       { messageType: 'user_input', content: 'hi', timestamp: 1 },
@@ -6585,5 +7730,209 @@ describe('handleResultUsage', () => {
     expect(
       handleResultUsage({ sessionId: null }, 'active-1').sessionId,
     ).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleMultiQuestionIntervention (#4653)
+// ---------------------------------------------------------------------------
+describe('handleMultiQuestionIntervention', () => {
+  it('appends a new intervention entry when toolUseId is unseen', () => {
+    const builder = handleMultiQuestionIntervention(
+      {
+        sessionId: 'sess-1',
+        toolUseId: 'toolu_1',
+        questionCount: 3,
+        reason: 'multi_question',
+        timestamp: 1700000000000,
+      },
+      'active-1',
+    )
+    expect(builder).not.toBeNull()
+    expect(builder!.sessionId).toBe('sess-1')
+    const { interventions } = builder!.applyTo([])
+    expect(interventions).toHaveLength(1)
+    expect(interventions[0]).toEqual({
+      kind: 'multi_question',
+      toolUseId: 'toolu_1',
+      count: 3,
+      timestamp: 1700000000000,
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_2', questionCount: 2 },
+      'active-1',
+    )
+    expect(builder!.sessionId).toBe('active-1')
+  })
+
+  it('dedups repeats by toolUseId — returns the array unchanged so React skips a re-render', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_dup', count: 4, timestamp: 100 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_dup', questionCount: 4, timestamp: 200 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    // Same reference — referential equality preserved for the React diff.
+    expect(interventions).toBe(existing)
+  })
+
+  it('appends second distinct intervention to existing list', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_a', count: 2, timestamp: 100 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_b', questionCount: 5, timestamp: 200 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    expect(interventions).toHaveLength(2)
+    expect(interventions[1].toolUseId).toBe('toolu_b')
+    expect(interventions[1].count).toBe(5)
+  })
+
+  it('defaults timestamp to Date.now() when payload omits it', () => {
+    const before = Date.now()
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_now', questionCount: 2 },
+      'active-1',
+    )
+    const after = Date.now()
+    const { interventions } = builder!.applyTo([])
+    expect(interventions[0].timestamp).toBeGreaterThanOrEqual(before)
+    expect(interventions[0].timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('floors fractional questionCount (defence-in-depth against malformed payloads)', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_frac', questionCount: 3.7 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo([])
+    // 3.7 floors to 3 — still >= 2, so it's accepted with the floored value.
+    expect(interventions[0].count).toBe(3)
+  })
+
+  it('returns null when toolUseId is missing or non-string', () => {
+    expect(
+      handleMultiQuestionIntervention({ questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: '', questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 123, questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns null when questionCount is missing, non-finite, or < 2 (mirrors wire schema)', () => {
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a' }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: NaN }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention(
+        { toolUseId: 'a', questionCount: Number.POSITIVE_INFINITY },
+        'active-1',
+      ),
+    ).toBeNull()
+    // < 2 — the permission-hook never denies single-q forms, so a 0/1
+    // count is a malformed payload and would render a misleading
+    // "0 questions" or "1 question" in the UI.
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: -1 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 0 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 1 }, 'active-1'),
+    ).toBeNull()
+    // 1.9 floors to 1 — also rejected (defence against fractional payloads
+    // that would sneak past a naive `>= 2` check).
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 1.9 }, 'active-1'),
+    ).toBeNull()
+    // Boundary: exactly 2 is the smallest valid count.
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 2 }, 'active-1'),
+    ).not.toBeNull()
+  })
+
+  it('accepts timestamp === 0 (epoch is valid per protocol — clock-skewed dev environments)', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_epoch', questionCount: 2, timestamp: 0 },
+      'a',
+    )
+    expect(builder).not.toBeNull()
+    const { interventions } = builder!.applyTo([])
+    expect(interventions[0].timestamp).toBe(0)
+  })
+
+  it('ring-caps the array at MAX_SESSION_INTERVENTIONS (drops oldest entries)', async () => {
+    const { MAX_SESSION_INTERVENTIONS } = await import('../utils')
+    // Pre-fill exactly to the cap with synthetic entries
+    const existing = Array.from({ length: MAX_SESSION_INTERVENTIONS }, (_, i) => ({
+      kind: 'multi_question' as const,
+      toolUseId: `toolu_${i}`,
+      count: 2,
+      timestamp: i,
+    }))
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_new', questionCount: 7, timestamp: 9999 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    expect(interventions).toHaveLength(MAX_SESSION_INTERVENTIONS)
+    // Oldest dropped, newest at the end.
+    expect(interventions[0].toolUseId).toBe('toolu_1')
+    expect(interventions[interventions.length - 1].toolUseId).toBe('toolu_new')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// applyInterventionBuilder (#4653)
+// ---------------------------------------------------------------------------
+describe('applyInterventionBuilder', () => {
+  it('reports isFirst=true when this is the first intervention in an empty session', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_first', questionCount: 2 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, [])
+    expect(interventions).toHaveLength(1)
+    expect(isFirst).toBe(true)
+  })
+
+  it('reports isFirst=false on subsequent distinct interventions', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_prev', count: 2, timestamp: 1 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_next', questionCount: 3 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, existing)
+    expect(interventions).toHaveLength(2)
+    expect(isFirst).toBe(false)
+  })
+
+  it('reports isFirst=false when a duplicate skips the append (no inline-notice on stuck-model re-emit)', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_dup', count: 2, timestamp: 1 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_dup', questionCount: 2 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, existing)
+    expect(interventions).toBe(existing)
+    expect(isFirst).toBe(false)
   })
 })

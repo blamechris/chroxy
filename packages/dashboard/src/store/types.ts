@@ -123,6 +123,11 @@ export interface ProviderCapabilities {
   // method existence — only providers whose session class implements
   // setPermissionRules report this as true (#3072).
   sessionRules?: boolean;
+  // #5026: true when the provider runs sessions inside an isolated Docker
+  // container (docker-cli, docker-sdk, docker-byok). The dashboard surfaces
+  // this with a visual badge + container settings knobs (image / memory /
+  // cpu / containerUser) in the New Session modal's advanced section.
+  containerized?: boolean;
 }
 
 // #3404 audit (F1+F5): per-provider auth state for grey-out + billing panel.
@@ -266,6 +271,40 @@ export interface SessionNotification {
   message: string;
   timestamp: number;
   requestId?: string;
+  /**
+   * #4890 — Slack-style read/unread tracking. Set to `Date.now()` when the
+   * operator has acknowledged the alert via an explicit action: clicking a
+   * row in the notifications widget (which both marks read and switches
+   * sessions), the per-row "mark as read" affordance, "Mark all read", or
+   * by switching to the alert's session via any session-switch path.
+   * Absent means unread; presence means the alert no longer counts toward
+   * the widget's unread badge count. Note: simply opening the widget panel
+   * does NOT mark notifications as read on its own.
+   *
+   * Tracked in memory only — `sessionNotifications` itself is transient and
+   * resets on reload/reconnect, so persisting `readAt` would outlive the
+   * matching alert. Cross-device read sync is out of scope for v1 and would
+   * need a server-side persistence model (see PR #4890 follow-ups).
+   */
+  readAt?: number;
+}
+
+/**
+ * #4982 — state for the SessionNotFoundChip banner.
+ *
+ * Set by message-handler when the server emits
+ * `session_error{code:'SESSION_NOT_FOUND', attemptedSessionId, message}`,
+ * surfaced as a calm banner over the empty pane (the operator's old
+ * activeSessionId is also cleared so chat sends don't loop the same error).
+ * The banner offers a Dismiss action that clears this field; clicking a
+ * different session in the sidebar also clears it (operator picked a new
+ * live id, lost-id surface is no longer relevant).
+ */
+export interface SessionNotFoundErrorState {
+  /** The id chroxy passed before the server rejected it. May be null. */
+  attemptedSessionId: string | null;
+  /** Server-provided message text (verbatim). */
+  message: string;
 }
 
 export interface FilePickerItem {
@@ -419,8 +458,10 @@ export interface ConnectionState {
   // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
   userDisconnected: boolean;
 
-  // Server mode: 'cli' (headless) or 'terminal' (PTY/tmux)
-  serverMode: 'cli' | 'terminal' | null;
+  // Server mode: 'cli' (headless). The wire protocol only emits 'cli' (#4810);
+  // `null` covers pre-`auth_ok` state and any non-`'cli'` value the parser
+  // couldn't validate (degrades to the "Invalid Server Mode" alert path).
+  serverMode: 'cli' | null;
 
   // Server context (from auth_ok)
   sessionCwd: string | null;
@@ -513,6 +554,17 @@ export interface ConnectionState {
   // Background session notifications (permission, question, completed, error)
   sessionNotifications: SessionNotification[];
 
+  // #4982 — set when the server emits `session_error{code:'SESSION_NOT_FOUND'}`.
+  // Activated by message-handler.ts:case 'session_error' on the
+  // SESSION_NOT_FOUND branch; cleared by the SessionNotFoundChip dismiss
+  // action OR by a subsequent successful switchSession (the operator picked
+  // a new live session, so the lost-id chip is no longer relevant).
+  //
+  // Co-occurs with `activeSessionId === null` — clearing the stale id is
+  // what stops the dashboard from re-sending against the dead id and
+  // looping the same toast (#4935 wedge UX).
+  sessionNotFoundError: SessionNotFoundErrorState | null;
+
   // Resolved permission decisions keyed by requestId. Persists the
   // user's Allow/Deny/AllowSession choice across component remounts
   // (tab switches), fixing #2833 where the prompt re-rendered as
@@ -590,7 +642,7 @@ export interface ConnectionState {
   pairingRefreshedCount: number;
 
   // View mode
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots';
 
   // Input settings
   inputSettings: InputSettings;
@@ -609,7 +661,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
   appendTerminalData: (data: string) => void;
@@ -629,14 +681,27 @@ export interface ConnectionState {
    * requestId — last write wins. */
   markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
   /**
-   * #4604 Chunk B — answer may be either a plain string (single-question /
-   * free-text path, back-compat) or a `Record<string,string>` map
-   * (multi-question form, keyed by question text with multi-select values
-   * JSON-stringified arrays). The Record path populates the wire's
-   * `answers` field; both paths populate `answer` with a human-readable
-   * summary so older servers stay functional.
+   * #4604 Chunk B / #4621 / #4651 / #4735 — answer may be one of three shapes:
+   * - `string`: legacy single-question / free-text path (back-compat).
+   * - `Record<string, string | string[]>`: multi-question form, keyed
+   *   by question text. Multi-select values are emitted as native
+   *   `string[]` (#4621 / #4735) so consumers don't have to JSON.parse
+   *   to recover the chosen labels. Pre-#4621 builds JSON-stringified
+   *   the array into a single string for back-compat (still accepted by
+   *   the server). The Record path populates the wire's `answers` field.
+   * - `{otherLabel, freeformText}`: single-question "Other" with freeform
+   *   text (#4651). The store sets `answer` to `otherLabel` (so the server
+   *   can resolve it to a 1-indexed TUI digit) and `freeformText` to the
+   *   typed text. The server writes the digit first, waits for claude
+   *   TUI's text-input prompt swap, then writes the freeform text + Enter.
+   *
+   * All paths populate `answer` with a human-readable summary so older
+   * servers stay functional.
    */
-  sendUserQuestionResponse: (answer: string | Record<string, string>, toolUseId?: string) => 'sent' | 'queued' | false;
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
+    toolUseId?: string,
+  ) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
   setModel: (model: string) => void;
@@ -747,7 +812,15 @@ export interface ConnectionState {
   // recovery button to the toast. Existing call sites that pass only
   // `message` keep working — `action` is undefined and the toast renders
   // message-only as before.
-  addServerError: (message: string, action?: ServerErrorAction, severity?: ServerError['severity']) => void;
+  // #5039: optional `partialCostLine` surfaces the PR #5037 partial-cost
+  // sub-line under the main toast message when the failed turn folded
+  // any parent + Task subagent rounds before erroring out.
+  addServerError: (
+    message: string,
+    action?: ServerErrorAction,
+    severity?: ServerError['severity'],
+    partialCostLine?: string,
+  ) => void;
   dismissServerError: (id: string) => void;
 
   // Info notification actions
@@ -756,6 +829,23 @@ export interface ConnectionState {
 
   // Session notification actions
   dismissSessionNotification: (id: string) => void;
+  /**
+   * #4890 — Slack-style notifications widget read/unread tracking.
+   *
+   * `markSessionNotificationRead(id)` stamps `readAt = Date.now()` on a single
+   * alert so it no longer counts toward the unread badge. Idempotent: calling
+   * twice keeps the first read timestamp (we don't want re-opens to look
+   * like a brand-new acknowledge).
+   *
+   * `markAllSessionNotificationsRead()` is the "Mark all read" affordance —
+   * stamps every currently-unread alert in one batch.
+   */
+  markSessionNotificationRead: (id: string) => void;
+  markAllSessionNotificationsRead: () => void;
+
+  // #4982 — session-not-found chip state
+  setSessionNotFoundError: (err: SessionNotFoundErrorState | null) => void;
+  dismissSessionNotFoundError: () => void;
 
   // Dev server preview
   closeDevPreview: (port: number) => void;

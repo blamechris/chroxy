@@ -11,10 +11,26 @@
 
 export { DEFAULT_CONTEXT_WINDOW } from './types'
 
+// #4853: runtime type-guard for `VoiceInputMode` — keyed off an
+// exhaustive `Record<VoiceInputMode, true>` so widening the union is a
+// TS error in the guard, not a silent drop at the call site.
+export { isVoiceInputMode } from './types'
+
+// #4875 / #4901: shared typed predicate + type for the AskUserQuestion
+// "Other / freeform" answer payload. Mobile store + mobile screen (#4875)
+// and the dashboard store + `QuestionPrompt.tsx` (#4901) all narrow off
+// this single guard, so widening `SelectOptionValue` to a third object
+// shape can't silently misroute it as freeform on either client.
+export { isFreeformAnswer } from './freeform-answer'
+export type { OtherFreeformAnswer } from './freeform-answer'
+
 export type {
   MessageAttachment,
   ToolResultImage,
   ChatMessage,
+  // #5016 — one nested wire event from a Task subagent, attached to
+  // the parent Task tool_use bubble via `ChatMessage.childAgentEvents[]`.
+  ChildAgentEvent,
   // #4604 Chunk B — one entry per question in a multi-question AskUserQuestion form
   ChatMessageQuestion,
   // #3188: auto-evaluator rewrite metadata attached to system ChatMessages
@@ -23,6 +39,10 @@ export type {
   ContextUsage,
   CumulativeUsage,
   InputSettings,
+  // #4825: consolidated VoiceInputMode union previously declared in
+  // packages/app/src/hooks/useSpeechRecognition.ts and
+  // packages/dashboard/src/hooks/useVoiceInput.ts.
+  VoiceInputMode,
   ModelInfo,
   SessionInfo,
   AgentInfo,
@@ -53,6 +73,8 @@ export type {
   Checkpoint,
   BaseSessionState,
   InactivityWarning,
+  // #4653: chroxy-side intervention ring (multi-q deny etc.)
+  SessionIntervention,
   // Git result element types (#3132)
   GitFileStatus,
   GitBranch,
@@ -139,6 +161,8 @@ export {
   createEmptyBaseSessionState,
   ACTIVITY_EVENT_TYPES,
   isActivityEvent,
+  // #4653: ring cap for SessionIntervention list on BaseSessionState
+  MAX_SESSION_INTERVENTIONS,
 } from './utils'
 
 // #4123: shared cost formatters used by both dashboard sidebar badge
@@ -147,7 +171,14 @@ export {
 export {
   formatCostBadge,
   formatCostBreakdown,
+  // #5039: error-path partial-cost helper shared by dashboard toast
+  // sub-line and mobile Alert.alert body.
+  formatPartialCostLine,
+  // #5065: compact `used / total` token label for the header
+  // context-window meter.
+  formatTokensCompact,
 } from './cost-format'
+export type { ErrorPartialCost } from './cost-format'
 
 export type {
   SessionVisualStatus,
@@ -190,6 +221,20 @@ export {
   formatToolBreakdown,
   formatToolName,
 } from './group-messages'
+
+// #4806: shared ChatView message pipeline — lifted from dashboard's
+// `useChatMessages` hook so both dashboard and mobile derive the same
+// chat-view representation (closes the silent #4615 stalled-prompt gap
+// on mobile as a side effect).
+export type {
+  ChatViewMessage,
+  ChatViewPipelineResult,
+} from './buildChatViewMessages'
+
+export {
+  buildChatViewMessages,
+  toChatViewMessage,
+} from './buildChatViewMessages'
 
 // #4243: shared tool-input summary helpers — both dashboard and mobile
 // ToolBubble derive the collapsed-preview string from the same
@@ -239,10 +284,15 @@ export type {
   PlanAllowedPrompt,
   ThinkingLevel,
   DevPreviewBuilder,
+  // #4653 — builder for the chroxy-side intervention append/dedup/ring-cap path
+  SessionInterventionBuilder,
   AgentInfoBuilder,
   PendingBackgroundShellsBuilder,
+  // #4767 — centralised session_list dispatch (GC + cumulativeUsage + pendingShells seeding)
+  SessionListPatches,
   ServerMode,
   AuthOkPayload,
+  AuthOkWebFeatures,
   CheckpointRestoredPayload,
   LogLevel,
   LogEntry,
@@ -309,9 +359,13 @@ export {
   handlePlanStarted,
   handlePlanReady,
   handleInactivityWarning,
+  // #4653 — chroxy-side multi-question deny notification
+  handleMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,
+  parseConnectedClients,
   handleAuthFail,
   handleKeyExchangeOk,
   handleServerMode,
@@ -320,6 +374,9 @@ export {
   handleCheckpointRestored,
   handleError,
   handleSessionError,
+  // #4879: quiet "user-initiated Stop" confirmation handler — flips
+  // stoppedAt/stoppedCode on the target session for the inline status strip
+  handleSessionStopped,
   handleLogEntry,
   handleClientJoined,
   handleClientLeft,
@@ -335,6 +392,11 @@ export {
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
   handleSessionList,
+  // #4767 — centralised session_list dispatch helpers (used by both app + dashboard)
+  buildSessionListPatches,
+  cumulativeUsageEquals,
+  chunkSubscribeSessionIds,
+  SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext,
   handleSessionTimeout,
   handleSessionRestoreFailed,
@@ -355,6 +417,9 @@ export {
   handleGitCommitResult,
   handleAgentSpawned,
   handleAgentCompleted,
+  // #5016 — Task subagent nested progress (one wire event per child
+  // `tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`).
+  handleAgentEvent,
   handleBackgroundWorkChanged,
   handleEnvironmentList,
   handleEnvironmentError,
@@ -388,3 +453,15 @@ export {
   formatPlatform,
   formatRelativeTime,
 } from './device-format'
+
+// #4771: shared WS close-code + HTTP health-check error message
+// helpers. Previously the app had a well-tested mapping while the
+// dashboard reimplemented only the health-check path inline (with a
+// less-detailed split) and ignored `event.code` on socket.onclose
+// entirely — a 4008 backpressure eviction surfaced as a generic
+// "Connection lost" rather than the "server was overwhelmed,
+// reconnecting" copy. Centralised here so both surfaces stay in sync.
+export {
+  getWsCloseMessage,
+  getHealthCheckErrorMessage,
+} from './ws-errors'

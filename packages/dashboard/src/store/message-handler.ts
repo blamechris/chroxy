@@ -32,6 +32,9 @@ import {
   handlePlanStarted as sharedPlanStarted,
   handlePlanReady as sharedPlanReady,
   handleInactivityWarning as sharedInactivityWarning,
+  // #4653: chroxy-side multi-question deny intervention surfaced to the user
+  handleMultiQuestionIntervention as sharedMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
@@ -40,6 +43,7 @@ import {
   handleStreamStart as sharedStreamStart,
   handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
+  parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
@@ -60,7 +64,8 @@ import {
   handleDirectoryListing as sharedDirectoryListing,
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
-  handleSessionList as sharedSessionList,
+  buildSessionListPatches as sharedBuildSessionListPatches,
+  cumulativeUsageEquals as sharedCumulativeUsageEquals,
   handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
@@ -74,6 +79,10 @@ import {
   handleGitStatusResult as sharedGitStatusResult,
   handleAgentSpawned as sharedAgentSpawned,
   handleAgentCompleted as sharedAgentCompleted,
+  // #5016 — Task subagent nested progress (one wire event per child
+  // `tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`,
+  // attached to the parent Task tool_use bubble's `childAgentEvents[]`).
+  handleAgentEvent as sharedAgentEvent,
   handleBackgroundWorkChanged as sharedBackgroundWorkChanged,
   handleEnvironmentList as sharedEnvironmentList,
   handleEnvironmentError as sharedEnvironmentError,
@@ -93,6 +102,9 @@ import {
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
+  // #5039: pre-formatted partial-cost sub-line used by the `case 'error'`
+  // branch so the toast and the mobile Alert share copy.
+  formatPartialCostLine,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -111,7 +123,6 @@ import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import type {
   ChatMessage,
-  ConnectedClient,
   ConnectionContext,
   ConnectionState,
   CustomAgent,
@@ -1309,7 +1320,13 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
 }
 
 function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  let deltaId = msg.messageId as string;
+  // Capture the ORIGINAL incoming messageId before any remap resolution.
+  // The post-tool continuation split (#4889) writes its remap entry against
+  // this id (not against the resolved `deltaId`) so successive splits
+  // overwrite a single map entry instead of forming a chain — keeps
+  // `_deltaIdRemaps` bounded and eliminates the need for chained lookup.
+  const originalMessageId = msg.messageId as string;
+  let deltaId = originalMessageId;
   const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
 
   // Forward delta text to terminal view (synthesize raw output in CLI mode)
@@ -1439,6 +1456,193 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
           }));
         }
         deltaId = suffixed;
+      }
+    }
+  }
+
+  // #4889 — post-tool continuation split. The server reuses ONE messageId for
+  // an entire assistant turn even when text → tool → text → tool → text. The
+  // #4297 reorder only fires on the FIRST delta (gated on content === '');
+  // subsequent text chunks concatenate into the same response.content with no
+  // separator — producing `…before filing.Filing now.Filed:` and losing
+  // paragraph breaks.
+  //
+  // Detect the boundary by checking whether a tool_use was appended AFTER the
+  // currently-resolved response slot. If so, materialize a fresh continuation
+  // slot at the end (`<deltaId>-cont-<ts>`) and remap the ORIGINAL incoming
+  // messageId directly to the new slot (single-hop, never chained — successive
+  // splits overwrite the existing entry so `_deltaIdRemaps` stays bounded and
+  // `handleStreamEnd`'s `_deltaIdRemaps.delete(out.messageId)` cleans up
+  // completely). The split mirrors the `-post-` permission-boundary pattern
+  // already in this file. Skipped while the session is replaying — replayed
+  // history is reassembled server-side and must not be re-split on the client.
+  {
+    const splitTargetId = capturedSessionId;
+    const splitEffectiveId = (splitTargetId && get().sessionStates[splitTargetId])
+      ? splitTargetId
+      : get().activeSessionId;
+    const isReplaying = splitEffectiveId ? _replayingSessions.has(splitEffectiveId) : false;
+    if (!isReplaying) {
+      const splitMessages = (splitEffectiveId && get().sessionStates[splitEffectiveId])
+        ? get().sessionStates[splitEffectiveId]!.messages
+        : get().messages;
+      const slotIdx = splitMessages.findIndex((m) => m.id === deltaId);
+      if (slotIdx >= 0) {
+        const slot = splitMessages[slotIdx]!;
+        // Buffered (not-yet-flushed) text counts as content for the split
+        // decision — otherwise a chunk that hasn't hit the 100ms flush yet
+        // would look empty and we'd append onto it.
+        const bufferedContent = pendingDeltas.get(deltaId)?.delta || '';
+        const hasContent = slot.type === 'response'
+          && (slot.content.length > 0 || bufferedContent.length > 0);
+        // Index-based scan instead of slice().some() — avoids allocating a
+        // tail array on every delta. handleStreamDelta is called many times
+        // per turn and sessions can carry long histories, so this stays on
+        // the hot path lean.
+        let toolAfter = false;
+        if (hasContent) {
+          for (let i = slotIdx + 1; i < splitMessages.length; i++) {
+            if (splitMessages[i]!.type === 'tool_use') {
+              toolAfter = true;
+              break;
+            }
+          }
+        }
+        // #4999 — mid-sentence fragmentation gate. The post-#4889 split only
+        // makes sense when the prior bubble's text reached a sentence boundary
+        // (the LLM finished a thought before invoking the tool); otherwise the
+        // tool interrupted mid-sentence and the post-tool delta is the same
+        // sentence continuing. Treat the prior slot as "sentence-complete"
+        // only when its trailing non-whitespace character is a sentence
+        // terminator (`.`, `!`, `?`) or a hard line break (`\n`). A bubble
+        // that ends with a word char, open paren, comma, colon, dash, etc.
+        // is mid-sentence — route the delta back to the existing slot so the
+        // sentence renders as one contiguous bubble (followed by the tool).
+        if (toolAfter) {
+          const priorFullForGate = slot.type === 'response' ? slot.content + bufferedContent : '';
+          // Trim trailing whitespace before inspecting the last char so e.g.
+          // `"...sentence.   "` still reads as sentence-complete.
+          const lastNonWs = priorFullForGate.replace(/\s+$/, '');
+          // Strip trailing closing punctuation/quotes that commonly follow a
+          // sentence terminator (`.")`, `."`, `!'`, `?)`, etc.) so the gate
+          // looks at the terminator itself, not the wrapper. Without this,
+          // `"He said \"done.\""` reads as ending in `"` and the #4889 split
+          // would wrongly disable — paragraph breaks across a tool boundary
+          // would be lost.
+          // #5014 — also strip CJK closing brackets (`」』）`) so a
+          // fullwidth-terminated sentence wrapped in CJK quotes still
+          // reads as sentence-complete.
+          const stripped = lastNonWs.replace(/[)\]}"'’”»›」』）]+$/, '');
+          const lastChar = stripped.charAt(stripped.length - 1);
+          // #5014 — recognize CJK fullwidth sentence terminators
+          // (`．` U+FF0E, `！` U+FF01, `？` U+FF1F) and the ideographic
+          // full stop (`。` U+3002) alongside ASCII. Without these, CJK
+          // assistant output would coalesce two sentences across a tool
+          // boundary when the user expects a paragraph break.
+          const endsSentence =
+            lastChar === '.' ||
+            lastChar === '!' ||
+            lastChar === '?' ||
+            lastChar === '．' ||
+            lastChar === '！' ||
+            lastChar === '？' ||
+            lastChar === '。';
+          const endsHardBreak = /\n\s*$/.test(priorFullForGate);
+          if (!endsSentence && !endsHardBreak) {
+            toolAfter = false;
+          }
+        }
+        if (toolAfter) {
+          // #4975 — mid-word peel. The LLM sometimes interrupts a text
+          // content block to call a tool, splitting a word across the
+          // boundary (e.g. `"...PR #3.Del"` → tool → `"egating..."`).
+          // The post-#4889 split would otherwise show "Del" in one bubble
+          // and "egating..." in another with the tool between. Detect the
+          // mid-word case (last char of the prior slot's full content is
+          // a word char AND the FIRST char of the incoming post-tool delta
+          // is also a word char — both sides of the boundary must be in
+          // a word, else the LLM emitted a normal word boundary and the
+          // peel would wrongly move a complete trailing word across the
+          // tool bubble) and peel the trailing partial word off the prior
+          // slot, seeding the continuation buffer with it. Result: the
+          // word reassembles in the continuation bubble.
+          const priorFull = slot.type === 'response' ? slot.content + bufferedContent : '';
+          const incomingDelta = msg.delta as string;
+          const incomingStartsMidWord = /^[A-Za-z0-9_]/.test(incomingDelta);
+          const midWordMatch = incomingStartsMidWord ? priorFull.match(/[A-Za-z0-9_]+$/) : null;
+          let priorTail = '';
+          if (midWordMatch && midWordMatch[0].length > 0) {
+            priorTail = midWordMatch[0];
+            // Peel the partial word off the prior slot. It may live in
+            // already-flushed `slot.content` and/or in the still-buffered
+            // `pendingDeltas[deltaId].delta` — strip from buffered first
+            // (it lives at the tail), then from flushed content if needed.
+            let remaining = priorTail.length;
+            if (bufferedContent.length > 0) {
+              const peelFromBuf = Math.min(remaining, bufferedContent.length);
+              const newBuf = bufferedContent.slice(0, bufferedContent.length - peelFromBuf);
+              if (newBuf.length > 0) {
+                pendingDeltas.set(deltaId, {
+                  sessionId: capturedSessionId,
+                  delta: newBuf,
+                });
+              } else {
+                pendingDeltas.delete(deltaId);
+              }
+              remaining -= peelFromBuf;
+            }
+            if (remaining > 0 && slot.type === 'response' && slot.content.length > 0) {
+              const updater = (ss: { messages: ChatMessage[] }) => ({
+                messages: ss.messages.map((m) =>
+                  m.id === deltaId && m.type === 'response'
+                    ? { ...m, content: m.content.slice(0, m.content.length - remaining) }
+                    : m
+                ),
+              });
+              if (splitEffectiveId && get().sessionStates[splitEffectiveId]) {
+                updateSession(splitEffectiveId, updater);
+              } else {
+                set((s) => ({ messages: updater({ messages: s.messages }).messages }));
+              }
+            }
+          }
+          const contId = `${deltaId}-cont-${Date.now()}`;
+          // Single-hop remap: write against the ORIGINAL incoming messageId
+          // so successive continuation splits overwrite this entry rather
+          // than building a chain. Keeps `_deltaIdRemaps` size bounded by
+          // the count of distinct in-flight turn ids, and lets
+          // `handleStreamEnd`'s `_deltaIdRemaps.delete(out.messageId)` clean
+          // up completely.
+          _deltaIdRemaps.set(originalMessageId, contId);
+          const contMsg: ChatMessage = {
+            id: contId,
+            type: 'response',
+            content: '',
+            timestamp: Date.now(),
+          };
+          if (splitEffectiveId && get().sessionStates[splitEffectiveId]) {
+            updateSession(splitEffectiveId, (ss) => ({
+              streamingMessageId: contId,
+              messages: [...ss.messages, contMsg],
+            }));
+          } else {
+            set((state: ConnectionState) => ({
+              streamingMessageId: contId,
+              messages: [...state.messages, contMsg],
+            }));
+          }
+          deltaId = contId;
+          // Seed the new continuation buffer with the peeled word so the
+          // first delta on `contId` carries the partial word as its prefix.
+          // The normal append below (`pendingDeltas.set(deltaId, ...)`)
+          // sees the existing buffer and concatenates correctly.
+          if (priorTail.length > 0) {
+            pendingDeltas.set(contId, {
+              sessionId: capturedSessionId,
+              delta: priorTail,
+            });
+          }
+        }
       }
     }
   }
@@ -1716,10 +1920,27 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
     if (!found) {
       set({ messages: updater({ messages: get().messages }).messages });
     }
-    // Auto-dismiss matching notification banner
+    // #5008 — drain the banner stack (which filters by `readAt === undefined`)
+    // without dropping the entry from `sessionNotifications`. Pre-#5008 we
+    // hard-removed the row, which silently drained every resolved alert from
+    // the NotificationsWidget's "durable history" view. Stamping `readAt`
+    // instead keeps the row visible in the widget (read row treatment) while
+    // the banner stack still vanishes.
+    //
+    // Idempotent — only stamp entries that have not already been acked, so a
+    // server-driven resolution arriving after the operator already marked the
+    // row read via the widget can't clobber the original ack timestamp.
+    //
+    // Hoist `Date.now()` out of the `.map(...)` so every matching row in this
+    // mutation shares a single timestamp. Matches the existing pattern at
+    // connection.ts:2167 (`switchReadStamp`) and connection.ts:2461
+    // (`markAllSessionNotificationsRead`).
+    const readStamp = Date.now();
     set((s) => ({
-      sessionNotifications: s.sessionNotifications.filter(
-        (n) => n.requestId !== resolvedRequestId
+      sessionNotifications: s.sessionNotifications.map((n) =>
+        n.requestId === resolvedRequestId && n.readAt === undefined
+          ? { ...n, readAt: readStamp }
+          : n
       ),
     }));
   }
@@ -1936,71 +2157,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       _replayingSessions.clear();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
-      // Extract server context fields via shared handler (#3102)
-      const authPayload = sharedAuthOk(msg);
-      const authServerMode = authPayload.serverMode;
-      const authSessionCwd = authPayload.sessionCwd;
-      const authDefaultCwd = authPayload.defaultCwd;
-      const authServerVersion = authPayload.serverVersion;
-      const authLatestVersion = authPayload.latestVersion;
-      const authServerCommit = authPayload.serverCommit;
-      const authProtocolVersion = authPayload.protocolVersion;
-      // #3760: server-advertised inactivity timeout. Older servers omit this
-      // field — we leave it null and ActivityIndicator falls back to its
-      // hardcoded reference timeout. Mirror the server's Number.isFinite
-      // guard so Infinity/NaN never reach the store (the server would have
-      // rejected them upstream, but clients shouldn't trust the wire).
-      const authResultTimeoutMs =
-        typeof msg.resultTimeoutMs === 'number' &&
-        Number.isFinite(msg.resultTimeoutMs) &&
-        msg.resultTimeoutMs > 0
-          ? msg.resultTimeoutMs
-          : null;
-      // #4497 / #4477: server-advertised stream-stall window — threaded to
-      // StreamStallChip so the headline can humanise to "No response for
-      // 5 minutes — retry?". 0 is the protocol's "disabled" sentinel so we
-      // treat it the same as absent: the chip falls back to the static
-      // phrase. Same finite/positive guard as resultTimeoutMs.
-      const authStreamStallTimeoutMs =
-        typeof msg.streamStallTimeoutMs === 'number' &&
-        Number.isFinite(msg.streamStallTimeoutMs) &&
-        msg.streamStallTimeoutMs > 0
-          ? msg.streamStallTimeoutMs
-          : null;
-      // Parse connected clients list with self-detection via clientId
-      const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
-      const clients: ConnectedClient[] = rawClients
-        .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
-        .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
-          clientId: c.clientId,
-          deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
-          deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
-          platform: typeof c.platform === 'string' ? c.platform : 'unknown',
-          isSelf: c.clientId === myClientId,
-        }));
-
-      // Parse web feature status from auth_ok
-      const webFeaturesRaw = msg.webFeatures as Record<string, unknown> | undefined;
-      const webFeatures = webFeaturesRaw ? {
-        available: !!webFeaturesRaw.available,
-        remote: !!webFeaturesRaw.remote,
-        teleport: !!webFeaturesRaw.teleport,
-      } : { available: false, remote: false, teleport: false };
-
-      // #3272: parse server-advertised capability map. Older servers
-      // omit the field; treat absence as "no advertised capabilities"
-      // so feature-gated UI hides itself fail-closed (rather than
-      // silently no-oping clicks against unimplemented WS handlers).
-      // Coerce values to boolean so a malformed entry can't accidentally
-      // enable a gate.
-      const capabilitiesRaw = msg.capabilities as Record<string, unknown> | undefined;
-      const serverCapabilities: Record<string, boolean> = {};
-      if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
-        for (const [k, v] of Object.entries(capabilitiesRaw)) {
-          serverCapabilities[k] = v === true;
-        }
-      }
+      // #4766: full wire-shape decode lives in the shared parser
+      // (handleAuthOk + parseConnectedClients). The dashboard assembles the
+      // platform-specific `set()` patch from the parsed payload below.
+      const auth = sharedAuthOk(msg);
+      const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
@@ -2010,17 +2171,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         apiToken: ctx.token,
         socket: ctx.socket,
         claudeReady: false,
-        serverMode: authServerMode,
-        sessionCwd: authSessionCwd,
-        defaultCwd: authDefaultCwd,
-        serverVersion: authServerVersion,
-        latestVersion: authLatestVersion,
-        serverCommit: authServerCommit,
-        serverProtocolVersion: authProtocolVersion,
-        serverResultTimeoutMs: authResultTimeoutMs,
-        streamStallTimeoutMs: authStreamStallTimeoutMs,
+        serverMode: auth.serverMode,
+        sessionCwd: auth.sessionCwd,
+        defaultCwd: auth.defaultCwd,
+        serverVersion: auth.serverVersion,
+        latestVersion: auth.latestVersion,
+        serverCommit: auth.serverCommit,
+        serverProtocolVersion: auth.protocolVersion,
+        serverResultTimeoutMs: auth.resultTimeoutMs,
+        streamStallTimeoutMs: auth.streamStallTimeoutMs,
         streamingMessageId: null,
-        myClientId: myClientId,
+        myClientId: auth.myClientId,
         connectedClients: clients,
         connectionError: null as string | null,
         connectionRetryCount: 0,
@@ -2030,8 +2191,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
-        webFeatures,
-        serverCapabilities,
+        webFeatures: auth.webFeatures,
+        serverCapabilities: auth.serverCapabilities,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -2051,7 +2212,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       startHeartbeat(ctx.socket);
 
       // Initiate key exchange if server requires encryption
-      if (msg.encryption === 'required') {
+      if (auth.encryption === 'required') {
         _pendingKeyPair = createKeyPair();
         _pendingSalt = generateConnectionSalt();
         // Send key_exchange plaintext (before encryption is active)
@@ -2131,136 +2292,153 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Multi-session messages ---
 
     case 'session_list': {
-      const sessionList = sharedSessionList(msg);
-      if (sessionList) {
-        // GC persisted messages for sessions that dropped out of the list
-        const prevSessionIds = Object.keys(get().sessionStates);
-        const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
-        const removedIds = prevSessionIds.filter((id) => !newSessionIdSet.has(id));
-        for (const prevId of removedIds) {
-          void clearPersistedSession(prevId);
+      // #4767: centralised dispatch — store-core precomputes GC + new-session
+      // ids + conversationId / cumulativeUsage / pendingShells patch maps;
+      // the consumer applies them with platform-specific side-effects
+      // (dashboard's activeModel lookup + isBusy → isIdle resync stay here).
+      const initialActiveId = get().activeSessionId;
+      const patches = sharedBuildSessionListPatches(
+        msg,
+        Object.keys(get().sessionStates),
+        initialActiveId,
+      );
+      if (!patches) break;
+      const {
+        sessionList,
+        removedIds,
+        newSessionIds,
+        conversationIdPatches,
+        cumulativeUsagePatches,
+        backgroundShellBuilders,
+      } = patches;
+      // GC persisted messages for sessions that dropped out of the list
+      for (const prevId of removedIds) {
+        void clearPersistedSession(prevId);
+      }
+      // Batch in-memory cleanup into a single state update
+      if (removedIds.length > 0) {
+        const patch: Partial<ConnectionState> = {};
+        const newStates = { ...get().sessionStates };
+        for (const id of removedIds) {
+          delete newStates[id];
         }
-        // Batch in-memory cleanup into a single state update
-        if (removedIds.length > 0) {
-          const patch: Partial<ConnectionState> = {};
-          const newStates = { ...get().sessionStates };
-          for (const id of removedIds) {
-            delete newStates[id];
-          }
-          patch.sessionStates = newStates;
-          // If the active session was removed, switch to next available
-          if (get().activeSessionId && removedIds.includes(get().activeSessionId!)) {
-            const remaining = Object.keys(newStates);
-            const nextId = remaining.length > 0 ? remaining[0] : null;
-            patch.activeSessionId = nextId;
-            if (nextId && newStates[nextId]) {
-              const ss = newStates[nextId];
-              patch.messages = ss.messages;
-              patch.streamingMessageId = ss.streamingMessageId;
-              patch.claudeReady = ss.claudeReady;
-              patch.activeModel = ss.activeModel;
-              patch.permissionMode = ss.permissionMode;
-              patch.contextUsage = ss.contextUsage;
-              patch.lastResultCost = ss.lastResultCost;
-              patch.lastResultDuration = ss.lastResultDuration;
-              patch.isIdle = ss.isIdle;
-            } else {
-              patch.messages = [];
-              patch.streamingMessageId = null;
-              patch.claudeReady = false;
-              patch.activeModel = null;
-              patch.permissionMode = null;
-              patch.contextUsage = null;
-              patch.lastResultCost = null;
-              patch.lastResultDuration = null;
-              patch.isIdle = true;
-            }
-          }
-          set(patch);
-        }
-        set({ sessions: sessionList });
-        // Sync activeModel from session list to prevent dropdown reset.
-        // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
-        // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
-        const activeSessionId = get().activeSessionId;
-        if (activeSessionId) {
-          const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
-          if (activeSessionInfo?.model) {
-            const fullId = activeSessionInfo.model as string;
-            const models = get().availableModels;
-            const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
-            set({ activeModel: matched ? matched.id : fullId });
+        patch.sessionStates = newStates;
+        // If the active session was removed, switch to next available
+        if (initialActiveId && removedIds.includes(initialActiveId)) {
+          const remaining = Object.keys(newStates);
+          const nextId = remaining.length > 0 ? remaining[0] : null;
+          patch.activeSessionId = nextId;
+          if (nextId && newStates[nextId]) {
+            const ss = newStates[nextId];
+            patch.messages = ss.messages;
+            patch.streamingMessageId = ss.streamingMessageId;
+            patch.claudeReady = ss.claudeReady;
+            patch.activeModel = ss.activeModel;
+            patch.permissionMode = ss.permissionMode;
+            patch.contextUsage = ss.contextUsage;
+            patch.lastResultCost = ss.lastResultCost;
+            patch.lastResultDuration = ss.lastResultDuration;
+            patch.isIdle = ss.isIdle;
+          } else {
+            patch.messages = [];
+            patch.streamingMessageId = null;
+            patch.claudeReady = false;
+            patch.activeModel = null;
+            patch.permissionMode = null;
+            patch.contextUsage = null;
+            patch.lastResultCost = null;
+            patch.lastResultDuration = null;
+            patch.isIdle = true;
           }
         }
-        // Initialize session state for any new sessions not yet tracked
+        set(patch);
+      }
+      set({ sessions: sessionList });
+      // Sync activeModel from session list to prevent dropdown reset.
+      // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
+      // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
+      const activeSessionId = get().activeSessionId;
+      if (activeSessionId) {
+        const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
+        if (activeSessionInfo?.model) {
+          const fullId = activeSessionInfo.model as string;
+          const models = get().availableModels;
+          const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
+          set({ activeModel: matched ? matched.id : fullId });
+        }
+      }
+      // Initialize session state for any new sessions not yet tracked.
+      // #4639: seed `isIdle` from the server's authoritative `isBusy` so a
+      // fresh tab / new-session entry reflects the real working state
+      // instead of defaulting to `isIdle: true` and silently dropping the
+      // Working banner until the next live event arrives.
+      if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
-        let initStatesChanged = false;
-        for (const s of sessionList) {
-          if (!newInitStates[s.sessionId]) {
-            newInitStates[s.sessionId] = createEmptySessionState();
-            initStatesChanged = true;
+        const sessionsBySid = new Map(sessionList.map((s) => [s.sessionId, s]));
+        for (const sid of newSessionIds) {
+          if (!newInitStates[sid]) {
+            const fresh = createEmptySessionState();
+            const s = sessionsBySid.get(sid);
+            if (s && typeof s.isBusy === 'boolean') fresh.isIdle = !s.isBusy;
+            newInitStates[sid] = fresh;
           }
         }
-        if (initStatesChanged) {
-          set({ sessionStates: newInitStates });
-        }
-        // Sync conversationId from session list into session states
-        for (const s of sessionList) {
-          if (s.conversationId && get().sessionStates[s.sessionId]) {
-            updateSession(s.sessionId, (ss) =>
-              ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
-            );
-          }
-        }
-        // #4073: seed cumulativeUsage from the snapshot so refreshing the
-        // dashboard mid-session shows the running total without waiting
-        // for the next session_usage event to land. listSessions on the
-        // server emits the field with zero defaults when no result has
-        // landed yet — `cumulativeUsage` is undefined only when an older
-        // server omits it entirely.
-        for (const s of sessionList) {
-          if (s.cumulativeUsage && get().sessionStates[s.sessionId]) {
-            const snapshot = s.cumulativeUsage;
-            updateSession(s.sessionId, (ss) => {
-              const current = ss.cumulativeUsage;
-              if (
-                current &&
-                current.inputTokens === snapshot.inputTokens &&
-                current.outputTokens === snapshot.outputTokens &&
-                current.cacheReadTokens === snapshot.cacheReadTokens &&
-                current.cacheCreationTokens === snapshot.cacheCreationTokens &&
-                current.costUsd === snapshot.costUsd &&
-                current.turnsBilled === snapshot.turnsBilled
-              ) {
-                return {};
-              }
-              return { cumulativeUsage: snapshot };
-            });
-          }
-        }
-        // #4307: seed pendingBackgroundShells from the snapshot so a
-        // fresh tab / reconnect catches up to any sessions already
-        // waiting on background work without needing the next
-        // background_work_changed event to arrive. The
-        // `handleBackgroundWorkChanged` builder does the
-        // same-reference short-circuit so duplicate seeds don't
-        // re-render. The field is optional on `SessionInfo` because
-        // older servers omit it; treat `undefined` as "no waiting
-        // work" (empty array passthrough).
-        for (const s of sessionList) {
-          if (!get().sessionStates[s.sessionId]) continue;
-          const builder = sharedBackgroundWorkChanged(
-            { sessionId: s.sessionId, pending: s.pendingBackgroundShells ?? [] },
-            get().activeSessionId,
-          );
-          updateSession(s.sessionId, (ss) => {
-            const next = builder.applyTo(ss.pendingBackgroundShells);
-            return next === ss.pendingBackgroundShells
-              ? {}
-              : { pendingBackgroundShells: next };
-          });
-        }
+        set({ sessionStates: newInitStates });
+      }
+      // #4639: resync `isIdle` on EXISTING session states against the
+      // snapshot's `isBusy`. Without this, a session that became busy on
+      // the server while the dashboard's local handlers missed the flip
+      // (tab swap during a long turn, peer-tab triggered the work, race
+      // between agent_busy and history_replay) shows the wrong banner and
+      // the wrong Send/Stop button. The snapshot is the source of truth.
+      for (const s of sessionList) {
+        if (typeof s.isBusy !== 'boolean') continue;
+        if (!get().sessionStates[s.sessionId]) continue;
+        const desiredIsIdle = !s.isBusy;
+        updateSession(s.sessionId, (ss) =>
+          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+        );
+      }
+      // Sync conversationId from session list into session states
+      for (const [sid, cid] of conversationIdPatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          ss.conversationId !== cid ? { conversationId: cid } : {}
+        );
+      }
+      // #4073: seed cumulativeUsage from the snapshot so refreshing the
+      // dashboard mid-session shows the running total without waiting
+      // for the next session_usage event to land. listSessions on the
+      // server emits the field with zero defaults when no result has
+      // landed yet — `cumulativeUsage` is undefined only when an older
+      // server omits it entirely. Six-field equality short-circuit lives
+      // in store-core via {@link sharedCumulativeUsageEquals} (#4767).
+      for (const [sid, snapshot] of cumulativeUsagePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          sharedCumulativeUsageEquals(ss.cumulativeUsage, snapshot)
+            ? {}
+            : { cumulativeUsage: snapshot }
+        );
+      }
+      // #4307: seed pendingBackgroundShells from the snapshot so a
+      // fresh tab / reconnect catches up to any sessions already
+      // waiting on background work without needing the next
+      // background_work_changed event to arrive. The
+      // `handleBackgroundWorkChanged` builder does the
+      // same-reference short-circuit so duplicate seeds don't
+      // re-render. The field is optional on `SessionInfo` because
+      // older servers omit it; treat `undefined` as "no waiting
+      // work" (empty array passthrough).
+      for (const [sid, builder] of backgroundShellBuilders) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) => {
+          const next = builder.applyTo(ss.pendingBackgroundShells);
+          return next === ss.pendingBackgroundShells
+            ? {}
+            : { pendingBackgroundShells: next };
+        });
       }
       break;
     }
@@ -2269,6 +2447,28 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const { sessionId: ctxSessionId, patch } = sharedSessionContext(msg, get().activeSessionId);
       if (ctxSessionId && get().sessionStates[ctxSessionId]) {
         updateSession(ctxSessionId, () => patch);
+      }
+      break;
+    }
+
+    case 'session_activity': {
+      // #4639: server-emitted busy/idle broadcast (ws-forwarding.js fires it
+      // on stream_start and result for every session, to every authenticated
+      // client). Pre-fix the dashboard had no handler, so a peer tab driving
+      // the session — or this tab's own session_list snapshot — was the only
+      // way to learn about busy state changes for non-active sessions. That
+      // gap is what made the Working banner desync after a tab swap.
+      //
+      // Defensive: ignore if either field is missing/wrong type, and skip
+      // unknown sessions (session_list is responsible for seeding new
+      // entries — we don't want session_activity racing it).
+      const activitySessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      const activityIsBusy = typeof msg.isBusy === 'boolean' ? msg.isBusy : null;
+      if (activitySessionId && activityIsBusy !== null && get().sessionStates[activitySessionId]) {
+        const desiredIsIdle = !activityIsBusy;
+        updateSession(activitySessionId, (ss) =>
+          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+        );
       }
       break;
     }
@@ -2322,10 +2522,54 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(crashedId, () => ({ health: 'crashed' as const }));
           pushSessionNotification(crashedId, 'error', 'Session crashed');
         }
+      } else if (parsed.code === 'SESSION_NOT_FOUND') {
+        // #4982 — dashboard's persisted `activeSessionId` points at a
+        // pre-restart session id that no longer exists after
+        // `session-manager.restoreState()` regenerated ids on the daemon
+        // side (#4979). Without clearing the stale id, the next user send
+        // trips the same error in a loop and the operator stays wedged.
+        //
+        // The SessionNotFoundChip reads `sessionNotFoundError` from the
+        // store and renders an actionable banner over the empty-state
+        // pane. The toast still fires so the operator sees the immediate
+        // signal too, but the loop stops because activeSessionId is gone
+        // and the next send addresses a different (operator-picked) id.
+        get().setSessionNotFoundError({
+          attemptedSessionId: parsed.attemptedSessionId ?? null,
+          message: parsed.message ?? 'Session not found.',
+        });
+        set({ activeSessionId: null });
+        if (parsed.message) {
+          _adapters.alert.alert('Session Restarted', parsed.message);
+          get().addServerError(parsed.message);
+        }
       } else if (parsed.message) {
         _adapters.alert.alert('Session Error', parsed.message);
         get().addServerError(parsed.message);
       }
+      break;
+    }
+
+    case 'session_stopped': {
+      // #4878: quiet, informational confirmation when CliSession exits
+      // cleanly after a user-initiated Stop. The wire path was wired in
+      // #4868 (CliSession 'stopped' → SessionManager → ws-forwarding →
+      // ServerSessionStoppedSchema). Routed through `addInfoNotification`
+      // (info-level toast, not the red `addServerError` reserved for
+      // crashes / STREAM_ERROR / ABORT) so the operator gets a positive
+      // "you clicked Stop and the session did indeed stop" confirmation.
+      //
+      // A non-zero exit code is surfaced as a small diagnostic suffix
+      // (e.g. "Session stopped. (exit 143)" for SIGTERM). Code 0 is the
+      // common clean-exit case and gets no decoration — the bare
+      // "Session stopped." carries the full signal there. Missing code
+      // (future in-process providers per the #4756 follow-up) is also
+      // bare; surfacing "(exit undefined)" would be noisier than useful.
+      const stoppedCode = typeof msg.code === 'number' ? msg.code : null;
+      const stoppedMessage = stoppedCode != null && stoppedCode !== 0
+        ? `Session stopped. (exit ${stoppedCode})`
+        : 'Session stopped.';
+      get().addInfoNotification(stoppedMessage);
       break;
     }
 
@@ -2578,6 +2822,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'agent_event': {
+      // #5016 — Task subagent intermediate progress. Builder appends one
+      // entry to the parent Task tool_use bubble's `childAgentEvents[]`.
+      // Same-reference no-op when the parent bubble isn't found (event
+      // arrived before tool_start, which should not happen given the
+      // server's ordering guarantee but is defended).
+      const builder = sharedAgentEvent(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.messages);
+          return next === ss.messages ? {} : { messages: next };
+        });
+      }
+      break;
+    }
+
     case 'background_work_changed': {
       // #4307 — pending-background-shells snapshot updated for a
       // session. Full-snapshot protocol, so the builder replaces the
@@ -2624,6 +2884,52 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'multi_question_intervention': {
+      // #4653 — chroxy's permission-hook (#4648) just denied a multi-question
+      // AskUserQuestion. Append a SessionIntervention entry so the
+      // FooterBar counter ticks, and on the FIRST such intervention per
+      // session push a one-time system ChatMessage explaining what
+      // happened (without it the deny is invisible — see v0.9.24
+      // dogfood feedback on #4653).
+      //
+      // applyInterventionBuilder dedups by toolUseId (a stuck model
+      // re-emitting the same payload won't double-count) and tells us
+      // whether this was the session's first intervention so the inline
+      // notice only fires once.
+      const builder = sharedMultiQuestionIntervention(msg, get().activeSessionId);
+      if (!builder) break;
+      const targetId = builder.sessionId;
+      if (!targetId) break;
+      const targetState = get().sessionStates[targetId];
+      if (!targetState) break;
+      const { interventions: nextInterventions, isFirst } = applyInterventionBuilder(
+        builder,
+        targetState.interventions,
+      );
+      // Skip the state mutation if nothing changed (dedup'd repeat) so React
+      // doesn't re-render the footer counter on every stuck-model re-emit.
+      if (nextInterventions === targetState.interventions) break;
+      updateSession(targetId, (ss) => {
+        if (isFirst) {
+          return {
+            interventions: nextInterventions,
+            messages: [
+              ...ss.messages,
+              {
+                id: nextMessageId('system'),
+                type: 'system',
+                content:
+                  "chroxy intercepted a multi-question form and asked the agent to break it into single questions.",
+                timestamp: Date.now(),
+              },
+            ],
+          };
+        }
+        return { interventions: nextInterventions };
+      });
+      break;
+    }
+
     case 'permission_expired': {
       const { requestId: expiredRequestId, systemMessage: expiredSystemMsg } =
         sharedPermissionExpired(msg);
@@ -2634,10 +2940,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // append so the UI does not surface this as an error to the user.
         const alreadyResolved = Boolean(get().resolvedPermissions?.[expiredRequestId]);
         if (alreadyResolved) {
-          // Still dismiss any lingering notification banner for this request.
+          // #5008 — drain the banner stack without dropping the row from the
+          // widget's durable history. See handlePermissionResolved for the
+          // full rationale; this branch handles the #2833 race where expiry
+          // arrives after we already resolved locally. Single timestamp per
+          // mutation — see handlePermissionResolved for the pattern source.
+          const readStamp = Date.now();
           set((s) => ({
-            sessionNotifications: s.sessionNotifications.filter(
-              (n) => n.requestId !== expiredRequestId
+            sessionNotifications: s.sessionNotifications.map((n) =>
+              n.requestId === expiredRequestId && n.readAt === undefined
+                ? { ...n, readAt: readStamp }
+                : n
             ),
           }));
           // #2839: surface a user-centric info toast confirming the
@@ -2657,10 +2970,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             ),
           }));
         }
-        // Auto-dismiss matching notification banner (#1580)
+        // #5008 — drain banner without dropping widget history. Mark the
+        // matching row read; the banner filter (`readAt === undefined`)
+        // drops it and the widget keeps the entry as part of its durable
+        // intervention history. Updates the original #1580 auto-dismiss
+        // contract from "remove" to "mark-read-and-keep". Single timestamp
+        // per mutation — see handlePermissionResolved for the pattern source.
+        const readStamp = Date.now();
         set((s) => ({
-          sessionNotifications: s.sessionNotifications.filter(
-            (n) => n.requestId !== expiredRequestId
+          sessionNotifications: s.sessionNotifications.map((n) =>
+            n.requestId === expiredRequestId && n.readAt === undefined
+              ? { ...n, readAt: readStamp }
+              : n
           ),
         }));
       }
@@ -3220,7 +3541,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // + app share a single normalised shape (no `msg.fatal` reach-in,
       // no per-client type guard, and a typo'd value can't silently
       // degrade severity).
-      const { code: errCode, message: errMsg, fatal: errFatal } = sharedError(msg);
+      // #5039: `partialCost` carries the optional PR #5037 fold of
+      // parent + Task subagent rounds completed before the error fired.
+      // Pre-formatted with the shared helper so the dashboard toast and
+      // mobile alert show identical wording.
+      const { code: errCode, message: errMsg, fatal: errFatal, partialCost } = sharedError(msg);
+      const partialCostLine = partialCost ? formatPartialCostLine(partialCost) : undefined;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
       // #3588: clear any in-flight skill_trust_grant whose requestId
       // matches this error envelope so the SkillsPanel "Pending review"
@@ -3296,7 +3622,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // the loud red toast instead of silently degrading.
       const isNonFatal = errFatal === false || NON_FATAL_ERROR_CODES.has(errCode);
       const severity: 'error' | 'warning' = isNonFatal ? 'warning' : 'error';
-      get().addServerError(surfaced, action, severity);
+      // #5039: thread the optional partial-cost sub-line through to the
+      // store. addServerError keeps it undefined for every pre-#5037
+      // error path so the existing toast layout is unchanged.
+      get().addServerError(surfaced, action, severity, partialCostLine);
       break;
     }
 

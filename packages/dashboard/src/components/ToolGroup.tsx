@@ -17,6 +17,7 @@ import {
   tryParseCompleteJson,
   getInputSummary,
 } from '@chroxy/store-core'
+import { ChildAgentEventList } from './ChildAgentEventList'
 
 export interface ToolGroupProps {
   messages: ChatMessage[]
@@ -192,6 +193,19 @@ function ToolGroupEntry({
               {resultDetail || resultPlaceholder}
             </pre>
           </div>
+          {/* #5016 — Task subagent nested progress in grouped-entry view.
+              When this entry is a Task tool_use whose subagent emitted
+              intermediate events, surface them here so the user sees the
+              same nested rendering as the singleton-bubble path. */}
+          {message.childAgentEvents && message.childAgentEvents.length > 0 && message.toolUseId && (
+            <div className="tool-group-entry-detail-section">
+              <div className="tool-group-entry-detail-label">Subagent</div>
+              <ChildAgentEventList
+                events={message.childAgentEvents}
+                parentToolUseId={message.toolUseId}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

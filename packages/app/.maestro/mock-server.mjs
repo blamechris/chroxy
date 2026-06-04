@@ -502,6 +502,133 @@ wss.on('connection', (ws) => {
           break
         }
 
+        // #4877: trigger phrase 'show-ask-other' emits a single-question
+        // AskUserQuestion so the Maestro ask-question-other-freeform flow
+        // can exercise the Other → freeform send-path on a real RN
+        // runtime. Mirrors the production wire shape `show-ask-user-question`
+        // uses, but with model-supplied option labels that are distinct
+        // from 'approve'/'deny' so the synthesized Other sentinel is the
+        // obvious target — and so the post-answer freeform text bubble
+        // can't be confused with a regular option label.
+        //
+        // The store-core `handleUserQuestion` normalizer appends the
+        // synthetic OTHER_OPTION_VALUE option to every single-select
+        // question that has at least one real option (see
+        // packages/store-core/src/handlers/index.ts ~L3680). The Maestro
+        // flow therefore taps `approval-button-__chroxy_other__` to drop
+        // the MessageBubble into freetext mode, types a freeform answer,
+        // and submits via `approval-freetext-send` — the testIDs that
+        // landed with PR #4864.
+        //
+        // The freeform shape `{otherLabel, freeformText}` is forwarded
+        // by SessionScreen.handleSelectOption to `sendUserQuestionResponse`,
+        // which serializes `{type:'user_question_response', answer:<label>,
+        // freeformText:<typed>, toolUseId}` on the wire. Mock handler
+        // `case 'user_question_response'` logs the payload so a maintainer
+        // can eyeball the wire shape in `[mock]` output; the Maestro
+        // assertion targets the answered-state render (the typed text
+        // renders in `styles.promptFreetextAnswered` after submit).
+        if (text.trim() === 'show-ask-other') {
+          showAskUserQuestionCounter += 1
+          const toolUseId = `tu-askuserquestion-other-mock-${showAskUserQuestionCounter}`
+          send(ws, {
+            type: 'user_question',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            questions: [
+              {
+                question: 'Which environment should I deploy to?',
+                options: [
+                  { label: 'production' },
+                  { label: 'staging' },
+                ],
+              },
+            ],
+          })
+          break
+        }
+
+        // #4762: trigger phrase 'show-multi-question' emits the four
+        // wedge shapes #4735 / #4604 Chunk B require coverage for —
+        // mixed (single-select + multi-select + with-Other in one
+        // payload). The dashboard's MultiQuestionForm exercises every
+        // branch in a single payload because the dashboard renders
+        // all N questions inline (#4760 lifted the suppression for
+        // SDK-mode sessions). The mobile MessageBubble currently
+        // renders only `questions[0]` so this flow pins the wire→Q[0]
+        // path for the mixed payload — when the mobile multi-question
+        // renderer lands the flow extends to iterate every question
+        // (`approval-question-1` / `approval-question-2`).
+        //
+        // The mixed shape exercises three independent wire branches
+        // in a single payload:
+        //   - Q[0]: single-select with model-supplied 'Other' label —
+        //     normalizeQuestion's `modelSuppliedOther` path (see
+        //     packages/store-core/src/handlers/index.ts:3670) preserves
+        //     it with `value === label` ("Other") rather than appending
+        //     the synthetic OTHER_OPTION_VALUE sentinel — so the testID
+        //     resolves to `approval-button-Other`, not
+        //     `approval-button-__chroxy_other__`.
+        //   - Q[1]: multi-select (`multiSelect: true`) — Other
+        //     sentinel is intentionally NOT appended (see
+        //     normalizeQuestion's `isMultiSelect` branch); a regression
+        //     that flipped the gate would surface as an extra option
+        //     when downstream renderers iterate Q[1].
+        //   - Q[2]: single-select with synthetic 'Other' (no model-
+        //     supplied entry) — handleUserQuestion appends the
+        //     OTHER_OPTION_VALUE sentinel automatically.
+        //
+        // toolUseId reuses the multi-question counter so repeated
+        // triggers don't collide (same rationale as
+        // show-ask-user-question-multi above).
+        if (text.trim() === 'show-multi-question') {
+          showAskUserQuestionCounter += 1
+          const toolUseId = `tu-multi-question-mock-${showAskUserQuestionCounter}`
+          send(ws, {
+            type: 'user_question',
+            sessionId: 'mock-sess-1',
+            toolUseId,
+            questions: [
+              // Q[0] — single-select with model-supplied 'Other'.
+              // Lowercase 'approve' / 'deny' so the
+              // `approval-button-<value>` testID matches the canonical
+              // selectors used by the existing ask-user-question flows.
+              {
+                question: 'Q1 — deploy to production?',
+                options: [
+                  { label: 'approve' },
+                  { label: 'deny' },
+                  { label: 'Other' },
+                ],
+              },
+              // Q[1] — multi-select. The Other sentinel is deliberately
+              // NOT appended by normalizeQuestion for multi-select
+              // questions (multi-select forms produced by claude SDK
+              // never include a free-text fallback).
+              {
+                question: 'Q2 — which areas to verify?',
+                multiSelect: true,
+                options: [
+                  { label: 'app' },
+                  { label: 'server' },
+                  { label: 'dashboard' },
+                ],
+              },
+              // Q[2] — single-select with synthetic Other (no model-
+              // supplied entry; handleUserQuestion appends the
+              // OTHER_OPTION_VALUE sentinel automatically).
+              {
+                question: 'Q3 — rollback strategy?',
+                options: [
+                  { label: 'auto-rollback' },
+                  { label: 'manual-rollback' },
+                ],
+              },
+            ],
+          })
+          break
+        }
+
         // #4697 Chunk B: 4-question multi-question form mirrors the
         // shape #4604 Chunk B pinned at the server level. The mobile
         // MessageBubble currently renders only `questions[0]` (the
@@ -592,7 +719,13 @@ wss.on('connection', (ws) => {
       // path (ws-server.js processes `user_question_response` /
       // `permission_response` symmetrically).
       case 'user_question_response':
-        console.log(`[mock] user_question_response: answer="${msg.answer}" toolUseId="${msg.toolUseId || ''}"`)
+        // #4877: log `freeformText` alongside `answer` so the Other →
+        // freeform send-path's wire shape is visible in the mock audit
+        // trail. When the user picks the synthesized Other option,
+        // `sendUserQuestionResponse` serializes the wire payload
+        // `{answer:<otherLabel>, freeformText:<typed>, toolUseId}` —
+        // the dashboard parity shape pinned by PR #4864.
+        console.log(`[mock] user_question_response: answer="${msg.answer}" freeformText="${msg.freeformText || ''}" toolUseId="${msg.toolUseId || ''}"`)
         break
 
       case 'permission_response':

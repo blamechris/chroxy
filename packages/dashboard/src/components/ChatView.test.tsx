@@ -126,11 +126,67 @@ describe('ChatView', () => {
     await act(() => { vi.advanceTimersByTime(50) })
     expect(container.scrollTop).toBe(200)
 
-    // Now add a new message — auto-scroll SHOULD fire (new count resets)
+    // #4652 — even when a new message arrives, a user who is actively
+    // scrolled up should NOT be snapped back to the bottom. They keep
+    // their reading position and can click the scroll-to-bottom button
+    // (which appears) when they're ready. Previously the count-change
+    // effect unconditionally reset `userScrolledUp` and scrolled — that
+    // made history unreachable while an AskUserQuestion form was open
+    // and downstream tool_use events kept arriving.
+    const moreMessages = makeMessages(4)
+    rerender(<ChatView messages={moreMessages} isStreaming={false} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(200)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('auto-scrolls on new message when user is at bottom (#4652)', async () => {
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(<ChatView messages={messages} isStreaming={false} />)
+    const container = screen.getByTestId('chat-messages')
+
+    // Setup: at bottom; user has not scrolled up
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // New message arrives — should snap to bottom (user is at bottom, so no
+    // disruption).
     const moreMessages = makeMessages(4)
     rerender(<ChatView messages={moreMessages} isStreaming={false} />)
     await act(() => { vi.advanceTimersByTime(50) })
     expect(container.scrollTop).toBe(1000)
+    vi.useRealTimers()
+  })
+
+  it('preserves scrolled-up position when streaming ends mid-history-read (#4652)', async () => {
+    // Repro for the AskUserQuestion scenario: streaming flips to false
+    // when the question arrives. Previously, the streaming-end effect
+    // unconditionally reset `userScrolledUp` to false — snapping the
+    // user back to the bottom while they were reading history.
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(<ChatView messages={messages} isStreaming />)
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // User scrolls up while assistant is still streaming
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // Streaming ends (AskUserQuestion arrived); user is still scrolled up
+    rerender(<ChatView messages={messages} isStreaming={false} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(100)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
     vi.useRealTimers()
   })
 

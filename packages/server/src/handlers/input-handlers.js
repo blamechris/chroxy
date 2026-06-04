@@ -6,10 +6,10 @@
  *          notification_prefs_set (#4541)
  */
 import { randomUUID } from 'node:crypto'
-import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
 
@@ -123,17 +123,64 @@ async function handleInput(ws, client, msg, ctx) {
   const targetSessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
   if (!entry) {
-    const message = msg.sessionId
-      ? `Session not found: ${msg.sessionId}`
-      : 'No active session'
-    ctx.send(ws, { type: 'session_error', message })
+    // #4935 — visibility fix for the silent post-restart wedge. Before this,
+    // a stale `sessionId` (common when the dashboard's persisted activeSessionId
+    // references a pre-restart session ID that no longer exists after
+    // session-manager regenerates IDs on restoreState) would silently drop
+    // the input on the floor — sendSessionError ran but the operator log only
+    // showed a debug-level `Message from ...` line below, and that line is
+    // never reached on this branch. The dashboard's session_error toast DID
+    // fire, but with a generic "Session not found: <id>" string that gave the
+    // user nothing actionable. Now:
+    //   1. Log at INFO with the attempted ID + client ID so chroxy.log
+    //      shows the mismatch and operators can correlate against the
+    //      session_list / session-state.json after a restart.
+    //   2. Emit a structured `code: 'SESSION_NOT_FOUND'` + `attemptedSessionId`
+    //      on the session_error envelope so the dashboard can surface an
+    //      actionable hint ("session restarted — pick a session below")
+    //      and clear its stale activeSessionId locally. Mirrors the existing
+    //      `code: 'resume_unknown'` affordance (#4947).
+    //
+    // IMPORTANT (Copilot review #4979): `resolveSession()` returns null for
+    // two distinct reasons — (a) the session truly does not exist, and
+    // (b) the client has a `boundSessionId` and `msg.sessionId` disagrees with
+    // it (session-token binding enforcement in handler-utils.js). Case (b) is
+    // a SESSION_TOKEN_MISMATCH, not a SESSION_NOT_FOUND, and conflating them
+    // would (i) mislabel the operator log line and (ii) cause a dashboard
+    // consumer keyed on SESSION_NOT_FOUND to clear local state for what is
+    // actually an authorization failure. Check the binding-mismatch case
+    // FIRST and emit the canonical SESSION_TOKEN_MISMATCH envelope (#2912 —
+    // unified shape across all call sites via buildSessionTokenMismatchPayload).
+    if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
+      log.info(`input rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
+      ctx.send(ws, {
+        type: 'session_error',
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessionManager,
+          boundSessionId: client.boundSessionId,
+        }),
+      })
+      return
+    }
+    if (msg.sessionId) {
+      log.info(`input dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
+      ctx.send(ws, {
+        type: 'session_error',
+        code: 'SESSION_NOT_FOUND',
+        message: `Session not found: ${msg.sessionId}`,
+        attemptedSessionId: msg.sessionId,
+      })
+    } else {
+      log.info(`input dropped: no active session client=${client.id}`)
+      sendSessionError(ws, ctx, 'No active session')
+    }
     return
   }
 
   if (attachments?.length) {
     const err = validateAttachments(attachments)
     if (err) {
-      ctx.send(ws, { type: 'session_error', message: `Invalid attachment: ${err}` })
+      sendSessionError(ws, ctx, `Invalid attachment: ${err}`)
       return
     }
   }
@@ -148,8 +195,64 @@ async function handleInput(ws, client, msg, ctx) {
   const attCount = attachments?.length || 0
   log.debug(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
+  // #4733 — wire-arrival fingerprint. Logs the byte/codepoint/whitespace
+  // shape of the inbound `data` so a corrupted-text reproduction can be
+  // localized to the dashboard boundary vs the server's PTY write path
+  // by correlating against the `writePtyText (msg=… codePoints=… bytes=…)`
+  // line in `claude-tui-session.js`. No content is logged — only counts —
+  // so this stays safe to enable when the env flag is set.
+  //
+  // Concretely, the original #4733 repro showed `writePtyText … codePoints=332`
+  // for a message the user intended at ~360 chars with ~24 spaces missing.
+  // Without an inbound-side counter we cannot tell whether the 28-codepoint
+  // delta was stripped before the WS arrived, in `trim()` (leading/trailing
+  // only, max +2 codepoints), in the evaluator rewrite path (#3635), or by
+  // the throttle. The four counts here pin which boundary stripped them.
+  //
+  // Gated behind `CHROXY_LOG_WIRE_FINGERPRINT=1` so it stays off by default
+  // — the input handler is the hot path for every typed/pasted user message
+  // and an unconditional info-level log line per message is too noisy for
+  // production user logs. Flip the env var when actively investigating
+  // #4733 (or any future "text stripped between dashboard and PTY" report).
+  if (process.env.CHROXY_LOG_WIRE_FINGERPRINT === '1' && typeof text === 'string' && text.length > 0) {
+    // Strip a SINGLE trailing newline (CR, LF, or CRLF) before fingerprinting
+    // so counts line up with `_writePtyTextThrottled` in claude-tui-session.js,
+    // which strips one trailing newline before the bracketed-paste body. Shift+
+    // Enter ends multi-line dashboard drafts with a trailing \n; counting it
+    // here would inflate `codePoints`/`wsTotal` by 1 (or 2 for \r\n) and skew
+    // the dashboard-vs-PTY boundary correlation by the same amount.
+    let fp = text
+    if (fp.endsWith('\r\n')) fp = fp.slice(0, -2)
+    else if (fp.endsWith('\n') || fp.endsWith('\r')) fp = fp.slice(0, -1)
+    const bytes = Buffer.byteLength(fp, 'utf8')
+    const codePoints = [...fp].length
+    // Counts ALL interior whitespace runs as one-per-run AND total chars
+    // separately — the run count survives a "double-space collapsed to
+    // single" bug (each run keeps at least one char) while the total
+    // catches "all interior spaces stripped" (run count → 0, total → 0).
+    let whitespaceTotal = 0
+    let whitespaceRuns = 0
+    let maxWordLen = 0
+    let currWordLen = 0
+    let inWhitespace = false
+    for (const ch of fp) {
+      if (/\s/.test(ch)) {
+        whitespaceTotal += 1
+        if (!inWhitespace) whitespaceRuns += 1
+        inWhitespace = true
+        if (currWordLen > maxWordLen) maxWordLen = currWordLen
+        currWordLen = 0
+      } else {
+        inWhitespace = false
+        currWordLen += 1
+      }
+    }
+    if (currWordLen > maxWordLen) maxWordLen = currWordLen
+    log.info(`input wire-fingerprint (client=${client.id} session=${targetSessionId} bytes=${bytes} codePoints=${codePoints} wsTotal=${whitespaceTotal} wsRuns=${whitespaceRuns} maxWordLen=${maxWordLen}) (#4733)`)
+  }
+
   if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.' })
+    sendSessionError(ws, ctx, 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.')
     return
   }
 
@@ -392,13 +495,44 @@ function handleInterrupt(ws, client, msg, ctx) {
   if (entry) {
     log.info(`Interrupt from ${client.id} to session ${interruptSessionId}`)
     entry.session.interrupt()
+    return
+  }
+  // #4935 — same visibility fix as handleInput for the silent post-restart
+  // wedge. An interrupt addressed to a stale session ID used to drop on the
+  // floor with no log line and no client-side error. Surface both so the
+  // dashboard can clear stale state and the operator can grep chroxy.log.
+  //
+  // IMPORTANT (Copilot review #4979): like handleInput, resolveSession() can
+  // return null for binding mismatches as well as truly-missing sessions.
+  // Disambiguate before emitting so a binding mismatch surfaces as the
+  // canonical SESSION_TOKEN_MISMATCH envelope rather than being mislabelled
+  // as a stale-ID drop.
+  if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
+    log.info(`interrupt rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
+    ctx.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
+    return
+  }
+  if (msg.sessionId) {
+    log.info(`interrupt dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
+    ctx.send(ws, {
+      type: 'session_error',
+      code: 'SESSION_NOT_FOUND',
+      message: `Session not found: ${msg.sessionId}`,
+      attemptedSessionId: msg.sessionId,
+    })
   }
 }
 
 function handleResumeBudget(ws, client, msg, ctx) {
   const budgetSessionId = msg.sessionId || client.activeSessionId
   if (!budgetSessionId || !resolveSession(ctx, msg, client)) {
-    ctx.send(ws, { type: 'session_error', message: 'No valid session for budget resume' })
+    sendSessionError(ws, ctx, 'No valid session for budget resume')
     return
   }
   if (ctx.sessionManager.isBudgetPaused(budgetSessionId)) {
@@ -545,6 +679,21 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   // correct client can still respond.
   if (client.boundSessionId && client.boundSessionId !== questionSessionId) return
 
+  // #4788 (audit P0.2): for UNBOUND clients, require the questionSessionId
+  // to match the client's active or subscribed sessions before routing the
+  // answer. Without this, an unbound dashboard tab could submit an answer
+  // for any session by replaying a known toolUseId — paired with the log
+  // leak in #4787 this enables cross-session answer hijacking. Mirrors the
+  // default filter used by _broadcastToSession (ws-broadcaster.js:106) so
+  // the set of clients permitted to ANSWER a question is the same set that
+  // could legitimately have RECEIVED it. Leaves the mapping intact so the
+  // legitimate subscribed client can still respond.
+  if (!client.boundSessionId) {
+    const subscribed = questionSessionId === client.activeSessionId
+      || (client.subscribedSessionIds && client.subscribedSessionIds.has(questionSessionId))
+    if (!subscribed) return
+  }
+
   if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
 
   const entry = ctx.sessionManager.getSession(questionSessionId)
@@ -553,7 +702,27 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // wedge is correlatable from chroxy.log alone (toolUseId + map-key
     // count distinguishes the SDK's per-question form from the TUI's
     // single-answer string).
-    log.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0}`)
+    // #4651: log freeformText presence so the Other-path two-stage write
+    // is greppable in chroxy.log without leaking the user's text.
+    // Copilot review (#4753): explicit boolean — `&&` of a string yields
+    // the string, not a boolean, which downstream conditionals can read
+    // but is confusing in a `freeform=${...}` log template.
+    const hasFreeform = typeof msg.freeformText === 'string' && msg.freeformText.length > 0
+    // #4792: scope this entry to the question's session so the WsServer
+    // log fan-out (#4787) routes it to the bound dashboard for that
+    // session rather than dropping it for all bound clients. The line
+    // carries toolUseId + freeform.length — useful for correlating
+    // multi-question form wedges per-session in chroxy.log.
+    //
+    // Legacy single-session mode (ws-message-handlers.js createCliSessionAdapter)
+    // serves `getSession(undefined)` from a synthetic default entry, so
+    // `questionSessionId` can legitimately be falsy here. In that mode
+    // there's exactly one session and no cross-session fan-out leak risk,
+    // so fall back to the unscoped `log` instead of throwing — multi-session
+    // deployments always have a real sessionId from the toolUseId map or
+    // client.activeSessionId.
+    const qlog = questionSessionId ? loggerForSession('ws', questionSessionId) : log
+    qlog.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0} freeform=${hasFreeform ? msg.freeformText.length : 0}`)
     // #4668: forward msg.toolUseId so claude-tui-session can route the
     // answer to the right pending entry in its Map. Sessions that don't
     // care about toolUseId (cli-session, sdk-session via permission-
@@ -561,7 +730,12 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // a safe addition. ByokSession's respondToQuestion forwards to
     // _permissions.respondToQuestion which similarly ignores trailing
     // args it doesn't read.
-    entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId)
+    // #4651: forward msg.freeformText as a final opts object — claude-tui-
+    // session uses it to drive the two-stage Other-path write (digit →
+    // text-input prompt → freeform text + Enter). Other providers ignore
+    // the trailing arg.
+    const opts = hasFreeform ? { freeformText: msg.freeformText } : undefined
+    entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId, opts)
   }
 }
 

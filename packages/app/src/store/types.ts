@@ -419,7 +419,25 @@ export interface MessageInputActions {
   sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
+  /**
+   * Send a `user_question_response` answer to the server.
+   *
+   * Accepts three answer shapes:
+   * - `string` — legacy single-question / free-text path. Wire shape stays
+   *   `{ type, answer, toolUseId? }` so older servers keep working.
+   * - `Record<string, string | string[]>` — multi-question form path
+   *   (#4604 / #4621 / #4735 / #4761). Populates the `answers` field per
+   *   `UserQuestionResponseSchema` and a flattened string `answer` summary.
+   * - `{ otherLabel, freeformText }` — single-question Other / freeform
+   *   path (#4755, mobile parity with dashboard #4651). Wire payload is
+   *   `{answer: <otherLabel>, freeformText: <typed text>}` so the server
+   *   drives the two-stage TUI write (Other digit → text-input prompt →
+   *   freeform text + Enter).
+   */
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
+    toolUseId?: string,
+  ) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
 }

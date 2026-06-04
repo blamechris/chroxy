@@ -27,6 +27,9 @@ import {
   ALLOWED_IMAGE_TYPES,
   broadcastFocusChanged,
   resolveSession,
+  resolveSessionOrError,
+  requireSessionMethod,
+  sendSessionError,
   sendError,
   buildSessionTokenMismatchPayload,
   SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
@@ -1227,5 +1230,195 @@ describe('buildSessionTokenMismatchPayload', () => {
     const payload = buildSessionTokenMismatchPayload({ boundSessionId: '' })
     assert.equal(payload.boundSessionId, null)
     assert.equal(payload.boundSessionName, null)
+  })
+})
+
+// ============================================================
+// sendSessionError — issue #4773
+// ============================================================
+//
+// Thin wrapper around ctx.send that emits the canonical `session_error`
+// envelope used across handlers. Centralising the shape here means the
+// 50+ inline `ctx.send(ws, { type: 'session_error', message })` sites can
+// collapse to a one-liner and any future schema tweak (adding `code`,
+// `recoverable`, etc.) happens in one place.
+
+describe('sendSessionError (#4773)', () => {
+  it('routes the session_error envelope through ctx.send', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    sendSessionError(ws, ctx, 'No active session')
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].ws, ws)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'No active session')
+  })
+
+  it('does nothing when ws is null or undefined', () => {
+    const ctx = { send: () => assert.fail('should not be called') }
+    assert.doesNotThrow(() => sendSessionError(null, ctx, 'oops'))
+    assert.doesNotThrow(() => sendSessionError(undefined, ctx, 'oops'))
+  })
+
+  it('does nothing when ctx is missing send', () => {
+    const ws = { readyState: 1, send: () => {} }
+    assert.doesNotThrow(() => sendSessionError(ws, null, 'oops'))
+    assert.doesNotThrow(() => sendSessionError(ws, {}, 'oops'))
+  })
+})
+
+// ============================================================
+// resolveSessionOrError — issue #4773
+// ============================================================
+//
+// Wraps resolveSession so the 13 hot sites that do:
+//   const entry = resolveSession(ctx, msg, client)
+//   if (!entry) {
+//     ctx.send(ws, { type: 'session_error', message: 'No active session' })
+//     return
+//   }
+// collapse to:
+//   const entry = resolveSessionOrError(ws, ctx, msg, client)
+//   if (!entry) return
+//
+// Returning `null` on miss (after emitting the error) keeps the caller
+// idiom dead-simple and identical to the manual pattern it replaces.
+
+describe('resolveSessionOrError (#4773)', () => {
+  it('returns the session entry on hit and emits nothing', () => {
+    const session = { id: 'sess-1', name: 'test' }
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = {
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: (id) => (id === 'sess-1' ? session : null) },
+    }
+    const result = resolveSessionOrError(ws, ctx, { sessionId: 'sess-1' }, {})
+    assert.deepStrictEqual(result, session)
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('returns null on miss and emits a session_error', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = {
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: () => null },
+    }
+    const result = resolveSessionOrError(ws, ctx, { sessionId: 'nope' }, {})
+    assert.strictEqual(result, null)
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'No active session')
+  })
+
+  it('falls back to client.activeSessionId when msg lacks sessionId', () => {
+    const session = { id: 'sess-2', name: 'fallback' }
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = {
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: (id) => (id === 'sess-2' ? session : null) },
+    }
+    const result = resolveSessionOrError(ws, ctx, {}, { activeSessionId: 'sess-2' })
+    assert.deepStrictEqual(result, session)
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('emits the canonical "No active session" message even when sessionManager is missing', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const result = resolveSessionOrError(ws, ctx, { sessionId: 'any' }, {})
+    assert.strictEqual(result, null)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'No active session')
+  })
+
+  it('returns null when a bound client requests a different session', () => {
+    // Binding violation: do not leak that the session exists.
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = {
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: () => ({ id: 'sess-1' }) },
+    }
+    const result = resolveSessionOrError(
+      ws,
+      ctx,
+      { sessionId: 'sess-1' },
+      { boundSessionId: 'sess-other' }
+    )
+    assert.strictEqual(result, null)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+  })
+})
+
+// ============================================================
+// requireSessionMethod — issue #4773
+// ============================================================
+//
+// Wraps the "capability gate" pattern (6 occurrences across handlers):
+//   if (typeof entry.session.setX !== 'function') {
+//     ctx.send(ws, { type: 'session_error', message: 'This provider does
+//       not support X' })
+//     return
+//   }
+// → if (!requireSessionMethod(ws, ctx, entry, 'setX',
+//      'This provider does not support X')) return
+
+describe('requireSessionMethod (#4773)', () => {
+  it('returns true and emits nothing when the method exists', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const entry = { session: { setX() {} } }
+    const ok = requireSessionMethod(ws, ctx, entry, 'setX', 'unsupported')
+    assert.strictEqual(ok, true)
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('returns false and emits a session_error when the method is missing', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const entry = { session: {} }
+    const ok = requireSessionMethod(
+      ws, ctx, entry, 'setX', 'This provider does not support X'
+    )
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'This provider does not support X')
+  })
+
+  it('returns false when entry is null', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ok = requireSessionMethod(ws, ctx, null, 'setX', 'nope')
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].msg.message, 'nope')
+  })
+
+  it('returns false when entry.session is missing', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ok = requireSessionMethod(ws, ctx, {}, 'setX', 'nope')
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
+  })
+
+  it('returns false when the property exists but is not a function', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const entry = { session: { setX: 'not-a-function' } }
+    const ok = requireSessionMethod(ws, ctx, entry, 'setX', 'nope')
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
   })
 })

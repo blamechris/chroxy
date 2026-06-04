@@ -13,6 +13,56 @@ import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
+// #4833 — back-pressure pause for chunked replay/flush loops.
+//
+// Both replayHistory and flushPostAuthQueue emit messages in 20-entry chunks
+// separated by setImmediate yields. On sessions with fat tool_result payloads
+// (200KB+ each), a single chunk can push ws.bufferedAmount past the 1MB
+// EVICT_THRESHOLD in ws-client-sender.js, tripping a post-send 4008 close and
+// surfacing as a "Reconnecting…" loop in the dashboard.
+//
+// Before scheduling the next chunk, the loop now polls bufferedAmount and
+// pauses (via setTimeout, every BACKPRESSURE_POLL_INTERVAL_MS) until it falls
+// back below BACKPRESSURE_PAUSE_THRESHOLD. The threshold (256KB) is well
+// below the 1MB eviction line so the next chunk has headroom even on slow
+// links. The poll interval (20ms) is short enough to keep the replay
+// responsive but long enough to give the socket time to actually flush.
+//
+// Both helpers abort the poll once ws.readyState leaves OPEN (client
+// disconnected while paused), so the poll chain terminates on socket close
+// without sending to a closed socket. Note that this is a narrower guarantee
+// than "we never leak a setTimeout" — a dead TCP connection that never moves
+// out of OPEN and never drains would keep polling indefinitely. That is the
+// same liveness window as the existing ws keep-alive ping; if we ever want a
+// hard cap, add a max-wait/backoff here.
+const BACKPRESSURE_PAUSE_THRESHOLD = 256 * 1024
+const BACKPRESSURE_POLL_INTERVAL_MS = 20
+
+/**
+ * Schedule `fn` once ws.bufferedAmount falls below BACKPRESSURE_PAUSE_THRESHOLD,
+ * or immediately (via setImmediate) if the buffer is already drained. Polls
+ * with setTimeout(BACKPRESSURE_POLL_INTERVAL_MS) while paused. Bails out
+ * silently if ws.readyState transitions away from OPEN — the caller's first
+ * action in `fn` already re-checks readyState so the bailout is safe.
+ */
+function scheduleAfterDrain(ws, fn) {
+  if (ws.readyState !== 1) return
+  const buffered = ws.bufferedAmount || 0
+  if (buffered <= BACKPRESSURE_PAUSE_THRESHOLD) {
+    setImmediate(fn)
+    return
+  }
+  const poll = () => {
+    if (ws.readyState !== 1) return
+    if ((ws.bufferedAmount || 0) <= BACKPRESSURE_PAUSE_THRESHOLD) {
+      setImmediate(fn)
+      return
+    }
+    setTimeout(poll, BACKPRESSURE_POLL_INTERVAL_MS)
+  }
+  setTimeout(poll, BACKPRESSURE_POLL_INTERVAL_MS)
+}
+
 /**
  * Send all post-authentication info to a newly authenticated client.
  * This includes auth_ok, server mode, session list, model/permission state,
@@ -29,6 +79,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     protocolVersion, minProtocolVersion, webTaskManager,
     send, broadcast, getConnectedClientList, permissions,
     resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs,
+    // #4835: per-device active-session memory. Consulted below before
+    // falling back to defaultSessionId / firstSessionId so a reconnect
+    // restores whatever session the client was actually viewing instead
+    // of silently snapping them back to "session 1" on every WS drop.
+    // Optional — older callers (and most tests) leave this undefined and
+    // get the legacy default/first behavior.
+    devicePreferences,
   } = ctx
   const client = clients.get(ws)
 
@@ -208,17 +265,47 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       }
     }
 
-    let activeId = defaultSessionId
-    let entry = activeId ? sessionManager.getSession(activeId) : null
+    // #4835: prefer the per-device persisted active session over the server
+    // default. We only consult this for non-bound clients (boundSessionId
+    // remains the security override below). The original snap-to-default
+    // behavior was an infinite trap when combined with #4833's
+    // backpressure eviction: every retry of the user's actually-active
+    // session got bounced back to defaultSessionId.
+    //
+    // Restore order:
+    //   1. devicePreferences[client.deviceInfo.deviceId] — if it still exists
+    //   2. defaultSessionId — config-driven server default
+    //   3. firstSessionId  — last-resort "any session beats no session"
+    //
+    // A stale persisted id (session destroyed between connects) falls
+    // through to step 2 without throwing — see #4835 acceptance criteria.
+    let activeId = null
+    let entry = null
+    const persistedDeviceId = client.deviceInfo?.deviceId
+    if (devicePreferences && persistedDeviceId) {
+      const persistedId = devicePreferences.getActiveSessionId(persistedDeviceId)
+      if (persistedId) {
+        const persistedEntry = sessionManager.getSession(persistedId)
+        if (persistedEntry) {
+          activeId = persistedId
+          entry = persistedEntry
+        }
+      }
+    }
+    if (!entry) {
+      activeId = defaultSessionId
+      entry = activeId ? sessionManager.getSession(activeId) : null
+    }
     if (!entry) {
       activeId = sessionManager.firstSessionId
       entry = activeId ? sessionManager.getSession(activeId) : null
     }
 
     // If the client is bound to a specific session (via session token), enforce
-    // that they can only view that session regardless of the server default.
-    // Fail closed: if the bound session no longer exists, clear the active
-    // session rather than silently falling back to a different session.
+    // that they can only view that session regardless of the server default or
+    // any persisted per-device preference. Fail closed: if the bound session
+    // no longer exists, clear the active session rather than silently falling
+    // back to a different session (or inheriting an unrelated persisted pref).
     if (client.boundSessionId) {
       const boundEntry = sessionManager.getSession(client.boundSessionId)
       if (boundEntry) {
@@ -374,7 +461,21 @@ export function replayHistory(ctx, ws, sessionId) {
   const CHUNK_SIZE = 20
   const sendChunk = (offset) => {
     if (ws.readyState !== 1) return
+    // #4833 follow-up: gate chunk *entry* on bufferedAmount too, not just
+    // chunk *scheduling*. The recursive setImmediate-via-scheduleAfterDrain
+    // path is already gated, but the very first sendChunk(0) call can land
+    // on a socket that's already congested from the preceding
+    // sendPostAuthInfo / session_switched burst. Without this check, the
+    // first history entry would be sent unconditionally and the mid-chunk
+    // break (which only fires *after* a send) wouldn't trip until i=1 —
+    // meaning we still push one fat tool_result onto an already-congested
+    // socket and can trip the 1MB EVICT_THRESHOLD.
+    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+      scheduleAfterDrain(ws, () => sendChunk(offset))
+      return
+    }
     const end = Math.min(offset + CHUNK_SIZE, history.length)
+    let nextOffset = end
     for (let i = offset; i < end; i++) {
       const entry = history[i]
       send(ws, { ...entry, sessionId })
@@ -393,9 +494,25 @@ export function replayHistory(ctx, ws, sessionId) {
       if (entry && entry.type === 'result') {
         send(ws, { type: 'agent_idle', sessionId })
       }
+      // #4833: break out of the chunk early if bufferedAmount already
+      // crossed the pause threshold mid-burst. The CHUNK_SIZE=20 cap was
+      // designed for short messages; a session with fat tool_result
+      // payloads (200KB+) can blow past the 1MB EVICT_THRESHOLD inside
+      // a single chunk, before the post-chunk scheduleAfterDrain ever
+      // gets to inspect bufferedAmount. Pause + resume from the next
+      // unsent entry instead.
+      if (i + 1 < end && (ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+        nextOffset = i + 1
+        break
+      }
     }
-    if (end < history.length) {
-      setImmediate(() => sendChunk(end))
+    if (nextOffset < history.length) {
+      // #4833: pause if the socket is already congested before scheduling
+      // the next chunk. Without this, every setImmediate fires another
+      // burst regardless of buffer pressure, blowing past the 1MB
+      // EVICT_THRESHOLD in ws-client-sender.js on sessions with fat
+      // tool_result payloads.
+      scheduleAfterDrain(ws, () => sendChunk(nextOffset))
     } else {
       send(ws, { type: 'history_replay_end', sessionId })
     }
@@ -420,14 +537,36 @@ export function flushPostAuthQueue(ctx, ws, queue) {
       }
       return
     }
+    // #4833 follow-up: gate chunk *entry* on bufferedAmount too — same
+    // rationale as replayHistory.sendChunk above. drainChunk(0) is invoked
+    // synchronously from flushPostAuthQueue, so the very first queued
+    // message can land on an already-congested socket (e.g. fat post-auth
+    // payloads that were queued during the encryption handshake) before the
+    // mid-chunk break (which only fires after a send) gets a chance to
+    // pause. Keep _flushing = true so any callers using ws-client-sender's
+    // _flushing buffer still queue overflow instead of blasting past us.
+    if ((ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+      if (client) client._flushing = true
+      scheduleAfterDrain(ws, () => drainChunk(offset))
+      return
+    }
     const end = Math.min(offset + CHUNK_SIZE, queue.length)
     if (client) client._flushing = false
+    let nextOffset = end
     for (let i = offset; i < end; i++) {
       send(ws, queue[i])
+      // #4833: break early if a fat queued message just tipped bufferedAmount
+      // past the pause threshold — same rationale as replayHistory above.
+      if (i + 1 < end && (ws.bufferedAmount || 0) > BACKPRESSURE_PAUSE_THRESHOLD) {
+        nextOffset = i + 1
+        break
+      }
     }
-    if (end < queue.length) {
+    if (nextOffset < queue.length) {
       if (client) client._flushing = true
-      setImmediate(() => drainChunk(end))
+      // #4833: pause if the socket is already congested before scheduling
+      // the next chunk — same rationale as replayHistory above.
+      scheduleAfterDrain(ws, () => drainChunk(nextOffset))
     } else if (client) {
       if (client._flushOverflow?.length) {
         const overflow = client._flushOverflow

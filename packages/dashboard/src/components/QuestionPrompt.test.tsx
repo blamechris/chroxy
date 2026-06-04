@@ -281,6 +281,13 @@ describe('QuestionPrompt', () => {
     })
 
     it('submits the typed answer when Send is clicked from Other mode', () => {
+      // #4651 — Other-mode submissions now emit an object payload carrying
+      // both the typed text AND the option label that triggered Other-mode
+      // ("Other" by default; a model-supplied label like "Custom" if the
+      // model overrode the label). The connection store reads this shape
+      // to send a two-stage `user_question_response` (digit → freeform
+      // text) to the server, so claude TUI's text-input prompt receives
+      // the freeform answer instead of jump-nav-ing on the menu.
       const onSelect = vi.fn()
       render(
         <QuestionPrompt
@@ -292,7 +299,27 @@ describe('QuestionPrompt', () => {
       fireEvent.click(screen.getByText('Other'))
       fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'custom answer' } })
       fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-      expect(onSelect).toHaveBeenCalledWith('custom answer')
+      expect(onSelect).toHaveBeenCalledWith({ otherLabel: 'Other', freeformText: 'custom answer' })
+    })
+
+    it('still emits a plain string when no options exist (free-text-only AskUserQuestion)', () => {
+      // #4651 — the freeform object shape is reserved for the
+      // "Other option exists in a menu" path. A question with zero
+      // options (free-text-only fallback, #1245) doesn't render an
+      // "Other" button at all, so onSelect must keep the legacy
+      // string shape for back-compat with the server's free-text
+      // handler.
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question="Any thoughts?"
+          options={[]}
+          onSelect={onSelect}
+        />
+      )
+      fireEvent.change(screen.getByPlaceholderText('Type your response…'), { target: { value: 'free text' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+      expect(onSelect).toHaveBeenCalledWith('free text')
     })
 
     it('Cancel returns to the option buttons without submitting', () => {
@@ -464,6 +491,85 @@ describe('QuestionPrompt', () => {
       expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
     })
 
+    // #4735 — `allowMultiQuestion` opt-in lifts the deferred-notice
+    // suppression for SDK-mode sessions whose underlying delivery path
+    // supports per-question answers natively (#4731). TUI sessions keep
+    // the deferred notice as before because their permission-hook denies
+    // multi-question tool_uses. App.tsx derives the flag from
+    // `session.provider !== 'claude-tui'`.
+    describe('allowMultiQuestion opt-in (#4735)', () => {
+      it('renders the interactive MultiQuestionForm when allowMultiQuestion is true', () => {
+        render(
+          <QuestionPrompt
+            question={q1.question}
+            options={q1.options}
+            questions={multiQuestions}
+            allowMultiQuestion
+            onSelect={vi.fn()}
+          />
+        )
+        expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
+        expect(screen.getByTestId('question-multi-submit')).toBeInTheDocument()
+        expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      })
+
+      it('renders the deferred notice when allowMultiQuestion is false (default)', () => {
+        render(
+          <QuestionPrompt
+            question={q1.question}
+            options={q1.options}
+            questions={multiQuestions}
+            allowMultiQuestion={false}
+            onSelect={vi.fn()}
+          />
+        )
+        expect(screen.getByTestId('multi-question-deferred-notice')).toBeInTheDocument()
+        expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+      })
+
+      it('still falls back to the single-question UI for N=1 even when allowMultiQuestion is true', () => {
+        // The opt-in flag only lifts the multi-question suppression; the
+        // N=1 path is unchanged so single-question regressions stay green.
+        render(
+          <QuestionPrompt
+            question="Just one?"
+            options={[{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }]}
+            questions={[{ question: 'Just one?', options: [{ label: 'Yes', value: 'Yes' }, { label: 'No', value: 'No' }] }]}
+            allowMultiQuestion
+            onSelect={vi.fn()}
+          />
+        )
+        expect(screen.getByTestId('question-prompt')).toBeInTheDocument()
+        expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+        expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      })
+
+      it('submitting the MultiQuestionForm propagates the answersMap through onSelect', () => {
+        const onSelect = vi.fn()
+        render(
+          <QuestionPrompt
+            question={q1.question}
+            options={q1.options}
+            questions={multiQuestions}
+            allowMultiQuestion
+            onSelect={onSelect}
+          />
+        )
+        // Strategy: pick "Patch"; Targets: pick "App" + "Tests"; Confirm: "Yes"
+        fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-App').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-Tests').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-2-Yes').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        expect(arg!['Which release strategy?']).toBe('Patch')
+        // Native string[] per #4735, not a JSON-stringified envelope.
+        expect(arg!['Which targets?']).toEqual(['App', 'Tests'])
+        expect(arg!['Confirm?']).toBe('Yes')
+      })
+    })
+
     it('falls back to single-question UI when answered is already set (multi-question post-answer summary path)', () => {
       // Once an answer is recorded, render the single-question collapse
       // UI — even for a multi-question payload. The deferred notice is
@@ -483,6 +589,47 @@ describe('QuestionPrompt', () => {
       expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
       // Single-q UI renders the answered summary (free-text variant).
       expect(screen.getByTestId('question-answered-summary')).toBeInTheDocument()
+    })
+
+    // #4731 / #4735 — SDK / BYOK sessions answer multi-question forms
+    // natively via the in-process `canUseTool` permission flow, bypassing
+    // the TUI permission-hook deny. App.tsx looks up the active session's
+    // provider and sets `allowMultiQuestion={true}` for everything except
+    // `claude-tui` / `claude-cli`. When set, the interactive
+    // MultiQuestionForm renders instead of the deferred notice.
+    it('renders MultiQuestionForm (not deferred notice) when allowMultiQuestion is true (#4731)', () => {
+      const onSelect = vi.fn()
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          allowMultiQuestion
+          onSelect={onSelect}
+        />
+      )
+      // Interactive multi-question form renders…
+      expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
+      expect(screen.getByTestId('question-multi-submit')).toBeInTheDocument()
+      // …and the TUI-mode deferred notice is gone.
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+    })
+
+    it('still renders deferred notice when allowMultiQuestion is explicitly false (#4731)', () => {
+      // Defensive: an explicit `false` from a TUI / CLI session must keep
+      // the existing #4666 behavior so the user can't submit answers that
+      // misroute through the keystroke driver.
+      render(
+        <QuestionPrompt
+          question={q1.question}
+          options={q1.options}
+          questions={multiQuestions}
+          allowMultiQuestion={false}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.getByTestId('multi-question-deferred-notice')).toBeInTheDocument()
+      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
     })
   })
 
@@ -515,9 +662,72 @@ describe('QuestionPrompt', () => {
       fireEvent.click(screen.getByTestId('question-multi-option-1-Yes').querySelector('input')!)
       fireEvent.click(screen.getByTestId('question-multi-submit'))
       expect(onSelect).toHaveBeenCalledTimes(1)
-      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string> | undefined
+      const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
       expect(arg!['Which release strategy?']).toBe('Minor')
       expect(arg!['Confirm?']).toBe('Yes')
+    })
+
+    // #4621 / #4735 — multi-select answers used to be JSON.stringify'd
+    // into a single string because the wire schema was
+    // Record<string,string>. Post-#4621 the wire accepts
+    // Record<string, string | string[]>, so the form emits native arrays.
+    // The server still accepts the old JSON-string shape for back-compat;
+    // the dashboard prefers arrays so the SDK canUseTool callback
+    // receives the structured form without a JSON.parse hop.
+    describe('multi-select native array emission (#4621 / #4735)', () => {
+      const qMulti = {
+        question: 'Which targets?',
+        multiSelect: true,
+        options: [
+          { label: 'App', value: 'App' },
+          { label: 'Docs', value: 'Docs' },
+          { label: 'Tests', value: 'Tests' },
+        ],
+      }
+
+      it('emits multi-select answers as a native string[]', () => {
+        const onSelect = vi.fn()
+        render(<MultiQuestionForm questions={[qMulti]} onSelect={onSelect} />)
+        fireEvent.click(screen.getByTestId('question-multi-option-0-App').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-0-Tests').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        const val = arg!['Which targets?']
+        expect(Array.isArray(val)).toBe(true)
+        expect(val).toEqual(['App', 'Tests'])
+      })
+
+      it('emits empty multi-select as an empty array (not "[]" string)', () => {
+        const onSelect = vi.fn()
+        render(<MultiQuestionForm questions={[qMulti]} onSelect={onSelect} />)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        const val = arg!['Which targets?']
+        expect(Array.isArray(val)).toBe(true)
+        expect(val).toEqual([])
+      })
+
+      it('mixes native string single-select with native string[] multi-select per question', () => {
+        const qSingle = {
+          question: 'Strategy?',
+          options: [
+            { label: 'Patch', value: 'Patch' },
+            { label: 'Minor', value: 'Minor' },
+          ],
+        }
+        const onSelect = vi.fn()
+        render(<MultiQuestionForm questions={[qSingle, qMulti]} onSelect={onSelect} />)
+        fireEvent.click(screen.getByTestId('question-multi-option-0-Patch').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-App').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-option-1-Docs').querySelector('input')!)
+        fireEvent.click(screen.getByTestId('question-multi-submit'))
+        expect(onSelect).toHaveBeenCalledTimes(1)
+        const arg = onSelect.mock.calls[0]?.[0] as Record<string, string | string[]> | undefined
+        expect(arg!['Strategy?']).toBe('Patch')
+        expect(arg!['Which targets?']).toEqual(['App', 'Docs'])
+      })
     })
 
     // #4624 — a11y: each per-question options block must be exposed to
@@ -598,6 +808,149 @@ describe('QuestionPrompt', () => {
         expect(submit2).not.toBeDisabled()
         expect(submit2.getAttribute('aria-disabled')).toBe('false')
       })
+    })
+  })
+
+  // #4685 — when an AskUserQuestion permission_request is still
+  // unresolved (user hasn't clicked Allow yet), the dashboard MUST NOT
+  // render the question content (text, options, free-text input,
+  // multi-question form, deferred notice). Pre-#4685 the question card
+  // rendered the moment `user_question` arrived, racing the permission
+  // prompt and leaking the model-supplied content before consent. The
+  // gate flips off as soon as the matching permission_request is
+  // resolved (allow/deny), at which point the normal content renders.
+  describe('pendingPermission gate (#4685)', () => {
+    const opts = [
+      { label: 'Option A', value: 'a' },
+      { label: 'Option B', value: 'b' },
+    ]
+
+    it('hides the question text and options when pendingPermission is true', () => {
+      render(
+        <QuestionPrompt
+          question="What is your password?"
+          options={opts}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // Neutral placeholder renders…
+      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(screen.getByText(/Pending permission to view question/i)).toBeInTheDocument()
+      // …and the actual question payload is NOT in the DOM. The model-
+      // supplied question text and every option label must stay hidden
+      // until permission is granted.
+      expect(screen.queryByText('What is your password?')).not.toBeInTheDocument()
+      expect(screen.queryByText('Option A')).not.toBeInTheDocument()
+      expect(screen.queryByText('Option B')).not.toBeInTheDocument()
+      // The normal question-prompt container is suppressed too.
+      expect(screen.queryByTestId('question-prompt')).not.toBeInTheDocument()
+    })
+
+    it('renders no interactive controls when pendingPermission is true', () => {
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={opts}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // No option buttons, no Send/Submit buttons, no inputs of any kind.
+      expect(screen.queryAllByRole('button')).toHaveLength(0)
+      expect(screen.queryByPlaceholderText('Type your response…')).not.toBeInTheDocument()
+    })
+
+    it('hides multi-question content (form and deferred notice) when pendingPermission is true', () => {
+      const multiQs = [
+        { question: 'Q1?', options: [{ label: 'a', value: 'a' }] },
+        { question: 'Q2?', options: [{ label: 'b', value: 'b' }] },
+      ]
+      render(
+        <QuestionPrompt
+          question="Q1?"
+          options={[{ label: 'a', value: 'a' }]}
+          questions={multiQs}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // Neither variant renders while permission is pending.
+      expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
+      // The placeholder takes over.
+      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // No question text from any of the questions is visible.
+      expect(screen.queryByText('Q1?')).not.toBeInTheDocument()
+      expect(screen.queryByText('Q2?')).not.toBeInTheDocument()
+    })
+
+    it('reveals the question content after pendingPermission flips to false', () => {
+      const { rerender } = render(
+        <QuestionPrompt
+          question="What is your password?"
+          options={opts}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      // While pending: placeholder only.
+      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(screen.queryByText('What is your password?')).not.toBeInTheDocument()
+
+      // User clicks Allow → store flips pendingPermission to false →
+      // component re-renders with the real content.
+      rerender(
+        <QuestionPrompt
+          question="What is your password?"
+          options={opts}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(screen.getByText('What is your password?')).toBeInTheDocument()
+      expect(screen.getByText('Option A')).toBeInTheDocument()
+      expect(screen.getByText('Option B')).toBeInTheDocument()
+    })
+
+    it('renders the question content normally when pendingPermission is false (legacy default)', () => {
+      // Defensive: explicit `false` must behave exactly like the prop
+      // being omitted so pre-#4685 callers stay green.
+      render(
+        <QuestionPrompt
+          question="Pick one"
+          options={opts}
+          pendingPermission={false}
+          onSelect={vi.fn()}
+        />
+      )
+      expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(screen.getByText('Pick one')).toBeInTheDocument()
+      expect(screen.getByText('Option A')).toBeInTheDocument()
+    })
+
+    it('placeholder copy is neutral — does not leak any question or option text', () => {
+      // The leaked content is the bug; the placeholder must NOT
+      // accidentally echo the question or options through some shared
+      // prop. Verify the placeholder carries only the generic "Pending
+      // permission" copy and nothing else.
+      render(
+        <QuestionPrompt
+          question="LEAK_ME_QUESTION"
+          options={[
+            { label: 'LEAK_ME_OPTION_A', value: 'a' },
+            { label: 'LEAK_ME_OPTION_B', value: 'b' },
+          ]}
+          pendingPermission
+          onSelect={vi.fn()}
+        />
+      )
+      const placeholder = screen.getByTestId('question-prompt-pending-permission')
+      expect(placeholder.textContent).not.toContain('LEAK_ME_QUESTION')
+      expect(placeholder.textContent).not.toContain('LEAK_ME_OPTION_A')
+      expect(placeholder.textContent).not.toContain('LEAK_ME_OPTION_B')
+      // And nothing leaks elsewhere in the rendered tree either.
+      expect(screen.queryByText(/LEAK_ME/)).not.toBeInTheDocument()
     })
   })
 })

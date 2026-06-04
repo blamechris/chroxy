@@ -42,6 +42,8 @@ import {
   handlePlanStarted as sharedPlanStarted,
   handlePlanReady as sharedPlanReady,
   handleInactivityWarning as sharedInactivityWarning,
+  handleMultiQuestionIntervention as sharedMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleDevPreview as sharedDevPreview,
   handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
@@ -50,6 +52,7 @@ import {
   handleStreamStart as sharedStreamStart,
   handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
+  parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
@@ -58,6 +61,8 @@ import {
   handleCheckpointRestored as sharedCheckpointRestored,
   handleError as sharedError,
   handleSessionError as sharedSessionError,
+  // #4879: quiet user-initiated Stop confirmation handler
+  handleSessionStopped as sharedSessionStopped,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
@@ -75,7 +80,10 @@ import {
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
   handleWriteFileResult as sharedWriteFileResult,
-  handleSessionList as sharedSessionList,
+  buildSessionListPatches as sharedBuildSessionListPatches,
+  cumulativeUsageEquals as sharedCumulativeUsageEquals,
+  chunkSubscribeSessionIds as sharedChunkSubscribeSessionIds,
+  SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
@@ -108,6 +116,10 @@ import {
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
+  // #5039: shared partial-cost line helper — the same one the dashboard
+  // toast uses, so the mobile Alert and the dashboard sub-line can't
+  // drift apart on copy/format.
+  formatPartialCostLine,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
@@ -115,7 +127,6 @@ import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
   Checkpoint,
-  ConnectedClient,
   ConnectionContext,
   ConnectionState,
   CustomAgent,
@@ -540,8 +551,13 @@ export function clearTerminalWriteBatching(): void {
 // ---------------------------------------------------------------------------
 // Client-side heartbeat
 // ---------------------------------------------------------------------------
-/** Max session IDs per subscribe_sessions message (must match server SubscribeSessionsSchema .max(20)) */
-export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = 20;
+/**
+ * Max session IDs per subscribe_sessions message (must match server
+ * SubscribeSessionsSchema .max(20)). Re-exported from
+ * `@chroxy/store-core`'s {@link SESSION_LIST_SUBSCRIBE_CHUNK_SIZE} so the
+ * app and dashboard can't drift apart (#4767).
+ */
+export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
@@ -973,77 +989,28 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!ctx.isReconnect) hapticSuccess();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
-      // Extract server context fields via shared handler (#3102).
-      // The shared handler accepts both 'cli' and 'terminal'; the app has no
-      // terminal view so we narrow 'terminal' to null (matches prior inline
-      // `msg.serverMode === 'cli' ? 'cli' : null` behaviour).
-      const authPayload = sharedAuthOk(msg);
-      const authServerMode: 'cli' | null = authPayload.serverMode === 'cli' ? 'cli' : null;
-      const authSessionCwd = authPayload.sessionCwd;
-      const authServerVersion = authPayload.serverVersion;
-      const authLatestVersion = authPayload.latestVersion;
-      const authServerCommit = authPayload.serverCommit;
-      const authProtocolVersion = authPayload.protocolVersion;
-      // #3760: server-advertised inactivity timeout. Older servers omit this
-      // field — leave it null so ActivityIndicator falls back to its built-in
-      // reference timeout. Mirror the server's Number.isFinite guard so
-      // Infinity/NaN never reach the store.
-      const authResultTimeoutMs =
-        typeof msg.resultTimeoutMs === 'number' &&
-        Number.isFinite(msg.resultTimeoutMs) &&
-        msg.resultTimeoutMs > 0
-          ? msg.resultTimeoutMs
-          : null;
-      // Parse connected clients list with self-detection via clientId
-      const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
-      const clients: ConnectedClient[] = rawClients
-        .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
-        .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
-          clientId: c.clientId,
-          deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
-          deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
-          platform: typeof c.platform === 'string' ? c.platform : 'unknown',
-          isSelf: c.clientId === myClientId,
-        }));
+      // #4766: full wire-shape decode lives in the shared parser
+      // (handleAuthOk + parseConnectedClients). The shared handler narrows
+      // serverMode to `'cli' | null` (#4810: the wire protocol only emits
+      // `'cli'`; the `'terminal'` branch was removed).
+      const auth = sharedAuthOk(msg);
+      const authServerMode: 'cli' | null = auth.serverMode;
+      const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
-      // Parse web feature status from auth_ok
-      const webFeaturesRaw = msg.webFeatures as Record<string, unknown> | undefined;
-      const webFeatures = webFeaturesRaw ? {
-        available: !!webFeaturesRaw.available,
-        remote: !!webFeaturesRaw.remote,
-        teleport: !!webFeaturesRaw.teleport,
-      } : { available: false, remote: false, teleport: false };
-
-      // #4560: parse server-advertised capability map. Older servers omit the
-      // field; treat absence as "no advertised capabilities" so feature-gated
-      // UI hides itself fail-closed (rather than silently no-oping clicks
-      // against unimplemented WS handlers). Coerce values to boolean so a
-      // malformed entry can't accidentally enable a gate.
-      const capabilitiesRaw = msg.capabilities as Record<string, unknown> | undefined;
-      const serverCapabilities: Record<string, boolean> = {};
-      if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
-        for (const [k, v] of Object.entries(capabilitiesRaw)) {
-          serverCapabilities[k] = v === true;
-        }
-      }
-
-
-      // On reconnect, preserve messages and terminal buffer
       // If server provided a sessionToken (via pairing), use it for future auth
-      const effectiveToken = typeof msg.sessionToken === 'string' ? msg.sessionToken : ctx.token;
+      const effectiveToken = auth.sessionToken ?? ctx.token;
       const connectedState = {
         viewingCachedSession: false,
         socket: ctx.socket,
         claudeReady: false,
         streamingMessageId: null,
-        myClientId: myClientId, // kept for backward compat; canonical source is useMultiClientStore
+        myClientId: auth.myClientId, // kept for backward compat; canonical source is useMultiClientStore
         connectedClients: clients, // kept for backward compat; canonical source is useMultiClientStore
         // Clear shutdown state on successful connect
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
-        webFeatures,
+        webFeatures: auth.webFeatures,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -1059,23 +1026,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         });
       }
       // Sync multi-client store (canonical source for multi-client state)
-      useMultiClientStore.getState().setMyClientId(myClientId);
+      useMultiClientStore.getState().setMyClientId(auth.myClientId);
       useMultiClientStore.getState().setConnectedClients(clients);
       // Sync connection lifecycle store
       useConnectionLifecycleStore.getState().setConnectionPhase('connected');
       useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, effectiveToken);
       useConnectionLifecycleStore.getState().setServerInfo({
         serverMode: authServerMode,
-        serverVersion: authServerVersion,
-        latestVersion: authLatestVersion,
-        serverCommit: authServerCommit,
-        serverProtocolVersion: authProtocolVersion,
-        serverResultTimeoutMs: authResultTimeoutMs,
-        sessionCwd: authSessionCwd,
+        serverVersion: auth.serverVersion,
+        latestVersion: auth.latestVersion,
+        serverCommit: auth.serverCommit,
+        serverProtocolVersion: auth.protocolVersion,
+        serverResultTimeoutMs: auth.resultTimeoutMs,
+        // #4766: previously dropped on mobile — StreamStallChip couldn't
+        // humanise the headline phrase without this. Dashboard already
+        // threaded it; now the shared parser exposes it to both.
+        streamStallTimeoutMs: auth.streamStallTimeoutMs,
+        sessionCwd: auth.sessionCwd,
         // #4560: overwrite stale capabilities from a previous connection on
         // every auth_ok so a reconnect against a different (or older) server
         // can't have UI gates left enabled by previously-advertised flags.
-        serverCapabilities,
+        serverCapabilities: auth.serverCapabilities,
       });
       useConnectionLifecycleStore.getState().setConnectionError(null, 0);
       useConnectionLifecycleStore.getState().setUserDisconnected(false);
@@ -1084,7 +1055,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       startHeartbeat(ctx.socket);
 
       // Initiate key exchange if server requires encryption
-      if (msg.encryption === 'required') {
+      if (auth.encryption === 'required') {
         _ctx.pendingKeyPair = createKeyPair();
         _ctx.pendingSalt = generateConnectionSalt();
         // Send key_exchange plaintext (before encryption is active)
@@ -1174,11 +1145,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'server_mode': {
-      // App has no terminal view, so 'terminal' is treated as null (matches
-      // prior inline behaviour `msg.mode === 'cli' ? 'cli' : null`).
+      // #4810: shared handler narrows `mode` to `'cli' | null` (the wire
+      // protocol only ever emits `'cli'`; previously the handler also
+      // accepted `'terminal'` but that branch was unreachable).
       const { mode } = sharedServerMode(msg);
-      const newServerMode: 'cli' | null = mode === 'cli' ? 'cli' : null;
-      useConnectionLifecycleStore.getState().setServerInfo({ serverMode: newServerMode });
+      useConnectionLifecycleStore.getState().setServerInfo({ serverMode: mode });
       // Force chat view in CLI mode (no terminal available)
       if (mode === 'cli' && get().viewMode === 'terminal') {
         set({ viewMode: 'chat' });
@@ -1189,132 +1160,131 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Multi-session messages ---
 
     case 'session_list': {
-      const sessionList = sharedSessionList(msg);
-      if (sessionList) {
-        // Auto-resume on server restart: if reconnecting and server has no sessions,
-        // restore the last active conversation so user doesn't have to navigate History.
-        if (sessionList.length === 0 && ctx.isReconnect) {
-          void (async () => {
-            const snapSocket = ctx.socket;
-            const lastId = await loadLastConversationId();
-            if (!lastId) return;
-            if (snapSocket && snapSocket.readyState === WebSocket.OPEN) {
-              console.log('[ws] Server restarted with no sessions — auto-resuming last conversation');
-              wsSend(snapSocket, { type: 'resume_conversation', conversationId: lastId });
-            }
-          })();
-          break;
-        }
-        // GC persisted messages for sessions that dropped out of the list
-        const prevSessionIds = Object.keys(get().sessionStates);
-        const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
-        const removedIds = prevSessionIds.filter((id) => !newSessionIdSet.has(id));
-        for (const prevId of removedIds) {
-          void clearPersistedSession(prevId);
-        }
-        // Batch in-memory cleanup into a single state update
-        if (removedIds.length > 0) {
-          const patch: Partial<ConnectionState> = {};
-          const newStates = { ...get().sessionStates };
-          for (const id of removedIds) {
-            delete newStates[id];
+      // #4767: centralised dispatch — store-core precomputes GC + new-session
+      // ids + conversationId / cumulativeUsage / pendingShells patch maps;
+      // the consumer applies them with platform-specific side-effects
+      // (clearPersistedSession, loadLastConversationId auto-resume, etc.).
+      const initialActiveId = get().activeSessionId;
+      const patches = sharedBuildSessionListPatches(
+        msg,
+        Object.keys(get().sessionStates),
+        initialActiveId,
+      );
+      if (!patches) break;
+      const {
+        sessionList,
+        removedIds,
+        newSessionIds,
+        conversationIdPatches,
+        cumulativeUsagePatches,
+        backgroundShellBuilders,
+        subscribeChunks,
+      } = patches;
+      // Auto-resume on server restart: if reconnecting and server has no sessions,
+      // restore the last active conversation so user doesn't have to navigate History.
+      if (sessionList.length === 0 && ctx.isReconnect) {
+        void (async () => {
+          const snapSocket = ctx.socket;
+          const lastId = await loadLastConversationId();
+          if (!lastId) return;
+          if (snapSocket && snapSocket.readyState === WebSocket.OPEN) {
+            console.log('[ws] Server restarted with no sessions — auto-resuming last conversation');
+            wsSend(snapSocket, { type: 'resume_conversation', conversationId: lastId });
           }
-          patch.sessionStates = newStates;
-          // If the active session was removed, switch to next available
-          if (get().activeSessionId && removedIds.includes(get().activeSessionId!)) {
-            const remaining = Object.keys(newStates);
-            const nextId = remaining.length > 0 ? remaining[0] : null;
-            patch.activeSessionId = nextId;
-          }
-          set(patch);
+        })();
+        break;
+      }
+      // GC persisted messages for sessions that dropped out of the list
+      for (const prevId of removedIds) {
+        void clearPersistedSession(prevId);
+      }
+      // Batch in-memory cleanup into a single state update
+      if (removedIds.length > 0) {
+        const patch: Partial<ConnectionState> = {};
+        const newStates = { ...get().sessionStates };
+        for (const id of removedIds) {
+          delete newStates[id];
         }
-        set({ sessions: sessionList });
-        // Initialize session state for any new sessions not yet tracked
+        patch.sessionStates = newStates;
+        // If the active session was removed, switch to next available
+        if (initialActiveId && removedIds.includes(initialActiveId)) {
+          const remaining = Object.keys(newStates);
+          const nextId = remaining.length > 0 ? remaining[0] : null;
+          patch.activeSessionId = nextId;
+        }
+        set(patch);
+      }
+      set({ sessions: sessionList });
+      // Initialize session state for any new sessions not yet tracked
+      if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newStates = { ...currentStates };
-        let statesChanged = false;
-        for (const s of sessionList) {
-          if (!newStates[s.sessionId]) {
-            newStates[s.sessionId] = createEmptySessionState();
-            statesChanged = true;
+        for (const sid of newSessionIds) {
+          if (!newStates[sid]) {
+            newStates[sid] = createEmptySessionState();
           }
         }
-        if (statesChanged) {
-          set({ sessionStates: newStates });
-        }
-        // Sync conversationId from session list into session states
-        for (const s of sessionList) {
-          if (s.conversationId && get().sessionStates[s.sessionId]) {
-            updateSession(s.sessionId, (ss) =>
-              ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
-            );
-          }
-        }
-        // #4074: seed cumulativeUsage from the snapshot so re-opening the
-        // mobile app mid-session shows the running cost in the header
-        // without waiting for the next session_usage event. Same pattern
-        // as the dashboard (#4073).
-        for (const s of sessionList) {
-          if (s.cumulativeUsage && get().sessionStates[s.sessionId]) {
-            const snapshot = s.cumulativeUsage;
-            updateSession(s.sessionId, (ss) => {
-              const current = ss.cumulativeUsage;
-              if (
-                current &&
-                current.inputTokens === snapshot.inputTokens &&
-                current.outputTokens === snapshot.outputTokens &&
-                current.cacheReadTokens === snapshot.cacheReadTokens &&
-                current.cacheCreationTokens === snapshot.cacheCreationTokens &&
-                current.costUsd === snapshot.costUsd &&
-                current.turnsBilled === snapshot.turnsBilled
-              ) {
-                return {};
-              }
-              return { cumulativeUsage: snapshot };
-            });
-          }
-        }
-        // #4307: seed pendingBackgroundShells from the snapshot so the
-        // app catches up on any sessions already waiting on background
-        // work without waiting for the next `background_work_changed`
-        // event. The shared handler's reference-equality short-circuit
-        // suppresses no-op re-renders.
-        for (const s of sessionList) {
-          if (!get().sessionStates[s.sessionId]) continue;
-          const builder = sharedBackgroundWorkChanged(
-            { sessionId: s.sessionId, pending: s.pendingBackgroundShells ?? [] },
-            get().activeSessionId,
-          );
-          updateSession(s.sessionId, (ss) => {
-            const next = builder.applyTo(ss.pendingBackgroundShells);
-            return next === ss.pendingBackgroundShells
-              ? {}
-              : { pendingBackgroundShells: next };
-          });
-        }
-        // Persist the active session's conversationId for auto-resume on server restart.
-        // Use the activeSessionId if set, otherwise fall back to the first session in the list.
-        const resolvedActiveId = get().activeSessionId ?? (sessionList[0]?.sessionId ?? null);
-        const activeSessionEntry = resolvedActiveId
-          ? sessionList.find((s) => s.sessionId === resolvedActiveId)
-          : null;
-        const activeConversationId = activeSessionEntry?.conversationId ?? null;
-        if (activeConversationId) {
-          void persistLastConversationId(activeConversationId);
-        }
-        // Subscribe to all non-active sessions so we receive their events
-        // (permissions, plan approvals, errors) in real-time
-        const activeId = get().activeSessionId;
-        const subscribeIds = sessionList
-          .map((s) => s.sessionId)
-          .filter((id) => id !== activeId);
-        if (subscribeIds.length > 0) {
-          const sock = get().socket;
-          if (sock && sock.readyState === WebSocket.OPEN) {
-            // Server schema enforces max IDs per message — chunk if needed
-            for (let i = 0; i < subscribeIds.length; i += SUBSCRIBE_SESSIONS_CHUNK_SIZE) {
-              wsSend(sock, { type: 'subscribe_sessions', sessionIds: subscribeIds.slice(i, i + SUBSCRIBE_SESSIONS_CHUNK_SIZE) });
-            }
+        set({ sessionStates: newStates });
+      }
+      // Sync conversationId from session list into session states
+      for (const [sid, cid] of conversationIdPatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          ss.conversationId !== cid ? { conversationId: cid } : {}
+        );
+      }
+      // #4074: seed cumulativeUsage from the snapshot so re-opening the
+      // mobile app mid-session shows the running cost in the header
+      // without waiting for the next session_usage event. Same pattern
+      // as the dashboard (#4073). Six-field equality short-circuit lives
+      // in store-core via {@link sharedCumulativeUsageEquals} (#4767).
+      for (const [sid, snapshot] of cumulativeUsagePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          sharedCumulativeUsageEquals(ss.cumulativeUsage, snapshot)
+            ? {}
+            : { cumulativeUsage: snapshot }
+        );
+      }
+      // #4307: seed pendingBackgroundShells from the snapshot so the
+      // app catches up on any sessions already waiting on background
+      // work without waiting for the next `background_work_changed`
+      // event. The shared handler's reference-equality short-circuit
+      // suppresses no-op re-renders.
+      for (const [sid, builder] of backgroundShellBuilders) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) => {
+          const next = builder.applyTo(ss.pendingBackgroundShells);
+          return next === ss.pendingBackgroundShells
+            ? {}
+            : { pendingBackgroundShells: next };
+        });
+      }
+      // Persist the active session's conversationId for auto-resume on server restart.
+      // Use the activeSessionId if set, otherwise fall back to the first session in the list.
+      const resolvedActiveId = get().activeSessionId ?? (sessionList[0]?.sessionId ?? null);
+      const activeSessionEntry = resolvedActiveId
+        ? sessionList.find((s) => s.sessionId === resolvedActiveId)
+        : null;
+      const activeConversationId = activeSessionEntry?.conversationId ?? null;
+      if (activeConversationId) {
+        void persistLastConversationId(activeConversationId);
+      }
+      // Subscribe to all non-active sessions so we receive their events
+      // (permissions, plan approvals, errors) in real-time. Use the
+      // precomputed chunks when the active id didn't change; otherwise
+      // (active was removed and reassigned above) recompute against the
+      // final active id via the shared chunk helper.
+      const finalActiveId = get().activeSessionId;
+      const effectiveChunks =
+        finalActiveId === initialActiveId
+          ? subscribeChunks
+          : sharedChunkSubscribeSessionIds(sessionList, finalActiveId);
+      if (effectiveChunks.length > 0) {
+        const sock = get().socket;
+        if (sock && sock.readyState === WebSocket.OPEN) {
+          for (const chunk of effectiveChunks) {
+            wsSend(sock, { type: 'subscribe_sessions', sessionIds: chunk });
           }
         }
       }
@@ -1422,6 +1392,34 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'session_stopped': {
+      // #4879: quiet, informational confirmation when CliSession exits
+      // cleanly after a user-initiated Stop. The wire path was wired in
+      // #4868 (CliSession 'stopped' → SessionManager → ws-forwarding →
+      // ServerSessionStoppedSchema). Distinct from `session_error` (which
+      // flips `health: 'crashed'` and surfaces a loud red banner): the
+      // operator tapped Stop, the child process did indeed stop.
+      //
+      // Sets `stoppedAt` + `stoppedCode` on the target session — the
+      // SessionScreen reads those fields to render a subtle, info-styled
+      // status strip ("Session stopped." / "Session stopped. (exit N)").
+      // Both fields are cleared automatically by `handleClaudeReady`
+      // (which returns `stoppedAt: null, stoppedCode: null`) when the
+      // server restarts the child after the operator's next input.
+      //
+      // NO Alert / push notification — this is intentionally NOT an
+      // error UX. The active session's inline banner carries the full
+      // signal; for inactive sessions the absence of a session_error
+      // already conveys "no crash, clean stop" and adding a notification
+      // here would just be noise.
+      const stoppedPatch = sharedSessionStopped(msg, get().activeSessionId);
+      const stoppedTarget = stoppedPatch.sessionId;
+      if (stoppedTarget && get().sessionStates[stoppedTarget]) {
+        updateSession(stoppedTarget, () => stoppedPatch.patch);
+      }
+      break;
+    }
+
     // --- History replay ---
 
     case 'history_replay_start': {
@@ -1452,6 +1450,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
         return Object.keys(patch).length > 0 ? patch : {};
       });
+      // #4909 — `session_stopped` is a transient event NOT recorded into
+      // per-session history (#4868 wire path), so it isn't replayed on
+      // reconnect. But the client-side `stoppedAt`/`stoppedCode` derived
+      // state survives the WebSocket teardown in Zustand store memory and
+      // the strip flashes back into view until activity resumes. Clear
+      // it on history replay (the canonical "reconnect handshake" event)
+      // for the same reason the transient `activeAgents`/`isPlanPending`
+      // are cleared above. Targets `replayTargetId` (per-session) rather
+      // than activeSessionId so a background session reconnecting also
+      // sheds its stale marker.
+      if (replayTargetId && get().sessionStates[replayTargetId]) {
+        updateSession(replayTargetId, (ss) => {
+          if (ss.stoppedAt == null && ss.stoppedCode == null) return {};
+          return { stoppedAt: null, stoppedCode: null };
+        });
+      }
       break;
     }
 
@@ -1546,7 +1560,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'stream_delta': {
-      let deltaId = msg.messageId as string;
+      // Capture the ORIGINAL incoming messageId before any remap resolution.
+      // The post-tool continuation split (#4922 / #4889) writes its remap entry
+      // against this id (not against the resolved `deltaId`) so successive
+      // splits overwrite a single map entry instead of forming a chain --
+      // keeps `_ctx.deltaIdRemaps` bounded and eliminates the need for
+      // chained lookup.
+      const originalMessageId = msg.messageId as string;
+      let deltaId = originalMessageId;
       const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
 
       // Permission boundary split: first delta after a split creates a new message
@@ -1595,6 +1616,178 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
               }));
             }
             deltaId = suffixed;
+          }
+        }
+      }
+
+      // #4922 / #4889 -- post-tool continuation split. The server reuses ONE
+      // messageId for an entire assistant turn even when text -> tool -> text
+      // -> tool -> text. The defensive remap above only fires when the slot
+      // at deltaId is non-response; subsequent text chunks otherwise
+      // concatenate into the same response.content with no separator --
+      // producing `...before filing.Filing now.Filed:` and losing paragraph
+      // breaks.
+      //
+      // Detect the boundary by checking whether a tool_use was appended AFTER
+      // the currently-resolved response slot. If so, materialize a fresh
+      // continuation slot at the end (`<deltaId>-cont-<ts>`) and remap the
+      // ORIGINAL incoming messageId directly to the new slot (single-hop,
+      // never chained -- successive splits overwrite the existing entry so
+      // `_ctx.deltaIdRemaps` stays bounded and `stream_end`'s
+      // `_ctx.deltaIdRemaps.delete(out.messageId)` cleans up completely).
+      // The split mirrors the `-post-` permission-boundary pattern already
+      // in this file. Skipped while the session is replaying -- replayed
+      // history is reassembled server-side and must not be re-split on the
+      // client.
+      {
+        const splitTargetId = capturedSessionId;
+        const splitEffectiveId = (splitTargetId && get().sessionStates[splitTargetId])
+          ? splitTargetId
+          : get().activeSessionId;
+        const isReplaying = splitEffectiveId ? _ctx.replayingSessions.has(splitEffectiveId) : false;
+        if (!isReplaying && splitEffectiveId && get().sessionStates[splitEffectiveId]) {
+          const splitMessages = get().sessionStates[splitEffectiveId].messages;
+          const slotIdx = splitMessages.findIndex((m) => m.id === deltaId);
+          if (slotIdx >= 0) {
+            const slot = splitMessages[slotIdx];
+            // Buffered (not-yet-flushed) text counts as content for the
+            // split decision -- otherwise a chunk that hasn't hit the 100ms
+            // flush yet would look empty and we'd append onto it.
+            const bufferedContent = _ctx.pendingDeltas.get(deltaId)?.delta || '';
+            const hasContent = slot.type === 'response'
+              && (slot.content.length > 0 || bufferedContent.length > 0);
+            // Index-based scan instead of slice().some() -- avoids allocating
+            // a tail array on every delta. stream_delta is called many times
+            // per turn and sessions can carry long histories, so this stays
+            // on the hot path lean.
+            let toolAfter = false;
+            if (hasContent) {
+              for (let i = slotIdx + 1; i < splitMessages.length; i++) {
+                if (splitMessages[i].type === 'tool_use') {
+                  toolAfter = true;
+                  break;
+                }
+              }
+            }
+            // #4999 -- mid-sentence fragmentation gate. The post-#4889 split
+            // only makes sense when the prior bubble's text reached a sentence
+            // boundary (the LLM finished a thought before invoking the tool);
+            // otherwise the tool interrupted mid-sentence and the post-tool
+            // delta is the same sentence continuing. Treat the prior slot as
+            // "sentence-complete" only when its trailing non-whitespace char
+            // is a sentence terminator (`.`, `!`, `?`) or a hard line break
+            // (`\n`). A bubble ending in a word char, open paren, comma,
+            // colon, dash, etc. is mid-sentence -- route the delta back to
+            // the existing slot so the sentence renders as one contiguous
+            // bubble (followed by the tool).
+            if (toolAfter) {
+              const priorFullForGate = slot.type === 'response' ? slot.content + bufferedContent : '';
+              const lastNonWs = priorFullForGate.replace(/\s+$/, '');
+              // Strip trailing closing punctuation/quotes that commonly follow
+              // a sentence terminator (`.")`, `."`, `!'`, `?)`, etc.) so the
+              // gate looks at the terminator itself, not the wrapper. Without
+              // this, `"He said \"done.\""` reads as ending in `"` and the
+              // #4889 split would wrongly disable -- paragraph breaks across
+              // a tool boundary would be lost.
+              // #5014 -- also strip CJK closing brackets (`」』）`) so a
+              // fullwidth-terminated sentence wrapped in CJK quotes still
+              // reads as sentence-complete.
+              const stripped = lastNonWs.replace(/[)\]}"'’”»›」』）]+$/, '');
+              const lastChar = stripped.charAt(stripped.length - 1);
+              // #5014 -- recognize CJK fullwidth sentence terminators
+              // (`．` U+FF0E, `！` U+FF01, `？` U+FF1F) and the ideographic
+              // full stop (`。` U+3002) alongside ASCII. Without these, CJK
+              // assistant output would coalesce two sentences across a tool
+              // boundary when the user expects a paragraph break.
+              const endsSentence =
+                lastChar === '.' ||
+                lastChar === '!' ||
+                lastChar === '?' ||
+                lastChar === '．' ||
+                lastChar === '！' ||
+                lastChar === '？' ||
+                lastChar === '。';
+              const endsHardBreak = /\n\s*$/.test(priorFullForGate);
+              if (!endsSentence && !endsHardBreak) {
+                toolAfter = false;
+              }
+            }
+            if (toolAfter) {
+              // #4975 -- mid-word peel. The LLM sometimes interrupts a
+              // text content block to call a tool, splitting a word across
+              // the boundary (e.g. `"...PR #3.Del"` -> tool -> `"egating..."`).
+              // The post-#4889 split would otherwise show "Del" in one
+              // bubble and "egating..." in another with the tool between.
+              // Detect the mid-word case (last char of the prior slot's
+              // full content is a word char AND the FIRST char of the
+              // incoming post-tool delta is also a word char -- both sides
+              // of the boundary must be in a word, else the LLM emitted
+              // a normal word boundary and the peel would wrongly move a
+              // complete trailing word across the tool bubble) and peel
+              // the trailing partial word off the prior slot, seeding the
+              // continuation buffer with it. Result: the word reassembles
+              // in the continuation bubble.
+              const priorFull = slot.type === 'response' ? slot.content + bufferedContent : '';
+              const incomingDelta = msg.delta as string;
+              const incomingStartsMidWord = /^[A-Za-z0-9_]/.test(incomingDelta);
+              const midWordMatch = incomingStartsMidWord ? priorFull.match(/[A-Za-z0-9_]+$/) : null;
+              let priorTail = '';
+              if (midWordMatch && midWordMatch[0].length > 0) {
+                priorTail = midWordMatch[0];
+                let remaining = priorTail.length;
+                if (bufferedContent.length > 0) {
+                  const peelFromBuf = Math.min(remaining, bufferedContent.length);
+                  const newBuf = bufferedContent.slice(0, bufferedContent.length - peelFromBuf);
+                  if (newBuf.length > 0) {
+                    _ctx.pendingDeltas.set(deltaId, {
+                      sessionId: capturedSessionId,
+                      delta: newBuf,
+                    });
+                  } else {
+                    _ctx.pendingDeltas.delete(deltaId);
+                  }
+                  remaining -= peelFromBuf;
+                }
+                if (remaining > 0 && slot.type === 'response' && slot.content.length > 0) {
+                  updateSession(splitEffectiveId, (ss) => ({
+                    messages: ss.messages.map((m) =>
+                      m.id === deltaId && m.type === 'response'
+                        ? { ...m, content: m.content.slice(0, m.content.length - remaining) }
+                        : m
+                    ),
+                  }));
+                }
+              }
+              const contId = `${deltaId}-cont-${Date.now()}`;
+              // Single-hop remap: write against the ORIGINAL incoming
+              // messageId so successive continuation splits overwrite this
+              // entry rather than building a chain. Keeps
+              // `_ctx.deltaIdRemaps` size bounded by the count of distinct
+              // in-flight turn ids, and lets `stream_end`'s
+              // `_ctx.deltaIdRemaps.delete(out.messageId)` clean up
+              // completely.
+              _ctx.deltaIdRemaps.set(originalMessageId, contId);
+              const contMsg: ChatMessage = {
+                id: contId,
+                type: 'response',
+                content: '',
+                timestamp: Date.now(),
+              };
+              updateSession(splitEffectiveId, (ss) => ({
+                streamingMessageId: contId,
+                messages: [...ss.messages, contMsg],
+              }));
+              deltaId = contId;
+              // Seed the new continuation buffer with the peeled word so
+              // the first delta on `contId` carries the partial word as
+              // its prefix.
+              if (priorTail.length > 0) {
+                _ctx.pendingDeltas.set(contId, {
+                  sessionId: capturedSessionId,
+                  delta: priorTail,
+                });
+              }
+            }
           }
         }
       }
@@ -1924,6 +2117,51 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (warning && warning.sessionId && get().sessionStates[warning.sessionId]) {
         updateSession(warning.sessionId, () => warning.patch);
       }
+      break;
+    }
+
+    case 'multi_question_intervention': {
+      // #4764 — chroxy's permission-hook (#4648) just denied a multi-question
+      // AskUserQuestion. Mirrors the dashboard's #4758 handler: append a
+      // SessionIntervention entry so the session-header counter ticks, and on
+      // the FIRST such intervention per session push a one-time system
+      // ChatMessage explaining what happened (without it the deny is invisible
+      // on the chat surface).
+      //
+      // applyInterventionBuilder dedups by toolUseId (a stuck model re-emitting
+      // the same payload won't double-count) and tells us whether this was the
+      // session's first intervention so the inline notice only fires once.
+      const builder = sharedMultiQuestionIntervention(msg, get().activeSessionId);
+      if (!builder) break;
+      const interventionTargetId = builder.sessionId;
+      if (!interventionTargetId) break;
+      const targetState = get().sessionStates[interventionTargetId];
+      if (!targetState) break;
+      const { interventions: nextInterventions, isFirst } = applyInterventionBuilder(
+        builder,
+        targetState.interventions,
+      );
+      // Skip the state mutation if nothing changed (dedup'd repeat) so React
+      // doesn't re-render the header counter on every stuck-model re-emit.
+      if (nextInterventions === targetState.interventions) break;
+      updateSession(interventionTargetId, (ss) => {
+        if (isFirst) {
+          return {
+            interventions: nextInterventions,
+            messages: [
+              ...ss.messages,
+              {
+                id: nextMessageId('system'),
+                type: 'system',
+                content:
+                  "chroxy intercepted a multi-question form and asked the agent to break it into single questions.",
+                timestamp: Date.now(),
+              },
+            ],
+          };
+        }
+        return { interventions: nextInterventions };
+      });
       break;
     }
 
@@ -2830,7 +3068,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'error': {
       // Structured error response from a handler catch block.
       // Log it and surface a modal alert so the user knows something failed.
-      const { code: errCode, message: errMsg, requestId: errRequestId } = sharedError(msg);
+      // #5039: `partialCost` carries the optional PR #5037 fold of parent
+      // + Task subagent rounds completed before the error fired. When
+      // present, append the pre-formatted sub-line to the Alert body so
+      // the user sees what the failed turn cost — same wording as the
+      // dashboard toast sub-line.
+      const {
+        code: errCode,
+        message: errMsg,
+        requestId: errRequestId,
+        partialCost,
+      } = sharedError(msg);
+      const partialCostLine = partialCost ? formatPartialCostLine(partialCost) : null;
+      // Build the Alert body once so the permission-mode branch below and
+      // the generic fallback both surface the partial-cost line.
+      const alertBody = partialCostLine ? `${errMsg}\n\n${partialCostLine}` : errMsg;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
 
       // Match against an in-flight set_permission_mode request — if the
@@ -2858,9 +3110,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           set({ pendingPermissionConfirm: null });
 
           if (errCode === 'CAPABILITY_NOT_SUPPORTED') {
+            // The targeted "Permission Mode Unavailable" alert uses its
+            // own fallback copy when errMsg is empty; the partial-cost
+            // line stays appended either way.
+            const permissionBody = errMsg || 'This provider does not support permission mode switching.';
             Alert.alert(
               'Permission Mode Unavailable',
-              errMsg || 'This provider does not support permission mode switching.',
+              partialCostLine ? `${permissionBody}\n\n${partialCostLine}` : permissionBody,
             );
             break;
           }
@@ -2870,7 +3126,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       }
 
-      Alert.alert('Server Error', errMsg);
+      Alert.alert('Server Error', alertBody);
       break;
     }
 

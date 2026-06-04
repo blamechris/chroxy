@@ -190,6 +190,34 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.equal(s2._resultTimeoutMs, 30 * 60 * 1000)
       assert.equal(s3._resultTimeoutMs, 30 * 60 * 1000)
     })
+
+    // #4790: same middle-layer trap as #3755 / #3225 / #3805 / #4660 / #3899 —
+    // SessionManager (PR #4745) wires per-provider streamStallTimeoutMs into
+    // providerOpts but JsonlSubprocessSession dropped the key from its
+    // destructure list, so Codex/Gemini sessions silently fell back to the
+    // BaseSession default. Pin the forwarding at every layer.
+    it('forwards streamStallTimeoutMs to BaseSession (#4790)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', streamStallTimeoutMs: 900_000 })
+      assert.equal(s._streamStallTimeoutMs, 900_000,
+        'JsonlSubprocessSession must forward streamStallTimeoutMs so Codex/Gemini honour the per-provider override')
+    })
+
+    it('forwards streamStallTimeoutMs: 0 (explicit disable) to BaseSession (#4790)', () => {
+      // BaseSession honours 0 (allowZero: true) as "disable active recovery".
+      // The middle layer must preserve this — an operator opting out per
+      // provider must not silently re-enable the default 5min timer.
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', streamStallTimeoutMs: 0 })
+      assert.equal(s._streamStallTimeoutMs, 0)
+    })
+
+    it('defaults _streamStallTimeoutMs to 5 min when omitted (#4790)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp' })
+      assert.equal(s._streamStallTimeoutMs, 5 * 60 * 1000,
+        'inherits BaseSession default when streamStallTimeoutMs is not provided')
+    })
   })
 
   describe('start()', () => {

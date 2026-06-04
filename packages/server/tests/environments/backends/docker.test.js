@@ -276,6 +276,72 @@ describe('DockerBackend.createComposeEnvironment()', () => {
     assert.ok(result.containerCliPath.includes('cli.js'))
   })
 
+  it('forwards opts.envFile as `docker compose --env-file <path>` before the subcommand (#5079)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) {
+        upArgs = [...args]
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-envfile',
+      cwd: '/proj',
+      composeFile: '/proj/docker-compose.yml',
+      composeProject: 'chroxy-env-envfile',
+      containerUser: 'chroxy',
+      envFile: '/tmp/chroxy-byok-secret.env',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    // --env-file MUST come before the `up` subcommand to scope it to
+    // compose itself (Docker's CLI ignores --env-file after the
+    // subcommand for compose-level interpolation).
+    const envFileIdx = upArgs.indexOf('--env-file')
+    const upIdx = upArgs.indexOf('up')
+    assert.ok(envFileIdx >= 0, '--env-file must be present in compose up args')
+    assert.ok(envFileIdx < upIdx, '--env-file must precede the up subcommand')
+    assert.equal(upArgs[envFileIdx + 1], '/tmp/chroxy-byok-secret.env')
+  })
+
+  it('omits --env-file from docker compose up when opts.envFile is absent (#5079)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upArgs = [...args]; cb(null, '', ''); return }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-no-envfile',
+      cwd: '/proj',
+      composeFile: '/proj/docker-compose.yml',
+      composeProject: 'chroxy-env-no-envfile',
+      containerUser: 'chroxy',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    assert.equal(upArgs.indexOf('--env-file'), -1, '--env-file must be absent when not requested')
+  })
+
   it('calls compose down and re-throws when primary container not found', async () => {
     let downCalled = false
     function mockExec(_cmd, args, opts, cb) {
@@ -846,6 +912,59 @@ describe('DockerBackend.execInEnvironment()', () => {
     )
   })
 
+  it('#5067: attaches captured stdout AND stderr to the rejected Error', async () => {
+    // postCreateCommand failures often print the actually-useful
+    // diagnostic on stdout (npm install per-package errors, repo
+    // bootstrap script `echo "FATAL: ..."` lines, apt-get summary).
+    // Pre-#5067 the backend dropped stdout on the floor and the caller
+    // had to re-run by hand to see what went wrong.
+    const backend = new DockerBackend({
+      _execFile(_cmd, _args, _opts, cb) {
+        const err = new Error('exit 1')
+        err.code = 1
+        cb(err, 'OUT: setup printed this on stdout\n', 'ERR: setup printed this on stderr\n')
+      },
+    })
+
+    let caught
+    try {
+      await backend.execInEnvironment('ctr-abc', { cmd: 'broken-setup.sh' })
+      assert.fail('expected execInEnvironment to reject')
+    } catch (err) {
+      caught = err
+    }
+
+    assert.equal(typeof caught.stdout, 'string', 'rejected error must carry stdout')
+    assert.equal(typeof caught.stderr, 'string', 'rejected error must carry stderr')
+    assert.match(caught.stdout, /OUT: setup printed this on stdout/)
+    assert.match(caught.stderr, /ERR: setup printed this on stderr/)
+    // The message stays stderr-first for log-line continuity with the
+    // pre-#5067 behaviour; stdout lives on the attached property.
+    assert.match(caught.message, /ERR: setup printed this on stderr/)
+  })
+
+  it('#5067: rejected Error has empty-string stdout/stderr fields when the streams are silent', async () => {
+    const backend = new DockerBackend({
+      _execFile(_cmd, _args, _opts, cb) {
+        cb(new Error('ETIMEDOUT'), '', '')
+      },
+    })
+
+    let caught
+    try {
+      await backend.execInEnvironment('ctr-abc', { cmd: 'hangs-forever' })
+      assert.fail('expected execInEnvironment to reject')
+    } catch (err) {
+      caught = err
+    }
+
+    assert.equal(caught.stdout, '', 'silent stdout normalised to empty string')
+    assert.equal(caught.stderr, '', 'silent stderr normalised to empty string')
+    // With no stderr to surface, the message falls back to err.message
+    // — matches the pre-#5067 shape used by log scrapers.
+    assert.equal(caught.message, 'ETIMEDOUT')
+  })
+
   it('filters out entries whose value is null', async () => {
     const mockExec = createMockExecFile({ results: { exec: '' } })
     const backend = new DockerBackend({ _execFile: mockExec })
@@ -959,6 +1078,23 @@ describe('DockerBackend.execInEnvironment()', () => {
     const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
     const joined = execCall.args.join(' ')
     assert.ok(!joined.includes('_TEST_EXEC_LEAK'), 'process.env must never be forwarded')
+  })
+
+  it('passes --env-file <path> when opts.envFile is set (#5079)', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      envFile: '/tmp/chroxy-byok-secret.env',
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const idx = execCall.args.indexOf('--env-file')
+    assert.ok(idx >= 0, '--env-file flag must be present when opts.envFile is set')
+    assert.equal(execCall.args[idx + 1], '/tmp/chroxy-byok-secret.env')
+    // Container ID must come after the flag — same ordering invariant as --env.
+    assert.ok(execCall.args.indexOf('ctr-abc') > idx + 1)
   })
 })
 

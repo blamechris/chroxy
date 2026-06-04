@@ -231,11 +231,66 @@ export class GeminiSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, resumeSessionId } = {}) {
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Gemini accepts GEMINI_API_KEY / GOOGLE_API_KEY env vars OR the OAuth
+   * state cached under `~/.gemini/` by `gemini login` (#4301). Filename
+   * varies between CLI versions — oauth_creds.json or google_accounts.json
+   * — the probe accepts either.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ hasGeminiOAuthCreds: () => boolean }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `Google API (${matched} set)`,
+      }
+    }
+    if (helpers.hasGeminiOAuthCreds()) {
+      return {
+        ready: true,
+        source: 'oauth',
+        envVar: null,
+        envVars,
+        hint,
+        detail: 'Google API (OAuth from `gemini login`)',
+      }
+    }
+    const resolvedHint = hint
+      ? `${hint} or run \`gemini login\``
+      : 'run `gemini login` or set GEMINI_API_KEY'
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: resolvedHint,
+      detail: envVars.length ? `Not configured — ${resolvedHint}` : 'Not configured',
+    }
+  }
+
+  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, resumeSessionId } = {}) {
     // #3899: hardTimeoutMs forwarded to BaseSession — same shape as
     // CodexSession. When Gemini gets the soft/hard split as a follow-
     // up, the operator config will already be flowing in.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'gemini', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, resumeSessionId })
+    // #4790: streamStallTimeoutMs likewise forwarded so the per-provider
+    // override SessionManager wired in PR #4745 actually reaches
+    // BaseSession's stream-stall timer — same middle-layer trap as the
+    // other BaseSession opts above ([[feedback_jsonl_subprocess_middle_layer]]).
+    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'gemini', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, resumeSessionId })
   }
 
   setModel(model) {

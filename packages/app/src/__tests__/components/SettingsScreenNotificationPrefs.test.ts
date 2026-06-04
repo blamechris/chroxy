@@ -574,17 +574,19 @@ describe('SettingsScreen — notification-prefs capability gate (#4560)', () => 
     expect(lifecycleSource).toMatch(/serverCapabilities:\s*\{\}\s*as\s*Record<string,\s*boolean>/);
   });
 
-  it('parses the auth_ok capability map in the message-handler (coerces non-true to false)', () => {
-    // Mirror of the dashboard's parser: malformed entries (string "true",
-    // numeric 1, null, etc.) must be coerced to `false` so a buggy server
-    // can't accidentally enable a UI gate.
-    expect(messageHandlerSource).toMatch(/capabilitiesRaw\s*=\s*msg\.capabilities/);
+  it('parses the auth_ok capability map via the shared handler and threads it into the lifecycle store', () => {
+    // The strict-true coercion (`v === true`) lives in store-core's
+    // `handleAuthOk` after #4766 unified the auth_ok wire parser so
+    // mobile + dashboard can't drift again. The dedicated parser tests
+    // in `packages/store-core/src/handlers/handlers.test.ts` (the
+    // `serverCapabilities` describe block) exercise the coercion table.
+    // Here we just lock in that the app routes the parsed value into the
+    // lifecycle store on auth_ok so the gate flips immediately on
+    // (re)connect.
+    expect(messageHandlerSource).toMatch(/sharedAuthOk\s*\(\s*msg\s*\)/);
+    expect(messageHandlerSource).toMatch(/auth\.serverCapabilities/);
     expect(messageHandlerSource).toMatch(
-      /serverCapabilities\s*:\s*Record<string,\s*boolean>\s*=\s*\{\}/,
+      /setServerInfo\([\s\S]{0,2000}serverCapabilities:\s*auth\.serverCapabilities,/,
     );
-    expect(messageHandlerSource).toMatch(/serverCapabilities\[k\]\s*=\s*v\s*===\s*true/);
-    // Forwarded to the lifecycle store on auth_ok so the gate flips
-    // immediately on (re)connect.
-    expect(messageHandlerSource).toMatch(/setServerInfo\([\s\S]{0,800}serverCapabilities,/);
   });
 });

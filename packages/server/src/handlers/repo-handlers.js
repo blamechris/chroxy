@@ -7,7 +7,7 @@ import { statSync, realpathSync } from 'fs'
 import { basename } from 'path'
 import { scanConversations as defaultScanConversations, groupConversationsByRepo } from '../conversation-scanner.js'
 import { readReposFromConfig as defaultReadRepos, writeReposToConfig as defaultWriteRepos } from '../config.js'
-import { validateCwdAllowed } from '../handler-utils.js'
+import { validateCwdAllowed, sendSessionError } from '../handler-utils.js'
 
 /**
  * Build merged repo list from auto-discovered and manual repos.
@@ -59,7 +59,7 @@ async function handleAddRepo(ws, client, msg, ctx) {
   const repoPath = msg.path
   const cwdError = validateCwdAllowed(repoPath, ctx.config)
   if (cwdError) {
-    ctx.send(ws, { type: 'session_error', message: cwdError })
+    sendSessionError(ws, ctx, cwdError)
     return
   }
 
@@ -75,7 +75,7 @@ async function handleAddRepo(ws, client, msg, ctx) {
     const repos = await buildRepoList(ctx)
     ctx.send(ws, { type: 'repo_list', repos })
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to add repo: ${err.message}` })
+    sendSessionError(ws, ctx, `Failed to add repo: ${err.message}`)
   }
 }
 

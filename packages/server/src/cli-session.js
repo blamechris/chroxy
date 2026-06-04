@@ -10,10 +10,10 @@ import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContex
 import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
-import { parseMcpToolName } from './mcp-tools.js'
+import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
-import { createLogger } from './logger.js'
+import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 
 const log = createLogger('cli-session')
@@ -31,6 +31,134 @@ const CLAUDE = resolveBinary('claude', [
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
+
+/**
+ * Patterns the claude CLI emits on stderr when `--resume <id>` fails because
+ * the conversation id is unknown locally (e.g. the operator wiped
+ * `~/.claude/projects/` between chroxy boots, or restored a state file from a
+ * different machine). Matched case-insensitively against each buffered stderr
+ * line; one match is enough to classify the failure as `resume_unknown` and
+ * trigger the one-shot fresh-conversation fallback in #4929.
+ *
+ * Kept as an exported constant so the regression test can pin both the
+ * detection contract AND the exact strings without re-implementing the matcher.
+ * If claude CLI ever changes its wording, the test will fail loudly here
+ * rather than silently regressing back into the "exited unexpectedly" respawn
+ * loop reported in #4929.
+ *
+ * #4950 — the original seventh pattern `/resume.*failed/i` was too loose:
+ * unrelated stderr like "tool resume failed" or "user wanted to resume after
+ * the failed sync" would falsely classify as resume_unknown and wipe
+ * `_sessionId` mid-conversation. The three replacement patterns require both
+ * the resume verb AND a session/conversation/id keyword nearby, so a tool-side
+ * failure that happens to log "resume failed" in isolation no longer triggers
+ * a phantom `_sessionId` wipe.
+ */
+export const RESUME_UNKNOWN_STDERR_PATTERNS = [
+  /no conversation found/i,
+  /conversation.*not.*found/i,
+  /session.*not.*found/i,
+  /no such conversation/i,
+  /unknown session/i,
+  /could not find session/i,
+  // #4950 — tightened replacements for the dropped `/resume.*failed/i`. Each
+  // requires the resume verb to co-occur with session/conversation/id so the
+  // matcher stays scoped to the --resume-id failure mode it was designed for.
+  //
+  // #4968 — `id` is anchored with \b so it doesn't bleed into substrings of
+  // unrelated words (invalid, considered, avoided, widget, mid, kid, …). The
+  // long tokens `session` and `conversation` don't need anchoring.
+  //
+  // #4969 — `resum(e|ing)` covers the gerund form claude CLI may emit
+  // ("Error resuming session abc-123"). Original `resume.*` patterns missed
+  // the gerund and silently fell through to the generic "exited unexpectedly"
+  // respawn loop reported in #4929.
+  /resum(e|ing).*(fail|error).*(session|conversation|\bid\b)/i,
+  /resum(e|ing).*(session|conversation|\bid\b).*(fail|error)/i,
+  /(fail|error|could not|unable to|cannot).*resum(e|ing).*(session|conversation|\bid\b)/i,
+]
+
+/**
+ * Inspect a buffered stderr line set and return true if any line matches a
+ * known "unknown resume id" pattern. Pure helper — exported so the test suite
+ * can pin the matcher behavior without spawning a child process.
+ *
+ * @param {string[]} stderrLines
+ * @returns {boolean}
+ */
+export function stderrIndicatesUnknownResume(stderrLines) {
+  if (!Array.isArray(stderrLines) || stderrLines.length === 0) return false
+  for (const line of stderrLines) {
+    if (typeof line !== 'string' || !line) continue
+    for (const pattern of RESUME_UNKNOWN_STDERR_PATTERNS) {
+      if (pattern.test(line)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Build the argv passed to `claude -p --input-format stream-json …`.
+ *
+ * Extracted so #4887 has a single, pure place to assert the resume contract.
+ * Mirrors the historical inline build in `start()` exactly — same arg order,
+ * same flag spellings — plus an optional `--resume <id>` segment when a prior
+ * `_sessionId` is known.
+ *
+ * Resume invariants (#4887):
+ *   - A fresh session (no `_sessionId` yet) omits `--resume`. claude CLI
+ *     allocates a brand-new conversation on first init.
+ *   - A respawn (model switch, perm-mode flip, crash) or a server-restart
+ *     restore call MUST include `--resume <id>`. Without it, the new
+ *     subprocess inherits the chroxy-side history ring buffer (replayed to
+ *     the dashboard) but the model itself starts cold mid-conversation —
+ *     the failure mode reported in #4887.
+ *
+ * @param {object} opts
+ * @param {string|null} opts.model
+ * @param {string} opts.permissionMode
+ * @param {string[]} opts.allowedTools
+ * @param {string} opts.skillsText
+ * @param {string|null} opts.resumeSessionId
+ * @returns {string[]}
+ */
+export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skillsText, resumeSessionId } = {}) {
+  const args = [
+    '-p',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+  ]
+
+  if (model) {
+    args.push('--model', model)
+  }
+
+  if (permissionMode === 'auto') {
+    args.push('--permission-mode', 'bypassPermissions')
+  } else if (permissionMode === 'plan') {
+    args.push('--permission-mode', 'plan')
+  }
+
+  if (Array.isArray(allowedTools) && allowedTools.length > 0) {
+    args.push('--allowedTools', allowedTools.join(','))
+  }
+
+  if (skillsText) {
+    args.push('--append-system-prompt', skillsText)
+  }
+
+  // #4887 — wire the prior claude session_id back onto the new subprocess so
+  // the model retains the full prior transcript. Only emitted when a non-empty
+  // string is known; a brand-new session (first start()) leaves this off so
+  // claude CLI mints a fresh conversation id on its `system.init` line.
+  if (typeof resumeSessionId === 'string' && resumeSessionId.length > 0) {
+    args.push('--resume', resumeSessionId)
+  }
+
+  return args
+}
 
 /**
  * Manages a persistent Claude Code CLI session using headless mode.
@@ -85,7 +213,11 @@ export class CliSession extends BaseSession {
       modelSwitch: true,
       permissionModeSwitch: true,
       planMode: true,
-      resume: false,
+      // #4887 — claude CLI supports `--resume <id>`; CliSession now wires
+      // `_sessionId` into the spawn argv on respawn / restore so the model
+      // retains the prior transcript instead of starting cold mid-conversation.
+      // Persistence + UI gating both branch on this flag.
+      resume: true,
       terminal: false,
       thinkingLevel: false,
       // #3932: declared explicitly so the capability matrix matches across
@@ -120,6 +252,29 @@ export class CliSession extends BaseSession {
         hint: 'run `claude login` or set ANTHROPIC_API_KEY',
         optional: true,
       },
+    }
+  }
+
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Host `claude-cli` always bills the Claude subscription: spawn-env.js's
+   * `claude` denylist strips ANTHROPIC_API_KEY before the subprocess starts,
+   * so the env var is irrelevant — the CLI auths via the host's ~/.claude
+   * OAuth state. Mark ready up front; the on-disk OAuth probe doesn't see
+   * Keychain credentials and would otherwise misreport unconfigured.
+   *
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth() {
+    const envVars = this.preflight.credentials.envVars
+    return {
+      ready: true,
+      source: 'oauth',
+      envVar: null,
+      envVars,
+      hint: 'run `claude login` if not yet authed',
+      detail: 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)',
     }
   }
 
@@ -161,7 +316,7 @@ export class CliSession extends BaseSession {
     }
   }
 
-  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } = {}) {
+  constructor({ cwd, allowedTools, model, port, apiToken, permissionMode, settingsPath, maxToolInput, transforms, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, resumeSessionId } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-cli', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs })
     this.allowedTools = allowedTools || []
     this._port = port || null
@@ -170,7 +325,19 @@ export class CliSession extends BaseSession {
     this._hookSecret = randomBytes(32).toString('hex')
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
-    this._sessionId = null
+    // #4887 — seed `_sessionId` from the persisted resume id so the very-first
+    // start() (post-restore) passes `--resume <id>` and the new claude
+    // subprocess re-hydrates the prior conversation. Falsy / non-string values
+    // (older state files, missing opt) leave `_sessionId` null exactly as
+    // before, so brand-new sessions still mint a fresh claude conversation.
+    this._sessionId = (typeof resumeSessionId === 'string' && resumeSessionId.length > 0)
+      ? resumeSessionId
+      : null
+    // #4828: session-scoped logger, lazily bound when the CLI emits its
+    // `init` message (where session_id becomes known). Pre-init log lines
+    // stay on the module-level `log` — same fallback pattern as SdkSession
+    // / ClaudeTuiSession.
+    this._log = null
     this._child = null
     this._rl = null
     this._stderrRL = null
@@ -186,6 +353,24 @@ export class CliSession extends BaseSession {
     this._respawnScheduled = false
     this._respawning = false
     this._interruptTimer = null
+    // #4929: track in-flight `--resume <id>` attempts so we can detect when
+    // claude CLI rejects an unknown id and avoid the spin-retry loop reported
+    // in the issue. Set in `_spawnPersistentProcess` whenever we passed
+    // `--resume`, cleared by `system.init` (resume confirmed) and inspected
+    // by `_handleChildClose` if the child exits before init fires.
+    this._attemptedResumeId = null
+    this._recentStderrLines = []
+    // One-shot fallback latch: if we detect `resume_unknown`, drop `_sessionId`
+    // and respawn a fresh conversation exactly once. If THAT also fails the
+    // child exits for a different reason and the normal respawn path runs.
+    // Prevents an infinite "clear → respawn → resume → clear" oscillation if
+    // some future bug ever re-introduces a phantom resume id.
+    this._didFallbackFromUnknownResume = false
+    // #4602: distinguishes "user clicked Stop" (interrupt → child exits)
+    // from "child crashed" so _handleChildClose skips the misleading
+    // "exited unexpectedly" toast + auto-respawn on the stop path.
+    // Single-use: set by interrupt(), cleared by _handleChildClose / destroy.
+    this._intentionalStop = false
 
     // Hook manager (shared module)
     this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
@@ -202,6 +387,23 @@ export class CliSession extends BaseSession {
   }
 
   /**
+   * Public accessor for the claude CLI session id used to resume conversations
+   * via `claude -p --resume <id>` (#4887). SessionManager.serializeState reads
+   * this to persist `sdkSessionId` (the cross-provider name for the resume
+   * token); restoreState forwards it back into the constructor as
+   * `resumeSessionId` so the new chroxy boot re-attaches to the prior
+   * conversation instead of starting cold.
+   *
+   * Returns `null` until the CLI emits its first `system.init` event (or until
+   * the constructor seeds the value from a persisted state file).
+   *
+   * @returns {string|null}
+   */
+  get resumeSessionId() {
+    return this._sessionId || null
+  }
+
+  /**
    * Start the persistent Claude process. Call once after construction.
    */
   start() {
@@ -210,35 +412,25 @@ export class CliSession extends BaseSession {
       this._hookManager.register()
     }
 
-    const args = [
-      '-p',
-      '--input-format', 'stream-json',
-      '--output-format', 'stream-json',
-      '--verbose',
-      '--include-partial-messages',
-    ]
-
-    if (this.model) {
-      args.push('--model', this.model)
-    }
-
-    if (this.permissionMode === 'auto') {
-      args.push('--permission-mode', 'bypassPermissions')
-    } else if (this.permissionMode === 'plan') {
-      args.push('--permission-mode', 'plan')
-    }
-
-    if (this.allowedTools.length > 0) {
-      args.push('--allowedTools', this.allowedTools.join(','))
-    }
-
     // Skills MVP (#2957) — append shared skills to the Claude CLI system prompt.
     const skillsText = this._buildSystemPrompt()
-    if (skillsText) {
-      args.push('--append-system-prompt', skillsText)
-    }
 
-    log.info(`Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})`)
+    // #4887 — pass `_sessionId` as `--resume` whenever it's known. This is the
+    // load-bearing flag for the bug: on respawn (crash / model switch / perm-
+    // mode flip) and on server-restart restore, the new claude subprocess
+    // would otherwise lose every prior turn in the model's context window and
+    // the user would see the dashboard transcript replay correctly while the
+    // model itself starts cold mid-conversation.
+    const args = buildClaudeCliArgs({
+      model: this.model,
+      permissionMode: this.permissionMode,
+      allowedTools: this.allowedTools,
+      skillsText,
+      resumeSessionId: this._sessionId,
+    })
+
+    const resumeNote = this._sessionId ? ` (resume ${this._sessionId})` : ''
+    log.info(`Starting persistent process (model: ${this.model || 'default'}, permission: ${this.permissionMode})${resumeNote}`)
     this._spawnPersistentProcess(args)
   }
 
@@ -269,6 +461,18 @@ export class CliSession extends BaseSession {
     this._cleanupReadlines()
     this._processReady = false
 
+    // #4929: capture which `--resume <id>` (if any) this spawn attempted.
+    // Read off the argv we're about to pass instead of `_sessionId` so the
+    // detection is robust to future refactors that build args differently —
+    // we're asking "what did we actually tell claude to resume?" not "what's
+    // our in-memory id?". `_handleChildClose` inspects this on exit to decide
+    // whether to classify a quick failure as `resume_unknown` (#4929).
+    const resumeIdx = args.indexOf('--resume')
+    this._attemptedResumeId = (resumeIdx >= 0 && typeof args[resumeIdx + 1] === 'string')
+      ? args[resumeIdx + 1]
+      : null
+    this._recentStderrLines = []
+
     const child = spawn(CLAUDE, args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -290,14 +494,30 @@ export class CliSession extends BaseSession {
     this._stderrRL = stderrRL
     stderrRL.on('line', (line) => {
       if (line.trim()) {
-        log.info(`stderr: ${line}`)
+        // #4828: session-scoped when init has fired (stderr arrives both
+        // pre- and post-init; the fallback covers the pre-init case).
+        ;(this._log || log).info(`stderr: ${line}`)
+        // #4929: buffer the most recent stderr lines while a `--resume` is
+        // outstanding so `_handleChildClose` can classify the failure. Bounded
+        // to 50 lines so a chatty subprocess can't grow this unbounded — the
+        // unknown-resume error fits in the first handful of lines so 50 is
+        // generous. Only buffer until `system.init` clears `_attemptedResumeId`
+        // (a successful resume confirms via init); after that we drop lines on
+        // the floor and let the normal stderr->log path do its job.
+        if (this._attemptedResumeId) {
+          this._recentStderrLines.push(line)
+          if (this._recentStderrLines.length > 50) {
+            this._recentStderrLines.shift()
+          }
+        }
       }
     })
 
     // Absorb EPIPE and other low-level stdin errors so they don't become
     // unhandled exceptions. Writes are already wrapped in try/catch below.
     child.stdin.on('error', (err) => {
-      log.warn(`stdin error (ignored): ${err.message}`)
+      // #4828: session-scoped when init has fired.
+      ;(this._log || log).warn(`stdin error (ignored): ${err.message}`)
     })
 
     child.on('error', (err) => {
@@ -322,7 +542,9 @@ export class CliSession extends BaseSession {
     // _clearMessageState() after each result.
     while (this._pendingQueue.length > 0 && !this._isBusy) {
       const pending = this._pendingQueue.shift()
-      log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
+      // #4828: session-scoped when init has fired (dequeue can race with
+      // the very-first init so the fallback is intentional).
+      ;(this._log || log).info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
   }
@@ -371,7 +593,9 @@ export class CliSession extends BaseSession {
         this.emit('error', { message: 'Pending message queue full (max 3) — message discarded' })
         return
       }
-      log.info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
+      // #4828: session-scoped when init has fired (queuing typically happens
+      // pre-init or during respawn — both can race with the binding).
+      ;(this._log || log).info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
       this._pendingQueue.push({ prompt, attachments, options })
       return
     }
@@ -431,11 +655,16 @@ export class CliSession extends BaseSession {
       },
     })
 
-    log.info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
+    // #4828: session-scoped when init has fired. The very first message
+    // sends pre-init (CLI's `init` arrives in the first response), so the
+    // first turn falls back to module-level `log`; all subsequent sends
+    // route through `this._log`.
+    ;(this._log || log).info(`Sending message ${this._currentMessageId}: "${(prompt || '').slice(0, 60)}"${attachments?.length ? ` (+${attachments.length} attachment(s))` : ''}`)
     try {
       this._child.stdin.write(ndjson + '\n')
     } catch (err) {
-      log.error(`stdin.write failed (sendMessage): ${err.message}`)
+      // #4828: session-scoped when init has fired.
+      ;(this._log || log).error(`stdin.write failed (sendMessage): ${err.message}`)
       this._clearMessageState()
       this.emit('error', { message: `Failed to send message: ${err.message}` })
       return
@@ -515,7 +744,8 @@ export class CliSession extends BaseSession {
     if (!this._isBusy) return
     const idleMs = this._resultTimeoutMs
     const friendly = formatIdleDuration(idleMs)
-    log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
+    // #4828: session-scoped (inactivity warning fires from active turn).
+    ;(this._log || log).info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
     this.emit('inactivity_warning', {
       messageId: this._currentMessageId,
       idleMs,
@@ -534,7 +764,8 @@ export class CliSession extends BaseSession {
   _handleHardTimeout() {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._hardTimeoutMs)
-    log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
+    // #4828: session-scoped (hard-cap fires from active turn).
+    ;(this._log || log).warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
     // Fire permission_expired for every pending permission we know about
     // so the client clears the stale prompt.
     for (const requestId of this._pendingPermissionIds) {
@@ -557,7 +788,8 @@ export class CliSession extends BaseSession {
   _handleStreamStall() {
     if (!this._isBusy) return
     const friendly = formatIdleDuration(this._streamStallTimeoutMs)
-    log.warn(
+    // #4828: session-scoped (stall fires from active turn).
+    ;(this._log || log).warn(
       `Stream stalled (${friendly}, messageId=${this._currentMessageId}) — clearing busy state for retry`,
     )
     this._emitInterruptedTurnResult(this._streamStallTimeoutMs)
@@ -654,13 +886,27 @@ export class CliSession extends BaseSession {
         if (data.subtype === 'init') {
           this._sessionId = data.session_id
           this._respawnCount = 0
+          // #4929: resume confirmed — claude CLI fired its first system.init,
+          // so the `--resume` (if any) succeeded. Clear the attempt tracker so
+          // a later unrelated exit doesn't get misclassified as resume failure,
+          // drop the stderr buffer (was only useful for failure diagnostics),
+          // and release the one-shot fallback latch so a FUTURE unknown-resume
+          // (e.g. user wipes ~/.claude/projects/ while chroxy keeps running and
+          // then crashes) can fall back again.
+          this._attemptedResumeId = null
+          this._recentStderrLines = []
+          this._didFallbackFromUnknownResume = false
+          // #4828: bind the session-scoped logger now that session_id is
+          // known. Subsequent log lines route through the WsServer log
+          // fan-out (#4787) to dashboards bound to this session.
+          this._log = loggerForSession('cli-session', data.session_id)
           // #3687: persist the actual model the CLI booted with so
           // sendSessionInfo (replay on reconnect / tab switch) reports the
           // truth instead of `null` when the user didn't specify a model.
           if (typeof data.model === 'string' && data.model) {
             this.bootedModel = data.model
           }
-          log.info(`Session initialized: ${data.session_id}`)
+          ;(this._log || log).info(`Session initialized: ${data.session_id}`)
           this.emit('ready', {
             sessionId: data.session_id,
             model: data.model,
@@ -669,7 +915,8 @@ export class CliSession extends BaseSession {
           // Emit MCP server status if present (including empty list to clear stale state)
           if (Array.isArray(data.mcp_servers)) {
             if (data.mcp_servers.length > 0) {
-              log.info(`MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
+              // #4828: session-scoped (post-init).
+              ;(this._log || log).info(`MCP servers: ${data.mcp_servers.map(s => `${s.name}(${s.status})`).join(', ')}`)
             }
             this.emit('mcp_servers', { servers: data.mcp_servers })
           }
@@ -677,7 +924,8 @@ export class CliSession extends BaseSession {
           // Forward non-init system events (e.g. usage limits, sub-agent
           // notifications) as system messages to the client
           const text = data.message || data.text || data.subtype || 'System event'
-          log.info(`System event (${data.subtype || 'unknown'}): ${text}`)
+          // #4828: session-scoped (non-init system event arrives after init).
+          ;(this._log || log).info(`System event (${data.subtype || 'unknown'}): ${text}`)
           this.emit('message', {
             type: 'system',
             content: text,
@@ -707,30 +955,25 @@ export class CliSession extends BaseSession {
               }
             } else if (blockType === 'tool_use') {
               ctx.currentToolName = event.content_block.name
-              ctx.currentToolUseId = event.content_block.id
               ctx.toolInputChunks = ''
               ctx.toolInputBytes = 0
               ctx.toolInputOverflow = false
-              // Use the tool's content_block.id as the tool_start messageId
-              // so each tool in a multi-tool turn has a distinct id. Sharing
-              // the turn-level messageId across tools collides with the
-              // post-tool stream_start id and corrupts client message state.
-              // Mirrors sdk-session.js. Reused for toolUseId so the wire
-              // schema (`ServerToolStartSchema.toolUseId: z.string()`) holds
-              // even on the defensive fallback path.
-              const toolId = event.content_block.id || `${messageId}-tool`
-              const toolStartData = {
-                messageId: toolId,
-                toolUseId: toolId,
-                tool: event.content_block.name,
-                input: null,
-              }
-              const mcp = parseMcpToolName(event.content_block.name)
-              if (mcp) toolStartData.serverName = mcp.serverName
+              // Delegate to the shared parser so CliSession + SdkSession
+              // emit identical tool_start payloads (see
+              // claude-stream-parser.js for the toolId-derivation rules).
+              const toolStartData = buildToolStartData(messageId, event.content_block)
+              // #4778: align ctx with the wire-emitted toolUseId so the
+              // synthesized fallback (`${messageId}-tool` when
+              // content_block.id is missing) propagates to
+              // _applyToolInputSemantics → user_question / agent_spawned
+              // and _activeAgents.set(). Without this, ctx.currentToolUseId
+              // stayed undefined on the fallback path and downstream
+              // payloads carried toolUseId=undefined.
+              ctx.currentToolUseId = toolStartData.toolUseId
               this.emit('tool_start', toolStartData)
               // #4628: track so _clearMessageState (or _emitResult) can
               // sweep on turn-end if the API ever drops a tool_result.
-              this._trackToolStart(toolId, event.content_block.name)
+              this._trackToolStart(toolStartData.toolUseId, event.content_block.name)
             }
             break
           }
@@ -752,7 +995,8 @@ export class CliSession extends BaseSession {
                 if (ctx.toolInputBytes + chunkBytes > this._maxToolInput) {
                   ctx.toolInputChunks = ''
                   ctx.toolInputOverflow = true
-                  log.warn(`toolInputChunks exceeded ${this._maxToolInput} bytes, discarding buffer`)
+                  // #4828: session-scoped (stream_event fires post-init).
+                  ;(this._log || log).warn(`toolInputChunks exceeded ${this._maxToolInput} bytes, discarding buffer`)
                   this.emit('error', {
                     message: `Tool input too large (>${Math.round(this._maxToolInput / 1024)}KB) for ${ctx.currentToolName || 'unknown tool'} — input was truncated`,
                   })
@@ -766,52 +1010,8 @@ export class CliSession extends BaseSession {
           }
 
           case 'content_block_stop': {
-            // toolInputChunks is falsy ('') after overflow discard, so the
-            // AskUserQuestion parse path is naturally skipped on overflow.
-            if (ctx && ctx.currentToolName === 'AskUserQuestion' && ctx.toolInputChunks) {
-              try {
-                const input = JSON.parse(ctx.toolInputChunks)
-                log.info(`AskUserQuestion detected (${ctx.currentToolUseId})`)
-                this._waitingForAnswer = true
-                this.emit('user_question', {
-                  toolUseId: ctx.currentToolUseId,
-                  questions: input.questions,
-                })
-              } catch (err) {
-                log.error(`Failed to parse AskUserQuestion input: ${err.message}`)
-              }
-            }
-            if (ctx && ctx.currentToolName === 'Task' && ctx.toolInputChunks) {
-              try {
-                const input = JSON.parse(ctx.toolInputChunks)
-                const description = (typeof input.description === 'string'
-                  ? input.description : 'Background task').slice(0, 200)
-                const agentInfo = {
-                  toolUseId: ctx.currentToolUseId,
-                  description,
-                  startedAt: Date.now(),
-                }
-                this._activeAgents.set(ctx.currentToolUseId, agentInfo)
-                this.emit('agent_spawned', agentInfo)
-              } catch (err) {
-                log.warn(`Failed to parse Task tool input: ${err.message}`)
-              }
-            }
-            if (ctx && ctx.currentToolName === 'EnterPlanMode') {
-              this._inPlanMode = true
-              this.emit('plan_started')
-            }
-            if (ctx && ctx.currentToolName === 'ExitPlanMode') {
-              let allowedPrompts = []
-              if (ctx.toolInputChunks) {
-                try {
-                  const input = JSON.parse(ctx.toolInputChunks)
-                  allowedPrompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts : []
-                } catch (err) {
-                  log.warn(`Failed to parse ExitPlanMode input: ${err.message}`)
-                }
-              }
-              this._planAllowedPrompts = allowedPrompts
+            if (ctx && ctx.currentToolName) {
+              this._applyToolInputSemantics(ctx)
             }
             if (ctx) {
               ctx.currentContentBlockType = null
@@ -875,6 +1075,43 @@ export class CliSession extends BaseSession {
         const messageId = this._currentMessageId
         const ctx = this._currentCtx
 
+        // #5064 — Fallback for turns that complete without ever emitting
+        // streamed assistant text. The canonical case is `/compact`: the
+        // CLI returns the compaction summary in `data.result` but emits
+        // either no `assistant` event at all, or one with empty/no-growth
+        // text content, so the dashboard sees nothing. Mirror the SDK
+        // fallback (sdk-session.js:801) and surface `data.result` as a
+        // `message` of type `response` before the `result` event fires.
+        // Guard on !hasStreamStarted so normal streamed turns aren't
+        // double-emitted.
+        //
+        // #5088 — Same silent-disappear pattern for error-subtype text.
+        // Some result events carry human-readable text in `data.error.subtype`
+        // (e.g. permission_denied, usage_limit_exceeded) without any
+        // streamed assistant content. Surface that text by emitting a
+        // `type: 'error'` message (→ `messageType: 'error'` on the wire) so
+        // downstream consumers render it as a distinct error bubble rather
+        // than a normal reply. The `data.result` path above takes priority —
+        // only fall back to error-subtype text when `data.result` was
+        // missing/empty so we never double-emit for the same turn.
+        if (!ctx?.hasStreamStarted && typeof data.result === 'string' && data.result.length > 0) {
+          this.emit('message', {
+            type: 'response',
+            content: data.result,
+            timestamp: Date.now(),
+          })
+        } else if (
+          !ctx?.hasStreamStarted &&
+          typeof data.error?.subtype === 'string' &&
+          data.error.subtype.length > 0
+        ) {
+          this.emit('message', {
+            type: 'error',
+            content: data.error.subtype,
+            timestamp: Date.now(),
+          })
+        }
+
         // Close any open stream before emitting result
         if (ctx?.hasStreamStarted) {
           this.emit('stream_end', { messageId })
@@ -898,6 +1135,100 @@ export class CliSession extends BaseSession {
         // Message complete — ready for next message
         this._clearMessageState()
         break
+      }
+    }
+  }
+
+  /**
+   * Apply session-state side effects for tools whose accumulated
+   * `toolInputChunks` JSON drives plan-mode flags, agent tracking, or
+   * user-question prompts. Called at `content_block_stop` once the full
+   * tool input has been buffered. Delegates the wire-format parsing to
+   * the shared {@link extractToolInputSemantics} so SdkSession (which
+   * receives the full input directly in `_handleToolUseBlock`) cannot
+   * drift in how it interprets the same tool names.
+   *
+   * `ctx.toolInputChunks` is the empty string after overflow discard, so
+   * AskUserQuestion / Task / ExitPlanMode paths that need a real payload
+   * are naturally skipped on overflow; EnterPlanMode takes the no-input
+   * path and still fires.
+   *
+   * @param {{ currentToolName: string|null, currentToolUseId: string|null, toolInputChunks: string }} ctx
+   * @private
+   */
+  _applyToolInputSemantics(ctx) {
+    const toolName = ctx.currentToolName
+    const toolUseId = ctx.currentToolUseId
+    // `parseSucceeded` tracks whether the buffered JSON parsed without
+    // throwing — distinct from `parsed != null`, because JSON.parse can
+    // legally return falsy values (0, false, '', null) and the
+    // pre-extraction code emitted on any successful parse regardless of
+    // the parsed value. Gating on truthiness would silently drop those
+    // payloads. (#4774 Copilot review)
+    let parsed = null
+    let parseSucceeded = false
+    if (ctx.toolInputChunks) {
+      try {
+        parsed = JSON.parse(ctx.toolInputChunks)
+        parseSucceeded = true
+      } catch (err) {
+        // Parse-failure logging matches the per-tool pre-extraction
+        // messages so existing log scraping continues to work.
+        if (toolName === 'AskUserQuestion') {
+          // #4828: session-scoped (tool parsing runs strictly post-init).
+          ;(this._log || log).error(`Failed to parse AskUserQuestion input: ${err.message}`)
+          return
+        }
+        if (toolName === 'Task') {
+          ;(this._log || log).warn(`Failed to parse Task tool input: ${err.message}`)
+          return
+        }
+        if (toolName === 'ExitPlanMode') {
+          ;(this._log || log).warn(`Failed to parse ExitPlanMode input: ${err.message}`)
+          // ExitPlanMode falls through with parseSucceeded=false so the
+          // empty allowedPrompts default still applies.
+        }
+      }
+    }
+
+    const semantics = extractToolInputSemantics(toolName, parsed)
+    if (!semantics) return
+
+    switch (semantics.kind) {
+      case 'ask_user_question': {
+        // The pre-extraction code required a non-empty buffer AND a
+        // successful parse before emitting; preserve that gate via
+        // `parseSucceeded` (truthiness of `parsed` would drop legal
+        // falsy JSON values).
+        if (!parseSucceeded) return
+        // #4828: session-scoped.
+        ;(this._log || log).info(`AskUserQuestion detected (${toolUseId})`)
+        this._waitingForAnswer = true
+        this.emit('user_question', {
+          toolUseId,
+          questions: semantics.payload.questions,
+        })
+        return
+      }
+      case 'task': {
+        if (!parseSucceeded) return
+        const agentInfo = {
+          toolUseId,
+          description: semantics.payload.description,
+          startedAt: Date.now(),
+        }
+        this._activeAgents.set(toolUseId, agentInfo)
+        this.emit('agent_spawned', agentInfo)
+        return
+      }
+      case 'enter_plan': {
+        this._inPlanMode = true
+        this.emit('plan_started')
+        return
+      }
+      case 'exit_plan': {
+        this._planAllowedPrompts = semantics.payload.allowedPrompts
+        return
       }
     }
   }
@@ -937,7 +1268,8 @@ export class CliSession extends BaseSession {
         if (this._destroying) return
         if (!this._processReady || this._pendingQueue.length === 0) return
         const pending = this._pendingQueue.shift()
-        log.info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
+        // #4828: session-scoped (post-result, post-init).
+        ;(this._log || log).info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
         this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
       })
     }
@@ -956,14 +1288,25 @@ export class CliSession extends BaseSession {
 
     this._respawning = true
     this._processReady = false
-    this._sessionId = null
+    // #4887 — DO NOT null `_sessionId` here. `start()` reads it as the
+    // `--resume` argument; clearing it would force the respawned subprocess
+    // to mint a brand-new conversation and the model would see the new user
+    // message with no prior turns — exactly the cold-start failure in #4887.
+    // The session id is re-confirmed by the next `system.init` (claude CLI
+    // echoes the resumed id back), so the in-process value stays accurate
+    // even on the rare fork case.
+    // #4828: drop the session-scoped logger so the next init re-binds it
+    // (the underlying session_id is unchanged on a normal resume, but the
+    // logger context is re-created on every init for symmetry with first-
+    // boot — cheap and avoids any stale closure).
+    this._log = null
 
-    // The new child process has no conversation state — and on Claude CLI
-    // the append/system bucket rides on `--append-system-prompt` at spawn,
-    // so it's already part of the new argv. The prepend bucket, however,
-    // is concatenated onto the FIRST user message; a respawn means the
-    // next sendMessage() is once again that first message. Reset the
-    // flag so the prepend bucket flows through on the next turn (#3225).
+    // #4887 — the respawned child re-attaches to the prior conversation via
+    // `--resume <_sessionId>`. The append/system bucket still rides on
+    // `--append-system-prompt` at spawn (already in the new argv). The
+    // prepend bucket is concatenated onto the FIRST user message; a respawn
+    // means the next sendMessage() is once again that first message. Reset
+    // the flag so the prepend bucket flows through on the next turn (#3225).
     this._skillsPrepended = false
 
     if (this._interruptTimer) {
@@ -1021,7 +1364,8 @@ export class CliSession extends BaseSession {
       // Force-kill after 10s if process doesn't exit cleanly
       const forceKillTimer = setTimeout(() => {
         if (!didClose) {
-          log.warn('Process did not exit after 10s, force-killing')
+          // #4828: session-scoped if init has fired before kill.
+          ;(this._log || log).warn('Process did not exit after 10s, force-killing')
           try {
             forceKill(oldChild)
           } catch (_err) {
@@ -1059,7 +1403,8 @@ export class CliSession extends BaseSession {
    */
   setModel(model) {
     if (!super.setModel(model)) return
-    log.info(`Model changed to ${this.model || 'default'}, restarting process`)
+    // #4828: session-scoped if init has fired before the model change.
+    ;(this._log || log).info(`Model changed to ${this.model || 'default'}, restarting process`)
     this._killAndRespawn()
   }
 
@@ -1070,7 +1415,8 @@ export class CliSession extends BaseSession {
     // the in-flight `claude -p` process is killed and respawned, dropping the
     // current turn. This is by design (parity with SDK auto-resolve of pending
     // prompts); see #3735 for the regression test pinning this behavior.
-    log.info(`Permission mode changed to ${mode}, restarting process`)
+    // #4828: session-scoped if init has fired.
+    ;(this._log || log).info(`Permission mode changed to ${mode}, restarting process`)
     this._killAndRespawn()
   }
 
@@ -1092,7 +1438,8 @@ export class CliSession extends BaseSession {
     try {
       this._child.stdin.write(ndjson + '\n')
     } catch (err) {
-      log.error(`stdin.write failed (respondToQuestion): ${err.message}`)
+      // #4828: session-scoped (respondToQuestion fires strictly post-init).
+      ;(this._log || log).error(`stdin.write failed (respondToQuestion): ${err.message}`)
     }
   }
 
@@ -1117,12 +1464,137 @@ export class CliSession extends BaseSession {
     this._processReady = false
     this._child = null
 
+    // #4602: capture-and-clear up front so the flag never leaks past a
+    // close, even when the _destroying / _respawning guards short-circuit
+    // (e.g. user clicks Stop → flag set → model switch fires
+    // _killAndRespawn → _respawning short-circuit hits, but the flag must
+    // not persist to silently swallow a real crash on a future close).
+    const wasIntentionalStop = this._intentionalStop
+    this._intentionalStop = false
+
+    // #4929: capture the resume-attempt state for this child BEFORE the
+    // destroy/respawn short-circuits return. A `--resume <id>` that the CLI
+    // rejected ("No conversation found …") exits the child quickly without
+    // ever emitting system.init, so `_attemptedResumeId` is still set when we
+    // get here. We mirror the wasIntentionalStop capture-and-clear pattern so
+    // the flag never leaks past a close.
+    const attemptedResumeId = this._attemptedResumeId
+    const stderrLines = this._recentStderrLines
+    this._attemptedResumeId = null
+    this._recentStderrLines = []
+
     if (this._destroying) return
     if (this._respawning) return
 
     this._emitInterruptedTurnResult()
 
-    log.info(`Process exited (code ${code}), scheduling respawn`)
+    // #4602: user-initiated Stop sent SIGINT via interrupt(). The child
+    // exited cleanly as a result — do NOT show "exited unexpectedly" and
+    // do NOT auto-respawn the child the user explicitly stopped.
+    if (wasIntentionalStop) {
+      // #4828: session-scoped if init had fired before the stop.
+      ;(this._log || log).info(`Process exited (code ${code}) after user stop`)
+      this.emit('stopped', { code })
+      return
+    }
+
+    // #4929: classify as resume-unknown when a `--resume <id>` spawn exited
+    // before claude CLI fired its first system.init AND the buffered stderr
+    // matches a known "no conversation found" pattern. Without this branch the
+    // generic "exited unexpectedly" toast + auto-respawn loop would re-pass
+    // the same broken resume id forever (the bug reported in #4929).
+    //
+    // Detection requires BOTH conditions:
+    //   - attemptedResumeId is set (the spawn passed `--resume`)
+    //   - stderrIndicatesUnknownResume(stderrLines) matched a known pattern
+    //
+    // We deliberately require the pattern match instead of treating "any exit
+    // before init while resuming" as resume-unknown — a genuine CLI crash
+    // mid-resume (network blip, OAuth refresh, OS OOM kill) would otherwise
+    // get misclassified and we'd silently wipe the user's `_sessionId`. The
+    // pattern matcher is the load-bearing safety net.
+    if (attemptedResumeId && stderrIndicatesUnknownResume(stderrLines)) {
+      // One-shot fallback latch (#4929 — see constructor). If we already
+      // fell back from an unknown resume earlier this lifecycle and the
+      // fresh spawn ALSO died with the same pattern, escalate to a terminal
+      // "auto-recovery exhausted" path: surface a distinct error code and
+      // STOP the auto-respawn so the session sits down until the user takes
+      // a deliberate next step.
+      //
+      // #4948: previously this branch still called `_scheduleRespawn()` —
+      // but the next spawn would re-confirm via `system.init` (clearing the
+      // latch AND re-setting `_sessionId` from the init payload) which made
+      // the "give up" toast immediately precede what looked like a normal
+      // recovery. Two problems with that:
+      //   1. The user sees a confusing "auto-recovery gave up" message and
+      //      then the session appears to be working again, with no signal
+      //      whether the underlying issue is actually resolved.
+      //   2. If the fresh-start spawn ALSO fails the same way, we'd just
+      //      respawn again, ad infinitum until `_respawnCount` hits the cap
+      //      buried inside `_scheduleRespawn`.
+      // Stopping here gives a clean terminal state: `_sessionId` is null,
+      // the latch resets so a future explicit start can re-arm the one-shot
+      // fallback, and the operator/UI gets an unambiguous "the auto-recovery
+      // gave up, you need to act" signal.
+      if (this._didFallbackFromUnknownResume) {
+        ;(this._log || log).error(
+          `Resume fallback also failed (code ${code}, attemptedResumeId=${attemptedResumeId}) — ` +
+          'auto-recovery exhausted; will NOT respawn. User must start a fresh session manually.',
+        )
+        // Reset the latch so a future explicit user-driven start can re-arm
+        // the one-shot fallback. Without this reset the latch would persist
+        // past the terminal error and prevent recovery on the very next
+        // manual start (which would silently skip the auto-fallback and
+        // fall straight through to the generic-crash respawn loop).
+        this._didFallbackFromUnknownResume = false
+        // Keep `_sessionId = null` (was already cleared by the first
+        // fallback branch below) so a manual restart omits `--resume` and
+        // mints a brand-new conversation rather than re-attempting the
+        // broken id a third time.
+        this._sessionId = null
+        this.emit('error', {
+          code: 'resume_unknown_exhausted',
+          message:
+            'Auto-recovery exhausted: Claude CLI rejected the resumed conversation id and a fresh-start ' +
+            'retry also failed. Start a new session manually to continue. ' +
+            'Check the chroxy logs for the stderr from the claude subprocess.',
+          attemptedResumeId,
+        })
+        return
+      }
+
+      ;(this._log || log).warn(
+        `Resume rejected by claude CLI (code ${code}, attemptedResumeId=${attemptedResumeId}) — ` +
+        'falling back to a fresh conversation. Prior transcript is preserved in the chroxy ring buffer ' +
+        'but the model will not see the earlier turns (claude CLI does not know that conversation id).',
+      )
+      // Clear the broken id so the next spawn omits `--resume` and mints a
+      // brand-new claude conversation. SessionManager will pick up the new
+      // session_id from the next system.init via the existing
+      // `resumeSessionId` getter → persistence chain (#4887).
+      this._sessionId = null
+      this._didFallbackFromUnknownResume = true
+      // Reset _skillsPrepended so the prepend bucket flows onto the FIRST
+      // user message of the fresh conversation (#3225) — mirrors the
+      // _killAndRespawn handling, just for the resume-fallback path.
+      this._skillsPrepended = false
+      // Emit a distinct error event so the dashboard can render a one-shot
+      // "Conversation no longer exists on this machine — starting fresh"
+      // affordance instead of the generic "exited unexpectedly" toast.
+      this.emit('error', {
+        code: 'resume_unknown',
+        message:
+          'Previous Claude conversation could not be resumed (the id is unknown to the local claude CLI — ' +
+          'it may have been wiped from ~/.claude/projects/). Starting a fresh conversation; the model will ' +
+          'not see the earlier transcript.',
+        attemptedResumeId,
+      })
+      this._scheduleRespawn()
+      return
+    }
+
+    // #4828: session-scoped if init had fired.
+    ;(this._log || log).info(`Process exited (code ${code}), scheduling respawn`)
     this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
     this._scheduleRespawn()
   }
@@ -1131,7 +1603,15 @@ export class CliSession extends BaseSession {
   interrupt() {
     if (!this._child) return
 
-    log.info('Sending SIGINT to claude process')
+    // #4602: mark the imminent child exit as user-initiated so
+    // _handleChildClose suppresses the "exited unexpectedly" error and the
+    // auto-respawn. If the child survives SIGINT (claude only aborts the
+    // current turn), the next natural exit will be a real crash — the flag
+    // is cleared in _handleChildClose on whichever exit fires first.
+    this._intentionalStop = true
+
+    // #4828: session-scoped if init has fired.
+    ;(this._log || log).info('Sending SIGINT to claude process')
     this._child.kill('SIGINT')
 
     // Safety: if still busy after 5s, force-clear state.
@@ -1143,8 +1623,13 @@ export class CliSession extends BaseSession {
     }
     this._interruptTimer = setTimeout(() => {
       this._interruptTimer = null
+      // #4602: if the child survived SIGINT (claude only aborted the turn),
+      // clear the flag so a later natural crash still triggers respawn —
+      // otherwise the flag stays armed indefinitely and swallows real crashes.
+      this._intentionalStop = false
       if (this._isBusy) {
-        log.warn('Interrupt safety timeout — force-clearing busy state')
+        // #4828: session-scoped.
+        ;(this._log || log).warn('Interrupt safety timeout — force-clearing busy state')
         this._emitInterruptedTurnResult()
       }
     }, 5000)
@@ -1154,6 +1639,7 @@ export class CliSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._respawning = false
+    this._intentionalStop = false
 
     // Clean up permission hook — destroy() now chains unregister() after any
     // in-flight register() promise, preventing a register-after-unregister race

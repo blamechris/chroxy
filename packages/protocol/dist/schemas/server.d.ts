@@ -92,6 +92,9 @@ export declare const ServerMessageSchema: z.ZodObject<{
     options: z.ZodOptional<z.ZodAny>;
     timestamp: z.ZodNumber;
     code: z.ZodOptional<z.ZodString>;
+    attemptedResumeId: z.ZodOptional<z.ZodString>;
+    stdout: z.ZodOptional<z.ZodString>;
+    stderr: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{
     type: z.ZodLiteral<"tool_start">;
@@ -206,6 +209,35 @@ export declare const ServerAgentCompletedSchema: z.ZodObject<{
     toolUseId: z.ZodString;
 }, z.core.$strip>;
 /**
+ * #5016 — Task subagent intermediate progress event.
+ *
+ * Carries a re-emit of a Task subagent's intermediate wire event
+ * (`tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`)
+ * tagged with the parent Task tool_use id so the dashboard can render
+ * the child's progress as nested sub-bubbles inside the parent's Task
+ * tool_call bubble.
+ *
+ * `parentToolUseId` — the id of the parent's `Task` tool_use block
+ *   (same id used for `agent_spawned` / `agent_completed`). Consumers
+ *   key the nested sub-bubble container off this id.
+ * `eventType` — the child's original event name (e.g. `'tool_start'`).
+ *   Consumers switch on this to render the wire event in the same
+ *   shape they would for a top-level event.
+ * `payload` — the verbatim child event payload. Fields are best-effort;
+ *   renderers MUST treat absence as a no-op.
+ *
+ * Nested Task: when a Task subagent itself dispatches a Task, the
+ * grand-child's events are forwarded up the chain re-tagged with the
+ * IMMEDIATE parent's `toolUseId`. The dashboard sees a flat stream
+ * — nested-nested rendering is intentionally not in v2.
+ */
+export declare const ServerAgentEventSchema: z.ZodObject<{
+    type: z.ZodLiteral<"agent_event">;
+    parentToolUseId: z.ZodString;
+    eventType: z.ZodString;
+    payload: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+}, z.core.$strip>;
+/**
  * #4307 — one entry per backgrounded `Bash` shell the session is still
  * waiting on. Pushed when the agent dispatches a `Bash` tool call with
  * `run_in_background: true` (the matching tool_result carries the
@@ -263,6 +295,13 @@ export declare const ServerInactivityWarningSchema: z.ZodObject<{
     messageId: z.ZodString;
     idleMs: z.ZodNumber;
     prefab: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerMultiQuestionInterventionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"multi_question_intervention">;
+    toolUseId: z.ZodString;
+    questionCount: z.ZodNumber;
+    reason: z.ZodLiteral<"multi_question">;
+    timestamp: z.ZodNumber;
 }, z.core.$strip>;
 export declare const ServerMcpServersSchema: z.ZodObject<{
     type: z.ZodLiteral<"mcp_servers">;
@@ -404,6 +443,31 @@ export declare const ServerSessionRestoreFailedSchema: z.ZodObject<{
     errorMessage: z.ZodString;
     originalHistoryPreserved: z.ZodBoolean;
     historyLength: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+/**
+ * #4756: user-initiated Stop confirmation broadcast. CliSession emits a
+ * `stopped` event from `_handleChildClose` when the child process exits
+ * cleanly after a Stop click (interrupt() set `_intentionalStop`). The
+ * SessionManager + ws-forwarding paths surface it as this `session_stopped`
+ * wire message so clients can render a quiet "Session stopped." confirmation
+ * — distinct from `session_error` (crash) which fires for unexpected exits
+ * that trigger the auto-respawn path.
+ *
+ * `sessionId` is injected by `_broadcastToSession` on the multi-session
+ * path, so it's optional on the schema for consumers that construct the
+ * message without it pre-broadcast (matches the `cost_update` / `session_usage`
+ * pattern). The legacy-cli path doesn't carry a sessionId at all.
+ *
+ * `code` is the child process exit code (number). Typically 0 on a clean
+ * SIGINT exit, but kept on the wire so clients can render the numeric code
+ * for non-zero exits (e.g. 143 = SIGTERM). Optional because future providers
+ * that adopt the `stopped` event for parity (see #4756 follow-up) may not
+ * have a meaningful exit code (e.g. in-process SDK session).
+ */
+export declare const ServerSessionStoppedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_stopped">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    code: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerProviderListSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_list">;
@@ -779,6 +843,7 @@ export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchem
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>;
 export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>;
 export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>;
+export type ServerSessionStoppedMessage = z.infer<typeof ServerSessionStoppedSchema>;
 export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;

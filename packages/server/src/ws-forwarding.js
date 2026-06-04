@@ -146,12 +146,17 @@ function setupCliForwarding(normalizer, ctx) {
   // forwarding loop below — which the schema explicitly allows for this
   // path; #3205's dashboard prompt treats null as "applies to whatever
   // CLI is connected".
+  // #4756: `stopped` mirrors the multi-session forwarding list (see
+  // session-manager.js `_wireSessionEvents` builtinTransient) so the legacy
+  // single-CLI path also surfaces the user-initiated Stop confirmation via
+  // the normalizer's `session_stopped` wire message.
   const FORWARDED_EVENTS = [
     'ready', 'stream_start', 'stream_delta', 'stream_end',
     'message', 'tool_start', 'tool_result', 'result', 'error',
     'user_question', 'agent_spawned', 'agent_completed',
     'plan_started', 'plan_ready', 'mcp_servers',
     'permission_expired', 'skill_changed', 'skill_trust_request', 'skill_trust_granted',
+    'stopped',
   ]
   for (const event of FORWARDED_EVENTS) {
     cliSession.on(event, (data) => {
@@ -261,7 +266,7 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
 /** Execute registration descriptors returned by the normalizer */
 function executeRegistrations(registrations, sessionId, ctx) {
   if (!registrations) return
-  const { permissionSessionMap, questionSessionMap } = ctx
+  const { permissionSessionMap, questionSessionMap, registerQuestionRoute, registerPermissionRoute } = ctx
   for (const reg of registrations) {
     // #3736: registrations support an explicit action ('set' | 'delete'),
     // defaulting to 'set' for backwards compatibility. The delete action is
@@ -276,7 +281,17 @@ function executeRegistrations(registrations, sessionId, ctx) {
         permissionSessionMap.delete(reg.key)
       } else {
         const mappedSessionId = reg.value ?? sessionId
-        permissionSessionMap.set(reg.key, mappedSessionId)
+        // #4798: prefer the WsServer-provided helper so dispatch also auto-
+        // subscribes eligible clients to the permission's session — keeps the
+        // settings-handler's subscription guard symmetric with
+        // _broadcastToSession's recipient filter. Falls back to a bare Map.set
+        // when ctx doesn't carry the helper (legacy unit tests that wire
+        // setupForwarding directly without a WsServer).
+        if (typeof registerPermissionRoute === 'function') {
+          registerPermissionRoute(reg.key, mappedSessionId)
+        } else {
+          permissionSessionMap.set(reg.key, mappedSessionId)
+        }
         // Diagnostic correlation log for #2832 — paired with
         // [session-binding-resend] and [session-binding-reject]. Allows
         // grepping the origin session for any requestId that later gets
@@ -289,7 +304,18 @@ function executeRegistrations(registrations, sessionId, ctx) {
       if (action === 'delete') {
         questionSessionMap.delete(reg.key)
       } else {
-        questionSessionMap.set(reg.key, reg.value ?? sessionId)
+        const mappedSessionId = reg.value ?? sessionId
+        // #4788 Wave 2: prefer the WsServer-provided helper so dispatch also
+        // auto-subscribes eligible clients to the question's session — keeps
+        // the input-handler's subscription guard symmetric with
+        // _broadcastToSession's recipient filter. Falls back to a bare Map.set
+        // when ctx doesn't carry the helper (legacy unit tests that wire
+        // setupForwarding directly without a WsServer).
+        if (typeof registerQuestionRoute === 'function') {
+          registerQuestionRoute(reg.key, mappedSessionId)
+        } else {
+          questionSessionMap.set(reg.key, mappedSessionId)
+        }
       }
     }
   }

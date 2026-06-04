@@ -29,8 +29,9 @@ import {
   getPartialSummary,
   tryParseCompleteJson,
 } from '@chroxy/store-core'
-import type { ToolResultImage } from '@chroxy/store-core'
+import type { ChildAgentEvent, ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
+import { ChildAgentEventList } from './ChildAgentEventList'
 
 export interface ToolBubbleProps {
   toolName: string
@@ -65,6 +66,15 @@ export interface ToolBubbleProps {
    * (#3794) and ActivityIndicator (#4311) so all three surfaces agree.
    */
   resultImages?: ToolResultImage[]
+  /**
+   * #5016 — Task subagent nested progress events. When this Task tool
+   * dispatches a subagent the parent forwards the child's `tool_start`
+   * / `tool_result` / `tool_input_delta` / `stream_delta` events under
+   * the parent's `toolUseId`; the message handler attaches each to
+   * this bubble. Rendered as a nested list inside the expanded
+   * Task tool_call. Only meaningful when `toolName === 'Task'`.
+   */
+  childAgentEvents?: ChildAgentEvent[]
 }
 
 // #4243: `getInputSummary` and `getPartialSummary` now live in
@@ -99,7 +109,7 @@ export interface ToolBubbleProps {
 // what #4655's generic key:value fallback in `tool-summary.ts` is for.
 const SUPPRESS_RAW_INPUT_TOOLS = new Set(['AskUserQuestion'])
 
-export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false, resultImages }: ToolBubbleProps) {
+export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false, resultImages, childAgentEvents }: ToolBubbleProps) {
   // #4313 — tail bubbles mount expanded so the singleton trailing-tool
   // case matches the #4309 tail-group behavior. Initial-state only via
   // the lazy `useState` initializer.
@@ -236,6 +246,23 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
           ) : (
             <pre>{result}</pre>
           )}
+        </div>
+      )}
+      {/* #5016 — Task subagent nested progress. When this bubble is the
+          parent of a Task dispatch, the child's per-tool wire events
+          arrive as `agent_event` and accumulate in `childAgentEvents`.
+          Rendered as a nested list inside the expanded Task tool_call
+          so users can see the subagent's reasoning steps in progress
+          without leaving the parent bubble. Click guard mirrors the
+          tool-result block above — interacting with a nested item must
+          not collapse the outer bubble. */}
+      {expanded && childAgentEvents && childAgentEvents.length > 0 && (
+        <div
+          className="tool-bubble-child-events"
+          data-testid={`tool-bubble-child-events-${toolUseId}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ChildAgentEventList events={childAgentEvents} parentToolUseId={toolUseId} />
         </div>
       )}
       {/* #4081: streaming preview — shown only while expanded AND no

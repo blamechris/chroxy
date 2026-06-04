@@ -1344,6 +1344,267 @@ describe('ClaudeTuiSession', () => {
       // sent at a stale PTY.
       assert.equal(writes.includes(huge), false, 'large body never reaches a torn-down PTY')
     })
+
+    // #4805: the single-line throttled path fed each code-point verbatim
+    // into _term.write — no defense against C0 control bytes or ANSI
+    // CSI / OSC sequences embedded in the freeform input. The newline
+    // bracketed-paste branch (#4678) already strips embedded `\x1b[201~`
+    // markers and explicitly cites attacker-controlled MCP tool results
+    // as the threat model; the single-line branch has the same input
+    // shape (freeformText from the dashboard, Zod-bounded only to
+    // string + 100KB length) and so needs parallel defense.
+    //
+    // Known damage paths from the audit:
+    //   - `\x03` (Ctrl-C) aborts the active form
+    //   - OSC `\x1b]0;...\x07` → terminal-title injection on some hosts
+    //   - Long ANSI CSI sequences desync the TUI input state machine
+    //     (the recurring wedge symptom class)
+    //
+    // The fix strips C0 control bytes (excluding \t which is whitespace
+    // the user might paste) and ANSI CSI / OSC sequences before the
+    // per-char loop. Tab is kept because it's a normal printable
+    // whitespace; \r and \n never reach this path (the multi-line branch
+    // handles them).
+    it('_writePtyTextThrottled: strips C0 control bytes (Ctrl-C) from single-line input (#4805)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-c0', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // Ctrl-C embedded mid-prompt. Without the strip the per-char loop
+      // would write \x03 verbatim and abort the TUI form.
+      const completed = await session._writePtyTextThrottled('hello\x03world')
+
+      assert.equal(completed, true)
+      // The combined per-char writes (chars between the disable/enable
+      // bookends and the \r submit) must contain no \x03 byte.
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x03'), false, 'Ctrl-C byte is stripped from the per-char write stream')
+      assert.equal(joined, 'helloworld', 'surrounding printable text passes through with the control byte excised')
+    })
+
+    it('_writePtyTextThrottled: strips ANSI CSI cursor sequences from single-line input (#4805)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-csi', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // ANSI CSI cursor-up sequence embedded in the body — drives the
+      // TUI's input cursor in ways the user never typed.
+      const completed = await session._writePtyTextThrottled('foo\x1b[Abar')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'ESC byte is stripped (no surviving CSI introducer)')
+      assert.equal(joined.includes('[A'), false, 'CSI tail bytes go with the introducer')
+      assert.equal(joined, 'foobar', 'CSI sequence is fully excised, surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: strips OSC title-set sequences from single-line input (#4805)', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-osc', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // OSC title-set: ESC ] 0 ; <title> BEL. On terminal hosts that
+      // honour OSC even inside the input box this rewrites the window
+      // title from attacker-controlled bytes.
+      const completed = await session._writePtyTextThrottled('hi\x1b]0;evil\x07there')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'OSC ESC is stripped')
+      assert.equal(joined.includes('\x07'), false, 'BEL terminator is stripped')
+      assert.equal(joined.includes('evil'), false, 'OSC payload between ESC ] and BEL is dropped')
+      assert.equal(joined, 'hithere', 'OSC sequence is fully excised, surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: passes normal printable text through untouched (#4805)', async () => {
+      // Regression guard for the strip — printable ASCII, tabs, and
+      // multi-byte BMP/non-BMP characters must survive byte-for-byte.
+      // (Newlines are handled by the multi-line branch, not this one.)
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-clean', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const clean = 'hello\tworld 你好 🚀 !@#$%^&*()'
+      const completed = await session._writePtyTextThrottled(clean)
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      assert.equal(charWrites.join(''), clean,
+        'printable + tab + multi-byte text is preserved byte-for-byte')
+    })
+
+    // #4805 Wave 2: the original strip regex left three classes of bytes
+    // through (Copilot + agent-review caught these post-merge):
+    //   1. Lone \x1b — char class [\x00-\x08\x0b-\x1a\x1c-\x1f\x7f] has
+    //      a gap at 0x1b (between 0x1a and 0x1c). The comment claimed
+    //      lone ESC was stripped; the code didn't deliver.
+    //   2. CSI parameter bytes 0x30-0x3f — the original `[\d;]*` covers
+    //      only digits + ';', missing DEC-private intro bytes `?`/`<`/
+    //      `=`/`>`/`:`. So `\x1b[?25l`, `\x1b[?1049h`, `\x1b[?1000h`,
+    //      `\x1b[?1006h` all pass through.
+    //   3. String-control introducers other than OSC — DCS `\x1b P`,
+    //      APC `\x1b _`, PM `\x1b ^`, SOS `\x1b X` were not in the
+    //      alternation. Some terminals (iTerm2) execute APC payloads.
+    //
+    // The Wave 2 regex broadens CSI to the full ECMA-48 grammar
+    // (params 0x30-0x3f, intermediates 0x20-0x2f, final 0x40-0x7e),
+    // adds DCS/APC/PM/SOS to the string-control alternation, adds a
+    // `\x1b.?` catch-all for stray two-byte ESC + final-byte sequences
+    // (RIS \x1b c, DECSC/DECRC \x1b 7/8, IND/RI/NEL/HTS \x1b D/M/E/H),
+    // and extends the C0 class to \x1f so a lone ESC is always stripped.
+    it('_writePtyTextThrottled: strips DEC-private CSI sequences (W2 #4805)', async () => {
+      // \x1b[?25l hides the cursor; \x1b[?1049h switches to the alt
+      // screen. Both are CSI sequences with `?` as the first parameter
+      // byte (0x3F, in the 0x30-0x3f param range). The original
+      // `[\d;]*` regex skipped them.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-dec', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const completed = await session._writePtyTextThrottled('a\x1b[?25lb\x1b[?1049hc')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'no ESC bytes survive DEC-private strip')
+      assert.equal(joined.includes('?'), false, 'no DEC-private parameter intro bytes survive')
+      assert.equal(joined.includes('25l'), false, 'no DEC sequence tail leaks as printable garbage')
+      assert.equal(joined.includes('1049h'), false, 'no alt-screen sequence tail leaks')
+      assert.equal(joined, 'abc', 'surrounding text preserved with both DEC sequences fully excised')
+    })
+
+    it('_writePtyTextThrottled: strips stray two-byte ESC + final-byte sequences like RIS (W2 #4805)', async () => {
+      // RIS (ESC + 'c', byte sequence `\x1bc`) is the full terminal-
+      // reset escape — clears scrollback, resets colours/attributes.
+      // The original regex matched CSI/OSC only; `\x1bc` passed
+      // through entirely (ESC in the char-class gap, `c` printable).
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-ris', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const completed = await session._writePtyTextThrottled('keep\x1bcmore')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'ESC byte stripped')
+      // The \x1b.? alternation consumes ESC + one trailing byte, so the
+      // `c` final byte of RIS goes with it; the surrounding "keep" and
+      // "more" land cleanly with no `c` between them.
+      assert.equal(joined, 'keepmore', 'RIS escape sequence fully excised')
+    })
+
+    it('_writePtyTextThrottled: strips APC payloads terminated by ST (W2 #4805)', async () => {
+      // APC (\x1b _ ... \x1b\\) — iTerm2 interprets these for
+      // proprietary commands. Original regex matched OSC only; APC
+      // body passed through as printable text.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-apc', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      const completed = await session._writePtyTextThrottled('pre\x1b_evil\x1b\\post')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'no ESC bytes survive')
+      assert.equal(joined.includes('evil'), false, 'APC payload between introducer and ST is dropped')
+      assert.equal(joined, 'prepost', 'APC sequence fully excised with surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: strips a lone ESC byte (W2 #4805 regression guard)', async () => {
+      // The original char class [\x00-\x08\x0b-\x1a\x1c-\x1f\x7f] had a
+      // gap at 0x1b. The block comment claimed ESC was stripped; the
+      // code didn't. The Wave 2 regex either matches ESC via the
+      // \x1b.? catch-all OR via the broadened class [\x00-\x08\x0b-\x1f
+      // \x7f]. Either way a bare ESC must not survive.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-lone-esc', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      // Trailing ESC at end-of-string — the \x1b.? alternation matches
+      // ESC + optional next byte, so a trailing bare ESC matches with
+      // an empty optional group and is dropped.
+      const completed = await session._writePtyTextThrottled('hello\x1b')
+
+      assert.equal(completed, true)
+      const charWrites = writes.slice(1, writes.indexOf('\r'))
+      const joined = charWrites.join('')
+      assert.equal(joined.includes('\x1b'), false, 'lone trailing ESC stripped')
+      assert.equal(joined, 'hello', 'surrounding text preserved')
+    })
+
+    it('_writePtyTextThrottled: handles all-control-byte input cleanly (W2 #4805 empty-after-strip)', async () => {
+      // Mirror the multi-line branch's `body.length === 0` guard
+      // (:1358): if the post-strip body is empty, abort the turn
+      // cleanly rather than submitting a bare \r to the TUI. Without
+      // the guard the single-line path would still write the bracketed-
+      // paste-disable + zero-iteration loop + \r submit, which is at
+      // best a no-op and at worst an empty prompt the TUI doesn't
+      // expect.
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._activeTurn = { messageId: 'm-empty', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+
+      let onAbortCalled = false
+      const completed = await session._writePtyTextThrottled('\x03\x1b[A\x07\x1b]0;t\x07', {
+        onAbort: () => { onAbortCalled = true },
+      })
+
+      assert.equal(completed, false, 'empty-after-strip returns false (no message left chroxy)')
+      assert.equal(onAbortCalled, true, 'onAbort fires so caller surfaces a finished-but-empty turn')
+      assert.equal(writes.includes('\r'), false, 'no bare \\r submit on empty body')
+      // The disable + finally re-enable bookends are fine to emit
+      // (they're idempotent terminal state) — what matters is no body
+      // and no \r reached the PTY.
+    })
+
+    it('_writePtyTextThrottled: audit log includes hex sample of stripped bytes (W2 #4805)', async () => {
+      // The original warn line said only "stripped N bytes" — useless
+      // for forensics on a real attack. The Wave 2 audit log includes
+      // a bounded hex-encoded sample (first 32 bytes) so an operator
+      // can grep for known-bad signatures and an incident-response
+      // run-book has the bytes themselves.
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'claude-tui-session') {
+          warnLines.push(entry.message)
+        }
+      }
+      addLogListener(logSpy)
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { messageId: 'm-audit', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+        session._term = { write: () => {}, kill: () => {} }
+
+        // \x03 (Ctrl-C) + \x1b[A (CSI cursor-up). Hex-encoded these are
+        // "03" and "1b5b41".
+        await session._writePtyTextThrottled('a\x03b\x1b[Ac')
+
+        const strip = warnLines.find((m) => /stripped \d+ control\/escape bytes/.test(m))
+        assert.ok(strip, `expected strip warn line, got warnLines=${JSON.stringify(warnLines)}`)
+        assert.match(strip, /msg=m-audit/, 'warn carries the active turn messageId')
+        assert.match(strip, /sample=/, 'warn includes a stripped-bytes sample field')
+        // The hex sample must contain the bytes we sent — both \x03
+        // (Ctrl-C) and the full CSI \x1b[A sequence.
+        assert.match(strip, /03/, 'hex sample contains the stripped Ctrl-C byte (0x03)')
+        assert.match(strip, /1b5b41/, 'hex sample contains the stripped CSI cursor-up bytes (\\x1b[A)')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
   })
 
   describe('attachment-cap warn lines (#4216)', () => {
@@ -2045,6 +2306,159 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #4732 — pre-first-output silence watchdog. The existing #4638
+  // streamStallTimeout only re-arms BETWEEN hook events; a turn where
+  // claude TUI accepts the prompt write but never emits ANY hook (stuck
+  // Anthropic API call, frozen dialog screen) had no recoverable
+  // watchdog short of the 2h hard cap. _firstOutputTimeout arms at
+  // _armResultTimeout() time and disarms on the first consumed hook
+  // event, surfacing a stream_stall with the same dashboard chip the
+  // inter-stream watchdog uses so the user can retry within minutes.
+  describe('first-output watchdog (#4732)', () => {
+    it('fires after _firstOutputTimeoutMs of zero hook events, clears busy state, emits stream_stall', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        // Long soft+hard+stream-stall so the first-output timer wins;
+        // short first-output so the test doesn't sleep for seconds.
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-first-output'
+      const TURN_AGE_MS = 100
+      session._activeTurn = { startedAt: Date.now() - TURN_AGE_MS, aborted: false }
+      const ptyWrites = []
+      session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
+
+      const events = []
+      session.on('stream_end', (e) => events.push({ type: 'stream_end', ...e }))
+      session.on('result', (e) => events.push({ type: 'result', ...e }))
+      session.on('error', (e) => events.push({ type: 'error', ...e }))
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed by _armResultTimeout')
+      await new Promise((r) => setTimeout(r, 80))
+
+      assert.equal(session._isBusy, false, 'busy cleared')
+      assert.equal(session._currentMessageId, null, 'messageId nulled')
+      assert.ok(ptyWrites.includes('\x03'), 'Ctrl-C written to PTY')
+
+      const types = events.map((e) => e.type)
+      assert.deepEqual(types, ['stream_end', 'result', 'error'],
+        'fan-out order matches stream-stall path: stream_end → result → error')
+
+      const err = events.find((e) => e.type === 'error')
+      assert.equal(err.code, 'stream_stall', 'distinct code reuses dashboard chip wire')
+      assert.match(err.message, /No response/i)
+    })
+
+    it('is disarmed by the first consumed hook event (does not fire on healthy turn)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 50,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-healthy'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      // Disarm helper the sendMessage poll loop calls when any hook
+      // file is consumed; documents that the watchdog can be cleared
+      // without re-arming the inter-stream timer.
+      session._clearFirstOutputWatchdog()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared')
+
+      // Wait past the original window — should NOT fire.
+      await new Promise((r) => setTimeout(r, 80))
+      assert.equal(session._isBusy, true, 'still busy — watchdog disarmed before fire')
+    })
+
+    it('is disabled when firstOutputTimeoutMs=0 (operator opt-out)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 0,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-opt-out'
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer not armed when disabled')
+
+      await new Promise((r) => setTimeout(r, 30))
+      assert.equal(session._isBusy, true, 'still busy — watchdog opted out')
+    })
+
+    it('is cleared by _finishTurnError so a stalled-after-error fire cannot land', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 5000,
+      })
+      session.on('error', () => {})  // swallow
+      session._isBusy = true
+      session._currentMessageId = 'msg-fte'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      session._finishTurnError('test', 'msg-fte')
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared on error path')
+    })
+
+    it('is cleared by destroy() so a late fire cannot land on a torn-down session', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-d-fo'
+      session._armResultTimeout()
+      assert.ok(session._firstOutputTimeout, 'first-output timer armed')
+
+      await session.destroy()
+      assert.equal(session._firstOutputTimeout, null, 'first-output timer cleared on destroy')
+    })
+
+    it('logs explicit elapsedMs line when fired', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 5000,
+        firstOutputTimeoutMs: 25,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-log'
+      session._activeTurn = { startedAt: Date.now() - 30, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+      session.on('stream_end', () => {})
+
+      const logs = []
+      const listener = (entry) => logs.push(entry)
+      addLogListener(listener)
+      try {
+        session._armResultTimeout()
+        await new Promise((r) => setTimeout(r, 80))
+      } finally {
+        removeLogListener(listener)
+      }
+
+      const matched = logs.find((l) => /first-output watchdog fired/i.test(l.message ?? ''))
+      assert.ok(matched, 'log line present: ' + JSON.stringify(logs.map((l) => l.message).slice(-5)))
+      assert.match(matched.message, /elapsedMs=\d+/, 'log line includes elapsedMs')
+      assert.match(matched.message, /claude TUI did not respond/, 'log line includes did-not-respond marker')
+    })
+  })
+
   // #4641 — `_teardownTurn` is the shared helper extracted from
   // `_handleHardTimeout` and `_handleStreamStall`. Both call sites
   // already have their own end-to-end coverage (see `inactivity timer`
@@ -2226,6 +2640,104 @@ describe('ClaudeTuiSession', () => {
       assert.equal(resultEvent.duration, 42, 'duration propagated from caller')
       assert.equal(resultEvent.usage, null, 'usage null (no token accounting on the teardown path)')
       assert.equal(resultEvent.sessionId, 'sess-helper-42', 'sessionId stamped from _sessionId')
+    })
+  })
+
+  // #4682 — per-turn summary log emitted from the shared _teardownTurn
+  // helper. PR #4681 added _logSendMessageSummary for the wedge
+  // investigation but originally only wired it into the success path
+  // and _finishTurnError. The stream-stall watchdog (#4638) and
+  // hard-timeout (#3920) finishers also null _activeTurn but skipped
+  // the helper, so the very wedge modes the instrumentation was
+  // designed to diagnose left no grep-able trail. After #4641
+  // refactored both finishers to delegate to _teardownTurn, the
+  // summary log lives at the top of the helper so every teardown path
+  // gets a uniform `sendMessage done` line.
+  describe('per-turn summary log on teardown paths (#4682)', () => {
+    it('_teardownTurn emits the `sendMessage done` summary line with the reason tag', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-summary-1'
+      session._sessionId = 'sess-summary-1'
+      session._activeTurn = { startedAt: Date.now() - 10, aborted: false, messageId: 'msg-summary-1' }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+
+      const summaryLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'info' && /sendMessage done/.test(entry.message)) summaryLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        session._teardownTurn('stream_stall', {
+          duration: 11,
+          errorPayload: { code: 'stream_stall', message: 'stalled' },
+        })
+        assert.equal(summaryLines.length, 1, 'one summary line per teardown call')
+        const summary = summaryLines[0]
+        assert.match(summary, /msg=msg-summary-1/, 'summary tags the messageId')
+        assert.match(summary, /reason=stream_stall/, 'summary tags the reason passed to _teardownTurn')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
+
+    it('_handleHardTimeout end-to-end produces the summary with reason=hard_timeout', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 50,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-summary-ht'
+      session._sessionId = 'sess-summary-ht'
+      session._activeTurn = { startedAt: Date.now() - 60, aborted: false, messageId: 'msg-summary-ht' }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+
+      const summaryLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'info' && /sendMessage done/.test(entry.message)) summaryLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        session._handleHardTimeout()
+        assert.equal(summaryLines.length, 1, 'hard-timeout path emits exactly one summary line')
+        assert.match(summaryLines[0], /reason=hard_timeout/, 'summary tags reason=hard_timeout')
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
+
+    it('_handleStreamStall end-to-end produces the summary with reason=stream_stall', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 50,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-summary-ss'
+      session._sessionId = 'sess-summary-ss'
+      session._activeTurn = { startedAt: Date.now() - 60, aborted: false, messageId: 'msg-summary-ss' }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session.on('result', () => {})
+
+      const summaryLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'info' && /sendMessage done/.test(entry.message)) summaryLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        session._handleStreamStall()
+        assert.equal(summaryLines.length, 1, 'stream-stall path emits exactly one summary line')
+        assert.match(summaryLines[0], /reason=stream_stall/, 'summary tags reason=stream_stall')
+      } finally {
+        removeLogListener(logSpy)
+      }
     })
   })
 
@@ -2664,19 +3176,58 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
-    it('respondToQuestion falls through to label text when matchIdx >= 9 (multi-digit hotkey guard #4292)', async () => {
+    it('respondToQuestion drives matchIdx >= 9 via arrow-key navigation (#4848)', async () => {
+      // #4292 originally fell through to writing the label text verbatim
+      // when matchIdx >= 9, which #4288 showed lands on whichever option's
+      // label starts with the same first character (jump-nav footgun).
+      // #4746 replaced the silent label-text fallback with a structured
+      // ASK_USER_QUESTION_TOO_MANY_OPTIONS error. #4848 takes the
+      // remaining step: drive the form natively via arrow-key navigation
+      // (Down arrow × matchIdx + Enter) so the user's explicit pick of
+      // option 10/11/12 actually lands on the right option instead of
+      // tearing the turn down.
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      session._isBusy = true
+      session._currentMessageId = 'msg-arrownav'
+      session._activeTurn = { uuid: 'turn-arrownav', synthSeq: 0, startedAt: Date.now() }
+      const options = Array.from({ length: 12 }, (_, i) => ({ label: `opt-${i}` }))
+      session._pendingUserAnswer = { toolUseId: 'toolu-arrownav', options }
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      // opt-9 is index 9 → drive via 9 Down arrows + Enter.
+      session.respondToQuestion('opt-9')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // No too-many error — arrow-nav drives the form natively.
+      assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+      // disable + 9× Down arrow + Enter + enable.
+      const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected 9× Down + Enter sequence, got ${JSON.stringify(writes)}`)
+    })
+
+    // #4848 boundary: opt-11 (idx 11) in a 12-option question — pin the
+    // larger-N arrow-nav case so the loop count tracks idx exactly.
+    it('respondToQuestion drives matchIdx=11 via 11× Down + Enter (#4848 boundary)', async () => {
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
       const options = Array.from({ length: 12 }, (_, i) => ({ label: `opt-${i}` }))
-      session._pendingUserAnswer = { toolUseId: 'toolu-10', options }
-      // opt-9 is index 9 (would be "10" — multi-digit), so we must NOT
-      // write "10\\r" (most single-keystroke menus commit on the first
-      // digit). Fall through to label-text path.
-      session.respondToQuestion('opt-9')
+      session._pendingUserAnswer = { toolUseId: 'toolu-arrownav-11', options }
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      // opt-11 is the LAST option (idx 11) → 11 Down arrows + Enter.
+      session.respondToQuestion('opt-11')
       await new Promise((resolve) => setTimeout(resolve, 50))
-      // First write is mode-disable; second is the first char of "opt-9".
-      assert.equal(writes[0], '\x1b[?2004l')
-      assert.equal(writes[1], 'o', 'multi-digit hotkey not used; falls through to label text')
+
+      assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+      const expected = ['\x1b[?2004l', ...Array(11).fill('\x1b[B'), '\r', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected 11× Down + Enter sequence, got ${JSON.stringify(writes)}`)
     })
 
     it('respondToQuestion writes the text when options array is missing or empty (free-text-only AskUserQuestion)', async () => {
@@ -2698,10 +3249,222 @@ describe('ClaudeTuiSession', () => {
     it('respondToQuestion is a no-op when no pending answer (defensive)', () => {
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
-      session._pendingUserAnswer = null
+      // #4802: explicit clear-all replaces the old `_pendingUserAnswer = null`
+      // back-compat setter (the implicit-clear pattern is now forbidden — it
+      // silently wiped sibling AskUserQuestion entries that still had answers
+      // in flight on the wire, per the audit P1.2 root cause).
+      session._pendingUserAnswers_clearAll()
 
       session.respondToQuestion('whatever')
       assert.equal(writes.length, 0, 'no PTY writes when there is no pending answer')
+    })
+
+    // #4651 — "Other" / freeform answer support. claude TUI's AskUserQuestion
+    // renders an "Other" option that, when picked via its digit, opens a
+    // text-input prompt. Pre-#4651 the dashboard's freeform Other path sent
+    // only the typed string; the server then tried to type that string at
+    // the digit-select menu (jump-nav landed wherever the first char
+    // happened to point — #4288). New protocol: dashboard sends the typed
+    // text in `freeformText`, with `answer` = the Other option label. The
+    // server resolves Other → digit, writes the digit to enter text-input
+    // mode, then writes the freeform text + Enter to submit.
+    describe('Other / freeform answer (#4651)', () => {
+      it('writes the Other digit, then the freeform text + Enter', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_other_freeform',
+          options: [
+            { label: 'Patch' },
+            { label: 'Minor' },
+            { label: 'Other' },
+          ],
+        }
+
+        // Dashboard sends: answer='Other' (the Other option label),
+        // freeformText='my custom answer' (the typed text).
+        session.respondToQuestion('Other', undefined, 'toolu_aq_other_freeform', {
+          freeformText: 'my custom answer',
+        })
+        // Allow throttled writes (digit + settle + per-char text) to drain.
+        await new Promise((resolve) => setTimeout(resolve, 250))
+
+        // Sequence shape: [paste-disable, '3' (Other digit), <settle pause>,
+        // paste-disable-again, per-char text, '\r', paste-enable]. We pin
+        // the digit and the text presence to keep the assertion stable
+        // regardless of intermediate enable/disable toggles.
+        const joined = writes.join('')
+        assert.ok(joined.includes('3'), `expected Other digit "3" in writes, got: ${JSON.stringify(writes)}`)
+        assert.ok(joined.includes('my custom answer'), `expected freeform text in writes, got: ${JSON.stringify(writes)}`)
+        const otherIdx = writes.indexOf('3')
+        const firstTextCharIdx = writes.indexOf('m')
+        assert.ok(otherIdx >= 0 && firstTextCharIdx > otherIdx, 'Other digit must be written BEFORE the freeform text')
+        // Trailing Enter so claude TUI submits the text-input prompt.
+        assert.ok(writes.includes('\r'), 'trailing Enter submits the freeform answer')
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after answer write')
+      })
+
+      it('falls through to legacy single-write path when no freeformText is supplied', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_other_legacy',
+          options: [
+            { label: 'Patch' },
+            { label: 'Other' },
+          ],
+        }
+
+        // Legacy path: answer matches an option label exactly → 1-indexed digit.
+        session.respondToQuestion('Patch')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // disable + '1' + \\r + enable = 4 writes (matches the #4290 test shape).
+        assert.equal(writes.length, 4, `expected 4 writes for legacy path, got ${writes.length}: ${JSON.stringify(writes)}`)
+        assert.equal(writes[1], '1', 'legacy index path unchanged when freeformText is absent')
+      })
+
+      it('is a no-op when freeformText is supplied but no Other option exists', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = {
+          toolUseId: 'toolu_aq_no_other',
+          options: [{ label: 'A' }, { label: 'B' }],
+        }
+
+        // Defensive: dashboard sent freeformText for an AskUserQuestion that
+        // has no "Other" option. Don't blindly write the freeform text at
+        // the digit menu (that's the #4288 jump-nav footgun). Drop + clear.
+        session.respondToQuestion('Other', undefined, 'toolu_aq_no_other', {
+          freeformText: 'should be dropped',
+        })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.equal(writes.length, 0, `no PTY writes when freeform requested but no Other option exists, got: ${JSON.stringify(writes)}`)
+      })
+
+      // #4808 — the Other/freeform path is driven by an async IIFE that
+      // awaits stage-1 write → settle delay → re-arms the watchdog →
+      // awaits stage-2 write. destroy() can run during any of these
+      // awaits but the IIFE keeps going. Pre-#4808 it would:
+      //   1. Re-arm `_askUserQuestionWatchdog` AFTER destroy() already
+      //      cleared it, leaking a 30s timer that holds `this` in its
+      //      closure (the `_onAskUserQuestionStall` guard prevents the
+      //      emit but doesn't release the closure).
+      //   2. Call `_writePtyTextThrottled(freeformText)` on a null
+      //      `_term`, which throws inside the write loop (or worse —
+      //      revives a write path against a torn-down session).
+      // Fix is `if (this._destroying) return` after each `await` and a
+      // null-check on `this._term` before stage 2.
+      describe('destroy() during the two-stage IIFE (#4808)', () => {
+        it('destroy() between stage-1 and stage-2 does NOT re-arm the watchdog', async () => {
+          const writes = []
+          session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+          session._pendingUserAnswer = {
+            toolUseId: 'toolu_aq_destroy_race',
+            options: [
+              { label: 'Patch' },
+              { label: 'Minor' },
+              { label: 'Other' },
+            ],
+          }
+
+          // Kick off the two-stage IIFE.
+          session.respondToQuestion('Other', undefined, 'toolu_aq_destroy_race', {
+            freeformText: 'race text',
+          })
+
+          // Stage 1 (the digit '3') finishes within ~5ms — give it a
+          // beat to land but tear the session down DURING the
+          // OTHER_FREEFORM_SETTLE_MS (150ms) sleep. Targeting 60ms
+          // hits well inside that window on any reasonable machine.
+          await new Promise((resolve) => setTimeout(resolve, 60))
+          await session.destroy()
+          // Null `session` so the afterEach hook does not double-destroy.
+          const torn = session
+          session = null
+
+          // The watchdog was cleared by destroy(). If the IIFE re-arms
+          // it after `await new Promise(setTimeout(SETTLE_MS))` resolves,
+          // a fresh timer appears on `_askUserQuestionWatchdog` —
+          // detectable by sampling the field repeatedly until well past
+          // the settle delay.
+          const samples = []
+          for (let i = 0; i < 4; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 60))
+            samples.push(torn._askUserQuestionWatchdog)
+          }
+
+          // Pre-#4808: at least one sample is a Timeout (re-armed).
+          // Post-fix: every sample stays null.
+          for (const s of samples) {
+            assert.equal(s, null, `_askUserQuestionWatchdog must stay null past destroy(); saw ${s}. samples=${samples.map((x) => x ? 'TIMER' : 'null').join(',')}`)
+          }
+        })
+
+        it('destroy() between stage-1 and stage-2 does NOT attempt to write on a null _term', async () => {
+          // Capture the "Other-freeform PTY write failed" warning — this
+          // is the symptom of the IIFE blindly calling
+          // `_writePtyTextThrottled(freeformText)` against a `_term` that
+          // destroy() set to null. Pre-#4808 the inner `this._term.write`
+          // throws `Cannot read properties of null (reading 'write')`,
+          // the IIFE's .catch logs that warning, and the session has just
+          // demonstrated that it can still execute write logic past
+          // destroy(). Post-fix the IIFE returns early after the
+          // settle-await and the warning never fires.
+          const warnLines = []
+          const captureWarn = (entry) => {
+            if (entry.level === 'warn' && /Other-freeform PTY write failed/.test(entry.message || '')) {
+              warnLines.push(entry.message)
+            }
+          }
+          addLogListener(captureWarn)
+
+          const stage1Writes = []
+          session._term = {
+            write: (data) => { stage1Writes.push(data) },
+            kill: () => {},
+          }
+          session._pendingUserAnswer = {
+            toolUseId: 'toolu_aq_destroy_term',
+            options: [
+              { label: 'Patch' },
+              { label: 'Minor' },
+              { label: 'Other' },
+            ],
+          }
+
+          try {
+            session.respondToQuestion('Other', undefined, 'toolu_aq_destroy_term', {
+              freeformText: 'after destroy',
+            })
+
+            // Let stage-1 (digit '3') land, then destroy during the
+            // OTHER_FREEFORM_SETTLE_MS (150ms) pause.
+            await new Promise((resolve) => setTimeout(resolve, 60))
+            await session.destroy()
+            const torn = session
+            session = null
+            // Sanity: destroy() nulled `_term`.
+            assert.equal(torn._term, null, 'destroy() nulls _term')
+
+            // Wait past the settle (150ms) + per-char throttle time for
+            // stage-2 to run if it's going to. Post-fix the IIFE returns
+            // after `if (this._destroying) return` and never touches
+            // `_term`.
+            await new Promise((resolve) => setTimeout(resolve, 250))
+
+            assert.equal(
+              warnLines.length, 0,
+              `IIFE must not execute stage-2 write into a null _term post-destroy; saw warns: ${JSON.stringify(warnLines)}`,
+            )
+            // Stage-1 digit DID land (it ran before destroy).
+            assert.ok(stage1Writes.some((w) => w === '3'), `stage-1 digit "3" expected to have written before destroy, got: ${JSON.stringify(stage1Writes)}`)
+          } finally {
+            removeLogListener(captureWarn)
+          }
+        })
+      })
     })
 
     it('PostToolUse for AskUserQuestion clears _pendingUserAnswer if it was still set', () => {
@@ -2807,21 +3570,28 @@ describe('ClaudeTuiSession', () => {
       )
     })
 
-    // #4286 (review-caught): _finishTurnError and _handleHardTimeout
-    // were the two asymmetric exits that left the answer slot dirty
-    // (interrupt/destroy already clear it). Pin both so a regression
-    // doesn't re-introduce a late user_question_response writing into
-    // a dead turn.
-    it('_finishTurnError clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+    // #4286 + #4802 (audit P1.2): _finishTurnError's original #4286 fix
+    // wiped the pending-answer slot for symmetry with interrupt/destroy,
+    // but the audit re-evaluated that decision once `_pendingUserAnswer`
+    // became a Map (#4668). `_finishTurnError` runs on paths that do NOT
+    // issue Ctrl-C (PTY exit / Stop hook timeout / prompt-write failure),
+    // so a parallel sibling AskUserQuestion's late answer may still be
+    // legitimately consumable. Post-#4802 `_finishTurnError` PRESERVES
+    // the Map; `_handleHardTimeout` (which DOES Ctrl-C via _teardownTurn)
+    // still wipes — see the #4691 + #4802 audit tests further down for
+    // the per-callsite intent matrix.
+    it('_finishTurnError preserves _pendingUserAnswer (audit P1.2 #4802)', () => {
       session._pendingUserAnswer = { toolUseId: 'toolu_aq_finish' }
       session.on('error', () => {})  // swallow
       session._currentMessageId = 'msg-x'
       session._activeTurn = { startedAt: Date.now(), aborted: false }
       session._finishTurnError('test-error', 'msg-x')
-      assert.equal(session._pendingUserAnswer, null, 'finishTurnError clears pending answer')
+      assert.ok(session._pendingUserAnswer, 'finishTurnError preserves pending answer (#4802)')
+      assert.equal(session._pendingUserAnswer.toolUseId, 'toolu_aq_finish',
+        'entry survives so a late respondToQuestion can still consume it')
     })
 
-    it('_handleHardTimeout clears _pendingUserAnswer (symmetry with interrupt/destroy)', () => {
+    it('_handleHardTimeout clears _pendingUserAnswer (symmetry with interrupt/destroy via Ctrl-C)', () => {
       session._pendingUserAnswer = { toolUseId: 'toolu_aq_hard' }
       session.on('error', () => {})
       session._isBusy = true
@@ -3262,8 +4032,8 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
-    // #4690 (review of #4687) — pin the watchdog teardown semantics when
-    // sibling pending entries exist in `_pendingUserAnswers`. Setup:
+    // #4691 — surgical watchdog teardown when sibling pending entries
+    // exist in `_pendingUserAnswers`. Setup:
     //
     //   1. PreToolUse arms A and B in the Map (parallel AskUserQuestion).
     //   2. respondToQuestion(A) consumes A's entry (surgical
@@ -3272,19 +4042,18 @@ describe('ClaudeTuiSession', () => {
     //   3. PostToolUse for A never arrives → watchdog fires →
     //      `_onAskUserQuestionStall(A)`.
     //
-    // CURRENT behaviour (claude-tui-session.js:2149 `_pendingUserAnswer =
-    // null` → back-compat setter → `_pendingUserAnswers.clear()`): the
-    // watchdog wipes EVERY pending entry, including B which had nothing
-    // to do with A's stall. The all-or-nothing collapse is intentional
-    // for the teardown sites listed at #4691 (destroy, hard timeout,
-    // interrupt) but the watchdog-with-siblings case is the borderline
-    // one: B's PostToolUse may still arrive, and its entry just got
-    // collapsed under it. The semantic question is open in #4691; this
-    // test pins the current behaviour so the change is loud when it
-    // happens — and asserts the error event still carries A's
-    // toolUseId (B's stall did not happen, so the error must not
-    // misattribute).
-    it('watchdog fire with N>1 sibling pending entries wipes the whole Map; error carries the timed-out toolUseId (#4690, #4691)', () => {
+    // Pre-#4691 behaviour was `_pendingUserAnswer = null` → back-compat
+    // setter → `_pendingUserAnswers.clear()`: the watchdog wiped EVERY
+    // pending entry, including B which had nothing to do with A's stall.
+    // Post-#4691: the watchdog only knows about A (the toolUseId it was
+    // armed with), so it surgically clears A via
+    // `_clearPendingAnswerByToolUseId('toolu_A_stall')` and leaves B
+    // intact. B's PostToolUse can still arrive without finding a
+    // collapsed entry. The other teardown sites (destroy, hard timeout,
+    // interrupt, _finishTurnError) remain all-or-nothing because the
+    // whole turn is over there — no live sibling can survive a turn
+    // ending — so wiping the Map matches their semantics exactly.
+    it('watchdog fire with N>1 sibling pending entries surgically clears ONLY the timed-out tool; siblings survive (#4691)', () => {
       mock.timers.enable({ apis: ['setTimeout'] })
       try {
         session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
@@ -3329,21 +4098,189 @@ describe('ClaudeTuiSession', () => {
         assert.equal(errors[0].toolUseId, 'toolu_A_stall',
           'error attributes the stall to A (the timed-out tool), not B')
 
-        // Pinned current semantics: the teardown's
-        // `_pendingUserAnswer = null` flows through the back-compat
-        // setter → `_pendingUserAnswers.clear()` → B is wiped too. If
-        // #4691 lands a surgical teardown, this assertion will flip and
-        // both the test + the issue should be updated in the same commit.
-        assert.equal(session._pendingUserAnswers.size, 0,
-          'CURRENT semantics: watchdog clears entire Map (see #4691 for the open semantic question)')
-        assert.ok(!session._pendingUserAnswers.has('toolu_B_pending'),
-          'specifically: B\'s pending entry collapsed along with A\'s teardown')
+        // #4691 surgical-teardown semantics: the watchdog ONLY clears
+        // the entry it was armed for (A). Sibling B survives because its
+        // PostToolUse path is still live. A regression that re-introduces
+        // the pre-#4691 back-compat `_pendingUserAnswer = null` here
+        // would silently wipe B and re-create the #4691 state-shape
+        // mismatch.
+        assert.equal(session._pendingUserAnswers.size, 1,
+          'watchdog clears ONLY the timed-out tool, not the whole Map')
+        assert.ok(session._pendingUserAnswers.has('toolu_B_pending'),
+          'B SURVIVES — its turn is still live, do not collapse it under A\'s teardown')
+        assert.ok(!session._pendingUserAnswers.has('toolu_A_stall'),
+          'A is gone (it was the watchdog\'s target)')
 
         // Busy state cleared so the session is recoverable.
         assert.equal(session._isBusy, false, 'busy cleared')
       } finally {
         mock.timers.reset()
       }
+    })
+
+    // #4691 — single-pending-entry watchdog still tears the slot down
+    // (no regression from the surgical refactor). When only one entry
+    // is armed AND the watchdog fires for it, surgical clear and
+    // all-or-nothing clear produce the same end state — empty Map.
+    // This pins that the common single-question case isn't accidentally
+    // left behind by the per-toolUseId change.
+    it('watchdog fire with exactly 1 pending entry still clears it (single-question, #4691)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { uuid: 'test-watchdog-single', synthSeq: 0 }
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_solo',
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'Q?', options: [{ label: 's1' }, { label: 's2' }] }] },
+        }, 'msg-watchdog-solo')
+
+        // respondToQuestion consumes the entry then we need to simulate
+        // the "no PostToolUse arrived" wedge by reinstating it (the
+        // production scenario where chroxy wrote the digit but TUI sat
+        // on a multi-question form). The watchdog still tears it down.
+        session.respondToQuestion('s1', undefined, 'toolu_solo')
+        session._pendingUserAnswers.set('toolu_solo', {
+          toolUseId: 'toolu_solo',
+          options: [{ label: 's1' }, { label: 's2' }],
+        })
+        session._lastPendingAnswerToolUseId = 'toolu_solo'
+
+        mock.timers.tick(31_000)
+
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].toolUseId, 'toolu_solo')
+        assert.equal(session._pendingUserAnswers.size, 0,
+          'single-entry case still ends empty (surgical clear of the only entry)')
+        assert.equal(session._isBusy, false, 'busy cleared')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    // #4802 — per-callsite intent audit. Each teardown site now picks an
+    // explicit method (`_pendingUserAnswers_clearAll()` or
+    // `_clearPendingAnswerByToolUseId(tid)`) instead of routing through
+    // a back-compat `_pendingUserAnswer = null` setter that implicitly
+    // wiped the entire Map. The audit flagged `_finishTurnError` in
+    // particular: it does NOT issue Ctrl-C and is invoked for several
+    // "turn ended unexpectedly" reasons (PTY exit, Stop hook timeout,
+    // prompt-write failure) where a sibling AskUserQuestion's answer can
+    // still be in flight on the wire. Wiping the sibling there hits the
+    // "no matching pending entry — dropping" path in respondToQuestion
+    // and produces the silent #4668-class wedge described in #4802.
+    //
+    // Post-#4802: `_finishTurnError` PRESERVES the Map (no clear-all);
+    // late respondToQuestion calls still find their entry. The other
+    // turn-ending sites (`_teardownTurn` via hard timeout / stream stall /
+    // first-output timeout, `interrupt()`, `destroy()`) keep clear-all
+    // because they all issue Ctrl-C (or kill the PTY outright), so any
+    // late keystroke would be writing into a torn-down TUI anyway.
+    it('_finishTurnError preserves pending entries (surgical, audit P1.2 #4802)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-finish'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._finishTurnError('test-error', 'msg-finish')
+      assert.equal(session._pendingUserAnswers.size, 2,
+        '_finishTurnError must NOT wipe pending entries — siblings can have answers in flight (#4802)')
+      assert.ok(session._pendingUserAnswers.has('toolu_one'), 'sibling one preserved')
+      assert.ok(session._pendingUserAnswers.has('toolu_two'), 'sibling two preserved')
+    })
+
+    it('_handleHardTimeout wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-hard'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session._hardTimeoutMs = 1000
+      session._handleHardTimeout()
+      assert.equal(session._pendingUserAnswers.size, 0,
+        'hard timeout ends the turn with Ctrl-C — every pending answer is now stale')
+    })
+
+    it('interrupt() wipes ALL pending entries (turn-level teardown, #4691)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._pendingUserAnswers.set('toolu_one', { toolUseId: 'toolu_one', options: [] })
+      session._pendingUserAnswers.set('toolu_two', { toolUseId: 'toolu_two', options: [] })
+      session._lastPendingAnswerToolUseId = 'toolu_two'
+      session._activeTurn = { startedAt: Date.now(), aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session.interrupt()
+      assert.equal(session._pendingUserAnswers.size, 0,
+        'interrupt ends the turn with Ctrl-C — every pending answer is now stale')
+    })
+
+    // #4802 — pin the parallel-questions-with-mid-flight-stall regression
+    // scenario from the audit verbatim. The audit's failure mode:
+    //
+    //   1. Turn emits AskUserQuestion A + B in parallel (post-#4668 deny
+    //      retry-as-singles shape).
+    //   2. PostToolUse for A arrives → A's entry is cleared surgically.
+    //   3. Stream stalls for an UNRELATED reason (Stop hook timeout, PTY
+    //      exit, etc.) → `_finishTurnError` runs.
+    //   4. Pre-#4802 the back-compat `_pendingUserAnswer = null` setter
+    //      called `_pendingUserAnswers.clear()` and wiped B.
+    //   5. B's answer arrives microseconds later from the dashboard,
+    //      finds the Map empty, hits the "no matching pending entry —
+    //      dropping" path, and silently wedges.
+    //
+    // Post-#4802: `_finishTurnError` does NOT wipe — B survives so the
+    // late response can still consume it.
+    it('parallel A+B with mid-flight _finishTurnError preserves sibling B (audit P1.2 #4802)', () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      session._isBusy = true
+      session._currentMessageId = 'msg-parallel-stall'
+      session._activeTurn = { startedAt: Date.now(), aborted: false, uuid: 'test-4802' }
+
+      // (1) Two parallel AskUserQuestion tool_uses arrive in one turn.
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }, { label: 'a2' }] }] },
+      }, 'msg-parallel-stall')
+      session._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_B',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }, { label: 'b2' }] }] },
+      }, 'msg-parallel-stall')
+      assert.equal(session._pendingUserAnswers.size, 2, 'precondition: A and B armed')
+
+      // (2) PostToolUse for A only — A cleared, B still pending.
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_A',
+        tool_name: 'AskUserQuestion',
+        tool_response: { selectedLabel: 'a1' },
+      }, 'msg-parallel-stall')
+      assert.ok(!session._pendingUserAnswers.has('toolu_A'), 'A cleared by its own PostToolUse')
+      assert.ok(session._pendingUserAnswers.has('toolu_B'), 'B still pending pre-stall')
+
+      // (3) Stream stalls for an unrelated reason → _finishTurnError fires.
+      session._finishTurnError('Stop hook timeout', 'msg-parallel-stall')
+
+      // (4) Pre-#4802: B was wiped by the back-compat null setter →
+      //     `_pendingUserAnswers.clear()`. Post-#4802: B SURVIVES — a
+      //     late response from the dashboard can still consume it.
+      assert.ok(session._pendingUserAnswers.has('toolu_B'),
+        'B\'s pending answer SURVIVES the unrelated turn teardown — late dashboard response must still find its entry (#4802)')
+      assert.equal(session._pendingUserAnswers.size, 1, 'only B remains (A already consumed)')
     })
 
     it('watchdog is cleared on destroy() (clean teardown)', async () => {
@@ -3517,14 +4454,78 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #4635 — last q (Q4) is single-select → 150ms settle is inserted
+      // before Submit; bump wait past settle + Enter.
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
       // Expected sequence: paste-disable, digits + Tab interleaved per the
-      // multi-question driver, '1' to confirm Submit, paste-enable.
-      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\x1b[?2004h']
+      // multi-question driver, '1' to confirm Submit, '\r' defensive Enter
+      // (#4635), paste-enable.
+      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\r', '\x1b[?2004h']
       assert.deepEqual(writes, expected,
         `expected empirical byte sequence, got ${JSON.stringify(writes)}`)
       assert.equal(session._pendingUserAnswer, null, 'pending cleared')
+    })
+
+    // #4621 — native string[] for multi-select answers (no JSON encoding).
+    // The wire protocol now accepts `Record<string, string | string[]>` so
+    // the dashboard can ship arrays directly. The driver MUST produce the
+    // exact same byte sequence as the legacy JSON-encoded shape.
+    it('accepts native string[] for multi-select answers (#4621)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'aa' }, { label: 'bb' }] },
+        { question: 'Q3?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }, { label: 'r' }] },
+        { question: 'Q4?', options: [{ label: 'x' }, { label: 'y' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_native_arr', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',          // → '1' (single, auto-advances)
+        'Q2?': 'bb',         // → '2' (single, auto-advances)
+        'Q3?': ['p', 'r'],   // → '1' '3' (NATIVE ARRAY, no JSON.stringify) + '\t'
+        'Q4?': 'y',          // → '2' (single, auto-advances)
+      }
+
+      session.respondToQuestion('', answersMap)
+      // #4635 — last q (Q4) is single-select → settle + trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      // Identical to the JSON-encoded shape — back-compat preserved.
+      const expected = ['\x1b[?2004l', '1', '2', '1', '3', '\t', '2', '1', '\r', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `expected identical byte sequence for native string[], got ${JSON.stringify(writes)}`)
+    })
+
+    // #4621 — labels containing commas survive the round-trip via native
+    // string[] (the legacy comma-split fallback corrupted these). Uses
+    // 2 questions so the multi-question driver kicks in (single-question
+    // path is text-driven, not answersMap-driven).
+    it('preserves comma-containing labels via native string[] (#4621)', async () => {
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'Hello, world' }, { label: 'foo' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_comma', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',                        // → '1'
+        'Q2?': ['Hello, world', 'foo'],    // → '1' '2' (both selected) + '\t'
+      }
+
+      session.respondToQuestion('', answersMap)
+      // Last q is multi-select → no settle delay, just trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 150))
+
+      // Q1 → '1'; Q2 (multi) → '1' '2' + '\t'; Submit → '1' + '\r' (#4635).
+      // Last q is multi-select so NO settle delay before Submit. The legacy
+      // comma-split would have split 'Hello, world' into ['Hello', 'world']
+      // which match nothing, defaulting to '1' only.
+      const expected = ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\r', '\x1b[?2004h']
+      assert.deepEqual(writes, expected,
+        `native string[] should preserve comma-containing labels, got ${JSON.stringify(writes)}`)
     })
 
     // Single-question regression guard: ensure the legacy text-driven path
@@ -3566,10 +4567,12 @@ describe('ClaudeTuiSession', () => {
       // Old dashboard sends just the freeform string of q1's answer —
       // we don't have an answersMap.
       session.respondToQuestion('a')
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #4635 — last q (Q3) is single-select → settle + trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
-      // Q1 → '1', Q2 (multi-select) → '1' + '\t' (advance), Q3 → '1', Submit → '1'.
-      assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '\t', '1', '1', '\x1b[?2004h'],
+      // Q1 → '1', Q2 (multi-select) → '1' + '\t' (advance), Q3 → '1',
+      // Submit → '1' + '\r' (#4635).
+      assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '\t', '1', '1', '\r', '\x1b[?2004h'],
         `expected default-to-option-1 sequence, got ${JSON.stringify(writes)}`)
 
       const missingMapWarn = warnLines.find((m) => /didn't send answersMap/.test(m))
@@ -3597,14 +4600,408 @@ describe('ClaudeTuiSession', () => {
       }
 
       session.respondToQuestion('', answersMap)
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #4635 — last q (Q3) is single-select → settle + trailing \r.
+      await new Promise((resolve) => setTimeout(resolve, 300))
 
-      assert.deepEqual(writes, ['\x1b[?2004l', '2', '1', '3', '1', '\x1b[?2004h'],
+      assert.deepEqual(writes, ['\x1b[?2004l', '2', '1', '3', '1', '\r', '\x1b[?2004h'],
         `expected partial-map sequence, got ${JSON.stringify(writes)}`)
 
       const missingQWarn = warnLines.find((m) => /no resolvable answer for q=/.test(m) && /Q2/.test(m))
       assert.ok(missingQWarn, `expected WARN about Q2 missing, got ${JSON.stringify(warnLines)}`)
       assert.match(missingQWarn, /defaulting to option 1/)
+    })
+
+    // #4635 — pure all-single-select multi-question form. v0.9.20 driver
+    // wrote `digit, digit, digit, digit, '1'` for a 4-q all-single-select
+    // form and claude TUI never emitted PostToolUse — the 30s stall
+    // watchdog fired. The mixed-form path works because the explicit
+    // `'\t'` after a multi-select question gives claude TUI a settle
+    // beat between commit and the next render; on a pure single-select
+    // sequence the LAST digit auto-advances directly to the Submit screen
+    // and the 1ms per-char throttle writes the Submit `'1'` before the
+    // Submit screen renders, so it gets swallowed.
+    //
+    // Fix layer 1: insert a render-settling pause before the Submit `'1'`
+    // when the LAST question is single-select (mirrors the
+    // OTHER_FREEFORM_SETTLE_MS pattern from #4651).
+    // Fix layer 2: append `'\r'` after the Submit `'1'` as a defensive
+    // commit — harmless on the mixed path per the single-q precedent
+    // (#4290 trailing Enter is redundant but harmless), potentially
+    // saves the all-single-select Submit screen if it actually requires
+    // Enter instead of auto-submit on `'1'`.
+    it('drives a pure all-single-select 3-question form with settle + trailing Enter (#4635)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+        { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }, { label: 'z' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_all_single', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',  // → '1' (auto-advances)
+        'Q2?': 'q',  // → '2' (auto-advances)
+        'Q3?': 'z',  // → '3' (auto-advances to Submit screen)
+      }
+
+      session.respondToQuestion('', answersMap)
+      // Wait longer than the 150ms settle delay + per-char throttle + Enter.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      // Byte sequence: paste-disable, Q1 → '1', Q2 → '2', Q3 → '3',
+      // [settle 150ms — no byte written], Submit '1', trailing Enter '\r',
+      // paste-enable.
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '1', '2', '3', '1', '\r', '\x1b[?2004h'],
+        `expected all-single-select sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // The settle MUST land between the last single-select digit ('3')
+      // and the Submit '1'. Measure the gap — pre-fix it was ~1ms (the
+      // PROMPT_CHAR_DELAY_MS), post-fix it's >= MULTI_QUESTION_SUBMIT_SETTLE_MS (150).
+      const lastDigitIdx = writes.lastIndexOf('3')
+      const submitIdx = writes.indexOf('1', lastDigitIdx + 1)
+      assert.ok(lastDigitIdx >= 0 && submitIdx > lastDigitIdx, 'found last digit + submit in sequence')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[lastDigitIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `expected settle gap >= 140ms between last single-select digit and Submit, got ${gapMs}ms`,
+      )
+
+      assert.equal(session._pendingUserAnswer, null, 'pending cleared')
+    })
+
+    // #4882 — minimal reproduction of the all-single-select wedge: a TWO-
+    // question pure-single-select form. The #4882 issue body specifically
+    // calls out "a 2+ question all-single-select prompt" as the empirical
+    // target; pinning the 2-q variant alongside the 3-q variant above makes
+    // the minimum failing shape explicit so a future regression that subtly
+    // breaks the smallest-N case can't slip past tests that only assert
+    // against larger forms.
+    //
+    // Q2 picks option 2 ('q' → '2') rather than option 1 so the last
+    // single-select digit is DISTINCT from the Submit screen's '1' — that
+    // way a future reorder bug that swapped the Q2 digit and the Submit
+    // digit would change the pinned byte sequence (currently `'2','2','1'`)
+    // instead of being invisible inside `'1','1','1'`.
+    //
+    // NOTE: this pins the bytes the DRIVER writes per the #4867 fix; the
+    // upstream empirical recorder pass against a live claude TUI is still
+    // outstanding (tracked under #4882) — until that runs, the trailing
+    // `\r` and the 150ms settle remain "best-effort defensive" not
+    // "empirically confirmed". Driver shape pinned here so any reconciliation
+    // PR after the recorder pass updates this test alongside the empirical
+    // findings recorded under #4882.
+    it('drives a pure all-single-select 2-question form with settle + trailing Enter (#4882)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_all_single_2q', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'b',  // → '2' (auto-advances)
+        'Q2?': 'q',  // → '2' (auto-advances to Submit screen) — distinct from Submit's '1'
+      }
+
+      session.respondToQuestion('', answersMap)
+      // Wait past the 150ms settle + per-char throttle + Enter.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      // Byte sequence (pinned by #4867 driver fix; empirical confirmation
+      // outstanding under #4882): paste-disable, Q1 → '2', Q2 → '2',
+      // [settle 150ms], Submit '1', trailing Enter '\r', paste-enable.
+      // Q2's '2' is intentionally distinct from Submit's '1' so a reorder
+      // regression would mutate the pinned sequence (see test comment above).
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '2', '2', '1', '\r', '\x1b[?2004h'],
+        `expected all-single-select 2-q sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // The settle MUST land between the last single-select digit (Q2's '2')
+      // and the Submit '1'. After paste-disable (idx 0), Q1 writes '2' (idx 1),
+      // Q2 writes '2' (idx 2), then the 150ms settle fires, then Submit '1'
+      // (idx 3). Measure the gap between idx 2 and idx 3.
+      const q2DigitWriteIdx = 2
+      const submitWriteIdx = 3
+      assert.equal(writes[q2DigitWriteIdx], '2', 'Q2 single-select pick at index 2')
+      assert.equal(writes[submitWriteIdx], '1', 'Submit at index 3')
+      const gapMs = writeEvents[submitWriteIdx].t - writeEvents[q2DigitWriteIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `expected settle gap >= 140ms between Q2 digit and Submit, got ${gapMs}ms`,
+      )
+
+      assert.equal(session._pendingUserAnswer, null, 'pending cleared')
+    })
+
+    // #4635 — when ONLY the last question is single-select (e.g. multi
+    // then single), still need the settle. Mirror of the all-single-select
+    // case but with a leading multi-select to confirm the settle decision
+    // is driven by the LAST question's shape, not the form's overall shape.
+    it('inserts settle delay when only the LAST question is single-select (#4635)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_multi_then_single', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': ['a', 'b'],  // → '1' '2' (toggles) + '\t' (commit + advance)
+        'Q2?': 'q',          // → '2' (auto-advances to Submit)
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '1', '2', '\t', '2', '1', '\r', '\x1b[?2004h'],
+        `expected multi-then-single sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // Gap between Q2's '2' and Submit '1' must include the settle.
+      const q2DigitIdx = writes.lastIndexOf('2')
+      const submitIdx = writes.indexOf('1', q2DigitIdx + 1)
+      assert.ok(q2DigitIdx >= 0 && submitIdx > q2DigitIdx, 'found Q2 digit + submit')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[q2DigitIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `expected settle gap >= 140ms before Submit when last q is single-select, got ${gapMs}ms`,
+      )
+    })
+
+    // #4635 — when the last question is multi-select, NO settle delay is
+    // needed (the explicit '\t' already commits + advances cleanly).
+    // Pin that the settle is NOT inserted in that path so we don't slow
+    // down forms that already work.
+    it('does NOT insert settle delay when LAST question is multi-select (#4635)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_single_then_multi', questions, options: questions[0].options }
+      const answersMap = {
+        'Q1?': 'a',          // → '1' (auto-advances)
+        'Q2?': ['p', 'q'],   // → '1' '2' (toggles) + '\t' (commit + advance to Submit)
+      }
+
+      session.respondToQuestion('', answersMap)
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const writes = writeEvents.map((e) => e.data)
+      assert.deepEqual(
+        writes,
+        ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\r', '\x1b[?2004h'],
+        `expected single-then-multi sequence with trailing \\r, got ${JSON.stringify(writes)}`,
+      )
+
+      // Tab → Submit gap should be ~per-char throttle (1ms), NOT 150ms.
+      const tabIdx = writes.indexOf('\t')
+      const submitIdx = writes.indexOf('1', tabIdx + 1)
+      const gapMs = writeEvents[submitIdx].t - writeEvents[tabIdx].t
+      assert.ok(
+        gapMs < 50,
+        `multi-select Tab → Submit must NOT incur settle, got ${gapMs}ms`,
+      )
+    })
+
+    // #4883 — tighten lastIsSingleSelect detection. Pre-fix logic was
+    // `!!(lastQuestion && !lastQuestion.multiSelect)`, which treated *any*
+    // non-truthy `multiSelect` (undefined, null, 0, '') as single-select
+    // silently. That's correct for today's TUI shape (single-select omits
+    // the field) but masks any future TUI shape drift. The tightened logic
+    // is `multiSelect !== true`, plus a WARN whenever the field is present
+    // but non-boolean so the drift surfaces in logs.
+
+    // The canonical single-select shape today is `multiSelect` absent. That
+    // path must STILL produce the settle (back-compat) AND must NOT warn,
+    // otherwise every multi-question form spams the log.
+    it('omitted multiSelect on last q: settle fires + NO warn (back-compat #4883)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] }, // multiSelect omitted
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_omit_multiselect', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': ['a', 'b'], 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      // Settle MUST fire — back-compat with the pre-tightening behaviour.
+      // Measure the gap from the LAST QUESTION's digit (Q2's '2') to the
+      // Submit '1', not from Q1's '\t'. The settle is inserted at that
+      // specific boundary; measuring across Q1's Tab would mask a
+      // regression where the last-q keystroke changes (Copilot #4902).
+      const writes = writeEvents.map((e) => e.data)
+      // Bytes: paste-disable, Q1 '1' '2' '\t', Q2 '2', [settle], Submit '1', '\r', paste-enable.
+      const tabIdx = writes.indexOf('\t')
+      const lastDigitIdx = writes.indexOf('2', tabIdx + 1) // Q2's '2' after the Tab
+      const submitIdx = writes.indexOf('1', lastDigitIdx + 1)
+      assert.ok(lastDigitIdx > tabIdx && submitIdx > lastDigitIdx, 'found Q2 digit + submit')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[lastDigitIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `omitted-multiSelect last q is single-select: expected settle gap >= 140ms between last digit and Submit, got ${gapMs}ms`,
+      )
+
+      // And the WARN must NOT fire on this canonical shape.
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.equal(
+        drift,
+        undefined,
+        `canonical single-select shape (multiSelect omitted) must NOT warn, got warns=${JSON.stringify(warnLines)}`,
+      )
+    })
+
+    // Explicit `multiSelect: false` on the last q: still single-select, no warn.
+    it('explicit multiSelect:false on last q: settle fires + NO warn (#4883)', async () => {
+      const writeEvents = []
+      session._term = {
+        write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+        kill: () => {},
+      }
+      const questions = [
+        { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: false, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_explicit_false', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': ['a', 'b'], 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      // Measure the gap at the actual settle boundary: Q2's digit ('2')
+      // → Submit '1'. Measuring across Q1's '\t' would mask a regression
+      // where the last-q keystroke changes (Copilot #4902).
+      const writes = writeEvents.map((e) => e.data)
+      // Bytes: paste-disable, Q1 '1' '2' '\t', Q2 '2', [settle], Submit '1', '\r', paste-enable.
+      const tabIdx = writes.indexOf('\t')
+      const lastDigitIdx = writes.indexOf('2', tabIdx + 1) // Q2's '2' after the Tab
+      const submitIdx = writes.indexOf('1', lastDigitIdx + 1)
+      assert.ok(lastDigitIdx > tabIdx && submitIdx > lastDigitIdx, 'found Q2 digit + submit')
+      const gapMs = writeEvents[submitIdx].t - writeEvents[lastDigitIdx].t
+      assert.ok(
+        gapMs >= 140,
+        `explicit multiSelect:false is single-select: expected settle gap >= 140ms between last digit and Submit, got ${gapMs}ms`,
+      )
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.equal(drift, undefined, `explicit boolean must NOT warn, got warns=${JSON.stringify(warnLines)}`)
+    })
+
+    // Drift: `multiSelect` present but a STRING (e.g. a future TUI ships
+    // `multiSelect: "true"` accidentally). Warn fires + settle assumed.
+    it('non-boolean multiSelect (string) on last q: WARN fires + still settles (#4883)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+        { question: 'Q2?', multiSelect: 'true', options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_string_drift', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.ok(
+        drift,
+        `expected drift WARN for non-boolean multiSelect, got warns=${JSON.stringify(warnLines)}`,
+      )
+      assert.match(drift, /Q2\?/, 'warn includes the offending question text')
+    })
+
+    // Drift: pathological in-code `{ multiSelect: undefined }`. JSON.stringify
+    // drops undefined-valued keys, so wire-deserialized shapes can't produce
+    // this — but in-code construction can. The tightened check uses
+    // `'multiSelect' in lastQuestion` precisely to catch this case
+    // (Copilot review on #4902): key present, value not boolean = drift.
+    it('explicit multiSelect:undefined on last q: WARN fires (Copilot #4902)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }] },
+        { question: 'Q2?', multiSelect: undefined, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      // Sanity: the key IS present (otherwise this test would be checking the
+      // omitted-multiSelect path, which has its own test above).
+      assert.ok('multiSelect' in questions[1], 'multiSelect key present on Q2')
+      session._pendingUserAnswer = { toolUseId: 'toolu_undef_drift', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.ok(
+        drift,
+        `expected drift WARN for explicit undefined multiSelect, got warns=${JSON.stringify(warnLines)}`,
+      )
+    })
+
+    // Drift: `multiSelect: null`. Same surfacing requirement as the string case.
+    it('null multiSelect on last q: WARN fires (#4883)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', options: [{ label: 'a' }] },
+        { question: 'Q2?', multiSelect: null, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_null_drift', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': 'q' })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.ok(
+        drift,
+        `expected drift WARN for null multiSelect, got warns=${JSON.stringify(warnLines)}`,
+      )
+    })
+
+    // Drift on a NON-last question must NOT trigger the warn — the settle
+    // decision is driven by the LAST question's shape only, so the warn is
+    // scoped to that one. (Keeps log noise bounded for forms that mix shapes
+    // and ensures the warn pinpoints the question that actually drove the
+    // settle branch.)
+    it('non-boolean multiSelect on a non-last q does NOT warn (#4883)', async () => {
+      session._term = { write: () => {}, kill: () => {} }
+      const questions = [
+        { question: 'Q1?', multiSelect: 'true', options: [{ label: 'a' }, { label: 'b' }] }, // drifty but NOT last
+        { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+      ]
+      session._pendingUserAnswer = { toolUseId: 'toolu_drift_not_last', questions, options: questions[0].options }
+
+      session.respondToQuestion('', { 'Q1?': ['a'], 'Q2?': ['p'] })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      const drift = warnLines.find((m) => /non-boolean multiSelect/.test(m))
+      assert.equal(
+        drift,
+        undefined,
+        `drift on non-last question must NOT warn, got warns=${JSON.stringify(warnLines)}`,
+      )
     })
 
     // Pre-Chunk-B watchdog still arms for multi-question forms — if claude
@@ -3661,6 +5058,560 @@ describe('ClaudeTuiSession', () => {
       // Back-compat: pre-Chunk-B callers reading `.options` get q[0].options.
       assert.deepEqual(session._pendingUserAnswer.options, questions[0].options,
         'options still points at questions[0].options for back-compat')
+    })
+
+    // #4884 — extend trailing-`'\r'` coverage to MIXED multi-question forms
+    // (single + multi-select mix). The #4867 fix added a defensive trailing
+    // `'\r'` for ALL multi-question forms; #4886 fixed the cross-PR test
+    // breakage. Live verification ran on the all-single-select shape (the
+    // wedge case). The mixed-form path inherits the trailing `'\r'` based
+    // on the #4290 single-q precedent, but the issue (#4884) calls out that
+    // mixed multi-question is a different TUI state — explicit assertion-
+    // level coverage of every mixed-form last-question shape pins that
+    // shape drift in the driver doesn't silently drop the trailing `'\r'`.
+    describe('trailing \\r on mixed multi-question forms (#4884)', () => {
+      // Shape: S+M (last is multi-select). #4867 sequence ends with
+      // `'\t'` (commit + advance to Submit) + `'1'` (Submit) + `'\r'`
+      // (defensive trailer). No settle — `'\t'` already settles.
+      it('S+M shape: trailing \\r lands immediately after Submit (no settle)', async () => {
+        const writeEvents = []
+        session._term = {
+          write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+          kill: () => {},
+        }
+        const questions = [
+          { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_sm', questions, options: questions[0].options }
+
+        session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': ['p', 'q'] })
+        await new Promise((resolve) => setTimeout(resolve, 200))
+
+        const writes = writeEvents.map((e) => e.data)
+        assert.deepEqual(
+          writes,
+          ['\x1b[?2004l', '1', '1', '2', '\t', '1', '\r', '\x1b[?2004h'],
+          `S+M shape must end with Submit '1' + trailing '\\r', got ${JSON.stringify(writes)}`,
+        )
+
+        // The Submit → '\r' gap must be ~per-char throttle (1ms), proving
+        // the trailing '\r' lands AFTER Submit-'1' (the issue's concern
+        // is the inverse — that it'd race ahead and land on the prompt).
+        const submitIdx = writes.lastIndexOf('1')
+        const enterIdx = writes.lastIndexOf('\r')
+        assert.ok(submitIdx >= 0 && enterIdx > submitIdx, 'trailing \\r is after Submit')
+        const gapMs = writeEvents[enterIdx].t - writeEvents[submitIdx].t
+        assert.ok(
+          gapMs < 50,
+          `Submit '1' → trailing '\\r' gap must be ~per-char throttle, got ${gapMs}ms`,
+        )
+      })
+
+      // Shape: M+S+M (multi → single → multi). Last is multi → no settle,
+      // trailing '\r' still pinned. Catches a regression where someone
+      // gates the trailing '\r' on the lastIsSingleSelect branch.
+      it('M+S+M shape: trailing \\r still pinned (no settle)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', options: [{ label: 'p' }, { label: 'q' }] },
+          { question: 'Q3?', multiSelect: true, options: [{ label: 'x' }, { label: 'y' }, { label: 'z' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_msm', questions, options: questions[0].options }
+
+        session.respondToQuestion('', {
+          'Q1?': ['a'],         // → '1' + '\t'
+          'Q2?': 'q',            // → '2' (auto-advances)
+          'Q3?': ['x', 'z'],     // → '1' '3' + '\t'
+        })
+        await new Promise((resolve) => setTimeout(resolve, 200))
+
+        // Last q is multi → no settle. Submit '1' + trailing '\r' still pinned.
+        assert.deepEqual(
+          writes,
+          ['\x1b[?2004l', '1', '\t', '2', '1', '3', '\t', '1', '\r', '\x1b[?2004h'],
+          `M+S+M sequence with trailing '\\r' broke, got ${JSON.stringify(writes)}`,
+        )
+      })
+
+      // Shape: S+M+S (single → multi → single). Last is single → settle
+      // fires AND trailing '\r' still pinned. The settle proves the
+      // last-q-shape decision; the '\r' proves the defensive trailer.
+      it('S+M+S shape: settle fires AND trailing \\r still pinned', async () => {
+        const writeEvents = []
+        session._term = {
+          write: (data) => { writeEvents.push({ data, t: Date.now() }) },
+          kill: () => {},
+        }
+        const questions = [
+          { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+          { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_sms', questions, options: questions[0].options }
+
+        session.respondToQuestion('', {
+          'Q1?': 'a',           // → '1'
+          'Q2?': ['p', 'q'],    // → '1' '2' + '\t'
+          'Q3?': 'y',           // → '2' (auto-advances; last q so settle fires)
+        })
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        const writes = writeEvents.map((e) => e.data)
+        assert.deepEqual(
+          writes,
+          ['\x1b[?2004l', '1', '1', '2', '\t', '2', '1', '\r', '\x1b[?2004h'],
+          `S+M+S sequence with trailing '\\r' broke, got ${JSON.stringify(writes)}`,
+        )
+
+        // Settle present: gap between last single-digit ('2' of Q3) and
+        // Submit '1' >= 140ms.
+        const q3DigitIdx = writes.indexOf('2', writes.indexOf('\t'))
+        const submitIdx = writes.indexOf('1', q3DigitIdx + 1)
+        const settleMs = writeEvents[submitIdx].t - writeEvents[q3DigitIdx].t
+        assert.ok(settleMs >= 140, `expected settle >= 140ms for last-q single-select, got ${settleMs}ms`)
+
+        // Trailing '\r' immediately after Submit (no settle).
+        const enterIdx = writes.lastIndexOf('\r')
+        assert.ok(enterIdx > submitIdx, 'trailing \\r is after Submit')
+        const trailerGapMs = writeEvents[enterIdx].t - writeEvents[submitIdx].t
+        assert.ok(
+          trailerGapMs < 50,
+          `Submit '1' → trailing '\\r' gap must be ~per-char throttle, got ${trailerGapMs}ms`,
+        )
+      })
+
+      // Forensic timing log (#4884 acceptance criterion #1): when PostToolUse
+      // for AskUserQuestion arrives after a multi-question submit, an INFO
+      // line emits the wall-clock delta from Submit-'1' write to PostToolUse
+      // arrival. After ~10 live captures (per the issue's AC#2), the log
+      // line can be downgraded to DEBUG.
+      it('PostToolUse logs Submit→PostToolUse delta at INFO (#4884)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        // Mixed S+M+S form — last is single so settle path also exercised.
+        const questions = [
+          { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+          { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+          { question: 'Q3?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_forensic', questions, options: questions[0].options }
+
+        session.respondToQuestion('', { 'Q1?': 'a', 'Q2?': ['p'], 'Q3?': 'y' })
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        // The Submit marker recorded a timestamp on the session — verify
+        // the writer dispatched the marker BEFORE the Submit byte.
+        assert.ok(
+          session._multiQuestionSubmitAt.has('toolu_forensic'),
+          `expected Submit marker timestamp recorded for the form, got keys=${[...session._multiQuestionSubmitAt.keys()].join(',')}`,
+        )
+
+        // Simulate the matching PostToolUse arriving 50ms later.
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_forensic',
+          tool_name: 'AskUserQuestion',
+          tool_response: '',
+        }, 'msg-post-forensic')
+
+        const forensicInfo = infoLines.find((m) => /Submit.PostToolUse=\d+ms/.test(m) && /toolu_forensic/.test(m))
+        assert.ok(
+          forensicInfo,
+          `expected INFO forensic line for #4884, got infoLines=${JSON.stringify(infoLines)}`,
+        )
+        assert.match(forensicInfo, /#4884/, 'forensic INFO line references the issue for triage')
+
+        // Submit-time entry is consumed on PostToolUse so the Map doesn't
+        // accumulate stale entries across many forms.
+        assert.equal(
+          session._multiQuestionSubmitAt.has('toolu_forensic'),
+          false,
+          'submit-time entry cleared after the forensic log fires',
+        )
+      })
+
+      // Negative: PostToolUse for a non-multi-question AskUserQuestion (the
+      // single-question text-driven path doesn't record a Submit marker)
+      // does NOT emit the forensic log. Pins the scope to multi-question
+      // forms so the log doesn't accidentally fire for single-q happy paths.
+      it('PostToolUse for single-question form does NOT emit forensic log (#4884)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const questions = [
+          { question: 'Solo?', options: [{ label: 'a' }, { label: 'b' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_only', questions, options: questions[0].options }
+
+        session.respondToQuestion('a')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // Single-question path does NOT use _writePtyMultiQuestionSequence,
+        // so no Submit marker is recorded.
+        assert.equal(
+          session._multiQuestionSubmitAt.has('toolu_single_only'),
+          false,
+          'single-question path must not record a Submit marker',
+        )
+
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_single_only',
+          tool_name: 'AskUserQuestion',
+          tool_response: '',
+        }, 'msg-single-post')
+
+        const forensicInfo = infoLines.find((m) => /Submit.PostToolUse=\d+ms/.test(m))
+        assert.equal(
+          forensicInfo,
+          undefined,
+          `single-question path must not emit forensic INFO, got infoLines=${JSON.stringify(infoLines)}`,
+        )
+      })
+
+      // Cleanup: when a teardown path (stall watchdog, _teardownTurn) wipes
+      // _pendingUserAnswers, the parallel _multiQuestionSubmitAt entries
+      // must also be cleared. Otherwise a teardown that wins the race
+      // against PostToolUse leaks the submit-time entry until destroy().
+      it('_pendingUserAnswers_clearAll wipes parallel submit-time entries (#4884)', () => {
+        session._multiQuestionSubmitAt.set('toolu_a', Date.now())
+        session._multiQuestionSubmitAt.set('toolu_b', Date.now())
+        session._pendingUserAnswers.set('toolu_a', { toolUseId: 'toolu_a', questions: [], options: [] })
+
+        session._pendingUserAnswers_clearAll()
+
+        assert.equal(session._multiQuestionSubmitAt.size, 0, 'submit-time map cleared in lockstep')
+      })
+
+      // Per-toolUseId cleanup parity: _clearPendingAnswerByToolUseId
+      // (the PostToolUse cleanup path) also drops the matching submit-time
+      // entry so a late-arriving PostToolUse for a torn-down form doesn't
+      // emit a forensic log with a stale (wall-clock-impossible) delta.
+      it('_clearPendingAnswerByToolUseId drops matching submit-time entry (#4884)', () => {
+        session._multiQuestionSubmitAt.set('toolu_x', Date.now())
+        session._multiQuestionSubmitAt.set('toolu_y', Date.now())
+        session._pendingUserAnswers.set('toolu_x', { toolUseId: 'toolu_x', questions: [], options: [] })
+        session._pendingUserAnswers.set('toolu_y', { toolUseId: 'toolu_y', questions: [], options: [] })
+
+        session._clearPendingAnswerByToolUseId('toolu_x')
+
+        assert.equal(session._multiQuestionSubmitAt.has('toolu_x'), false, 'cleared toolu_x submit time')
+        assert.equal(session._multiQuestionSubmitAt.has('toolu_y'), true, 'kept toolu_y submit time (per-id scope)')
+      })
+    })
+
+    // #4625 — 10+ option questions. claude TUI's single-digit hotkey
+    // alphabet only covers indices 0..8 (digits '1'..'9'). The pre-#4625
+    // driver silently defaulted picks of options 10+ to option 1 (with a
+    // WARN buried in chroxy.log), so the user's explicit pick was
+    // dropped without any UI feedback. The fix surfaces a structured
+    // error before any keystroke is written so the dashboard can prompt
+    // the user to re-ask with fewer options.
+    describe('10+ option support (#4625 + #4848)', () => {
+      // #4848 — single-select question with a 10+ option pick: drive
+      // natively via arrow-key navigation (Down arrow × idx + Enter)
+      // instead of bailing with the too-many error. Pre-#4848 this
+      // teardown fired (see #4625 history); the user's explicit pick of
+      // option 10+ would never reach claude TUI.
+      it('multi-question: single-select pick of option 10+ drives via arrow-nav (#4848)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        // Q1 has 12 options; user picked option 10 (label 'j', idx 9).
+        const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenPlusOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session.respondToQuestion('', { 'Q1?': 'j', 'Q2?': 'x' })
+        // 300ms wait: the #4867 last-question-single-select settle is 150ms;
+        // 300ms leaves comfortable margin under CI load (Copilot review on
+        // #4886 flagged 200ms as too tight). Sibling settle-path tests in
+        // this file use 300ms for the same reason.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        // No too-many error — arrow nav drives the form.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // Q1 → 9× Down + Enter (idx 9 nav), Q2 → '1' (single-digit), Submit → '1',
+        // then defensive trailing '\r' (#4867 — guards against last-question
+        // single-select forms not auto-committing), wrapped in paste-disable/enable.
+        const expected = ['\x1b[?2004l', ...Array(9).fill('\x1b[B'), '\r', '1', '1', '\r', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected arrow-nav + digits sequence, got ${JSON.stringify(writes)}`)
+
+        // Pending cleared on the happy path.
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after answer write')
+      })
+
+      // #4848 boundary: option 30 in a 30-option single-select question.
+      // Pin the larger-N case to make sure the arrow count tracks idx exactly.
+      it('multi-question: single-select pick of option 30 (idx 29) drives via 29× Down + Enter (#4848)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const thirtyOptions = Array.from({ length: 30 }, (_, i) => ({ label: `o-${i}` }))
+        const questions = [
+          { question: 'Q1?', options: thirtyOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_30', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session.respondToQuestion('', { 'Q1?': 'o-29', 'Q2?': 'y' })
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // Trailing '\r' is the #4867 last-question-single-select defensive Enter.
+        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '2', '1', '\r', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected 29× Down + Enter + Q2 digit + Submit, got ${JSON.stringify(writes)}`)
+      })
+
+      // Boundary: a 10-option question where the user picked option 9 (the
+      // LAST representable digit) — driver MUST drive normally, not bail.
+      // This pins the exact edge of the supported range.
+      it('multi-question: pick of option 9 in a 10-option question still drives normally', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_edge', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // 'i' is index 8 → digit '9' (the highest supported digit).
+        session.respondToQuestion('', { 'Q1?': 'i', 'Q2?': 'x' })
+        // #4635 — last q (Q2) is single-select → settle + trailing \r.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        // Driver wrote normally — no too-many error.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // Q1 → '9', Q2 → '1', Submit → '1' + '\r' (#4635), wrapped in paste toggles.
+        assert.deepEqual(writes, ['\x1b[?2004l', '9', '1', '1', '\r', '\x1b[?2004h'],
+          `expected '9' + '1' + Submit sequence, got ${JSON.stringify(writes)}`)
+      })
+
+      // Multi-select toggle of an option at index ≥ 9 also fires the error.
+      // (Mirror of the single-select case to make sure the multi-select
+      // branch isn't accidentally exempt — both go through labelToDigit.)
+      // Form has 2 questions so the multi-question driver path is taken
+      // (the questions.length===1 branch falls into the legacy single-q
+      // writer which has its own #4292 fall-through-to-label-text path).
+      it('multi-question (multi-select): toggle of option 10+ surfaces ASK_USER_QUESTION_TOO_MANY_OPTIONS', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_mb'
+        session._activeTurn = { uuid: 'turn_mb', synthSeq: 0, startedAt: Date.now() }
+        const elevenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: elevenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_multi_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // User toggled options 'a' (index 0 → digit '1') AND 'k' (index 10 → unrepresentable).
+        session.respondToQuestion('', { 'Q1?': JSON.stringify(['a', 'k']), 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        // No FORM keystrokes — bailed before any digit write. Only the
+        // teardown Ctrl-C ('\x03') is present.
+        assert.deepEqual(writes, ['\x03'],
+          `expected only Ctrl-C teardown write, got ${JSON.stringify(writes)}`)
+        assert.equal(errors.length, 1, 'one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+        assert.equal(errors[0].toolUseId, 'toolu_multi_big')
+      })
+
+      // Multi-select via the comma-joined fallback wire encoding (the
+      // pre-Chunk-B back-compat path that resolveQuestionDigits accepts).
+      // Copilot review feedback: the pre-scan MUST split comma-joined
+      // multi-select strings same as resolveQuestionDigits, else an
+      // unrepresentable pick sent as "a,k" is treated as a single 3-char
+      // label and slips through to the silent default-to-option-1 path.
+      it('multi-question (multi-select): comma-joined "a,k" with k at index 10 surfaces the too-many error', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg_cj'
+        session._activeTurn = { uuid: 'turn_cj', synthSeq: 0, startedAt: Date.now() }
+        const elevenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', multiSelect: true, options: elevenOptions },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_cj', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Comma-joined "a,k" — NOT JSON. k is at index 10 (unrepresentable).
+        session.respondToQuestion('', { 'Q1?': 'a,k', 'Q2?': 'x' })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        assert.deepEqual(writes, ['\x03'],
+          `expected Ctrl-C teardown only, got ${JSON.stringify(writes)}`)
+        assert.equal(errors.length, 1, 'one error emitted')
+        assert.equal(errors[0].code, 'ASK_USER_QUESTION_TOO_MANY_OPTIONS')
+      })
+
+      // Negative: a 10+ option question where the dashboard sent NO
+      // answersMap (back-compat fallback). The pre-#4625 behavior of
+      // defaulting to option 1 is preserved — no error fires because
+      // the user didn't make an unrepresentable pick.
+      it('multi-question: 10+ options with NO answersMap keeps the default-to-option-1 back-compat (no error)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenPlus = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+          .map((label) => ({ label }))
+        const questions = [
+          { question: 'Q1?', options: tenPlus },
+          { question: 'Q2?', options: [{ label: 'x' }, { label: 'y' }] },
+        ]
+        session._pendingUserAnswer = { toolUseId: 'toolu_nomap_big', questions, options: questions[0].options }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Old client: just text, no answersMap.
+        session.respondToQuestion('a')
+        // #4635 — last q (Q2) is single-select → settle + trailing \r.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        // No error — the user's pick (option 1) IS representable; the
+        // default-to-option-1 fallback honors it for Q2 too. This is the
+        // pre-#4625 path; #4625 only fires when the user EXPLICITLY picks
+        // an index ≥ 9.
+        assert.equal(errors.length, 0, `expected no errors for back-compat path, got ${JSON.stringify(errors)}`)
+        // Q1 → '1', Q2 → '1', Submit → '1' + '\r' (#4635).
+        assert.deepEqual(writes, ['\x1b[?2004l', '1', '1', '1', '\r', '\x1b[?2004h'],
+          `expected default-to-1 sequence even with 10+ options, got ${JSON.stringify(writes)}`)
+      })
+
+      // #4848 — single-question pick of option 10+: drive natively via
+      // arrow-key navigation instead of the too-many teardown. Pre-#4848
+      // (#4746) this fired ASK_USER_QUESTION_TOO_MANY_OPTIONS with full
+      // turn teardown; #4848 takes the next step and actually drives the
+      // form by sending matchIdx Down arrows + Enter.
+      it('single-question: pick of option 10+ drives via arrow-nav (#4848)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        // Single question with 12 options; user picked option 11 ('k', idx 10).
+        const tenPlusOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
+          .map((label) => ({ label }))
+        const questions = [{ question: 'Pick one?', options: tenPlusOptions }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_big', questions, options: tenPlusOptions }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Single-question is text-driven (no answersMap) — user picked 'k' (idx 10).
+        session.respondToQuestion('k')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // No too-many error — arrow nav drives the form natively.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // 10× Down arrow + Enter (cursor starts at idx 0, lands at idx 10),
+        // wrapped in paste-disable/enable.
+        const expected = ['\x1b[?2004l', ...Array(10).fill('\x1b[B'), '\r', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected 10× Down + Enter sequence, got ${JSON.stringify(writes)}`)
+
+        // Pending cleared on the happy path.
+        assert.equal(session._pendingUserAnswer, null, 'pending cleared after answer write')
+      })
+
+      // #4848 — single-question last option (idx N-1) in a 30-option
+      // prompt. Pin the larger-N case to make sure arrow count tracks
+      // idx exactly across larger forms.
+      it('single-question: last option in a 30-option question drives via 29× Down + Enter (#4848)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const thirtyOptions = Array.from({ length: 30 }, (_, i) => ({ label: `s-${i}` }))
+        const questions = [{ question: 'Pick one?', options: thirtyOptions }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_30', questions, options: thirtyOptions }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        session.respondToQuestion('s-29')
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        const expected = ['\x1b[?2004l', ...Array(29).fill('\x1b[B'), '\r', '\x1b[?2004h']
+        assert.deepEqual(writes, expected,
+          `expected 29× Down + Enter sequence, got ${JSON.stringify(writes)}`)
+      })
+
+      // Boundary: a 10-option single-question where the user picked option 9
+      // (the LAST representable digit). Driver MUST drive normally, not
+      // bail. Pins the exact edge of the supported range for the single-q path.
+      it('single-question: pick of option 9 in a 10-option question still drives normally', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenOptions = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j']
+          .map((label) => ({ label }))
+        const questions = [{ question: 'Pick one?', options: tenOptions }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_edge', questions, options: tenOptions }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // 'i' is index 8 → digit '9' (the highest supported digit).
+        session.respondToQuestion('i')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // Driver wrote normally — no too-many error.
+        assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
+        // disable + '9' + \r + enable — the legacy single-q byte shape.
+        assert.deepEqual(writes, ['\x1b[?2004l', '9', '\r', '\x1b[?2004h'],
+          `expected '9' + trailing \\r sequence, got ${JSON.stringify(writes)}`)
+      })
+
+      // Negative: single-question 10+ options where the user typed a label
+      // that does NOT match any option (the Other / freeform fallback).
+      // The #4746 guard scopes to MATCHED picks at idx >= 9; an unmatched
+      // label still falls through to typing the literal text (the v0.9.3
+      // / pre-#4292 path). This preserves the existing Other-without-
+      // freeformText back-compat path so old clients still work.
+      it('single-question: 10+ options with no matching label still falls through to label-text (back-compat)', async () => {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        const tenPlus = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']
+          .map((label) => ({ label }))
+        const questions = [{ question: 'Pick one?', options: tenPlus }]
+        session._pendingUserAnswer = { toolUseId: 'toolu_single_other', questions, options: tenPlus }
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Label doesn't match any option — falls through to label-text path.
+        session.respondToQuestion('zzz-not-an-option')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        // No error — only matched picks at idx >= 9 surface the too-many error.
+        assert.equal(errors.length, 0, `expected no errors for unmatched-label fallback, got ${JSON.stringify(errors)}`)
+        // First write is the paste-disable; subsequent writes type the label per-char.
+        assert.equal(writes[0], '\x1b[?2004l', 'paste-disable first')
+        assert.equal(writes[1], 'z', 'falls through to per-char label-text write')
+      })
     })
   })
 

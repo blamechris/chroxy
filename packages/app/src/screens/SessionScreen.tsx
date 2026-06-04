@@ -19,10 +19,18 @@ import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, stripAnsi, nextMessageId } from '../store/connection';
 import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
+import type { SessionIntervention } from '@chroxy/store-core';
+// #4875: shared typed predicate for the AskUserQuestion freeform shape.
+// Replaces the looser 2-condition inline check (`'otherLabel' in &&
+// 'freeformText' in`) with the same 5-condition guard the store layer
+// uses, so widening `SelectOptionValue` to a third object shape can't
+// silently misroute it as freeform.
+import { isFreeformAnswer } from '@chroxy/store-core';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
+import type { SelectOptionValue } from '../components/chat/MessageBubble';
 import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { WebTasksPanel } from '../components/WebTasksPanel';
@@ -60,6 +68,7 @@ const EMPTY_AGENTS: AgentInfo[] = [];
 const EMPTY_MCP_SERVERS: McpServer[] = [];
 const EMPTY_DEV_PREVIEWS: DevPreview[] = [];
 const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
+const EMPTY_INTERVENTIONS: SessionIntervention[] = [];
 
 // Message sent when user taps "Approve" on a plan approval card
 const PLAN_APPROVAL_MESSAGE = 'Go ahead with the plan';
@@ -228,6 +237,18 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].health : 'healthy';
   });
+  // #4879: quiet user-initiated Stop marker. Set by the `session_stopped`
+  // handler (sharedSessionStopped); cleared on next claude_ready. Drives
+  // the subtle "Session stopped." status strip below — distinct from the
+  // loud red crashed banner reserved for unexpected exits.
+  const activeSessionStoppedAt = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].stoppedAt : null;
+  });
+  const activeSessionStoppedCode = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].stoppedCode : null;
+  });
   const isPlanPending = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].isPlanPending : false;
@@ -269,6 +290,13 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].costThresholdWarning : null;
   });
   const costBudget = useConnectionStore((s) => s.costBudget);
+  // #4764 — chroxy-side intervention ring for the active session. Drives the
+  // session-header counter badge and the tap-to-expand recent-interventions
+  // sheet (mirrors the dashboard's FooterBar surface from #4758).
+  const interventions = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].interventions : EMPTY_INTERVENTIONS;
+  });
   const devPreviews = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].devPreviews : EMPTY_DEV_PREVIEWS;
@@ -311,8 +339,12 @@ export function SessionScreen() {
   const searchInputRef = useRef<TextInput>(null);
   const searchFocusTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Speech recognition
-  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
+  // Speech recognition — wire mode from inputSettings.voiceInputMode (#4807).
+  // Mobile defaults to `'continuous'` in the store so users get click-to-stop
+  // semantics matching the dashboard.
+  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition({
+    mode: inputSettings.voiceInputMode,
+  });
   const dictationStartRef = useRef(inputText.length);
   const usedVoiceRef = useRef(false);
 
@@ -658,17 +690,47 @@ export function SessionScreen() {
   };
 
   // Handle tapping a prompt option
-  const handleSelectOption = (value: string, messageId: string, requestId?: string, toolUseId?: string) => {
+  // #4755 — `value` widened to `SelectOptionValue` to carry the
+  // single-question Other / freeform payload (`{otherLabel, freeformText}`).
+  // We forward the object shape directly to `sendUserQuestionResponse` so
+  // the wire layer can emit `{answer: <otherLabel>, freeformText}` for the
+  // server's two-stage TUI write (Other digit → text-input prompt →
+  // freeform text + Enter). The local `markPromptAnswered` summary stores
+  // the typed text — not the literal "Other" label — matching the
+  // post-answer UX of the free-text-only path (#1245) so the chat bubble
+  // shows what the user actually wrote. Mirrors dashboard App.tsx +
+  // `formatQuestionAnswerSummary` for the freeform shape (#4651).
+  const handleSelectOption = (
+    value: SelectOptionValue,
+    messageId: string,
+    requestId?: string,
+    toolUseId?: string,
+  ) => {
+    // #4875: shared `isFreeformAnswer` guard from @chroxy/store-core
+    // narrows `value` to `OtherFreeformAnswer` in the true branch, so the
+    // string-branch arms can drop the `as string` cast in favour of plain
+    // assignment. The previous inline 2-condition check (`'otherLabel' in
+    // && 'freeformText' in`) was looser than the store-layer detector and
+    // would have silently misrouted a future third object shape; the
+    // shared guard keeps both call sites in lockstep.
+    const freeform = isFreeformAnswer(value);
     let sent: 'sent' | 'queued' | false = false;
     if (toolUseId) {
       sent = sendUserQuestionResponse(value, toolUseId);
     } else if (requestId) {
-      sent = sendPermissionResponse(requestId, value);
+      // Permission responses are decision strings ('allow' / 'deny' / etc.)
+      // and never carry an Other / freeform payload — the freeform branch
+      // is defence-in-depth only; in practice this site sees `string`.
+      sent = sendPermissionResponse(requestId, freeform ? value.freeformText : value);
     } else {
-      sent = sendInput(hasTerminal ? value + '\r' : value);
+      const literal = freeform ? value.freeformText : value;
+      sent = sendInput(hasTerminal ? literal + '\r' : literal);
     }
     if (sent === 'sent') {
-      markPromptAnswered(messageId, value);
+      // For the freeform shape, store the typed text (not the label) so
+      // the answered-state UI renders the user's actual answer.
+      const summary = freeform ? value.freeformText : value;
+      markPromptAnswered(messageId, summary);
     }
   };
 
@@ -988,6 +1050,7 @@ export function SessionScreen() {
           serverMode={serverMode}
           isIdle={isIdle}
           activeAgents={activeAgents}
+          interventions={interventions}
           connectedClients={connectedClients}
           customAgents={customAgents}
           mcpServers={mcpServers}
@@ -1105,6 +1168,35 @@ export function SessionScreen() {
             >
               <Icon name="close" size={14} color={COLORS.accentRed} />
             </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* #4879: Quiet stopped status strip for active session — surfaced
+          when the server confirms a user-initiated Stop (session_stopped
+          wire message, wired in #4868). Intentionally informational
+          rather than error-styled: this is positive feedback that the
+          Stop tap landed. Suppressed when health === 'crashed' so the
+          loud red crash banner above isn't doubled up on the unlikely
+          race where both arrive (defensive — the server only emits
+          stopped for clean exits per CliSession._handleChildClose). The
+          strip auto-clears on the next `claude_ready` (typically when
+          the operator sends another message). */}
+      {activeSessionHealth !== 'crashed' && activeSessionStoppedAt !== null && (
+        <View
+          testID="session-stopped-banner"
+          style={[styles.reconnectingBanner, styles.stoppedBanner]}
+        >
+          <View style={styles.errorBannerContent}>
+            <Text
+              testID="session-stopped-banner-text"
+              style={styles.stoppedBannerText}
+              numberOfLines={1}
+            >
+              {activeSessionStoppedCode !== null && activeSessionStoppedCode !== 0
+                ? `Session stopped. (exit ${activeSessionStoppedCode})`
+                : 'Session stopped.'}
+            </Text>
           </View>
         </View>
       )}
@@ -1674,6 +1766,18 @@ const styles = StyleSheet.create({
     color: COLORS.accentRed,
     fontSize: 12,
     fontWeight: '600',
+  },
+  // #4879: subtle "Session stopped." status strip. Uses the muted
+  // backgroundCard surface (greyed out, NOT the red/orange accent banners
+  // reserved for crashes / warnings) and textMuted copy so the operator
+  // reads it as a calm confirmation rather than an error.
+  stoppedBanner: {
+    backgroundColor: COLORS.backgroundCard,
+  },
+  stoppedBannerText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '500',
   },
   sheetOverlay: {
     flex: 1,

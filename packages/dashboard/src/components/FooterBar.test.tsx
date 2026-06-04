@@ -5,7 +5,7 @@
  * busy indicator, and agent count.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { FooterBar } from './FooterBar'
 
 afterEach(cleanup)
@@ -224,6 +224,78 @@ describe('FooterBar', () => {
     expect(onShowQr).toHaveBeenCalledOnce()
   })
 
+  // #4630 — every icon/short-label footer control needs a `title` for
+  // browser-native hover tooltips. The QR button only had aria-label;
+  // version + status-dot had neither. Without these, hovering produced
+  // nothing and SR users had no label either.
+  describe('#4630 tooltips on footer chips and buttons', () => {
+    it('QR button exposes both title and aria-label', () => {
+      render(<FooterBar {...baseProps} onShowQr={vi.fn()} />)
+      const btn = screen.getByLabelText('Show QR code')
+      expect(btn.getAttribute('title'), 'QR button needs title').toBeTruthy()
+      expect(btn.getAttribute('aria-label')).toBe('Show QR code')
+    })
+
+    it('Share-session button exposes both title and aria-label', () => {
+      render(<FooterBar {...baseProps} onShareSession={vi.fn()} />)
+      const btn = screen.getByTestId('btn-share-session')
+      expect(btn.getAttribute('title'), 'Share button needs title').toBeTruthy()
+      expect(btn.getAttribute('aria-label')).toBe('Share this session')
+    })
+
+    it('version chip exposes both title and aria-label', () => {
+      const { container } = render(<FooterBar {...baseProps} serverVersion="1.2.3" />)
+      const v = container.querySelector('.footer-version')
+      expect(v, 'footer-version must exist').toBeTruthy()
+      expect(v!.getAttribute('title'), 'version chip needs title').toBeTruthy()
+      expect(v!.getAttribute('aria-label'), 'version chip needs aria-label').toBeTruthy()
+    })
+
+    it('connection status dot exposes both title and aria-label', () => {
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="connected" />)
+      const dot = container.querySelector('.footer-status-dot')
+      expect(dot, 'footer-status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('title'), 'status dot needs title').toBeTruthy()
+      expect(dot!.getAttribute('aria-label'), 'status dot needs aria-label').toBeTruthy()
+    })
+  })
+
+  // -----------------------------------------------------------------
+  // #4873 — the footer status dot must NOT carry role="status" /
+  // aria-live, because reconnect-storm churn (connecting →
+  // reconnecting → connected → reconnecting…) would announce every
+  // intermediate state to SR users. The dot is still discoverable on
+  // focus/hover via aria-label; settled-state announcements are
+  // handled by the page-level ConnectionAnnouncer.
+  // Also: avoid duplicate SR announcement between the dot and the
+  // adjacent visible status-label.
+  // -----------------------------------------------------------------
+  describe('#4873 footer status dot avoids polite live-region churn', () => {
+    it('connection status dot does NOT carry role="status"', () => {
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="reconnecting" />)
+      const dot = container.querySelector('.footer-status-dot')
+      expect(dot, 'footer-status-dot must exist').toBeTruthy()
+      expect(dot!.getAttribute('role'), 'status dot must NOT be role=status').not.toBe('status')
+    })
+
+    it('connection status dot does NOT carry aria-live', () => {
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="reconnecting" />)
+      const dot = container.querySelector('.footer-status-dot')
+      expect(dot!.getAttribute('aria-live'), 'status dot must not be a live region').toBeNull()
+    })
+
+    it('footer-status-label is aria-hidden to avoid duplicate SR announcement with the dot', () => {
+      // The dot already carries the spoken label via aria-label, so
+      // the adjacent visible text would be announced twice if both
+      // were exposed. Hide the visible label from SR while keeping
+      // the dot's aria-label as the spoken name.
+      const { container } = render(<FooterBar {...baseProps} connectionPhase="connected" />)
+      const label = container.querySelector('.footer-status-label')
+      expect(label, 'footer-status-label must exist').toBeTruthy()
+      expect(label!.getAttribute('aria-hidden')).toBe('true')
+    })
+  })
+
   // -----------------------------------------------------------------
   // #3857 — high-utilization compact-suggestion chip
   // -----------------------------------------------------------------
@@ -282,6 +354,153 @@ describe('FooterBar', () => {
     it('chip is hidden when contextPercent is null (no usage data yet)', () => {
       render(<FooterBar {...baseProps} context="0 tokens" contextPercent={null} onCompact={vi.fn()} />)
       expect(screen.queryByTestId('btn-compact-session')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('#4653 chroxy intervention counter', () => {
+    it('hides the chip when interventions is empty or undefined', () => {
+      const { rerender } = render(<FooterBar {...baseProps} />)
+      expect(screen.queryByTestId('footer-interventions')).not.toBeInTheDocument()
+      rerender(<FooterBar {...baseProps} interventions={[]} />)
+      expect(screen.queryByTestId('footer-interventions')).not.toBeInTheDocument()
+    })
+
+    it('shows the counter chip with singular label for exactly one intervention', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_1', count: 3, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      const chip = screen.getByTestId('footer-interventions')
+      expect(chip).toBeInTheDocument()
+      expect(chip).toHaveTextContent('1 intervention')
+    })
+
+    it('shows plural label when count > 1', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'a', count: 2, timestamp: 1 },
+            { kind: 'multi_question', toolUseId: 'b', count: 3, timestamp: 2 },
+            { kind: 'multi_question', toolUseId: 'c', count: 4, timestamp: 3 },
+          ]}
+        />,
+      )
+      const chip = screen.getByTestId('footer-interventions')
+      expect(chip).toHaveTextContent('3 interventions')
+    })
+
+    it('panel is collapsed by default — list not in the DOM until click', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_x', count: 2, timestamp: 1 },
+          ]}
+        />,
+      )
+      expect(screen.queryByTestId('footer-interventions-panel')).not.toBeInTheDocument()
+    })
+
+    it('clicking the chip expands the panel and lists newest-first', () => {
+      const t1 = Date.now() - 60_000 // 1m ago
+      const t2 = Date.now() - 1_000  // 1s ago
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'older', count: 2, timestamp: t1 },
+            { kind: 'multi_question', toolUseId: 'newer', count: 3, timestamp: t2 },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      const panel = screen.getByTestId('footer-interventions-panel')
+      expect(panel).toBeInTheDocument()
+      // Newest-first: the "newer" row should appear before "older" in the rendered DOM.
+      const items = Array.from(panel.querySelectorAll('[data-testid^="intervention-"]'))
+      expect(items).toHaveLength(2)
+      expect(items[0]?.getAttribute('data-testid')).toBe('intervention-newer')
+      expect(items[1]?.getAttribute('data-testid')).toBe('intervention-older')
+    })
+
+    it('aria-expanded reflects the panel state', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_a', count: 2, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      const chip = screen.getByTestId('footer-interventions')
+      expect(chip).toHaveAttribute('aria-expanded', 'false')
+      fireEvent.click(chip)
+      expect(chip).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.click(chip)
+      expect(chip).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('describes the multi_question kind with the question count', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_q', count: 4, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      expect(screen.getByTestId('intervention-toolu_q')).toHaveTextContent('4 questions')
+      expect(screen.getByTestId('intervention-toolu_q')).toHaveTextContent(/ask one at a time/i)
+    })
+
+    it('close button collapses the panel', () => {
+      render(
+        <FooterBar
+          {...baseProps}
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_c', count: 2, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      expect(screen.getByTestId('footer-interventions-panel')).toBeInTheDocument()
+      fireEvent.click(screen.getByLabelText('Close interventions panel'))
+      expect(screen.queryByTestId('footer-interventions-panel')).not.toBeInTheDocument()
+    })
+
+    it('collapses the panel when the active session changes (#4653 Copilot review)', () => {
+      // The FooterBar is a single instance shared across sessions (not keyed
+      // on activeSessionId), so without an explicit effect the panel would
+      // stay open showing the OLD session's entries after a switch. This
+      // pins the reset-on-switch behavior.
+      const { rerender } = render(
+        <FooterBar
+          {...baseProps}
+          activeSessionId="sess-a"
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_a', count: 2, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('footer-interventions'))
+      expect(screen.getByTestId('footer-interventions-panel')).toBeInTheDocument()
+      // Switch to a different session — panel must collapse.
+      rerender(
+        <FooterBar
+          {...baseProps}
+          activeSessionId="sess-b"
+          interventions={[
+            { kind: 'multi_question', toolUseId: 'toolu_b', count: 3, timestamp: Date.now() },
+          ]}
+        />,
+      )
+      expect(screen.queryByTestId('footer-interventions-panel')).not.toBeInTheDocument()
     })
   })
 })
