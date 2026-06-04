@@ -879,3 +879,193 @@ describe('DockerContainerPool — forget() (#5045 review)', () => {
     assert.equal(execFile.calls.length, 0, 'must not call docker rm -f with an empty id')
   })
 })
+
+describe('DockerContainerPool — inspect() (#5052)', () => {
+  /**
+   * `inspect()` is a read-only snapshot of what's currently parked in the
+   * pool. The event stream (#5044) answers "what did the pool do in the
+   * last 60s?"; `inspect()` answers "what's parked right now, and for how
+   * long?" — feeding the dashboard pool-health panel (#5053).
+   *
+   * Contract per #5052:
+   *   - Returns an Array of `{ key, size, oldestIdleMs }` — one entry per
+   *     non-empty bucket.
+   *   - Sorted by `key` ascending so the output is stable for tests and
+   *     dashboard diffs.
+   *   - `oldestIdleMs` = `now - min(releasedAt for entry in bucket)`, i.e.
+   *     `max(now - releasedAt)` — the idle age of the OLDEST parked entry.
+   *   - SHALLOW snapshot: caller mutations to the returned array MUST NOT
+   *     leak back into pool state (no live Map / array references).
+   *   - `release()` stamps `releasedAt` on every entry so `oldestIdleMs`
+   *     can be computed without iterating timers.
+   */
+
+  it('returns an empty array on an empty pool', () => {
+    const pool = new DockerContainerPool({ _execFile: execFileStub() })
+    const snap = pool.inspect()
+    assert.ok(Array.isArray(snap))
+    assert.equal(snap.length, 0)
+  })
+
+  it('returns one entry per non-empty bucket with key, size, oldestIdleMs', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    let now = 1_000_000
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+      _now: () => now,
+    })
+    await pool.release('shape-a', 'C1')
+    now += 250
+    const snap = pool.inspect()
+    assert.equal(snap.length, 1)
+    assert.equal(snap[0].key, 'shape-a')
+    assert.equal(snap[0].size, 1)
+    assert.equal(snap[0].oldestIdleMs, 250)
+  })
+
+  it('computes oldestIdleMs from the OLDEST entry in the bucket (highest age)', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    let now = 1_000_000
+    const pool = new DockerContainerPool({
+      maxPerKey: 5,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+      _now: () => now,
+    })
+    await pool.release('shape', 'OLD') // releasedAt = 1_000_000
+    now += 1000
+    await pool.release('shape', 'NEW') // releasedAt = 1_001_000
+    now += 500 // inspect at 1_001_500
+    const snap = pool.inspect()
+    assert.equal(snap.length, 1)
+    assert.equal(snap[0].key, 'shape')
+    assert.equal(snap[0].size, 2)
+    // OLD's idle age: 1_001_500 - 1_000_000 = 1500
+    // NEW's idle age: 1_001_500 - 1_001_000 = 500
+    // oldestIdleMs picks the larger one — the oldest entry.
+    assert.equal(snap[0].oldestIdleMs, 1500)
+  })
+
+  it('returns buckets sorted by key ascending (stable output)', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    // Release in non-alphabetical order; inspect() must still sort asc.
+    await pool.release('shape-c', 'C_C')
+    await pool.release('shape-a', 'C_A')
+    await pool.release('shape-b', 'C_B')
+    const snap = pool.inspect()
+    assert.deepEqual(snap.map((b) => b.key), ['shape-a', 'shape-b', 'shape-c'])
+  })
+
+  it('omits empty buckets — only non-empty buckets appear in the snapshot', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    await pool.release('shape-keep', 'C_KEEP')
+    await pool.release('shape-drain', 'C_DRAIN')
+    // Drain shape-drain so its bucket is empty.
+    assert.equal(pool.acquire('shape-drain'), 'C_DRAIN')
+    const snap = pool.inspect()
+    assert.equal(snap.length, 1)
+    assert.equal(snap[0].key, 'shape-keep')
+  })
+
+  it('reflects state after eviction (over-cap release does not appear in snapshot)', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      maxPerKey: 1,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    await pool.release('k', 'C1')
+    await pool.release('k', 'C2') // evicted over cap
+    const snap = pool.inspect()
+    assert.equal(snap.length, 1)
+    assert.equal(snap[0].size, 1)
+  })
+
+  it('reflects state after markSoiled+release (soiled-evicted entry does not appear)', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    pool.markSoiled('C_SOILED')
+    await pool.release('k', 'C_SOILED')
+    const snap = pool.inspect()
+    assert.equal(snap.length, 0)
+  })
+
+  it('returns a SHALLOW snapshot — mutating the returned array must not affect pool state', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    await pool.release('shape-a', 'C1')
+    await pool.release('shape-b', 'C2')
+    const snap = pool.inspect()
+    // Mutate the array and the entry objects.
+    snap.length = 0
+    const snap2 = pool.inspect()
+    assert.equal(snap2.length, 2, 'pool must still report both buckets')
+    snap2[0].size = 999
+    snap2[0].key = 'tampered'
+    const snap3 = pool.inspect()
+    assert.notEqual(snap3[0].size, 999, 'pool state must not have been mutated')
+    assert.notEqual(snap3[0].key, 'tampered')
+  })
+
+  it('release stamps releasedAt on every pooled entry', async () => {
+    // The pool needs releasedAt to compute oldestIdleMs without
+    // iterating timers. Verify the stamp lands on the internal entry.
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    let now = 1_000_000
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+      _now: () => now,
+    })
+    await pool.release('k', 'C1')
+    const bucket = pool._entries.get('k')
+    assert.ok(bucket && bucket.length === 1)
+    assert.equal(bucket[0].releasedAt, 1_000_000)
+    // A second release of the same id resets releasedAt to "now".
+    assert.equal(pool.acquire('k'), 'C1')
+    now += 5000
+    await pool.release('k', 'C1')
+    const bucket2 = pool._entries.get('k')
+    assert.equal(bucket2[0].releasedAt, 1_005_000)
+  })
+
+  it('inspect after shutdown returns an empty array', async () => {
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({ _execFile: execFile })
+    await pool.release('k', 'C1')
+    await pool.shutdown()
+    const snap = pool.inspect()
+    assert.equal(snap.length, 0)
+  })
+})
