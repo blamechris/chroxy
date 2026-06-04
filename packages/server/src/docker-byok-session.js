@@ -1098,12 +1098,12 @@ export class DockerByokSession extends ClaudeByokSession {
    * value, in which case a change to the file's `image` field doesn't
    * actually change the resolved launch shape).
    *
-   * Note on stability: `JSON.stringify` follows insertion order for
-   * plain objects, which is fine for `_dcConfig` because both the
-   * parser and the sanitiser build it in a deterministic order. If a
-   * future refactor reshuffles the fields, two equivalent configs
-   * could fingerprint differently — at worst that's a one-time pool
-   * miss after the change, never a stale-config hit.
+   * Note on stability: #5103 — the input is canonicalised via
+   * `_canonicalStringify` (object keys sorted recursively) before
+   * hashing, so semantically identical overlays produce the same
+   * fingerprint regardless of source-side key order. Arrays are
+   * preserved in declared order because devcontainer.json arrays
+   * (mounts, forwardPorts) are order-sensitive.
    *
    * @param {object|null} resolved
    * @returns {string|null}
@@ -1112,16 +1112,46 @@ export class DockerByokSession extends ClaudeByokSession {
     if (!resolved || typeof resolved !== 'object') return null
     // Project the resolved overlay down to only the fields that
     // affect container provisioning but are NOT already in the base
-    // pool key. Built in a fixed key order so the fingerprint is
-    // stable regardless of how the source `resolved` object was
-    // assembled.
+    // pool key. Key order here is irrelevant — _canonicalStringify
+    // sorts before hashing.
     const fingerprintInput = {
       mounts: resolved.mounts,
       containerEnv: resolved.containerEnv,
       forwardPorts: resolved.forwardPorts,
       postCreateCommand: resolved.postCreateCommand,
     }
-    return createHash('sha1').update(JSON.stringify(fingerprintInput)).digest('hex').slice(0, 16)
+    return createHash('sha1').update(this._canonicalStringify(fingerprintInput)).digest('hex').slice(0, 16)
+  }
+
+  /**
+   * #5103: Canonical (stable) JSON-shaped stringifier that sorts object
+   * keys recursively. Arrays preserve their declared order because
+   * devcontainer.json arrays (mounts, forwardPorts, runArgs) are
+   * order-sensitive — the consuming tool may treat the first mount
+   * differently from the last, and forwarded ports surface in the UI
+   * in declared order.
+   *
+   * Used by `_computeDevcontainerFingerprint` so an editor that
+   * alphabetises object keys (or a hand-edit that reorders them)
+   * cannot bust the pool key for a semantically unchanged overlay.
+   *
+   * NOT a full JSON serialiser — this only handles values reachable
+   * from a parsed devcontainer.json (object, array, string, number,
+   * boolean, null, undefined). It deliberately omits exotic JSON.stringify
+   * features (toJSON, replacer, BigInt) — the call site never sees them.
+   *
+   * @param {unknown} value
+   * @returns {string}
+   */
+  _canonicalStringify(value) {
+    if (Array.isArray(value)) {
+      return '[' + value.map(v => this._canonicalStringify(v)).join(',') + ']'
+    }
+    if (value && typeof value === 'object') {
+      const keys = Object.keys(value).sort()
+      return '{' + keys.map(k => JSON.stringify(k) + ':' + this._canonicalStringify(value[k])).join(',') + '}'
+    }
+    return JSON.stringify(value)
   }
 
   /**

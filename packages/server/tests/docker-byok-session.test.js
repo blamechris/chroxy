@@ -3019,6 +3019,91 @@ describe('DockerByokSession — devcontainer fingerprint in pool key (#5080)', (
       rmSync(cwdB, { recursive: true, force: true })
     }
   })
+
+  it('#5103: containerEnv key order in devcontainer.json does NOT change fingerprint', () => {
+    // The pre-#5103 fingerprint used JSON.stringify, which serialises
+    // object keys in insertion order. An editor that alphabetises keys
+    // (or a hand-edit that reorders them) would produce a different
+    // fingerprint for semantically identical overlays, busting the pool
+    // unnecessarily. The fix: canonical-stringify (sort object keys
+    // recursively) before hashing. JSON parsing preserves source order,
+    // so writing the file with two different key orders is a faithful
+    // proxy for the editor-reformat scenario.
+    const cwdA = makeDevcontainerCwd({ containerEnv: { LANG: 'en_US.UTF-8', TZ: 'UTC' } })
+    const cwdB = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(cwdB, '.devcontainer'), { recursive: true })
+    // Hand-craft the JSON so the key order is preserved on parse —
+    // JSON.stringify({LANG, TZ}) and JSON.stringify({TZ, LANG}) produce
+    // different strings, and so do their parsed-then-restringified forms
+    // without canonicalisation.
+    writeFileSync(
+      join(cwdB, '.devcontainer', 'devcontainer.json'),
+      '{"containerEnv":{"TZ":"UTC","LANG":"en_US.UTF-8"}}'
+    )
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'containerEnv key order must not affect the fingerprint')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('#5103: nested object key order does NOT change fingerprint', () => {
+    // Recursion check — a nested object inside the overlay must also be
+    // canonicalised. We exercise this via containerEnv (the most likely
+    // map field) but the contract is: every plain object at every depth
+    // is key-sorted before hashing.
+    const cwdA = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    const cwdB = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(cwdA, '.devcontainer'), { recursive: true })
+    mkdirSync(join(cwdB, '.devcontainer'), { recursive: true })
+    writeFileSync(
+      join(cwdA, '.devcontainer', 'devcontainer.json'),
+      '{"containerEnv":{"A":"1","B":"2","C":"3"},"postCreateCommand":"echo hi"}'
+    )
+    writeFileSync(
+      join(cwdB, '.devcontainer', 'devcontainer.json'),
+      '{"postCreateCommand":"echo hi","containerEnv":{"C":"3","B":"2","A":"1"}}'
+    )
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'top-level and nested key reordering must not affect the fingerprint')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('#5103: forwardPorts array order DOES change fingerprint (arrays are order-sensitive)', () => {
+    // Arrays in devcontainer.json are NOT semantically order-insensitive —
+    // forwardPorts: [3000, 8080] is not the same as [8080, 3000] in
+    // every consuming tool, and mounts order can matter for overlay
+    // shadowing. The canonical serializer must NOT sort array values,
+    // only object keys. Two overlays differing only in array order
+    // must therefore still fingerprint differently.
+    const cwdA = makeDevcontainerCwd({ forwardPorts: [3000, 8080] })
+    const cwdB = makeDevcontainerCwd({ forwardPorts: [8080, 3000] })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'array order must still bust the fingerprint — arrays are order-sensitive')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('DockerByokSession — Docker Compose support (#5024)', () => {
