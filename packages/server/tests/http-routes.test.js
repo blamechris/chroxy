@@ -403,11 +403,13 @@ describe('http-routes', () => {
     })
 
     // #5101 — when env-management is disabled, resolveRemoveImage falls
-    // through to lazily constructing a DockerBackend. Caching that
-    // instance avoids re-opening a docker socket on every DELETE during
-    // batch cleanup. The test seam (`_snapshotRemoveImage`) and the
-    // env-manager path (`environmentManager._backend`) both pre-empt the
-    // cache, so they're unaffected.
+    // through to lazily constructing a DockerBackend. Caching that init
+    // avoids re-running the dynamic `import()` and re-allocating a
+    // DockerBackend on every DELETE during batch cleanup — the `docker
+    // rmi` shell-out still happens per call. The test seam
+    // (`_snapshotRemoveImage`) and the env-manager path
+    // (`environmentManager._backend`) both pre-empt the cache, so they're
+    // unaffected.
     describe('DockerBackend caching for DELETE (#5101)', () => {
       beforeEach(() => {
         _resetSnapshotBackendCacheForTests()
