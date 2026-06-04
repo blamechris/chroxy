@@ -6,6 +6,44 @@ const log = createLogger('docker-backend')
 const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
 
 /**
+ * #5127 — Cap on the per-stream buffer the streaming execInEnvironment path
+ * retains for the resolved value / failure tail. The buffered execFile path
+ * rejects past Node's 1 MB maxBuffer; the streaming path used to accumulate
+ * without limit, so a postCreateCommand that printed hundreds of MB grew the
+ * daemon's retained buffer unbounded.
+ *
+ * We keep the LAST N bytes (the tail) because the failure event only surfaces
+ * a 4 KiB tail (POST_CREATE_OUTPUT_CAP_BYTES in docker-byok-session.js) and
+ * diagnostic info (the actual exception, exit codes) lands at the end. 256 KiB
+ * is comfortably larger than the 4 KiB failure tail while staying bounded.
+ *
+ * onData STILL fires for every chunk — streaming is not truncated, only the
+ * retained accumulator is capped.
+ */
+const STREAM_RETAINED_BUFFER_CAP_BYTES = 256 * 1024
+
+/**
+ * #5126 — Grace period after a SIGTERM-on-timeout before escalating to
+ * SIGKILL. A child that ignores SIGTERM (or is stuck uninterruptibly) would
+ * otherwise leave the streaming promise pending forever, since it only settles
+ * on the subsequent `close`.
+ */
+const STREAM_SIGKILL_GRACE_MS = 5_000
+
+/**
+ * Append `chunk` to `buf` keeping at most `cap` UTF-16 code units (the tail).
+ * Uses string length as a cheap proxy for byte size — exact byte accounting
+ * isn't required since the value is a diagnostic tail and the downstream
+ * failure event re-caps to 4 KiB. A multibyte sequence clipped at the cut
+ * boundary decodes to U+FFFD, which is acceptable for a tail.
+ */
+function appendCapped(buf, chunk, cap = STREAM_RETAINED_BUFFER_CAP_BYTES) {
+  const next = buf + chunk
+  if (next.length <= cap) return next
+  return next.slice(next.length - cap)
+}
+
+/**
  * Env vars explicitly forwarded into the container during streamCliInEnvironment.
  * Mirrors the allowlist in docker-sdk-session.js — keep both in sync.
  *
@@ -236,11 +274,16 @@ export class DockerBackend {
         let settled = false
         let timedOut = false
         let timer = null
+        // #5126 — SIGKILL escalation timer, armed only after the SIGTERM-on-
+        // timeout fires. Cleared on close so a child that exits promptly never
+        // gets force-killed.
+        let killTimer = null
 
         const settle = (fn, arg) => {
           if (settled) return
           settled = true
           if (timer) clearTimeout(timer)
+          if (killTimer) clearTimeout(killTimer)
           fn(arg)
         }
 
@@ -252,6 +295,22 @@ export class DockerBackend {
             if (child && !child.killed) {
               try { child.kill('SIGTERM') } catch { /* already gone */ }
             }
+            // #5126 — Escalate to SIGKILL if the child ignores SIGTERM. The
+            // promise otherwise only settles on `close`; a child stuck in an
+            // uninterruptible state would leave it pending forever. Cleared on
+            // close via settle(); unref'd so it never holds the loop open.
+            //
+            // Gate on `!settled` (the `close` hasn't fired) rather than
+            // `!child.killed`: Node flips `child.killed` to true the moment a
+            // signal is *delivered*, even if the process keeps running, so a
+            // `!child.killed` guard would skip the SIGKILL on exactly the
+            // stuck-child case this is meant to handle.
+            killTimer = setTimeout(() => {
+              if (!settled && child) {
+                try { child.kill('SIGKILL') } catch { /* already gone */ }
+              }
+            }, STREAM_SIGKILL_GRACE_MS)
+            if (killTimer && typeof killTimer.unref === 'function') killTimer.unref()
           }, timeout)
           // Don't let the timeout keep the event loop alive on its own.
           if (timer && typeof timer.unref === 'function') timer.unref()
@@ -260,7 +319,9 @@ export class DockerBackend {
         if (child.stdout) {
           child.stdout.setEncoding('utf-8')
           child.stdout.on('data', (chunk) => {
-            stdout += chunk
+            // #5127 — retain a bounded tail, not the full stream. onData still
+            // fires for every chunk below (streaming is never truncated).
+            stdout = appendCapped(stdout, chunk)
             // Never let an onData throw escape and orphan the child.
             try { onData(chunk, 'stdout') } catch { /* listener error — ignore */ }
           })
@@ -268,7 +329,7 @@ export class DockerBackend {
         if (child.stderr) {
           child.stderr.setEncoding('utf-8')
           child.stderr.on('data', (chunk) => {
-            stderr += chunk
+            stderr = appendCapped(stderr, chunk)
             try { onData(chunk, 'stderr') } catch { /* listener error — ignore */ }
           })
         }
