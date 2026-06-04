@@ -1248,8 +1248,13 @@ describe('DockerBackend.execInEnvironment()', () => {
   // #5126 — SIGKILL escalation when a child ignores SIGTERM on timeout.
   // ───────────────────────────────────────────────────────────────────────
 
-  // A child that records every signal it receives but NEVER flips `killed`
-  // (i.e. it ignores SIGTERM) and never emits `close` on its own.
+  // A child that records every signal it receives and flips `killed=true` on
+  // the FIRST signal — matching real Node `ChildProcess.kill()` semantics,
+  // where `killed` means "a signal was delivered", NOT "the process exited".
+  // The process keeps running (never emits `close` on its own), simulating a
+  // stuck child that ignores SIGTERM. Because `killed` is true after SIGTERM,
+  // this stub would expose any escalation logic that (wrongly) gates SIGKILL
+  // on `!child.killed` — such logic would never fire SIGKILL.
   function makeStubbornChild() {
     const child = new EventEmitter()
     child.stdout = new PassThrough()
@@ -1258,9 +1263,7 @@ describe('DockerBackend.execInEnvironment()', () => {
     child.signals = []
     child.kill = (sig) => {
       child.signals.push(sig)
-      // Deliberately do NOT set child.killed — simulate a process that
-      // ignores SIGTERM. SIGKILL would normally be uncatchable; we let the
-      // backend's escalation path do its thing and assert on the signal log.
+      child.killed = true // Node sets this on signal delivery, not on exit.
     }
     return child
   }

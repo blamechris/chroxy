@@ -299,8 +299,14 @@ export class DockerBackend {
             // promise otherwise only settles on `close`; a child stuck in an
             // uninterruptible state would leave it pending forever. Cleared on
             // close via settle(); unref'd so it never holds the loop open.
+            //
+            // Gate on `!settled` (the `close` hasn't fired) rather than
+            // `!child.killed`: Node flips `child.killed` to true the moment a
+            // signal is *delivered*, even if the process keeps running, so a
+            // `!child.killed` guard would skip the SIGKILL on exactly the
+            // stuck-child case this is meant to handle.
             killTimer = setTimeout(() => {
-              if (child && !child.killed) {
+              if (!settled && child) {
                 try { child.kill('SIGKILL') } catch { /* already gone */ }
               }
             }, STREAM_SIGKILL_GRACE_MS)
