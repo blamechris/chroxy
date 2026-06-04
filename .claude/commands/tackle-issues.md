@@ -41,7 +41,6 @@ REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 REPO_NAME=$(basename "$REPO")
 SESSION_START=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-# Session branches use feat/, fix/, refactor/, test/ prefixes matching existing conventions
 BRANCH_PREFIX="feat/"
 ```
 
@@ -55,23 +54,11 @@ Build the initial queue using the same logic as `/autonomous-dev-flow` Phase 0:
 - Filter out assigned issues
 - Apply sort and cap
 
-**Pre-queue: check for existing PRs covering each issue.** Before declaring the queue final, scan open PRs for closing-keyword references to each queued issue. If any hit, mark that issue as `Existing PR — defer` and remove it from the worker queue. This prevents worktree agents from duplicating an external contributor's work (or your own stale branch).
-
-```bash
-for ISSUE_NUM in "${QUEUE[@]}"; do
-  HITS=$(gh pr list --state open --search "Closes #${ISSUE_NUM} OR Fixes #${ISSUE_NUM} OR Resolves #${ISSUE_NUM}" --json number,title,author --jq '.[] | "#\(.number) by @\(.author.login): \(.title)"')
-  if [ -n "$HITS" ]; then
-    echo "Issue #${ISSUE_NUM} already has open PR(s): $HITS"
-    # Drop from worker queue; surface in the marathon-queue display as deferred
-  fi
-done
-```
-
 **Validate:**
 - At least 1 issue must be open and unassigned
 - If 0 issues match, report and stop
 
-Display the marathon queue (deferred issues shown but greyed/marked, so the user can decide whether to override):
+Display the marathon queue:
 
 ```markdown
 ## Marathon Session — {N} issues, up to {W} waves
@@ -82,7 +69,6 @@ Display the marathon queue (deferred issues shown but greyed/marked, so the user
 | 2 | #15 — Add leaderboard | from-review | Decompose → sub-issues |
 | 3 | #18 — Auth integration tests | enhancement | Implement |
 | — | #16 — Refactor auth module | enhancement | Assigned to @user (skipped) |
-| — | #21 — MCP config parser | from-review | Existing PR #4082 by @external — defer |
 
 **Mode:** Unattended marathon (up to {W} waves)
 **Merge after:** {Yes/No}
@@ -342,7 +328,7 @@ These issues could not be implemented after {W} waves. Each has a detailed comme
 
 ### Decomposition Log
 
-- **#15** (from-review) → #20, #21, #22 — all completed in W1
+- **#15** (large scope) → #20, #21, #22 — all completed in W1
 
 ### Wave-by-Wave Summary
 
@@ -398,4 +384,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 15. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running `/full-review` in every wave.
 16. **Sync before every branch** — Always `git checkout main && git pull` before starting each issue in each wave.
 17. **Morning summary is mandatory** — Even if interrupted, output the best summary possible with data collected so far.
-<!-- skill-templates: tackle-issues 57ceacc 2026-05-27 -->
+<!-- skill-templates: tackle-issues ebdb14e 2026-06-02 -->

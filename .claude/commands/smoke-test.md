@@ -87,11 +87,13 @@ Output a summary table:
 | # | Check | Status | Notes |
 |---|-------|--------|-------|
 | 1 | Dashboard loads | PASS | HTTP 200, WS connected |
-| 2 | Session creation | PASS | Modal opens, form works |
-| 3 | Keyboard shortcuts | PASS | Ctrl+N, Ctrl+K, ? all work |
+| 2 | Session creation | PASS | Ctrl+N modal opens |
+| 3 | Keyboard shortcuts | PASS | ? and Ctrl+K work |
 
 **Screenshots reviewed:** N
 **Visual issues found:** M (describe any issues)
+
+If the test failed, check that the server is running and the dashboard was rebuilt. Provider picker CSS is invisible without a rebuild.
 ```
 
 ### 5. Cleanup
@@ -174,8 +176,9 @@ Many apps need a backend connection before the full UI renders. Always wait for 
 ```javascript
 // Wait for app to be fully loaded and connected
 await page.waitForFunction(() => {
-  const body = document.body.innerText
-  return !body.includes('Disconnected') && !body.includes('Connecting...')
+  // Check that page does NOT contain "Disconnected" or "Connecting..."
+  const bodyText = document.body.innerText
+  return !bodyText.includes('Disconnected') && !bodyText.includes('Connecting...')
 }, { timeout: 10000 })
 ```
 
@@ -198,6 +201,6 @@ Organize checks into logical groups:
 4. **Stable selectors** — Use aria labels and roles, not brittle CSS class names that change with refactors.
 5. **Visual verification is the point** — The automated checks catch DOM presence. Reading screenshots catches visual regressions (z-index, color, spacing).
 6. **Idempotent** — Safe to run repeatedly. Don't create persistent state (sessions, data, etc.) that would affect the next run.
-7. **Dashboard rebuild required** — Always run `npm run dashboard:build` before testing. Provider picker CSS and other assets are not visible without rebuild.
-8. **Keyboard shortcut quirk** — `?` shortcut fails if textarea has focus (key goes to input, not shortcut handler). Click body first before testing the shortcut.
-<!-- skill-templates: smoke-test 57ceacc 2026-05-27 -->
+7. **Rebuild dashboard before testing** — Dashboard serves compiled Vite bundles. Source changes are NOT visible without `npm run dashboard:build`.
+8. **Known quirk: `?` shortcut fails with textarea focus** — If the textarea has focus, the keystroke goes to input, not the shortcut handler. Test selector issue, not app bug. Click body first.
+<!-- skill-templates: smoke-test ebdb14e 2026-06-02 -->

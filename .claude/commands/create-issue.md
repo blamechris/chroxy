@@ -142,4 +142,4 @@ Then below the table:
 4. **Be specific** — The issue description must be self-contained. Another developer should understand it without reading the review thread.
 5. **Always include acceptance criteria** — Even if just one checkbox. Issues without criteria are hard to close confidently.
 6. **Link to source** — If from a review, always include the PR number and comment URL in the body.
-<!-- skill-templates: create-issue 57ceacc 2026-05-27 -->
+<!-- skill-templates: create-issue ebdb14e 2026-06-02 -->

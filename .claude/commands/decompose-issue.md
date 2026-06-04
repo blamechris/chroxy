@@ -207,7 +207,7 @@ Next: `/autonomous-dev-flow #${SUB_1} #${SUB_2} #${SUB_3}` to implement them, or
 4. **Each sub-issue must be independently implementable.** A separate PR could ship it. If a sub-issue depends on another sub-issue's code, you split wrong — re-think the seams.
 5. **Cross-link both directions.** Every sub-issue body says "Part of #N". The parent gets a single "Decomposed into #A, #B, #C" comment.
 6. **2-5 sub-issues.** Fewer than 2 means the parent wasn't actually too complex (recommend `--force` exit instead). More than 5 means the work is unbounded and probably needs a design doc, not decomposition.
-7. **Respect labels that don't exist.** Skip missing labels gracefully — don't fail the run because the repo doesn't use `complexity:*`.
+7. **Respect labels that don't exist.** Skip missing labels gracefully — don't fail the run because the repo doesn't use a label.
 8. **NO attribution.** Follow the project's attribution policy. No "Generated with Claude" / `Co-Authored-By` lines in issue bodies or comments.
 
 ## When NOT to use this skill
@@ -216,4 +216,4 @@ Next: `/autonomous-dev-flow #${SUB_1} #${SUB_2} #${SUB_3}` to implement them, or
 - The parent describes a single atomic operation (a migration, a one-line config change, a single test) → it doesn't decompose, it just gets done.
 - The parent already has a "Decomposed into" comment → use the existing sub-issues unless they're wrong.
 - The work spans multiple repos → that's a coordination problem, not a decomposition problem. Open issues in each repo separately.
-<!-- skill-templates: decompose-issue b4268c2 2026-05-27 -->
+<!-- skill-templates: decompose-issue ebdb14e 2026-06-02 -->

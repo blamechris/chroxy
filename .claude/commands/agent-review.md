@@ -32,16 +32,16 @@ The agent reviews against these standards:
 - [ ] Proper error handling
 - [ ] No obvious security issues (injection, path traversal, credential exposure)
 - [ ] Clean naming and structure
-- [ ] Server: ES modules, no semicolons, single quotes, EventEmitter cleanup on destroy/close
-- [ ] App: TypeScript strict, functional components with hooks, Zustand immutable updates via `set()`, no `any` types, platform-aware code, no `AbortSignal.timeout()` (not in React Native)
+- **Server:** ES modules (import/export), no semicolons, single quotes, EventEmitter pattern for component communication, proper cleanup on destroy/close
+- **App:** TypeScript strict, functional components with hooks, Zustand store patterns (immutable updates via `set()`), no `any` types, platform-aware code, no `AbortSignal.timeout()` (not in React Native)
 
 #### Architecture Alignment
 - [ ] Changes follow established patterns
 - [ ] No breaking changes to existing interfaces/APIs
 - [ ] New patterns documented if introduced
-- [ ] CLI mode and PTY/terminal mode remain independent paths
-- [ ] WS protocol messages documented in ws-server.js header
-- [ ] Auth flow: auth → auth_ok → server_mode → status → claude_ready
+- CLI mode and PTY/terminal mode remain independent paths
+- WS protocol messages documented in ws-server.js header
+- Auth flow: auth → auth_ok → server_mode → status → claude_ready
 
 #### Testing
 - [ ] Tests pass
@@ -197,4 +197,4 @@ Mindset: "Will this code work reliably over a cellular connection through a tunn
 3. **Pragmatic over perfect** - Working code first, polish later
 4. **Reliability first** - Always consider error recovery and edge cases
 5. **Keep it simple** - No over-engineering, no premature abstractions
-<!-- skill-templates: agent-review 57ceacc 2026-05-27 -->
+<!-- skill-templates: agent-review ebdb14e 2026-06-02 -->
