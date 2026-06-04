@@ -8,12 +8,34 @@
  * Render tests focus on what users see: collapsed by default, expands
  * on click, surfaces input summary + result text.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ChildAgentEventList, __reduceEventsForTest } from './ChildAgentEventList'
+import type { PermissionDecision } from '../store/types'
+
+// #5061 — the component reads `resolvedPermissions` and calls
+// `sendPermissionResponse` from the connection store. Mock it so the
+// nested permission affordance can be tested without booting Zustand.
+type MockStore = {
+  resolvedPermissions: Record<string, PermissionDecision>
+  sendPermissionResponse: (requestId: string, decision: PermissionDecision) => void
+}
+const sendPermissionResponseMock = vi.fn()
+let mockStoreState: MockStore = {
+  resolvedPermissions: {},
+  sendPermissionResponse: sendPermissionResponseMock,
+}
+vi.mock('../store/connection', () => ({
+  useConnectionStore: <T,>(selector: (s: MockStore) => T): T => selector(mockStoreState),
+}))
 
 afterEach(() => {
   cleanup()
+  sendPermissionResponseMock.mockReset()
+  mockStoreState = {
+    resolvedPermissions: {},
+    sendPermissionResponse: sendPermissionResponseMock,
+  }
 })
 
 describe('reduceEvents (#5016)', () => {
@@ -102,11 +124,11 @@ describe('reduceEvents (#5016)', () => {
   it('ignores unknown event types (forward-compat against future server emits)', () => {
     const out = __reduceEventsForTest([
       { type: 'tool_start', payload: { toolUseId: 'c1', tool: 'Read' } },
-      { type: 'permission_request', payload: { tool: 'Bash' } },
       { type: 'something_new', payload: { foo: 'bar' } },
     ])
     expect(out.tools).toHaveLength(1)
     expect(out.assistantText).toBe('')
+    expect(out.permissions).toHaveLength(0)
   })
 
   it('replays of tool_start preserve resolved state on the row', () => {
@@ -119,6 +141,61 @@ describe('reduceEvents (#5016)', () => {
     expect(out.tools).toHaveLength(1)
     expect(out.tools[0]?.hasResult).toBe(true)
     expect(out.tools[0]?.result).toBe('done')
+  })
+
+  // #5061 — child permission_request / permission_resolved relay.
+  it('surfaces one permission row per child permission_request', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash', description: 'run ls' } },
+    ])
+    expect(out.permissions).toHaveLength(1)
+    expect(out.permissions[0]?.requestId).toBe('p1')
+    expect(out.permissions[0]?.tool).toBe('Bash')
+    expect(out.permissions[0]?.description).toBe('run ls')
+    expect(out.permissions[0]?.serverDecision).toBeUndefined()
+  })
+
+  it('ignores a permission_request without a string requestId', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_request', payload: { tool: 'Bash' } },
+    ])
+    expect(out.permissions).toHaveLength(0)
+  })
+
+  it('settles a permission row when permission_resolved relays a decision', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+      { type: 'permission_resolved', payload: { requestId: 'p1', decision: 'deny' } },
+    ])
+    expect(out.permissions).toHaveLength(1)
+    expect(out.permissions[0]?.serverDecision).toBe('deny')
+  })
+
+  it('synthesises a permission row when permission_resolved arrives first (out-of-order relay)', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_resolved', payload: { requestId: 'pX', decision: 'allow' } },
+    ])
+    expect(out.permissions).toHaveLength(1)
+    expect(out.permissions[0]?.requestId).toBe('pX')
+    expect(out.permissions[0]?.serverDecision).toBe('allow')
+  })
+
+  it('treats a permission_resolved without a decision as denied', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+      { type: 'permission_resolved', payload: { requestId: 'p1' } },
+    ])
+    expect(out.permissions[0]?.serverDecision).toBe('denied')
+  })
+
+  it('replayed permission_request preserves a prior server resolution', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+      { type: 'permission_resolved', payload: { requestId: 'p1', decision: 'allow' } },
+      { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+    ])
+    expect(out.permissions).toHaveLength(1)
+    expect(out.permissions[0]?.serverDecision).toBe('allow')
   })
 })
 
@@ -202,6 +279,111 @@ describe('ChildAgentEventList render (#5016)', () => {
       </div>,
     )
     fireEvent.click(screen.getByTestId('child-agent-tool-c1'))
+    // No throw — stopPropagation is working.
+  })
+})
+
+describe('ChildAgentEventList nested permission affordance (#5061)', () => {
+  it('renders a permission row with Allow / Deny buttons', () => {
+    render(
+      <ChildAgentEventList
+        events={[
+          { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash', description: 'run ls' } },
+        ]}
+        parentToolUseId="tu-parent-perm-1"
+      />,
+    )
+    expect(screen.getByTestId('child-agent-permission-p1')).toHaveTextContent('Bash')
+    expect(screen.getByTestId('child-agent-permission-p1')).toHaveTextContent('run ls')
+    expect(screen.getByTestId('child-agent-permission-allow-p1')).toBeInTheDocument()
+    expect(screen.getByTestId('child-agent-permission-deny-p1')).toBeInTheDocument()
+  })
+
+  it('mounts even when there are no tool rows or stream text', () => {
+    // A child whose only event is a permission_request must still render
+    // (the parent ToolBubble mounts us because childAgentEvents is non-empty).
+    const { container } = render(
+      <ChildAgentEventList
+        events={[
+          { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+        ]}
+        parentToolUseId="tu-parent-perm-2"
+      />,
+    )
+    expect(container.firstChild).not.toBeNull()
+    expect(screen.getByTestId('child-agent-permission-p1')).toBeInTheDocument()
+  })
+
+  it('Allow calls sendPermissionResponse with allow', () => {
+    render(
+      <ChildAgentEventList
+        events={[
+          { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+        ]}
+        parentToolUseId="tu-parent-perm-3"
+      />,
+    )
+    fireEvent.click(screen.getByTestId('child-agent-permission-allow-p1'))
+    expect(sendPermissionResponseMock).toHaveBeenCalledWith('p1', 'allow')
+  })
+
+  it('Deny calls sendPermissionResponse with deny', () => {
+    render(
+      <ChildAgentEventList
+        events={[
+          { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+        ]}
+        parentToolUseId="tu-parent-perm-4"
+      />,
+    )
+    fireEvent.click(screen.getByTestId('child-agent-permission-deny-p1'))
+    expect(sendPermissionResponseMock).toHaveBeenCalledWith('p1', 'deny')
+  })
+
+  it('shows answered state (no buttons) when the store has a recorded decision', () => {
+    mockStoreState.resolvedPermissions = { p1: 'allow' }
+    render(
+      <ChildAgentEventList
+        events={[
+          { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+        ]}
+        parentToolUseId="tu-parent-perm-5"
+      />,
+    )
+    expect(screen.getByTestId('child-agent-permission-answer-p1')).toHaveTextContent('Allowed')
+    expect(screen.queryByTestId('child-agent-permission-allow-p1')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('child-agent-permission-deny-p1')).not.toBeInTheDocument()
+  })
+
+  it('shows Denied answered state from a server permission_resolved relay', () => {
+    render(
+      <ChildAgentEventList
+        events={[
+          { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+          { type: 'permission_resolved', payload: { requestId: 'p1', decision: 'deny' } },
+        ]}
+        parentToolUseId="tu-parent-perm-6"
+      />,
+    )
+    expect(screen.getByTestId('child-agent-permission-answer-p1')).toHaveTextContent('Denied')
+    expect(screen.queryByTestId('child-agent-permission-allow-p1')).not.toBeInTheDocument()
+  })
+
+  it('clicking a permission button does not propagate to the parent bubble', () => {
+    const onContainerClick = () => {
+      throw new Error('outer onClick should not fire')
+    }
+    render(
+      <div onClick={onContainerClick} role="presentation">
+        <ChildAgentEventList
+          events={[
+            { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+          ]}
+          parentToolUseId="tu-parent-perm-7"
+        />
+      </div>,
+    )
+    fireEvent.click(screen.getByTestId('child-agent-permission-allow-p1'))
     // No throw — stopPropagation is working.
   })
 })
