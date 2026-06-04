@@ -13,6 +13,7 @@ import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { TodoList, parseTodoList } from './TodoList';
+import { ChildAgentEventList } from './ChildAgentEventList';
 import {
   summarizeToolCounts,
   formatToolBreakdown,
@@ -104,37 +105,52 @@ function ActivityEntry({
           {hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
         </Text>
       </View>
-      {expanded && (() => {
-        if (todoParsed) return <TodoList parsed={todoParsed} />
-        // #4203: prefer toolResult text when present; otherwise fall back to
-        // content (pre-result/pending state). When toolResult is undefined
-        // but images are attached (e.g. screenshot tool with no text body),
-        // the pre-#4203 expression resolved to an empty string and the
-        // expanded body was visually blank even though the row's image
-        // badge said 'N images'. Render an explicit placeholder so the
-        // user sees what's there. Inline image rendering can land later
-        // — the placeholder is the minimum signal.
-        const resultText = hasResult ? (message.toolResult || '') : (message.content || '')
-        if (resultText.length > 0) {
-          return (
-            <Text selectable style={styles.activityEntryExpanded}>
-              {resultText}
-            </Text>
-          )
-        }
-        if (imageCount > 0) {
-          return (
-            <Text style={styles.activityEntryExpanded}>
-              {imageCount === 1 ? '1 image attached (preview not yet rendered inline)' : `${imageCount} images attached (preview not yet rendered inline)`}
-            </Text>
-          )
-        }
-        return (
-          <Text style={styles.activityEntryExpanded}>
-            (no output)
-          </Text>
-        )
-      })()}
+      {expanded && (
+        <>
+          {(() => {
+            if (todoParsed) return <TodoList parsed={todoParsed} />
+            // #4203: prefer toolResult text when present; otherwise fall back to
+            // content (pre-result/pending state). When toolResult is undefined
+            // but images are attached (e.g. screenshot tool with no text body),
+            // the pre-#4203 expression resolved to an empty string and the
+            // expanded body was visually blank even though the row's image
+            // badge said 'N images'. Render an explicit placeholder so the
+            // user sees what's there. Inline image rendering can land later
+            // — the placeholder is the minimum signal.
+            const resultText = hasResult ? (message.toolResult || '') : (message.content || '')
+            if (resultText.length > 0) {
+              return (
+                <Text selectable style={styles.activityEntryExpanded}>
+                  {resultText}
+                </Text>
+              )
+            }
+            if (imageCount > 0) {
+              return (
+                <Text style={styles.activityEntryExpanded}>
+                  {imageCount === 1 ? '1 image attached (preview not yet rendered inline)' : `${imageCount} images attached (preview not yet rendered inline)`}
+                </Text>
+              )
+            }
+            return (
+              <Text style={styles.activityEntryExpanded}>
+                (no output)
+              </Text>
+            )
+          })()}
+          {/* #5060 — Task subagent nested progress. The child's
+              intermediate tool_start/tool_result/tool_input_delta/
+              stream_delta events arrive as `agent_event` and accumulate
+              in `childAgentEvents`, mirroring the dashboard's nested
+              sub-bubble rendering under the parent Task tool_call. */}
+          {message.childAgentEvents && message.childAgentEvents.length > 0 && message.toolUseId && (
+            <ChildAgentEventList
+              events={message.childAgentEvents}
+              parentToolUseId={message.toolUseId}
+            />
+          )}
+        </>
+      )}
     </TouchableOpacity>
   );
 }
