@@ -105,6 +105,7 @@ import { ClaudeByokSession } from './byok-session.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
 import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
+import { getSharedComposeStateStore } from './byok-compose-state-shared.js'
 import { createLogger } from './logger.js'
 import { writeFileRestricted } from './platform.js'
 import {
@@ -469,6 +470,15 @@ export class DockerByokSession extends ClaudeByokSession {
     this._writeEnvFile = opts._writeEnvFile || ((p, c) => writeFileSync(p, c, { mode: 0o600 }))
     this._unlinkEnvFile = opts._unlinkEnvFile || ((p) => { try { unlinkSync(p) } catch { /* ignore */ } })
     this._envForApiKey = opts._envForApiKey || process.env
+    // #5081 — crash-durable record of the compose project id so a daemon
+    // crash between `compose up` and `compose down` leaves an on-disk paper
+    // trail the boot-time sweep can clean up. record()'d after a successful
+    // `compose up`, forget()'d after a clean `compose down`. Resolved lazily
+    // in `_getComposeStateStore()` to the shared singleton (so the boot sweep
+    // and live sessions agree on one state file) ONLY in compose mode —
+    // non-compose sessions never touch it, keeping their test paths off the
+    // real home. Injectable for tests.
+    this._composeStateStore = opts._composeStateStore || null
 
     const user = opts.containerUser || DEFAULT_USER
     if (!VALID_USERNAME_RE.test(user)) {
@@ -1243,6 +1253,33 @@ export class DockerByokSession extends ClaudeByokSession {
     }
     this._containerId = result.containerId
     log.info(`docker-byok compose primary container: ${this._containerId.slice(0, 12)}`)
+    // #5081 — only AFTER a successful `compose up` do we persist the project
+    // id. Recording earlier would leave a phantom entry on disk for a stack
+    // that never started; the boot sweep would then `compose down` a project
+    // that was never up (harmless but noisy). record() is best-effort:
+    // persistence failures must not fail an otherwise-healthy session.
+    try {
+      this._getComposeStateStore().record({
+        projectId: this._composeProject,
+        composeFile: this._composeFile,
+        cwd,
+      })
+    } catch (err) {
+      log.warn(`docker-byok compose: failed to persist project id: ${err.message}`)
+    }
+  }
+
+  /**
+   * #5081 — resolve the compose-state store for THIS session. Returns the
+   * injected store when present (tests), otherwise the process-wide shared
+   * singleton. Only ever called on the compose path, so non-compose sessions
+   * never construct the default (and never touch the real ~/.chroxy state).
+   */
+  _getComposeStateStore() {
+    if (!this._composeStateStore) {
+      this._composeStateStore = getSharedComposeStateStore()
+    }
+    return this._composeStateStore
   }
 
   /**
@@ -1822,6 +1859,14 @@ export class DockerByokSession extends ClaudeByokSession {
             composeProject,
             cwd,
           })
+          // #5081 — only drop the on-disk record after a clean teardown. If
+          // `compose down` threw (daemon gone), the entry has to survive so
+          // the next boot's sweep retries the teardown.
+          try {
+            this._getComposeStateStore().forget(composeProject)
+          } catch (err) {
+            log.warn(`docker-byok compose: failed to forget project id: ${err.message}`)
+          }
         } catch (err) {
           log.warn(`compose destroy failed: ${err.message}`)
         }
