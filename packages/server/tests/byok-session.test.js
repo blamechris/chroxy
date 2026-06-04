@@ -4369,6 +4369,16 @@ describe('ClaudeByokSession', () => {
       // a stale lookup of the same id doesn't leak past the request's
       // lifetime.
       assert.ok(childRef, 'child was created')
+      assert.equal(
+        session._subagentPermissionRouting.has('perm-child-routed'),
+        false,
+        'routing entry must be cleared after the child resolves + finishes',
+      )
+      assert.equal(
+        session._subagentPermissionRouting.size,
+        0,
+        'no routing entries should leak past the request lifetime',
+      )
       await session.destroy()
     })
 

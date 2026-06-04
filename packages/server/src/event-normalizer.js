@@ -152,16 +152,41 @@ Object.assign(EVENT_MAP, {
   // `parentToolUseId` is the parent's tool_use id (same key used by
   // agent_spawned / agent_completed). `eventType` is the child's
   // original event name. `payload` is the verbatim child event payload.
-  agent_event: (data) => ({
-    messages: [{
-      msg: {
-        type: 'agent_event',
-        parentToolUseId: data.parentToolUseId,
-        eventType: data.type,
-        payload: data.payload ?? {},
-      },
-    }],
-  }),
+  agent_event: (data, ctx) => {
+    const out = {
+      messages: [{
+        msg: {
+          type: 'agent_event',
+          parentToolUseId: data.parentToolUseId,
+          eventType: data.type,
+          payload: data.payload ?? {},
+        },
+      }],
+    }
+    // #5056: a relayed Task-subagent permission_request must register its
+    // requestId in permissionSessionMap (keyed to the PARENT session id,
+    // ctx.sessionId) — exactly like a top-level permission_request does
+    // (see the permission_request normalizer above). Two reasons:
+    //   1. A pairing-BOUND dashboard client's Approve/Deny is rejected
+    //      unless permissionSessionMap[requestId] === boundSessionId
+    //      (handlePermissionResponse, settings-handlers.js ~line 309).
+    //      The dashboard responds on the PARENT session (the only one it
+    //      knows), so the map must point requestId → parent session.
+    //   2. registerPermissionRoute auto-subscribes eligible clients to
+    //      the session so the broadcast actually reaches them (#4798).
+    // The in-process redirect to the child PermissionManager then happens
+    // in ClaudeByokSession.respondToPermission via its routing table — so
+    // the wire-level routing (parent session) and the in-process routing
+    // (child manager) compose correctly. permission_resolved emits the
+    // matching delete so the map is pruned on every resolution path.
+    const payload = (data.payload && typeof data.payload === 'object') ? data.payload : {}
+    if (data.type === 'permission_request' && payload.requestId) {
+      out.registrations = [{ map: 'permission', key: payload.requestId, value: ctx?.sessionId }]
+    } else if (data.type === 'permission_resolved' && payload.requestId) {
+      out.registrations = [{ map: 'permission', key: payload.requestId, action: 'delete' }]
+    }
+    return out
+  },
 
   // #4307: pending-background-shells snapshot changed for a session.
   // BaseSession emits this on both push (run_in_background tool_result
