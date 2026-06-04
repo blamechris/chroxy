@@ -101,6 +101,11 @@ import {
   handleAgentSpawned as sharedAgentSpawned,
   handleAgentCompleted as sharedAgentCompleted,
   handleBackgroundWorkChanged as sharedBackgroundWorkChanged,
+  // #5060 — Task subagent intermediate progress. Appends one entry to
+  // the parent Task tool_use bubble's `childAgentEvents[]`; the shared
+  // builder is the same one the dashboard uses so the two platforms
+  // can't drift on routing.
+  handleAgentEvent as sharedAgentEvent,
   handleAvailableModels as sharedAvailableModels,
   handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
@@ -1891,6 +1896,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(builder.sessionId, (ss) => {
           const next = builder.applyTo(ss.activeAgents);
           return next === ss.activeAgents ? {} : { activeAgents: next };
+        });
+      }
+      break;
+    }
+
+    case 'agent_event': {
+      // #5060 — Task subagent intermediate progress. The shared builder
+      // appends one entry to the parent Task tool_use bubble's
+      // `childAgentEvents[]`. Same-reference no-op when the parent
+      // bubble isn't found (event arrived before tool_start, which the
+      // server's ordering guarantee prevents but is defended).
+      const builder = sharedAgentEvent(msg, get().activeSessionId);
+      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
+        updateSession(builder.sessionId, (ss) => {
+          const next = builder.applyTo(ss.messages);
+          return next === ss.messages ? {} : { messages: next };
         });
       }
       break;

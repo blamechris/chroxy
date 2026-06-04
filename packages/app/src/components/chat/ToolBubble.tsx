@@ -13,6 +13,7 @@ import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { formatToolName } from './chat-utils';
 import { TodoList, parseTodoList } from './TodoList';
+import { ChildAgentEventList } from './ChildAgentEventList';
 
 /**
  * #4081: while a `tool_use` is streaming its input via
@@ -179,11 +180,24 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
         </Text>
       </View>
       {expanded ? (
-        todoParsed ? (
-          <TodoList parsed={todoParsed} />
-        ) : (
-          <Text selectable style={styles.toolContentExpanded}>{content}</Text>
-        )
+        <>
+          {todoParsed ? (
+            <TodoList parsed={todoParsed} />
+          ) : (
+            <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+          )}
+          {/* #5060 — Task subagent nested progress. The child's
+              intermediate tool_start/tool_result/tool_input_delta/
+              stream_delta events arrive as `agent_event` and accumulate
+              in `childAgentEvents`, mirroring the dashboard's nested
+              sub-bubble rendering under the parent Task tool_call. */}
+          {message.childAgentEvents && message.childAgentEvents.length > 0 && message.toolUseId && (
+            <ChildAgentEventList
+              events={message.childAgentEvents}
+              parentToolUseId={message.toolUseId}
+            />
+          )}
+        </>
       ) : (
         <Text
           testID="tool-collapsed-preview"
