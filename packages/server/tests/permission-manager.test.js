@@ -26,6 +26,54 @@ describe('PermissionManager', () => {
 
   // -- Permission requests --
 
+  // #5121: requestIds must be globally unique across sessions so the
+  // parent-level subagent routing table (byok-session.js) can never alias
+  // a parent's own pending requestId against a child's. Each manager mints
+  // a per-instance nonce; the id is opaque to all consumers.
+  describe('requestId global uniqueness (#5121)', () => {
+    it('two managers do not mint the same requestId even with identical counters', () => {
+      const a = createManager()
+      const b = createManager()
+      try {
+        const aEvents = []
+        const bEvents = []
+        a.on('permission_request', (d) => aEvents.push(d))
+        b.on('permission_request', (d) => bEvents.push(d))
+
+        // Same tool/input/counter position in each manager — only the
+        // per-instance nonce keeps the ids apart.
+        a.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+        b.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+
+        assert.ok(aEvents[0].requestId)
+        assert.ok(bEvents[0].requestId)
+        assert.notEqual(aEvents[0].requestId, bEvents[0].requestId)
+        assert.match(aEvents[0].requestId, /^perm-/)
+        assert.match(bEvents[0].requestId, /^perm-/)
+      } finally {
+        a.destroy()
+        b.destroy()
+      }
+    })
+
+    it('a single manager mints distinct requestIds with a stable nonce', () => {
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      pm.handlePermission('Bash', { command: 'pwd' }, null, 'approve')
+
+      assert.notEqual(events[0].requestId, events[1].requestId)
+      // Both ids share this manager's nonce, proving the nonce is
+      // per-instance, not per-request. Extract it by stripping the `perm-`
+      // prefix and the trailing `-<counter>-<ms>` rather than indexing a
+      // fixed segment, so the assertion stays valid if the nonce format
+      // changes (it remains opaque to consumers either way).
+      const nonceOf = (id) => id.replace(/^perm-/, '').replace(/-\d+-\d+$/, '')
+      assert.equal(nonceOf(events[0].requestId), nonceOf(events[1].requestId))
+    })
+  })
+
   describe('handlePermission', () => {
     it('emits permission_request and creates entry in pending map', () => {
       const events = []
