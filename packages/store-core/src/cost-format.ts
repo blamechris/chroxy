@@ -61,8 +61,7 @@ export interface ErrorPartialCost {
  *
  * Falls back to a cost-only string when the usage object was empty (a
  * subscription-billed provider that only produced a cost). Token counts
- * use the same K/M abbreviation as `SidebarTokenView.formatTokenCount`
- * — kept inline here to keep cost-format dependency-free.
+ * use the canonical `formatTokens` K/M abbreviation.
  */
 export function formatPartialCostLine(partial: ErrorPartialCost): string {
   const cost = formatCostBadge(partial.costUsd)
@@ -74,16 +73,70 @@ export function formatPartialCostLine(partial: ErrorPartialCost): string {
   return `This turn cost ${cost} (${formatTokens(inTokens)} in · ${formatTokens(outTokens)} out)`
 }
 
-/** Token-count abbreviation mirroring `SidebarTokenView.formatTokenCount`. */
-function formatTokens(n: number): string {
+/**
+ * Canonical token-count formatters (#5058 / #5094).
+ *
+ * The dashboard accumulated five subtly-different K/M token formatters
+ * (uppercase `K` vs lowercase `k`, 1- vs 2-decimal `M`, two of them with
+ * an overflow bug that rendered `1000k` / `1000.0k` at exactly 1M instead
+ * of rolling over). The same fill amount could render as `30k`, `30.0k`,
+ * `30.0K`, or `30K` depending on which surface displayed it.
+ *
+ * We collapse them to TWO canonical helpers, both living here in
+ * `@chroxy/store-core` so every surface (dashboard sidebar, status/footer
+ * tooltips, header meter, error-path cost line) draws from one source:
+ *
+ *   - `formatTokens`        — STANDARD: uppercase `K` (1 decimal), `M`
+ *                             (2 decimals). Used by the sidebar token view,
+ *                             the cost-badge tooltip breakdown, and the
+ *                             error-path partial-cost line. Higher
+ *                             precision for the detailed/breakdown surfaces.
+ *   - `formatTokensCompact` — COMPACT: lowercase `k` (1 decimal), `M`
+ *                             (1 decimal, trailing `.0` stripped so common
+ *                             window sizes show `1M` / `2M`). Used by the
+ *                             header status-line meter, the context chip
+ *                             label, and the context-chip breakdown
+ *                             tooltip. Tighter for single-line chips.
+ *
+ * #5058 guard decision: the defensive `!Number.isFinite(n) || n <= 0 → '0'`
+ * guard lives ON the shared helpers (not as a per-caller wrapper). It is
+ * cheap, and the wire-data consumers (`formatPartialCostLine` via
+ * `pickFiniteTokenCount`, the context tooltip fed from raw turn usage)
+ * need it — putting it on the helper makes every caller safe by default
+ * and a corrupted upstream payload can't poison any renderer with `NaN`.
+ */
+
+/**
+ * STANDARD token-count abbreviation — uppercase `K`, 2-decimal `M`.
+ *
+ *   formatTokens(0)         → "0"
+ *   formatTokens(999)       → "999"
+ *   formatTokens(1234)      → "1.2K"
+ *   formatTokens(999_499)   → "999.5K"
+ *   formatTokens(999_500)   → "1.00M"   ← rolls to M before "1000.0K"
+ *   formatTokens(1_000_000) → "1.00M"
+ *   formatTokens(1_500_000) → "1.50M"
+ *
+ * Rolls over to `M` when the K-rounded value would reach 1000 (n ≥ 999_500
+ * rounds to 1000.0K) to avoid the "1000.0K" visual nonsense. Returns "0"
+ * defensively for zero / negative / non-finite input.
+ *
+ * Non-integer input (possible via untyped wire data through
+ * `pickFiniteTokenCount`) is rounded to an integer FIRST, so the
+ * threshold checks below run on the same value that gets rendered —
+ * otherwise 999.6 would pass the `< 1000` branch yet render as "1000"
+ * with no `K` suffix.
+ */
+export function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0'
+  n = Math.round(n)
   if (n < 1000) return String(n)
   if (n < 999_500) return `${(n / 1000).toFixed(1)}K`
   return `${(n / 1_000_000).toFixed(2)}M`
 }
 
 /**
- * #5065: compact lowercase token formatter for the header status-line
+ * #5065: COMPACT lowercase token formatter for the header status-line
  * `used / total tokens` label.
  *
  *   formatTokensCompact(0)         → "0"
@@ -105,7 +158,11 @@ function formatTokens(n: number): string {
  */
 export function formatTokensCompact(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0'
-  if (n < 1000) return String(Math.round(n))
+  // Round non-integer wire data to an integer first so the threshold
+  // checks below run on the same value that gets rendered (mirrors
+  // `formatTokens`): otherwise 999.6 would pass `< 1000` yet render "1000".
+  n = Math.round(n)
+  if (n < 1000) return String(n)
   if (n < 999_500) return `${(n / 1000).toFixed(1)}k`
   // Round to one decimal first, then strip a trailing ".0" so whole
   // millions render as "1M" / "2M" / "1M" (rolled over from 999_500)

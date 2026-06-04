@@ -23,6 +23,10 @@
 // Adding a provider in one site without the other was the bug-in-waiting that
 // motivated the extraction — see that module's header for the full why.
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from './client-estimated-cost-providers'
+// #5094: canonical COMPACT token formatter (lowercase `k`, 1-decimal `M`,
+// correct rollover at 1M). Replaces the old file-private `formatTokens`
+// here that overflowed to "1000.0k" at exactly one million tokens.
+import { formatTokensCompact } from '@chroxy/store-core'
 
 export interface CostTooltipArgs {
   cost: number | undefined
@@ -102,20 +106,13 @@ export interface TokenChipTooltipArgs {
  * "out of scope" section pins this to enriching the existing chip.
  *
  * Token counts under 1000 render in raw form ("450 tokens"); 1000+
- * round to one decimal as kilo ("1.5k"). Matches `formatContext` in
- * App.tsx so the chip text + tooltip stay visually consistent.
+ * abbreviate as kilo ("1.5k") via the canonical `formatTokensCompact`,
+ * matching the header meter + `formatContext` chip in App.tsx so the chip
+ * text + tooltip stay visually consistent (#5094).
  */
 export function tokenChipTooltip({ inputTokens, outputTokens }: TokenChipTooltipArgs): string {
   const total = inputTokens + outputTokens
-  return `Breakdown: ${formatTokens(inputTokens)} input + ${formatTokens(outputTokens)} output = ${formatTokens(total)} tokens.`
-}
-
-function formatTokens(n: number): string {
-  if (n < 1000) return String(n)
-  const k = n / 1000
-  // Trim trailing .0 the same way roundPercent does — "1k" is cleaner
-  // than "1.0k" for round multiples of 1000.
-  return Number.isInteger(k) ? `${k}k` : `${k.toFixed(1)}k`
+  return `Breakdown: ${formatTokensCompact(inputTokens)} input + ${formatTokensCompact(outputTokens)} output = ${formatTokensCompact(total)} tokens.`
 }
 
 function roundPercent(n: number): string {

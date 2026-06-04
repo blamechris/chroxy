@@ -183,9 +183,9 @@ describe('FooterBar', () => {
       const ctx = container.querySelector('.footer-context')
       const title = ctx!.getAttribute('title') ?? ''
       expect(title).toContain('45%')
-      expect(title).toContain('80k input')
-      expect(title).toContain('10k output')
-      expect(title).toContain('90k tokens')
+      expect(title).toContain('80.0k input')
+      expect(title).toContain('10.0k output')
+      expect(title).toContain('90.0k tokens')
     })
 
     it('falls back to the plain percent-only tooltip when token counts are absent', () => {

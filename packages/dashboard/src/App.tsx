@@ -10,6 +10,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   deriveSessionVisualStatus,
   formatPasteMarker,
+  formatTokensCompact,
   expandPasteMarkers,
   type SessionInfo,
 } from '@chroxy/store-core'
@@ -106,22 +107,19 @@ export function getChroxyConfig(): ChroxyConfig | undefined {
 
 
 /**
- * Format context usage as a compact string.
+ * Format context usage as a compact `<n> tokens` chip label.
  *
- * Trims trailing `.0` on round kilo totals (90000 → `90k tokens`, not
- * `90.0k tokens`) so the chip text stays in lockstep with the
- * `formatTokens` helper in `lib/status-tooltips.ts` — both the chip
- * label and the breakdown inside its tooltip use the same rule. Without
- * this, the same tooltip would read `... (90.0k tokens) ... Breakdown:
- * ... = 90k tokens.` (#4230 Copilot review).
+ * Delegates the number formatting to the canonical `formatTokensCompact`
+ * helper in `@chroxy/store-core` (#5094) so the chip label, the header
+ * meter, and the status-tooltip breakdown all share one casing/decimal
+ * rule and one (correct) 1M rollover. Keeps only the ` tokens` suffix and
+ * the "hide when empty" behaviour here.
  */
 function formatContext(usage: { inputTokens: number; outputTokens: number } | null): string | undefined {
   if (!usage) return undefined
   const total = usage.inputTokens + usage.outputTokens
   if (total === 0) return undefined
-  if (total < 1000) return `${total} tokens`
-  const k = total / 1000
-  return Number.isInteger(k) ? `${k}k tokens` : `${k.toFixed(1)}k tokens`
+  return `${formatTokensCompact(total)} tokens`
 }
 
 type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots'

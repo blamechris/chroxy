@@ -22,7 +22,7 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CumulativeUsage, SessionInfo } from '@chroxy/store-core'
-import { formatCostBadge, getProviderLabel } from '@chroxy/store-core'
+import { formatCostBadge, formatTokens, getProviderLabel } from '@chroxy/store-core'
 
 // Subscription/PTY providers that never emit token usage today (decision #1).
 // claude-tui is the only one in this set right now; if upstream adds usage
@@ -127,24 +127,6 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
     totalSessions,
     hasUntracked,
   }
-}
-
-/**
- * Format integer tokens with K/M abbreviation.
- *
- *   formatTokenCount(0)         → "0"
- *   formatTokenCount(999)       → "999"
- *   formatTokenCount(1234)      → "1.2K"
- *   formatTokenCount(999_999)   → "1.0M"   ← #4304 review: cross to M when K would round to 1000
- *   formatTokenCount(1_500_000) → "1.50M"
- */
-export function formatTokenCount(n: number): string {
-  if (n < 1000) return String(n)
-  // Roll over to "M" when the K-rounded value would be ≥ 1000 (i.e. when
-  // n ≥ 999500 rounds to 1000.0K). Avoid the "1000.0K" visual nonsense
-  // that the simple < 1_000_000 cutoff produced.
-  if (n < 999_500) return `${(n / 1000).toFixed(1)}K`
-  return `${(n / 1_000_000).toFixed(2)}M`
 }
 
 /**
@@ -332,13 +314,13 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
             className="sidebar-token-view-value"
             data-testid="sidebar-token-view-today-total"
           >
-            {formatTokenCount(totalTokens)} tokens
+            {formatTokens(totalTokens)} tokens
           </span>
         </div>
         <div className="sidebar-token-view-aggregate-row">
           <span className="sidebar-token-view-label">Input · Output</span>
           <span className="sidebar-token-view-value-secondary">
-            {formatTokenCount(agg.totals.inputTokens)} · {formatTokenCount(agg.totals.outputTokens)}
+            {formatTokens(agg.totals.inputTokens)} · {formatTokens(agg.totals.outputTokens)}
           </span>
         </div>
         {agg.totals.costUsd > 0 && (
@@ -390,7 +372,7 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
                     </InfoDisclosure>
                   ) : (
                     <span className="sidebar-token-view-provider-tokens">
-                      {formatTokenCount(tokens)}
+                      {formatTokens(tokens)}
                       {row.totals.costUsd > 0 && (
                         <span className="sidebar-token-view-provider-cost">
                           {' '}({formatCostBadge(row.totals.costUsd)})
@@ -416,5 +398,5 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
 export function tokenViewCollapsedMetric(sessions: SessionInfo[]): string {
   const agg = aggregateUsage(sessions)
   const totalTokens = agg.totals.inputTokens + agg.totals.outputTokens
-  return `${formatTokenCount(totalTokens)} tokens`
+  return `${formatTokens(totalTokens)} tokens`
 }

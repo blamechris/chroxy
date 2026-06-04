@@ -160,19 +160,20 @@ describe('contextTooltip rounding (#4204 Copilot review)', () => {
 })
 
 describe('tokenChipTooltip (#4205)', () => {
+  // #5094: now delegates to the canonical `formatTokensCompact`, which keeps
+  // one decimal on all kilo values for consistency with the header meter.
   it('formats in/out/total breakdown in kilo-tokens', () => {
     const t = tokenChipTooltip({ inputTokens: 1200, outputTokens: 8000 })
     expect(t).toContain('1.2k input')
-    expect(t).toContain('8k output')
+    expect(t).toContain('8.0k output')
     expect(t).toContain('9.2k tokens')
   })
 
-  it('trims trailing .0 for round multiples of 1000', () => {
+  it('keeps one decimal for round multiples of 1000 (canonical compact)', () => {
     const t = tokenChipTooltip({ inputTokens: 2000, outputTokens: 1000 })
-    expect(t).toContain('2k input')
-    expect(t).toContain('1k output')
-    expect(t).toContain('3k tokens')
-    expect(t).not.toContain('2.0k')
+    expect(t).toContain('2.0k input')
+    expect(t).toContain('1.0k output')
+    expect(t).toContain('3.0k tokens')
   })
 
   it('renders raw counts under 1000 without the "k" suffix', () => {
@@ -202,9 +203,9 @@ describe('contextTooltip + token breakdown (#4205)', () => {
     expect(t).toContain('45%')
     // …and the breakdown follows so the chip explains where the
     // percent came from (the original #3858 acceptance criterion).
-    expect(t).toContain('80k input')
-    expect(t).toContain('10k output')
-    expect(t).toContain('90k tokens')
+    expect(t).toContain('80.0k input')
+    expect(t).toContain('10.0k output')
+    expect(t).toContain('90.0k tokens')
   })
 
   it('omits the breakdown when only inputTokens is known (defensive)', () => {

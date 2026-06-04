@@ -10,6 +10,7 @@ import {
   formatCostBadge,
   formatCostBreakdown,
   formatPartialCostLine,
+  formatTokens,
   formatTokensCompact,
 } from './cost-format'
 import type { ErrorPartialCost } from './cost-format'
@@ -110,7 +111,7 @@ describe('formatPartialCostLine (#5039)', () => {
     ).toBe('This turn cost $0.0010 (0 in · 750 out)')
   })
 
-  it('uses K/M abbreviation matching SidebarTokenView.formatTokenCount', () => {
+  it('uses the canonical formatTokens K/M abbreviation', () => {
     expect(
       formatPartialCostLine(
         partial({ costUsd: 1.5, inputTokens: 1_234_567, outputTokens: 999_499 }),
@@ -122,6 +123,51 @@ describe('formatPartialCostLine (#5039)', () => {
     expect(
       formatPartialCostLine(partial({ costUsd: 0, inputTokens: 50, outputTokens: 0 })),
     ).toBe('This turn cost $0 (50 in · 0 out)')
+  })
+})
+
+// STANDARD formatter (#5058 / #5094) — migrated here from
+// SidebarTokenView.test.tsx so each canonical formatter has ONE test home.
+describe('formatTokens (#5058 / #5094)', () => {
+  it('renders below 1000 verbatim', () => {
+    expect(formatTokens(0)).toBe('0')
+    expect(formatTokens(999)).toBe('999')
+  })
+
+  it('abbreviates thousands with uppercase K (one decimal)', () => {
+    expect(formatTokens(1000)).toBe('1.0K')
+    expect(formatTokens(1234)).toBe('1.2K')
+    expect(formatTokens(30_000)).toBe('30.0K')
+    expect(formatTokens(999_499)).toBe('999.5K')
+  })
+
+  // Avoid the "1000.0K" visual nonsense — roll to M before the K-rounded
+  // value crosses 1000.
+  it('rolls over to M before the K-rounded value crosses 1000', () => {
+    expect(formatTokens(999_500)).toBe('1.00M')
+    expect(formatTokens(999_999)).toBe('1.00M')
+  })
+
+  it('abbreviates millions with uppercase M (two decimals)', () => {
+    expect(formatTokens(1_000_000)).toBe('1.00M')
+    expect(formatTokens(1_500_000)).toBe('1.50M')
+    expect(formatTokens(1_234_567)).toBe('1.23M')
+  })
+
+  // #5058 guard decision: the defensive guard lives on the shared helper.
+  it('returns "0" for non-finite / non-positive (defensive)', () => {
+    expect(formatTokens(-1)).toBe('0')
+    expect(formatTokens(NaN)).toBe('0')
+    expect(formatTokens(Infinity)).toBe('0')
+  })
+
+  // Copilot #5122: non-integer wire data must be rounded BEFORE the
+  // threshold checks so 999.6 doesn't slip through the "< 1000" branch and
+  // render "1000" with no K suffix.
+  it('rounds non-integer input before applying thresholds', () => {
+    expect(formatTokens(999.6)).toBe('1.0K')
+    expect(formatTokens(999.4)).toBe('999')
+    expect(formatTokens(1234.5)).toBe('1.2K')
   })
 })
 
@@ -159,5 +205,11 @@ describe('formatTokensCompact (#5065)', () => {
     expect(formatTokensCompact(-1)).toBe('0')
     expect(formatTokensCompact(NaN)).toBe('0')
     expect(formatTokensCompact(Infinity)).toBe('0')
+  })
+
+  // Copilot #5122: round non-integer input before the threshold checks.
+  it('rounds non-integer input before applying thresholds', () => {
+    expect(formatTokensCompact(999.6)).toBe('1.0k')
+    expect(formatTokensCompact(999.4)).toBe('999')
   })
 })
