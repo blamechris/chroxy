@@ -134,14 +134,30 @@ export class ByokComposeStateStore {
         return
       }
       for (const entry of data.stacks) {
-        if (entry && typeof entry.projectId === 'string' && entry.projectId) {
-          this._stacks.set(entry.projectId, {
-            projectId: entry.projectId,
-            composeFile: entry.composeFile,
-            cwd: entry.cwd,
-            createdAt: entry.createdAt,
-          })
+        // Drop entries missing any required field (or with non-string
+        // values). A half-written / hand-edited record with an undefined
+        // composeFile or cwd would otherwise reach the boot sweep and call
+        // destroyComposeEnvironment with undefined args — which fails and,
+        // because a failed teardown is retained for retry, would never
+        // clear. Skipping it here is the safe default.
+        if (
+          !entry
+          || typeof entry.projectId !== 'string' || !entry.projectId
+          || typeof entry.composeFile !== 'string' || !entry.composeFile
+          || typeof entry.cwd !== 'string' || !entry.cwd
+        ) {
+          continue
         }
+        this._stacks.set(entry.projectId, {
+          projectId: entry.projectId,
+          composeFile: entry.composeFile,
+          cwd: entry.cwd,
+          // Normalise a missing/invalid createdAt rather than persisting
+          // `undefined` back out on the next write.
+          createdAt: typeof entry.createdAt === 'string' && entry.createdAt
+            ? entry.createdAt
+            : new Date().toISOString(),
+        })
       }
     } catch {
       // Corrupt / non-JSON state file — start empty rather than crash.
