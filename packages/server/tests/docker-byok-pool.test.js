@@ -892,7 +892,8 @@ describe('DockerContainerPool — inspect() (#5052)', () => {
    *     non-empty bucket.
    *   - Sorted by `key` ascending so the output is stable for tests and
    *     dashboard diffs.
-   *   - `oldestIdleMs` = `now - max(releasedAt for entry in bucket)`.
+   *   - `oldestIdleMs` = `now - min(releasedAt for entry in bucket)`, i.e.
+   *     `max(now - releasedAt)` — the idle age of the OLDEST parked entry.
    *   - SHALLOW snapshot: caller mutations to the returned array MUST NOT
    *     leak back into pool state (no live Map / array references).
    *   - `release()` stamps `releasedAt` on every entry so `oldestIdleMs`
