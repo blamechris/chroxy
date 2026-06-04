@@ -188,6 +188,22 @@ describe('reduceEvents (#5016)', () => {
     expect(out.permissions[0]?.serverDecision).toBe('denied')
   })
 
+  it('normalises an unrecognised decision value to denied (fail-safe)', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+      { type: 'permission_resolved', payload: { requestId: 'p1', decision: 'bogus' } },
+    ])
+    expect(out.permissions[0]?.serverDecision).toBe('denied')
+  })
+
+  it('accepts the allowAlways wire decision verbatim', () => {
+    const out = __reduceEventsForTest([
+      { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+      { type: 'permission_resolved', payload: { requestId: 'p1', decision: 'allowAlways' } },
+    ])
+    expect(out.permissions[0]?.serverDecision).toBe('allowAlways')
+  })
+
   it('replayed permission_request preserves a prior server resolution', () => {
     const out = __reduceEventsForTest([
       { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
@@ -367,6 +383,19 @@ describe('ChildAgentEventList nested permission affordance (#5061)', () => {
     )
     expect(screen.getByTestId('child-agent-permission-answer-p1')).toHaveTextContent('Denied')
     expect(screen.queryByTestId('child-agent-permission-allow-p1')).not.toBeInTheDocument()
+  })
+
+  it('shows Allowed for an allowAlways server relay', () => {
+    render(
+      <ChildAgentEventList
+        events={[
+          { type: 'permission_request', payload: { requestId: 'p1', tool: 'Bash' } },
+          { type: 'permission_resolved', payload: { requestId: 'p1', decision: 'allowAlways' } },
+        ]}
+        parentToolUseId="tu-parent-perm-aa"
+      />,
+    )
+    expect(screen.getByTestId('child-agent-permission-answer-p1')).toHaveTextContent('Allowed')
   })
 
   it('clicking a permission button does not propagate to the parent bubble', () => {

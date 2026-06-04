@@ -70,7 +70,6 @@ import { useMemo, useState } from 'react'
 import type { ChildAgentEvent } from '@chroxy/store-core'
 import { formatToolName, getInputSummary, getPartialSummary } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
-import type { PermissionDecision } from '../store/types'
 
 interface ChildAgentEventListProps {
   events: ChildAgentEvent[]
@@ -108,6 +107,20 @@ interface ChildToolRow {
  * terminal `serverDecision` here too so the row settles even when the
  * user never tapped a button.
  */
+/**
+ * Server-relayed terminal decision from `permission_resolved`. This is
+ * the WIRE decision set (`'allow' | 'allowAlways' | 'deny'`, see
+ * `PermissionResponseSchema` in @chroxy/protocol) plus a `'denied'`
+ * sentinel for resolutions that carry no explicit decision (timeout /
+ * abort / malformed relay), which we fail-safe to denied. Deliberately
+ * NOT `PermissionDecision` (a UI-only type that includes `'allowSession'`
+ * and excludes `'allowAlways'`) so the server set can't drift into it.
+ */
+type ServerPermissionDecision = 'allow' | 'allowAlways' | 'deny' | 'denied'
+
+/** Wire decisions the server may relay; anything else is treated as denied. */
+const WIRE_PERMISSION_DECISIONS = new Set<ServerPermissionDecision>(['allow', 'allowAlways', 'deny'])
+
 interface ChildPermissionRow {
   /** Permission requestId — store key + wire key for the response. */
   requestId: string
@@ -121,7 +134,7 @@ interface ChildPermissionRow {
    * decision in `resolvedPermissions` — either flips the row to its
    * answered state.
    */
-  serverDecision?: PermissionDecision | 'denied'
+  serverDecision?: ServerPermissionDecision
 }
 
 /**
@@ -243,7 +256,13 @@ function reduceEvents(events: ChildAgentEvent[]): {
       // even when no local decision was recorded.
       const requestId = typeof p.requestId === 'string' ? p.requestId : null
       if (!requestId) continue
-      const decision = typeof p.decision === 'string' ? p.decision : 'denied'
+      // Normalise to a known wire decision; anything unexpected (or a
+      // resolution with no decision: timeout / abort) fails safe to denied
+      // so an unrecognised value can never read as "Allowed".
+      const decision: ServerPermissionDecision =
+        WIRE_PERMISSION_DECISIONS.has(p.decision as ServerPermissionDecision)
+          ? (p.decision as ServerPermissionDecision)
+          : 'denied'
       let row = permById.get(requestId)
       if (!row) {
         // Defensive: resolved arrived without a preceding request (replay
@@ -253,7 +272,7 @@ function reduceEvents(events: ChildAgentEvent[]): {
         permById.set(requestId, row)
         permissions.push(row)
       }
-      row.serverDecision = decision as PermissionDecision | 'denied'
+      row.serverDecision = decision
     }
     // Unknown types fall through silently and are NOT rendered.
     // Adding a new surface means adding an explicit branch above AND a
