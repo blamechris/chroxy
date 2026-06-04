@@ -340,6 +340,8 @@ export type {
   ToolInputDeltaPayload,
   StreamStartPayload,
   StreamEndPayload,
+  StreamDeltaContext,
+  PendingDelta,
   ResultUsagePayload,
 } from './handlers'
 
@@ -445,6 +447,7 @@ export {
   handleToolResult,
   handleToolInputDelta,
   handleStreamStart,
+  sharedStreamDelta,
   handleStreamEnd,
   handleResultUsage,
 } from './handlers'
