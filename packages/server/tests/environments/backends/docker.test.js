@@ -1243,6 +1243,199 @@ describe('DockerBackend.execInEnvironment()', () => {
     const result = await p
     assert.equal(result.stdout, 'hello\n')
   })
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5126 — SIGKILL escalation when a child ignores SIGTERM on timeout.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // A child that records every signal it receives but NEVER flips `killed`
+  // (i.e. it ignores SIGTERM) and never emits `close` on its own.
+  function makeStubbornChild() {
+    const child = new EventEmitter()
+    child.stdout = new PassThrough()
+    child.stderr = new PassThrough()
+    child.killed = false
+    child.signals = []
+    child.kill = (sig) => {
+      child.signals.push(sig)
+      // Deliberately do NOT set child.killed — simulate a process that
+      // ignores SIGTERM. SIGKILL would normally be uncatchable; we let the
+      // backend's escalation path do its thing and assert on the signal log.
+    }
+    return child
+  }
+
+  it('#5126: escalates to SIGKILL when the child ignores SIGTERM, and the promise rejects', async () => {
+    // Deterministic: stub setTimeout so the 5s grace timer runs synchronously.
+    const stubborn = makeStubbornChild()
+    const backend = new DockerBackend({ _spawn: () => stubborn })
+
+    const realSetTimeout = global.setTimeout
+    // Run the SHORTEST timer (the timeout) on a real micro-delay, but make the
+    // grace timer (the longer 5s one) fire immediately so we don't wait 5s.
+    global.setTimeout = (fn, ms, ...rest) => {
+      if (ms >= 1000) {
+        // The SIGKILL grace timer — fire on next tick instead of after 5s.
+        const t = realSetTimeout(fn, 0, ...rest)
+        if (t && typeof t.unref === 'function') t.unref()
+        return t
+      }
+      return realSetTimeout(fn, ms, ...rest)
+    }
+
+    let caught
+    try {
+      const p = backend.execInEnvironment('ctr-abc', {
+        cmd: 'hangs-forever',
+        timeout: 5,
+        onData: () => {},
+      })
+      // Let timeout fire (SIGTERM) then the (now-immediate) grace timer (SIGKILL).
+      await new Promise((r) => realSetTimeout(r, 30))
+      assert.deepEqual(
+        stubborn.signals,
+        ['SIGTERM', 'SIGKILL'],
+        'must SIGTERM first, then escalate to SIGKILL after grace',
+      )
+      // The real docker process would now close from the SIGKILL.
+      stubborn.emit('close', null, 'SIGKILL')
+      await p
+      assert.fail('expected rejection on timeout')
+    } catch (err) {
+      caught = err
+    } finally {
+      global.setTimeout = realSetTimeout
+    }
+    assert.match(caught.message, /timed out after 5ms/)
+    assert.equal(caught.killed, true)
+  })
+
+  it('#5126: grace timer is cleared on a prompt close (no SIGKILL on a child that honours SIGTERM)', async () => {
+    // Detect any attempt to arm a >=1s timer (the SIGKILL grace) and whether it
+    // ever fires. The grace is 5s in production; the child closes promptly after
+    // SIGTERM, so settle() must clear the armed grace timer before it fires.
+    const realSetTimeout = global.setTimeout
+    const realClearTimeout = global.clearTimeout
+    let graceFired = false
+    let graceArmed = false
+    let graceCleared = false
+    let graceHandle = null
+    global.setTimeout = (fn, ms, ...rest) => {
+      if (ms >= 1000) {
+        graceArmed = true
+        graceHandle = realSetTimeout(() => { graceFired = true; fn() }, ms, ...rest)
+        if (graceHandle && typeof graceHandle.unref === 'function') graceHandle.unref()
+        return graceHandle
+      }
+      return realSetTimeout(fn, ms, ...rest)
+    }
+    global.clearTimeout = (t) => {
+      if (t && t === graceHandle) graceCleared = true
+      return realClearTimeout(t)
+    }
+
+    const { backend, fakeChild } = makeStreamingBackend()
+    fakeChild.signals = []
+    const realKill = fakeChild.kill
+    fakeChild.kill = (sig) => { fakeChild.signals.push(sig); realKill(sig) }
+
+    let caught
+    try {
+      const p = backend.execInEnvironment('ctr-abc', {
+        cmd: 'hangs-then-dies',
+        timeout: 5,
+        onData: () => {},
+      })
+      // Timeout fires -> SIGTERM + grace armed. Child honours it and closes
+      // before the 5s grace fires, so settle() must clear the grace timer.
+      await new Promise((r) => realSetTimeout(r, 20))
+      assert.ok(fakeChild.signals.includes('SIGTERM'), 'SIGTERM sent on timeout')
+      assert.ok(graceArmed, 'grace timer must be armed after SIGTERM')
+      fakeChild.emit('close', null, 'SIGTERM')
+      await p
+      assert.fail('expected rejection on timeout')
+    } catch (err) {
+      caught = err
+    } finally {
+      global.setTimeout = realSetTimeout
+      global.clearTimeout = realClearTimeout
+    }
+    assert.match(caught.message, /timed out after 5ms/)
+    assert.ok(graceCleared, 'grace timer must be cleared once the child closes')
+    assert.ok(!graceFired, 'grace timer must not fire when the child closes promptly')
+    assert.ok(!fakeChild.signals.includes('SIGKILL'), 'no SIGKILL when SIGTERM is honoured')
+  })
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5127 — bounded retained buffer (maxBuffer parity). onData still fires
+  // for every chunk; only the accumulator is capped to a last-N tail.
+  // ───────────────────────────────────────────────────────────────────────
+
+  it('#5127: caps the retained stdout buffer while still delivering every chunk to onData', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const seen = []
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'spammy-setup.sh',
+      onData: (chunk, stream) => seen.push([stream, chunk]),
+    })
+
+    // The retained cap is 256 KiB. Emit well past it as many discrete chunks so
+    // we can assert (a) every chunk reached onData and (b) the resolved buffer
+    // is bounded to the tail.
+    const CAP = 256 * 1024
+    const chunk = 'x'.repeat(64 * 1024) // 64 KiB per chunk
+    const numChunks = 10 // 640 KiB total — 2.5x the cap
+    const tailMarker = 'TAIL-MARKER-END\n'
+    for (let i = 0; i < numChunks; i++) {
+      fakeChild.stdout.write(chunk)
+    }
+    fakeChild.stdout.write(tailMarker)
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+
+    const result = await p
+
+    // (a) Every emitted chunk reached onData — streaming is NOT truncated.
+    const stdoutChunks = seen.filter(([s]) => s === 'stdout')
+    assert.equal(stdoutChunks.length, numChunks + 1, 'onData fires for every chunk past the cap')
+    const totalStreamed = stdoutChunks.reduce((n, [, c]) => n + c.length, 0)
+    assert.equal(totalStreamed, numChunks * chunk.length + tailMarker.length, 'full bytes streamed via onData')
+
+    // (b) The retained buffer is bounded to the cap.
+    assert.ok(result.stdout.length <= CAP, `retained stdout (${result.stdout.length}) must be <= cap (${CAP})`)
+    assert.ok(result.stdout.length > 0, 'retained buffer is non-empty')
+    // (c) The TAIL is kept (diagnostic info lands at the end).
+    assert.ok(result.stdout.endsWith(tailMarker), 'the last bytes (the diagnostic tail) are retained')
+  })
+
+  it('#5127: failure tail is preserved off the bounded buffer on non-zero exit', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'broken-spammy-setup.sh',
+      onData: () => {},
+    })
+
+    const filler = 'y'.repeat(64 * 1024)
+    for (let i = 0; i < 8; i++) {
+      fakeChild.stderr.write(filler) // 512 KiB of noise — past the 256 KiB cap
+    }
+    fakeChild.stderr.write('ERR: the actual failure line\n')
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 1, null)
+
+    let caught
+    try {
+      await p
+      assert.fail('expected rejection on non-zero exit')
+    } catch (err) {
+      caught = err
+    }
+    const CAP = 256 * 1024
+    assert.ok(caught.stderr.length <= CAP, 'failure stderr is bounded to the cap')
+    assert.match(caught.stderr, /ERR: the actual failure line/, 'failure tail survives the cap')
+    assert.match(caught.message, /ERR: the actual failure line/, 'message derives from the bounded tail')
+    assert.equal(caught.code, 1)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
