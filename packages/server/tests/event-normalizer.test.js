@@ -311,6 +311,59 @@ describe('EventNormalizer', () => {
     })
   })
 
+  describe('agent_event event (#5016 / #5056)', () => {
+    it('maps a relayed child wire event to the agent_event message', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'tool_start',
+        payload: { toolUseId: 'tu_child', tool: 'Read' },
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      assert.equal(result.messages[0].msg.type, 'agent_event')
+      assert.equal(result.messages[0].msg.parentToolUseId, 'tu_task')
+      assert.equal(result.messages[0].msg.eventType, 'tool_start')
+      assert.deepEqual(result.messages[0].msg.payload, { toolUseId: 'tu_child', tool: 'Read' })
+      // Non-permission events must NOT register a permissionSessionMap entry.
+      assert.equal(result.registrations, undefined)
+    })
+
+    it('#5056: a relayed permission_request registers the requestId to the PARENT session id', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'permission_request',
+        payload: { requestId: 'perm-child-1', tool: 'mcp__foo__bar', input: { x: 1 } },
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      // Bound dashboard clients respond on the parent session, so the map
+      // entry MUST point requestId -> parent session id (ctx.sessionId).
+      assert.deepEqual(result.registrations, [
+        { map: 'permission', key: 'perm-child-1', value: 'sess-1' },
+      ])
+    })
+
+    it('#5056: a relayed permission_resolved emits the matching delete registration', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'permission_resolved',
+        payload: { requestId: 'perm-child-1', decision: 'allow' },
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      assert.deepEqual(result.registrations, [
+        { map: 'permission', key: 'perm-child-1', action: 'delete' },
+      ])
+    })
+
+    it('#5056: a relayed permission_request without a requestId registers nothing', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'permission_request',
+        payload: {},
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      assert.equal(result.registrations, undefined)
+    })
+  })
+
   // ---- EVENT_MAP: plan_started / plan_ready ----
 
   describe('plan_started event', () => {

@@ -313,6 +313,20 @@ export class ClaudeByokSession extends BaseSession {
     // _subagentSessions map — nested Task → Task is naturally supported.
     this._subagentSessions = new Map()
 
+    // #5056: routing table for subagent permission responses. When a Task
+    // subagent fires a permission_request (e.g. an MCP tool under approve
+    // mode), the pending entry lives in the CHILD's PermissionManager —
+    // not the parent's. The dashboard, however, only knows the parent
+    // session id (ws-permissions resolves against the parent), so a tap
+    // Approve/Deny lands on `parent.respondToPermission(requestId, ...)`.
+    // This map records `childRequestId -> childSession` while the prompt
+    // is outstanding so the parent can forward the response to the child
+    // whose PermissionManager actually holds it. Entries are added when
+    // the child's permission_request is relayed upward and removed on
+    // permission_resolved (or when the child is torn down), so a stale
+    // requestId can never resolve past its lifetime.
+    this._subagentPermissionRouting = new Map()
+
     // #4049: per-turn accumulators for subagent (Task tool) usage + cost.
     // Folded into the parent's result.usage / result.cost just before
     // the result event fires so cost attribution stays on the user-
@@ -1441,6 +1455,39 @@ export class ClaudeByokSession extends BaseSession {
     child.on('tool_result', (e) => {
       this._emitAgentEvent(toolUseId, 'tool_result', e)
     })
+    // #5056: relay the child's permission_request up to the parent's
+    // wire path so the dashboard can render the nested prompt and the
+    // user can approve/deny it. Without this, an MCP tool the subagent
+    // fires under `approve` mode surfaces a permission_request that
+    // nothing forwards — the dashboard never shows it and the request
+    // silently times out → denied.
+    //
+    // The pending entry lives in the CHILD's PermissionManager, so we
+    // record `requestId -> child` in the parent's routing table. When
+    // the user responds, ws-permissions calls the PARENT's
+    // respondToPermission (the only session id it knows); the parent
+    // consults this table and forwards to the child that actually holds
+    // the pending entry. See respondToPermission below.
+    //
+    // Authority note (bearer-token-authority.md): this relay does NOT
+    // widen the trust boundary. The response still flows through the
+    // existing ws-permissions gate on the PARENT session id (primary or
+    // pairing-bound-to-parent token required). The routing table only
+    // redirects an already-authorized decision to the correct in-process
+    // PermissionManager — it grants no new authority and is unreachable
+    // by the child or the model (in-process Map, no wire surface).
+    child.on('permission_request', (e) => {
+      if (e && e.requestId) {
+        this._subagentPermissionRouting.set(e.requestId, child)
+      }
+      this._emitAgentEvent(toolUseId, 'permission_request', e)
+    })
+    child.on('permission_resolved', (e) => {
+      if (e && e.requestId) {
+        this._subagentPermissionRouting.delete(e.requestId)
+      }
+      this._emitAgentEvent(toolUseId, 'permission_resolved', e)
+    })
     // #5016: when the child itself dispatches a Task (grand-child),
     // its own `agent_event` fires on the child. Forward those too,
     // re-tagged with THIS parent's toolUseId so the dashboard groups
@@ -1463,6 +1510,17 @@ export class ClaudeByokSession extends BaseSession {
       const mergedPayload = e?.parentToolUseId
         ? { ...basePayload, parentToolUseId: e.parentToolUseId }
         : basePayload
+      // #5056: a grand-child permission_request reaches us as an
+      // `agent_event` re-emitted by the child. Route the response one
+      // hop down — to the IMMEDIATE child — which already holds the
+      // grand-child mapping in its own routing table and forwards the
+      // decision the rest of the way. This keeps the chain recursive:
+      // each level only needs to know its direct child.
+      if (e.type === 'permission_request' && basePayload.requestId) {
+        this._subagentPermissionRouting.set(basePayload.requestId, child)
+      } else if (e.type === 'permission_resolved' && basePayload.requestId) {
+        this._subagentPermissionRouting.delete(basePayload.requestId)
+      }
       this._emitAgentEvent(toolUseId, e.type, mergedPayload)
     })
 
@@ -1487,6 +1545,7 @@ export class ClaudeByokSession extends BaseSession {
     if (signal?.aborted) {
       if (signal) signal.removeEventListener?.('abort', onAbort)
       this._subagentSessions.delete(toolUseId)
+      this._purgeSubagentPermissionRouting(child)
       try { await child.destroy() } catch (err) {
         log.warn(`subagent destroy on pre-send abort failed: ${err?.message || err}`)
       }
@@ -1503,6 +1562,11 @@ export class ClaudeByokSession extends BaseSession {
       // racing interrupt() during teardown doesn't try to abort an
       // already-half-destroyed child.
       this._subagentSessions.delete(toolUseId)
+      // #5056: drop any still-outstanding permission routing entries for
+      // this child so a late dashboard response can't dereference a
+      // destroyed child (the child's own teardown rejects its pending
+      // permissions; this just clears the parent's pointer).
+      this._purgeSubagentPermissionRouting(child)
       try { await child.destroy() } catch (err) {
         log.warn(`subagent destroy on Task completion failed: ${err?.message || err}`)
       }
@@ -1573,6 +1637,20 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   /**
+   * #5056: remove every permission-routing entry that points at the given
+   * child session. Called when a Task subagent is torn down so a late
+   * dashboard response can never dereference a destroyed child. Cheap
+   * (the map is empty in the common case where no permission was pending).
+   *
+   * @param {object} child  The subagent session being torn down
+   */
+  _purgeSubagentPermissionRouting(child) {
+    for (const [requestId, routed] of this._subagentPermissionRouting) {
+      if (routed === child) this._subagentPermissionRouting.delete(requestId)
+    }
+  }
+
+  /**
    * Dispatch one built-in tool (Read/Write/Edit/Bash/Glob/Grep/WebFetch/
    * TodoWrite) to the local executor. Returns `{ content, isError }` —
    * the shape `_executeToolBlock` threads into the next round's
@@ -1638,6 +1716,23 @@ export class ClaudeByokSession extends BaseSession {
    * handlePermission() above.
    */
   respondToPermission(requestId, decision) {
+    // #5056: if this requestId belongs to a Task subagent (its pending
+    // entry lives in the CHILD's PermissionManager, not ours), forward
+    // the decision to that child. ws-permissions only ever calls the
+    // PARENT (the session id it knows), so this redirect is what lets a
+    // dashboard Approve/Deny reach a nested MCP permission prompt. The
+    // child's own respondToPermission recurses if the prompt actually
+    // belongs to a grand-child. Authority is unchanged: the caller was
+    // already authorized against the parent session by ws-permissions.
+    const child = this._subagentPermissionRouting.get(requestId)
+    if (child) {
+      // Drop the routing entry first so a duplicate/late response can't
+      // re-resolve a stale id. The child also emits permission_resolved
+      // which our relay listener uses to clear the same entry — deleting
+      // here too is idempotent and closes the lifetime tightly.
+      this._subagentPermissionRouting.delete(requestId)
+      return child.respondToPermission(requestId, decision)
+    }
     return this._permissions.respondToPermission(requestId, decision)
   }
 
@@ -1806,6 +1901,9 @@ export class ClaudeByokSession extends BaseSession {
     // reference (test capture, future export) would keep them alive.
     this._streamingIndexToToolUseId.clear()
     this._pendingPermissionToolUseIds.clear()
+    // #5056: drop any outstanding subagent permission-routing pointers so
+    // the destroyed parent doesn't retain references to its children.
+    this._subagentPermissionRouting.clear()
     // #4049: tear down any active subagent sessions. interrupt() (run
     // at the top of destroy()) already cascaded the abort signal; this
     // step also drops each child's PermissionManager, MCP fleet, and
