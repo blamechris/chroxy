@@ -274,19 +274,36 @@ export class DockerContainerPool extends EventEmitter {
       log.debug(`pool miss for ${key}`)
       return null
     }
-    // Lazily skip + evict any over-age entries at the head of the bucket (#5045).
+    // Lazily skip + evict any over-age or soiled entries at the head of
+    // the bucket. Over-age is #5045; the soiled check (#5049) is
+    // defense-in-depth — the documented session lifecycle never lets
+    // `markSoiled(id)` race against `release()` (destroy() nulls
+    // _containerId before pool.release()), but the public markSoiled(id)
+    // API takes any id, so a future non-session caller could mark an
+    // already-pooled id. Without this check the next acquire() would
+    // silently hand out a soiled container. The soiled marker is
+    // consumed on the inline eviction so the same id isn't poisoned
+    // forever — matches the release-path semantics.
     const now = this._now()
     while (bucket.length > 0) {
       const head = bucket[0]
       const age = now - (head.createdAt ?? now)
-      if (age <= this._maxAgeMs) break
+      const overAge = age > this._maxAgeMs
+      const soiled = this._soiledIds.has(head.containerId)
+      if (!overAge && !soiled) break
       bucket.shift()
       this._clearTimeout(head.timer)
       this._createdAt.delete(head.containerId)
-      this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId: head.containerId, reason: 'over_age' })
-      log.info(`pool over-age on acquire (${age}ms > ${this._maxAgeMs}ms): evicting ${head.containerId.slice(0, 12)}`)
+      if (soiled) {
+        this._soiledIds.delete(head.containerId)
+        this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId: head.containerId, reason: 'soiled' })
+        log.info(`pool soiled on acquire: evicting ${head.containerId.slice(0, 12)}`)
+      } else {
+        this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId: head.containerId, reason: 'over_age' })
+        log.info(`pool over-age on acquire (${age}ms > ${this._maxAgeMs}ms): evicting ${head.containerId.slice(0, 12)}`)
+      }
       this._evict(head.containerId).catch((err) => {
-        log.warn(`over-age eviction of ${head.containerId.slice(0, 12)} failed: ${err.message}`)
+        log.warn(`acquire-time eviction of ${head.containerId.slice(0, 12)} failed: ${err.message}`)
       })
     }
     if (bucket.length === 0) {

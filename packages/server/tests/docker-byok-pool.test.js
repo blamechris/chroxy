@@ -461,6 +461,71 @@ describe('DockerContainerPool — markSoiled() (#5043)', () => {
     await pool.shutdown()
     assert.equal(pool.isSoiled('CONTAINER_X'), false)
   })
+
+  /**
+   * Defense-in-depth check (#5049): the documented session lifecycle
+   * never lets `markSoiled(id)` race against `release()` — `destroy()`
+   * nulls `_containerId` before calling `pool.release()`, so the marker
+   * can only fire while the container is acquired (not pooled). But the
+   * public `markSoiled(id)` API takes any id, and a future non-session
+   * caller (dashboard endpoint, admin tool, snapshot helper that bypasses
+   * the session) could mark an already-pooled id. Without this check the
+   * next `acquire()` would silently hand it out before the soiled marker
+   * fires on release.
+   *
+   * Fix: in `acquire()`, after popping an entry from the bucket, check
+   * `this._soiledIds.has(entry.containerId)`. If so, evict it inline and
+   * continue draining the bucket until a non-soiled entry surfaces (or
+   * the bucket is empty, returning null).
+   */
+  it('acquire skips a soiled container in the pool and evicts it inline', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    // Seed the bucket the normal way, then mark the pooled id soiled
+    // out-of-band — simulating a future caller that bypasses the session.
+    await pool.release('k', 'POOLED_THEN_SOILED')
+    assert.equal(pool.size(), 1)
+    pool.markSoiled('POOLED_THEN_SOILED')
+    const got = pool.acquire('k')
+    assert.equal(got, null, 'soiled pool entry must NOT be returned to caller')
+    assert.equal(pool.size(), 0, 'soiled pool entry must be removed from the pool')
+    // Drain microtasks so the async _evict() runs.
+    await new Promise((r) => setImmediate(r))
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1, 'soiled pool entry must be docker rm -f')
+    assert.ok(rmCalls[0].args.includes('POOLED_THEN_SOILED'))
+    // The soiled marker is consumed on the inline acquire-time eviction
+    // so the same id doesn't stay poisoned forever (matches the
+    // release-path semantics).
+    assert.equal(pool.isSoiled('POOLED_THEN_SOILED'), false)
+  })
+
+  it('acquire skips a soiled head entry and returns the next clean one in the bucket', async () => {
+    const timers = timerStubs()
+    const execFile = execFileStub()
+    const pool = new DockerContainerPool({
+      maxPerKey: 5,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+    await pool.release('k', 'SOILED_HEAD')
+    await pool.release('k', 'CLEAN_NEXT')
+    pool.markSoiled('SOILED_HEAD')
+    const got = pool.acquire('k')
+    assert.equal(got, 'CLEAN_NEXT', 'must skip past soiled entry to reach a clean one')
+    await new Promise((r) => setImmediate(r))
+    const rmCalls = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1)
+    assert.ok(rmCalls[0].args.includes('SOILED_HEAD'))
+    // The clean entry is now held by the caller, pool is empty.
+    assert.equal(pool.size(), 0)
+  })
 })
 
 describe('DockerContainerPool — max age (#5045)', () => {
