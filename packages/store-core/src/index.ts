@@ -174,8 +174,11 @@ export {
   // #5039: error-path partial-cost helper shared by dashboard toast
   // sub-line and mobile Alert.alert body.
   formatPartialCostLine,
-  // #5065: compact `used / total` token label for the header
-  // context-window meter.
+  // #5058 / #5094: canonical token-count formatters. `formatTokens` is the
+  // STANDARD (uppercase K, 2-decimal M) used by the sidebar + breakdown
+  // surfaces; `formatTokensCompact` is the COMPACT (lowercase k, 1-decimal
+  // M) used by the single-line header meter + context chip.
+  formatTokens,
   formatTokensCompact,
 } from './cost-format'
 export type { ErrorPartialCost } from './cost-format'

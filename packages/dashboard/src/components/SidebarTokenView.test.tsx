@@ -7,7 +7,6 @@ import type { SessionInfo, CumulativeUsage } from '@chroxy/store-core'
 import {
   SidebarTokenView,
   aggregateUsage,
-  formatTokenCount,
   tokenViewCollapsedMetric,
 } from './SidebarTokenView'
 
@@ -141,29 +140,10 @@ describe('SidebarTokenView (#4303 v0)', () => {
     })
   })
 
-  describe('formatTokenCount', () => {
-    it('renders below 1000 verbatim', () => {
-      expect(formatTokenCount(0)).toBe('0')
-      expect(formatTokenCount(999)).toBe('999')
-    })
-
-    it('abbreviates thousands with K', () => {
-      expect(formatTokenCount(1000)).toBe('1.0K')
-      expect(formatTokenCount(1234)).toBe('1.2K')
-      expect(formatTokenCount(999_499)).toBe('999.5K')
-    })
-
-    // #4304 review: avoid the "1000.0K" visual nonsense.
-    it('rolls over to M before the K-rounded value crosses 1000', () => {
-      expect(formatTokenCount(999_500)).toBe('1.00M')
-      expect(formatTokenCount(999_999)).toBe('1.00M')
-    })
-
-    it('abbreviates millions with M', () => {
-      expect(formatTokenCount(1_000_000)).toBe('1.00M')
-      expect(formatTokenCount(1_500_000)).toBe('1.50M')
-    })
-  })
+  // formatTokenCount was unified into the canonical `formatTokens` in
+  // @chroxy/store-core (#5058 / #5094); its unit tests now live in
+  // store-core/src/cost-format.test.ts. The render-level assertions below
+  // (today-total, by-provider) still exercise the formatter end-to-end.
 
   describe('tokenViewCollapsedMetric', () => {
     it('returns the same total as the expanded view', () => {
