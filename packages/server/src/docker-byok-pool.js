@@ -391,7 +391,11 @@ export class DockerContainerPool extends EventEmitter {
     // container doesn't keep the event loop alive on shutdown.
     if (timer && typeof timer.unref === 'function') timer.unref()
     this._createdAt.set(containerId, createdAt)
-    bucket.push({ containerId, timer, createdAt })
+    // Stamp releasedAt on every pooled entry so `inspect()` (#5052) can
+    // report `oldestIdleMs` without iterating timers. We already have
+    // `now` from the over-age check above; reuse it so the stamp matches
+    // the bookkeeping time exactly.
+    bucket.push({ containerId, timer, createdAt, releasedAt: now })
     this._entries.set(key, bucket)
     this._emitPoolEvent(POOL_EVENTS.RELEASED, { key, containerId })
     log.info(`pool release: ${containerId.slice(0, 12)} → ${key} (idle ${this._idleTimeoutMs}ms, age ${age}ms/${this._maxAgeMs}ms)`)
@@ -414,6 +418,52 @@ export class DockerContainerPool extends EventEmitter {
   sizeOf(key) {
     const bucket = this._entries.get(key)
     return bucket ? bucket.length : 0
+  }
+
+  /**
+   * Read-only per-key bucket snapshot (#5052). Returns one
+   * `{ key, size, oldestIdleMs }` for every non-empty bucket, sorted by
+   * key ascending so output is stable for tests and dashboard diffs.
+   *
+   *   - `size`          — number of containers currently parked under
+   *                       this key.
+   *   - `oldestIdleMs`  — `now - max(entry.releasedAt)` across the
+   *                       bucket; the idle age of the OLDEST parked
+   *                       container. Useful for leak detection and
+   *                       idle-lifetime distribution.
+   *
+   * Companion to the structured event stream (#5044):
+   *   - Events answer "what did the pool DO recently?"
+   *   - `inspect()` answers "what's parked right now?"
+   *
+   * SHALLOW snapshot: caller mutations on the returned array (or its
+   * entry objects) MUST NOT affect pool state. We build fresh plain
+   * objects and never expose the internal `_entries` Map.
+   *
+   * @returns {Array<{ key: string, size: number, oldestIdleMs: number }>}
+   */
+  inspect() {
+    const now = this._now()
+    const snapshot = []
+    for (const [key, bucket] of this._entries.entries()) {
+      if (!bucket || bucket.length === 0) continue
+      // `oldestIdleMs` = max(now - releasedAt) across the bucket. The
+      // oldest entry is the one with the SMALLEST releasedAt — fall
+      // back to `now` (idle 0) if an entry somehow lacks the stamp so
+      // the snapshot stays well-formed in pathological cases.
+      let oldestReleasedAt = now
+      for (const entry of bucket) {
+        const ra = typeof entry.releasedAt === 'number' ? entry.releasedAt : now
+        if (ra < oldestReleasedAt) oldestReleasedAt = ra
+      }
+      snapshot.push({
+        key,
+        size: bucket.length,
+        oldestIdleMs: now - oldestReleasedAt,
+      })
+    }
+    snapshot.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    return snapshot
   }
 
   /**
