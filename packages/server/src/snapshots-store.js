@@ -283,8 +283,13 @@ export async function reconcileOrphans({ listImages, dir } = {}) {
 
   // Source of truth first. A rejection here is fatal BY DESIGN — we must
   // never act on a partial/empty image list (it would nuke live sidecars).
+  // A non-array return is treated the same way: fail loud rather than
+  // coerce to [] and silently delete every sidecar (fail-destructive).
   const rawImages = await listImages()
-  const snapshotImages = (Array.isArray(rawImages) ? rawImages : []).filter(
+  if (!Array.isArray(rawImages)) {
+    throw new Error('reconcileOrphans: listImages must resolve to an array')
+  }
+  const snapshotImages = rawImages.filter(
     (tag) => typeof tag === 'string' && tag.startsWith(SNAPSHOT_TAG_PREFIX),
   )
   const imageSet = new Set(snapshotImages)
