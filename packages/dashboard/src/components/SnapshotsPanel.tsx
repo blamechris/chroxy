@@ -199,6 +199,9 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
     async (slug: string) => {
       setDeletingSlug(slug)
       setError(null)
+      // Reset any warning from a prior delete so each operation starts
+      // clean — otherwise a stale tag can linger across a later success.
+      setWarning(null)
       const token = resolvedGetToken()
       try {
         const res = await resolvedFetch(`/api/snapshots/${encodeURIComponent(slug)}`, {
@@ -269,6 +272,8 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
         <div
           className="env-empty"
           data-testid="snapshots-warning"
+          role="status"
+          aria-live="polite"
           style={{
             color: 'var(--status-warning, #f59e0b)',
             display: 'flex',
@@ -282,6 +287,7 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
             className="btn-env-new"
             data-testid="snapshots-warning-dismiss"
             onClick={() => setWarning(null)}
+            aria-label="Dismiss warning"
             title="Dismiss"
           >
             Dismiss
