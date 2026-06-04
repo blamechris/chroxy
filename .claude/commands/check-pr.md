@@ -24,7 +24,7 @@ PR_AGE_SECONDS=$(gh pr view ${PR_NUM} --json createdAt \
 
 # Check Copilot review status
 COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+  --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (any(.[]; .state == "PENDING")) then "IN_PROGRESS" else "COMPLETED" end')
 
 # If no review exists yet AND PR is less than 5 min old, wait for it to appear
 if [ "$COPILOT_STATUS" = "NOT_FOUND" ] && [ "${PR_AGE_SECONDS%.*}" -lt 300 ]; then
@@ -32,7 +32,7 @@ if [ "$COPILOT_STATUS" = "NOT_FOUND" ] && [ "${PR_AGE_SECONDS%.*}" -lt 300 ]; th
   for i in $(seq 1 10); do
     sleep 30
     COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (any(.[]; .state == "PENDING")) then "IN_PROGRESS" else "COMPLETED" end')
     [ "$COPILOT_STATUS" != "NOT_FOUND" ] && echo "Copilot review detected (status: $COPILOT_STATUS)" && break
   done
 fi
@@ -43,7 +43,7 @@ if [ "$COPILOT_STATUS" = "IN_PROGRESS" ]; then
   for i in $(seq 1 10); do
     sleep 30
     COPILOT_STATUS=$(gh api repos/${REPO}/pulls/${PR_NUM}/reviews \
-      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (.[0].state == "PENDING") then "IN_PROGRESS" else "COMPLETED" end')
+      --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")] | if length == 0 then "NOT_FOUND" elif (any(.[]; .state == "PENDING")) then "IN_PROGRESS" else "COMPLETED" end')
     [ "$COPILOT_STATUS" != "IN_PROGRESS" ] && break
   done
 fi
@@ -212,6 +212,7 @@ When a suggestion is valid but out of scope for this PR. You MUST create a GitHu
 
 ```bash
 # 1. ALWAYS create the issue — this is NOT optional
+# NEVER write "Created a follow-up issue" without the URL. The URL is the whole point.
 ISSUE_URL=$(gh issue create \
   --title "Short descriptive title" \
   --label "enhancement" \
@@ -237,7 +238,6 @@ EOF
 )")
 
 # 2. Reply inline referencing the issue — MUST include the FULL issue URL
-# NEVER write "Created a follow-up issue" without the URL. The URL is the whole point.
 gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
   --method POST \
   -f body="**FOLLOW-UP ISSUE**
@@ -323,18 +323,27 @@ THREAD_IDS=$(gh api graphql --paginate -f query="
     }
   }" --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .id')
 
-# Resolve each unresolved thread; surface any single-thread failure
-# instead of swallowing it (a 401/403 on one thread shouldn't be silent).
-echo "$THREAD_IDS" | while read -r tid; do
-  [ -z "$tid" ] && continue
-  gh api graphql -f query="
-    mutation {
-      resolveReviewThread(input: {threadId: \"$tid\"}) {
-        thread { isResolved }
-      }
-    }" --jq '.data.resolveReviewThread.thread | "  resolved: \(.isResolved)"' \
-    || echo "  FAILED to resolve: $tid"
-done
+# Resolve each unresolved thread via Python — pass the Base64-ish thread ID
+# (PRRT_*) as a GraphQL *variable* (-f id=...) so it never gets interpolated
+# into the query string or the shell (merge.md Critical Rule 4). The
+# --paginate THREAD_IDS fetch above stays in bash (it only emits IDs). gh
+# exits 0 even when the GraphQL response body carries an `errors` array, so
+# validate the parsed response's isResolved rather than the exit code;
+# surface each failure per-thread.
+echo "$THREAD_IDS" | python3 -c "
+import sys, subprocess, json
+q = 'mutation(\$id: ID!) { resolveReviewThread(input: {threadId: \$id}) { thread { isResolved } } }'
+for tid in sys.stdin.read().split():
+    r = subprocess.run(['gh', 'api', 'graphql', '-f', 'query=' + q, '-f', 'id=' + tid], capture_output=True, text=True)
+    ok = False
+    if r.returncode == 0:
+        try:
+            d = json.loads(r.stdout)
+            ok = 'errors' not in d and d['data']['resolveReviewThread']['thread']['isResolved'] is True
+        except (ValueError, KeyError, TypeError):
+            ok = False
+    print('  resolved: ' + tid if ok else '  FAILED to resolve: ' + tid)
+"
 
 # Verify zero unresolved threads remain. --paginate emits one length per page,
 # which we sum with awk so the count is correct on PRs with >100 threads. If
@@ -359,7 +368,7 @@ echo "Unresolved threads: ${UNRESOLVED}"
 
 **Pagination cap:** `gh api graphql --paginate` follows `pageInfo.hasNextPage` until exhausted — no implicit cap. On the rare PR with thousands of threads, GitHub's GraphQL rate limit (5000 points/hr) is the practical ceiling. If you see HTTP 403 with "API rate limit exceeded" from gh on step 6b, the resolve loop will short-circuit on the failing call and the verify will report nonzero — re-run after the rate limit window resets.
 
-**When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **always resolve**.
+**When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **always resolve**. Chroxy branch protection REQUIRES conversation resolution — do NOT skip.
 
 **Edge cases:**
 - A thread you marked FALSE POSITIVE: still resolve it. The reply records the rationale; if a reviewer disagrees, they can re-open the thread.
@@ -451,4 +460,4 @@ Then below the table, list:
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```
-<!-- skill-templates: check-pr ebdb14e 2026-06-02 -->
+<!-- skill-templates: check-pr cc062bc 2026-06-03 -->

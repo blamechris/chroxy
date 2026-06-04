@@ -25,7 +25,7 @@ node -e "require('playwright')" 2>/dev/null || {
 
 # Check smoke test script exists
 test -f packages/server/tests/smoke-test.mjs || {
-  echo "Smoke test script not found at packages/server/tests/smoke-test.mjs"
+  echo "Error: smoke test script not found at packages/server/tests/smoke-test.mjs"
   exit 1
 }
 ```
@@ -45,15 +45,41 @@ done
 
 # No server found — start one
 echo "Starting chroxy server..."
-npx chroxy start
+npx chroxy start &
+SERVER_PID=$!
+sleep 2
+
+# Verify it started
+if ! curl -s http://localhost:8765/health >/dev/null 2>&1; then
+  echo "Failed to start server"
+  kill $SERVER_PID 2>/dev/null
+  exit 1
+fi
 ```
 
 ### 2. Run the Smoke Test
 
+**Do NOT forward `$ARGUMENTS` verbatim to `playwright test`.** Only `--headed` is a real
+Playwright flag; `--keep-screenshots` is a skill-level flag handled by this skill's
+cleanup step (5), not Playwright. Parse the two out separately:
+
 ```bash
+PW_FLAGS=""
+KEEP_SCREENSHOTS=false
+for arg in $ARGUMENTS; do
+  case "$arg" in
+    --headed) PW_FLAGS="$PW_FLAGS --headed" ;;
+    --keep-screenshots) KEEP_SCREENSHOTS=true ;;  # skill-level, NOT passed to Playwright
+    *) ;;  # ignore unknown flags rather than forwarding them
+  esac
+done
+
+# Rebuild dashboard before testing (source changes not visible without rebuild)
 cd packages/server
 npm run dashboard:build
-node tests/smoke-test.mjs $ARGUMENTS
+
+# Run the smoke test
+cd packages/server && node tests/smoke-test.mjs $PW_FLAGS
 ```
 
 The test script should:
@@ -86,22 +112,26 @@ Output a summary table:
 
 | # | Check | Status | Notes |
 |---|-------|--------|-------|
-| 1 | Dashboard loads | PASS | HTTP 200, WS connected |
+| 1 | Dashboard loads | PASS | HTTP 200, WS connects |
 | 2 | Session creation | PASS | Ctrl+N modal opens |
-| 3 | Keyboard shortcuts | PASS | ? and Ctrl+K work |
+| 3 | Keyboard shortcuts | PASS | `?` help, `Ctrl+K` palette |
 
 **Screenshots reviewed:** N
 **Visual issues found:** M (describe any issues)
 
-If the test failed, check that the server is running and the dashboard was rebuilt. Provider picker CSS is invisible without a rebuild.
+If the test failed, check:
+- Is the server running? (`curl http://localhost:8765/health`)
+- Did the dashboard rebuild? (`npm run dashboard:build`)
+- Are there console errors in the browser? (check screenshots or run with `--headed`)
 ```
 
 ### 5. Cleanup
 
 ```bash
-# Remove screenshots unless --keep-screenshots was passed
-if [[ "$ARGUMENTS" != *"--keep-screenshots"* ]]; then
-  rm -rf packages/server/tests/screenshots/
+# Remove screenshots unless --keep-screenshots was passed (parsed in step 2, NOT
+# forwarded to Playwright). $KEEP_SCREENSHOTS is the skill's own flag.
+if [ "$KEEP_SCREENSHOTS" != "true" ]; then
+  rm -rf packages/server/tests/screenshots
 fi
 ```
 
@@ -177,8 +207,8 @@ Many apps need a backend connection before the full UI renders. Always wait for 
 // Wait for app to be fully loaded and connected
 await page.waitForFunction(() => {
   // Check that page does NOT contain "Disconnected" or "Connecting..."
-  const bodyText = document.body.innerText
-  return !bodyText.includes('Disconnected') && !bodyText.includes('Connecting...')
+  const body = document.body.innerText
+  return !body.includes('Disconnected') && !body.includes('Connecting...')
 }, { timeout: 10000 })
 ```
 
@@ -202,5 +232,5 @@ Organize checks into logical groups:
 5. **Visual verification is the point** — The automated checks catch DOM presence. Reading screenshots catches visual regressions (z-index, color, spacing).
 6. **Idempotent** — Safe to run repeatedly. Don't create persistent state (sessions, data, etc.) that would affect the next run.
 7. **Rebuild dashboard before testing** — Dashboard serves compiled Vite bundles. Source changes are NOT visible without `npm run dashboard:build`.
-8. **Known quirk: `?` shortcut fails with textarea focus** — If the textarea has focus, the keystroke goes to input, not the shortcut handler. Test selector issue, not app bug. Click body first.
-<!-- skill-templates: smoke-test ebdb14e 2026-06-02 -->
+8. **`?` shortcut quirk** — Test fails if textarea has focus (keystroke goes to input, not shortcut handler). Click body first to ensure focus is not in the input bar.
+<!-- skill-templates: smoke-test 21fa678 2026-06-03 -->

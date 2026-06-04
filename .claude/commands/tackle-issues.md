@@ -8,6 +8,7 @@ Composes `/autonomous-dev-flow` logic internally but adds multi-wave retry with 
 
 - `$ARGUMENTS` - Issue source and options. Same as `/autonomous-dev-flow` plus marathon-specific options:
   - `label:from-review` (all open issues with this label)
+  - `label:enhancement` (all open issues with this label)
   - `milestone:"v1.2"` (all open issues in milestone)
   - `#12 #15 #18` or `12 15 18` (specific issues by number)
   - `label:from-review max:10 sort:created-asc` (with options)
@@ -42,6 +43,8 @@ REPO_NAME=$(basename "$REPO")
 SESSION_START=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 BRANCH_PREFIX="feat/"
+
+BRANCH_PREFIX_RE="^(feat|fix|refactor|test)/"
 ```
 
 Parse `$ARGUMENTS` — same as `/autonomous-dev-flow` but with higher defaults:
@@ -152,8 +155,8 @@ Add new unassigned issues to the queue if they match the original filter criteri
 
 ```bash
 gh pr list --state merged --json number,headRefName,mergedAt --limit 30 \
-  | jq --arg start "$SESSION_START" --arg prefix "$BRANCH_PREFIX" \
-    '[.[] | select(.mergedAt > $start) | select(.headRefName | startswith($prefix))]'
+  | jq --arg start "$SESSION_START" --arg prefix "$BRANCH_PREFIX_RE" \
+    '[.[] | select(.mergedAt > $start) | select(.headRefName | test($prefix))]'
 ```
 
 Note merged PRs. If a merged PR's issue is in the retry queue, remove it — the user handled it.
@@ -352,7 +355,7 @@ This skill uses **GitHub state** for resume — no local state files. Same as `/
 
 If a marathon session is interrupted (crash, timeout, user stops it), re-running with the same arguments will:
 
-1. Query GitHub for existing session branches (matching `BRANCH_PREFIX`) and PRs referencing each issue
+1. Query GitHub for existing session branches (matching `BRANCH_PREFIX_RE`) and PRs referencing each issue
 2. Detect which wave the session was in by counting attempts per issue
 3. Skip issues that already have merged or clean open PRs
 4. Resume from the first unfinished issue in the current wave
@@ -384,4 +387,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 15. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running `/full-review` in every wave.
 16. **Sync before every branch** — Always `git checkout main && git pull` before starting each issue in each wave.
 17. **Morning summary is mandatory** — Even if interrupted, output the best summary possible with data collected so far.
-<!-- skill-templates: tackle-issues ebdb14e 2026-06-02 -->
+<!-- skill-templates: tackle-issues 21fa678 2026-06-03 -->
