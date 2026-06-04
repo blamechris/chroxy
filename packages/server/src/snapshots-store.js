@@ -304,6 +304,12 @@ export async function reconcileOrphans({ listImages, dir } = {}) {
   const trackedTags = new Set()
 
   for (const entry of sidecars) {
+    // Only reconcile sidecars that reference an image in OUR namespace. A
+    // sidecar whose tag was corrupted (or written by a future format) into
+    // a non-snapshot namespace is outside our authority — `listImages` only
+    // returns `chroxy-byok-snap:` tags, so such an entry would never match
+    // and we'd wrongly unlink it. Leave it untouched.
+    if (!entry.tag.startsWith(SNAPSHOT_TAG_PREFIX)) continue
     trackedTags.add(entry.tag)
     if (imageSet.has(entry.tag)) continue
     // Sidecar's image is gone from the daemon — drop the ghost.

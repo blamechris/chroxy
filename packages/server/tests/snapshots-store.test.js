@@ -296,5 +296,21 @@ describe('snapshots-store', () => {
       assert.deepEqual(result.orphanedSidecarsRemoved, [])
       assert.deepEqual(result.orphanedImagesLogged, [])
     })
+
+    it('never unlinks a sidecar whose tag is outside the snapshot namespace', async () => {
+      // A corrupted/foreign-namespace tag is outside our authority: listImages
+      // only ever returns chroxy-byok-snap: tags, so such an entry could never
+      // match and would be wrongly classified as orphaned. It must be left alone.
+      writeSidecar('snap-foreign', { tag: 'node:22-slim' })
+      writeSidecar('snap-real', { tag: 'chroxy-byok-snap:real' })
+      const result = await reconcileOrphans({
+        listImages: async () => ['chroxy-byok-snap:real'],
+        dir: snapDir,
+      })
+      assert.deepEqual(result.orphanedSidecarsRemoved, [])
+      assert.deepEqual(result.orphanedImagesLogged, [])
+      assert.equal(existsSync(join(snapDir, 'snap-foreign.json')), true)
+      assert.equal(existsSync(join(snapDir, 'snap-real.json')), true)
+    })
   })
 })
