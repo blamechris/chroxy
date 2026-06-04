@@ -64,11 +64,13 @@ describe('PermissionManager', () => {
       pm.handlePermission('Bash', { command: 'pwd' }, null, 'approve')
 
       assert.notEqual(events[0].requestId, events[1].requestId)
-      // Both ids share this manager's nonce (the segment between perm- and
-      // the counter), proving the nonce is per-instance, not per-request.
-      const nonceA = events[0].requestId.split('-')[1]
-      const nonceB = events[1].requestId.split('-')[1]
-      assert.equal(nonceA, nonceB)
+      // Both ids share this manager's nonce, proving the nonce is
+      // per-instance, not per-request. Extract it by stripping the `perm-`
+      // prefix and the trailing `-<counter>-<ms>` rather than indexing a
+      // fixed segment, so the assertion stays valid if the nonce format
+      // changes (it remains opaque to consumers either way).
+      const nonceOf = (id) => id.replace(/^perm-/, '').replace(/-\d+-\d+$/, '')
+      assert.equal(nonceOf(events[0].requestId), nonceOf(events[1].requestId))
     })
   })
 

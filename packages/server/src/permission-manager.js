@@ -48,7 +48,9 @@ export class PermissionManager extends EventEmitter {
     // own pending id against a child's (#5121). The counter is retained for
     // human-readable ordering in logs; global uniqueness comes from the
     // nonce. The id is opaque to all consumers — nothing parses its shape.
-    this._idNonce = randomUUID().slice(0, 8)
+    // Full 128-bit UUID (dashes stripped so the nonce stays a single id
+    // segment) — 32 bits would be birthday-bound vulnerable at scale.
+    this._idNonce = randomUUID().replace(/-/g, '')
     this._lastPermissionData = new Map() // requestId -> emitted permission_request payload
 
     // Session-scoped permission rules
