@@ -3104,6 +3104,42 @@ describe('DockerByokSession — devcontainer fingerprint in pool key (#5080)', (
       rmSync(cwdB, { recursive: true, force: true })
     }
   })
+
+  it('#5103: _canonicalStringify matches JSON.stringify for undefined props (empty overlay → {})', () => {
+    // Copilot review: the canonical serializer must drop object properties
+    // whose value is `undefined` (as JSON.stringify does) rather than
+    // emitting non-JSON `...:undefined` slots. The most important case is
+    // the "empty overlay" where all four fingerprintInput fields are
+    // undefined — it must canonicalise to `{}`, identical to the pre-#5103
+    // JSON.stringify output, so an overlay-free devcontainer.json keeps a
+    // stable, clean fingerprint.
+    const cwd = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(cwd, '.devcontainer'), { recursive: true })
+    writeFileSync(join(cwd, '.devcontainer', 'devcontainer.json'), '{}')
+    try {
+      const session = makeSession(cwd)
+      const emptyOverlay = {
+        mounts: undefined,
+        containerEnv: undefined,
+        forwardPorts: undefined,
+        postCreateCommand: undefined,
+      }
+      assert.equal(session._canonicalStringify(emptyOverlay), '{}',
+        'all-undefined overlay must canonicalise to {} like JSON.stringify')
+      // Partial overlay: undefined props dropped, defined props kept + sorted.
+      assert.equal(
+        session._canonicalStringify({ postCreateCommand: 'echo hi', mounts: undefined, containerEnv: { B: '2', A: '1' } }),
+        JSON.stringify({ containerEnv: { A: '1', B: '2' }, postCreateCommand: 'echo hi' }),
+        'undefined props dropped; defined object keys sorted recursively, matching JSON',
+      )
+      // Top-level undefined → empty string, exactly like JSON.stringify(undefined).
+      assert.equal(session._canonicalStringify(undefined), '')
+      // Array undefined element → null, exactly like JSON.stringify([undefined]).
+      assert.equal(session._canonicalStringify([1, undefined, 2]), '[1,null,2]')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('DockerByokSession — Docker Compose support (#5024)', () => {

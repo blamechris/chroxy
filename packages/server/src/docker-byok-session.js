@@ -1140,18 +1140,29 @@ export class DockerByokSession extends ClaudeByokSession {
    * boolean, null, undefined). It deliberately omits exotic JSON.stringify
    * features (toJSON, replacer, BigInt) — the call site never sees them.
    *
+   * Matches JSON.stringify's `undefined` semantics so an "empty overlay"
+   * (where mounts/containerEnv/forwardPorts/postCreateCommand are all
+   * absent) serialises to a clean `{}` rather than emitting non-JSON
+   * `...:undefined` slots: object properties whose value is `undefined`
+   * are dropped, and a top-level `undefined` yields the empty string —
+   * exactly as `JSON.stringify` does.
+   *
    * @param {unknown} value
    * @returns {string}
    */
   _canonicalStringify(value) {
     if (Array.isArray(value)) {
-      return '[' + value.map(v => this._canonicalStringify(v)).join(',') + ']'
+      // JSON.stringify renders an undefined array element as `null`.
+      return '[' + value.map(v => (v === undefined ? 'null' : this._canonicalStringify(v))).join(',') + ']'
     }
     if (value && typeof value === 'object') {
-      const keys = Object.keys(value).sort()
+      const keys = Object.keys(value)
+        .filter(k => value[k] !== undefined) // JSON.stringify omits undefined props
+        .sort()
       return '{' + keys.map(k => JSON.stringify(k) + ':' + this._canonicalStringify(value[k])).join(',') + '}'
     }
-    return JSON.stringify(value)
+    // JSON.stringify(undefined) === undefined (not a string); normalise to ''.
+    return JSON.stringify(value) ?? ''
   }
 
   /**
