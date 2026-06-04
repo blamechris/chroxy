@@ -4765,17 +4765,39 @@ export function sharedStreamDelta(
   msg: Record<string, unknown>,
   ctx: StreamDeltaContext,
 ): void {
+  // #5130 — runtime guards against malformed/spoofed payloads. The wire schema
+  // (`ServerStreamDeltaSchema`) declares both `messageId` and `delta` as
+  // required `z.string()`, so a well-formed message always satisfies these
+  // guards and behaves EXACTLY as before. The guards only catch genuinely
+  // malformed payloads that bypassed Zod parse (e.g. a buggy producer or a
+  // dispatcher that skipped validation):
+  //
+  //   - non-string `messageId` would otherwise become a non-string key in
+  //     `deltaIdRemaps` / `pendingDeltas` / `postPermissionSplits`, poisoning
+  //     those collections. Early-return so no state is touched.
+  //   - non-string `delta` would otherwise stringify to the literal
+  //     `"undefined"` (or `"null"`, `"[object Object]"`, etc.) and append that
+  //     to a response slot's content. Early-return so nothing is buffered.
+  if (typeof msg.messageId !== 'string') return
+  if (typeof msg.delta !== 'string') return
+
   // Capture the ORIGINAL incoming messageId before any remap resolution.
   // The post-tool continuation split (#4889) writes its remap entry against
   // this id (not against the resolved `deltaId`) so successive splits
   // overwrite a single map entry instead of forming a chain — keeps
   // `deltaIdRemaps` bounded and eliminates the need for chained lookup.
-  const originalMessageId = msg.messageId as string
+  const originalMessageId = msg.messageId
   let deltaId = originalMessageId
-  const capturedSessionId = (msg.sessionId as string) || ctx.activeSessionId
+  // `sessionId` is an optional routing tag (not part of ServerStreamDeltaSchema)
+  // added at the broadcast layer. Guard it consistently with `handleStreamEnd`
+  // / `handleToolStart`: a non-string value falls back to the active session
+  // rather than coercing onto a Map key. `|| ctx.activeSessionId` also folds an
+  // empty string into the fallback, preserving the prior `(as string) ||` shape.
+  const capturedSessionId =
+    (typeof msg.sessionId === 'string' ? msg.sessionId : null) || ctx.activeSessionId
 
   // Forward delta text to terminal view (dashboard-only; app no-op).
-  if (typeof msg.delta === 'string' && msg.delta.length > 0) {
+  if (msg.delta.length > 0) {
     ctx.appendTerminalDelta(msg.delta)
   }
 
@@ -4945,7 +4967,7 @@ export function sharedStreamDelta(
           // the prior slot, seeding the continuation buffer with it. Result:
           // the word reassembles in the continuation bubble.
           const priorFull = slot.type === 'response' ? slot.content + bufferedContent : ''
-          const incomingDelta = msg.delta as string
+          const incomingDelta = msg.delta
           const incomingStartsMidWord = /^[A-Za-z0-9_]/.test(incomingDelta)
           const midWordMatch = incomingStartsMidWord ? priorFull.match(/[A-Za-z0-9_]+$/) : null
           let priorTail = ''
@@ -5006,7 +5028,7 @@ export function sharedStreamDelta(
   const existingDelta = ctx.pendingDeltas.get(deltaId)
   ctx.pendingDeltas.set(deltaId, {
     sessionId: capturedSessionId,
-    delta: (existingDelta?.delta || '') + (msg.delta as string),
+    delta: (existingDelta?.delta || '') + msg.delta,
   })
   ctx.scheduleFlush()
 }
