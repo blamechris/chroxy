@@ -8155,4 +8155,95 @@ describe('sharedStreamDelta (#4981)', () => {
     expect(suffixed!.content).toBe('hi')
     expect(h.deltaIdRemaps.get('resp-collide')).toBe('resp-collide-response')
   })
+
+  // -------------------------------------------------------------------------
+  // #5130 — malformed-payload hardening. ServerStreamDeltaSchema declares
+  // `messageId` and `delta` as required `z.string()`, so these arms only fire
+  // for payloads that bypassed Zod parse. Valid payloads (covered by every
+  // test above) are unaffected.
+  // -------------------------------------------------------------------------
+
+  it('#5130: non-string messageId early-returns without poisoning any collection', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    // messageId is a number — must not become a Map/Set key.
+    h.send({ messageId: 123 as unknown as string, delta: 'world' })
+    h.flush()
+    // No buffering happened, content untouched.
+    expect(h.pendingDeltas.size).toBe(0)
+    expect(h.deltaIdRemaps.size).toBe(0)
+    expect(h.postPermissionSplits.size).toBe(0)
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Hello')
+    // No non-string key leaked into pendingDeltas.
+    for (const key of h.pendingDeltas.keys()) {
+      expect(typeof key).toBe('string')
+    }
+  })
+
+  it('#5130: missing messageId early-returns', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    h.send({ delta: 'world' })
+    h.flush()
+    expect(h.pendingDeltas.size).toBe(0)
+    expect(h.deltaIdRemaps.size).toBe(0)
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses[0]!.content).toBe('Hello')
+  })
+
+  it('#5130: missing delta does NOT append the literal "undefined"', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    h.send({ messageId: 'resp-1' }) // delta absent
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    // The literal "undefined" must NOT have been concatenated.
+    expect(responses[0]!.content).toBe('Hello')
+    expect(responses[0]!.content).not.toContain('undefined')
+    expect(h.pendingDeltas.size).toBe(0)
+  })
+
+  it('#5130: non-string delta does NOT append (early-return, nothing buffered)', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    h.send({ messageId: 'resp-1', delta: { foo: 'bar' } as unknown as string })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses[0]!.content).toBe('Hello')
+    expect(responses[0]!.content).not.toContain('[object Object]')
+    expect(h.pendingDeltas.size).toBe(0)
+  })
+
+  it('#5130: non-string sessionId falls back to the active session (no Map-key coercion)', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello ')
+    // Call the handler directly to override the harness's spread sessionId with
+    // a non-string value. The captured sessionId should fall back to the
+    // active session ('s1'), and the delta should buffer + flush normally.
+    sharedStreamDelta(
+      { messageId: 'resp-1', delta: 'world', sessionId: 42 as unknown as string },
+      {
+        activeSessionId: 's1',
+        pendingDeltas: h.pendingDeltas,
+        deltaIdRemaps: h.deltaIdRemaps,
+        postPermissionSplits: h.postPermissionSplits,
+        replayingSessions: h.replayingSessions,
+        getSessionMessages: (id) => (id === 's1' ? h.messages : null),
+        getFlatMessages: () => [],
+        appendTerminalDelta: () => {},
+        reorderEmptyResponseSlot: () => {},
+        appendResponseSlot: () => {},
+        peelSlotContent: () => {},
+        scheduleFlush: () => {},
+      },
+    )
+    // The buffered entry's sessionId must be the active-session fallback, not 42.
+    const buffered = h.pendingDeltas.get('resp-1')
+    expect(buffered).toBeDefined()
+    expect(buffered!.sessionId).toBe('s1')
+    expect(buffered!.delta).toBe('world')
+  })
 })
