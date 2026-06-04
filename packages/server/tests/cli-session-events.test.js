@@ -273,6 +273,86 @@ describe('CliSession stream-event handling', () => {
       assert.equal(events[0].messageId, 'msg-1-tool')
       assert.equal(events[0].toolUseId, 'msg-1-tool')
     })
+
+    it('aligns ctx.currentToolUseId with the synthesized fallback id (#4778)', () => {
+      const session = createSession()
+      // content_block.id missing — buildToolStartData synthesizes
+      // `${messageId}-tool`. Pre-fix: ctx.currentToolUseId stayed
+      // undefined, so downstream user_question / agent_spawned emits
+      // and _activeAgents.set(toolUseId, ...) saw `undefined`. Post-fix
+      // the synthesized id propagates through ctx so handlers correlate.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'Bash' },
+        },
+      })
+
+      assert.equal(session._currentCtx.currentToolUseId, 'msg-1-tool')
+    })
+
+    it('correlates user_question.toolUseId with the synthesized fallback id when content_block.id is missing (#4778)', () => {
+      const session = createSession()
+      const events = []
+      session.on('user_question', (data) => events.push(data))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'AskUserQuestion' },
+        },
+      })
+
+      const input = JSON.stringify({
+        questions: [{
+          question: 'Which approach?',
+          header: 'Approach',
+          options: [
+            { label: 'A', description: 'Option A' },
+            { label: 'B', description: 'Option B' },
+          ],
+          multiSelect: false,
+        }],
+      })
+      session._handleEvent(inputJsonDelta(input))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(events.length, 1)
+      // Pre-fix this was `undefined`, leaving the client with no way to
+      // correlate the question against the originating tool_start.
+      assert.equal(events[0].toolUseId, 'msg-1-tool')
+    })
+
+    it('keys _activeAgents by the synthesized fallback id when content_block.id is missing (#4778)', () => {
+      const session = createSession()
+      const events = []
+      session.on('agent_spawned', (data) => events.push(data))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'Task' },
+        },
+      })
+
+      const input = JSON.stringify({
+        description: 'Investigate something',
+        prompt: 'Look into the bug',
+        subagent_type: 'general-purpose',
+      })
+      session._handleEvent(inputJsonDelta(input))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'msg-1-tool')
+      // Pre-fix: _activeAgents had key `undefined`. Post-fix: keyed by
+      // the synthesized id so subsequent tool_result correlation works.
+      assert.equal(session._activeAgents.has('msg-1-tool'), true)
+      assert.equal(session._activeAgents.has(undefined), false)
+    })
   })
 
   describe('text streaming', () => {

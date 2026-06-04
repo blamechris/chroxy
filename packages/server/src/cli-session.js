@@ -735,7 +735,6 @@ export class CliSession extends BaseSession {
               }
             } else if (blockType === 'tool_use') {
               ctx.currentToolName = event.content_block.name
-              ctx.currentToolUseId = event.content_block.id
               ctx.toolInputChunks = ''
               ctx.toolInputBytes = 0
               ctx.toolInputOverflow = false
@@ -743,6 +742,14 @@ export class CliSession extends BaseSession {
               // emit identical tool_start payloads (see
               // claude-stream-parser.js for the toolId-derivation rules).
               const toolStartData = buildToolStartData(messageId, event.content_block)
+              // #4778: source currentToolUseId from the parser's resolved
+              // id (not raw content_block.id) so the synthesized
+              // `${messageId}-tool` fallback propagates to downstream
+              // emits — user_question / agent_spawned and
+              // _activeAgents.set(toolUseId, ...). Without this,
+              // missing-id upstream events landed `undefined` as the
+              // Map key and on the wire.
+              ctx.currentToolUseId = toolStartData.toolUseId
               this.emit('tool_start', toolStartData)
               // #4628: track so _clearMessageState (or _emitResult) can
               // sweep on turn-end if the API ever drops a tool_result.
