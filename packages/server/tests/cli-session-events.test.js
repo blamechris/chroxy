@@ -891,8 +891,10 @@ describe('CliSession stream-event handling', () => {
       })
 
       // Subscription-billed result: cost is null (no per-turn $$$), but
-      // usage carries real token counts. The `usage` payload here is the
-      // exact shape `claude -p` emits on a subscription-billing path.
+      // usage carries real token counts. The `usage` payload here is a
+      // representative example of the shape `claude -p` emits on a
+      // subscription-billing path (illustrative values, not a captured
+      // wire sample).
       const usage = {
         input_tokens: 137,
         output_tokens: 42,
@@ -930,9 +932,9 @@ describe('CliSession stream-event handling', () => {
       assert.equal(results[0].usage.output_tokens, 42)
       assert.equal(results[0].usage.cache_creation_input_tokens, 1024)
       assert.equal(results[0].usage.cache_read_input_tokens, 8192)
-      // Identity check: the result event must forward the same usage object
-      // reference (or an equivalent shape) that the wire payload carried —
-      // not a synthesized subset that drops cache fields.
+      // Structural-equality check: the result event must forward a usage
+      // object deeply equal to the one the wire payload carried — not a
+      // synthesized subset that drops cache fields.
       assert.deepEqual(results[0].usage, usage)
     })
   })
