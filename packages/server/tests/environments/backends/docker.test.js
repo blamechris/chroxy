@@ -406,6 +406,31 @@ describe('DockerBackend.createComposeEnvironment()', () => {
     assert.deepEqual(fFlagFiles, ['/proj/docker-compose.yml'])
   })
 
+  it('fails fast with a clear error when composeFile normalises to an empty set (#5124)', async () => {
+    let upCalled = false
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upCalled = true }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    // An array with no usable entries must not silently run `docker compose up`
+    // with zero `-f` flags (which would fall back to a default compose file).
+    await assert.rejects(
+      () => backend.createComposeEnvironment({
+        envId: 'env-empty',
+        cwd: '/proj',
+        composeFile: ['', null],
+        composeProject: 'chroxy-env-empty',
+        containerUser: 'chroxy',
+      }),
+      /requires at least one compose file/
+    )
+    assert.equal(upCalled, false, 'docker compose up must not run with an empty file set')
+  })
+
   it('calls compose down and re-throws when primary container not found', async () => {
     let downCalled = false
     function mockExec(_cmd, args, opts, cb) {

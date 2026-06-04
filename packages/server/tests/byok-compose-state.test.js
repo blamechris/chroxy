@@ -104,6 +104,21 @@ describe('ByokComposeStateStore', () => {
     assert.deepEqual(b.list()[0].composeFile, files)
   })
 
+  it('does not alias the caller-provided compose-file array (#5124)', () => {
+    const store = new ByokComposeStateStore({ statePath })
+    const files = ['/proj/base.yml', '/proj/override.yml']
+    store.record({ projectId: 'p1', composeFile: files, cwd: '/proj' })
+
+    // Mutating the caller's array after record() must NOT change stored state.
+    files.push('/proj/sneaky.yml')
+    assert.deepEqual(store.list()[0].composeFile, ['/proj/base.yml', '/proj/override.yml'])
+
+    // Mutating the array returned by list() must NOT change stored state either.
+    const returned = store.list()[0].composeFile
+    returned.push('/proj/also-sneaky.yml')
+    assert.deepEqual(store.list()[0].composeFile, ['/proj/base.yml', '/proj/override.yml'])
+  })
+
   it('rejects an empty or non-string compose-file array (#5124)', () => {
     const store = new ByokComposeStateStore({ statePath })
     assert.throws(() => store.record({ projectId: 'p', composeFile: [], cwd: '/a' }), /composeFile/)

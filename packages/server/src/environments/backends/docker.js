@@ -744,9 +744,10 @@ export class DockerBackend {
 
   // #5124: `composeFile` may be a single path or an ARRAY of paths
   // (devcontainer.json `dockerComposeFile` base + overrides). Normalise a
-  // lone string to a single-element array and drop empty entries so every
-  // call site emits `-f <file>` flags in declared order. Backward-compatible:
-  // existing single-file callers pass a string and get one `-f`.
+  // lone string to a single-element array and drop non-string/empty entries
+  // so every call site emits `-f <file>` flags in declared order.
+  // Backward-compatible: existing single-file callers pass a string and get
+  // one `-f`.
   _composeFileList(composeFile) {
     const files = Array.isArray(composeFile) ? composeFile : [composeFile]
     return files.filter((f) => typeof f === 'string' && f.length > 0)
@@ -765,9 +766,18 @@ export class DockerBackend {
       // #5124: compose merges a base + overrides via a repeated `-f` flag in
       // DECLARED ORDER (later files override earlier ones), so we emit one
       // `-f <file>` per entry rather than a single `-f`.
+      const files = this._composeFileList(composeFile)
+      // Fail fast on an empty/invalid file set rather than letting
+      // `docker compose up` silently fall back to a default compose file in
+      // cwd. The pre-#5124 single-`-f` path errored on an undefined file, so
+      // this preserves that fail-fast contract for the array path too.
+      if (files.length === 0) {
+        reject(new Error('docker compose up requires at least one compose file'))
+        return
+      }
       const args = ['compose']
       if (envFile) args.push('--env-file', envFile)
-      for (const file of this._composeFileList(composeFile)) {
+      for (const file of files) {
         args.push('-f', file)
       }
       args.push('-p', project, 'up', '-d')

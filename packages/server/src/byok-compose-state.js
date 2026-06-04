@@ -46,6 +46,18 @@ function isValidComposeFile(composeFile) {
 }
 
 /**
+ * #5124 — Defensive copy so the store never aliases a caller-provided array.
+ * Strings are immutable and returned as-is; arrays are shallow-cloned so a
+ * later mutation by the caller can't change persisted state (or what a prior
+ * `list()` consumer sees).
+ * @param {string|string[]} composeFile
+ * @returns {string|string[]}
+ */
+function cloneComposeFile(composeFile) {
+  return Array.isArray(composeFile) ? [...composeFile] : composeFile
+}
+
+/**
  * Default on-disk location, mirroring environment-manager.js's
  * `~/.chroxy/environments.json`. Honors CHROXY_CONFIG_DIR like the rest of
  * the docker-byok stack does.
@@ -98,7 +110,7 @@ export class ByokComposeStateStore {
     }
     this._stacks.set(projectId, {
       projectId,
-      composeFile,
+      composeFile: cloneComposeFile(composeFile),
       cwd,
       createdAt: new Date().toISOString(),
     })
@@ -119,7 +131,7 @@ export class ByokComposeStateStore {
    * @returns {Array<{projectId:string, composeFile:string|string[], cwd:string, createdAt:string}>}
    */
   list() {
-    return Array.from(this._stacks.values()).map((s) => ({ ...s }))
+    return Array.from(this._stacks.values()).map((s) => ({ ...s, composeFile: cloneComposeFile(s.composeFile) }))
   }
 
   _persist() {
