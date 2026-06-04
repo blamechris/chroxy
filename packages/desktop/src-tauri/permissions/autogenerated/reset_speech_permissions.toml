@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-speech-permissions"
+description = "Enables the reset_speech_permissions command without any pre-configured scope."
+commands.allow = ["reset_speech_permissions"]
+
+[[permission]]
+identifier = "deny-reset-speech-permissions"
+description = "Denies the reset_speech_permissions command without any pre-configured scope."
+commands.deny = ["reset_speech_permissions"]
