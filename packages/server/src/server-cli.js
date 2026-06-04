@@ -23,6 +23,7 @@ import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { registerDockerProvider, resolveProviderLabel } from './providers.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
+import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { loadModelsCache, getModels } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
@@ -772,6 +773,16 @@ export async function startCliServer(config) {
   })
   // Bind to localhost-only when auth is disabled
   wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
+
+  // #5053: wire the pool stats aggregator to the shared pool so the
+  // dashboard's GET /api/pool/stats has rolling counters (hit rate,
+  // eviction-by-reason, recent evictions) to read. Default-OFF — only the
+  // shared pool exists when CHROXY_DOCKER_BYOK_POOL is enabled, so this is a
+  // no-op otherwise. attach() is idempotent (won't double-subscribe).
+  if (isPoolEnabled(process.env)) {
+    const statsPool = getSharedPool(process.env)
+    if (statsPool) getSharedPoolStats().attach(statsPool)
+  }
 
   // Wire session timeout to WsServer viewer checks
   sessionManager.setActiveViewersFn((sid) => wsServer.hasActiveViewersForSession(sid))

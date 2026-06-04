@@ -85,6 +85,7 @@ import { StartupErrorScreen } from './components/StartupErrorScreen'
 import { ConsolePage } from './components/ConsolePage'
 import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
+import { PoolStatsPanel } from './components/PoolStatsPanel'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -122,7 +123,7 @@ function formatContext(usage: { inputTokens: number; outputTokens: number } | nu
   return `${formatTokensCompact(total)} tokens`
 }
 
-type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots'
+type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool'
 
 /** Scrollable tab bar with arrow buttons when overflowing */
 function ViewSwitcher({
@@ -231,6 +232,7 @@ function ViewSwitcher({
         )}
         <button className={`view-tab${viewMode === 'environments' ? ' active' : ''}`} onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }} type="button">Envs</button>
         <button className={`view-tab${viewMode === 'snapshots' ? ' active' : ''}`} onClick={() => { setViewMode('snapshots'); setSplitMode(null); persistSplitMode(null) }} type="button">Snapshots</button>
+        <button className={`view-tab${viewMode === 'pool' ? ' active' : ''}`} onClick={() => { setViewMode('pool'); setSplitMode(null); persistSplitMode(null) }} type="button">Pool</button>
         <div className="view-switch-spacer" />
         <button className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`} onClick={() => setCheckpointsOpen(prev => !prev)} type="button" title="Toggle checkpoint timeline">Checkpoints</button>
         <button className={`view-tab${viewMode === 'diff' ? ' active' : ''}`} onClick={() => setViewMode('diff')} type="button">Diff</button>
@@ -2407,6 +2409,9 @@ export function App() {
                 )}
                 {viewMode === 'snapshots' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <SnapshotsPanel />
+                )}
+                {viewMode === 'pool' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <PoolStatsPanel />
                 )}
               </div>
               {checkpointsOpen && (

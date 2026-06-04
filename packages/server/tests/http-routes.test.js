@@ -460,4 +460,84 @@ describe('http-routes', () => {
       })
     })
   })
+
+  // #5053 — docker-byok pool stats endpoint. Test seams: `_poolStatsEnabled`
+  // overrides the env probe, `_poolStats` injects a stub aggregator so the
+  // route doesn't depend on process.env or a live pool.
+  describe('pool stats endpoint', () => {
+    function fakeAggregator(snapshot) {
+      return { snapshot: () => snapshot }
+    }
+
+    it('GET /api/pool/stats returns the snapshot when the pool is enabled', async () => {
+      const snap = {
+        hits: 7,
+        misses: 3,
+        releases: 4,
+        shutdowns: 0,
+        hitRate: 0.7,
+        totalSize: 2,
+        buckets: [{ key: 'k', size: 2, oldestIdleMs: 1234 }],
+        evictionsByReason: { idle: 5, over_cap: 1 },
+        recentEvictions: [{ key: 'k', containerId: 'c1', reason: 'idle', timestamp: 111 }],
+      }
+      const mock = createMockServer({
+        _poolStatsEnabled: true,
+        _poolStats: fakeAggregator(snap),
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/pool/stats`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.equal(body.enabled, true)
+      assert.equal(body.hits, 7)
+      assert.equal(body.misses, 3)
+      assert.equal(body.hitRate, 0.7)
+      assert.equal(body.totalSize, 2)
+      assert.deepEqual(body.buckets, snap.buckets)
+      assert.deepEqual(body.evictionsByReason, snap.evictionsByReason)
+      assert.deepEqual(body.recentEvictions, snap.recentEvictions)
+    })
+
+    it('GET /api/pool/stats returns { enabled: false } when the pool is disabled', async () => {
+      const mock = createMockServer({
+        _poolStatsEnabled: false,
+        // _poolStats must NOT be consulted when disabled.
+        _poolStats: { snapshot: () => { throw new Error('should not be called') } },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/pool/stats`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.deepEqual(body, { enabled: false })
+    })
+
+    it('GET /api/pool/stats rejects without bearer auth', async () => {
+      const mock = createMockServer({
+        _poolStatsEnabled: true,
+        _poolStats: fakeAggregator({ hits: 1 }),
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/pool/stats`)
+      assert.equal(res.status, 403)
+    })
+
+    it('GET /api/pool/stats returns 500 when the aggregator throws', async () => {
+      const mock = createMockServer({
+        _poolStatsEnabled: true,
+        _poolStats: { snapshot: () => { throw new Error('boom') } },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/pool/stats`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 500)
+      const body = await res.json()
+      assert.ok(body.error)
+    })
+  })
 })
