@@ -4240,6 +4240,154 @@ describe('ClaudeByokSession', () => {
       assert.ok(ClaudeByokSession.customEvents.includes('agent_event'),
         'agent_event must be in customEvents for ws-forwarding to pick it up')
     })
+
+    // #5056 / #5061 — child permission_request relay. The child has its own
+    // PermissionManager (separate identity from the parent's); when the
+    // subagent fires a permission_request (e.g. an MCP tool under approve
+    // mode), nothing previously bridged it up to the parent's wire path.
+    // The dashboard never saw the prompt and the request silently timed out.
+    // These tests pin the relay envelope + the response routing back down.
+    it('#5056: re-emits child permission_request as agent_event with parentToolUseId so dashboard can render it nested', async () => {
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('permission_request', {
+          requestId: 'perm-child-1',
+          tool: 'mcp__foo__bar',
+          description: 'mcp__foo__bar({"x":1})',
+          input: { x: 1 },
+          remainingMs: 60000,
+          createdAt: Date.now(),
+        })
+      })
+      const permEvents = captured.filter(
+        (e) => e.parentToolUseId && e.type === 'permission_request',
+      )
+      assert.equal(permEvents.length, 1,
+        'child permission_request must surface exactly once on the parent')
+      assert.equal(permEvents[0].parentToolUseId, 'tu_task_5016')
+      assert.equal(permEvents[0].payload.requestId, 'perm-child-1')
+      assert.equal(permEvents[0].payload.tool, 'mcp__foo__bar')
+      assert.equal(permEvents[0].payload.input.x, 1)
+    })
+
+    it('#5056: re-emits child permission_resolved so the dashboard can clear the nested prompt', async () => {
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('permission_request', {
+          requestId: 'perm-child-2',
+          tool: 'mcp__foo__bar',
+          description: '...',
+          input: {},
+          remainingMs: 60000,
+          createdAt: Date.now(),
+        })
+        child.emit('permission_resolved', {
+          requestId: 'perm-child-2',
+          decision: 'allow',
+          reason: 'user',
+        })
+      })
+      const resolved = captured.find(
+        (e) => e.parentToolUseId && e.type === 'permission_resolved',
+      )
+      assert.ok(resolved, 'permission_resolved must be relayed on the parent')
+      assert.equal(resolved.parentToolUseId, 'tu_task_5016')
+      assert.equal(resolved.payload.requestId, 'perm-child-2')
+      assert.equal(resolved.payload.decision, 'allow')
+    })
+
+    it('#5056: parent.respondToPermission routes a child requestId to the child PermissionManager', async () => {
+      // The user taps Approve/Deny in the dashboard; the wire message lands
+      // on the parent session id (the only one ws-permissions knows about).
+      // The parent must forward the response to the child whose
+      // PermissionManager actually holds the pending entry.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._gateToolBlock = async () => ({ behavior: 'allow' })
+      // Replace the child-set so we can grab the child without running a
+      // full agent loop.
+      let childRef = null
+      const origSet = session._subagentSessions.set.bind(session._subagentSessions)
+      session._subagentSessions.set = (k, v) => {
+        childRef = v
+        v.sendMessage = async () => {
+          // Trigger the child to emit a permission_request — the parent's
+          // listener should record the routing so respondToPermission can
+          // find it.
+          v.emit('permission_request', {
+            requestId: 'perm-child-routed',
+            tool: 'mcp__foo__bar',
+            input: {},
+            remainingMs: 60000,
+          })
+          // Populate the child's own pending map so the response actually
+          // resolves something (the PermissionManager keys by requestId
+          // and rejects unknown requestIds).
+          let resolvedResult = null
+          v._permissions._pendingPermissions.set('perm-child-routed', {
+            resolve: (r) => { resolvedResult = r },
+            input: { x: 1 },
+          })
+          // Sanity: the parent doesn't yet hold the request.
+          assert.equal(session._permissions._pendingPermissions.has('perm-child-routed'), false)
+          // Route a response addressed to the child's requestId via the
+          // parent's respondToPermission (the only API exposed on the WS
+          // surface).
+          const ok = session.respondToPermission('perm-child-routed', 'allow')
+          assert.equal(ok, true, 'parent.respondToPermission must succeed for a child requestId')
+          assert.ok(resolvedResult, 'the child PermissionManager must receive the decision')
+          assert.equal(resolvedResult.behavior, 'allow')
+          v.emit('result', { messageId: 'cm_1', usage: { input_tokens: 0, output_tokens: 0 }, cost: 0 })
+          v.emit('stream_end', { messageId: 'cm_1' })
+          v._isBusy = false
+        }
+        return origSet(k, v)
+      }
+      session._client = {
+        messages: {
+          stream: () => {
+            // First call: emit a Task tool_use. Second call: end_turn.
+            if (!session._client._round) {
+              session._client._round = 1
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_task_routing', name: 'Task', input: { description: 'd', prompt: 'p' } }],
+                  usage: { input_tokens: 1, output_tokens: 1 },
+                },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+              { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      await session.start()
+      await session.sendMessage('go')
+      // After the child finishes, the routing entry should be cleared so
+      // a stale lookup of the same id doesn't leak past the request's
+      // lifetime.
+      assert.ok(childRef, 'child was created')
+      await session.destroy()
+    })
+
+    it('#5056: parent.respondToPermission falls back to the parent PermissionManager for unknown child ids', async () => {
+      // Sanity: routing must not break the existing top-level path. A
+      // requestId that the parent's PermissionManager holds (the normal
+      // case) still resolves there even when subagents are active.
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      let resolvedOnParent = null
+      session._permissions._pendingPermissions.set('perm-parent-1', {
+        resolve: (r) => { resolvedOnParent = r },
+        input: {},
+      })
+      const ok = session.respondToPermission('perm-parent-1', 'deny')
+      assert.equal(ok, true)
+      assert.ok(resolvedOnParent)
+      assert.equal(resolvedOnParent.behavior, 'deny')
+      await session.destroy()
+    })
   })
 
   describe('lifecycle', () => {
