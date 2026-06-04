@@ -1680,47 +1680,69 @@ export class SessionManager extends EventEmitter {
           })
         }
 
-        // Track cumulative cost and check budget on priced turn-terminal
-        // events. Both `result` (success path) AND `error` (failure path,
-        // partial spend surfaced by #5037) fold into the same cumulative
-        // tracker — otherwise the user-billed tokens on a failed turn
-        // would silently drop out of cumulativeUsage / sessionCost /
-        // budget gates (#5038).
+        // Track cumulative cost and token usage on turn-terminal events.
+        // Both `result` (success path) AND `error` (failure path, partial
+        // spend surfaced by #5037) fold into the same cumulative tracker —
+        // otherwise the user-billed tokens on a failed turn would silently
+        // drop out of cumulativeUsage / sessionCost / budget gates (#5038).
         //
-        // Single-counting guarantee: the `Number.isFinite(data?.cost)`
-        // predicate below — NOT result/error mutual exclusion — is what
-        // ensures we account each priced turn exactly once.
-        //   - Happy path: a single `result` (with finite cost) per turn.
-        //   - byok-session error path: a single `error` (with finite cost
-        //     for the partial spend, see #5037).
+        // Two independent gates (#5115):
+        //   1. COST gate — `Number.isFinite(data?.cost)`. Drives _trackCost
+        //      (the $ accumulator + budget thresholds). Subscription-billed
+        //      runs report `total_cost_usd: null`, so this stays zero for
+        //      them (no dollar budget applies to a flat subscription).
+        //   2. USAGE gate — finite cost OR finite `usage.input_tokens`.
+        //      Drives _trackUsage (the cumulativeUsage token accumulator
+        //      that lights up the dashboard header meter). A subscription
+        //      `claude -p` turn carries real token counts with `cost: null`
+        //      (#5095 / #5108 verified cli-session forwards the full usage
+        //      payload verbatim), so the meter must ratchet on tokens, not
+        //      cost. _trackUsage itself drops a non-finite cost via an
+        //      explicit Number.isFinite coercion, so cumulativeCost is never
+        //      poisoned even when this gate passes on tokens alone.
+        //
+        // Single-counting guarantee: each priced/usage-bearing turn folds
+        // in exactly once.
+        //   - Happy path: a single `result` (finite cost AND usage) per turn.
+        //   - Subscription path: a single `result` (cost null, finite
+        //     input_tokens) per turn → counted via the usage gate.
+        //   - byok-session error path: a single `error` (finite cost for the
+        //     partial spend, see #5037).
         //   - Stream-stall path (sdk-session._handleStreamStall and
         //     cli-session._handleStreamStall — the latter calls
         //     _emitInterruptedTurnResult for the synthetic `result` and
         //     then emits the `error` itself): emits BOTH a synthetic
         //     `result` AND `error` for the same turn — but the synthetic
-        //     `result` carries `cost: null`, so the Number.isFinite gate
-        //     filters it. The `error` half is plain stream-stall metadata
-        //     (no cost field), also filtered.
-        // No emit topology change is needed to add new failure paths as
-        // long as they keep this invariant (priced terminal ⇒ exactly one
-        // event with a finite cost per turn).
+        //     `result` carries `cost: null` AND `usage: null`, so BOTH gates
+        //     filter it. The `error` half is plain stream-stall metadata
+        //     (no cost / no usage field), also filtered by both gates.
+        // No emit topology change is needed to add new failure paths as long
+        // as they keep this invariant (terminal turn ⇒ at most one event
+        // carrying a finite cost and/or finite input_tokens).
         //
         // Number.isFinite also guards against NaN / Infinity (provider
         // bugs) poisoning cumulative totals or triggering spurious budget
         // events (#4088 review).
-        if ((event === 'result' || event === 'error') && Number.isFinite(data?.cost)) {
-          const sessionEntry = this._sessions.get(sessionId)
-          const model = session.currentModel || sessionEntry?.model || null
-          this._trackCost(sessionId, data.cost, model)
-          // #4072: also accumulate token usage for cumulative-display.
-          // Gated on the same `Number.isFinite(data.cost)` predicate so
-          // subscription-only providers (cost: null) stay zero (no badge
-          // in UI) and NaN/Infinity can't poison the accumulator.
+        if (event === 'result' || event === 'error') {
+          const hasFiniteCost = Number.isFinite(data?.cost)
+          const hasFiniteTokens = Number.isFinite(data?.usage?.input_tokens)
+          if (hasFiniteCost) {
+            const sessionEntry = this._sessions.get(sessionId)
+            const model = session.currentModel || sessionEntry?.model || null
+            this._trackCost(sessionId, data.cost, model)
+          }
+          // #4072 / #5115: accumulate token usage for cumulative-display.
+          // Runs when EITHER cost OR input_tokens is finite, so
+          // subscription-only providers (cost: null, finite tokens) ratchet
+          // the header meter (#5115) while NaN/Infinity-only payloads still
+          // can't poison the accumulator.
           //
           // #5038: an errored turn DOES count as a billed turn — the user
           // was charged for the partial work — so `turnsBilled` ticks
           // exactly as it would on the success path.
-          this._trackUsage(sessionId, data)
+          if (hasFiniteCost || hasFiniteTokens) {
+            this._trackUsage(sessionId, data)
+          }
         }
       })
     }
@@ -1855,11 +1877,20 @@ export class SessionManager extends EventEmitter {
     if (!entry.cumulativeUsage) entry.cumulativeUsage = makeZeroCumulativeUsage()
     const u = resultData?.usage || {}
     const acc = entry.cumulativeUsage
-    acc.inputTokens += Number(u.input_tokens) || 0
-    acc.outputTokens += Number(u.output_tokens) || 0
-    acc.cacheReadTokens += Number(u.cache_read_input_tokens) || 0
-    acc.cacheCreationTokens += Number(u.cache_creation_input_tokens) || 0
-    acc.costUsd += Number(resultData?.cost) || 0
+    // #5115: coerce to a finite number, defaulting to 0. Plain
+    // `Number(x) || 0` does NOT reject Infinity (Infinity is truthy), so a
+    // provider bug that reports Infinity tokens / cost would poison the
+    // accumulator. Now that the usage gate lets `cost: null` / non-finite
+    // cost through (so subscription tokens ratchet), the cost line in
+    // particular MUST drop a non-finite cost rather than add it — exactly
+    // the cumulativeCost-poison guard called out in #5115's acceptance
+    // criteria and #4088.
+    const finite = (x) => (Number.isFinite(x) ? x : 0)
+    acc.inputTokens += finite(Number(u.input_tokens))
+    acc.outputTokens += finite(Number(u.output_tokens))
+    acc.cacheReadTokens += finite(Number(u.cache_read_input_tokens))
+    acc.cacheCreationTokens += finite(Number(u.cache_creation_input_tokens))
+    acc.costUsd += finite(Number(resultData?.cost))
     acc.turnsBilled += 1
     // Shallow-copy on emit so a subscriber that mutates the payload
     // can't corrupt the canonical accumulator (#4072 review-prep).

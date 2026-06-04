@@ -2835,27 +2835,47 @@ describe('SessionManager._trackUsage (#4072)', () => {
     assert.ok(Math.abs(events[0].data.cumulativeUsage.costUsd - 0.000375) < 1e-9)
   })
 
-  it('does NOT accumulate when result has no `cost` (subscription-only providers)', () => {
+  it('DOES accumulate tokens when result has usage but no `cost` (subscription-only providers, #5115)', () => {
+    // #5115: a subscription-billed `claude -p` turn reports
+    // `total_cost_usd: null` but carries real token counts. The usage gate
+    // re-keys on finite `usage.input_tokens` so the dashboard header meter
+    // ratchets even though the cost accumulator stays at 0.
     const { mgr, session } = makeWiredManager()
     const events = captureSessionUsage(mgr)
-    // claude-tui-style result — usage may be absent or present, but no cost.
+    // claude-tui-style result — usage present, but no cost field.
     session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 } })
-    assert.equal(events.length, 0, 'no session_usage event without cost')
+    assert.equal(events.length, 1, 'usage with finite input_tokens fires session_usage')
     const got = mgr.getCumulativeUsage('s1')
-    assert.equal(got.turnsBilled, 0, 'turnsBilled stays zero')
-    assert.equal(got.inputTokens, 0, 'tokens stay zero')
+    assert.equal(got.turnsBilled, 1, 'a subscription turn IS a billed turn')
+    assert.equal(got.inputTokens, 1000, 'tokens ratchet')
+    assert.equal(got.outputTokens, 500)
+    assert.equal(got.costUsd, 0, 'cost accumulator stays zero — no cost to add')
   })
 
-  it('does NOT accumulate when result has `cost: null` (claude-tui subscription shape)', () => {
-    // #4072 review: claude-tui emits `cost: null` to mean "subscription-
-    // billed, not measured." The gate is `typeof cost === 'number'` so
-    // null skips (typeof null === 'object'). Locking this down prevents
-    // a regression where someone changes claude-tui back to `cost: 0`,
-    // which would silently tick `turnsBilled` for non-billed sessions.
+  it('DOES accumulate tokens when result has `cost: null` but finite usage (#5115)', () => {
+    // #5115: claude-tui emits `cost: null` to mean "subscription-billed,
+    // not measured" — but the usage payload still carries real tokens. The
+    // token accumulator must ratchet (header meter) while the cost
+    // accumulator stays at 0 (no dollar budget on a flat subscription).
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: null, usage: { input_tokens: 250, output_tokens: 80 } })
+    assert.equal(events.length, 1, 'cost: null with finite usage fires session_usage')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.inputTokens, 250)
+    assert.equal(got.costUsd, 0, 'null cost must not poison cumulativeCost')
+  })
+
+  it('does NOT accumulate when result has `cost: null` AND `usage: null` (interrupted/stall shape)', () => {
+    // #4072 / #5115: a synthetic interrupted-turn result
+    // (_emitInterruptedTurnResult) carries BOTH `cost: null` and
+    // `usage: null`. With no finite cost and no finite input_tokens, both
+    // gates filter it — the stall path stays single-counted.
     const { mgr, session } = makeWiredManager()
     const events = captureSessionUsage(mgr)
     session.emit('result', { cost: null, usage: null })
-    assert.equal(events.length, 0, 'cost: null must not fire session_usage')
+    assert.equal(events.length, 0, 'cost: null + usage: null must not fire session_usage')
     const got = mgr.getCumulativeUsage('s1')
     assert.equal(got.turnsBilled, 0)
   })
@@ -2876,24 +2896,42 @@ describe('SessionManager._trackUsage (#4072)', () => {
     assert.equal(got.costUsd, 0)
   })
 
-  it('does NOT accumulate when `cost` is NaN (provider bug, #4088 review)', () => {
+  it('accumulates tokens but NOT cost when `cost` is NaN with finite usage (#4088 / #5115)', () => {
+    // #4088: a NaN cost is a provider bug and must never poison the cost
+    // accumulator. #5115: but if the usage payload carries finite tokens,
+    // those ARE legitimate and ratchet the token meter. The usage gate keys
+    // on input_tokens; _trackUsage coerces the NaN cost to 0.
     const { mgr, session } = makeWiredManager()
     const events = captureSessionUsage(mgr)
     session.emit('result', { cost: NaN, usage: { input_tokens: 100 } })
-    assert.equal(events.length, 0, 'NaN cost must not pass the gate')
+    assert.equal(events.length, 1, 'finite usage fires session_usage even with NaN cost')
     const got = mgr.getCumulativeUsage('s1')
-    assert.equal(got.turnsBilled, 0)
-    assert.equal(got.inputTokens, 0)
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.inputTokens, 100)
+    assert.equal(got.costUsd, 0, 'NaN cost must not poison cumulativeCost')
   })
 
-  it('does NOT accumulate when `cost` is Infinity (provider bug, #4088 review)', () => {
+  it('accumulates tokens but NOT cost when `cost` is Infinity with finite usage (#4088 / #5115)', () => {
     const { mgr, session } = makeWiredManager()
     const events = captureSessionUsage(mgr)
     session.emit('result', { cost: Infinity, usage: { input_tokens: 100 } })
-    assert.equal(events.length, 0, 'Infinity cost must not pass the gate')
+    assert.equal(events.length, 1, 'finite usage fires session_usage even with Infinity cost')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.inputTokens, 100)
+    assert.equal(got.costUsd, 0, 'Infinity cost must not poison cumulativeCost')
+  })
+
+  it('does NOT accumulate when both `cost` and `usage.input_tokens` are non-finite (#4088 / #5115)', () => {
+    // Neither gate passes: NaN cost (cost gate fails) and no finite
+    // input_tokens (usage gate fails). Nothing is tracked, nothing emits.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: NaN, usage: { output_tokens: 50 } })
+    assert.equal(events.length, 0, 'NaN cost + no input_tokens passes neither gate')
     const got = mgr.getCumulativeUsage('s1')
     assert.equal(got.turnsBilled, 0)
-    assert.equal(got.inputTokens, 0)
+    assert.equal(got.outputTokens, 0)
   })
 
   it('handles missing usage object on result gracefully (no NaN)', () => {
@@ -3371,9 +3409,11 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
     assert.equal(usageEvents.length, 0)
   })
 
-  it('error event with NaN / Infinity `cost` does NOT poison cumulative totals (#5038)', () => {
-    // Same defensive gate as the result path (#4088) — NaN / Infinity
-    // would poison cumulativeUsage and trigger spurious budget events.
+  it('error event with NaN / Infinity `cost` does NOT poison cumulative cost (#5038 / #4088)', () => {
+    // #4088: NaN / Infinity cost must never poison the cost accumulator or
+    // trigger spurious budget events. #5115: but finite tokens on the same
+    // error payload ARE legitimate partial spend and ratchet the token
+    // meter — the usage gate keys on input_tokens, the cost gate on cost.
     const { mgr, session } = makeWired({ budget: 1.0 })
     const costUpdates = captureSessionEvents(mgr, 'cost_update')
     session.emit('error', {
@@ -3384,9 +3424,13 @@ describe('SessionManager._trackCost integration with result events (#4086)', () 
       messageId: 'm', message: 'boom', code: 'STREAM_ERROR',
       cost: Infinity, usage: { input_tokens: 999 },
     })
-    assert.equal(mgr.getSessionCost('s1'), 0)
-    assert.equal(costUpdates.length, 0)
-    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 0)
+    // Cost accumulator stays clean — neither error ticked the budget.
+    assert.equal(mgr.getSessionCost('s1'), 0, 'NaN / Infinity cost must not poison cumulativeCost')
+    assert.equal(costUpdates.length, 0, 'non-finite cost must not fire cost_update')
+    assert.equal(mgr.getCumulativeUsage('s1').costUsd, 0)
+    // #5115: tokens ratchet (both errors carried finite input_tokens).
+    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 1998)
+    assert.equal(mgr.getCumulativeUsage('s1').turnsBilled, 2)
   })
 })
 
@@ -3466,19 +3510,20 @@ describe('SessionManager cost-threshold soft warning (#4075)', () => {
     assert.equal(crossings.length, 1, 'still no re-fire')
   })
 
-  it('does NOT fire for subscription-billed sessions (cost stays at 0)', () => {
+  it('does NOT fire the COST threshold for subscription-billed sessions, but DOES ratchet tokens (#5115)', () => {
     const { mgr, session } = makeMgr({ threshold: 0.001 })
     const crossings = captureCrossings(mgr)
-    // claude-tui-like flow: cost is null on the result event. The wired
-    // result handler gates _trackUsage on `Number.isFinite(data.cost)`
-    // (#4088), so subscription-billed sessions never increment the
-    // accumulator OR fire the threshold. From the badge's perspective
-    // both surfaces stay at 0 — no clutter.
+    // claude-tui-like flow: cost is null on the result event but the usage
+    // payload carries real tokens. #5115: the usage gate keys on
+    // input_tokens so the token meter ratchets, while costUsd stays at 0 —
+    // so the dollar-denominated soft threshold never crosses (no $ budget
+    // applies to a flat subscription). Both invariants hold simultaneously.
     session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 }, cost: null })
     session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 }, cost: null })
-    assert.equal(crossings.length, 0, 'subscription sessions must never trigger the threshold')
-    assert.equal(mgr.getCumulativeUsage('s1').costUsd, 0)
-    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 0, 'tokens are not tracked when cost is null')
+    assert.equal(crossings.length, 0, 'subscription sessions must never trigger the COST threshold')
+    assert.equal(mgr.getCumulativeUsage('s1').costUsd, 0, 'costUsd stays at 0 — no cost to add')
+    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 2000, 'tokens ARE tracked even when cost is null (#5115)')
+    assert.equal(mgr.getCumulativeUsage('s1').turnsBilled, 2)
   })
 
   it('is disabled when threshold is 0', () => {
