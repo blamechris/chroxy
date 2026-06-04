@@ -1167,6 +1167,13 @@ export class DockerByokSession extends ClaudeByokSession {
       log.info('devcontainer.json build ignored — explicit image opt wins')
       return
     }
+    // The devcontainer spec treats `image` and `build` as mutually
+    // exclusive. If both are present we honour `build` (it overwrites the
+    // image overlay applied just above) — surface a warning so the
+    // operator knows the declared `image` field was superseded.
+    if (config.image) {
+      log.warn(`devcontainer.json declares both "image" (${config.image}) and "build" — building from the Dockerfile; "image" is ignored`)
+    }
     const dcDir = config.dir || cwd
     const absCwd = resolve(cwd)
     const cwdPrefix = absCwd.endsWith(sep) ? absCwd : absCwd + sep
