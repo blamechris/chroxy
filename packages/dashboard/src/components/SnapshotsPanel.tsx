@@ -162,6 +162,10 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
+  // #5102 — partial-success notice: the sidecar dropped but `docker rmi`
+  // failed (image still in use, daemon down). The row legitimately
+  // disappears, so without this the leaked image would be invisible.
+  const [warning, setWarning] = useState<string | null>(null)
   const [deletingSlug, setDeletingSlug] = useState<string | null>(null)
 
   // Hoist for testability — production passes neither override and falls
@@ -205,9 +209,23 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
           const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
           throw new Error((body as { error?: string }).error || `HTTP ${res.status}`)
         }
+        const body = (await res
+          .json()
+          .catch(() => ({}))) as { tag?: string; imageRemoved?: boolean }
         // Drop locally so the row disappears even if a follow-up
         // /api/snapshots round-trip is slow. refresh() will reconcile.
         setSnapshots((prev) => prev.filter((s) => s.slug !== slug))
+        // #5102 — the metadata is gone (row removed) but `docker rmi`
+        // failed, so the image is still on disk. Surface the tag + the
+        // manual cleanup command since the operator can no longer see it.
+        if (body.imageRemoved === false) {
+          const tag = body.tag || slug
+          setWarning(
+            `Snapshot deleted, but its Docker image (${tag}) could not be removed — ` +
+              `it may still be in use or the daemon is unavailable. ` +
+              `Run \`docker rmi ${tag}\` to clean it up manually.`,
+          )
+        }
         // Best-effort refresh to catch any other state drift.
         void refresh()
       } catch (err) {
@@ -244,6 +262,30 @@ export function SnapshotsPanel({ fetchImpl, getToken }: SnapshotsPanelProps = {}
           style={{ color: 'var(--status-error, #ef4444)' }}
         >
           {error}
+        </div>
+      )}
+
+      {warning && (
+        <div
+          className="env-empty"
+          data-testid="snapshots-warning"
+          style={{
+            color: 'var(--status-warning, #f59e0b)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '0.75rem',
+            justifyContent: 'space-between',
+          }}
+        >
+          <span>{warning}</span>
+          <button
+            className="btn-env-new"
+            data-testid="snapshots-warning-dismiss"
+            onClick={() => setWarning(null)}
+            title="Dismiss"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
