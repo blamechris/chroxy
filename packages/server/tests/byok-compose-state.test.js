@@ -91,6 +91,26 @@ describe('ByokComposeStateStore', () => {
     assert.throws(() => store.record({ projectId: 'p', composeFile: '/a' }), /cwd/)
   })
 
+  it('records and round-trips a compose-file overlay array (#5124)', () => {
+    const a = new ByokComposeStateStore({ statePath })
+    const files = ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml']
+    a.record({ projectId: 'overlay', composeFile: files, cwd: '/proj' })
+
+    const raw = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.deepEqual(raw.stacks[0].composeFile, files)
+
+    // Survives a reload so the boot sweep replays the same `-f` set.
+    const b = new ByokComposeStateStore({ statePath })
+    assert.deepEqual(b.list()[0].composeFile, files)
+  })
+
+  it('rejects an empty or non-string compose-file array (#5124)', () => {
+    const store = new ByokComposeStateStore({ statePath })
+    assert.throws(() => store.record({ projectId: 'p', composeFile: [], cwd: '/a' }), /composeFile/)
+    assert.throws(() => store.record({ projectId: 'p', composeFile: ['/a', ''], cwd: '/a' }), /composeFile/)
+    assert.throws(() => store.record({ projectId: 'p', composeFile: ['/a', 5], cwd: '/a' }), /composeFile/)
+  })
+
   it('load() ignores a corrupt state file but does not crash', () => {
     writeFileSync(statePath, 'this is not json')
     const store = new ByokComposeStateStore({ statePath })

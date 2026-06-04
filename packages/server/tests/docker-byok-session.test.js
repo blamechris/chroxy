@@ -3962,7 +3962,7 @@ describe('DockerByokSession — devcontainer build / compose (#5078)', () => {
     }
   })
 
-  it('dockerComposeFile (array) uses the first file and resolves relative to devcontainer dir', async () => {
+  it('dockerComposeFile (array) threads the full overlay set, each resolved relative to devcontainer dir, in order (#5124)', async () => {
     const cwd = makeDevcontainerCwd({
       dockerComposeFile: ['../base.yml', 'override.yml'],
       service: 'app',
@@ -3974,8 +3974,33 @@ describe('DockerByokSession — devcontainer build / compose (#5078)', () => {
       session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
       await session.start()
       const call = backend.createCalls[0]
-      // ../base.yml from <cwd>/.devcontainer resolves to <cwd>/base.yml
-      assert.equal(call.composeFile, join(cwd, 'base.yml'))
+      // ../base.yml from <cwd>/.devcontainer resolves to <cwd>/base.yml;
+      // override.yml resolves to <cwd>/.devcontainer/override.yml. Both are
+      // threaded in declared order (base first) for compose's later-wins
+      // overlay merge.
+      assert.deepEqual(call.composeFile, [
+        join(cwd, 'base.yml'),
+        join(cwd, '.devcontainer', 'override.yml'),
+      ])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('dockerComposeFile (single-element array) resolves to a lone string for backward compat (#5124)', async () => {
+    const cwd = makeDevcontainerCwd({
+      dockerComposeFile: ['solo.yml'],
+      service: 'app',
+    })
+    try {
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const backend = composeBackendStub()
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backend })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const call = backend.createCalls[0]
+      assert.equal(call.composeFile, join(cwd, '.devcontainer', 'solo.yml'))
       await session.destroy()
     } finally {
       rmSync(cwd, { recursive: true, force: true })

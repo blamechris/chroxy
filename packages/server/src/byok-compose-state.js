@@ -31,6 +31,21 @@ import { writeFileRestricted } from './platform.js'
 const STATE_VERSION = 1
 
 /**
+ * #5124 — A persisted compose file may be a single path or an array of paths
+ * (base + override overlay). Valid when it's a non-empty string, or a
+ * non-empty array of non-empty strings.
+ * @param {*} composeFile
+ * @returns {boolean}
+ */
+function isValidComposeFile(composeFile) {
+  if (typeof composeFile === 'string') return composeFile.length > 0
+  if (Array.isArray(composeFile)) {
+    return composeFile.length > 0 && composeFile.every((f) => typeof f === 'string' && f.length > 0)
+  }
+  return false
+}
+
+/**
  * Default on-disk location, mirroring environment-manager.js's
  * `~/.chroxy/environments.json`. Honors CHROXY_CONFIG_DIR like the rest of
  * the docker-byok stack does.
@@ -65,15 +80,18 @@ export class ByokComposeStateStore {
    *
    * @param {object} entry
    * @param {string} entry.projectId   - Compose project id (chroxy-byok-<hex>).
-   * @param {string} entry.composeFile - Absolute path to the compose file.
+   * @param {string|string[]} entry.composeFile - Absolute path to the compose
+   *   file, or an ARRAY of paths for a base + override overlay (#5124). The
+   *   boot sweep replays the same `-f` set so the merged config — and thus the
+   *   stack torn down — matches the one brought up.
    * @param {string} entry.cwd         - Working directory the stack runs in.
    */
   record({ projectId, composeFile, cwd } = {}) {
     if (!projectId || typeof projectId !== 'string') {
       throw new Error('record() requires a non-empty projectId')
     }
-    if (!composeFile || typeof composeFile !== 'string') {
-      throw new Error('record() requires a non-empty composeFile')
+    if (!isValidComposeFile(composeFile)) {
+      throw new Error('record() requires a non-empty composeFile (string or array of strings)')
     }
     if (!cwd || typeof cwd !== 'string') {
       throw new Error('record() requires a non-empty cwd')
@@ -98,7 +116,7 @@ export class ByokComposeStateStore {
 
   /**
    * Snapshot of all recorded stacks (insertion order).
-   * @returns {Array<{projectId:string, composeFile:string, cwd:string, createdAt:string}>}
+   * @returns {Array<{projectId:string, composeFile:string|string[], cwd:string, createdAt:string}>}
    */
   list() {
     return Array.from(this._stacks.values()).map((s) => ({ ...s }))
@@ -143,7 +161,7 @@ export class ByokComposeStateStore {
         if (
           !entry
           || typeof entry.projectId !== 'string' || !entry.projectId
-          || typeof entry.composeFile !== 'string' || !entry.composeFile
+          || !isValidComposeFile(entry.composeFile)
           || typeof entry.cwd !== 'string' || !entry.cwd
         ) {
           continue

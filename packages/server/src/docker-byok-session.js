@@ -89,9 +89,10 @@
  *     is treated as if the operator passed `composeFile`, and the primary
  *     service is taken from devcontainer.json's `service` field. The same
  *     compose lifecycle (up / attach / down) and pooling-disabled posture
- *     as the explicit `composeFile` opt applies. Arrays use the FIRST
- *     file (compose overlay merge is not yet supported — the extras are
- *     logged, not silently dropped).
+ *     as the explicit `composeFile` opt applies. Arrays are threaded
+ *     through in full as a base + override overlay — `_composeUp`/
+ *     `_composeDown` emit one `-f <file>` per entry in declared order so
+ *     compose merges them (later files override earlier ones). (#5124)
  *
  * Snapshot / restore (#5023)
  * --------------------------
@@ -1227,14 +1228,17 @@ export class DockerByokSession extends ClaudeByokSession {
    * #5078 — Resolve a devcontainer.json `dockerComposeFile` declaration
    * into the session's compose opts. When present (and no explicit
    * `composeFile` constructor opt was passed), sets `_composeFile` to the
-   * primary compose file resolved relative to the devcontainer.json dir,
+   * compose file(s) resolved relative to the devcontainer.json dir,
    * picks the primary service from devcontainer.json's `service` field,
    * and disables pooling (compose stacks own their container lifecycle).
    *
-   * The devcontainer spec allows an ARRAY of compose files (base +
-   * overrides). The current backend `_composeUp` shells a single `-f`;
-   * we attach to the FIRST file and warn that overlays are not yet
-   * merged, rather than silently dropping the extras.
+   * #5124 — The devcontainer spec allows an ARRAY of compose files (a base
+   * file plus one or more overrides). Compose merges them via a repeated
+   * `-f` flag in declared order, so we thread the FULL resolved array (each
+   * entry resolved relative to the devcontainer.json dir) through to the
+   * backend `_composeUp`/`_composeDown` rather than attaching only to the
+   * first file. A single declared file resolves to a lone string for
+   * backward compatibility.
    *
    * No-op when the overlay declares no compose file or an explicit
    * `composeFile` constructor opt already won.
@@ -1246,13 +1250,11 @@ export class DockerByokSession extends ClaudeByokSession {
       return
     }
     const dcDir = config.dir || cwd
-    const files = config.dockerComposeFile
-    if (files.length > 1) {
-      log.warn(
-        `devcontainer.json dockerComposeFile lists ${files.length} files; only the first ("${files[0]}") is used (compose overlay merge is not yet supported)`,
-      )
-    }
-    this._composeFile = resolve(dcDir, files[0])
+    const files = config.dockerComposeFile.map((f) => resolve(dcDir, f))
+    // Thread the full set so `_composeUp` emits `-f <base> -f <override>`
+    // in declared order. A lone file stays a plain string so single-file
+    // callers and persisted state are unaffected.
+    this._composeFile = files.length === 1 ? files[0] : files
     // Primary service: devcontainer.json `service` field wins; otherwise
     // fall back to the first service the backend reports.
     if (!this._composeService && config.service) {
