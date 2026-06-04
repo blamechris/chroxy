@@ -241,4 +241,142 @@ describe('SnapshotsPanel', () => {
     })
     expect(screen.getByTestId('snapshot-card-snap-fail')).toBeTruthy()
   })
+
+  // #5102 — `DELETE /api/snapshots/:slug` reports `imageRemoved: false` when
+  // the sidecar dropped but `docker rmi` failed (image still in use by
+  // another container, daemon down, etc.). The row legitimately disappears
+  // because the metadata is gone, but the operator needs to know an image
+  // is still on disk and which tag to clean up manually.
+  it('surfaces a warning with the tag when imageRemoved is false on a successful delete', async () => {
+    let listCalled = 0
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (init?.method === 'DELETE') {
+        return new Response(
+          JSON.stringify({ ok: true, tag: 'chroxy-byok-snap:ghost-1', imageRemoved: false }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url === '/api/snapshots') {
+        listCalled += 1
+        const snaps =
+          listCalled === 1
+            ? [makeSnap({ slug: 'snap-ghost', tag: 'chroxy-byok-snap:ghost-1' })]
+            : []
+        return new Response(JSON.stringify({ snapshots: snaps }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('not found', { status: 404 })
+    })
+
+    render(<SnapshotsPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 'tok'} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('snapshot-card-snap-ghost')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByTestId('snapshot-delete-snap-ghost'))
+    fireEvent.click(screen.getByTestId('snapshot-confirm-yes-snap-ghost'))
+
+    // Sidecar dropped, row removed — same as the happy path so far.
+    await waitFor(() => {
+      expect(screen.queryByTestId('snapshot-card-snap-ghost')).toBeNull()
+    })
+
+    // But a warning notice must surface the leaked image tag so the
+    // operator knows to clean it up manually.
+    const warn = await screen.findByTestId('snapshots-warning')
+    expect(warn.textContent).toContain('chroxy-byok-snap:ghost-1')
+    expect(warn.textContent).toContain('docker rmi')
+
+    // The error banner stays unused — this is a partial-success warning,
+    // not an error.
+    expect(screen.queryByTestId('snapshots-error')).toBeNull()
+  })
+
+  it('dismisses the imageRemoved warning when its dismiss button is clicked', async () => {
+    let listCalled = 0
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (init?.method === 'DELETE') {
+        return new Response(
+          JSON.stringify({ ok: true, tag: 'chroxy-byok-snap:leaked', imageRemoved: false }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url === '/api/snapshots') {
+        listCalled += 1
+        const snaps =
+          listCalled === 1
+            ? [makeSnap({ slug: 'snap-leak', tag: 'chroxy-byok-snap:leaked' })]
+            : []
+        return new Response(JSON.stringify({ snapshots: snaps }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('not found', { status: 404 })
+    })
+
+    render(<SnapshotsPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 'tok'} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('snapshot-card-snap-leak')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByTestId('snapshot-delete-snap-leak'))
+    fireEvent.click(screen.getByTestId('snapshot-confirm-yes-snap-leak'))
+
+    const warn = await screen.findByTestId('snapshots-warning')
+    expect(warn).toBeTruthy()
+
+    fireEvent.click(screen.getByTestId('snapshots-warning-dismiss'))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('snapshots-warning')).toBeNull()
+    })
+  })
+
+  it('does not surface a warning when imageRemoved is true (happy path)', async () => {
+    let listCalled = 0
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (init?.method === 'DELETE') {
+        return new Response(
+          JSON.stringify({ ok: true, tag: 'chroxy-byok-snap:clean', imageRemoved: true }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (url === '/api/snapshots') {
+        listCalled += 1
+        const snaps =
+          listCalled === 1
+            ? [makeSnap({ slug: 'snap-clean', tag: 'chroxy-byok-snap:clean' })]
+            : []
+        return new Response(JSON.stringify({ snapshots: snaps }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('not found', { status: 404 })
+    })
+
+    render(<SnapshotsPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 'tok'} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('snapshot-card-snap-clean')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByTestId('snapshot-delete-snap-clean'))
+    fireEvent.click(screen.getByTestId('snapshot-confirm-yes-snap-clean'))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('snapshot-card-snap-clean')).toBeNull()
+    })
+
+    // No warning should appear on the happy path.
+    expect(screen.queryByTestId('snapshots-warning')).toBeNull()
+  })
 })
