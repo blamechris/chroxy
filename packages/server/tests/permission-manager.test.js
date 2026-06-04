@@ -26,6 +26,52 @@ describe('PermissionManager', () => {
 
   // -- Permission requests --
 
+  // #5121: requestIds must be globally unique across sessions so the
+  // parent-level subagent routing table (byok-session.js) can never alias
+  // a parent's own pending requestId against a child's. Each manager mints
+  // a per-instance nonce; the id is opaque to all consumers.
+  describe('requestId global uniqueness (#5121)', () => {
+    it('two managers do not mint the same requestId even with identical counters', () => {
+      const a = createManager()
+      const b = createManager()
+      try {
+        const aEvents = []
+        const bEvents = []
+        a.on('permission_request', (d) => aEvents.push(d))
+        b.on('permission_request', (d) => bEvents.push(d))
+
+        // Same tool/input/counter position in each manager — only the
+        // per-instance nonce keeps the ids apart.
+        a.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+        b.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+
+        assert.ok(aEvents[0].requestId)
+        assert.ok(bEvents[0].requestId)
+        assert.notEqual(aEvents[0].requestId, bEvents[0].requestId)
+        assert.match(aEvents[0].requestId, /^perm-/)
+        assert.match(bEvents[0].requestId, /^perm-/)
+      } finally {
+        a.destroy()
+        b.destroy()
+      }
+    })
+
+    it('a single manager mints distinct requestIds with a stable nonce', () => {
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      pm.handlePermission('Bash', { command: 'pwd' }, null, 'approve')
+
+      assert.notEqual(events[0].requestId, events[1].requestId)
+      // Both ids share this manager's nonce (the segment between perm- and
+      // the counter), proving the nonce is per-instance, not per-request.
+      const nonceA = events[0].requestId.split('-')[1]
+      const nonceB = events[1].requestId.split('-')[1]
+      assert.equal(nonceA, nonceB)
+    })
+  })
+
   describe('handlePermission', () => {
     it('emits permission_request and creates entry in pending map', () => {
       const events = []

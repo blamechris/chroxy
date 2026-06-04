@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events'
+import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
 
 const _fallbackLog = createLogger('permission-manager')
@@ -39,6 +40,15 @@ export class PermissionManager extends EventEmitter {
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
     this._permissionCounter = 0
+    // Per-instance (per-session) nonce so requestIds are globally unique
+    // across sessions. Without it the id was `perm-${counter}-${ms}` with a
+    // counter that restarts at 0 every session — two sessions could mint the
+    // same id (same counter + same millisecond), and the parent-level
+    // subagent routing table (byok-session.js) would then alias a parent's
+    // own pending id against a child's (#5121). The counter is retained for
+    // human-readable ordering in logs; global uniqueness comes from the
+    // nonce. The id is opaque to all consumers — nothing parses its shape.
+    this._idNonce = randomUUID().slice(0, 8)
     this._lastPermissionData = new Map() // requestId -> emitted permission_request payload
 
     // Session-scoped permission rules
@@ -161,7 +171,7 @@ export class PermissionManager extends EventEmitter {
     }
 
     return new Promise((resolve) => {
-      const requestId = `perm-${++this._permissionCounter}-${Date.now()}`
+      const requestId = `perm-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
       this._pendingPermissions.set(requestId, {
         resolve,
         input: input || {},
@@ -229,7 +239,7 @@ export class PermissionManager extends EventEmitter {
     return new Promise((resolve) => {
       const questionInput = input || {}
       this._waitingForAnswer = true
-      const toolUseId = `ask-${++this._permissionCounter}-${Date.now()}`
+      const toolUseId = `ask-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
       // #3975: stash toolUseId on the pending entry so clearAll() can
       // emit it on the cleared-variant permission_resolved. Without
       // toolUseId the sdk-session re-emit gate at sdk-session.js:281
@@ -531,7 +541,7 @@ export class PermissionManager extends EventEmitter {
    */
   requestMcpTrust(server) {
     return new Promise((resolve) => {
-      const requestId = `mcp-trust-${++this._permissionCounter}-${Date.now()}`
+      const requestId = `mcp-trust-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
       const argv0 = Array.isArray(server.args) && server.args.length > 0 ? server.args[0] : ''
       const input = {
         mcpServer: {
