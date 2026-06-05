@@ -417,3 +417,104 @@ describe('ControlRoomSection activity drill-down (#5176)', () => {
     expect(screen.getByTestId('control-room-empty')).toHaveTextContent('No activity in flight')
   })
 })
+
+describe('ControlRoomSection investigate action (#5202)', () => {
+  it('renders the investigate verdict as a non-interactive span when no handler is wired', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    const tag = screen.getByTestId('cr-verdict-investigate')
+    expect(tag.tagName).toBe('SPAN')
+  })
+
+  it('renders the investigate verdict as a button when onInvestigate is provided', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onInvestigate={() => {}}
+      />,
+    )
+    const tag = screen.getByTestId('cr-verdict-investigate')
+    expect(tag.tagName).toBe('BUTTON')
+    expect(tag).toHaveClass('cr-tag-action')
+  })
+
+  it('gives the investigate button a per-row accessible name including the repo', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onInvestigate={() => {}}
+      />,
+    )
+    const tag = screen.getByTestId('cr-verdict-investigate')
+    expect(tag).toHaveAttribute('aria-label', expect.stringContaining('medlens'))
+  })
+
+  it('calls onInvestigate with the repo cwd, name, and reason note on click', () => {
+    const onInvestigate = vi.fn()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onInvestigate={onInvestigate}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('cr-verdict-investigate'))
+    expect(onInvestigate).toHaveBeenCalledWith({
+      cwd: '/Users/me/Projects/medlens',
+      name: 'medlens',
+      reason: '172 worktrees — likely a leak/runaway.',
+    })
+  })
+
+  it('passes an empty reason when the repo has no note', () => {
+    const onInvestigate = vi.fn()
+    const snap = makeSnapshot({
+      repos: [
+        {
+          name: 'noteless',
+          path: '/Users/me/Projects/noteless',
+          branch: 'main',
+          verdict: 'investigate',
+          live: false,
+          tree: { state: 'dirty', untracked: 1, modified: 0, staged: 0 },
+          worktrees: 99,
+          openPRs: null,
+          attribution: null,
+          onboarding: 'skipped',
+          lastTouched: '2026-05-28T11:00:00.000Z',
+          // no note
+        },
+      ],
+    })
+    render(
+      <ControlRoomSection snapshot={snap} loading={false} onRefresh={() => {}} now={() => NOW} onInvestigate={onInvestigate} />,
+    )
+    fireEvent.click(screen.getByTestId('cr-verdict-investigate'))
+    expect(onInvestigate).toHaveBeenCalledWith({
+      cwd: '/Users/me/Projects/noteless',
+      name: 'noteless',
+      reason: '',
+    })
+  })
+
+  it('leaves non-actionable verdicts (live, onboarded) as plain spans even with a handler', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onInvestigate={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('cr-verdict-live').tagName).toBe('SPAN')
+    expect(screen.getByTestId('cr-verdict-onboarded').tagName).toBe('SPAN')
+  })
+})
