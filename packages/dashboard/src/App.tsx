@@ -88,7 +88,7 @@ import { ConsolePage } from './components/ConsolePage'
 import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
-import { ControlRoomSection } from './components/ControlRoomSection'
+import { ControlRoomSection, type RepoInvestigateRequest } from './components/ControlRoomSection'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -638,6 +638,11 @@ export function App() {
   // #5206 — the session id awaiting close-confirmation, or null when no
   // confirm is pending. Drives the ConfirmDialog rendered near the modals.
   const [closeConfirmSessionId, setCloseConfirmSessionId] = useState<string | null>(null)
+  // #5202 — when an Investigate verdict launches a session, the reason note is
+  // stashed here at click time and seeded into the new session's composer once
+  // the server confirms the session (the create-confirm effect). A ref (not
+  // state) so it survives without re-renders and is read at the transition.
+  const pendingSeedPromptRef = useRef<string | null>(null)
 
   // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
   const [transcriptCopied, setTranscriptCopied] = useState(false)
@@ -909,6 +914,19 @@ export function App() {
       setShowCreateSession(false)
       setIsCreatingSession(false)
       setSessionCreateError(null)
+      // #5202 — if this create was launched from an Investigate verdict, seed
+      // the freshly-created session's composer with the reason note and drop
+      // out of the Control Room so the operator lands in the new session. We
+      // write the per-session draft ref too so the draft-restore effect (which
+      // runs after this one on the same activeSessionId change) reads the seed
+      // rather than clobbering it with an empty draft.
+      if (pendingSeedPromptRef.current) {
+        const reason = pendingSeedPromptRef.current
+        inputDraftsRef.current.set(activeSessionId, reason)
+        setInputDraftValue(reason)
+        setControlRoomActive(false)
+        pendingSeedPromptRef.current = null
+      }
     }
   }, [activeSessionId, isCreatingSession])
 
@@ -1402,6 +1420,19 @@ export function App() {
 
   const handleNewSession = useCallback(() => {
     setPendingCwd(null)
+    // #5202 — a plain new session carries no investigation seed; clear any
+    // stale one so it can't leak into this session's composer.
+    pendingSeedPromptRef.current = null
+    setShowCreateSession(true)
+  }, [])
+
+  // #5202 — open the create-session picker pre-filled for an Investigate
+  // action: cwd = the repo path, and the reason note stashed for seeding into
+  // the new session's composer once it's created. The user still picks
+  // model/provider/options in the modal before creating.
+  const handleInvestigate = useCallback((req: RepoInvestigateRequest) => {
+    pendingSeedPromptRef.current = req.reason || null
+    setPendingCwd(req.cwd)
     setShowCreateSession(true)
   }, [])
 
@@ -2361,7 +2392,7 @@ export function App() {
             even with zero sessions. */}
         {controlRoomActive && connectionPhase !== 'connecting' && (
           <div className="main-content" data-testid="control-room-main">
-            <ControlRoomSection />
+            <ControlRoomSection onInvestigate={handleInvestigate} />
           </div>
         )}
 
@@ -2739,7 +2770,7 @@ export function App() {
       {/* Modals */}
       <CreateSessionModal
         open={showCreateSession}
-        onClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null) }}
+        onClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
         onCreate={handleCreateSession}
         initialCwd={pendingCwd}
         knownCwds={knownCwds}

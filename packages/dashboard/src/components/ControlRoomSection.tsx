@@ -62,6 +62,29 @@ const VERDICT_LABEL: Record<RepoVerdict, string> = {
 }
 
 /**
+ * #5202 — payload emitted when an operator clicks an actionable verdict tag.
+ * The host wires this to the create-session flow: it opens the picker
+ * pre-filled with `cwd` and seeds `reason` into the new session's composer.
+ */
+export interface RepoInvestigateRequest {
+  /** Absolute path of the repo — becomes the new session's cwd. */
+  cwd: string
+  /** Repo display name, for labelling the action and session. */
+  name: string
+  /** The investigation reason (the repo's `↳` note) to seed the composer with. */
+  reason: string
+}
+
+/**
+ * #5202 — which verdicts are clickable "control actions". Start with
+ * `investigate` only; extend this map per-verdict as more actions land (e.g.
+ * `abandoned` → review-and-clean) so the click wiring grows in one place.
+ */
+const ACTIONABLE_VERDICTS: Partial<Record<RepoVerdict, true>> = {
+  investigate: true,
+}
+
+/**
  * A worktree or open-PR count at or above this threshold renders in the "bad"
  * colour — the brief flags runaway worktree/PR counts (e.g. 172 worktrees =
  * leak) so the operator's eye lands on them. Kept low enough to surface a
@@ -164,8 +187,37 @@ const SUMMARY_CHIPS: readonly SummaryChip[] = [
   { key: 'recent', label: 'Recent / your call', accent: 'warn' },
 ]
 
-function VerdictTag({ verdict }: { verdict: RepoVerdict }) {
+function VerdictTag({
+  repo,
+  onInvestigate,
+}: {
+  repo: RepoStatus
+  /** #5202 — when provided and the verdict is actionable, the tag is a button. */
+  onInvestigate?: (req: RepoInvestigateRequest) => void
+}) {
+  const { verdict } = repo
   const accent = VERDICT_ACCENT[verdict]
+  // #5202 — the only wired action today is Investigate. Keep the dispatch
+  // table-driven so adding e.g. an `abandoned` action is a one-line change.
+  const actionable = ACTIONABLE_VERDICTS[verdict] === true && !!onInvestigate
+
+  if (actionable) {
+    return (
+      <button
+        type="button"
+        className={`cr-tag cr-tag-${accent} cr-tag-action`}
+        data-testid={`cr-verdict-${verdict}`}
+        data-accent={accent}
+        title={`Investigate ${repo.name} — open a session in ${repo.path}`}
+        onClick={() =>
+          onInvestigate!({ cwd: repo.path, name: repo.name, reason: repo.note ?? '' })
+        }
+      >
+        {VERDICT_LABEL[verdict]}
+      </button>
+    )
+  }
+
   return (
     <span
       className={`cr-tag cr-tag-${accent}`}
@@ -240,9 +292,11 @@ interface RepoRowsProps {
   onToggleExpand: (path: string) => void
   /** Injectable clock for the activity tree's elapsed timers (tests). */
   now?: () => number
+  /** #5202 — investigate action, forwarded to the verdict tag. */
+  onInvestigate?: (req: RepoInvestigateRequest) => void
 }
 
-function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now }: RepoRowsProps) {
+function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate }: RepoRowsProps) {
   // Map repo → its active chroxy session (by cwd). When a session is found the
   // name cell becomes a disclosure toggle that reveals that session's live
   // activity tree (subagents / shells / tools — the retired v1 panel's view).
@@ -281,7 +335,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now }: R
               hover (title) instead of forcing the table wider / clipping. */}
           <div className="cr-dim cr-mono cr-branch" data-testid={`cr-branch-${repo.name}`} title={repo.branch}>{repo.branch}</div>
         </td>
-        <td><VerdictTag verdict={repo.verdict} /></td>
+        <td><VerdictTag repo={repo} onInvestigate={onInvestigate} /></td>
         {/* #5201: ellipsis-truncate on an inner block element, not the <td>
             itself — text-overflow on display:table-cell is unreliable and can
             still let long content widen the column. The branch cell already
@@ -367,6 +421,12 @@ export interface ControlRoomSectionProps {
   sessions?: readonly SessionInfo[]
   /** Injectable clock (epoch ms) for the "generated Nm ago" string. */
   now?: () => number
+  /**
+   * #5202 — invoked when an operator clicks an actionable verdict tag
+   * (currently Investigate). The host opens the create-session picker
+   * pre-filled with the repo cwd and seeds the reason into the composer.
+   */
+  onInvestigate?: (req: RepoInvestigateRequest) => void
 }
 
 // Stable empty-activity default so the `activity` prop falling back to its
@@ -381,6 +441,7 @@ export function ControlRoomSection({
   activity: activityProp,
   sessions: sessionsProp,
   now = Date.now,
+  onInvestigate,
 }: ControlRoomSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.hostStatus)
   const storeLoading = useConnectionStore((s) => s.hostStatusLoading)
@@ -527,6 +588,7 @@ export function ControlRoomSection({
                       expanded={expandedRepos.has(repo.path)}
                       onToggleExpand={handleToggleRepo}
                       now={now}
+                      onInvestigate={onInvestigate}
                     />
                   ))
                 )}

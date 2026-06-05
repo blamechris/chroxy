@@ -8774,3 +8774,23 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-red);
 }
 
+/* #5202 — an actionable verdict tag rendered as a <button> (e.g. Investigate).
+ * Inherits the .cr-tag look; resets button chrome and adds a clickable
+ * affordance (pointer, hover lift, focus ring) so it reads as interactive. */
+.cr-tag-action {
+  cursor: pointer;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11px;
+  transition: filter 0.12s, box-shadow 0.12s;
+}
+.cr-tag-action:hover {
+  filter: brightness(1.12);
+  box-shadow: 0 0 0 1px currentColor inset;
+}
+.cr-tag-action:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
