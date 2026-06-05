@@ -937,6 +937,33 @@
   background: var(--bg-muted, color-mix(in srgb, var(--text-secondary) 10%, transparent));
 }
 
+/* #5200: launcher buttons in the slot header (e.g. "Control Room") — an
+   action that opens a wide view in the main content area rather than
+   rendering in the narrow slot. Accented so it reads as an action, not a
+   passive view tab. */
+.sidebar-panel-slot-launchers {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+.sidebar-panel-slot-launcher {
+  background: transparent;
+  border: 1px solid var(--border-primary, color-mix(in srgb, var(--text-secondary) 22%, transparent));
+  padding: 3px 8px;
+  color: var(--accent-blue);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.sidebar-panel-slot-launcher:hover {
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+}
+
 .sidebar-panel-slot-collapsed-metric {
   font-size: 11px;
   color: var(--text-secondary);

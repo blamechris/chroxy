@@ -220,9 +220,10 @@ function ViewSwitcher({
       >
         <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
         <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
-        {/* #5197: Control Room sits right after Output (marquee feature) so it's
-            always visible instead of overflowing off the end of the tab bar. */}
-        <button className={`view-tab${viewMode === 'control-room' ? ' active' : ''}`} onClick={() => { setViewMode('control-room'); setSplitMode(null); persistSplitMode(null) }} type="button">Control Room</button>
+        {/* #5200: the Control Room is launched from the bottom sidebar panel
+            slot (its header "Control Room" button), not a top tab — the wide
+            host/repo table gets the full main content area. The 'control-room'
+            viewMode still renders below; it just has no top-tab entry now. */}
         <button
           className={`view-tab${splitMode ? ' active' : ''}`}
           onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
@@ -2213,6 +2214,7 @@ export function App() {
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}
+          onOpenControlRoom={() => { setViewMode('control-room'); setSplitMode(null); persistSplitMode(null) }}
           onNewSession={(cwd) => {
             setPendingCwd(cwd || null)
             setShowCreateSession(true)
