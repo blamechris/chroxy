@@ -41,6 +41,8 @@ const mockSetTheme = vi.fn()
 const mockUpdateInputSettings = vi.fn()
 // #5184: spy for the cost-badge mode setter.
 const mockSetCostBadgeMode = vi.fn()
+// #5206: spy for the confirm-session-close setter.
+const mockSetConfirmSessionClose = vi.fn()
 
 // #3404 audit F1: settable so individual tests can override availableProviders
 // without redefining the whole mock.
@@ -57,6 +59,9 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     // #5184: header cost-badge display mode default + setter spy.
     costBadgeMode: 'provider-model',
     setCostBadgeMode: mockSetCostBadgeMode,
+    // #5206: confirm-before-close setting default + setter spy.
+    confirmSessionClose: true,
+    setConfirmSessionClose: mockSetConfirmSessionClose,
     availableProviders: [],
     // Per-session promptEvaluator toggle defaults — overridden by the
     // Active session test cases. Default empty array + null id keeps the
@@ -245,6 +250,29 @@ describe('SettingsPanel', () => {
       const select = screen.getByTestId('cost-badge-mode-select')
       fireEvent.change(select, { target: { value: 'not-a-mode' } })
       expect(mockSetCostBadgeMode).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('confirm-before-close toggle (#5206)', () => {
+    it('reflects the enabled state from the store', () => {
+      setMockState({ confirmSessionClose: true })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const toggle = screen.getByTestId('confirm-session-close-toggle') as HTMLInputElement
+      expect(toggle.checked).toBe(true)
+    })
+
+    it('reflects the disabled state from the store', () => {
+      setMockState({ confirmSessionClose: false })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const toggle = screen.getByTestId('confirm-session-close-toggle') as HTMLInputElement
+      expect(toggle.checked).toBe(false)
+    })
+
+    it('calls setConfirmSessionClose when toggled', () => {
+      setMockState({ confirmSessionClose: true })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      fireEvent.click(screen.getByTestId('confirm-session-close-toggle'))
+      expect(mockSetConfirmSessionClose).toHaveBeenCalledWith(false)
     })
   })
 

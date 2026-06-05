@@ -55,6 +55,7 @@ import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
+import { ConfirmDialog } from './components/ConfirmDialog'
 import { NotificationBanners } from './components/NotificationBanners'
 import { Toast, type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
@@ -520,6 +521,7 @@ export function App() {
   const destroySession = useConnectionStore(s => s.destroySession)
   const renameSession = useConnectionStore(s => s.renameSession)
   const createSession = useConnectionStore(s => s.createSession)
+  const confirmSessionClose = useConnectionStore(s => s.confirmSessionClose)
   const setViewMode = useConnectionStore(s => s.setViewMode)
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
@@ -633,6 +635,9 @@ export function App() {
     setControlRoomOpen(false)
     setControlRoomActive(false)
   }, [])
+  // #5206 — the session id awaiting close-confirmation, or null when no
+  // confirm is pending. Drives the ConfirmDialog rendered near the modals.
+  const [closeConfirmSessionId, setCloseConfirmSessionId] = useState<string | null>(null)
 
   // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
   const [transcriptCopied, setTranscriptCopied] = useState(false)
@@ -694,8 +699,9 @@ export function App() {
     switchSession(sessionId)
   }, [switchSession, activeSessionId])
 
-  const handleCloseSession = useCallback((sessionId: string) => {
-    if (!window.confirm('Close this session? The Claude process will be terminated.')) return
+  // The actual session teardown, shared by the confirm path and the
+  // no-confirm path (#5206).
+  const performCloseSession = useCallback((sessionId: string) => {
     // #3800: evict the per-session composer state (draft + collapsed-paste
     // blocks + next-id counter) so the refs further down don't leak the
     // pasted-text content for the lifetime of <App />. `handleSend` already
@@ -706,6 +712,18 @@ export function App() {
     evictSessionComposerState(sessionId)
     destroySession(sessionId)
   }, [destroySession])
+
+  const handleCloseSession = useCallback((sessionId: string) => {
+    // #5206 — gate the teardown behind a styled confirm dialog when the
+    // setting is enabled (the default). When disabled, close immediately.
+    // The Control Room tab closes via its own non-session path and never
+    // reaches here, so it stays exempt from the confirmation.
+    if (confirmSessionClose) {
+      setCloseConfirmSessionId(sessionId)
+      return
+    }
+    performCloseSession(sessionId)
+  }, [confirmSessionClose, performCloseSession])
 
   // #3567 / #3602: dedicated restart handler for the StdinDisabledBanner.
   // Creates a replacement session FIRST and then destroys the broken one so
@@ -2728,6 +2746,28 @@ export function App() {
         existingNames={sessions.map(s => s.name)}
         serverError={sessionCreateError ?? undefined}
         isCreating={isCreatingSession}
+      />
+
+      {/* #5206 — session-close confirmation. Shown only when the
+          confirmSessionClose setting is enabled (handleCloseSession gates it).
+          Confirm tears the session down; cancel/Escape/backdrop keep it. */}
+      <ConfirmDialog
+        open={closeConfirmSessionId !== null}
+        title="Close session?"
+        message={(() => {
+          const name = sessions.find(s => s.sessionId === closeConfirmSessionId)?.name
+          return name
+            ? `Close "${name}"? The Claude process will be terminated.`
+            : 'Close this session? The Claude process will be terminated.'
+        })()}
+        confirmLabel="Close session"
+        cancelLabel="Cancel"
+        danger
+        onConfirm={() => {
+          if (closeConfirmSessionId) performCloseSession(closeConfirmSessionId)
+          setCloseConfirmSessionId(null)
+        }}
+        onCancel={() => setCloseConfirmSessionId(null)}
       />
 
       {/* Toasts */}

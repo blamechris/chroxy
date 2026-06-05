@@ -1607,8 +1607,20 @@ button.sidebar-token-view-session-row:hover {
   transition: opacity 0.15s;
 }
 
-.session-tab:hover .tab-close {
+/* #5205 — reveal the × on hover OR keyboard focus anywhere within the tab
+ * (the tab div itself is focusable via tabIndex=0, so :focus-within fires when
+ * a keyboard user lands on the tab, not only once they reach the × button).
+ * Keeps the close affordance discoverable for both mouse and keyboard. */
+.session-tab:hover .tab-close,
+.session-tab:focus-within .tab-close {
   opacity: 1;
+}
+
+/* #5205 — subtle "expand slightly" affordance on hover/focus so the tab grows
+ * to make room for the revealed ×, matching the requested feel. */
+.session-tab:hover,
+.session-tab:focus-within {
+  padding-right: 14px;
 }
 
 .tab-close:hover {
@@ -5032,6 +5044,28 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .btn-modal-create:hover { background: #3a8eef; }
+
+/* #5206 — destructive confirm button (e.g. "Close session"). Same shape as
+ * .btn-modal-create but red, signalling the action is irreversible. */
+.btn-modal-danger {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent-red);
+  color: #fff;
+  font-size: var(--text-base);
+  cursor: pointer;
+  font-weight: 500;
+}
+.btn-modal-danger:hover { filter: brightness(1.1); }
+
+/* #5206 — ConfirmDialog body text. */
+.confirm-dialog-message {
+  margin: 0 0 14px;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  line-height: 1.5;
+}
 
 .form-error {
   color: var(--accent-red);

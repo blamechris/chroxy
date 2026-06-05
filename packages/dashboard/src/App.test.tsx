@@ -143,6 +143,8 @@ vi.mock('./store/connection', () => {
     serverErrors: [],
     connectionRetryCount: 0,
     terminalRawBuffer: '',
+    // #5206 — mirror the real default (session-close confirmation on).
+    confirmSessionClose: true,
     getActiveSessionState: () => ({
       messages: [],
       streamingMessageId: null,
@@ -533,6 +535,47 @@ describe('App', () => {
       render(<App />)
       fireEvent.keyDown(window, { key: 'w', metaKey: true })
       expect(destroySession).not.toHaveBeenCalled()
+    })
+
+    describe('#5206 session-close confirmation', () => {
+      it('clicking a tab × opens the confirm dialog instead of destroying immediately (default on)', () => {
+        const destroySession = vi.fn()
+        stateOverrides = { connectionPhase: 'connected', sessions: twoSessions, activeSessionId: 's1', destroySession, confirmSessionClose: true }
+        render(<App />)
+        const tab = screen.getByTestId('session-tab-s2')
+        fireEvent.click(within(tab).getByTestId('tab-close'))
+        expect(screen.getByTestId('confirm-dialog')).toBeInTheDocument()
+        expect(destroySession).not.toHaveBeenCalled()
+      })
+
+      it('confirming the dialog destroys the targeted session', () => {
+        const destroySession = vi.fn()
+        stateOverrides = { connectionPhase: 'connected', sessions: twoSessions, activeSessionId: 's1', destroySession, confirmSessionClose: true }
+        render(<App />)
+        fireEvent.click(within(screen.getByTestId('session-tab-s2')).getByTestId('tab-close'))
+        fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+        expect(destroySession).toHaveBeenCalledWith('s2')
+        expect(screen.queryByTestId('confirm-dialog')).toBeNull()
+      })
+
+      it('cancelling the dialog keeps the session', () => {
+        const destroySession = vi.fn()
+        stateOverrides = { connectionPhase: 'connected', sessions: twoSessions, activeSessionId: 's1', destroySession, confirmSessionClose: true }
+        render(<App />)
+        fireEvent.click(within(screen.getByTestId('session-tab-s2')).getByTestId('tab-close'))
+        fireEvent.click(screen.getByTestId('confirm-dialog-cancel'))
+        expect(destroySession).not.toHaveBeenCalled()
+        expect(screen.queryByTestId('confirm-dialog')).toBeNull()
+      })
+
+      it('closes immediately without a dialog when the setting is off', () => {
+        const destroySession = vi.fn()
+        stateOverrides = { connectionPhase: 'connected', sessions: twoSessions, activeSessionId: 's1', destroySession, confirmSessionClose: false }
+        render(<App />)
+        fireEvent.click(within(screen.getByTestId('session-tab-s2')).getByTestId('tab-close'))
+        expect(screen.queryByTestId('confirm-dialog')).toBeNull()
+        expect(destroySession).toHaveBeenCalledWith('s2')
+      })
     })
   })
 
@@ -1245,18 +1288,13 @@ describe('App', () => {
       })
       expect(screen.getByTestId('pasted-text-chips')).toBeInTheDocument()
 
-      // Confirm dialog returns true so handleCloseSession proceeds.
-      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-      try {
-        // Click the close (×) button on s1's tab. SessionBar hides the close
-        // button when only one session remains, so we need ≥2 sessions for
-        // this to render at all.
-        const s1Tab = screen.getByTestId('session-tab-s1')
-        const closeBtn = within(s1Tab).getByTestId('tab-close')
-        fireEvent.click(closeBtn)
-      } finally {
-        confirmSpy.mockRestore()
-      }
+      // Click the close (×) button on s1's tab. SessionBar hides the close
+      // button when only one session remains, so we need ≥2 sessions for
+      // this to render at all. #5206 — closing now opens the ConfirmDialog;
+      // confirm it to proceed with the teardown.
+      const s1Tab = screen.getByTestId('session-tab-s1')
+      fireEvent.click(within(s1Tab).getByTestId('tab-close'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
       expect(destroySessionFn).toHaveBeenCalledWith('s1')
 
       // Simulate the store completing destruction: s1 is gone, s2 is active.
