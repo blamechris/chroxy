@@ -209,6 +209,38 @@ Object.assign(EVENT_MAP, {
     sideEffects: [{ type: 'session_list' }],
   }),
 
+  // #5160: Control Room activity tree. The ActivityRegistry (owned by
+  // BaseSession) maps the existing in-flight signals (tool_start /
+  // agent_spawned / background_work_changed / permission_request / …) into
+  // `ActivityEntry` records and emits these two events. We inject the
+  // canonical `ctx.sessionId` (matching `background_work_changed`) so the
+  // wire message carries the SessionManager key the dashboard routes on,
+  // regardless of what internal id the session held. Both are transient —
+  // not replayed from history; a reconnecting client gets the full tree from
+  // the snapshot-on-subscribe in ws-history.sendSessionInfo.
+  activity_delta: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'activity_delta',
+        sessionId: ctx.sessionId,
+        schemaVersion: data.schemaVersion,
+        op: data.op,
+        entry: data.entry,
+      },
+    }],
+  }),
+
+  activity_snapshot: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'activity_snapshot',
+        sessionId: ctx.sessionId,
+        schemaVersion: data.schemaVersion,
+        entries: Array.isArray(data?.entries) ? data.entries : [],
+      },
+    }],
+  }),
+
   mcp_servers: (data) => ({
     messages: [{
       msg: { type: 'mcp_servers', servers: data.servers },
