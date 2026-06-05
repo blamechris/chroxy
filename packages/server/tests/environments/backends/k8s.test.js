@@ -14,9 +14,16 @@ import { K8sBackend } from '../../../src/environments/backends/k8s.js'
  * @param {Function} [opts.readPod]      - Override for `readNamespacedPod` (poll) call
  * @param {Function} [opts.createSecret] - Override for `createNamespacedSecret` call
  * @param {Function} [opts.deleteSecret] - Override for `deleteNamespacedSecret` call
+ * @param {Function} [opts.readNs]       - Override for `readNamespace` (ensureNamespace probe)
+ * @param {Function} [opts.createNs]     - Override for `createNamespace` (ensureNamespace create)
+ * @param {Function} [opts.listPods]     - Override for `listNamespacedPod` (listEnvironments)
  */
-function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret, readSecret } = {}) {
-  const calls = { create: [], delete: [], read: [], createSecret: [], deleteSecret: [], readSecret: [] }
+function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret, readSecret,
+  readNs, createNs, listPods } = {}) {
+  const calls = {
+    create: [], delete: [], read: [], createSecret: [], deleteSecret: [], readSecret: [],
+    readNs: [], createNs: [], listPods: [],
+  }
 
   const api = {
     createNamespacedPod: createPod
@@ -42,6 +49,21 @@ function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecr
     readNamespacedSecret: readSecret
       ? async (args) => { calls.readSecret.push(args); return readSecret(args) }
       : async (args) => { calls.readSecret.push(args); return {} },
+
+    // Namespace lifecycle (#3194). Default readNamespace resolves so the
+    // namespace is treated as already-existing and createEnvironment does NOT
+    // attempt a create — existing createEnvironment tests keep their behaviour.
+    readNamespace: readNs
+      ? async (args) => { calls.readNs.push(args); return readNs(args) }
+      : async (args) => { calls.readNs.push(args); return {} },
+
+    createNamespace: createNs
+      ? async (args) => { calls.createNs.push(args); return createNs(args) }
+      : async (args) => { calls.createNs.push(args); return {} },
+
+    listNamespacedPod: listPods
+      ? async (args) => { calls.listPods.push(args); return listPods(args) }
+      : async (args) => { calls.listPods.push(args); return { items: [] } },
   }
 
   api.calls = calls
@@ -2960,7 +2982,6 @@ describe('K8sBackend Phase-1 stubs', () => {
     ['createComposeEnvironment', b => b.createComposeEnvironment({})],
     ['destroyComposeEnvironment', b => b.destroyComposeEnvironment({})],
     ['removeImage', b => b.removeImage('tag')],
-    ['listEnvironments', b => b.listEnvironments()],
     ['commitEnvironment', b => b.commitEnvironment('id', 'tag')],
     ['restoreEnvironment', b => b.restoreEnvironment({})],
   ]
@@ -4413,5 +4434,330 @@ describe('SidecarProcess stdin disabled signal (#3402)', () => {
       'data must NOT be buffered once forwarding is disabled')
 
     proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #3194 — per-user/per-project namespace isolation
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend namespace isolation (#3194)', () => {
+  // ─── default namespaceFor mapping ──────────────────────────────────────────
+
+  it('createEnvironment derives chroxy-user-<userId> namespace from userId', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest', userId: 'alice' })
+
+    assert.equal(api.calls.create[0].namespace, 'chroxy-user-alice')
+    assert.equal(api.calls.createSecret[0].namespace, 'chroxy-user-alice')
+  })
+
+  it('falls back to projectId when no userId is supplied', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest', projectId: 'team-x' })
+
+    assert.equal(api.calls.create[0].namespace, 'chroxy-user-team-x')
+  })
+
+  it('userId takes precedence over projectId in the default mapping', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'agent:latest', userId: 'alice', projectId: 'team-x',
+    })
+
+    assert.equal(api.calls.create[0].namespace, 'chroxy-user-alice')
+  })
+
+  it('explicit opts.namespace overrides identity mapping', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'agent:latest', userId: 'alice', namespace: 'production',
+    })
+
+    assert.equal(api.calls.create[0].namespace, 'production')
+  })
+
+  it('falls back to the static default namespace when no identity is supplied', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'shared', _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest' })
+
+    assert.equal(api.calls.create[0].namespace, 'shared')
+  })
+
+  it('accepts a custom namespaceFor mapping function', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      namespaceFor: ({ projectId }) => projectId ? `proj-${projectId}` : null,
+    })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest', projectId: 'foo' })
+
+    assert.equal(api.calls.create[0].namespace, 'proj-foo')
+  })
+
+  it('throws if namespaceFor is not a function', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceFor: 'nope' }),
+      /namespaceFor must be a function/,
+    )
+  })
+
+  // ─── sanitization (RFC 1123) and tenant collision-resistance ───────────────
+
+  it('sanitizes uppercase and invalid characters into a valid RFC 1123 label', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'agent:latest', userId: 'Alice.Smith@Example.com',
+    })
+
+    const ns = api.calls.create[0].namespace
+    // Valid RFC 1123 label: lowercase alnum + hyphens, start/end alnum, <=63.
+    assert.match(ns, /^chroxy-user-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/)
+    assert.ok(ns.length <= 63, `namespace too long: ${ns.length}`)
+  })
+
+  it('is deterministic — same identity maps to the same namespace', async () => {
+    const api1 = createMockApi()
+    const api2 = createMockApi()
+    const b1 = new K8sBackend({ _coreV1Api: api1 })
+    const b2 = new K8sBackend({ _coreV1Api: api2 })
+
+    await b1.createEnvironment({ envId: 'e1', image: 'a', userId: 'weird/id.v2' })
+    await b2.createEnvironment({ envId: 'e2', image: 'a', userId: 'weird/id.v2' })
+
+    assert.equal(api1.calls.create[0].namespace, api2.calls.create[0].namespace)
+  })
+
+  it('distinct identities that sanitize alike still map to DIFFERENT namespaces (no cross-tenant collision)', async () => {
+    const apiA = createMockApi()
+    const apiB = createMockApi()
+    const bA = new K8sBackend({ _coreV1Api: apiA })
+    const bB = new K8sBackend({ _coreV1Api: apiB })
+
+    // 'a.b' and 'a/b' both naively sanitize to 'a-b'; the hash suffix keeps them apart.
+    await bA.createEnvironment({ envId: 'e1', image: 'a', userId: 'a.b' })
+    await bB.createEnvironment({ envId: 'e2', image: 'a', userId: 'a/b' })
+
+    assert.notEqual(apiA.calls.create[0].namespace, apiB.calls.create[0].namespace)
+  })
+
+  it('truncates very long identities to within the 63-char RFC 1123 limit', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'a', userId: 'x'.repeat(200),
+    })
+
+    const ns = api.calls.create[0].namespace
+    assert.ok(ns.length <= 63, `namespace exceeds 63 chars: ${ns.length}`)
+    assert.match(ns, /^chroxy-user-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/)
+  })
+
+  it('an all-symbol identity still produces a valid label (hash fallback)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: '@@@///...' })
+
+    const ns = api.calls.create[0].namespace
+    assert.match(ns, /^chroxy-user-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/)
+  })
+
+  // ─── ensureNamespace idempotency ───────────────────────────────────────────
+
+  it('createEnvironment creates the namespace when it does not exist (404 → create)', async () => {
+    const api = createMockApi({ readNs: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.readNs.length, 1)
+    assert.equal(api.calls.createNs.length, 1)
+    assert.equal(api.calls.createNs[0].body.metadata.name, 'chroxy-user-bob')
+    assert.equal(api.calls.createNs[0].body.metadata.labels['app.kubernetes.io/managed-by'], 'chroxy')
+  })
+
+  it('does NOT create the namespace when it already exists (read succeeds)', async () => {
+    const api = createMockApi() // default readNamespace resolves
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.readNs.length, 1)
+    assert.equal(api.calls.createNs.length, 0)
+  })
+
+  it('ensureNamespace swallows 409 AlreadyExists on concurrent create', async () => {
+    const make409 = () => Object.assign(new Error('Conflict'), { code: 409 })
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { throw make409() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    // Must not throw despite the 409 from createNamespace.
+    await backend.ensureNamespace('chroxy-user-race')
+    assert.equal(api.calls.createNs.length, 1)
+  })
+
+  it('ensureNamespace re-throws a non-404 read error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ readNs: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(() => backend.ensureNamespace('chroxy-user-x'), /boom/)
+  })
+
+  it('ensureNamespace re-throws a non-409 create error', async () => {
+    const make500 = () => Object.assign(new Error('denied'), { code: 500 })
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { throw make500() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(() => backend.ensureNamespace('chroxy-user-x'), /denied/)
+  })
+
+  it('ensureNamespace caches per process — second call for same ns is a no-op', async () => {
+    const api = createMockApi({ readNs: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.ensureNamespace('chroxy-user-cache')
+    await backend.ensureNamespace('chroxy-user-cache')
+
+    assert.equal(api.calls.readNs.length, 1, 'read should only happen once')
+    assert.equal(api.calls.createNs.length, 1, 'create should only happen once')
+  })
+
+  it('ensureNamespace never creates the static default namespace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
+
+    await backend.ensureNamespace('default')
+
+    assert.equal(api.calls.readNs.length, 0)
+    assert.equal(api.calls.createNs.length, 0)
+  })
+
+  it('createEnvironment ensures the namespace BEFORE creating the Secret/Pod', async () => {
+    const order = []
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { order.push('createNs'); return {} },
+      createSecret: () => { order.push('createSecret'); return {} },
+      createPod: () => { order.push('createPod'); return {} },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'carol' })
+
+    assert.deepEqual(order, ['createNs', 'createSecret', 'createPod'])
+  })
+
+  // ─── scoped listEnvironments ───────────────────────────────────────────────
+
+  it('listEnvironments scopes to the identity namespace + chroxy label', async () => {
+    const api = createMockApi({
+      listPods: () => ({
+        items: [
+          { metadata: { name: 'chroxy-env-a' } },
+          { metadata: { name: 'chroxy-env-b' } },
+        ],
+      }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const names = await backend.listEnvironments({ userId: 'dana' })
+
+    assert.deepEqual(names, ['chroxy-env-a', 'chroxy-env-b'])
+    assert.equal(api.calls.listPods[0].namespace, 'chroxy-user-dana')
+    assert.equal(api.calls.listPods[0].labelSelector, 'app.kubernetes.io/managed-by=chroxy')
+  })
+
+  it('listEnvironments filters out pods with no name and returns [] for an empty namespace', async () => {
+    const api = createMockApi({
+      listPods: () => ({ items: [{ metadata: {} }, { metadata: { name: '' } }] }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const names = await backend.listEnvironments({ userId: 'empty' })
+    assert.deepEqual(names, [])
+  })
+
+  it('listEnvironments uses the static default namespace when no identity is given', async () => {
+    const api = createMockApi({ listPods: () => ({ items: [] }) })
+    const backend = new K8sBackend({ namespace: 'shared', _coreV1Api: api })
+
+    await backend.listEnvironments()
+    assert.equal(api.calls.listPods[0].namespace, 'shared')
+  })
+
+  it('two tenants never see each other in listEnvironments (separate namespaces)', async () => {
+    const seenNamespaces = []
+    const api = createMockApi({
+      listPods: (args) => {
+        seenNamespaces.push(args.namespace)
+        return { items: [{ metadata: { name: `pod-in-${args.namespace}` } }] }
+      },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const alice = await backend.listEnvironments({ userId: 'alice' })
+    const bob = await backend.listEnvironments({ userId: 'bob' })
+
+    assert.deepEqual(alice, ['pod-in-chroxy-user-alice'])
+    assert.deepEqual(bob, ['pod-in-chroxy-user-bob'])
+    assert.deepEqual(seenNamespaces, ['chroxy-user-alice', 'chroxy-user-bob'])
+  })
+
+  // ─── identity routing on destroy / status ──────────────────────────────────
+
+  it('destroyEnvironment targets the identity namespace', async () => {
+    const api = createMockApi({ deletePod: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.destroyEnvironment('chroxy-env-e1', { userId: 'erin' })
+
+    assert.equal(api.calls.delete[0].namespace, 'chroxy-user-erin')
+    assert.equal(api.calls.deleteSecret[0].namespace, 'chroxy-user-erin')
+  })
+
+  it('getEnvironmentStatus targets the identity namespace', async () => {
+    const api = createMockApi({ readPod: () => ({ status: { phase: 'Running' } }) })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const running = await backend.getEnvironmentStatus('chroxy-env-e1', { userId: 'frank' })
+
+    assert.equal(running, true)
+    assert.equal(api.calls.read[0].namespace, 'chroxy-user-frank')
+  })
+
+  it('rejects an identity that maps to an invalid namespace before any API call', async () => {
+    const api = createMockApi()
+    // A namespaceFor that returns a clearly-invalid label must be caught by
+    // _validateNamespace, not silently sent to the API server.
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceFor: () => 'BAD_NS' })
+
+    await assert.rejects(
+      () => backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'x' }),
+      /RFC 1123/,
+    )
+    assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
   })
 })
