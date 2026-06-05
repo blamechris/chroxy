@@ -34,6 +34,10 @@ export interface ActivityTreeProps {
   now?: () => number
 }
 
+// Stable empty tree for the null-session case so we don't allocate a new array
+// each render (keeps the `hasLiveEntry` / render path referentially cheap).
+const EMPTY_TREE: readonly ActivityTreeNode[] = []
+
 // Kind → glyph. Kept ASCII-ish so it renders in a small font without needing
 // an icon font. Mirrors the kinds in the protocol `ActivityKindSchema`
 // (agent / shell / tool).
@@ -241,7 +245,10 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand }: EntryTree
 }
 
 export function ActivityTree({ activity, sessionId, now = Date.now }: ActivityTreeProps) {
-  const tree = selectActivityTree(activity, sessionId ?? '')
+  // Only query the reducer for a real session — a null id has no tree, and
+  // selecting with an empty-string id would do pointless work (and could match
+  // a degenerate "" session key). The empty-state branch below renders for null.
+  const tree = sessionId !== null ? selectActivityTree(activity, sessionId) : EMPTY_TREE
   const live = hasLiveEntry(tree)
   const tick = useTick(live, now)
 

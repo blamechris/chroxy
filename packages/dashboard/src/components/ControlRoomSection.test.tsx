@@ -311,6 +311,18 @@ describe('sessionIdForRepoPath (#5176)', () => {
     expect(sessionIdForRepoPath('/Users/me/Projects/chroxy', sessions)).toBe('s-deep')
   })
 
+  it('matches across Windows backslash vs forward-slash separators (mirrors server pathKey)', () => {
+    // The server's repo.path may arrive backslash-separated on Windows while a
+    // session cwd is forward-slash (or vice versa); normalization folds both.
+    const sessions = [makeSession('s-win', 'C:/Users/me/Projects/chroxy')]
+    expect(sessionIdForRepoPath('C:\\Users\\me\\Projects\\chroxy', sessions)).toBe('s-win')
+  })
+
+  it('matches a nested Windows cwd under a backslash repo path', () => {
+    const sessions = [makeSession('s-wt', 'C:\\Users\\me\\Projects\\chroxy\\wt')]
+    expect(sessionIdForRepoPath('C:/Users/me/Projects/chroxy', sessions)).toBe('s-wt')
+  })
+
   it('returns null when no session maps to the repo', () => {
     const sessions = [makeSession('s-other', '/Users/me/Projects/medlens')]
     expect(sessionIdForRepoPath('/Users/me/Projects/chroxy', sessions)).toBeNull()

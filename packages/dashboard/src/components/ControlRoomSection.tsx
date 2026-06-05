@@ -97,14 +97,22 @@ function isoDate(iso: string): string {
 }
 
 /**
- * Normalize a filesystem path for comparison: strip a single trailing slash
- * (but keep root "/"). The host survey's `repo.path` and a session's `cwd` come
- * from independent sources (server-side `git` walk vs. the session's launch
- * cwd) and one may carry a trailing slash the other doesn't.
+ * Normalize a filesystem path for comparison: convert backslashes to forward
+ * slashes, then strip a single trailing slash (but keep root "/"). The host
+ * survey's `repo.path` and a session's `cwd` come from independent sources
+ * (server-side `git` walk vs. the session's launch cwd) and one may carry a
+ * trailing slash the other doesn't.
+ *
+ * This deliberately mirrors the server's own Control Room binding normalization
+ * (`pathKey` in `packages/server/src/control-room/survey.js`) so the dashboard
+ * decides "this repo has a live session" on exactly the same key the server
+ * used to derive the repo's `live` verdict — including the backslash → slash
+ * fold that lets the drill-down resolve on Windows.
  */
 function normalizePath(path: string): string {
-  if (path.length > 1 && path.endsWith('/')) return path.slice(0, -1)
-  return path
+  const slashed = path.replace(/\\/g, '/')
+  if (slashed.length > 1 && slashed.endsWith('/')) return slashed.slice(0, -1)
+  return slashed
 }
 
 /**
