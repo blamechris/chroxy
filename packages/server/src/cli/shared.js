@@ -54,6 +54,7 @@ export function addServerOptions(cmd) {
     .option('--dangerously-skip-permissions', 'TUI provider only: spawn claude with --dangerously-skip-permissions and disable chroxy permission gating (mirrors `chroxy resume` flag)')
     .option('-v, --verbose', 'Show detailed config sources and validation info')
     .option('--environments', 'Enable environment isolation providers (e.g. docker)')
+    .option('--environment-backend <backend>', 'Environment backend: docker (default), k8s, or rancher')
 }
 
 /**
@@ -127,7 +128,24 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   if (options.legacyCli) cliOverrides.legacyCli = true
   if (options.provider !== undefined) cliOverrides.provider = options.provider
   if (options.logFormat !== undefined) cliOverrides.logFormat = options.logFormat
-  if (options.environments) cliOverrides.environments = { enabled: true }
+  // #5144: the `environments` key is an object whose sub-blocks (k8s, rancher,
+  // workspace) normally live in the config file. mergeConfig replaces a whole
+  // top-level key on CLI override, so a naive `cliOverrides.environments =
+  // { enabled: true }` would WIPE a file-configured k8s/rancher block. Layer
+  // the CLI-supplied environment sub-fields over a shallow copy of the file's
+  // block instead, so `--environments` / `--environment-backend` compose with
+  // file config rather than clobbering it.
+  const fileEnv = (fileConfig.environments && typeof fileConfig.environments === 'object' && !Array.isArray(fileConfig.environments))
+    ? fileConfig.environments
+    : {}
+  let envOverride = null
+  if (options.environments) {
+    envOverride = { ...fileEnv, enabled: true }
+  }
+  if (options.environmentBackend !== undefined) {
+    envOverride = { ...(envOverride || fileEnv), backend: options.environmentBackend }
+  }
+  if (envOverride) cliOverrides.environments = envOverride
   // #4209 / #4246: only forward when the flag was explicitly passed.
   // Commander sets the property to `true` when present and leaves it
   // `undefined` when absent, so we never write a coerced `false` that

@@ -30,7 +30,7 @@ import { loadModelsCache, getModels } from './models.js'
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -419,7 +419,25 @@ export async function startCliServer(config) {
       // Docker / other backends silently ignore the field at runtime.
       log.info(`EnvironmentManager: K8s workspace PVC configured (claim: ${workspacePVCDefault.claimName}, mount: ${mountPath})${readOnlyTag} — active only on K8sBackend; ignored by Docker and other backends`)
     }
-    environmentManager = new EnvironmentManager({ workspacePVCDefault })
+    // #5144: config-driven backend selection. `environments.backend` picks
+    // docker (default) | k8s | rancher; the selected backend's options come
+    // from `environments.k8s` / `environments.rancher` (Rancher token resolved
+    // from a secret-friendly source and never logged). The factory imports the
+    // backend module lazily so a Docker deployment never pulls in the kube SDK,
+    // and throws on a malformed k8s/rancher block — surfaced here as a fatal
+    // startup error rather than a silent fall-through to Docker.
+    let backend
+    try {
+      const built = await buildEnvironmentBackend(config)
+      backend = built.backend
+      if (built.type !== 'docker') {
+        log.info(`EnvironmentManager: using '${built.type}' backend (from environments.backend)`)
+      }
+    } catch (err) {
+      log.error(`EnvironmentManager: failed to construct '${config?.environments?.backend || 'docker'}' backend — ${err.message}`)
+      throw err
+    }
+    environmentManager = new EnvironmentManager({ backend, workspacePVCDefault })
     await logEnvironmentManagerReconnectResult(environmentManager, log)
   }
 
