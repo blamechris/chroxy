@@ -428,11 +428,17 @@ describe('ActivityRegistry — BaseSession wiring', () => {
     const deltas = []
     session.on('activity_delta', (d) => deltas.push(d))
 
+    session.on('result', () => {})
     session.removeAllListeners()
 
     assert.equal(deltas.length, 1)
     assert.equal(deltas[0].op, 'ended')
     assert.equal(session.getActivitySnapshot().entries.length, 0)
+    // The override must still remove ALL session listeners — passing
+    // `undefined` to EventEmitter.removeAllListeners is a no-op, so the
+    // no-arg forwarding is load-bearing.
+    assert.equal(session.listenerCount('result'), 0)
+    assert.equal(session.listenerCount('tool_start'), 0)
   })
 
   it('targeted removeAllListeners(event) does NOT drain the registry', () => {

@@ -739,8 +739,13 @@ export class BaseSession extends EventEmitter {
   removeAllListeners(eventName) {
     // Only the full teardown variant (no event name) clears the registry —
     // a targeted removeAllListeners('foo') must not drain the activity tree.
+    // Note: `super.removeAllListeners(undefined)` is NOT equivalent to the
+    // no-arg call — EventEmitter treats `undefined` as the event named
+    // `undefined` and removes nothing. So branch on arity and forward each
+    // shape with the right argument count.
     if (eventName === undefined) {
       this._activity.clear()
+      return super.removeAllListeners()
     }
     return super.removeAllListeners(eventName)
   }
