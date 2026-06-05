@@ -432,6 +432,29 @@
   border-color: var(--accent-blue);
 }
 
+/* #5183 — Projects/explorer header with the daemon Running indicator. */
+.sidebar-projects-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.sidebar-projects-title {
+  font-weight: 600;
+}
+
+.sidebar-projects-status-label {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
 .sidebar-tree {
   flex: 1;
   overflow-y: auto;
