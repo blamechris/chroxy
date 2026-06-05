@@ -391,9 +391,9 @@ describe('useConnectionStore', () => {
 
   // #5184: header cost-badge display mode — default, setter, persistence.
   describe('costBadgeMode (#5184)', () => {
-    it('defaults to provider-model', async () => {
+    it('defaults to cost (#5203)', async () => {
       const { useConnectionStore } = await import('./connection');
-      expect(useConnectionStore.getState().costBadgeMode).toBe('provider-model');
+      expect(useConnectionStore.getState().costBadgeMode).toBe('cost');
     });
 
     it('setCostBadgeMode updates state and persists to localStorage', async () => {

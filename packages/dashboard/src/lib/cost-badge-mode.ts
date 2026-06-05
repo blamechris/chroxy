@@ -31,8 +31,11 @@ export type CostBadgeMode =
   | 'context-pct'
   | 'session-type'
 
-/** Default mode — what a fresh install / unset localStorage shows. */
-export const DEFAULT_COST_BADGE_MODE: CostBadgeMode = 'provider-model'
+/** Default mode — what a fresh install / unset localStorage shows.
+ * #5203: defaults to `cost` because the two-row header's left identity group
+ * now owns provider/model, so the right-side badge defaulting to provider-model
+ * would duplicate it. Still fully switchable in Settings. */
+export const DEFAULT_COST_BADGE_MODE: CostBadgeMode = 'cost'
 
 /**
  * Exhaustive list of modes. The `Record<CostBadgeMode, true>` keying makes

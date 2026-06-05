@@ -104,10 +104,11 @@ export function StatusBar({
         : ''
 
   return (
+    // #5203: two groups — LEFT is the session identity (type badge + model
+    // name), RIGHT is the metrics (configurable cost badge + token meter).
+    // `.status-bar` spans the full second-row width and space-betweens them.
     <div className="status-bar" data-testid="status-bar">
-      {isBusy && (
-        <span className="busy-indicator" data-testid="busy-indicator" />
-      )}
+    <div className="status-bar-group status-bar-left">
       {prov && (
         <span
           className="status-provider"
@@ -118,6 +119,16 @@ export function StatusBar({
         >
           {prov.short}
         </span>
+      )}
+      {model && (
+        <span className="status-model" data-testid="status-model" title={model}>
+          {model}
+        </span>
+      )}
+    </div>
+    <div className="status-bar-group status-bar-right">
+      {isBusy && (
+        <span className="busy-indicator" data-testid="busy-indicator" />
       )}
       {costBadgeMode ? (
         // #5184: configurable badge. The display mode comes from Settings
@@ -199,6 +210,7 @@ export function StatusBar({
           {agentCount} {agentCount === 1 ? 'agent' : 'agents'}
         </span>
       )}
+    </div>
     </div>
   )
 }

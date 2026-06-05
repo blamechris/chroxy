@@ -13,9 +13,26 @@ describe('StatusBar', () => {
     expect(screen.getByTestId('status-bar')).toBeInTheDocument()
   })
 
-  it('does not render model (model shown in header dropdown)', () => {
+  it('renders no model element when no model prop is given', () => {
     const { container } = render(<StatusBar />)
     expect(container.querySelector('.status-model')).toBeNull()
+  })
+
+  it('#5203: renders the model in the left identity group, metrics on the right', () => {
+    const { container } = render(<StatusBar provider="claude-sdk" model="Sonnet 4.6" cost={0.29} />)
+    const left = container.querySelector('.status-bar-left')
+    const right = container.querySelector('.status-bar-right')
+    expect(left).toBeTruthy()
+    expect(right).toBeTruthy()
+    // identity (provider badge + model) sits in the LEFT group
+    expect(left?.querySelector('.status-provider')).toBeTruthy()
+    const modelEl = left?.querySelector('.status-model')
+    expect(modelEl).toBeTruthy()
+    expect(modelEl).toHaveTextContent('Sonnet 4.6')
+    expect(modelEl).toHaveAttribute('title', 'Sonnet 4.6')
+    // metrics (cost badge) sit in the RIGHT group, not the left
+    expect(right?.querySelector('.status-cost')).toBeTruthy()
+    expect(left?.querySelector('.status-cost')).toBeNull()
   })
 
   it('shows formatted cost with 4 decimal places', () => {
