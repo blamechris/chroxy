@@ -31,6 +31,7 @@
  * bridge (#3954) replaces this with a Unix socket driven solely by the session.
  */
 import { createServer } from 'http'
+import { pathToFileURL } from 'url'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -170,6 +171,16 @@ export function startHttpControlSurface({ mcp, port = DEFAULT_PORT, log = (...a)
   let nextChatId = 1
 
   const httpServer = createServer((req, res) => {
+    // The control surface only accepts POST (the documented `curl -X POST`
+    // path). Reject anything else up front so it's clear exactly what reaches
+    // the Claude session.
+    if ((req.method || '') !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'text/plain', Allow: 'POST' })
+      res.end('method not allowed')
+      req.resume() // drain any body so the socket can be reused/closed cleanly
+      return
+    }
+
     const chunks = []
     // Body is read fully into memory: fine for a localhost debug prototype, not
     // for the real bridge. No size cap by design — the surface is trusted-local.
@@ -222,9 +233,12 @@ export async function main() {
   startHttpControlSurface({ mcp, port })
 }
 
-// Only auto-run when executed directly (not when imported by tests).
+// Only auto-run when executed directly (not when imported by tests). Compare
+// against pathToFileURL(process.argv[1]) — argv[1] can be a RELATIVE path (e.g.
+// `node ./chroxy-channel-server.js`), so a naive `file://${argv[1]}` would never
+// match the absolute `import.meta.url` and main() would silently never run.
 const isDirectRun = process.argv[1] &&
-  import.meta.url === `file://${process.argv[1]}`
+  import.meta.url === pathToFileURL(process.argv[1]).href
 if (isDirectRun) {
   main().catch(err => {
     console.error('[chroxy-channel] fatal:', err)

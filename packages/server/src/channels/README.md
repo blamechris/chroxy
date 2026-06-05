@@ -35,8 +35,9 @@ The server is spawned by `claude` over stdio, so running it directly just exits
 (it has no stdio peer — that is expected).
 
 ```bash
-# Terminal 1 — register it in .mcp.json (run from your project root).
-# Use an absolute path to the file so claude can spawn it from any cwd.
+# Terminal 1 — register it in .mcp.json. The relative path below works when you
+# launch claude from this repo's root; for a user-level ~/.claude.json, or to
+# launch from any cwd, use the absolute path to the file instead.
 cat > .mcp.json <<'EOF'
 {
   "mcpServers": {

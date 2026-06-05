@@ -221,6 +221,15 @@ describe('chroxy-channel: HTTP control surface', () => {
     })
   })
 
+  it('rejects non-POST methods with 405 and does not notify', async () => {
+    await withServer(async ({ port, sent }) => {
+      const res = await fetch(`http://127.0.0.1:${port}/`, { method: 'GET' })
+      assert.equal(res.status, 405)
+      assert.equal(res.headers.get('allow'), 'POST')
+      assert.equal(sent.length, 0, 'no channel notification for a non-POST request')
+    })
+  })
+
   it('returns 502 when the notification fails', async () => {
     const mcp = { notification: async () => { throw new Error('no transport') } }
     const httpServer = startHttpControlSurface({ mcp, port: 0, log: () => {} })
