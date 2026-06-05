@@ -667,6 +667,24 @@ export function Sidebar({
             />
           )}
 
+          {/* #5183 — Projects/explorer header. Surfaces the daemon Running
+              state (reusing the same `serverStatus` signal the footer uses)
+              at the top of the left explorer where the user looks first,
+              not just buried in the footer. */}
+          <div className="sidebar-projects-header" data-testid="sidebar-projects-header">
+            <span className="sidebar-projects-title">Projects</span>
+            <span
+              className={`sidebar-status-dot ${serverStatus}`}
+              data-testid="sidebar-projects-status-dot"
+              title={
+                serverStatus === 'connected' ? 'Server running'
+                  : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
+                    : 'Server stopped'
+              }
+            />
+            <span className="sidebar-projects-status-label">{statusLabel}</span>
+          </div>
+
           {/* Repo tree */}
           <div className="sidebar-tree" role="tree" aria-label="Repository sessions" ref={treeRef} onKeyDown={handleTreeKeyDown}>
             {filteredRepos.map(repo => {

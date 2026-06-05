@@ -168,6 +168,31 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('3')
   })
 
+  // #5183 — the Running indicator is surfaced on the left projects/explorer
+  // header (in addition to the footer), reusing the serverStatus signal.
+  it('shows Running indicator on the projects header when connected', () => {
+    renderSidebar({ serverStatus: 'connected' })
+    const header = screen.getByTestId('sidebar-projects-header')
+    expect(header).toHaveTextContent('Running')
+    const dot = screen.getByTestId('sidebar-projects-status-dot')
+    expect(dot).toHaveClass('connected')
+  })
+
+  it('shows Reconnecting on the projects header when reconnecting', () => {
+    renderSidebar({ serverStatus: 'reconnecting' })
+    const header = screen.getByTestId('sidebar-projects-header')
+    expect(header).toHaveTextContent('Reconnecting')
+    expect(screen.getByTestId('sidebar-projects-status-dot')).toHaveClass('reconnecting')
+  })
+
+  it('shows Stopped on the projects header when disconnected', () => {
+    renderSidebar({ serverStatus: 'disconnected' })
+    const header = screen.getByTestId('sidebar-projects-header')
+    expect(header).toHaveTextContent('Stopped')
+    expect(header).not.toHaveTextContent('Running')
+    expect(screen.getByTestId('sidebar-projects-status-dot')).toHaveClass('disconnected')
+  })
+
   it('renders collapsed state when isOpen is false', () => {
     renderSidebar({ isOpen: false })
     const sidebar = screen.getByTestId('sidebar')
