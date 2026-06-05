@@ -8,24 +8,31 @@ import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../src/control-room/r
 /**
  * Build a fake filesystem seam from a declarative tree description.
  *
+ * Every listed child entry is a directory by default. Pass `filePaths` to mark
+ * specific child paths as plain files so the resolver's `isDirectory()` guard is
+ * genuinely exercised (a non-directory must be rejected even if it had a `.git`).
+ *
  * @param {Object<string, string[]>} dirs - Map of dir path → entry names.
  * @param {Set<string>} gitPaths - Paths that exist as a `.git` entry.
- * @param {Object<string, string>} [realpaths] - Optional path → canonical override.
+ * @param {object} [extra]
+ * @param {Object<string, string>} [extra.realpaths] - Optional path → canonical override.
+ * @param {Set<string>} [extra.filePaths] - Child paths that are plain files, not directories.
  * @returns {{ _readdir, _stat, _exists, _realpath }}
  */
-function fakeFs(dirs, gitPaths, realpaths = {}) {
+function fakeFs(dirs, gitPaths, { realpaths = {}, filePaths = new Set() } = {}) {
   return {
     _readdir: dir => {
       if (!(dir in dirs)) throw new Error(`ENOENT: ${dir}`)
       return dirs[dir]
     },
     _stat: p => {
-      // Anything we listed as a directory key is a directory; subdir entries
-      // (children listed under a parent) are directories too.
-      const isDir = p in dirs || Object.values(dirs).some((entries, i) => {
-        const parent = Object.keys(dirs)[i]
-        return entries.some(e => join(parent, e) === p)
-      })
+      // Explicit files are not directories; everything else listed as a dir key
+      // or as a child entry under a parent is a directory.
+      const isFile = filePaths.has(p)
+      const isChild = Object.entries(dirs).some(([parent, entries]) =>
+        entries.some(e => join(parent, e) === p),
+      )
+      const isDir = !isFile && (p in dirs || isChild)
       return { isDirectory: () => isDir }
     },
     _exists: p => gitPaths.has(p),
@@ -56,11 +63,31 @@ describe('resolveRepoSet', () => {
   it('returns scan-only repos that contain a .git entry', () => {
     const dirs = { '/root': ['repo-a', 'repo-b', 'not-a-repo', 'file.txt'] }
     const gitPaths = new Set(['/root/repo-a/.git', '/root/repo-b/.git'])
-    const result = resolveRepoSet({ repos: [], root: '/root', ...fakeFs(dirs, gitPaths) })
+    // file.txt is a plain file so the isDirectory() guard rejects it before the
+    // .git check; not-a-repo is a directory but has no .git.
+    const result = resolveRepoSet({
+      repos: [],
+      root: '/root',
+      ...fakeFs(dirs, gitPaths, { filePaths: new Set(['/root/file.txt']) }),
+    })
     assert.deepEqual(result, [
       { name: 'repo-a', path: '/root/repo-a' },
       { name: 'repo-b', path: '/root/repo-b' },
     ])
+  })
+
+  it('skips a non-directory entry even when a .git path would match', () => {
+    // Proves the isDirectory() guard is independent of the .git existence check:
+    // file.txt is rejected purely because it is not a directory, despite having
+    // a matching .git entry in the fake fs.
+    const dirs = { '/root': ['file.txt'] }
+    const gitPaths = new Set(['/root/file.txt/.git'])
+    const result = resolveRepoSet({
+      repos: [],
+      root: '/root',
+      ...fakeFs(dirs, gitPaths, { filePaths: new Set(['/root/file.txt']) }),
+    })
+    assert.deepEqual(result, [])
   })
 
   it('treats a .git file (worktree/submodule) as a repo', () => {
@@ -96,14 +123,14 @@ describe('resolveRepoSet', () => {
     const result = resolveRepoSet({
       repos: [{ path: '/work/shared', name: 'my-shared' }],
       root: '/root',
-      ...fakeFs(dirs, gitPaths, realpaths),
+      ...fakeFs(dirs, gitPaths, { realpaths }),
     })
     assert.deepEqual(result, [{ name: 'my-shared', path: '/work/shared' }])
   })
 
   it('de-dupes duplicate config entries by realpath', () => {
     const realpaths = { '/a/repo': '/canon/repo', '/b/repo': '/canon/repo' }
-    const fs = fakeFs({ '/root': [] }, new Set(), realpaths)
+    const fs = fakeFs({ '/root': [] }, new Set(), { realpaths })
     const result = resolveRepoSet({
       repos: [{ path: '/a/repo', name: 'first' }, { path: '/b/repo', name: 'second' }],
       root: '/root',

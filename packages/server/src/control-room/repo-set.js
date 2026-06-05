@@ -6,8 +6,8 @@
  * under a configurable discovery root.
  *
  * Pure server utility — no protocol dependency. The filesystem access is fully
- * injectable (`_readdir` / `_stat` / `_realpath`) so tests never touch the real
- * disk or the user's home directory.
+ * injectable (`_readdir` / `_stat` / `_exists` / `_realpath`) so tests never
+ * touch the real disk or the user's home directory.
  */
 
 import { readdirSync, statSync, existsSync, realpathSync } from 'fs'
@@ -26,9 +26,11 @@ function defaultFs() {
     // List immediate directory entries as names (strings).
     readdir: dir => readdirSync(dir),
     // Return { isDirectory(): boolean } for a path. Used to check that a
-    // discovered entry is a directory and that its `.git` is a dir/file.
+    // discovered entry is a directory.
     stat: p => statSync(p),
-    // Whether a path exists (the `.git` entry check).
+    // Whether a path exists. Used for the `.git` entry check (a `.git`
+    // directory for a clone or a `.git` file for a worktree/submodule both
+    // count — existence alone qualifies).
     exists: p => existsSync(p),
     // Canonical absolute path used as the de-dupe key. Falls back to the
     // input on failure (e.g. a symlink target that no longer resolves).
@@ -44,7 +46,9 @@ function defaultFs() {
  *
  * @param {string} root - Discovery root (absolute path).
  * @param {object} fs - Filesystem seam (see defaultFs()).
- * @returns {Array<{ name: string, path: string }>} Discovered repos (basename + realpath).
+ * @returns {Array<{ name: string, path: string }>} Discovered repos: `name` is
+ *   the basename, `path` is the joined `root/entry` directory path (NOT the
+ *   realpath — realpath is only computed later as the de-dupe key).
  */
 function discoverRepos(root, fs) {
   let entries
