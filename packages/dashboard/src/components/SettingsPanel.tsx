@@ -131,6 +131,11 @@ export interface SettingsPanelProps {
   onClose: () => void
   showConsoleTab?: boolean
   onToggleConsoleTab?: (show: boolean) => void
+  // #4891 — audible intervention ping enable/mute. Optional so existing
+  // call sites / tests that don't wire it stay valid; the row only renders
+  // when the handler is provided.
+  interventionPingEnabled?: boolean
+  onToggleInterventionPing?: (enabled: boolean) => void
 }
 
 /**
@@ -592,7 +597,7 @@ function ThemeSwatches({ theme }: { theme: ThemeDefinition }) {
   )
 }
 
-export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab }: SettingsPanelProps) {
+export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing }: SettingsPanelProps) {
   const backdropRef = useRef<HTMLDivElement>(null)
   const activeTheme = useConnectionStore(s => s.activeTheme)
   const setTheme = useConnectionStore(s => s.setTheme)
@@ -1616,18 +1621,46 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
             )}
           </section>
 
-          {onToggleConsoleTab && (
-            <section className="settings-section">
+          {(onToggleConsoleTab || onToggleInterventionPing) && (
+            <section className="settings-section" data-testid="dashboard-section">
               <h3>Dashboard</h3>
-              <div className="settings-field">
-                <label htmlFor="show-console-tab">Show Console tab</label>
-                <input
-                  id="show-console-tab"
-                  type="checkbox"
-                  checked={showConsoleTab ?? false}
-                  onChange={(e) => onToggleConsoleTab(e.target.checked)}
-                />
-              </div>
+              {onToggleConsoleTab && (
+                <div className="settings-field">
+                  <label htmlFor="show-console-tab">Show Console tab</label>
+                  <input
+                    id="show-console-tab"
+                    type="checkbox"
+                    checked={showConsoleTab ?? false}
+                    onChange={(e) => onToggleConsoleTab(e.target.checked)}
+                  />
+                </div>
+              )}
+              {/* #4891 — audible intervention ping toggle. Plays a short
+                  chirp in this tab whenever the agent needs input (permission
+                  request / question), even when the tab is minimized or
+                  idle in the background. Defaults on; mute is per-device. */}
+              {onToggleInterventionPing && (
+                <div className="settings-field settings-field-checkbox">
+                  <label htmlFor="intervention-ping-toggle">
+                    <input
+                      id="intervention-ping-toggle"
+                      type="checkbox"
+                      checked={interventionPingEnabled ?? true}
+                      onChange={(e) => onToggleInterventionPing(e.target.checked)}
+                      data-testid="intervention-ping-toggle"
+                    />
+                    Play a sound when the agent needs input
+                  </label>
+                  <p className="settings-hint">
+                    A short chirp plays in this browser tab whenever a session
+                    needs an intervention (permission prompt or question) — so
+                    you get pulled back in even with the tab minimized or idle.
+                    Applies to this device only. Repeat alerts for the same
+                    request are deduped, and bursts across multiple sessions
+                    are throttled into a single ping.
+                  </p>
+                </div>
+              )}
             </section>
           )}
 

@@ -256,6 +256,44 @@ describe('SettingsPanel', () => {
     expect(screen.queryByLabelText('Show Console tab')).toBeNull()
   })
 
+  // #4891 — audible intervention ping toggle
+  it('renders the intervention-ping toggle when onToggleInterventionPing is provided', () => {
+    const onToggle = vi.fn()
+    render(
+      <SettingsPanel
+        isOpen={true}
+        onClose={vi.fn()}
+        interventionPingEnabled={true}
+        onToggleInterventionPing={onToggle}
+      />
+    )
+
+    const checkbox = screen.getByTestId('intervention-ping-toggle') as HTMLInputElement
+    expect(checkbox).toBeTruthy()
+    expect(checkbox.checked).toBe(true)
+
+    fireEvent.click(checkbox)
+    expect(onToggle).toHaveBeenCalledWith(false)
+  })
+
+  it('reflects the muted state on the intervention-ping toggle', () => {
+    render(
+      <SettingsPanel
+        isOpen={true}
+        onClose={vi.fn()}
+        interventionPingEnabled={false}
+        onToggleInterventionPing={vi.fn()}
+      />
+    )
+    const checkbox = screen.getByTestId('intervention-ping-toggle') as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+  })
+
+  it('does not render the intervention-ping toggle when handler is absent', () => {
+    render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+    expect(screen.queryByTestId('intervention-ping-toggle')).toBeNull()
+  })
+
   // #3404 audit F1
   describe('Provider auth status section', () => {
     it('hides the section when the server has not surfaced any auth field', () => {

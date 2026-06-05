@@ -73,10 +73,11 @@ import { useTauriMenuEvents } from './hooks/useTauriMenuEvents'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
+import { useInterventionPing } from './hooks/useInterventionPing'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder, persistSessionTabOrder, loadPersistedSessionTabOrder } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder, persistSessionTabOrder, loadPersistedSessionTabOrder } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
@@ -446,6 +447,17 @@ export function App() {
     [storeMessages],
   )
   usePermissionNotification(permissionPrompts)
+  // #4891 — audible intervention ping enable/mute. Defaults on; persisted
+  // per-device in localStorage. Toggled via Settings → Dashboard.
+  const [interventionPingEnabled, setInterventionPingEnabled] = useState(() => {
+    return loadPersistedInterventionPing()
+  })
+  // #4891 — audible ping on incoming intervention (permission request /
+  // question / blocked-on-input). Reuses the same derived prompt list as the
+  // OS-notification hook so both surfaces fire on identical events. The hook
+  // dedupes by requestId and throttles bursts; `enabled` honors the operator
+  // mute toggle (Settings → Dashboard, persisted per-device).
+  useInterventionPing(permissionPrompts, { enabled: interventionPingEnabled })
 
   // #3698 — derive the user-message history for the InputBar's terminal-
   // style Up/Down navigation. Oldest-first (matches the natural arrival
@@ -2546,6 +2558,11 @@ export function App() {
         onToggleConsoleTab={(show) => {
           setShowConsoleTab(show)
           persistShowConsoleTab(show)
+        }}
+        interventionPingEnabled={interventionPingEnabled}
+        onToggleInterventionPing={(enabled) => {
+          setInterventionPingEnabled(enabled)
+          persistInterventionPing(enabled)
         }}
       />
 

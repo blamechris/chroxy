@@ -20,6 +20,9 @@ const KEY_SPLIT_MODE = `${KEY_PREFIX}split_mode`;
 const KEY_ACTIVE_SERVER = `${KEY_PREFIX}active_server_id`;
 const KEY_THEME = `${KEY_PREFIX}theme`;
 const KEY_SHOW_CONSOLE_TAB = `${KEY_PREFIX}show_console_tab`;
+// #4891 — audible intervention ping. Defaults on; persisted per-device so a
+// muted browser tab stays muted across reload + Tauri restart.
+const KEY_INTERVENTION_PING = `${KEY_PREFIX}intervention_ping`;
 // #4303 — pluggable sidebar panel slot persistence
 const KEY_SIDEBAR_PANEL_HEIGHT = `${KEY_PREFIX}sidebar_panel_height`;
 const KEY_SIDEBAR_PANEL_VIEW = `${KEY_PREFIX}sidebar_panel_view`;
@@ -448,6 +451,31 @@ export function loadPersistedShowConsoleTab(): boolean {
     return localStorage.getItem(KEY_SHOW_CONSOLE_TAB) === 'true';
   } catch {
     return false;
+  }
+}
+
+/** Persist the intervention audio-ping enable/mute preference (#4891) */
+export function persistInterventionPing(enabled: boolean): void {
+  try {
+    localStorage.setItem(KEY_INTERVENTION_PING, String(enabled));
+  } catch {
+    // Storage not available
+  }
+}
+
+/**
+ * Load the persisted intervention audio-ping preference (#4891).
+ *
+ * Defaults to ON (returns true) when unset so the audible alert ships
+ * enabled out of the box — the whole point of the feature is to pull the
+ * operator back in. Only an explicit `'false'` mutes it. Falls back to ON
+ * if storage is unavailable so the alert never silently disappears.
+ */
+export function loadPersistedInterventionPing(): boolean {
+  try {
+    return localStorage.getItem(KEY_INTERVENTION_PING) !== 'false';
+  } catch {
+    return true;
   }
 }
 
