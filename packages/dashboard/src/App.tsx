@@ -2043,6 +2043,15 @@ export function App() {
             )
           })()}
           {(() => {
+            // #5182 (D1) — the top-bar dot reflects CONNECTED state (the
+            // app's WS/tunnel connection), NOT a daemon "running" state.
+            // It is driven purely by `connectionPhase` (the connected
+            // signal) plus the tunnel-warming gate below, mirroring the
+            // FooterBar's "Connected" dot exactly. The separate "Running"
+            // indicator lives on the left projects/explorer header (#5192)
+            // and is intentionally NOT wired here. The dot only turns
+            // green (`.connected`) when `connectionPhase === 'connected'`
+            // AND the tunnel is ready — i.e. genuinely connected end-to-end.
             const warming = serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null)
             const phase = warming ? 'connecting' : connectionPhase
             const STATUS_LABELS: Record<string, string> = {

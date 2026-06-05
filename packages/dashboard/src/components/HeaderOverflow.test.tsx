@@ -40,11 +40,24 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).not.toMatch(/flex-shrink:/)
   })
 
-  it('.header-right is a flex container — sizing pinned by the grid `auto` track', () => {
+  it('.header-right is a flex container, content-pinned so it never collapses its children (#5180)', () => {
     const block = css.match(/\.header-right\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/display:\s*flex/)
-    expect(block![0]).not.toMatch(/flex-shrink:/)
+    // #5180: the right cluster must keep its intrinsic width so the bell,
+    // ⋯ overflow, cost badge and tokens sit side-by-side instead of
+    // shrinking on top of one another (the occlusion symptom). The grid's
+    // `auto` track plus `min-width: max-content` pin the column to its
+    // content. Strip CSS comments before asserting on declarations so
+    // explanatory prose mentioning `flex-shrink` doesn't trip the regex.
+    const decls = block![0].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(decls).toMatch(/min-width:\s*max-content/)
+  })
+
+  it('every direct child of .header-right is flex-shrink: 0 so no control overlaps a sibling (#5180)', () => {
+    const block = css.match(/\.header-right > \*\s*\{[^}]*\}/s)
+    expect(block, '.header-right > * rule must exist').toBeTruthy()
+    expect(block![0]).toMatch(/flex-shrink:\s*0/)
   })
 
   it('.header-right .status-bar (a flex item inside header-right) gets flex-shrink: 0 + nowrap', () => {
@@ -85,7 +98,12 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(model).toBeTruthy()
     expect(permission).toBeTruthy()
     expect(thinking).toBeTruthy()
-    expect(model![0]).toMatch(/min-width:\s*180px/)
+    // #5181: the model select is content-aware (width: auto) with a small
+    // min-width floor so short ids ("Auto") don't float in an over-wide
+    // box, and a 240px max-width cap so long ids truncate-with-ellipsis
+    // in place rather than overflowing onto the right cluster.
+    expect(model![0]).toMatch(/width:\s*auto/)
+    expect(model![0]).toMatch(/min-width:\s*90px/)
     expect(model![0]).toMatch(/max-width:\s*240px/)
     expect(permission![0]).toMatch(/min-width:\s*110px/)
     expect(permission![0]).toMatch(/max-width:\s*160px/)
@@ -145,8 +163,27 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     // 100/140 floor was only valid when all three selects shared one rule.
     const block = css.match(/@media \(max-width: 600px\)\s*\{[\s\S]*?\n\}/)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/select\[data-kind="model"\]\s*\{\s*min-width:\s*120px;\s*max-width:\s*160px/)
+    // #5181: model floor relaxed to 80px at narrow widths so short ids
+    // aren't padded into a wide box; the 160px cap keeps long ids from
+    // pushing the right cluster off-screen on phones.
+    expect(block![0]).toMatch(/select\[data-kind="model"\]\s*\{\s*min-width:\s*80px;\s*max-width:\s*160px/)
     expect(block![0]).toMatch(/select\[data-kind="permission"\]\s*\{\s*min-width:\s*80px;\s*max-width:\s*110px/)
     expect(block![0]).toMatch(/select\[data-kind="thinking"\]\s*\{\s*min-width:\s*60px;\s*max-width:\s*80px/)
+  })
+
+  // #5179 (C1): the token meter stacks the fill bar beneath the label.
+  it('.status-context-meter--stacked is a column so the bar sits under the label (#5179)', () => {
+    const block = css.match(/\.status-context-meter--stacked\s*\{[^}]*\}/s)
+    expect(block, '.status-context-meter--stacked rule must exist').toBeTruthy()
+    expect(block![0]).toMatch(/flex-direction:\s*column/)
+    // align-items: stretch lets the bar span the label width and anchor
+    // to the same left edge instead of floating at a fixed inline width.
+    expect(block![0]).toMatch(/align-items:\s*stretch/)
+  })
+
+  it('the stacked meter bar spans the column width instead of the inline 50px floor (#5179)', () => {
+    const block = css.match(/\.status-context-meter--stacked \.status-context-bar\s*\{[^}]*\}/s)
+    expect(block, 'stacked bar override rule must exist').toBeTruthy()
+    expect(block![0]).toMatch(/width:\s*auto/)
   })
 })

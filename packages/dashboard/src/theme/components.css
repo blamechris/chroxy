@@ -135,8 +135,19 @@
    permission and thinking selects too, where it visually crowded the
    right zone (icons + cost) for no reason — those selects' longest
    labels are "Accept Edits" and "Default" respectively. */
+/* #5181: responsive model dropdown. The previous hard `min-width: 180px`
+   was a forcing function that surfaced two bugs: short ids ("Auto")
+   looked cramped/floating inside an over-wide box, and the `max-width`
+   alone didn't stop very long ids from pushing the right-zone cluster
+   under the sidebar at narrow widths. Switch to content-aware sizing:
+   `width: auto` lets the select size to its label, a small `min-width`
+   floor keeps short labels legible without padding them into a wide
+   empty box, and the `max-width` cap (combined with the select's own
+   `text-overflow: ellipsis`) truncates long ids in place instead of
+   overflowing the grid column onto its neighbours. */
 .header-center select[data-kind="model"] {
-  min-width: 180px;
+  width: auto;
+  min-width: 90px;
   max-width: 240px;
 }
 .header-center select[data-kind="permission"] {
@@ -169,7 +180,10 @@
   white-space: nowrap;
   text-overflow: ellipsis;
   flex-shrink: 1;
-  min-width: 180px;
+  /* #5181: mirror the model <select>'s responsive sizing so the
+     read-only TUI pill sits cleanly in the same slot — content-aware
+     width with a small floor and the same 240px truncation cap. */
+  min-width: 90px;
   max-width: 240px;
   display: inline-block;
 }
@@ -309,12 +323,23 @@
   display: flex;
   gap: 8px;
   align-items: center;
-  min-width: 0;
-  /* As a grid item, this column is sized by `grid-template-columns: ... auto`
-     on #header — it pins to content width automatically. No flex-shrink
-     needed (would be a no-op anyway since this isn't a flex item). The
-     `min-width: 0` here lets the inner flex distribute children correctly
-     without forcing a horizontal scroll. */
+  /* #5180: the right cluster (bell, ⋯ overflow, cost badge, tokens) is
+     content-pinned by the grid's `auto` track. Each child must keep its
+     own width so they sit side-by-side instead of collapsing on top of
+     one another — the occlusion symptom was a child shrinking to zero
+     and the next one painting over it. `min-width: max-content` stops
+     the column from being squeezed narrower than its children need, and
+     the per-child `flex-shrink: 0` below guarantees no individual control
+     gets clipped. The center column's `minmax(0, 1fr)` absorbs the
+     remaining space, so it (not the right cluster) is what yields when
+     the window narrows. */
+  min-width: max-content;
+}
+
+/* #5180: every direct control in the right cluster keeps its intrinsic
+   width — none may shrink and overlap a sibling. */
+.header-right > * {
+  flex-shrink: 0;
 }
 
 /* Status bar lives inside header-right (cost + tokens). It must NOT shrink
@@ -4133,6 +4158,16 @@ button.sidebar-token-view-session-row:hover {
   font-family: var(--font-mono);
 }
 
+/* #5179: stacked variant — label on top, fill bar beneath it, both
+   left-aligned to the same edge. `align-items: stretch` lets the bar
+   span the full label width so the bar visually anchors to the number
+   it describes instead of floating at a fixed 50px to its left. */
+.status-context-meter--stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
 .status-context-bar {
   display: inline-block;
   width: 50px;
@@ -4141,6 +4176,13 @@ button.sidebar-token-view-session-row:hover {
   border-radius: 3px;
   overflow: hidden;
   flex-shrink: 0;
+}
+
+/* In the stacked layout the bar spans the label width (set by the
+   column's stretch) rather than the inline 50px floor. */
+.status-context-meter--stacked .status-context-bar {
+  display: block;
+  width: auto;
 }
 
 .status-context-fill {
@@ -5100,14 +5142,14 @@ button.sidebar-token-view-session-row:hover {
   }
   /* Narrow-viewport floors: relaxed across all kinds (#3705) so the grid's
      center column can shrink without overflow. Per-kind ratios preserved. */
-  .header-center select[data-kind="model"] { min-width: 120px; max-width: 160px; }
+  .header-center select[data-kind="model"] { min-width: 80px; max-width: 160px; }
   .header-center select[data-kind="permission"] { min-width: 80px; max-width: 110px; }
   .header-center select[data-kind="thinking"] { min-width: 60px; max-width: 80px; }
   /* #4464: match the model <select>'s narrow-viewport floors. Without
      this rule the read-only badge keeps the 180–240px desktop floor and
      overflows the header center column on phone widths. */
   .header-center .chat-settings-readonly-badge {
-    min-width: 120px;
+    min-width: 80px;
     max-width: 160px;
     font-size: var(--text-sm);
     padding: 3px 6px;
