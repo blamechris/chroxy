@@ -608,8 +608,16 @@ export class K8sBackend {
     } else if (typeof defaultResources === 'object' && !Array.isArray(defaultResources)) {
       const merged = { ...DEFAULT_RESOURCES, ...defaultResources }
       // Reuse the per-call builder purely to validate the merged quantities
-      // (defaults disabled so only the merged object is validated).
-      buildResourceBlock(merged, undefined, undefined, null)
+      // (defaults disabled so only the merged object is validated). Re-scope
+      // any failure to opts.defaultResources — buildResourceBlock blames
+      // `resources.*`/`createEnvironment`, which points at the wrong call
+      // site for constructor config (#3195 review) — preserving the
+      // underlying error as `cause`.
+      try {
+        buildResourceBlock(merged, undefined, undefined, null)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.defaultResources is invalid — ${err.message}`, { cause: err })
+      }
       this._defaultResources = merged
     } else {
       throw new TypeError('K8sBackend: opts.defaultResources must be an object or null')
@@ -2693,8 +2701,9 @@ function _validateResourceQuantity(value, kind, field) {
  *      disable defaults so only explicit per-call values produce a block.
  *
  * Every resolved quantity is validated against the K8s quantity grammar; an
- * invalid string throws before any API call so a bad value never leaks a
- * half-provisioned Secret.
+ * invalid string throws before the Pod/Secret are created — `createEnvironment`
+ * awaits `ensureNamespace()` first, so the tenant namespace may already exist,
+ * but no workload is provisioned with a bad value.
  *
  * @param {Object} [resources]            - opts.resources (structured form)
  * @param {string} [legacyCpuLimit]       - opts.cpuLimit (flat form)
@@ -2702,6 +2711,13 @@ function _validateResourceQuantity(value, kind, field) {
  * @param {Object|null} [defaults=DEFAULT_RESOURCES] - Per-field defaults, or null to disable
  * @returns {{ requests?: Object, limits?: Object }} A resources block (possibly empty)
  */
+function _resolveResourceField(structured, structuredLabel, legacy, legacyLabel, dflt, defaultLabel) {
+  if (structured != null) return { value: structured, field: structuredLabel }
+  if (legacy != null) return { value: legacy, field: legacyLabel }
+  if (dflt != null) return { value: dflt, field: defaultLabel }
+  return { value: null, field: null }
+}
+
 export function buildResourceBlock(resources, legacyCpuLimit, legacyMemoryLimit, defaults = DEFAULT_RESOURCES) {
   if (resources != null && (typeof resources !== 'object' || Array.isArray(resources))) {
     throw new Error('createEnvironment: opts.resources must be an object')
@@ -2709,18 +2725,22 @@ export function buildResourceBlock(resources, legacyCpuLimit, legacyMemoryLimit,
   const r = resources || {}
   const d = defaults || {}
 
-  // Resolve each of the four dimensions through the precedence chain.
-  const cpuRequest = r.cpu ?? legacyCpuLimit ?? d.cpu
-  const memRequest = r.memory ?? legacyMemoryLimit ?? d.memory
-  const cpuLimit = r.cpuLimit ?? legacyCpuLimit ?? d.cpuLimit
-  const memLimit = r.memoryLimit ?? legacyMemoryLimit ?? d.memoryLimit
+  // Resolve each of the four dimensions through the precedence chain,
+  // tracking which source actually supplied the value so a validation
+  // failure names the option the operator set (#3195 review) — the legacy
+  // flat opt or a constructor default — instead of always blaming
+  // `resources.*`.
+  const cpuRequest = _resolveResourceField(r.cpu, 'resources.cpu', legacyCpuLimit, 'cpuLimit', d.cpu, 'defaultResources.cpu')
+  const memRequest = _resolveResourceField(r.memory, 'resources.memory', legacyMemoryLimit, 'memoryLimit', d.memory, 'defaultResources.memory')
+  const cpuLimit = _resolveResourceField(r.cpuLimit, 'resources.cpuLimit', legacyCpuLimit, 'cpuLimit', d.cpuLimit, 'defaultResources.cpuLimit')
+  const memLimit = _resolveResourceField(r.memoryLimit, 'resources.memoryLimit', legacyMemoryLimit, 'memoryLimit', d.memoryLimit, 'defaultResources.memoryLimit')
 
   const requests = {}
   const limits = {}
-  if (cpuRequest != null) requests.cpu = _validateResourceQuantity(cpuRequest, 'cpu', 'resources.cpu')
-  if (memRequest != null) requests.memory = _validateResourceQuantity(memRequest, 'memory', 'resources.memory')
-  if (cpuLimit != null) limits.cpu = _validateResourceQuantity(cpuLimit, 'cpu', 'resources.cpuLimit')
-  if (memLimit != null) limits.memory = _validateResourceQuantity(memLimit, 'memory', 'resources.memoryLimit')
+  if (cpuRequest.value != null) requests.cpu = _validateResourceQuantity(cpuRequest.value, 'cpu', cpuRequest.field)
+  if (memRequest.value != null) requests.memory = _validateResourceQuantity(memRequest.value, 'memory', memRequest.field)
+  if (cpuLimit.value != null) limits.cpu = _validateResourceQuantity(cpuLimit.value, 'cpu', cpuLimit.field)
+  if (memLimit.value != null) limits.memory = _validateResourceQuantity(memLimit.value, 'memory', memLimit.field)
 
   const block = {}
   if (Object.keys(requests).length > 0) block.requests = requests
