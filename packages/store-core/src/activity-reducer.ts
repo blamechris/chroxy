@@ -63,14 +63,34 @@ export interface ActivityTreeNode {
   readonly children: readonly ActivityTreeNode[]
 }
 
+/**
+ * All dictionaries keyed off WIRE-controlled strings (`bySession` by
+ * `sessionId`, `byId` by `ActivityEntry.id`) use a null-prototype map so a
+ * malicious / accidental key like `"__proto__"`, `"toString"`, or
+ * `"constructor"` can't collide with an inherited `Object.prototype` member.
+ * On a plain `{}`, `"toString" in obj` is `true` even when unset (breaking
+ * upsert/order bookkeeping) and `obj["__proto__"] = entry` mutates the
+ * prototype rather than storing a value — both are closed off here. This
+ * matches the existing store-core hardening (`freeform-answer.ts`,
+ * `types.ts`'s `hasOwnProperty.call` guards). `hasKey` is the matching
+ * own-property check used instead of the `in` operator on these maps.
+ */
+function emptyRecord<V>(): Record<string, V> {
+  return Object.create(null) as Record<string, V>
+}
+
+function hasKey(obj: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key)
+}
+
 const EMPTY_SESSION: SessionActivityState = Object.freeze({
-  byId: Object.freeze({}),
+  byId: Object.freeze(emptyRecord<ActivityEntry>()),
   order: Object.freeze([]),
 })
 
 /** Fresh, empty reducer state. */
 export function createEmptyActivityState(): ActivityState {
-  return { bySession: {} }
+  return { bySession: emptyRecord<SessionActivityState>() }
 }
 
 function isTerminal(entry: ActivityEntry): boolean {
@@ -128,7 +148,9 @@ function upsertEntry(
   const existing = session.byId[entry.id]
   if (!shouldReplace(existing, entry)) return session
 
-  const byId: Record<string, ActivityEntry> = { ...session.byId, [entry.id]: entry }
+  const byId = emptyRecord<ActivityEntry>()
+  Object.assign(byId, session.byId)
+  byId[entry.id] = entry
   const order = existing === undefined ? [...session.order, entry.id] : session.order
 
   return pruneTerminal({ byId, order }, maxTerminal)
@@ -163,7 +185,7 @@ function pruneTerminal(session: SessionActivityState, maxTerminal: number): Sess
   const evictCount = terminalIds.length - maxTerminal
   const evicted = new Set(sorted.slice(0, evictCount))
 
-  const byId: Record<string, ActivityEntry> = {}
+  const byId = emptyRecord<ActivityEntry>()
   for (const id of session.order) {
     if (!evicted.has(id)) byId[id] = session.byId[id]!
   }
@@ -185,17 +207,18 @@ export function applyActivitySnapshot(
   message: ServerActivitySnapshotMessage,
   maxTerminal: number = MAX_TERMINAL_ENTRIES_PER_SESSION,
 ): ActivityState {
-  const byId: Record<string, ActivityEntry> = {}
+  const byId = emptyRecord<ActivityEntry>()
   const order: string[] = []
   for (const entry of message.entries) {
-    if (!(entry.id in byId)) order.push(entry.id)
+    if (!hasKey(byId, entry.id)) order.push(entry.id)
     byId[entry.id] = entry
   }
 
   const session = pruneTerminal({ byId, order }, maxTerminal)
-  return {
-    bySession: { ...state.bySession, [message.sessionId]: session },
-  }
+  const bySession = emptyRecord<SessionActivityState>()
+  Object.assign(bySession, state.bySession)
+  bySession[message.sessionId] = session
+  return { bySession }
 }
 
 /**
@@ -213,9 +236,10 @@ export function applyActivityDelta(
   const current = state.bySession[message.sessionId] ?? EMPTY_SESSION
   const next = upsertEntry(current, message.entry, maxTerminal)
   if (next === current) return state
-  return {
-    bySession: { ...state.bySession, [message.sessionId]: next },
-  }
+  const bySession = emptyRecord<SessionActivityState>()
+  Object.assign(bySession, state.bySession)
+  bySession[message.sessionId] = next
+  return { bySession }
 }
 
 /**
@@ -223,8 +247,9 @@ export function applyActivityDelta(
  * Returns the SAME state reference if the session wasn't present.
  */
 export function clearSessionActivity(state: ActivityState, sessionId: string): ActivityState {
-  if (!(sessionId in state.bySession)) return state
-  const bySession = { ...state.bySession }
+  if (!hasKey(state.bySession, sessionId)) return state
+  const bySession = emptyRecord<SessionActivityState>()
+  Object.assign(bySession, state.bySession)
   delete bySession[sessionId]
   return { bySession }
 }
@@ -260,7 +285,7 @@ export function selectActivityTree(state: ActivityState, sessionId: string): rea
     const entry = session.byId[id]
     if (entry === undefined) continue
     const parentId = entry.parentId
-    if (parentId !== undefined && parentId !== entry.id && parentId in session.byId) {
+    if (parentId !== undefined && parentId !== entry.id && hasKey(session.byId, parentId)) {
       const bucket = childrenByParent.get(parentId)
       if (bucket === undefined) childrenByParent.set(parentId, [entry])
       else bucket.push(entry)
