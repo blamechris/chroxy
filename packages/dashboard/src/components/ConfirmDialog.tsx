@@ -40,9 +40,12 @@ export function ConfirmDialog({
   return (
     <Modal open={open} onClose={onCancel} title={title} maxWidth="420px">
       <div className="confirm-dialog" data-testid="confirm-dialog">
-        <p className="confirm-dialog-message" data-testid="confirm-dialog-message">
+        {/* Neutral container (not <p>) so callers can pass richer block-level
+            content — lists, multiple paragraphs, etc. — without producing
+            invalid nested markup. Styled like body text via the CSS class. */}
+        <div className="confirm-dialog-message" data-testid="confirm-dialog-message">
           {message}
-        </p>
+        </div>
         <div className="modal-buttons">
           <button
             type="button"
