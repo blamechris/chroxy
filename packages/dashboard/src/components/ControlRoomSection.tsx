@@ -208,6 +208,10 @@ function VerdictTag({
         className={`cr-tag cr-tag-${accent} cr-tag-action`}
         data-testid={`cr-verdict-${verdict}`}
         data-accent={accent}
+        // #5202 — the visible label is just "Investigate", identical on every
+        // row; give screen readers a per-row accessible name (the title tooltip
+        // is not a reliable accessible-name source).
+        aria-label={`Investigate ${repo.name} — open a session in ${repo.path}`}
         title={`Investigate ${repo.name} — open a session in ${repo.path}`}
         onClick={() =>
           onInvestigate!({ cwd: repo.path, name: repo.name, reason: repo.note ?? '' })

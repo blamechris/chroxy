@@ -440,6 +440,20 @@ describe('ControlRoomSection investigate action (#5202)', () => {
     expect(tag).toHaveClass('cr-tag-action')
   })
 
+  it('gives the investigate button a per-row accessible name including the repo', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onInvestigate={() => {}}
+      />,
+    )
+    const tag = screen.getByTestId('cr-verdict-investigate')
+    expect(tag).toHaveAttribute('aria-label', expect.stringContaining('medlens'))
+  })
+
   it('calls onInvestigate with the repo cwd, name, and reason note on click', () => {
     const onInvestigate = vi.fn()
     render(
