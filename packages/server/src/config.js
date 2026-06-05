@@ -67,6 +67,12 @@ const CONFIG_SCHEMA = {
   costBudget: 'number',
   externalUrl: 'string',
   repos: 'array',
+  // #5172 (Control Room v2): filesystem root the Host Status survey scans
+  // for auto-discovered git repos. resolveRepoSet (control-room/repo-set.js)
+  // unions any explicit `repos[]` entries with the immediate subdirectories
+  // of this root that contain a `.git` entry. Defaults to ~/Projects when
+  // unset. Mirrored by the CHROXY_CONTROL_ROOM_ROOT env var.
+  controlRoomRoot: 'string',
   maxSessions: 'number',
   maxHistory: 'number',
   maxMessages: 'number',
@@ -737,6 +743,8 @@ function envKeyForConfig(key) {
     maxMessages: 'CHROXY_MAX_MESSAGES',
     showToken: 'CHROXY_SHOW_TOKEN',
     repos: 'CHROXY_REPOS',
+    // #5172: discovery root for the Control Room Host Status repo survey.
+    controlRoomRoot: 'CHROXY_CONTROL_ROOM_ROOT',
     logFormat: 'CHROXY_LOG_FORMAT',
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
@@ -1036,6 +1044,42 @@ export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
     // Start fresh if parse fails
   }
   existing.repos = repos
+  const dir = dirname(configPath)
+  mkdirSync(dir, { recursive: true })
+  writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
+}
+
+/**
+ * Read the Control Room discovery root from a config file (#5172).
+ * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
+ * @returns {string|undefined} The configured root, or undefined if missing/invalid.
+ */
+export function readControlRoomRootFromConfig(configPath = DEFAULT_CONFIG_PATH) {
+  try {
+    if (!existsSync(configPath)) return undefined
+    const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
+    return typeof raw.controlRoomRoot === 'string' ? raw.controlRoomRoot : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Write the Control Room discovery root to a config file, preserving other
+ * fields (#5172).
+ * @param {string} root - Absolute path to the discovery root.
+ * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
+ */
+export function writeControlRoomRootToConfig(root, configPath = DEFAULT_CONFIG_PATH) {
+  let existing = {}
+  try {
+    if (existsSync(configPath)) {
+      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
+    }
+  } catch {
+    // Start fresh if parse fails
+  }
+  existing.controlRoomRoot = root
   const dir = dirname(configPath)
   mkdirSync(dir, { recursive: true })
   writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
