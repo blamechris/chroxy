@@ -17,6 +17,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import type { ServerHostStatusSnapshotMessage } from '@chroxy/protocol'
+import type { ActivityEntry, ActivityState, SessionInfo } from '@chroxy/store-core'
+import { applyActivitySnapshot, createEmptyActivityState } from '@chroxy/store-core'
 
 // The component reads the store as a fallback when props are omitted; these
 // render tests always pass explicit props, so the store-selector path only
@@ -35,8 +37,46 @@ vi.mock('../store/connection', () => ({
 import {
   ControlRoomSection,
   formatGeneratedAgo,
+  sessionIdForRepoPath,
   HIGH_COUNT_THRESHOLD,
 } from './ControlRoomSection'
+
+// Minimal SessionInfo factory — only the fields the repo→session mapping reads
+// (`sessionId`, `cwd`) matter; the rest satisfy the type.
+function makeSession(sessionId: string, cwd: string): SessionInfo {
+  return {
+    sessionId,
+    name: sessionId,
+    cwd,
+    type: 'cli',
+    hasTerminal: false,
+    model: null,
+    permissionMode: null,
+    isBusy: false,
+    createdAt: 0,
+    conversationId: null,
+  }
+}
+
+function buildActivity(sessionId: string, entries: ActivityEntry[]): ActivityState {
+  return applyActivitySnapshot(createEmptyActivityState(), {
+    type: 'activity_snapshot',
+    sessionId,
+    schemaVersion: 1,
+    entries,
+  })
+}
+
+function activityEntry(id: string, over: Partial<ActivityEntry> = {}): ActivityEntry {
+  return {
+    id,
+    kind: 'agent',
+    label: `Label ${id}`,
+    status: 'running',
+    startedAt: 1000,
+    ...over,
+  }
+}
 
 afterEach(() => cleanup())
 
@@ -246,5 +286,123 @@ describe('formatGeneratedAgo (#5175)', () => {
   })
   it('clamps a future / clock-skewed timestamp to "just now"', () => {
     expect(formatGeneratedAgo(base + 60_000, base)).toBe('generated just now')
+  })
+})
+
+describe('sessionIdForRepoPath (#5176)', () => {
+  it('maps a repo path to the session whose cwd matches exactly', () => {
+    const sessions = [
+      makeSession('s-chroxy', '/Users/me/Projects/chroxy'),
+      makeSession('s-other', '/Users/me/Projects/medlens'),
+    ]
+    expect(sessionIdForRepoPath('/Users/me/Projects/chroxy', sessions)).toBe('s-chroxy')
+  })
+
+  it('tolerates a trailing-slash mismatch between repo path and cwd', () => {
+    const sessions = [makeSession('s-chroxy', '/Users/me/Projects/chroxy/')]
+    expect(sessionIdForRepoPath('/Users/me/Projects/chroxy', sessions)).toBe('s-chroxy')
+  })
+
+  it('falls back to the deepest nested cwd under the repo path (e.g. a worktree)', () => {
+    const sessions = [
+      makeSession('s-shallow', '/Users/me/Projects/chroxy/pkg'),
+      makeSession('s-deep', '/Users/me/Projects/chroxy/pkg/server'),
+    ]
+    expect(sessionIdForRepoPath('/Users/me/Projects/chroxy', sessions)).toBe('s-deep')
+  })
+
+  it('matches across Windows backslash vs forward-slash separators (mirrors server pathKey)', () => {
+    // The server's repo.path may arrive backslash-separated on Windows while a
+    // session cwd is forward-slash (or vice versa); normalization folds both.
+    const sessions = [makeSession('s-win', 'C:/Users/me/Projects/chroxy')]
+    expect(sessionIdForRepoPath('C:\\Users\\me\\Projects\\chroxy', sessions)).toBe('s-win')
+  })
+
+  it('matches a nested Windows cwd under a backslash repo path', () => {
+    const sessions = [makeSession('s-wt', 'C:\\Users\\me\\Projects\\chroxy\\wt')]
+    expect(sessionIdForRepoPath('C:/Users/me/Projects/chroxy', sessions)).toBe('s-wt')
+  })
+
+  it('returns null when no session maps to the repo', () => {
+    const sessions = [makeSession('s-other', '/Users/me/Projects/medlens')]
+    expect(sessionIdForRepoPath('/Users/me/Projects/chroxy', sessions)).toBeNull()
+  })
+
+  it('does not treat a sibling repo with a shared prefix as nested', () => {
+    // /chroxy-2 starts with /chroxy but is NOT under /chroxy/.
+    const sessions = [makeSession('s-sibling', '/Users/me/Projects/chroxy-2')]
+    expect(sessionIdForRepoPath('/Users/me/Projects/chroxy', sessions)).toBeNull()
+  })
+})
+
+describe('ControlRoomSection activity drill-down (#5176)', () => {
+  const NOW_TICK = () => 5000
+
+  it('renders a drill-down toggle only for repos with a mapped active session', () => {
+    const sessions = [makeSession('s-chroxy', '/Users/me/Projects/chroxy')]
+    const activity = buildActivity('s-chroxy', [activityEntry('a1')])
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={NOW_TICK}
+        sessions={sessions}
+        activity={activity}
+      />,
+    )
+    // chroxy has a mapped session → disclosure toggle present.
+    expect(screen.getByTestId('cr-drill-toggle-chroxy')).toBeTruthy()
+    // medlens / no-it-all have no session → no toggle.
+    expect(screen.queryByTestId('cr-drill-toggle-medlens')).toBeNull()
+    expect(screen.queryByTestId('cr-drill-toggle-no-it-all')).toBeNull()
+  })
+
+  it('reveals the mapped session activity tree when a repo row is expanded', () => {
+    const sessions = [makeSession('s-chroxy', '/Users/me/Projects/chroxy')]
+    const activity = buildActivity('s-chroxy', [
+      activityEntry('a1', { label: 'build agent', status: 'running' }),
+      activityEntry('a2', { kind: 'shell', label: 'tail logs', status: 'blocked' }),
+    ])
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={NOW_TICK}
+        sessions={sessions}
+        activity={activity}
+      />,
+    )
+    // Collapsed by default — no tree yet.
+    expect(screen.queryByTestId('cr-activity-row-chroxy')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('cr-drill-toggle-chroxy'))
+
+    // Expanded: the activity tree renders the session's entries with status.
+    expect(screen.getByTestId('cr-activity-row-chroxy')).toBeTruthy()
+    expect(screen.getByTestId('control-room-tree')).toBeTruthy()
+    expect(screen.getByTestId('control-room-entry-label-a1')).toHaveTextContent('build agent')
+    expect(screen.getByTestId('control-room-status-a1')).toHaveTextContent('Running')
+    expect(screen.getByTestId('control-room-entry-label-a2')).toHaveTextContent('tail logs')
+    expect(screen.getByTestId('control-room-status-a2')).toHaveTextContent('Blocked')
+  })
+
+  it('shows the empty "no activity" state for a mapped session with no in-flight work', () => {
+    const sessions = [makeSession('s-chroxy', '/Users/me/Projects/chroxy')]
+    const activity = createEmptyActivityState()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={NOW_TICK}
+        sessions={sessions}
+        activity={activity}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('cr-drill-toggle-chroxy'))
+    expect(screen.getByTestId('cr-activity-row-chroxy')).toBeTruthy()
+    expect(screen.getByTestId('control-room-empty')).toHaveTextContent('No activity in flight')
   })
 })

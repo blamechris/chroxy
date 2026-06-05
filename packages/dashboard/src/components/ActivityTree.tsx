@@ -1,19 +1,18 @@
 /**
- * ControlRoomPanel (#5163, epic #5159) — the v1 user-facing surface of the
- * Control Room: a read-only live tree of everything in flight inside the
- * active session (subagents, background shells, long-running tools), each with
- * a status badge, a live-ticking elapsed timer, a kind icon, and an
- * expand-to-output affordance.
+ * ActivityTree (#5176, epic #5170) — the reusable, read-only live tree of a
+ * single session's in-flight work (subagents, background shells, long-running
+ * tools), each with a kind icon, status badge, a live-ticking elapsed timer,
+ * and an expand-to-output affordance.
  *
- * Slots into the sidebar panel slot (#4303) alongside the token view. It reads
- * the per-session activity state off the connection store (fed by the
- * store-core reducer from `activity_snapshot` / `activity_delta`) and renders
- * the tree via `selectActivityTree` so the dashboard and future mobile parity
- * share one tree-building implementation.
+ * This is the presentational core extracted from the retired Control Room v1
+ * sidebar panel (`ControlRoomPanel`, #5163). The same tree now drills down
+ * inside the main-tab `ControlRoomSection` (#5176): when an operator expands a
+ * repo row, the repo's active chroxy session is mapped to its activity tree and
+ * rendered here. Keeping one implementation means the v1 reducer / protocol /
+ * `selectActivityTree` stay the single source of truth for the tree shape.
  *
- * v1 is READ-ONLY: no cancel/kill/jump-to-intervene actions. Control actions,
- * the cross-session aggregate view, and mobile parity are tracked phase-2
- * fast-follows on the epic (#5159), not this panel.
+ * v1 is READ-ONLY: no cancel/kill/jump-to-intervene actions. Control actions
+ * and mobile parity are tracked phase-2 fast-follows on the epic (#5159).
  *
  * Blocked-on-input entries are visually prominent and tie into the dashboard's
  * intervention convention (#4891): a blocked entry pulses the same accent the
@@ -23,11 +22,11 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ActivityEntry, ActivityState, ActivityTreeNode } from '@chroxy/store-core'
 import { selectActivityTree } from '@chroxy/store-core'
 
-export interface ControlRoomPanelProps {
+export interface ActivityTreeProps {
   /** Whole-store activity state (one tree per session). */
   activity: ActivityState
-  /** Active session whose tree is rendered. Null → empty state. */
-  activeSessionId: string | null
+  /** Session whose tree is rendered. Null → renders the empty state. */
+  sessionId: string | null
   /**
    * Injectable clock for deterministic tests. Defaults to `Date.now`. Used by
    * the elapsed timer; production passes nothing.
@@ -35,9 +34,13 @@ export interface ControlRoomPanelProps {
   now?: () => number
 }
 
-// Kind → glyph. Kept ASCII-ish so it renders in the sidebar's small font
-// without needing an icon font. Mirrors the kinds in the protocol
-// `ActivityKindSchema` (agent / shell / tool).
+// Stable empty tree for the null-session case so we don't allocate a new array
+// each render (keeps the `hasLiveEntry` / render path referentially cheap).
+const EMPTY_TREE: readonly ActivityTreeNode[] = []
+
+// Kind → glyph. Kept ASCII-ish so it renders in a small font without needing
+// an icon font. Mirrors the kinds in the protocol `ActivityKindSchema`
+// (agent / shell / tool).
 const KIND_ICON: Record<ActivityEntry['kind'], string> = {
   agent: '◆',
   shell: '$',
@@ -241,19 +244,22 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand }: EntryTree
   )
 }
 
-export function ControlRoomPanel({ activity, activeSessionId, now = Date.now }: ControlRoomPanelProps) {
-  const tree = selectActivityTree(activity, activeSessionId ?? '')
+export function ActivityTree({ activity, sessionId, now = Date.now }: ActivityTreeProps) {
+  // Only query the reducer for a real session — a null id has no tree, and
+  // selecting with an empty-string id would do pointless work (and could match
+  // a degenerate "" session key). The empty-state branch below renders for null.
+  const tree = sessionId !== null ? selectActivityTree(activity, sessionId) : EMPTY_TREE
   const live = hasLiveEntry(tree)
   const tick = useTick(live, now)
 
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set())
-  // Copilot review: `ActivityEntry.id` is only unique WITHIN a session, so the
-  // expansion set must be scoped to the active session — otherwise switching
-  // sessions could auto-expand a colliding id in the new session or carry UI
-  // state across unrelated sessions. Reset on every active-session change.
+  // `ActivityEntry.id` is only unique WITHIN a session, so the expansion set
+  // must be scoped to the rendered session — otherwise switching sessions could
+  // auto-expand a colliding id in the new session or carry UI state across
+  // unrelated sessions. Reset on every session change.
   useEffect(() => {
     setExpandedIds(new Set())
-  }, [activeSessionId])
+  }, [sessionId])
   const handleToggleExpand = useCallback((id: string) => {
     setExpandedIds((prev) => {
       const next = new Set(prev)
@@ -263,7 +269,7 @@ export function ControlRoomPanel({ activity, activeSessionId, now = Date.now }: 
     })
   }, [])
 
-  if (activeSessionId === null) {
+  if (sessionId === null) {
     return (
       <div className="control-room-panel" data-testid="control-room-panel">
         <div className="control-room-empty" data-testid="control-room-empty">
@@ -294,33 +300,4 @@ export function ControlRoomPanel({ activity, activeSessionId, now = Date.now }: 
       />
     </div>
   )
-}
-
-/**
- * Collapsed-panel header metric for the Control Room (decision #4 in #4303):
- * a one-glance count of live (running/blocked) entries in the active session's
- * tree, so the operator sees in-flight work without expanding the panel.
- * Returns null when nothing is live so the slot can hide the metric.
- */
-export function controlRoomCollapsedMetric(
-  activity: ActivityState,
-  activeSessionId: string | null,
-): string | null {
-  if (activeSessionId === null) return null
-  const tree = selectActivityTree(activity, activeSessionId)
-  let live = 0
-  let blocked = 0
-  function walk(nodes: readonly ActivityTreeNode[]): void {
-    for (const node of nodes) {
-      if (!isTerminal(node.entry.status)) {
-        live += 1
-        if (node.entry.status === 'blocked') blocked += 1
-      }
-      walk(node.children)
-    }
-  }
-  walk(tree)
-  if (live === 0) return null
-  if (blocked > 0) return `${live} live · ${blocked} blocked`
-  return `${live} live`
 }

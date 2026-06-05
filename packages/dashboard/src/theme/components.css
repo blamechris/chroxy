@@ -8515,6 +8515,54 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-purple);
 }
 
+/* #5176 — per-repo activity drill-down inside the Control Room table. The repo
+   name cell becomes a disclosure toggle; expanding reveals the active session's
+   live activity tree (folded in from the retired v1 sidebar panel). */
+.cr-drill-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.cr-drill-toggle:hover .cr-drill-chevron,
+.cr-drill-toggle:focus-visible .cr-drill-chevron {
+  color: var(--accent-purple);
+}
+
+.cr-drill-chevron {
+  font-size: 9px;
+  color: var(--text-muted);
+  width: 10px;
+  flex: 0 0 auto;
+}
+
+.cr-activity-row td {
+  padding-top: 0;
+  padding-bottom: 12px;
+}
+
+.cr-activity-drill {
+  border-left: 2px solid var(--accent-purple);
+  padding-left: 10px;
+  margin-left: 4px;
+}
+
+.cr-activity-heading {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
 .cr-num {
   text-align: center;
 }

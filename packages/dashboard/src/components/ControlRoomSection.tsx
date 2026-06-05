@@ -9,8 +9,15 @@
  *
  * Lives in the dashboard's MAIN content tab bar (the wide area where Chat /
  * Output / Files / System / Envs / Snapshots live) — the fleet table is too
- * wide for the narrow sidebar. The old sidebar activity panel
- * (ControlRoomPanel) is a separate, unrelated surface retired in #5176.
+ * wide for the narrow sidebar.
+ *
+ * #5176 (epic #5170): the Control Room v1 per-session activity tree (the old
+ * sidebar `ControlRoomPanel`, retired here) is folded in as a per-repo
+ * drill-down. Each repo row maps its filesystem `path` to the active chroxy
+ * session whose `cwd` matches (`sessionIdForRepoPath`); expanding the row
+ * reveals that session's live activity tree (subagents / shells / tools) via
+ * the reused `ActivityTree` + v1 `selectActivityTree`. So nothing the v1 panel
+ * surfaced is lost — it just moved into the Control Room next to the verdict.
  *
  * Data flow: the Refresh button dispatches `host_status_request` via the store's
  * `requestHostStatus` action; the server replies with one `host_status_snapshot`
@@ -24,8 +31,12 @@
  *   - recent      → warn  (amber)  — recent uncommitted work; eyeball before touching.
  *   - onboarded   → ok    (green)  — on the pull-model; just needs a checkout+pull.
  */
+import { useCallback, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { RepoStatus, RepoVerdict, ServerHostStatusSnapshotMessage } from '@chroxy/protocol'
+import type { ActivityState, SessionInfo } from '@chroxy/store-core'
+import { createEmptyActivityState } from '@chroxy/store-core'
+import { ActivityTree } from './ActivityTree'
 
 // Verdict → semantic accent. The three buckets map onto the dashboard's
 // ok/warn/bad theme accents (green/amber/red). A single named map keeps the tag
@@ -83,6 +94,59 @@ function isoDate(iso: string): string {
   // Defensive: if it doesn't look like an ISO date, render it verbatim.
   const m = /^(\d{4}-\d{2}-\d{2})/.exec(iso)
   return m ? m[1]! : iso
+}
+
+/**
+ * Normalize a filesystem path for comparison: convert backslashes to forward
+ * slashes, then strip a single trailing slash (but keep root "/"). The host
+ * survey's `repo.path` and a session's `cwd` come from independent sources
+ * (server-side `git` walk vs. the session's launch cwd) and one may carry a
+ * trailing slash the other doesn't.
+ *
+ * This deliberately mirrors the server's own Control Room binding normalization
+ * (`pathKey` in `packages/server/src/control-room/survey.js`) so the dashboard
+ * decides "this repo has a live session" on exactly the same key the server
+ * used to derive the repo's `live` verdict — including the backslash → slash
+ * fold that lets the drill-down resolve on Windows.
+ */
+function normalizePath(path: string): string {
+  const slashed = path.replace(/\\/g, '/')
+  if (slashed.length > 1 && slashed.endsWith('/')) return slashed.slice(0, -1)
+  return slashed
+}
+
+/**
+ * Map a repo (by its filesystem `path`) to the session id of the active chroxy
+ * session whose `cwd` matches that path — the link that lets the Control Room
+ * drill down into a repo's live activity tree.
+ *
+ * Match precedence:
+ *   1. Exact (normalized) `cwd === repo.path`.
+ *   2. A session whose `cwd` is nested under `repo.path` (e.g. a worktree or
+ *      subdir launch) — closest (longest) match wins so a session in
+ *      `/repo/sub` prefers `/repo/sub` over `/repo`.
+ *
+ * Returns null when no session maps to the repo. Exported for direct unit
+ * testing of the mapping rule.
+ */
+export function sessionIdForRepoPath(repoPath: string, sessions: readonly SessionInfo[]): string | null {
+  const target = normalizePath(repoPath)
+  // Exact match first.
+  for (const s of sessions) {
+    if (normalizePath(s.cwd) === target) return s.sessionId
+  }
+  // Nested fallback: pick the session whose cwd is the deepest path under the
+  // repo (a `${target}/...` prefix). Longest cwd wins the tie.
+  let best: { sessionId: string; depth: number } | null = null
+  const prefix = target === '/' ? '/' : `${target}/`
+  for (const s of sessions) {
+    const cwd = normalizePath(s.cwd)
+    if (cwd.startsWith(prefix)) {
+      const depth = cwd.length
+      if (best === null || depth > best.depth) best = { sessionId: s.sessionId, depth }
+    }
+  }
+  return best ? best.sessionId : null
 }
 
 interface SummaryChip {
@@ -164,12 +228,46 @@ function AttributionCell({ attribution }: { attribution: boolean | null }) {
   )
 }
 
-function RepoRows({ repo }: { repo: RepoStatus }) {
+interface RepoRowsProps {
+  repo: RepoStatus
+  /** Whole-store activity state, for the drill-down tree. */
+  activity: ActivityState
+  /** Active sessions, used to map this repo's path → its session id. */
+  sessions: readonly SessionInfo[]
+  /** Whether this repo's activity drill-down is expanded. */
+  expanded: boolean
+  /** Toggle the drill-down for this repo (keyed by repo.path). */
+  onToggleExpand: (path: string) => void
+  /** Injectable clock for the activity tree's elapsed timers (tests). */
+  now?: () => number
+}
+
+function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now }: RepoRowsProps) {
+  // Map repo → its active chroxy session (by cwd). When a session is found the
+  // name cell becomes a disclosure toggle that reveals that session's live
+  // activity tree (subagents / shells / tools — the retired v1 panel's view).
+  const sessionId = sessionIdForRepoPath(repo.path, sessions)
+  const drillable = sessionId !== null
+
   return (
     <>
-      <tr data-testid={`cr-row-${repo.name}`}>
+      <tr data-testid={`cr-row-${repo.name}`} className={repo.live ? 'cr-row-live' : undefined}>
         <td>
-          <b data-testid={`cr-name-${repo.name}`}>{repo.name}</b>
+          {drillable ? (
+            <button
+              type="button"
+              className="cr-drill-toggle"
+              data-testid={`cr-drill-toggle-${repo.name}`}
+              aria-expanded={expanded}
+              onClick={() => onToggleExpand(repo.path)}
+              title={expanded ? 'Hide live activity' : 'Show live activity'}
+            >
+              <span className="cr-drill-chevron" aria-hidden="true">{expanded ? '▼' : '▶'}</span>
+              <b data-testid={`cr-name-${repo.name}`}>{repo.name}</b>
+            </button>
+          ) : (
+            <b data-testid={`cr-name-${repo.name}`}>{repo.name}</b>
+          )}
           {repo.live && (
             <span
               className="cr-live-dot"
@@ -193,6 +291,18 @@ function RepoRows({ repo }: { repo: RepoStatus }) {
         <tr className="cr-act" data-testid={`cr-note-row-${repo.name}`}>
           <td colSpan={8}>
             <span className="cr-arrow" aria-hidden="true">↳</span> {repo.note}
+          </td>
+        </tr>
+      )}
+      {drillable && expanded && (
+        <tr className="cr-activity-row" data-testid={`cr-activity-row-${repo.name}`}>
+          <td colSpan={8}>
+            <div className="cr-activity-drill">
+              <div className="cr-activity-heading" data-testid={`cr-activity-heading-${repo.name}`}>
+                Live activity · {repo.name}
+              </div>
+              <ActivityTree activity={activity} sessionId={sessionId} now={now} />
+            </div>
           </td>
         </tr>
       )}
@@ -239,26 +349,59 @@ export interface ControlRoomSectionProps {
   connected?: boolean
   /** Refresh action. Defaults to the store's `requestHostStatus`. */
   onRefresh?: () => void
+  /**
+   * Whole-store activity state (one tree per session) for the per-repo
+   * drill-down. Defaults to the store's `activity`. Injectable for tests.
+   */
+  activity?: ActivityState
+  /**
+   * Active sessions, used to map a repo's `path` → its session id for the
+   * drill-down. Defaults to the store's `sessions`. Injectable for tests.
+   */
+  sessions?: readonly SessionInfo[]
   /** Injectable clock (epoch ms) for the "generated Nm ago" string. */
   now?: () => number
 }
+
+// Stable empty-activity default so the `activity` prop falling back to its
+// default doesn't allocate a new object each render.
+const EMPTY_ACTIVITY: ActivityState = createEmptyActivityState()
 
 export function ControlRoomSection({
   snapshot: snapshotProp,
   loading: loadingProp,
   connected: connectedProp,
   onRefresh: onRefreshProp,
+  activity: activityProp,
+  sessions: sessionsProp,
   now = Date.now,
 }: ControlRoomSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.hostStatus)
   const storeLoading = useConnectionStore((s) => s.hostStatusLoading)
   const storeConnected = useConnectionStore((s) => s.connectionPhase === 'connected')
   const requestHostStatus = useConnectionStore((s) => s.requestHostStatus)
+  const storeActivity = useConnectionStore((s) => s.activity)
+  const storeSessions = useConnectionStore((s) => s.sessions)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
   const connected = connectedProp !== undefined ? connectedProp : storeConnected
   const onRefresh = onRefreshProp ?? requestHostStatus
+  const activity = activityProp ?? storeActivity ?? EMPTY_ACTIVITY
+  const sessions = sessionsProp ?? storeSessions ?? []
+
+  // Per-repo drill-down expansion, keyed by repo.path. A repo's row reveals its
+  // active session's live activity tree (subagents / shells / tools) when
+  // toggled — the per-session view folded in from the retired v1 panel (#5176).
+  const [expandedRepos, setExpandedRepos] = useState<ReadonlySet<string>>(() => new Set())
+  const handleToggleRepo = useCallback((path: string) => {
+    setExpandedRepos((prev) => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }, [])
 
   // Gate the refresh on connection state: a dropped request would otherwise
   // spin/no-op silently. Disabled while a refresh is in flight or disconnected.
@@ -369,7 +512,17 @@ export function ControlRoomSection({
                     <td colSpan={8} className="cr-dim">No repos found under {snapshot.root}.</td>
                   </tr>
                 ) : (
-                  snapshot.repos.map((repo) => <RepoRows key={repo.path} repo={repo} />)
+                  snapshot.repos.map((repo) => (
+                    <RepoRows
+                      key={repo.path}
+                      repo={repo}
+                      activity={activity}
+                      sessions={sessions}
+                      expanded={expandedRepos.has(repo.path)}
+                      onToggleExpand={handleToggleRepo}
+                      now={now}
+                    />
+                  ))
                 )}
               </tbody>
             </table>
