@@ -247,6 +247,68 @@ test_scaffolds_new_section() {
   [ "$new_line" -lt "$prev_line" ]
 }
 
+test_inserts_after_unreleased_section() {
+  # #5207 — when the CHANGELOG has an [Unreleased] section on top, the new
+  # versioned section must land directly BELOW it (and its body), not above —
+  # preserving Keep-a-Changelog ordering and not burying pending entries.
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.1.0"
+  install_bump_script "$dir"
+  cat > "$dir/CHANGELOG.md" <<'EOF'
+# Changelog
+
+The format is based on [Keep a Changelog]; [Unreleased] stays on top.
+
+## [Unreleased]
+
+### Added
+
+- A pending entry not yet released
+
+## [0.1.0] - 2026-01-01
+
+### Added
+
+- Initial release
+EOF
+
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.2.0) > /dev/null 2>&1 || return 1
+
+  grep -q "^## \[0.2.0\] - " "$dir/CHANGELOG.md" || return 1
+
+  # Ordering must be: [Unreleased] < [0.2.0] < [0.1.0]
+  local unrel_line new_line prev_line
+  unrel_line=$(grep -n "^## \[Unreleased\]" "$dir/CHANGELOG.md" | head -1 | cut -d: -f1)
+  new_line=$(grep -n "^## \[0.2.0\]" "$dir/CHANGELOG.md" | head -1 | cut -d: -f1)
+  prev_line=$(grep -n "^## \[0.1.0\]" "$dir/CHANGELOG.md" | head -1 | cut -d: -f1)
+  [ "$unrel_line" -lt "$new_line" ] || {
+    echo "    new section landed above [Unreleased] (line $new_line vs $unrel_line)" >&2
+    return 1
+  }
+  [ "$new_line" -lt "$prev_line" ] || {
+    echo "    new section landed below the prior release (line $new_line vs $prev_line)" >&2
+    return 1
+  }
+
+  # The pending [Unreleased] entry must be preserved (not buried/dropped) AND
+  # stay above the new version header — i.e. the new section must land below the
+  # [Unreleased] *body*, not immediately after the `## [Unreleased]` line (which
+  # would push the pending entry under the cut release). Assert by line number,
+  # not just existence, so a regression that splices after the header line fails.
+  local pending_line
+  pending_line=$(grep -n "A pending entry not yet released" "$dir/CHANGELOG.md" | head -1 | cut -d: -f1)
+  [ -n "$pending_line" ] || {
+    echo "    pending [Unreleased] entry was dropped" >&2
+    return 1
+  }
+  [ "$pending_line" -lt "$new_line" ] || {
+    echo "    pending [Unreleased] entry landed below the new section (line $pending_line vs $new_line)" >&2
+    return 1
+  }
+}
+
 test_preserves_header_preamble() {
   local dir
   dir=$(mktemp -d)
@@ -594,6 +656,8 @@ echo "Running bump-version.sh tests"
 echo "============================="
 run_test "scaffolds a new CHANGELOG section with today's date" \
   test_scaffolds_new_section
+run_test "inserts the new section below [Unreleased], above the prior release (#5207)" \
+  test_inserts_after_unreleased_section
 run_test "preserves the Keep-a-Changelog header preamble" \
   test_preserves_header_preamble
 run_test "is idempotent when a section for the new version already exists" \

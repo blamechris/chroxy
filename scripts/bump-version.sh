@@ -319,16 +319,34 @@ if [ "$SKIP_CHANGELOG" -eq 0 ] && [ -f "$CHANGELOG" ]; then
 
 EOF
 
-    # Insert the new section before the first `## [` line. The header (title +
-    # "Keep a Changelog" preamble) sits above that line and must be preserved.
+    # Insert the new section before the first *versioned* `## [` header — i.e.
+    # the first `## [` that is NOT `## [Unreleased]`. This keeps the new release
+    # directly BELOW the [Unreleased] section (and its body), preserving the
+    # Keep-a-Changelog ordering the file documents ([Unreleased] on top,
+    # releases descending). The header (title + preamble) and any [Unreleased]
+    # section above the first versioned header are preserved. #5207 — before
+    # this fix the entry landed above [Unreleased], inverting the order and
+    # burying pending [Unreleased] entries. When there is no [Unreleased]
+    # section the first `## [` IS a versioned header, so the placement is
+    # unchanged.
     track_tmp "$CHANGELOG.tmp"
     awk -v entry_file="$CHANGELOG.entry.tmp" '
-      !inserted && /^## \[/ {
+      !inserted && /^## \[/ && !/^## \[Unreleased\]/ {
         while ((getline line < entry_file) > 0) print line
         close(entry_file)
         inserted = 1
       }
       { print }
+      END {
+        # No versioned release header existed (only [Unreleased], or none at
+        # all) — append the new section at the end so it still lands below
+        # [Unreleased] rather than silently vanishing (the post-grep verify
+        # would otherwise fail the bump).
+        if (!inserted) {
+          while ((getline line < entry_file) > 0) print line
+          close(entry_file)
+        }
+      }
     ' "$CHANGELOG" > "$CHANGELOG.tmp" && mv "$CHANGELOG.tmp" "$CHANGELOG"
     rm -f "$CHANGELOG.entry.tmp"
 
