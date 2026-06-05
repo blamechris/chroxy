@@ -115,7 +115,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerHostStatusSnapshotSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -1878,6 +1878,25 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
 }
 
 /**
+ * #5175 (epic #5170) — Host/Repo Status Control Room `host_status_snapshot`:
+ * REPLACE the stored survey with the carried snapshot and clear the in-flight
+ * loading flag. The survey is a full picture (no delta stream), so each
+ * snapshot wholesale-replaces the previous one — the Control Room section
+ * re-renders the fleet table from `hostStatus`.
+ *
+ * The wire shape is validated with the protocol Zod schema (same defensive
+ * pattern as the activity / credential-status handlers) so a malformed payload
+ * is dropped rather than crashing the renderer. `hostStatusLoading` is cleared
+ * even on a successful parse only — a malformed payload leaves the spinner up
+ * so a buggy server doesn't make the Refresh button silently lie.
+ */
+function handleHostStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerHostStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ hostStatus: parsed.data, hostStatusLoading: false });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
@@ -1931,6 +1950,8 @@ const HANDLERS: Record<string, Handler> = {
   // #5163 (epic #5159): Control Room live activity tree.
   activity_snapshot: handleActivitySnapshot,
   activity_delta: handleActivityDelta,
+  // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
+  host_status_snapshot: handleHostStatusSnapshot,
 };
 
 // ---------------------------------------------------------------------------

@@ -373,6 +373,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #5163 (epic #5159): Control Room activity tree, fed by the store-core
   // reducer from activity_snapshot / activity_delta.
   activity: createEmptyActivityState(),
+  // #5175 (epic #5170): Host/Repo Status Control Room snapshot, fed by the
+  // host_status_snapshot handler. Null until the first survey lands.
+  hostStatus: null,
+  hostStatusLoading: false,
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -617,6 +621,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'test_credential', key });
+      return true;
+    }
+    return false;
+  },
+
+  // #5175 (epic #5170): request a Host/Repo Status survey from the server.
+  // Sends a `host_status_request`; the reply is a single `host_status_snapshot`
+  // handled into `hostStatus`. Flips `hostStatusLoading` so the Refresh button
+  // can spin while the survey runs. Returns false (and does NOT set loading)
+  // when the socket is closed so the Control Room can render a "not connected"
+  // state rather than spinning forever.
+  requestHostStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ hostStatusLoading: true });
+      wsSend(socket, { type: 'host_status_request' });
       return true;
     }
     return false;
