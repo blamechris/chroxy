@@ -106,18 +106,29 @@ function playChirp(): void {
     // Two ascending notes (A5 → E6) — recognizable "attention" interval
     // without being alarming.
     const freqs = [880, 1318.51]
-    freqs.forEach((freq, i) => {
+    const oscs = freqs.map((freq, i) => {
       const osc = ctx.createOscillator()
       osc.type = 'sine'
       osc.frequency.setValueAtTime(freq, now + i * noteSec)
       osc.connect(gain)
       osc.start(now + i * noteSec)
       osc.stop(now + (i + 1) * noteSec)
+      return osc
     })
     // Fade the shared gain out at the end of the second note so the next
     // chirp re-ramps from silence.
     gain.gain.setValueAtTime(0.15, now + freqs.length * noteSec - 0.02)
     gain.gain.exponentialRampToValueAtTime(0.0001, now + freqs.length * noteSec)
+    // Disconnect the per-chirp nodes once the final note finishes so repeated
+    // interventions don't grow the audio graph / retain orphaned nodes (#4891
+    // review). onended fires when the last oscillator reaches its stop time.
+    const lastOsc = oscs[oscs.length - 1]
+    lastOsc.onended = () => {
+      for (const osc of oscs) {
+        try { osc.disconnect() } catch { /* already gone */ }
+      }
+      try { gain.disconnect() } catch { /* already gone */ }
+    }
   } catch {
     // Audio unavailable — fail soft.
   }

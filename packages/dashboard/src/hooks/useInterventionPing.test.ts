@@ -98,6 +98,14 @@ beforeEach(() => {
 afterEach(() => {
   __resetInterventionPingAudioContextForTests()
   vi.restoreAllMocks()
+  // Restore real timers in case a test enabled fake timers and threw before
+  // its own cleanup, and remove the global Web Audio mock so it can't leak
+  // into unrelated dashboard tests that expect jsdom's default (#4891 review).
+  vi.useRealTimers()
+  // @ts-expect-error — remove mock
+  delete globalThis.window.AudioContext
+  // @ts-expect-error — remove prefixed fallback if a test added it
+  delete globalThis.window.webkitAudioContext
 })
 
 describe('useInterventionPing', () => {
