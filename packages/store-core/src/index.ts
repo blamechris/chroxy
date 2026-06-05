@@ -205,6 +205,26 @@ export {
   applyOrphanDeltas,
 } from './orphan-deltas'
 
+// #5162 (epic #5159): platform-agnostic Control Room activity reducer. The
+// dashboard panel (#5163) and future mobile parity both derive the per-session
+// activity tree from this one implementation (snapshot replace + self-healing
+// upsert-by-id deltas + terminal-retention prune + tree selector).
+export type {
+  SessionActivityState,
+  ActivityState,
+  ActivityTreeNode,
+} from './activity-reducer'
+
+export {
+  MAX_TERMINAL_ENTRIES_PER_SESSION,
+  createEmptyActivityState,
+  applyActivitySnapshot,
+  applyActivityDelta,
+  clearSessionActivity,
+  selectSessionEntries,
+  selectActivityTree,
+} from './activity-reducer'
+
 // #4242: cheap structural gate for `JSON.parse` on streaming
 // `tool_input_delta` accumulators. Amortises N-1 throws on long
 // streams (every Bash invocation, every Edit).
