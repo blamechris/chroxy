@@ -1,0 +1,226 @@
+/**
+ * Integration test for the Control Room activity wiring (#5163, epic #5159).
+ *
+ * Guards the wire path between the dashboard message handler and the store-core
+ * activity reducer:
+ *   - `activity_snapshot` REPLACES the target session's tree.
+ *   - `activity_delta` upserts the carried entry by id (self-healing).
+ *   - malformed payloads are dropped (Zod safeParse) without crashing.
+ *   - a no-op delta short-circuits without re-allocating `activity`.
+ *   - `session_list` removal drops a closed session's activity tree.
+ *
+ * The reducer + selector have their own unit tests in store-core
+ * (activity-reducer.test.ts); this file covers ONLY the handler glue.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+
+vi.mock('./crypto', () => ({
+  createKeyPair: vi.fn(() => ({ publicKey: 'mock-pub', secretKey: 'mock-sec' })),
+  deriveSharedKey: vi.fn(),
+  encrypt: vi.fn(),
+  decrypt: vi.fn(),
+  generateConnectionSalt: vi.fn(() => 'mock-salt'),
+  deriveConnectionKey: vi.fn(() => new Uint8Array(32)),
+  DIRECTION_CLIENT: 0,
+  DIRECTION_SERVER: 1,
+}))
+
+vi.mock('./persistence', () => ({
+  clearPersistedSession: vi.fn(),
+}))
+
+import {
+  handleMessage,
+  setStore,
+  clearDeltaBuffers,
+  clearPermissionSplits,
+  stopHeartbeat,
+  resetReplayFlags,
+} from './message-handler'
+import {
+  createEmptyActivityState,
+  selectActivityTree,
+  type ActivityEntry,
+} from '@chroxy/store-core'
+import { createEmptySessionState } from './utils'
+import type { ConnectionState } from './types'
+
+const SESSION_ID = 'sess-cr-1'
+const OTHER_SESSION_ID = 'sess-cr-2'
+
+function createMockStore(initial: Partial<ConnectionState>) {
+  let state = initial as ConnectionState
+  return {
+    getState: () => state,
+    setState: (s: Partial<ConnectionState> | ((prev: ConnectionState) => Partial<ConnectionState>)) => {
+      const patch = typeof s === 'function' ? s(state) : s
+      state = { ...state, ...patch }
+    },
+  }
+}
+
+function createMockSocket(): WebSocket {
+  return {
+    send: vi.fn(),
+    close: vi.fn(),
+    readyState: WebSocket.OPEN,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  } as unknown as WebSocket
+}
+
+function baseState(): Partial<ConnectionState> {
+  return {
+    connectionPhase: 'connected',
+    socket: null,
+    sessions: [],
+    activeSessionId: SESSION_ID,
+    sessionStates: { [SESSION_ID]: createEmptySessionState() },
+    activity: createEmptyActivityState(),
+    messages: [],
+  }
+}
+
+function runningEntry(id: string, over: Partial<ActivityEntry> = {}): ActivityEntry {
+  return {
+    id,
+    kind: 'agent',
+    label: `entry-${id}`,
+    status: 'running',
+    startedAt: 1000,
+    ...over,
+  }
+}
+
+function snapshot(entries: ActivityEntry[], sessionId = SESSION_ID) {
+  return { type: 'activity_snapshot', sessionId, schemaVersion: 1, entries }
+}
+
+function delta(op: 'started' | 'updated' | 'ended', entry: ActivityEntry, sessionId = SESSION_ID) {
+  return { type: 'activity_delta', sessionId, schemaVersion: 1, op, entry }
+}
+
+describe('Control Room activity dispatch (#5163)', () => {
+  let store: ReturnType<typeof createMockStore>
+  let mockSocket: WebSocket
+
+  const ctx = () => ({
+    url: 'wss://t',
+    token: 'tok',
+    socket: mockSocket,
+    isReconnect: false,
+    silent: false,
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    clearDeltaBuffers()
+    clearPermissionSplits()
+    mockSocket = createMockSocket()
+    store = createMockStore(baseState())
+    setStore(store)
+  })
+
+  afterEach(() => {
+    stopHeartbeat()
+    clearDeltaBuffers()
+    clearPermissionSplits()
+    resetReplayFlags()
+  })
+
+  it('applies activity_snapshot, replacing the session tree', () => {
+    handleMessage(snapshot([runningEntry('a'), runningEntry('b')]), ctx() as never)
+    const tree = selectActivityTree(store.getState().activity, SESSION_ID)
+    expect(tree.map((n) => n.entry.id)).toEqual(['a', 'b'])
+
+    // A second snapshot REPLACES (not merges) the prior entries.
+    handleMessage(snapshot([runningEntry('c')]), ctx() as never)
+    const tree2 = selectActivityTree(store.getState().activity, SESSION_ID)
+    expect(tree2.map((n) => n.entry.id)).toEqual(['c'])
+  })
+
+  it('applies activity_delta upserts by id (started then ended)', () => {
+    handleMessage(delta('started', runningEntry('x')), ctx() as never)
+    expect(selectActivityTree(store.getState().activity, SESSION_ID).map((n) => n.entry.status)).toEqual([
+      'running',
+    ])
+
+    handleMessage(
+      delta('ended', runningEntry('x', { status: 'done', endedAt: 5000 })),
+      ctx() as never,
+    )
+    const tree = selectActivityTree(store.getState().activity, SESSION_ID)
+    expect(tree).toHaveLength(1)
+    expect(tree[0]!.entry.status).toBe('done')
+    expect(tree[0]!.entry.endedAt).toBe(5000)
+  })
+
+  it('builds parent→child hierarchy from a delta with parentId', () => {
+    handleMessage(delta('started', runningEntry('parent', { kind: 'agent' })), ctx() as never)
+    handleMessage(
+      delta('started', runningEntry('child', { kind: 'tool', parentId: 'parent' })),
+      ctx() as never,
+    )
+    const tree = selectActivityTree(store.getState().activity, SESSION_ID)
+    expect(tree).toHaveLength(1)
+    expect(tree[0]!.entry.id).toBe('parent')
+    expect(tree[0]!.children.map((c) => c.entry.id)).toEqual(['child'])
+  })
+
+  it('keeps per-session trees isolated', () => {
+    handleMessage(snapshot([runningEntry('a')], SESSION_ID), ctx() as never)
+    handleMessage(snapshot([runningEntry('b')], OTHER_SESSION_ID), ctx() as never)
+    expect(selectActivityTree(store.getState().activity, SESSION_ID).map((n) => n.entry.id)).toEqual(['a'])
+    expect(selectActivityTree(store.getState().activity, OTHER_SESSION_ID).map((n) => n.entry.id)).toEqual([
+      'b',
+    ])
+  })
+
+  it('drops a malformed activity_snapshot without crashing or mutating state', () => {
+    const before = store.getState().activity
+    // Missing required `entries` array.
+    handleMessage({ type: 'activity_snapshot', sessionId: SESSION_ID, schemaVersion: 1 }, ctx() as never)
+    expect(store.getState().activity).toBe(before)
+  })
+
+  it('drops a malformed activity_delta (terminal status without endedAt)', () => {
+    const before = store.getState().activity
+    handleMessage(
+      delta('ended', { id: 'bad', kind: 'tool', label: 'b', status: 'done', startedAt: 1 }),
+      ctx() as never,
+    )
+    expect(store.getState().activity).toBe(before)
+  })
+
+  it('short-circuits a no-op delta without re-allocating activity state', () => {
+    // End the entry, then send a STALE running update for the same id. The
+    // reducer's terminal-precedence guard rejects it (returns the same state
+    // reference), and the handler must NOT call set() for that no-op.
+    handleMessage(delta('started', runningEntry('y')), ctx() as never)
+    handleMessage(delta('ended', runningEntry('y', { status: 'done', endedAt: 5000 })), ctx() as never)
+    const after = store.getState().activity
+    handleMessage(delta('updated', runningEntry('y', { status: 'running' })), ctx() as never)
+    expect(store.getState().activity).toBe(after)
+  })
+
+  it('clears a session activity tree when session_list drops it', () => {
+    handleMessage(snapshot([runningEntry('a')], SESSION_ID), ctx() as never)
+    handleMessage(snapshot([runningEntry('b')], OTHER_SESSION_ID), ctx() as never)
+
+    // session_list now only lists OTHER_SESSION_ID — SESSION_ID is removed.
+    handleMessage(
+      {
+        type: 'session_list',
+        sessions: [{ sessionId: OTHER_SESSION_ID, name: 'keep', cwd: '/tmp', provider: 'claude-cli' }],
+      },
+      ctx() as never,
+    )
+
+    expect(selectActivityTree(store.getState().activity, SESSION_ID)).toEqual([])
+    expect(selectActivityTree(store.getState().activity, OTHER_SESSION_ID).map((n) => n.entry.id)).toEqual([
+      'b',
+    ])
+  })
+})

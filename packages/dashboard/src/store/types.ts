@@ -65,6 +65,13 @@ export type {
   // dashboard-local GitStatusEntry. Same shape (path + status union) — was
   // missed by the #3132 dedup sweep that moved DiffFile/Hunk/HunkLine.
   GitFileStatus,
+  // #5163 (epic #5159): Control Room activity state. The reducer + selector
+  // live in store-core (#5162); the dashboard holds one `ActivityState` on
+  // the connection store and the Control Room panel renders it via
+  // `selectActivityTree`.
+  ActivityState,
+  ActivityEntry,
+  ActivityTreeNode,
 } from '@chroxy/store-core';
 
 // Import for local use in SessionState/ConnectionState definitions below
@@ -514,6 +521,16 @@ export interface ConnectionState {
   sessions: SessionInfo[];
   activeSessionId: string | null;
   sessionStates: Record<string, SessionState>;
+
+  /**
+   * #5163 (epic #5159) — Control Room activity state: the per-session live
+   * tree of in-flight subagents / background shells / long-running tools,
+   * fed by `activity_snapshot` + `activity_delta` through the store-core
+   * reducer. The Control Room sidebar panel renders the active session's
+   * tree via `selectActivityTree(activity, activeSessionId)`. Read-only in
+   * v1 — control actions are a tracked phase-2 follow-up on the epic.
+   */
+  activity: import('@chroxy/store-core').ActivityState;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;

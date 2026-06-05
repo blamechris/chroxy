@@ -5,12 +5,13 @@
  * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback, useRef, useMemo } from 'react'
-import type { CumulativeUsage, SessionInfo, SessionVisualStatus } from '@chroxy/store-core'
-import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
+import type { ActivityState, CumulativeUsage, SessionInfo, SessionVisualStatus } from '@chroxy/store-core'
+import { createEmptyActivityState, formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
 import { SidebarPanelSlot, type SidebarPanelView } from './SidebarPanelSlot'
 import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
+import { ControlRoomPanel, controlRoomCollapsedMetric } from './ControlRoomPanel'
 import type { SearchResult } from '../store/types'
 import {
   persistSidebarPanelHeight,
@@ -84,6 +85,10 @@ export interface SidebarProps {
   // #4303 — full sessions list (used by the bottom slot's token view).
   // Optional so existing tests + callers don't break; defaults to [].
   sessions?: SessionInfo[]
+  // #5163 (epic #5159) — Control Room activity state for the bottom slot's
+  // Control Room view. Optional so existing tests/callers default to an empty
+  // tree (the panel renders its "no activity" empty state).
+  activity?: ActivityState
   // #4303 — initial state for the bottom panel slot (loaded from
   // localStorage in App.tsx; defaults applied here).
   initialPanelHeight?: number
@@ -97,6 +102,11 @@ export interface SidebarProps {
   onReorderRepos?: (orderedRepoPaths: string[]) => void
   onReorderSessions?: (repoPath: string, orderedSessionIds: string[]) => void
 }
+
+// #5163 — stable empty-activity default so the `activity` prop falling back to
+// its default doesn't allocate a new object each render (which would break the
+// panelViews useMemo referential check below).
+const EMPTY_ACTIVITY: ActivityState = createEmptyActivityState()
 
 function abbreviateTunnel(url: string): string {
   try {
@@ -128,6 +138,7 @@ export function Sidebar({
   clearSearchResults,
   onWidthChange,
   sessions = [],
+  activity = EMPTY_ACTIVITY,
   initialPanelHeight = 200,
   initialPanelView = null,
   initialPanelCollapsed = false,
@@ -188,7 +199,17 @@ export function Sidebar({
       ),
       collapsedHeaderMetric: () => tokenViewCollapsedMetric(sessions),
     },
-  ]), [sessions, activeSessionId, onSessionClick])
+    {
+      // #5163 (epic #5159) — Control Room: live read-only tree of the active
+      // session's in-flight subagents / background shells / tools.
+      id: 'control-room',
+      label: 'Control Room',
+      render: () => (
+        <ControlRoomPanel activity={activity} activeSessionId={activeSessionId} />
+      ),
+      collapsedHeaderMetric: () => controlRoomCollapsedMetric(activity, activeSessionId),
+    },
+  ]), [sessions, activeSessionId, onSessionClick, activity])
 
   const toggleRepo = useCallback((path: string) => {
     setCollapsed(prev => ({ ...prev, [path]: !prev[path] }))

@@ -103,13 +103,19 @@ import {
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
+  // #5163 (epic #5159): Control Room activity reducer — snapshot replace +
+  // self-healing delta upsert + terminal-retention prune. The dashboard
+  // panel and future mobile parity both consume this one implementation.
+  applyActivitySnapshot,
+  applyActivityDelta,
+  clearSessionActivity,
   // #5039: pre-formatted partial-cost sub-line used by the `case 'error'`
   // branch so the toast and the mobile Alert share copy.
   formatPartialCostLine,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -1817,6 +1823,42 @@ function handleServerShutdown(msg: Record<string, unknown>, _get: MsgGet, set: M
 }
 
 /**
+ * #5163 (epic #5159) — Control Room `activity_snapshot`: REPLACE the target
+ * session's activity tree with the snapshot's entries via the store-core
+ * reducer. Emitted on subscribe / resync so a late-joining or reconnecting
+ * client reaches canonical state in one message.
+ *
+ * The wire shape is validated with the protocol Zod schema (same defensive
+ * pattern as the credential-status handlers) so a malformed payload is dropped
+ * rather than crashing the reducer. `applyActivityDelta`/`applyActivitySnapshot`
+ * return the SAME state reference on a no-op, so the equality short-circuit
+ * below skips a needless re-render.
+ */
+function handleActivitySnapshot(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerActivitySnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const prev = get().activity;
+  const next = applyActivitySnapshot(prev, parsed.data);
+  if (next === prev) return;
+  set({ activity: next });
+}
+
+/**
+ * #5163 (epic #5159) — Control Room `activity_delta`: upsert the carried entry
+ * into its session by id. `op` is advisory — the full entry drives the result,
+ * so a dropped earlier delta is self-healed by the next one. Validated +
+ * no-op-short-circuited like the snapshot handler above.
+ */
+function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerActivityDeltaSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const prev = get().activity;
+  const next = applyActivityDelta(prev, parsed.data);
+  if (next === prev) return;
+  set({ activity: next });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
@@ -1867,6 +1909,9 @@ const HANDLERS: Record<string, Handler> = {
   budget_resumed: handleBudgetResumed,
   server_error: handleServerError,
   server_shutdown: handleServerShutdown,
+  // #5163 (epic #5159): Control Room live activity tree.
+  activity_snapshot: handleActivitySnapshot,
+  activity_delta: handleActivityDelta,
 };
 
 // ---------------------------------------------------------------------------
@@ -2110,6 +2155,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           delete newStates[id];
         }
         patch.sessionStates = newStates;
+        // #5163: drop the Control Room activity tree for any session that
+        // dropped out of the list so a closed session's tree doesn't linger.
+        let nextActivity = get().activity;
+        for (const id of removedIds) {
+          nextActivity = clearSessionActivity(nextActivity, id);
+        }
+        if (nextActivity !== get().activity) patch.activity = nextActivity;
         // If the active session was removed, switch to next available
         if (initialActiveId && removedIds.includes(initialActiveId)) {
           const remaining = Object.keys(newStates);

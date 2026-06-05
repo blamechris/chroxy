@@ -1064,6 +1064,179 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
+/* #5163 (epic #5159) — Control Room panel: live read-only activity tree. */
+.control-room-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.control-room-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+  padding: 4px 2px;
+}
+
+.control-room-entry-list,
+.control-room-entry-list-inner {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.control-room-entry-row {
+  display: flex;
+  flex-direction: column;
+}
+
+.control-room-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.control-room-entry:hover,
+.control-room-entry:focus-visible {
+  background: var(--bg-tertiary);
+}
+
+.control-room-entry-icon {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.control-room-entry-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-room-entry-elapsed {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.control-room-status-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.control-room-status-badge.status-running {
+  color: var(--accent-blue);
+  background: var(--accent-blue-light);
+  border-color: var(--accent-blue-border);
+}
+
+.control-room-status-badge.status-done {
+  color: var(--accent-green);
+  background: var(--accent-green-light);
+  border-color: var(--accent-green-border);
+}
+
+.control-room-status-badge.status-failed {
+  color: var(--accent-red);
+  background: var(--accent-red-light);
+  border-color: var(--accent-red-border);
+}
+
+.control-room-status-badge.status-blocked {
+  color: var(--accent-orange);
+  background: var(--accent-orange-medium);
+  border-color: var(--accent-orange-border-strong);
+}
+
+/* Blocked-on-input entries are visually prominent and tie into the
+   intervention surface (#4891): a steady amber accent + left rule so the
+   operator's eye lands on "this needs you". A subtle pulse draws attention
+   without the motion being distracting; respects reduced-motion below. */
+.control-room-entry-blocked {
+  background: var(--accent-orange-light);
+  border-color: var(--accent-orange-border);
+  border-left: 3px solid var(--accent-orange);
+  animation: control-room-blocked-pulse 2s ease-in-out infinite;
+}
+
+.control-room-entry-blocked:hover,
+.control-room-entry-blocked:focus-visible {
+  background: var(--accent-orange-subtle);
+}
+
+@keyframes control-room-blocked-pulse {
+  0%, 100% { border-left-color: var(--accent-orange); }
+  50% { border-left-color: var(--accent-orange-border-strong); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .control-room-entry-blocked {
+    animation: none;
+  }
+}
+
+.control-room-entry-output {
+  margin: 2px 6px 4px 18px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.control-room-output-row {
+  display: flex;
+  gap: 8px;
+}
+
+.control-room-output-key {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-width: 48px;
+}
+
+.control-room-output-val {
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.control-room-output-ref {
+  font-family: var(--font-mono, monospace);
+}
+
+.control-room-output-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .sidebar-status-dot {
   width: 6px;
   height: 6px;
