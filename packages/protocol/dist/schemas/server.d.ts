@@ -344,16 +344,26 @@ export declare const ActivityStatusSchema: z.ZodEnum<{
  *   - `'message'` — `id` is a `stream_start` messageId; output arrives as the
  *     existing `stream_delta` stream for that message.
  *
- * A consumer that doesn't recognise a future `kind` (added additively in a
- * later revision) should treat the entry as "no drill-in available" rather
- * than erroring.
+ * `kind` is an OPEN, non-empty string — deliberately NOT a closed `z.enum`. A
+ * future server may introduce a new channel kind additively, and a strict enum
+ * would reject the WHOLE activity message at an older client's schema boundary
+ * (the exact opposite of this contract's forward-compat intent). With an open
+ * string, an unrecognised kind parses cleanly and the consumer switches on the
+ * known values below, treating anything else as "no drill-in available". The
+ * three values defined today are:
+ *   - `'tool_use'` — `id` is the tool_use id; output arrives as the existing
+ *     `agent_event` stream keyed by `parentToolUseId` (#5016).
+ *   - `'shell'` — `id` is the short shell token (e.g. `brk57kt6pm`); output is
+ *     fetched via the existing `BashOutput` / background-shell path (#4307).
+ *   - `'message'` — `id` is a `stream_start` messageId; output arrives as the
+ *     existing `stream_delta` stream for that message.
+ *
+ * `ACTIVITY_OUTPUT_REF_KINDS` exports the known set so #5162/#5163 can branch
+ * exhaustively without re-declaring the literals.
  */
+export declare const ACTIVITY_OUTPUT_REF_KINDS: readonly ["tool_use", "shell", "message"];
 export declare const ActivityOutputRefSchema: z.ZodObject<{
-    kind: z.ZodEnum<{
-        message: "message";
-        shell: "shell";
-        tool_use: "tool_use";
-    }>;
+    kind: z.ZodString;
     id: z.ZodString;
 }, z.core.$strip>;
 /**
@@ -408,11 +418,7 @@ export declare const ActivityEntrySchema: z.ZodObject<{
     endedAt: z.ZodOptional<z.ZodNumber>;
     parentId: z.ZodOptional<z.ZodString>;
     outputRef: z.ZodOptional<z.ZodObject<{
-        kind: z.ZodEnum<{
-            message: "message";
-            shell: "shell";
-            tool_use: "tool_use";
-        }>;
+        kind: z.ZodString;
         id: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
@@ -448,11 +454,7 @@ export declare const ServerActivitySnapshotSchema: z.ZodObject<{
         endedAt: z.ZodOptional<z.ZodNumber>;
         parentId: z.ZodOptional<z.ZodString>;
         outputRef: z.ZodOptional<z.ZodObject<{
-            kind: z.ZodEnum<{
-                message: "message";
-                shell: "shell";
-                tool_use: "tool_use";
-            }>;
+            kind: z.ZodString;
             id: z.ZodString;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
@@ -504,11 +506,7 @@ export declare const ServerActivityDeltaSchema: z.ZodObject<{
         endedAt: z.ZodOptional<z.ZodNumber>;
         parentId: z.ZodOptional<z.ZodString>;
         outputRef: z.ZodOptional<z.ZodObject<{
-            kind: z.ZodEnum<{
-                message: "message";
-                shell: "shell";
-                tool_use: "tool_use";
-            }>;
+            kind: z.ZodString;
             id: z.ZodString;
         }, z.core.$strip>>;
     }, z.core.$strip>;

@@ -1879,13 +1879,36 @@ describe('@chroxy/protocol schemas', () => {
         assert.ok(!result.success, 'startedAt must be an integer ms epoch')
       })
 
-      it('rejects an unknown outputRef kind', async () => {
+      it('accepts a future/unknown outputRef kind (open string for forward compat)', async () => {
+        // #5161 (Copilot review): outputRef.kind is an OPEN non-empty string,
+        // not a closed enum — a newer server introducing a new channel kind
+        // must NOT reject the whole message at an older client. The consumer
+        // switches on the known kinds and degrades to "no drill-in" otherwise.
         const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
         const result = ActivityEntrySchema.safeParse({
           ...runningEntry,
           outputRef: { kind: 'pty', id: 'x' },
         })
-        assert.ok(!result.success, 'unknown outputRef kind must reject')
+        assert.ok(result.success, 'unknown outputRef kind must parse (degrade gracefully, not reject)')
+        assert.equal(result.data.outputRef.kind, 'pty')
+      })
+
+      it('accepts all three known outputRef kinds', async () => {
+        const { ActivityEntrySchema, ACTIVITY_OUTPUT_REF_KINDS } = await import('../src/schemas/server.ts')
+        assert.deepEqual([...ACTIVITY_OUTPUT_REF_KINDS], ['tool_use', 'shell', 'message'])
+        for (const kind of ACTIVITY_OUTPUT_REF_KINDS) {
+          const result = ActivityEntrySchema.safeParse({ ...runningEntry, outputRef: { kind, id: 'x' } })
+          assert.ok(result.success, `known outputRef kind ${kind} should validate`)
+        }
+      })
+
+      it('rejects an empty outputRef id', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({
+          ...runningEntry,
+          outputRef: { kind: 'shell', id: '' },
+        })
+        assert.ok(!result.success, 'outputRef.id must be non-empty')
       })
 
       it('strips unknown fields for forward compat', async () => {
