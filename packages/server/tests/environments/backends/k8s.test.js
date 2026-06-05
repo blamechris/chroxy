@@ -1,7 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
-import { K8sBackend, sanitizeNamespaceLabel } from '../../../src/environments/backends/k8s.js'
+import {
+  K8sBackend,
+  sanitizeNamespaceLabel,
+  buildResourceBlock,
+  DEFAULT_RESOURCES,
+} from '../../../src/environments/backends/k8s.js'
 
 // ─── Mock CoreV1Api factory ───────────────────────────────────────────────────
 
@@ -1508,10 +1513,13 @@ describe('K8sBackend.createEnvironment() — git-clone workspace strategy (#3193
 // K8sBackend.createEnvironment — resource limits (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// These tests exercise the legacy flat `memoryLimit`/`cpuLimit` opts in
+// isolation, so the backend is constructed with `defaultResources: null` to
+// suppress the #3195 defaults that would otherwise fill the unset dimension.
 describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
   it('sets resources.limits and resources.requests when memoryLimit is provided', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'mem-only',
@@ -1528,7 +1536,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('sets resources.limits and resources.requests when cpuLimit is provided', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'cpu-only',
@@ -1545,7 +1553,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('sets both memory and cpu limits when both are provided', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'both-limits',
@@ -1563,7 +1571,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('normalises Docker-style memory suffix "g" to "Gi"', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'mem-g',
@@ -1577,7 +1585,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('normalises Docker-style memory suffix "m" to "Mi"', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'mem-m',
@@ -1589,14 +1597,243 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
     assert.equal(resources.limits.memory, '512Mi', '"512m" must be normalised to "512Mi"')
   })
 
-  it('omits container.resources when neither memoryLimit nor cpuLimit is provided', async () => {
+  it('omits container.resources when no limits are set AND defaults disabled', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({ envId: 'no-limits', image: 'agent:latest' })
 
     const container = api.calls.create[0].body.spec.containers[0]
     assert.equal(container.resources, undefined, 'resources must be absent when no limits are set')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — structured resources + defaults (#3195)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend resource defaults (#3195)', () => {
+  it('applies DEFAULT_RESOURCES when no resource opts are given', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'defaults', image: 'agent:latest' })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.deepEqual(resources, {
+      requests: { cpu: '500m', memory: '512Mi' },
+      limits: { cpu: '2', memory: '4Gi' },
+    })
+  })
+
+  it('exposes the documented default quantities', () => {
+    assert.equal(DEFAULT_RESOURCES.cpu, '500m')
+    assert.equal(DEFAULT_RESOURCES.memory, '512Mi')
+    assert.equal(DEFAULT_RESOURCES.cpuLimit, '2')
+    assert.equal(DEFAULT_RESOURCES.memoryLimit, '4Gi')
+  })
+
+  it('constructor-level defaultResources merge over the built-in defaults', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      defaultResources: { cpu: '250m', memoryLimit: '8Gi' },
+    })
+
+    await backend.createEnvironment({ envId: 'merged-defaults', image: 'agent:latest' })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    // Overridden fields take the operator value; untouched fields keep the built-in.
+    assert.equal(resources.requests.cpu, '250m')
+    assert.equal(resources.requests.memory, '512Mi')
+    assert.equal(resources.limits.cpu, '2')
+    assert.equal(resources.limits.memory, '8Gi')
+  })
+
+  it('defaultResources: null omits the resources block entirely', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
+
+    await backend.createEnvironment({ envId: 'no-defaults', image: 'agent:latest' })
+
+    assert.equal(api.calls.create[0].body.spec.containers[0].resources, undefined)
+  })
+
+  it('rejects a malformed quantity in constructor defaultResources', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), defaultResources: { cpu: 'not-a-cpu' } }),
+      /not a valid K8s CPU quantity/,
+    )
+  })
+
+  it('rejects a non-object defaultResources', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), defaultResources: '500m' }),
+      /defaultResources must be an object or null/,
+    )
+  })
+})
+
+describe('K8sBackend structured resources opt (#3195)', () => {
+  it('maps resources.{cpu,memory} to requests and {cpuLimit,memoryLimit} to limits', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'structured',
+      image: 'agent:latest',
+      resources: { cpu: '250m', memory: '256Mi', cpuLimit: '1', memoryLimit: '1Gi' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.deepEqual(resources, {
+      requests: { cpu: '250m', memory: '256Mi' },
+      limits: { cpu: '1', memory: '1Gi' },
+    })
+  })
+
+  it('structured resources override the legacy flat opts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'override-legacy',
+      image: 'agent:latest',
+      cpuLimit: '4',
+      memoryLimit: '8Gi',
+      resources: { cpuLimit: '1', memoryLimit: '1Gi' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    // resources.* wins for limits; legacy flat opts still seed the requests for
+    // the dimensions structured-resources left unset (cpu/memory requests).
+    assert.equal(resources.limits.cpu, '1')
+    assert.equal(resources.limits.memory, '1Gi')
+    assert.equal(resources.requests.cpu, '4')
+    assert.equal(resources.requests.memory, '8Gi')
+  })
+
+  it('a partial structured resources fills the rest from defaults', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'partial',
+      image: 'agent:latest',
+      resources: { memoryLimit: '16Gi' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '16Gi')   // explicit
+    assert.equal(resources.limits.cpu, '2')          // default
+    assert.equal(resources.requests.cpu, '500m')     // default
+    assert.equal(resources.requests.memory, '512Mi') // default
+  })
+
+  it('normalises Docker-style memory suffixes in structured resources', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'structured-norm',
+      image: 'agent:latest',
+      resources: { memory: '256m', memoryLimit: '2g' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.requests.memory, '256Mi')
+    assert.equal(resources.limits.memory, '2Gi')
+  })
+
+  it('rejects a malformed CPU quantity before creating the Secret', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'bad-cpu',
+        image: 'agent:latest',
+        resources: { cpu: '500x' },
+      }),
+      /not a valid K8s CPU quantity/,
+    )
+    // No Secret/Pod should have been created — validation runs before either call.
+    assert.equal(api.calls.createSecret.length, 0)
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('rejects a malformed memory quantity', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'bad-mem',
+        image: 'agent:latest',
+        resources: { memory: '512Megabytes' },
+      }),
+      /not a valid K8s memory quantity/,
+    )
+  })
+
+  it('rejects a non-object resources opt', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'bad-resources',
+        image: 'agent:latest',
+        resources: '500m',
+      }),
+      /opts\.resources must be an object/,
+    )
+  })
+})
+
+describe('buildResourceBlock() (#3195)', () => {
+  it('round-trips a full structured resources object', () => {
+    const block = buildResourceBlock(
+      { cpu: '500m', memory: '512Mi', cpuLimit: '2', memoryLimit: '4Gi' },
+      undefined, undefined, null,
+    )
+    assert.deepEqual(block, {
+      requests: { cpu: '500m', memory: '512Mi' },
+      limits: { cpu: '2', memory: '4Gi' },
+    })
+  })
+
+  it('returns an empty block when nothing is set and defaults are disabled', () => {
+    assert.deepEqual(buildResourceBlock(undefined, undefined, undefined, null), {})
+  })
+
+  it('legacy flat limit applies to both request and limit for its dimension', () => {
+    const block = buildResourceBlock(undefined, '2', undefined, null)
+    assert.deepEqual(block, { requests: { cpu: '2' }, limits: { cpu: '2' } })
+  })
+
+  it('accepts a variety of valid CPU quantities', () => {
+    for (const cpu of ['1', '0.5', '.5', '500m', '1500m', '2']) {
+      assert.doesNotThrow(() => buildResourceBlock({ cpu }, undefined, undefined, null), `cpu=${cpu}`)
+    }
+  })
+
+  it('rejects malformed CPU quantities', () => {
+    for (const cpu of ['', '500x', 'abc', '1Gi', '1.2.3', '500 m', '-1']) {
+      assert.throws(() => buildResourceBlock({ cpu }, undefined, undefined, null), `cpu=${cpu} should throw`)
+    }
+  })
+
+  it('accepts a variety of valid memory quantities (post-normalisation)', () => {
+    for (const memory of ['512Mi', '2Gi', '1G', '500M', '1024', '1.5Gi', '128974848', '64Mi', '1e6']) {
+      assert.doesNotThrow(() => buildResourceBlock({ memory }, undefined, undefined, null), `memory=${memory}`)
+    }
+  })
+
+  it('rejects malformed memory quantities', () => {
+    for (const memory of ['', '512Megabytes', 'abc', '2 Gi', '1.2.3Gi', 'Gi', '-512Mi']) {
+      assert.throws(() => buildResourceBlock({ memory }, undefined, undefined, null), `memory=${memory} should throw`)
+    }
   })
 })
 

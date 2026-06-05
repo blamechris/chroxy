@@ -32,6 +32,29 @@ const DEFAULT_SIDECAR_IMAGE = 'chroxy-pod-agent:latest'
 const AGENT_PORT = 7681
 
 /**
+ * Default resource requests/limits applied to the sidecar container when a
+ * createEnvironment call does not specify its own (#3195).
+ *
+ * Requests are what the scheduler reserves (and what the pod is guaranteed);
+ * limits are the hard ceiling the kernel/cgroup enforces. The defaults keep a
+ * single runaway session from starving the node while leaving generous
+ * headroom for a real Claude Code workload:
+ *   - request 500m CPU / 512Mi memory — modest reservation so several
+ *     environments can be packed onto one node.
+ *   - limit   2 CPU  / 4Gi  memory — a session may burst well above its
+ *     request but is capped before it can consume the whole node.
+ *
+ * Operators override any field per-call via `opts.resources` (or the legacy
+ * `opts.memoryLimit`/`opts.cpuLimit`); see createEnvironment's JSDoc.
+ */
+export const DEFAULT_RESOURCES = Object.freeze({
+  cpu: '500m',
+  memory: '512Mi',
+  cpuLimit: '2',
+  memoryLimit: '4Gi',
+})
+
+/**
  * Default container CLI path — used to remap the host's absolute cli.js path
  * (passed by the SDK as args[0]) to a path that exists inside the Pod.
  * Mirrors DEFAULT_CONTAINER_CLI_PATH in docker.js.
@@ -538,6 +561,12 @@ export class K8sBackend {
    *   containers in the Pod spec. When unset the field is omitted and Kubernetes applies its own default
    *   ('Always' for :latest tags, 'IfNotPresent' otherwise). Set to 'IfNotPresent' for air-gapped
    *   clusters or local kind-based CI where images are loaded directly into the cluster.
+   * @param {Object|null} [opts.defaultResources] - Cluster-wide default resource requests/limits
+   *   applied to the sidecar container when a createEnvironment call does not override them (#3195).
+   *   Same shape as `createEnvironment`'s `opts.resources` (`{ cpu, memory, cpuLimit, memoryLimit }`).
+   *   An object is merged over the built-in {@link DEFAULT_RESOURCES} (so partial overrides are fine)
+   *   and validated at construction. Pass `null` to disable defaults entirely — then only explicit
+   *   per-call resource values produce a `resources` block. Omit to use the built-in defaults.
    * @param {'portforward'|'clusterip'} [opts.connectMode='portforward'] - How to reach the sidecar
    * @param {object}  [opts._coreV1Api]                 - Injected CoreV1Api for testing
    * @param {object}  [opts._portForward]               - Injected PortForward for testing
@@ -549,7 +578,7 @@ export class K8sBackend {
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
   constructor({ namespace, namespaceFor, inCluster, kubeconfigPath, sidecarImage, gitImage, imagePullPolicy,
-    connectMode, _coreV1Api, _portForward, _dialWs, _net,
+    defaultResources, connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
@@ -566,6 +595,33 @@ export class K8sBackend {
     this._sidecarImage = sidecarImage ?? DEFAULT_SIDECAR_IMAGE
     this._gitImage = gitImage ?? DEFAULT_GIT_IMAGE
     this._imagePullPolicy = imagePullPolicy ?? null
+    // Default resource requests/limits applied to the sidecar container (#3195).
+    //   - undefined → use the module DEFAULT_RESOURCES
+    //   - an object → merge over DEFAULT_RESOURCES (operator-set cluster-wide defaults)
+    //   - null      → disable defaults entirely (only explicit per-call values apply)
+    // Validate any object form up-front so a malformed quantity surfaces at
+    // construction rather than at the first createEnvironment call.
+    if (defaultResources === null) {
+      this._defaultResources = null
+    } else if (defaultResources === undefined) {
+      this._defaultResources = { ...DEFAULT_RESOURCES }
+    } else if (typeof defaultResources === 'object' && !Array.isArray(defaultResources)) {
+      const merged = { ...DEFAULT_RESOURCES, ...defaultResources }
+      // Reuse the per-call builder purely to validate the merged quantities
+      // (defaults disabled so only the merged object is validated). Re-scope
+      // any failure to opts.defaultResources — buildResourceBlock blames
+      // `resources.*`/`createEnvironment`, which points at the wrong call
+      // site for constructor config (#3195 review) — preserving the
+      // underlying error as `cause`.
+      try {
+        buildResourceBlock(merged, undefined, undefined, null)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.defaultResources is invalid — ${err.message}`, { cause: err })
+      }
+      this._defaultResources = merged
+    } else {
+      throw new TypeError('K8sBackend: opts.defaultResources must be an object or null')
+    }
     this._connectMode = connectMode ?? 'portforward'
 
     if (_coreV1Api) {
@@ -869,11 +925,24 @@ export class K8sBackend {
    * @param {number}   [opts.gitRepo.depth]    - Positive integer for a shallow clone (`--depth`)
    * @param {string}   [opts.gitRepo.mountPath] - Pod-side workspace mount path (default: `/workspace`)
    * @param {string}   [opts.image]        - Overrides the constructor sidecarImage
-   * @param {string}   [opts.memoryLimit]  - K8s memory quantity string (e.g. "2Gi").
-   *   Applied to both `resources.limits.memory` and `resources.requests.memory`.
+   * @param {Object}   [opts.resources]    - Structured resource requests/limits (#3195).
+   *   All four fields are optional K8s quantity strings, validated before any API call:
+   *     - `resources.cpu`         → `resources.requests.cpu`    (e.g. "500m", "1")
+   *     - `resources.memory`      → `resources.requests.memory` (e.g. "512Mi", "1Gi")
+   *     - `resources.cpuLimit`    → `resources.limits.cpu`      (e.g. "2")
+   *     - `resources.memoryLimit` → `resources.limits.memory`   (e.g. "4Gi")
+   *   Unset fields fall back to the legacy flat opts (below), then to the
+   *   constructor `defaultResources` (default {@link DEFAULT_RESOURCES}). Pass the
+   *   constructor `defaultResources: null` to omit defaults entirely.
+   * @param {string}   [opts.memoryLimit]  - Legacy flat K8s memory quantity string (e.g. "2Gi").
+   *   Applied to BOTH `resources.limits.memory` and `resources.requests.memory` for the
+   *   memory dimension (pre-#3195 behaviour). Superseded by `opts.resources.memory` /
+   *   `opts.resources.memoryLimit` when those are set.
    *   Accepts Docker-style suffixes ("g"/"m") and standard K8s suffixes ("Gi"/"Mi").
-   * @param {string}   [opts.cpuLimit]     - K8s CPU quantity string (e.g. "2" or "500m").
-   *   Applied to both `resources.limits.cpu` and `resources.requests.cpu`.
+   * @param {string}   [opts.cpuLimit]     - Legacy flat K8s CPU quantity string (e.g. "2" or "500m").
+   *   Applied to BOTH `resources.limits.cpu` and `resources.requests.cpu` for the CPU
+   *   dimension (pre-#3195 behaviour). Superseded by `opts.resources.cpu` /
+   *   `opts.resources.cpuLimit` when those are set.
    *   A plain integer or float (e.g. "2", "0.5") is valid K8s CPU quantity syntax.
    * @param {number[]|string[]} [opts.forwardPorts] - Extra ports to expose from the container
    *   (in addition to the built-in AGENT_PORT).  Each value may be a bare port number
@@ -902,7 +971,7 @@ export class K8sBackend {
   async createEnvironment(opts) {
     const {
       envId, cwd, containerEnv, namespace, userId, projectId,
-      memoryLimit, cpuLimit, forwardPorts, mounts,
+      memoryLimit, cpuLimit, resources: callResources, forwardPorts, mounts,
       imagePullPolicy: callImagePullPolicy,
       workspacePVC, gitRepo,
     } = opts
@@ -938,6 +1007,14 @@ export class K8sBackend {
         parsedMounts.push(_parseMountString(mounts[i]))
       }
     }
+
+    // Build + validate the resources block up-front too (#3195). A malformed
+    // quantity throws here, BEFORE the Secret/Pod create, so a bad value never
+    // leaks a half-provisioned Secret. Defaults are applied unless the operator
+    // disabled them (constructor `defaultResources: null`).
+    const resources = buildResourceBlock(
+      callResources, cpuLimit, memoryLimit, this._defaultResources,
+    )
 
     // 1. Generate per-Pod auth token
     const agentToken = randomBytes(32).toString('base64url')
@@ -1068,27 +1145,9 @@ export class K8sBackend {
       }
     }
 
-    // 6. Build resource limits/requests.
-    //    Convert Docker-style suffixes (g → Gi, m → Mi) to K8s quantity strings.
-    //    A plain integer/float string (e.g. "2", "0.5") is already valid K8s CPU syntax.
-    //    Note: the g→Gi / m→Mi mapping errs generous (~7 % / ~5 % over SI).
-    //    See _normaliseMemoryQuantity JSDoc for details.
-    const resources = {}
-    if (memoryLimit || cpuLimit) {
-      const limits = {}
-      const requests = {}
-      if (memoryLimit) {
-        const mem = _normaliseMemoryQuantity(memoryLimit)
-        limits.memory = mem
-        requests.memory = mem
-      }
-      if (cpuLimit) {
-        limits.cpu = String(cpuLimit)
-        requests.cpu = String(cpuLimit)
-      }
-      resources.limits = limits
-      resources.requests = requests
-    }
+    // 6. Resources block (requests/limits) was built + validated up-front in
+    //    step 0 (`resources`). See buildResourceBlock for the precedence rules
+    //    and DEFAULT_RESOURCES for the defaults (#3195).
 
     // 7. Assemble container spec
     const containerSpec = {
@@ -2579,4 +2638,112 @@ function _normaliseMemoryQuantity(value) {
     const map = { g: 'Gi', G: 'Gi', m: 'Mi', M: 'Mi', k: 'Ki', K: 'Ki' }
     return num + (map[unit] || unit)
   })
+}
+
+// Valid Kubernetes CPU quantity: a plain decimal number ("2", "0.5", "1.5")
+// or a milli-cpu value with the `m` suffix ("500m", "1500m"). Exponent /
+// binary-SI suffixes are not meaningful for CPU and are rejected.
+const _CPU_QUANTITY_RE = /^(?:\d+(?:\.\d+)?|\.\d+|\d+m)$/
+
+// Valid Kubernetes memory quantity AFTER normalisation: a number with an
+// optional binary-SI ("Ki"/"Mi"/"Gi"/"Ti"/"Pi"/"Ei"), decimal-SI
+// ("k"/"M"/"G"/"T"/"P"/"E"), or exponent ("e6") suffix, or a bare byte count.
+// We normalise Docker-style lone-letter suffixes first, then validate.
+const _MEMORY_QUANTITY_RE =
+  /^(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+|Ki|Mi|Gi|Ti|Pi|Ei|[kKMGTPE])?$/
+
+/**
+ * Validate + normalise a single resource quantity string (#3195).
+ *
+ * @param {string} value    - The caller-supplied quantity (e.g. "500m", "2Gi")
+ * @param {'cpu'|'memory'} kind - Which quantity grammar to enforce
+ * @param {string} field    - Field label for the error message (e.g. "resources.cpu")
+ * @returns {string} The validated (and, for memory, normalised) quantity string
+ * @throws {Error} If `value` is not a string or is not a valid K8s quantity
+ */
+function _validateResourceQuantity(value, kind, field) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(
+      `createEnvironment: ${field} must be a non-empty K8s quantity string`,
+    )
+  }
+  const trimmed = value.trim()
+  if (kind === 'cpu') {
+    if (!_CPU_QUANTITY_RE.test(trimmed)) {
+      throw new Error(
+        `createEnvironment: ${field} "${value}" is not a valid K8s CPU quantity ` +
+        '(expected e.g. "500m", "1", "0.5")',
+      )
+    }
+    return trimmed
+  }
+  // memory
+  const normalised = _normaliseMemoryQuantity(trimmed)
+  if (!_MEMORY_QUANTITY_RE.test(normalised)) {
+    throw new Error(
+      `createEnvironment: ${field} "${value}" is not a valid K8s memory quantity ` +
+      '(expected e.g. "512Mi", "2Gi", "1G")',
+    )
+  }
+  return normalised
+}
+
+/**
+ * Build a Pod container `resources` block from caller opts + defaults (#3195).
+ *
+ * Resolution precedence per field (highest first):
+ *   1. The structured `opts.resources` object: `{ cpu, memory, cpuLimit, memoryLimit }`
+ *      where `cpu`/`memory` map to `requests` and `cpuLimit`/`memoryLimit` to `limits`.
+ *   2. The legacy flat opts `opts.cpuLimit` / `opts.memoryLimit` (applied to BOTH
+ *      the request and the limit for that dimension — the pre-#3195 behaviour).
+ *   3. The supplied `defaults` object (constructor `defaultResources`, itself
+ *      seeded from the module-level {@link DEFAULT_RESOURCES}). Pass `null` to
+ *      disable defaults so only explicit per-call values produce a block.
+ *
+ * Every resolved quantity is validated against the K8s quantity grammar; an
+ * invalid string throws before the Pod/Secret are created — `createEnvironment`
+ * awaits `ensureNamespace()` first, so the tenant namespace may already exist,
+ * but no workload is provisioned with a bad value.
+ *
+ * @param {Object} [resources]            - opts.resources (structured form)
+ * @param {string} [legacyCpuLimit]       - opts.cpuLimit (flat form)
+ * @param {string} [legacyMemoryLimit]    - opts.memoryLimit (flat form)
+ * @param {Object|null} [defaults=DEFAULT_RESOURCES] - Per-field defaults, or null to disable
+ * @returns {{ requests?: Object, limits?: Object }} A resources block (possibly empty)
+ */
+function _resolveResourceField(structured, structuredLabel, legacy, legacyLabel, dflt, defaultLabel) {
+  if (structured != null) return { value: structured, field: structuredLabel }
+  if (legacy != null) return { value: legacy, field: legacyLabel }
+  if (dflt != null) return { value: dflt, field: defaultLabel }
+  return { value: null, field: null }
+}
+
+export function buildResourceBlock(resources, legacyCpuLimit, legacyMemoryLimit, defaults = DEFAULT_RESOURCES) {
+  if (resources != null && (typeof resources !== 'object' || Array.isArray(resources))) {
+    throw new Error('createEnvironment: opts.resources must be an object')
+  }
+  const r = resources || {}
+  const d = defaults || {}
+
+  // Resolve each of the four dimensions through the precedence chain,
+  // tracking which source actually supplied the value so a validation
+  // failure names the option the operator set (#3195 review) — the legacy
+  // flat opt or a constructor default — instead of always blaming
+  // `resources.*`.
+  const cpuRequest = _resolveResourceField(r.cpu, 'resources.cpu', legacyCpuLimit, 'cpuLimit', d.cpu, 'defaultResources.cpu')
+  const memRequest = _resolveResourceField(r.memory, 'resources.memory', legacyMemoryLimit, 'memoryLimit', d.memory, 'defaultResources.memory')
+  const cpuLimit = _resolveResourceField(r.cpuLimit, 'resources.cpuLimit', legacyCpuLimit, 'cpuLimit', d.cpuLimit, 'defaultResources.cpuLimit')
+  const memLimit = _resolveResourceField(r.memoryLimit, 'resources.memoryLimit', legacyMemoryLimit, 'memoryLimit', d.memoryLimit, 'defaultResources.memoryLimit')
+
+  const requests = {}
+  const limits = {}
+  if (cpuRequest.value != null) requests.cpu = _validateResourceQuantity(cpuRequest.value, 'cpu', cpuRequest.field)
+  if (memRequest.value != null) requests.memory = _validateResourceQuantity(memRequest.value, 'memory', memRequest.field)
+  if (cpuLimit.value != null) limits.cpu = _validateResourceQuantity(cpuLimit.value, 'cpu', cpuLimit.field)
+  if (memLimit.value != null) limits.memory = _validateResourceQuantity(memLimit.value, 'memory', memLimit.field)
+
+  const block = {}
+  if (Object.keys(requests).length > 0) block.requests = requests
+  if (Object.keys(limits).length > 0) block.limits = limits
+  return block
 }

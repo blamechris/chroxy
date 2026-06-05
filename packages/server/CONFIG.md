@@ -314,6 +314,54 @@ the per-call value always wins. With no caller override and no config block,
 the manager omits the field entirely and the K8s backend falls back to the
 `hostPath` strategy (single-node clusters).
 
+### Kubernetes resource quotas (CPU / memory requests & limits)
+
+When the K8s environment backend is active, every Pod it creates carries CPU and
+memory **requests** (what the scheduler reserves and the pod is guaranteed) and
+**limits** (the hard ceiling enforced by the kernel/cgroup). This keeps a single
+runaway session from starving the node (`#3195`).
+
+If a `createEnvironment` call does not specify resources, the backend applies
+these built-in defaults:
+
+| Dimension | Request | Limit |
+|-----------|---------|-------|
+| CPU       | `500m`  | `2`   |
+| Memory    | `512Mi` | `4Gi` |
+
+All values are standard [Kubernetes resource quantities](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/):
+CPU as a decimal number or milli-cpu (`500m`, `1`, `2`), memory as a binary-SI
+quantity (`512Mi`, `2Gi`) or bytes. Docker-style memory suffixes (`512m`, `2g`)
+are normalised to their binary-SI equivalents (`512Mi`, `2Gi`). Malformed
+quantities are rejected before any Pod or Secret is created.
+
+Per-create callers can override any field via the structured `resources` opt:
+
+```js
+await environmentManager.create({
+  name: 'big-build',
+  cwd: '/path/to/project',
+  resources: {
+    cpu: '1',          // requests.cpu
+    memory: '1Gi',     // requests.memory
+    cpuLimit: '4',     // limits.cpu
+    memoryLimit: '8Gi' // limits.memory
+  },
+})
+```
+
+Unset fields fall back to the legacy flat `memoryLimit`/`cpuLimit` opts (applied
+to both the request and the limit for that dimension) and then to the defaults
+above. The structured `resources` opt always wins where both are present.
+
+Docker and other non-K8s backends ignore the `resources` opt entirely.
+
+Operators can also change the cluster-wide defaults when constructing the
+backend: pass `defaultResources` as a partial `{ cpu, memory, cpuLimit,
+memoryLimit }` object (merged over the built-ins) to raise/lower them, or
+`defaultResources: null` to disable defaults so only explicit per-call values
+produce a `resources` block.
+
 ## Examples
 
 ### Using Config File Only

@@ -105,6 +105,11 @@ export class EnvironmentManager extends EventEmitter {
    * @param {string} [opts.image] - Docker image (default: node:22-slim)
    * @param {string} [opts.memoryLimit] - Memory limit (default: 2g)
    * @param {string} [opts.cpuLimit] - CPU limit (default: 2)
+   * @param {Object} [opts.resources] - K8s-only: structured resource requests/limits
+   *   `{ cpu, memory, cpuLimit, memoryLimit }` (#3195). Forwarded verbatim to the backend;
+   *   only K8sBackend acts on it (DockerBackend and others ignore it). On K8s these values
+   *   take precedence over the flat `memoryLimit`/`cpuLimit` above; unset fields fall back to
+   *   the backend's configured defaults.
    * @param {string} [opts.containerUser] - Non-root user (default: chroxy)
    * @param {Object} [opts.workspacePVC] - K8s-only: mount a pre-provisioned
    *   PersistentVolumeClaim as the workspace instead of the host `cwd` directory.
@@ -120,7 +125,7 @@ export class EnvironmentManager extends EventEmitter {
    *   for any future dashboard/CLI input).
    * @returns {Promise<Object>} The created environment object
    */
-  async create({ name, cwd, image, memoryLimit, cpuLimit, containerUser, compose, primaryService, devcontainer, workspacePVC } = {}) {
+  async create({ name, cwd, image, memoryLimit, cpuLimit, resources, containerUser, compose, primaryService, devcontainer, workspacePVC } = {}) {
     if (!name?.trim()) throw new Error('Environment name is required')
     if (!cwd?.trim()) throw new Error('Environment cwd is required')
 
@@ -168,6 +173,10 @@ export class EnvironmentManager extends EventEmitter {
       image: resolvedImage,
       memoryLimit: resolvedMemory,
       cpuLimit: resolvedCpu,
+      // #3195: structured K8s resource requests/limits, forwarded verbatim.
+      // Only K8sBackend acts on it; the manager does no shape validation
+      // (that lives in K8sBackend.buildResourceBlock). undefined → backend defaults.
+      resources,
       containerUser: user,
       containerEnv: validatedEnv,
       forwardPorts: dcConfig.forwardPorts,

@@ -49,6 +49,11 @@
  * @param {string}   opts.image           - Docker image tag (already resolved to a default before this call)
  * @param {string}   opts.memoryLimit     - Docker memory limit string (e.g. "2g")
  * @param {string}   opts.cpuLimit        - Docker CPU limit string (e.g. "2")
+ * @param {Object}   [opts.resources]     - Structured K8s resource requests/limits (#3195):
+ *   `{ cpu, memory, cpuLimit, memoryLimit }` (all optional K8s quantity strings; `cpu`/`memory`
+ *   map to `requests`, `cpuLimit`/`memoryLimit` to `limits`). Honoured only by K8sBackend —
+ *   Docker and other backends silently ignore this field. When unset, K8sBackend falls back to
+ *   the legacy `opts.cpuLimit`/`opts.memoryLimit`, then to its configured defaults.
  * @param {string}   opts.containerUser   - Non-root username to create inside the container
  * @param {Object.<string,string>} [opts.containerEnv]  - Extra environment variables to inject (already sanitized)
  * @param {number[]|string[]} [opts.forwardPorts] - Ports to expose from the container
