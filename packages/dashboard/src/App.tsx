@@ -280,6 +280,8 @@ export function App() {
   const viewMode = useConnectionStore(s => s.viewMode)
   const availableModels = useConnectionStore(s => s.availableModels)
   const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
+  // #5184: header cost-badge display mode (Settings-driven, persisted).
+  const costBadgeMode = useConnectionStore(s => s.costBadgeMode)
   const defaultModelId = useConnectionStore(s => s.defaultModelId)
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const availableProviders = useConnectionStore(s => s.availableProviders)
@@ -1909,6 +1911,15 @@ export function App() {
     return (total / contextWindow) * 100
   }, [contextUsage, activeModel, availableModels])
 
+  // #5184: human-readable model label for the `provider-model` cost-badge
+  // mode. Prefer the server-supplied `label`; fall back to the raw model id
+  // so a model missing from `availableModels` still shows something.
+  const activeModelLabel = useMemo(() => {
+    if (!activeModel) return undefined
+    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
+    return modelInfo?.label ?? activeModel
+  }, [activeModel, availableModels])
+
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
   const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
@@ -2161,6 +2172,11 @@ export function App() {
             isBusy={!isIdle}
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+            // #5184: model label + Settings-driven badge mode. The mode is
+            // always defined (store default `provider-model`), so the
+            // StatusBar always renders the configurable badge in the app.
+            model={activeModelLabel}
+            costBadgeMode={costBadgeMode}
           />
         </div>
       </header>

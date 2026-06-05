@@ -39,6 +39,8 @@ vi.mock('../theme/theme-engine', () => ({
 
 const mockSetTheme = vi.fn()
 const mockUpdateInputSettings = vi.fn()
+// #5184: spy for the cost-badge mode setter.
+const mockSetCostBadgeMode = vi.fn()
 
 // #3404 audit F1: settable so individual tests can override availableProviders
 // without redefining the whole mock.
@@ -52,6 +54,9 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     setDefaultProvider: vi.fn(),
     inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' },
     updateInputSettings: mockUpdateInputSettings,
+    // #5184: header cost-badge display mode default + setter spy.
+    costBadgeMode: 'provider-model',
+    setCostBadgeMode: mockSetCostBadgeMode,
     availableProviders: [],
     // Per-session promptEvaluator toggle defaults — overridden by the
     // Active session test cases. Default empty array + null id keeps the
@@ -118,6 +123,7 @@ vi.mock('../store/connection', () => ({
 
 beforeEach(() => {
   mockSetTheme.mockClear()
+  mockSetCostBadgeMode.mockClear()
   setMockState()
 })
 
@@ -200,6 +206,46 @@ describe('SettingsPanel', () => {
     const select = screen.getByLabelText('Send shortcut')
     fireEvent.change(select, { target: { value: 'cmd-enter' } })
     expect(mockUpdateInputSettings).toHaveBeenCalledWith({ chatEnterToSend: false })
+  })
+
+  // #5184: header cost-badge display mode select. Reads / writes through the
+  // store (mocked here) — the store layer owns the localStorage persistence,
+  // covered by the connection-store tests.
+  describe('cost-badge display mode (#5184)', () => {
+    it('renders the cost-badge mode selector with all five options', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByTestId('cost-badge-mode-select') as HTMLSelectElement
+      expect(select).toBeInTheDocument()
+      const values = Array.from(select.options).map(o => o.value).sort()
+      expect(values).toEqual(['context-pct', 'cost', 'provider-model', 'session-type', 'tokens'])
+    })
+
+    it('reflects the persisted mode from the store', () => {
+      setMockState({ costBadgeMode: 'tokens' })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByTestId('cost-badge-mode-select') as HTMLSelectElement
+      expect(select.value).toBe('tokens')
+    })
+
+    it('defaults the selector to provider-model', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByTestId('cost-badge-mode-select') as HTMLSelectElement
+      expect(select.value).toBe('provider-model')
+    })
+
+    it('calls setCostBadgeMode when a new mode is chosen', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByTestId('cost-badge-mode-select')
+      fireEvent.change(select, { target: { value: 'context-pct' } })
+      expect(mockSetCostBadgeMode).toHaveBeenCalledWith('context-pct')
+    })
+
+    it('ignores an invalid value rather than committing junk to the store', () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const select = screen.getByTestId('cost-badge-mode-select')
+      fireEvent.change(select, { target: { value: 'not-a-mode' } })
+      expect(mockSetCostBadgeMode).not.toHaveBeenCalled()
+    })
   })
 
   it('closes on Escape key', () => {

@@ -8,6 +8,7 @@ import {
   contextTooltip,
   agentCountTooltip,
 } from '../lib/status-tooltips'
+import { SidebarCostBadge, type CostBadgeMode } from './SidebarCostBadge'
 
 export interface StatusBarProps {
   cost?: number
@@ -28,6 +29,21 @@ export interface StatusBarProps {
   isBusy?: boolean
   agentCount?: number
   provider?: string
+  /**
+   * #5184: human-readable model label (e.g. `Sonnet 4.6`) for the
+   * `provider-model` badge mode. Optional — when absent the badge shows the
+   * provider label alone.
+   */
+  model?: string
+  /**
+   * #5184: cost-badge display mode chosen in Settings. When provided the
+   * cost slot renders the configurable `SidebarCostBadge` instead of the
+   * legacy `$X.XXXX` span. Left undefined by callers that don't wire the
+   * setting (and by the existing test suite) so the legacy behaviour stays
+   * the render fallback. The live app always passes the store value, whose
+   * own default is `provider-model`.
+   */
+  costBadgeMode?: CostBadgeMode
 }
 
 // #4204 Copilot review: explicit non-breaking-space escape so the
@@ -47,7 +63,7 @@ export const STATUS_OVER_BUDGET_THRESHOLD = 100
 
 export function StatusBar({
   cost, context, contextPercent, inputTokens, outputTokens, contextWindow,
-  isBusy, agentCount, provider,
+  isBusy, agentCount, provider, model, costBadgeMode,
 }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
   // #4204 Copilot review: compute each chip's tooltip once so the
@@ -103,13 +119,31 @@ export function StatusBar({
           {prov.short}
         </span>
       )}
-      <span
-        className="status-cost"
-        title={costTip}
-        aria-label={costTip}
-      >
-        {cost != null ? `$${cost.toFixed(4)}` : NBSP}
-      </span>
+      {costBadgeMode ? (
+        // #5184: configurable badge. The display mode comes from Settings
+        // (store-backed, default `provider-model`); the host still owns the
+        // tooltip so the hover breakdown is unchanged. `className` adds
+        // `status-cost` so existing layout/selectors keep working.
+        <SidebarCostBadge
+          mode={costBadgeMode}
+          cost={cost}
+          provider={provider}
+          model={model}
+          inputTokens={inputTokens}
+          outputTokens={outputTokens}
+          contextPercent={contextPercent}
+          title={costTip}
+          className="status-cost"
+        />
+      ) : (
+        <span
+          className="status-cost"
+          title={costTip}
+          aria-label={costTip}
+        >
+          {cost != null ? `$${cost.toFixed(4)}` : NBSP}
+        </span>
+      )}
       {showMeter ? (
         <span
           className="status-context-meter"

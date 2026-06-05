@@ -13,6 +13,10 @@
 // puts it on the public surface but doesn't bring it into this file's
 // type-name scope).
 import type { PermissionMode } from '@chroxy/store-core'
+// #5184: header cost-badge display mode. Defined alongside the badge
+// component (which owns the union + runtime guard) — the store only needs
+// the type for its state slot.
+import type { CostBadgeMode } from '../components/SidebarCostBadge'
 
 // Re-export shared protocol types from store-core
 export type {
@@ -910,6 +914,12 @@ export interface ConnectionState {
   setDefaultProvider: (provider: string) => void;
   defaultModel: string;
   setDefaultModel: (model: string) => void;
+
+  // #5184: header cost-badge display mode (provider-model | cost | tokens |
+  // context-pct | session-type). Persisted to localStorage; defaults to
+  // 'provider-model'. Typed as `CostBadgeMode` at the component layer.
+  costBadgeMode: CostBadgeMode;
+  setCostBadgeMode: (mode: CostBadgeMode) => void;
 
   // #4052: BYOK credentials state + actions. The raw key is NEVER stored
   // here — only the masked preview from the server's reply.
