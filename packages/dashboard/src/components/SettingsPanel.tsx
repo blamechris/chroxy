@@ -13,6 +13,11 @@ import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 import {
+  COST_BADGE_MODES,
+  COST_BADGE_MODE_LABELS,
+  isCostBadgeMode,
+} from './SidebarCostBadge'
+import {
   buildQuietHoursTimezoneList,
   formatPlatform,
   formatRelativeTime,
@@ -609,6 +614,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const availableProviders = useConnectionStore(s => s.availableProviders ?? [])
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
+  // #5184: header cost-badge display mode. Persisted via the store setter
+  // (same localStorage pattern as theme / default provider).
+  const costBadgeMode = useConnectionStore(s => s.costBadgeMode)
+  const setCostBadgeMode = useConnectionStore(s => s.setCostBadgeMode)
   // Per-session promptEvaluator toggle. Lives in settings (not the header)
   // so the "Auto-evaluate prompts before send" label has room for a hint
   // line and doesn't crowd the model/permission selects. Only shown when
@@ -971,6 +980,15 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     setDefaultModel(e.target.value)
   }, [setDefaultModel])
 
+  // #5184: validate the select value through the shared guard before
+  // committing — a stray option (or a value injected by automated tooling)
+  // can't poison the union the way a bare cast would.
+  const handleCostBadgeModeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    if (isCostBadgeMode(e.target.value)) {
+      setCostBadgeMode(e.target.value)
+    }
+  }, [setCostBadgeMode])
+
   const handleSendShortcutChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     updateInputSettings({ chatEnterToSend: e.target.value === 'enter' })
   }, [updateInputSettings])
@@ -1078,6 +1096,30 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 </select>
               </div>
             )}
+            {/* #5184: header cost-badge display mode. The badge in the
+                top bar (provider/model by default) can show cost, tokens,
+                % of context used, or the session-type tag instead. */}
+            <div className="settings-field">
+              <label htmlFor="cost-badge-mode">Header badge shows</label>
+              <select
+                id="cost-badge-mode"
+                aria-label="Header badge display"
+                value={costBadgeMode}
+                onChange={handleCostBadgeModeChange}
+                data-testid="cost-badge-mode-select"
+              >
+                {COST_BADGE_MODES.map(mode => (
+                  <option key={mode} value={mode}>
+                    {COST_BADGE_MODE_LABELS[mode]}
+                  </option>
+                ))}
+              </select>
+              <p className="settings-hint">
+                Choose what the badge in the top bar displays — provider and
+                model, the running dollar cost, token count, percent of the
+                context window used, or the session-type tag.
+              </p>
+            </div>
             <div className="settings-field">
               <label htmlFor="send-shortcut">Send message with</label>
               <select

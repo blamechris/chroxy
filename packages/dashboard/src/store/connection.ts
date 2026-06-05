@@ -132,6 +132,15 @@ import {
   createEmptyActivityState,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
+// #5184: header cost-badge mode union, default, and runtime guard. Lives in
+// a plain `lib/` module (no React dependency) so the store layer doesn't
+// import a `.tsx` component; the type, the rehydrate validation, and the
+// Settings select all share this one source of truth.
+import {
+  DEFAULT_COST_BADGE_MODE,
+  isCostBadgeMode,
+  type CostBadgeMode,
+} from '../lib/cost-badge-mode';
 import {
   loadPersistedState,
   loadSessionList,
@@ -383,6 +392,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   activeTheme: loadPersistedSetting('chroxy_persist_theme', 'default'),
   defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-sdk'),
   defaultModel: loadPersistedSetting('chroxy_default_model', ''),
+  // #5184: header cost-badge display mode. Validated through the badge's
+  // own `isCostBadgeMode` guard so a stale / corrupt localStorage value
+  // falls back to the default instead of poisoning the union.
+  costBadgeMode: (() => {
+    const raw = loadPersistedSetting('chroxy_cost_badge_mode', DEFAULT_COST_BADGE_MODE)
+    return isCostBadgeMode(raw) ? raw : DEFAULT_COST_BADGE_MODE
+  })(),
   // #4052: BYOK credentials state. Server-of-truth lives in
   // ~/.chroxy/credentials.json or ANTHROPIC_API_KEY env var; the dashboard
   // mirrors the resolved status (set/missing) + a masked preview. Updates
@@ -521,6 +537,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setDefaultModel: (model: string) => {
     set({ defaultModel: model });
     try { localStorage.setItem('chroxy_default_model', model); } catch { /* noop */ }
+  },
+
+  // #5184: persist the header cost-badge display mode. Mirrors the
+  // setTheme / setDefaultProvider pattern — immutable `set` + best-effort
+  // localStorage write that swallows quota / private-mode failures.
+  setCostBadgeMode: (mode: CostBadgeMode) => {
+    set({ costBadgeMode: mode });
+    try { localStorage.setItem('chroxy_cost_badge_mode', mode); } catch { /* noop */ }
   },
 
   // #4052: BYOK credentials actions. The full key is never stored in the

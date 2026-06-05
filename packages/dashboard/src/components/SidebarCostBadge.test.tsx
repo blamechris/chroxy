@@ -34,6 +34,15 @@ vi.mock('../store/connection', () => ({
 import { Sidebar } from './Sidebar'
 // #4123: formatters now live in store-core, not Sidebar.tsx.
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
+// #5184: the configurable header badge component + its pure formatter.
+import {
+  SidebarCostBadge,
+  formatCostBadgeContent,
+  isCostBadgeMode,
+  COST_BADGE_MODES,
+  COST_BADGE_MODE_LABELS,
+  DEFAULT_COST_BADGE_MODE,
+} from './SidebarCostBadge'
 
 afterEach(cleanup)
 
@@ -175,5 +184,136 @@ describe('Sidebar cost badge rendering (#4073)', () => {
   it('hides the badge when cumulativeUsage is undefined (older server)', () => {
     render(<Sidebar {...makeProps(undefined)} />)
     expect(screen.queryByTestId('sidebar-cost-badge-sess-1')).not.toBeInTheDocument()
+  })
+})
+
+// #5184: the header badge is now display-mode configurable. These tests pin
+// each mode's output, the default, and the defensive fallbacks.
+describe('SidebarCostBadge mode union (#5184)', () => {
+  it('exposes exactly the five documented modes', () => {
+    expect([...COST_BADGE_MODES].sort()).toEqual(
+      ['context-pct', 'cost', 'provider-model', 'session-type', 'tokens'],
+    )
+  })
+
+  it('defaults to provider-model', () => {
+    expect(DEFAULT_COST_BADGE_MODE).toBe('provider-model')
+  })
+
+  it('has a human-readable label for every mode', () => {
+    for (const mode of COST_BADGE_MODES) {
+      expect(typeof COST_BADGE_MODE_LABELS[mode]).toBe('string')
+      expect(COST_BADGE_MODE_LABELS[mode].length).toBeGreaterThan(0)
+    }
+  })
+
+  it('isCostBadgeMode accepts valid modes and rejects junk', () => {
+    expect(isCostBadgeMode('cost')).toBe(true)
+    expect(isCostBadgeMode('provider-model')).toBe(true)
+    expect(isCostBadgeMode('nonsense')).toBe(false)
+    expect(isCostBadgeMode('')).toBe(false)
+    expect(isCostBadgeMode(undefined)).toBe(false)
+    expect(isCostBadgeMode(42)).toBe(false)
+  })
+
+  it('isCostBadgeMode rejects inherited Object.prototype keys (no prototype pollution)', () => {
+    // The guard must use hasOwnProperty, NOT `in` — otherwise a corrupt
+    // localStorage value of `toString` / `constructor` / `__proto__` would
+    // pass and get stored as a fake CostBadgeMode.
+    expect(isCostBadgeMode('toString')).toBe(false)
+    expect(isCostBadgeMode('constructor')).toBe(false)
+    expect(isCostBadgeMode('hasOwnProperty')).toBe(false)
+    expect(isCostBadgeMode('__proto__')).toBe(false)
+  })
+})
+
+describe('formatCostBadgeContent per mode (#5184)', () => {
+  const full = {
+    cost: 0.2903,
+    provider: 'claude-sdk',
+    model: 'Sonnet 4.6',
+    inputTokens: 25000,
+    outputTokens: 5000,
+    contextPercent: 45.4,
+  }
+
+  it('provider-model (default): "Claude Code (SDK) · Sonnet 4.6"', () => {
+    expect(formatCostBadgeContent({ ...full, mode: 'provider-model' }))
+      .toBe('Claude Code (SDK) · Sonnet 4.6')
+  })
+
+  it('provider-model falls back to provider label alone when no model', () => {
+    expect(formatCostBadgeContent({ ...full, mode: 'provider-model', model: null }))
+      .toBe('Claude Code (SDK)')
+  })
+
+  it('defaults to provider-model when mode is omitted', () => {
+    expect(formatCostBadgeContent(full)).toBe('Claude Code (SDK) · Sonnet 4.6')
+  })
+
+  it('cost: legacy "$0.2903" 4-decimal form', () => {
+    expect(formatCostBadgeContent({ ...full, mode: 'cost' })).toBe('$0.2903')
+  })
+
+  it('tokens: compact input+output total with a tokens suffix', () => {
+    expect(formatCostBadgeContent({ ...full, mode: 'tokens' })).toBe('30.0k tokens')
+  })
+
+  it('context-pct: rounded percent of the context window', () => {
+    expect(formatCostBadgeContent({ ...full, mode: 'context-pct' })).toBe('45%')
+  })
+
+  it('session-type: the provider short tag', () => {
+    expect(formatCostBadgeContent({ ...full, mode: 'session-type' })).toBe('SDK')
+    expect(formatCostBadgeContent({ ...full, mode: 'session-type', provider: 'claude-cli' }))
+      .toBe('CLI')
+  })
+
+  it('renders an NBSP placeholder when the mode datum is missing (no layout shift)', () => {
+    const NBSP = ' '
+    expect(formatCostBadgeContent({ mode: 'cost', cost: null })).toBe(NBSP)
+    expect(formatCostBadgeContent({ mode: 'tokens', inputTokens: 0, outputTokens: 0 })).toBe(NBSP)
+    expect(formatCostBadgeContent({ mode: 'context-pct', contextPercent: null })).toBe(NBSP)
+    expect(formatCostBadgeContent({ mode: 'session-type', provider: null })).toBe(NBSP)
+  })
+
+  it('cost guards against non-finite input', () => {
+    const NBSP = ' '
+    expect(formatCostBadgeContent({ mode: 'cost', cost: NaN })).toBe(NBSP)
+    expect(formatCostBadgeContent({ mode: 'cost', cost: Infinity })).toBe(NBSP)
+  })
+})
+
+describe('SidebarCostBadge render (#5184)', () => {
+  it('renders the mode content and stamps data-cost-badge-mode', () => {
+    render(
+      <SidebarCostBadge
+        mode="cost"
+        cost={0.2903}
+        provider="claude-sdk"
+        model="Sonnet 4.6"
+        title="Total session cost"
+      />,
+    )
+    const badge = screen.getByTestId('sidebar-cost-badge')
+    expect(badge.textContent).toBe('$0.2903')
+    expect(badge.getAttribute('data-cost-badge-mode')).toBe('cost')
+    expect(badge.getAttribute('title')).toBe('Total session cost')
+    expect(badge.getAttribute('aria-label')).toBe('Total session cost')
+  })
+
+  it('defaults to provider-model when no mode prop is given', () => {
+    render(<SidebarCostBadge provider="claude-sdk" model="Sonnet 4.6" />)
+    const badge = screen.getByTestId('sidebar-cost-badge')
+    expect(badge.getAttribute('data-cost-badge-mode')).toBe('provider-model')
+    expect(badge.textContent).toBe('Claude Code (SDK) · Sonnet 4.6')
+  })
+
+  it('appends an extra className alongside the base cost-badge class', () => {
+    const { container } = render(<SidebarCostBadge mode="session-type" provider="claude-cli" className="status-cost" />)
+    const el = container.querySelector('.cost-badge')
+    expect(el).not.toBeNull()
+    expect(el!.className).toContain('status-cost')
+    expect(el!.textContent).toBe('CLI')
   })
 })

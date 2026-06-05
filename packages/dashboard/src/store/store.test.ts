@@ -389,6 +389,38 @@ describe('useConnectionStore', () => {
     expect(typeof state.clearPlanState).toBe('function');
   });
 
+  // #5184: header cost-badge display mode — default, setter, persistence.
+  describe('costBadgeMode (#5184)', () => {
+    it('defaults to provider-model', async () => {
+      const { useConnectionStore } = await import('./connection');
+      expect(useConnectionStore.getState().costBadgeMode).toBe('provider-model');
+    });
+
+    it('setCostBadgeMode updates state and persists to localStorage', async () => {
+      const { useConnectionStore } = await import('./connection');
+      useConnectionStore.getState().setCostBadgeMode('tokens');
+      expect(useConnectionStore.getState().costBadgeMode).toBe('tokens');
+      expect(localStorage.getItem('chroxy_cost_badge_mode')).toBe('tokens');
+      // Restore so later tests in this file see the default again.
+      useConnectionStore.getState().setCostBadgeMode('provider-model');
+    });
+
+    it('swallows a localStorage write failure (private mode / quota)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota exceeded');
+      });
+      try {
+        expect(() => useConnectionStore.getState().setCostBadgeMode('cost')).not.toThrow();
+        // State still updates even when the write fails.
+        expect(useConnectionStore.getState().costBadgeMode).toBe('cost');
+      } finally {
+        spy.mockRestore();
+        useConnectionStore.getState().setCostBadgeMode('provider-model');
+      }
+    });
+  });
+
   it('switchSession updates activeSessionId even without cached state', async () => {
     const { useConnectionStore } = await import('./connection');
 
