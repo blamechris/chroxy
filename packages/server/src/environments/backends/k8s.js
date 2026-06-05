@@ -163,7 +163,7 @@ const DEFAULT_NAMESPACE_PREFIX = 'chroxy-user-'
  * @returns {string} An RFC 1123-label-safe fragment (non-empty)
  * @throws {Error} If `identity` is not a non-empty string
  */
-function sanitizeNamespaceLabel(identity, { maxLength = 50 } = {}) {
+export function sanitizeNamespaceLabel(identity, { maxLength = 50 } = {}) {
   if (typeof identity !== 'string' || identity.length === 0) {
     throw new Error('sanitizeNamespaceLabel: identity must be a non-empty string')
   }
@@ -193,7 +193,15 @@ function sanitizeNamespaceLabel(identity, { maxLength = 50 } = {}) {
   // Reserve room for "-<hash>" within maxLength, then re-trim any '-' the
   // truncation may have exposed at the boundary.
   const suffix = `-${hash}`
-  const budget = Math.max(1, maxLength - suffix.length)
+  // When maxLength is too small to hold even "<1char>-<hash>", drop the fragment
+  // entirely and return the hash truncated to maxLength. This keeps the
+  // documented length cap a hard guarantee (the `head + suffix` path below would
+  // otherwise overshoot for pathologically small maxLength values).  The hash is
+  // [a-f0-9], so any prefix of it is still a valid RFC 1123 label.
+  if (maxLength <= suffix.length) {
+    return hash.slice(0, Math.max(1, maxLength))
+  }
+  const budget = maxLength - suffix.length
   const head = fragment.slice(0, budget).replace(/-+$/g, '')
   // `head` can be empty when the identity was all symbols; fall back to the
   // hash alone (always [a-f0-9], a valid label).
@@ -1542,6 +1550,11 @@ export class K8sBackend {
    * namespace.  There is intentionally no cluster-wide list: a tenant must only
    * ever see its own environments.
    *
+   * A brand-new tenant whose namespace has not been created yet has, by
+   * definition, no environments.  The K8s API returns 404 ("namespace not
+   * found") for `listNamespacedPod` in that case, which we translate to an empty
+   * list rather than surfacing as an error.
+   *
    * @param {Object} [opts]
    * @param {string} [opts.namespace]  - Explicit namespace to list
    * @param {string} [opts.userId]     - Tenant identity for namespace resolution
@@ -1550,10 +1563,17 @@ export class K8sBackend {
    */
   async listEnvironments(opts = {}) {
     const ns = this._namespaceForCall(opts, 'listEnvironments')
-    const result = await this._api.listNamespacedPod({
-      namespace: ns,
-      labelSelector: 'app.kubernetes.io/managed-by=chroxy',
-    })
+    let result
+    try {
+      result = await this._api.listNamespacedPod({
+        namespace: ns,
+        labelSelector: 'app.kubernetes.io/managed-by=chroxy',
+      })
+    } catch (err) {
+      // The tenant namespace does not exist yet → no environments.
+      if (_isNotFound(err)) return []
+      throw err
+    }
     const items = result?.items || []
     return items
       .map((pod) => pod?.metadata?.name)

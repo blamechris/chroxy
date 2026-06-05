@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
-import { K8sBackend } from '../../../src/environments/backends/k8s.js'
+import { K8sBackend, sanitizeNamespaceLabel } from '../../../src/environments/backends/k8s.js'
 
 // ─── Mock CoreV1Api factory ───────────────────────────────────────────────────
 
@@ -4591,6 +4591,23 @@ describe('K8sBackend namespace isolation (#3194)', () => {
     assert.match(ns, /^chroxy-user-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/)
   })
 
+  // ─── sanitizeNamespaceLabel length-cap hard guarantee ──────────────────────
+
+  it('sanitizeNamespaceLabel never exceeds maxLength, even for tiny caps', () => {
+    // The hash suffix is "-" + 8 hex = 9 chars; a maxLength below that must
+    // still be honoured (the function falls back to a truncated hash).
+    for (const maxLength of [1, 3, 5, 9, 12, 20]) {
+      const out = sanitizeNamespaceLabel('some.very/long@identity-value', { maxLength })
+      assert.ok(out.length <= maxLength, `len ${out.length} > maxLength ${maxLength} for "${out}"`)
+      assert.ok(out.length >= 1, 'must be non-empty')
+      assert.match(out, /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, `"${out}" is not a valid RFC 1123 label`)
+    }
+  })
+
+  it('sanitizeNamespaceLabel leaves a clean identity untouched (no hash)', () => {
+    assert.equal(sanitizeNamespaceLabel('alice'), 'alice')
+  })
+
   // ─── ensureNamespace idempotency ───────────────────────────────────────────
 
   it('createEnvironment creates the namespace when it does not exist (404 → create)', async () => {
@@ -4711,6 +4728,24 @@ describe('K8sBackend namespace isolation (#3194)', () => {
 
     const names = await backend.listEnvironments({ userId: 'empty' })
     assert.deepEqual(names, [])
+  })
+
+  it('listEnvironments returns [] when the tenant namespace does not exist yet (404)', async () => {
+    const api = createMockApi({ listPods: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    // Brand-new user with no environments: namespace not created yet.
+    const names = await backend.listEnvironments({ userId: 'newcomer' })
+    assert.deepEqual(names, [])
+    assert.equal(api.calls.listPods[0].namespace, 'chroxy-user-newcomer')
+  })
+
+  it('listEnvironments re-throws a non-404 list error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ listPods: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(() => backend.listEnvironments({ userId: 'x' }), /boom/)
   })
 
   it('listEnvironments uses the static default namespace when no identity is given', async () => {
