@@ -1108,4 +1108,244 @@ describe('SessionBar', () => {
       expect(tabA.getAttribute('aria-describedby')).toBe(null)
     })
   })
+
+  describe('#5204 Control Room top-level tab', () => {
+    it('does not render the CR tab when controlRoom is omitted', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+        />
+      )
+      expect(screen.queryByTestId('control-room-tab')).toBeNull()
+    })
+
+    it('does not render the CR tab when open is false', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: false, active: false, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      expect(screen.queryByTestId('control-room-tab')).toBeNull()
+    })
+
+    it('renders the pinned CR tab when open, before the session tabs', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      const tablist = screen.getByRole('tablist')
+      const tabs = within(tablist).getAllByRole('tab')
+      // CR tab is rendered first (pinned left), ahead of the session pills.
+      expect(tabs[0]).toBe(screen.getByTestId('control-room-tab'))
+      expect(screen.getByText('Control Room')).toBeInTheDocument()
+    })
+
+    it('marks the CR tab aria-selected when active', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: true, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      const crTab = screen.getByTestId('control-room-tab')
+      expect(crTab).toHaveAttribute('aria-selected', 'true')
+      expect(crTab.className).toContain('active')
+    })
+
+    it('calls onActivate when an inactive CR tab is clicked', () => {
+      const onActivate = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate, onClose: vi.fn() }}
+        />
+      )
+      fireEvent.click(screen.getByTestId('control-room-tab'))
+      expect(onActivate).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not call onActivate when the already-active CR tab is clicked', () => {
+      const onActivate = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: true, onActivate, onClose: vi.fn() }}
+        />
+      )
+      fireEvent.click(screen.getByTestId('control-room-tab'))
+      expect(onActivate).not.toHaveBeenCalled()
+    })
+
+    it('activates the CR tab via Enter / Space keys', () => {
+      const onActivate = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate, onClose: vi.fn() }}
+        />
+      )
+      const crTab = screen.getByTestId('control-room-tab')
+      fireEvent.keyDown(crTab, { key: 'Enter' })
+      fireEvent.keyDown(crTab, { key: ' ' })
+      expect(onActivate).toHaveBeenCalledTimes(2)
+    })
+
+    it('closes the CR tab via its × without activating (stopPropagation)', () => {
+      const onActivate = vi.fn()
+      const onClose = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate, onClose }}
+        />
+      )
+      fireEvent.click(screen.getByTestId('control-room-tab-close'))
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(onActivate).not.toHaveBeenCalled()
+    })
+
+    it('CR tab close is always shown even with a single session (exempt from showClose gate)', () => {
+      render(
+        <SessionBar
+          sessions={[{ sessionId: 's1', name: 'Default', isBusy: false, isActive: true }]}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      // The single session tab has no close (showClose=false), but the CR tab does.
+      expect(screen.getByTestId('control-room-tab-close')).toBeInTheDocument()
+    })
+
+    it('CR tab is not draggable (not a session)', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          onReorder={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      const crTab = screen.getByTestId('control-room-tab')
+      expect(crTab.getAttribute('draggable')).not.toBe('true')
+    })
+
+    it('does not activate the CR tab when Enter/Space bubbles from its close ×', () => {
+      const onActivate = vi.fn()
+      const onClose = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate, onClose }}
+        />
+      )
+      // A key event originating on the close button must not reach the tab's
+      // activate handler (guarded by target === currentTarget).
+      const closeBtn = screen.getByTestId('control-room-tab-close')
+      fireEvent.keyDown(closeBtn, { key: 'Enter' })
+      fireEvent.keyDown(closeBtn, { key: ' ' })
+      expect(onActivate).not.toHaveBeenCalled()
+    })
+
+    it('clears the active session tab selection while the CR tab is active (single selected tab)', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: true, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      // s1 is the active session, but the CR tab is the focused view — only
+      // the CR tab should report aria-selected, never two tabs at once.
+      const crTab = screen.getByTestId('control-room-tab')
+      const sessionTab = screen.getByTestId('session-tab-s1')
+      expect(crTab).toHaveAttribute('aria-selected', 'true')
+      expect(sessionTab).toHaveAttribute('aria-selected', 'false')
+      expect(sessionTab.className).not.toContain('active')
+      const selected = screen
+        .getAllByRole('tab')
+        .filter(t => t.getAttribute('aria-selected') === 'true')
+      expect(selected).toHaveLength(1)
+    })
+
+    it('restores the active session selection when the CR tab is open but not active', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      const sessionTab = screen.getByTestId('session-tab-s1')
+      expect(sessionTab).toHaveAttribute('aria-selected', 'true')
+      expect(sessionTab.className).toContain('active')
+    })
+
+    it('fires onSwitch when clicking the underlying-active session while CR is active', () => {
+      const onSwitch = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={onSwitch}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: true, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      // Clicking the active session while CR is overlaid must return to it.
+      fireEvent.click(screen.getByTestId('session-tab-s1'))
+      expect(onSwitch).toHaveBeenCalledWith('s1')
+    })
+  })
 })

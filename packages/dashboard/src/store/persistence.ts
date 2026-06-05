@@ -92,8 +92,11 @@ const MAX_MESSAGES = 100;
 /** Max terminal buffer size to persist (characters, ~50 KB for ASCII) */
 const MAX_TERMINAL_SIZE = 50_000;
 
-/** Valid view modes — used to validate persisted values */
-const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'system', 'console', 'environments', 'snapshots', 'pool', 'control-room'] as const;
+/** Valid view modes — used to validate persisted values.
+ * #5204 — 'control-room' removed: it's a top-level tab now, not a view mode.
+ * Any stale persisted 'control-room' value fails validation and falls back to
+ * the default, which is the desired behaviour. */
+const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'system', 'console', 'environments', 'snapshots', 'pool'] as const;
 type ViewMode = (typeof VALID_VIEW_MODES)[number];
 
 function sessionMessagesKey(sessionId: string): string {

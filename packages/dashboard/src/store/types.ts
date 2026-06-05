@@ -703,8 +703,9 @@ export interface ConnectionState {
   // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).
   pairingRefreshedCount: number;
 
-  // View mode
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool' | 'control-room';
+  // View mode. #5204 — 'control-room' removed: the Control Room is now a
+  // session-independent top-level tab in App, not a per-session view mode.
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool';
 
   // Input settings
   inputSettings: InputSettings;
@@ -723,7 +724,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool' | 'control-room') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
   appendTerminalData: (data: string) => void;
