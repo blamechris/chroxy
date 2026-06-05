@@ -5,6 +5,8 @@ import {
   K8sBackend,
   sanitizeNamespaceLabel,
   buildResourceBlock,
+  buildResourceQuotaSpec,
+  buildLimitRangeSpec,
   DEFAULT_RESOURCES,
 } from '../../../src/environments/backends/k8s.js'
 
@@ -22,12 +24,18 @@ import {
  * @param {Function} [opts.readNs]       - Override for `readNamespace` (ensureNamespace probe)
  * @param {Function} [opts.createNs]     - Override for `createNamespace` (ensureNamespace create)
  * @param {Function} [opts.listPods]     - Override for `listNamespacedPod` (listEnvironments)
+ * @param {Function} [opts.readQuota]    - Override for `readNamespacedResourceQuota` (ensureResourceQuota probe)
+ * @param {Function} [opts.createQuota]  - Override for `createNamespacedResourceQuota` (ensureResourceQuota create)
+ * @param {Function} [opts.readLimitRange]   - Override for `readNamespacedLimitRange` (ensureLimitRange probe)
+ * @param {Function} [opts.createLimitRange] - Override for `createNamespacedLimitRange` (ensureLimitRange create)
  */
 function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret, readSecret,
-  readNs, createNs, listPods } = {}) {
+  readNs, createNs, listPods,
+  readQuota, createQuota, readLimitRange, createLimitRange } = {}) {
   const calls = {
     create: [], delete: [], read: [], createSecret: [], deleteSecret: [], readSecret: [],
     readNs: [], createNs: [], listPods: [],
+    readQuota: [], createQuota: [], readLimitRange: [], createLimitRange: [],
   }
 
   const api = {
@@ -69,6 +77,25 @@ function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecr
     listNamespacedPod: listPods
       ? async (args) => { calls.listPods.push(args); return listPods(args) }
       : async (args) => { calls.listPods.push(args); return { items: [] } },
+
+    // Namespace-level ResourceQuota / LimitRange lifecycle (#5142). Default read
+    // resolves so the object is treated as already-existing — when the feature is
+    // enabled and no override is given, ensure does NOT attempt a create.
+    readNamespacedResourceQuota: readQuota
+      ? async (args) => { calls.readQuota.push(args); return readQuota(args) }
+      : async (args) => { calls.readQuota.push(args); return {} },
+
+    createNamespacedResourceQuota: createQuota
+      ? async (args) => { calls.createQuota.push(args); return createQuota(args) }
+      : async (args) => { calls.createQuota.push(args); return {} },
+
+    readNamespacedLimitRange: readLimitRange
+      ? async (args) => { calls.readLimitRange.push(args); return readLimitRange(args) }
+      : async (args) => { calls.readLimitRange.push(args); return {} },
+
+    createNamespacedLimitRange: createLimitRange
+      ? async (args) => { calls.createLimitRange.push(args); return createLimitRange(args) }
+      : async (args) => { calls.createLimitRange.push(args); return {} },
   }
 
   api.calls = calls
@@ -5045,5 +5072,371 @@ describe('K8sBackend namespace isolation (#3194)', () => {
     )
     assert.equal(api.calls.create.length, 0)
     assert.equal(api.calls.createSecret.length, 0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Namespace-level ResourceQuota / LimitRange (#5142)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildResourceQuotaSpec() (#5142)', () => {
+  it('maps cpu/memory to aggregate requests.* keys', () => {
+    const hard = buildResourceQuotaSpec({ cpu: '8', memory: '16Gi' })
+    assert.deepEqual(hard, { 'requests.cpu': '8', 'requests.memory': '16Gi' })
+  })
+
+  it('maps cpuLimit/memoryLimit to aggregate limits.* keys', () => {
+    const hard = buildResourceQuotaSpec({ cpuLimit: '16', memoryLimit: '32Gi' })
+    assert.deepEqual(hard, { 'limits.cpu': '16', 'limits.memory': '32Gi' })
+  })
+
+  it('maps pods to a stringified count quota', () => {
+    const hard = buildResourceQuotaSpec({ pods: 5 })
+    assert.deepEqual(hard, { pods: '5' })
+  })
+
+  it('combines every dimension', () => {
+    const hard = buildResourceQuotaSpec({
+      cpu: '4', memory: '8Gi', cpuLimit: '8', memoryLimit: '16Gi', pods: 10,
+    })
+    assert.deepEqual(hard, {
+      'requests.cpu': '4',
+      'requests.memory': '8Gi',
+      'limits.cpu': '8',
+      'limits.memory': '16Gi',
+      pods: '10',
+    })
+  })
+
+  it('normalises Docker-style memory suffixes via the shared validator', () => {
+    const hard = buildResourceQuotaSpec({ memory: '16g' })
+    assert.equal(hard['requests.memory'], '16Gi')
+  })
+
+  it('throws on a malformed CPU quantity', () => {
+    assert.throws(() => buildResourceQuotaSpec({ cpu: 'lots' }), /not a valid K8s CPU quantity/)
+  })
+
+  it('throws on a malformed memory quantity', () => {
+    assert.throws(() => buildResourceQuotaSpec({ memory: '8 gigabytes' }), /not a valid K8s memory quantity/)
+  })
+
+  it('throws on a non-positive / non-integer pods count', () => {
+    assert.throws(() => buildResourceQuotaSpec({ pods: 0 }), /positive integer/)
+    assert.throws(() => buildResourceQuotaSpec({ pods: 2.5 }), /positive integer/)
+    assert.throws(() => buildResourceQuotaSpec({ pods: -1 }), /positive integer/)
+  })
+
+  it('throws when no cap is set', () => {
+    assert.throws(() => buildResourceQuotaSpec({}), /at least one of/)
+  })
+
+  it('throws on a non-object spec', () => {
+    assert.throws(() => buildResourceQuotaSpec(null), /must be an object/)
+    assert.throws(() => buildResourceQuotaSpec([]), /must be an object/)
+    assert.throws(() => buildResourceQuotaSpec('8'), /must be an object/)
+  })
+})
+
+describe('buildLimitRangeSpec() (#5142)', () => {
+  it('maps cpu/memory to defaultRequest.*', () => {
+    const item = buildLimitRangeSpec({ cpu: '250m', memory: '256Mi' })
+    assert.deepEqual(item, {
+      type: 'Container',
+      defaultRequest: { cpu: '250m', memory: '256Mi' },
+    })
+  })
+
+  it('maps cpuLimit/memoryLimit to default.*', () => {
+    const item = buildLimitRangeSpec({ cpuLimit: '1', memoryLimit: '1Gi' })
+    assert.deepEqual(item, {
+      type: 'Container',
+      default: { cpu: '1', memory: '1Gi' },
+    })
+  })
+
+  it('combines requests + limits in one container item', () => {
+    const item = buildLimitRangeSpec({ cpu: '250m', memory: '256Mi', cpuLimit: '1', memoryLimit: '1Gi' })
+    assert.deepEqual(item, {
+      type: 'Container',
+      default: { cpu: '1', memory: '1Gi' },
+      defaultRequest: { cpu: '250m', memory: '256Mi' },
+    })
+  })
+
+  it('normalises Docker-style memory suffixes via the shared validator', () => {
+    const item = buildLimitRangeSpec({ memoryLimit: '1g' })
+    assert.equal(item.default.memory, '1Gi')
+  })
+
+  it('throws on a malformed quantity', () => {
+    assert.throws(() => buildLimitRangeSpec({ cpu: 'nope' }), /not a valid K8s CPU quantity/)
+  })
+
+  it('throws when no default is set', () => {
+    assert.throws(() => buildLimitRangeSpec({}), /at least one of/)
+  })
+
+  it('throws on a non-object spec', () => {
+    assert.throws(() => buildLimitRangeSpec(null), /must be an object/)
+    assert.throws(() => buildLimitRangeSpec([]), /must be an object/)
+  })
+})
+
+describe('K8sBackend constructor namespaceQuota / namespaceLimitRange validation (#5142)', () => {
+  it('validates namespaceQuota at construction (fails fast on bad quantity)', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceQuota: { cpu: 'bad' } }),
+      /not a valid K8s CPU quantity/,
+    )
+  })
+
+  it('validates namespaceLimitRange at construction (fails fast on bad quantity)', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceLimitRange: { memoryLimit: 'bad' } }),
+      /not a valid K8s memory quantity/,
+    )
+  })
+
+  it('rejects an empty namespaceQuota object at construction', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceQuota: {} }),
+      /at least one of/,
+    )
+  })
+
+  it('accepts a valid namespaceQuota / namespaceLimitRange', () => {
+    assert.doesNotThrow(() => new K8sBackend({
+      _coreV1Api: createMockApi(),
+      namespaceQuota: { cpu: '8', memory: '16Gi', pods: 10 },
+      namespaceLimitRange: { cpu: '250m', cpuLimit: '1' },
+    }))
+  })
+
+  it('treats null / omitted as feature-off (no spec stored)', () => {
+    const off = new K8sBackend({ _coreV1Api: createMockApi() })
+    assert.equal(off._namespaceQuotaSpec, null)
+    assert.equal(off._namespaceLimitRangeSpec, null)
+    const explicitNull = new K8sBackend({
+      _coreV1Api: createMockApi(), namespaceQuota: null, namespaceLimitRange: null,
+    })
+    assert.equal(explicitNull._namespaceQuotaSpec, null)
+    assert.equal(explicitNull._namespaceLimitRangeSpec, null)
+  })
+})
+
+describe('K8sBackend.ensureResourceQuota() / ensureLimitRange() (#5142)', () => {
+  const QUOTA = { cpu: '8', memory: '16Gi', pods: 10 }
+  const LIMITS = { cpu: '250m', memory: '256Mi', cpuLimit: '1', memoryLimit: '1Gi' }
+
+  // ─── opt-in / no-op when unconfigured ──────────────────────────────────────
+
+  it('is a no-op when neither quota nor limitrange is configured', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.ensureResourceQuota('chroxy-user-x')
+    await backend.ensureLimitRange('chroxy-user-x')
+
+    assert.equal(api.calls.readQuota.length, 0)
+    assert.equal(api.calls.createQuota.length, 0)
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  it('createEnvironment never touches quota/limitrange when feature is off', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.readQuota.length, 0)
+    assert.equal(api.calls.createQuota.length, 0)
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  // ─── ResourceQuota idempotent ensure ───────────────────────────────────────
+
+  it('ensureResourceQuota creates the quota when it does not exist (404 → create)', async () => {
+    const api = createMockApi({ readQuota: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-bob')
+
+    assert.equal(api.calls.readQuota.length, 1)
+    assert.equal(api.calls.createQuota.length, 1)
+    assert.equal(api.calls.createQuota[0].namespace, 'chroxy-user-bob')
+    const body = api.calls.createQuota[0].body
+    assert.equal(body.kind, 'ResourceQuota')
+    assert.equal(body.metadata.name, 'chroxy-quota')
+    assert.equal(body.metadata.labels['app.kubernetes.io/managed-by'], 'chroxy')
+    assert.deepEqual(body.spec.hard, {
+      'requests.cpu': '8', 'requests.memory': '16Gi', pods: '10',
+    })
+  })
+
+  it('ensureResourceQuota does NOT create when it already exists (read succeeds)', async () => {
+    const api = createMockApi() // default readQuota resolves
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-bob')
+
+    assert.equal(api.calls.readQuota.length, 1)
+    assert.equal(api.calls.createQuota.length, 0)
+  })
+
+  it('ensureResourceQuota swallows 409 AlreadyExists on concurrent create', async () => {
+    const make409 = () => Object.assign(new Error('Conflict'), { code: 409 })
+    const api = createMockApi({
+      readQuota: () => { throw make404Error() },
+      createQuota: () => { throw make409() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-race')
+    assert.equal(api.calls.createQuota.length, 1)
+  })
+
+  it('ensureResourceQuota re-throws a non-404 read error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ readQuota: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await assert.rejects(() => backend.ensureResourceQuota('chroxy-user-x'), /boom/)
+  })
+
+  it('ensureResourceQuota re-throws a non-409 create error', async () => {
+    const make500 = () => Object.assign(new Error('denied'), { code: 500 })
+    const api = createMockApi({
+      readQuota: () => { throw make404Error() },
+      createQuota: () => { throw make500() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await assert.rejects(() => backend.ensureResourceQuota('chroxy-user-x'), /denied/)
+  })
+
+  it('ensureResourceQuota caches per process — second call is a no-op', async () => {
+    const api = createMockApi({ readQuota: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-cache')
+    await backend.ensureResourceQuota('chroxy-user-cache')
+
+    assert.equal(api.calls.readQuota.length, 1)
+    assert.equal(api.calls.createQuota.length, 1)
+  })
+
+  it('ensureResourceQuota never touches the static default namespace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('default')
+
+    assert.equal(api.calls.readQuota.length, 0)
+    assert.equal(api.calls.createQuota.length, 0)
+  })
+
+  // ─── LimitRange idempotent ensure ──────────────────────────────────────────
+
+  it('ensureLimitRange creates the limitrange when it does not exist (404 → create)', async () => {
+    const api = createMockApi({ readLimitRange: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-bob')
+
+    assert.equal(api.calls.readLimitRange.length, 1)
+    assert.equal(api.calls.createLimitRange.length, 1)
+    const body = api.calls.createLimitRange[0].body
+    assert.equal(body.kind, 'LimitRange')
+    assert.equal(body.metadata.name, 'chroxy-limits')
+    assert.equal(body.metadata.labels['app.kubernetes.io/managed-by'], 'chroxy')
+    assert.deepEqual(body.spec.limits, [{
+      type: 'Container',
+      default: { cpu: '1', memory: '1Gi' },
+      defaultRequest: { cpu: '250m', memory: '256Mi' },
+    }])
+  })
+
+  it('ensureLimitRange does NOT create when it already exists (read succeeds)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-bob')
+
+    assert.equal(api.calls.readLimitRange.length, 1)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  it('ensureLimitRange swallows 409 AlreadyExists on concurrent create', async () => {
+    const make409 = () => Object.assign(new Error('Conflict'), { code: 409 })
+    const api = createMockApi({
+      readLimitRange: () => { throw make404Error() },
+      createLimitRange: () => { throw make409() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-race')
+    assert.equal(api.calls.createLimitRange.length, 1)
+  })
+
+  it('ensureLimitRange caches per process — second call is a no-op', async () => {
+    const api = createMockApi({ readLimitRange: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-cache')
+    await backend.ensureLimitRange('chroxy-user-cache')
+
+    assert.equal(api.calls.readLimitRange.length, 1)
+    assert.equal(api.calls.createLimitRange.length, 1)
+  })
+
+  it('ensureLimitRange never touches the static default namespace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('default')
+
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  // ─── composition with ensureNamespace via createEnvironment ─────────────────
+
+  it('createEnvironment ensures namespace → quota → limitrange → secret → pod, in order', async () => {
+    const order = []
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { order.push('createNs'); return {} },
+      readQuota: () => { throw make404Error() },
+      createQuota: () => { order.push('createQuota'); return {} },
+      readLimitRange: () => { throw make404Error() },
+      createLimitRange: () => { order.push('createLimitRange'); return {} },
+      createSecret: () => { order.push('createSecret'); return {} },
+      createPod: () => { order.push('createPod'); return {} },
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api, namespaceQuota: QUOTA, namespaceLimitRange: LIMITS,
+    })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'carol' })
+
+    assert.deepEqual(order, [
+      'createNs', 'createQuota', 'createLimitRange', 'createSecret', 'createPod',
+    ])
+    assert.equal(api.calls.createQuota[0].namespace, 'chroxy-user-carol')
+    assert.equal(api.calls.createLimitRange[0].namespace, 'chroxy-user-carol')
+  })
+
+  it('createEnvironment ensures only the quota when only namespaceQuota is set', async () => {
+    const api = createMockApi({ readQuota: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.createQuota.length, 1)
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
   })
 })

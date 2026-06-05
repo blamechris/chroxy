@@ -965,6 +965,10 @@ export async function buildEnvironmentBackend(config, { _execFile, _loadBackends
       sidecarImage: k8s.sidecarImage,
       imagePullPolicy: k8s.imagePullPolicy,
       connectMode: k8s.connectMode,
+      // Per-tenant namespace-level guardrails (#5142). Both opt-in; the backend
+      // validates the quantity strings and throws on a malformed block.
+      namespaceQuota: k8s.namespaceQuota,
+      namespaceLimitRange: k8s.namespaceLimitRange,
     })
     return { backend, type }
   }
@@ -981,6 +985,9 @@ export async function buildEnvironmentBackend(config, { _execFile, _loadBackends
       sidecarImage: k8s.sidecarImage,
       imagePullPolicy: k8s.imagePullPolicy,
       connectMode: k8s.connectMode,
+      // Per-tenant namespace-level guardrails (#5142), shared with the plain K8s path.
+      namespaceQuota: k8s.namespaceQuota,
+      namespaceLimitRange: k8s.namespaceLimitRange,
       // Rancher connection block. Token is resolved from a secret-friendly
       // source and never logged.
       rancherUrl: rancher.rancherUrl,

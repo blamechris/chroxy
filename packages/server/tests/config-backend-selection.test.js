@@ -100,6 +100,8 @@ describe('buildEnvironmentBackend (#5144)', () => {
           sidecarImage: 'agent:1',
           imagePullPolicy: 'IfNotPresent',
           connectMode: 'clusterip',
+          namespaceQuota: { cpu: '8', memory: '16Gi', pods: 10 },
+          namespaceLimitRange: { cpu: '250m', cpuLimit: '1' },
           // workspace lives here too but is wired separately via the manager;
           // it should NOT be passed into the K8sBackend constructor here.
           workspace: { claimName: 'pvc' },
@@ -115,6 +117,8 @@ describe('buildEnvironmentBackend (#5144)', () => {
     assert.equal(backend.opts.sidecarImage, 'agent:1')
     assert.equal(backend.opts.imagePullPolicy, 'IfNotPresent')
     assert.equal(backend.opts.connectMode, 'clusterip')
+    assert.deepEqual(backend.opts.namespaceQuota, { cpu: '8', memory: '16Gi', pods: 10 })
+    assert.deepEqual(backend.opts.namespaceLimitRange, { cpu: '250m', cpuLimit: '1' })
     assert.ok(!('workspace' in backend.opts))
   })
 
@@ -132,7 +136,12 @@ describe('buildEnvironmentBackend (#5144)', () => {
     const config = {
       environments: {
         backend: 'rancher',
-        k8s: { namespace: 'chroxy', connectMode: 'clusterip' },
+        k8s: {
+          namespace: 'chroxy',
+          connectMode: 'clusterip',
+          namespaceQuota: { cpu: '8', memory: '16Gi' },
+          namespaceLimitRange: { cpuLimit: '1' },
+        },
         rancher: {
           rancherUrl: 'https://rancher.example.com',
           clusterId: 'c-m-abc123',
@@ -149,6 +158,8 @@ describe('buildEnvironmentBackend (#5144)', () => {
     // k8s knobs flow through
     assert.equal(backend.opts.namespace, 'chroxy')
     assert.equal(backend.opts.connectMode, 'clusterip')
+    assert.deepEqual(backend.opts.namespaceQuota, { cpu: '8', memory: '16Gi' })
+    assert.deepEqual(backend.opts.namespaceLimitRange, { cpuLimit: '1' })
     // rancher block flows through
     assert.equal(backend.opts.rancherUrl, 'https://rancher.example.com')
     assert.equal(backend.opts.clusterId, 'c-m-abc123')

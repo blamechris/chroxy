@@ -362,6 +362,69 @@ memoryLimit }` object (merged over the built-ins) to raise/lower them, or
 `defaultResources: null` to disable defaults so only explicit per-call values
 produce a `resources` block.
 
+### Kubernetes per-tenant namespace caps (`ResourceQuota` / `LimitRange`)
+
+The pod-level `resources` block above limits each individual Pod. Now that the
+K8s backend gives every tenant their own namespace (`#3194`), you can also set
+**namespace-level** guardrails that apply to the tenant as a whole (`#5142`).
+Both are **opt-in**; when unset the namespace-ensure path is unchanged. They are
+only applied to per-tenant namespaces — never to the static default namespace.
+
+**`environments.k8s.namespaceQuota`** ensures an idempotent `ResourceQuota` that
+caps the AGGREGATE resources a tenant may consume across ALL their Pods:
+
+```json
+{
+  "environments": {
+    "backend": "k8s",
+    "k8s": {
+      "namespaceQuota": {
+        "cpu": "8",          // aggregate requests.cpu cap
+        "memory": "16Gi",    // aggregate requests.memory cap
+        "cpuLimit": "16",    // aggregate limits.cpu cap
+        "memoryLimit": "32Gi", // aggregate limits.memory cap
+        "pods": 10           // max Pods in the namespace
+      }
+    }
+  }
+}
+```
+
+At least one field is required. `cpu`/`memory` map to the aggregate `requests.*`
+keys, `cpuLimit`/`memoryLimit` to the aggregate `limits.*` keys, and `pods` to
+the object-count quota. With a quota in place, Pods that lack their own
+requests/limits will be REJECTED by the cluster — pair it with a `LimitRange`
+(below) or the backend's own `defaultResources` so every Pod carries values.
+
+**`environments.k8s.namespaceLimitRange`** ensures an idempotent `LimitRange`
+that supplies cluster-level DEFAULT requests/limits, so Pods created without
+explicit resources inherit namespace defaults (defence-in-depth on top of the
+backend's own `defaultResources`):
+
+```json
+{
+  "environments": {
+    "k8s": {
+      "namespaceLimitRange": {
+        "cpu": "250m",       // defaultRequest.cpu
+        "memory": "256Mi",   // defaultRequest.memory
+        "cpuLimit": "1",     // default.cpu (the limit)
+        "memoryLimit": "1Gi" // default.memory (the limit)
+      }
+    }
+  }
+}
+```
+
+At least one field is required. `cpu`/`memory` become the LimitRange
+`defaultRequest`, while `cpuLimit`/`memoryLimit` become the `default` (limit).
+
+Both blocks accept the same quantity grammar as the per-pod `resources` opt
+(CPU as a decimal/milli-cpu string, memory as a binary-SI quantity; Docker-style
+suffixes are normalised). Malformed quantities are rejected at startup. The ensure
+is idempotent (read-or-create, already-exists swallowed) and cached per process,
+so it adds a single API roundtrip the first time a tenant namespace is used.
+
 ## Examples
 
 ### Using Config File Only
