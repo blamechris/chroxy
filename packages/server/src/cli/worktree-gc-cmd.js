@@ -66,7 +66,7 @@ export function collectWorktreeGc(options = {}, deps = {}) {
     const cfg = readConfigSoft(configPath, deps)
     repos = resolveRepoSet({
       repos: cfg.repos,
-      root: cfg.controlRoom?.discoveryRoot,
+      root: cfg.controlRoomRoot,
       ...(deps.repoSetSeams || {}),
     })
   }
