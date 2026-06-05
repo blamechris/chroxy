@@ -45,9 +45,18 @@ export interface MultiQuestionFormProps {
 }
 
 export function MultiQuestionForm({ questions, onSubmit }: MultiQuestionFormProps) {
-  // State per question, indexed by question position so duplicate
-  // question texts don't collide: single-select holds the chosen value
-  // string, multi-select holds an array of chosen value strings.
+  // Local selection state is indexed by question POSITION so that while
+  // the form is open, two questions with identical text track their
+  // choices independently (single-select holds the chosen value string,
+  // multi-select holds an array of chosen value strings). NOTE: the
+  // emitted `answersMap` (see `handleSubmit`) is keyed by `q.question`
+  // text — this is the wire shape `UserQuestionResponseSchema` /
+  // `PermissionManager.respondToQuestion` consume, and it matches the
+  // dashboard's `MultiQuestionForm`. If a payload ever carried two
+  // questions with the exact same text, the later one would overwrite the
+  // earlier in the emitted map; that's an inherent constraint of the
+  // question-text-keyed wire contract (shared with the dashboard), not a
+  // mobile-only limitation.
   const [singleSelectByIdx, setSingleSelectByIdx] = useState<Record<number, string>>({});
   const [multiSelectByIdx, setMultiSelectByIdx] = useState<Record<number, string[]>>({});
   // #3753 parity — one-shot send guard so a rapid double-tap on Submit

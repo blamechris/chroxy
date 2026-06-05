@@ -141,6 +141,23 @@ export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, 
     isPrompt && Array.isArray(message.questions) && message.questions.length > 1;
   const showMultiQuestionForm =
     isMultiQuestion && !!allowMultiQuestion && message.answered == null && !isExpired;
+  // #4973 — the per-question structured summary chip needs the
+  // `answeredAnswers` map (recorded by `markPromptAnsweredMulti` on the
+  // client that submitted). When a multi-question prompt is answered but
+  // that map is absent — e.g. it was answered on another client, or
+  // rehydrated from history before this field existed — fall back to the
+  // flat `message.answered` summary text (Copilot review) so the answer
+  // is never shown as blank.
+  const hasMultiQuestionAnswers =
+    isMultiQuestion &&
+    !!allowMultiQuestion &&
+    message.answered != null &&
+    message.answeredAnswers != null;
+  const showMultiQuestionFallbackSummary =
+    isMultiQuestion &&
+    !!allowMultiQuestion &&
+    message.answered != null &&
+    message.answeredAnswers == null;
   const showMultiQuestionSummary =
     isMultiQuestion && !!allowMultiQuestion && message.answered != null;
   // #4973 — per-question display labels for the post-answer summary chip.
@@ -148,7 +165,7 @@ export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, 
   // `answeredAnswers` map) back to its option label(s), comma-joined for
   // multi-select. Falls back to the raw value when no matching option is
   // found (defensive — covers free-form values older servers might echo).
-  const multiQuestionAnswerLabels = showMultiQuestionSummary
+  const multiQuestionAnswerLabels = hasMultiQuestionAnswers
     ? (message.questions ?? []).map((q) => {
         const value = message.answeredAnswers?.[q.question];
         const toLabel = (v: string) =>
@@ -333,7 +350,7 @@ export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, 
           }}
         />
       )}
-      {showMultiQuestionSummary && (
+      {hasMultiQuestionAnswers && (
         <View style={styles.multiQuestionSummary} testID="question-multi-summary">
           {message.questions!.map((q, i) => (
             <View key={`s-${i}`} style={styles.multiQuestionSummaryRow}>
@@ -346,6 +363,19 @@ export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, 
               </Text>
             </View>
           ))}
+        </View>
+      )}
+      {showMultiQuestionFallbackSummary && (
+        // #4973 — answered elsewhere / rehydrated without the structured
+        // `answeredAnswers` map: render the flat comma-joined summary so
+        // the answer is never blank (Copilot review).
+        <View style={styles.multiQuestionSummary} testID="question-multi-summary">
+          <View style={styles.multiQuestionSummaryRow}>
+            <Icon name="check" size={14} color={COLORS.accentGreen} />
+            <Text style={styles.multiQuestionSummaryText} testID="question-multi-summary-flat">
+              {message.answered}
+            </Text>
+          </View>
         </View>
       )}
       {showOptionButtons && (

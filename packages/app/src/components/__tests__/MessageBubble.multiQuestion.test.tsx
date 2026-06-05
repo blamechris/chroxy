@@ -199,4 +199,23 @@ describe('MessageBubble multi-question form (#4973)', () => {
     const toppings = first(tree, 'question-multi-summary-1');
     expect(toppings.props.children.join('')).toBe('Pick toppings: Cherry, Date');
   });
+
+  it('falls back to the flat answered summary when answeredAnswers is missing (answered elsewhere / rehydrated)', () => {
+    // No `answeredAnswers` — e.g. the prompt was answered on another
+    // client or rehydrated from history before the structured field
+    // existed. The chip must still show the flat `answered` summary
+    // rather than blank per-question lines.
+    const answered = multiQuestionPrompt({
+      answered: 'Q1 — deploy to production?: approve | Q2 — which areas to verify?: app, server',
+    });
+    const tree = render(answered, { allowMultiQuestion: true });
+    expect(present(tree, 'question-multi-summary')).toBe(true);
+    // No per-question structured rows (those need answeredAnswers).
+    expect(present(tree, 'question-multi-summary-0')).toBe(false);
+    // The flat summary line shows the comma-joined answer text.
+    const flat = first(tree, 'question-multi-summary-flat');
+    expect(flat.props.children).toBe(
+      'Q1 — deploy to production?: approve | Q2 — which areas to verify?: app, server',
+    );
+  });
 });
