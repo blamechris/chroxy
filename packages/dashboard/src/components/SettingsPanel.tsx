@@ -618,6 +618,8 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   // (same localStorage pattern as theme / default provider).
   const costBadgeMode = useConnectionStore(s => s.costBadgeMode)
   const setCostBadgeMode = useConnectionStore(s => s.setCostBadgeMode)
+  const confirmSessionClose = useConnectionStore(s => s.confirmSessionClose)
+  const setConfirmSessionClose = useConnectionStore(s => s.setConfirmSessionClose)
   // Per-session promptEvaluator toggle. Lives in settings (not the header)
   // so the "Auto-evaluate prompts before send" label has room for a hint
   // line and doesn't crowd the model/permission selects. Only shown when
@@ -1118,6 +1120,27 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 Choose what the badge in the top bar displays — provider and
                 model, the running dollar cost, token count, percent of the
                 context window used, or the session-type tag.
+              </p>
+            </div>
+            {/* #5206: confirm-before-close toggle. When on (default), closing
+                a session tab prompts a confirmation so a session isn't
+                terminated by an accidental click. The Control Room tab is
+                exempt — it closes immediately. */}
+            <div className="settings-field settings-field-checkbox">
+              <label htmlFor="confirm-session-close">
+                <input
+                  id="confirm-session-close"
+                  type="checkbox"
+                  checked={confirmSessionClose}
+                  onChange={(e) => setConfirmSessionClose(e.target.checked)}
+                  data-testid="confirm-session-close-toggle"
+                />
+                Confirm before closing a session
+              </label>
+              <p className="settings-hint">
+                Ask for confirmation before closing a session tab so you don't
+                terminate a session by accident. Closing the Control Room tab
+                never asks.
               </p>
             </div>
             <div className="settings-field">

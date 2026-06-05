@@ -941,6 +941,11 @@ export interface ConnectionState {
   costBadgeMode: CostBadgeMode;
   setCostBadgeMode: (mode: CostBadgeMode) => void;
 
+  // #5206: whether closing a session tab prompts a confirmation dialog first.
+  // Persisted to localStorage ('true'/'false'); defaults to enabled (true).
+  confirmSessionClose: boolean;
+  setConfirmSessionClose: (enabled: boolean) => void;
+
   // #4052: BYOK credentials state + actions. The raw key is NEVER stored
   // here — only the masked preview from the server's reply.
   byokCredentialsStatus: {

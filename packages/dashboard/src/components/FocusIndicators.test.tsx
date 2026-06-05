@@ -51,6 +51,13 @@ describe('Focus indicators (#997)', () => {
     expect(componentsCss).toMatch(/\.tab-close:focus-visible/)
   })
 
+  it('reveals the tab × on hover AND keyboard focus within the tab (#5205)', () => {
+    // The × is opacity:0 by default; it must reveal on both pointer hover and
+    // keyboard focus anywhere in the tab so it's discoverable for both.
+    expect(componentsCss).toMatch(/\.session-tab:hover \.tab-close/)
+    expect(componentsCss).toMatch(/\.session-tab:focus-within \.tab-close/)
+  })
+
   it('has :focus-visible styles for new session button', () => {
     expect(componentsCss).toMatch(/\.btn-new-session:focus-visible/)
   })

@@ -421,6 +421,37 @@ describe('useConnectionStore', () => {
     });
   });
 
+  describe('confirmSessionClose (#5206)', () => {
+    it('defaults to enabled (true)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      expect(useConnectionStore.getState().confirmSessionClose).toBe(true);
+    });
+
+    it('setConfirmSessionClose updates state and persists to localStorage', async () => {
+      const { useConnectionStore } = await import('./connection');
+      useConnectionStore.getState().setConfirmSessionClose(false);
+      expect(useConnectionStore.getState().confirmSessionClose).toBe(false);
+      expect(localStorage.getItem('chroxy_confirm_session_close')).toBe('false');
+      useConnectionStore.getState().setConfirmSessionClose(true);
+      expect(useConnectionStore.getState().confirmSessionClose).toBe(true);
+      expect(localStorage.getItem('chroxy_confirm_session_close')).toBe('true');
+    });
+
+    it('swallows a localStorage write failure (private mode / quota)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota exceeded');
+      });
+      try {
+        expect(() => useConnectionStore.getState().setConfirmSessionClose(false)).not.toThrow();
+        expect(useConnectionStore.getState().confirmSessionClose).toBe(false);
+      } finally {
+        spy.mockRestore();
+        useConnectionStore.getState().setConfirmSessionClose(true);
+      }
+    });
+  });
+
   it('switchSession updates activeSessionId even without cached state', async () => {
     const { useConnectionStore } = await import('./connection');
 

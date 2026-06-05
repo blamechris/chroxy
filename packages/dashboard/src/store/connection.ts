@@ -403,6 +403,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const raw = loadPersistedSetting('chroxy_cost_badge_mode', DEFAULT_COST_BADGE_MODE)
     return isCostBadgeMode(raw) ? raw : DEFAULT_COST_BADGE_MODE
   })(),
+  // #5206 — whether closing a session tab prompts a confirmation first.
+  // Defaults to enabled (string 'true'); only an explicit 'false' disables it,
+  // so a missing / corrupt value safely falls back to the protective default.
+  confirmSessionClose: loadPersistedSetting('chroxy_confirm_session_close', 'true') !== 'false',
   // #4052: BYOK credentials state. Server-of-truth lives in
   // ~/.chroxy/credentials.json or ANTHROPIC_API_KEY env var; the dashboard
   // mirrors the resolved status (set/missing) + a masked preview. Updates
@@ -549,6 +553,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setCostBadgeMode: (mode: CostBadgeMode) => {
     set({ costBadgeMode: mode });
     try { localStorage.setItem('chroxy_cost_badge_mode', mode); } catch { /* noop */ }
+  },
+
+  // #5206 — toggle the session-close confirmation. Persisted as 'true'/'false'
+  // strings to match the loadPersistedSetting string contract.
+  setConfirmSessionClose: (enabled: boolean) => {
+    set({ confirmSessionClose: enabled });
+    try { localStorage.setItem('chroxy_confirm_session_close', enabled ? 'true' : 'false'); } catch { /* noop */ }
   },
 
   // #4052: BYOK credentials actions. The full key is never stored in the
