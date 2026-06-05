@@ -278,11 +278,19 @@ function validateRancherBlock(rancher, warnings) {
     return
   }
 
-  const { rancherUrl, clusterId, token, caData, skipTLSVerify, defaultProjectId } = rancher
+  const { rancherUrl, clusterId, token, tokenEnv, tokenFile, caData, skipTLSVerify, defaultProjectId } = rancher
 
-  // Presence gate (mirrors isRancherConfigured): unless all three identity
-  // fields are present, treat as "not configured yet" — only shape was checked.
-  const configured = Boolean(rancherUrl && clusterId && token)
+  // A token can come from any of three secret-friendly sources (resolved by
+  // `resolveRancherToken` at construct time). Presence of ANY source counts
+  // toward "configured" so a block using `tokenEnv` / `tokenFile` is still
+  // validated here (Copilot review #5148) — not just inline `token`.
+  const hasTokenSource = Boolean(token || tokenEnv || tokenFile)
+
+  // Presence gate (mirrors isRancherConfigured): unless rancherUrl + clusterId
+  // are present AND a token source is configured, treat the block as "not
+  // configured yet" — only the top-level shape was checked above. This keeps a
+  // half-filled-in block from spamming warnings during setup.
+  const configured = Boolean(rancherUrl && clusterId && hasTokenSource)
   if (!configured) return
 
   if (typeof rancherUrl !== 'string' || rancherUrl.length === 0) {
@@ -308,10 +316,24 @@ function validateRancherBlock(rancher, warnings) {
     )
   }
 
-  if (typeof token !== 'string' || token.length === 0) {
-    // Never echo the token value.
-    warnings.push(`Invalid value for 'environments.rancher.token': must be a non-empty bearer token string`)
+  // Token sources. Validate the SHAPE of each provided source (never the value
+  // — the token is never echoed). Only warn "missing token" when NO source is
+  // present; an inline `token` is no longer required when `tokenEnv` /
+  // `tokenFile` is set (Copilot review #5148).
+  if (token != null && (typeof token !== 'string' || token.length === 0)) {
+    warnings.push(`Invalid value for 'environments.rancher.token': when provided, must be a non-empty bearer token string`)
   }
+  if (tokenEnv != null && (typeof tokenEnv !== 'string' || tokenEnv.length === 0)) {
+    warnings.push(`Invalid value for 'environments.rancher.tokenEnv': when provided, must be a non-empty env-var name`)
+  }
+  if (tokenFile != null && (typeof tokenFile !== 'string' || tokenFile.length === 0)) {
+    warnings.push(`Invalid value for 'environments.rancher.tokenFile': when provided, must be a non-empty file path`)
+  }
+  // NB: a "missing token" warning is unreachable here — the `configured` gate
+  // above already requires at least one token source, so a block with no token
+  // source short-circuits as "not configured yet" without warning (the intended
+  // setup-friendly behaviour). The shape checks above only fire on a block that
+  // is otherwise complete.
 
   if (caData != null && (typeof caData !== 'string' || caData.length === 0)) {
     warnings.push(
@@ -512,8 +534,14 @@ export function validateConfig(config, verbose = false) {
     if (Object.prototype.hasOwnProperty.call(config.environments, 'backend')) {
       const backend = config.environments.backend
       if (typeof backend !== 'string') {
+        // Deliberately an "Invalid value" (not "Invalid type") warning: the
+        // wiring layer (`resolveEnvironmentBackend`) treats anything
+        // unrecognised as Docker, so a typo must NOT be fatal.
+        // `loadAndMergeConfig` escalates only "Invalid type" warnings to a hard
+        // exit, which would contradict the documented "malformed → docker"
+        // fallback (Copilot review #5148).
         warnings.push(
-          `Invalid type for 'environments.backend': expected string, got ${Array.isArray(backend) ? 'array' : typeof backend}`,
+          `Invalid value for 'environments.backend': expected one of ${[...ENVIRONMENT_BACKENDS].join(', ')}, got ${Array.isArray(backend) ? 'array' : typeof backend}`,
         )
       } else if (!ENVIRONMENT_BACKENDS.has(backend)) {
         warnings.push(

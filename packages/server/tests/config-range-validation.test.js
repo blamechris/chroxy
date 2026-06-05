@@ -250,10 +250,14 @@ describe('validateConfig environments.backend (#5144)', () => {
     assert.ok(result.warnings.some(w => /environments\.backend/.test(w) && /nomad/.test(w)))
   })
 
-  it('warns when backend is not a string', () => {
+  it('warns (warn-only, not fatal "Invalid type") when backend is not a string', () => {
     const result = validateConfig({ environments: { backend: 123 } })
     assert.equal(result.valid, false)
-    assert.ok(result.warnings.some(w => /environments\.backend/.test(w) && /string/.test(w)))
+    const w = result.warnings.find(x => /environments\.backend/.test(x))
+    assert.ok(w, `expected environments.backend warning, got: ${result.warnings.join('; ')}`)
+    // Must NOT use the "Invalid type" prefix — loadAndMergeConfig escalates
+    // those to a fatal exit, which would break the "malformed → docker" fallback.
+    assert.ok(!w.startsWith('Invalid type'), `backend warning must not be fatal: ${w}`)
   })
 
   it('passes when the backend key is absent (default path unchanged)', () => {
@@ -392,5 +396,47 @@ describe('validateConfig environments.rancher block (#5144)', () => {
       environments: { rancher: { ...fullRancher, clusterId: 'bogus' } },
     })
     assert.ok(!result.warnings.some(w => w.includes('token-secret-xyz')))
+  })
+
+  it('validates a block configured via tokenEnv (no inline token) — surfaces malformed clusterId', () => {
+    const result = validateConfig({
+      environments: {
+        rancher: { rancherUrl: 'https://rancher.example.com', clusterId: 'bogus', tokenEnv: 'RANCHER_TOKEN' },
+      },
+    })
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => /environments\.rancher\.clusterId/.test(w)))
+  })
+
+  it('does NOT warn "missing token" when only tokenFile is set on a complete block', () => {
+    const result = validateConfig({
+      environments: {
+        rancher: { ...fullRancher, token: undefined, tokenFile: '/run/secrets/rancher-token' },
+      },
+    })
+    assert.equal(result.valid, true, `warnings: ${result.warnings.join('; ')}`)
+  })
+
+  it('warns when tokenEnv is an empty string on an otherwise complete block', () => {
+    const result = validateConfig({
+      environments: { rancher: { ...fullRancher, tokenEnv: '' } },
+    })
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => /tokenEnv/.test(w)))
+  })
+
+  it('warns when tokenFile is the wrong type on an otherwise complete block', () => {
+    const result = validateConfig({
+      environments: { rancher: { ...fullRancher, tokenFile: 42 } },
+    })
+    assert.equal(result.valid, false)
+    assert.ok(result.warnings.some(w => /tokenFile/.test(w)))
+  })
+
+  it('treats a block with rancherUrl+clusterId but no token source as "not configured" (no warnings)', () => {
+    const result = validateConfig({
+      environments: { rancher: { rancherUrl: 'https://rancher.example.com', clusterId: 'c-m-abc' } },
+    })
+    assert.equal(result.valid, true, `warnings: ${result.warnings.join('; ')}`)
   })
 })
