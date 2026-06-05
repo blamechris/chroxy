@@ -676,10 +676,17 @@ export function Sidebar({
             <span
               className={`sidebar-status-dot ${serverStatus}`}
               data-testid="sidebar-projects-status-dot"
+              // Decorative — the adjacent status label already announces the
+              // state, so hide the dot from screen readers to avoid a
+              // redundant/ambiguous announcement (Copilot review).
+              aria-hidden="true"
+              // Reuse the SAME tooltip wording as the footer dot so the two
+              // indicators don't disagree when both are visible (Copilot
+              // review).
               title={
-                serverStatus === 'connected' ? 'Server running'
+                serverStatus === 'connected' ? 'Server connected'
                   : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
-                    : 'Server stopped'
+                    : 'Server disconnected'
               }
             />
             <span className="sidebar-projects-status-label">{statusLabel}</span>
