@@ -434,6 +434,20 @@ export function sendSessionInfo(ctx, ws, sessionId) {
       send(ws, { type: 'permission_rules_updated', rules, sessionId })
     }
   }
+
+  // #5160: snapshot-on-subscribe for the Control Room activity tree. A fresh
+  // subscriber (new client, tab switch, reconnect) gets the full current tree
+  // in one `activity_snapshot` so it reaches canonical state without replaying
+  // the `activity_delta` stream — mirroring the `background_work_changed`
+  // full-snapshot philosophy. Always sent (empty `entries` is the valid "no
+  // in-flight activity" state) so a client can clear any stale tree from a
+  // previous session on switch. We stamp the canonical `sessionId` here
+  // (matching the live-broadcast path's normalizer injection) rather than
+  // trusting whatever internal id the session held.
+  if (typeof session.getActivitySnapshot === 'function') {
+    const snapshot = session.getActivitySnapshot()
+    send(ws, { ...snapshot, sessionId })
+  }
 }
 
 /**

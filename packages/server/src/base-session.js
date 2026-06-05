@@ -20,6 +20,7 @@ import {
 import { SkillsTrustStore } from './skills-trust.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { createLogger } from './logger.js'
+import { ActivityRegistry } from './activity-registry.js'
 
 const log = createLogger('base-session')
 
@@ -307,6 +308,19 @@ export class BaseSession extends EventEmitter {
     // path: SessionMessageHistory.sweepUnresolvedToolStarts (#4617/#4619)
     // catches stragglers at restore-time as a backstop.
     this._inFlightToolStarts = new Map()
+    // #5160: per-session activity registry (Control Room). A thin unifying
+    // layer that maps the signals BaseSession already emits (tool_start /
+    // tool_result / agent_spawned / agent_completed / background_work_changed
+    // / permission_request / user_question / permission_resolved) into the
+    // `ActivityEntry` wire shape and re-emits `activity_delta` /
+    // `activity_snapshot` for the WS layer. NOT a parallel tracker — it
+    // listens to this session's own events (wired in _setupActivityRegistry)
+    // so it can never drift from the canonical signal source.
+    this._activity = new ActivityRegistry({
+      sessionId: '',
+      emit: (event, payload) => this.emit(event, payload),
+    })
+    this._setupActivityRegistry()
     this._messageCounter = 0
     // Boot-unique prefix mixed into every emitted messageId (#3700).
     // The dashboard caches up to 100 messages per session in localStorage
@@ -688,6 +702,69 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #5160: wire the activity registry to this session's own lifecycle
+   * events. The registry is a pure consumer — it only maps already-emitted
+   * signals into `ActivityEntry` records, so listening here keeps it a thin
+   * unifying layer rather than a parallel tracker. Listeners are attached on
+   * the session itself (an EventEmitter) so every provider that routes
+   * through these canonical events feeds the registry for free.
+   *
+   * @private
+   */
+  _setupActivityRegistry() {
+    this.on('tool_start', (d) => this._activity.onToolStart(d))
+    this.on('tool_result', (d) => this._activity.onToolResult(d))
+    this.on('agent_spawned', (d) => this._activity.onAgentSpawned(d))
+    this.on('agent_completed', (d) => this._activity.onAgentCompleted(d))
+    this.on('agent_event', (d) => this._activity.onAgentEvent(d))
+    this.on('background_work_changed', (d) => this._activity.onBackgroundWorkChanged(d))
+    this.on('permission_request', (d) => this._activity.onPermissionRequest(d))
+    this.on('user_question', (d) => this._activity.onUserQuestion(d))
+    this.on('permission_resolved', (d) => this._activity.onPermissionResolved(d))
+  }
+
+  /**
+   * #5160: clear the activity registry before any listener teardown. Every
+   * provider's `destroy()` routes through `removeAllListeners()` (directly,
+   * or via super.destroy() chaining — cli/jsonl/gemini/codex call it; sdk/tui
+   * also clear the registry explicitly via `_destroyPendingBackgroundShells`).
+   * Overriding here is the single chokepoint that guarantees a destroyed
+   * session emits `ended` deltas for any still-open node (so live subscribers
+   * see the tree drain) and leaves no stale entries — without having to touch
+   * each subclass's bespoke destroy(). Clearing BEFORE super removes the
+   * listeners means the `activity_delta` emits still reach the wired
+   * forwarder. Idempotent: a second call (or a session that already cleared
+   * via `_destroyPendingBackgroundShells`) sees an empty registry and no-ops.
+   */
+  removeAllListeners(eventName) {
+    // Only the full teardown variant (no event name) clears the registry —
+    // a targeted removeAllListeners('foo') must not drain the activity tree.
+    if (eventName === undefined) {
+      this._activity.clear()
+    }
+    return super.removeAllListeners(eventName)
+  }
+
+  /**
+   * #5160: keep the activity registry's session id in sync. Subclasses that
+   * learn their canonical session id late (SDK sessions, on `init`) call this
+   * so emitted `activity_*` messages carry the right id.
+   * @param {string} sessionId
+   */
+  setActivitySessionId(sessionId) {
+    this._activity.setSessionId(sessionId)
+  }
+
+  /**
+   * #5160: full current activity tree as an `activity_snapshot` message.
+   * Served to a fresh subscriber (snapshot-on-subscribe) and on resync.
+   * @returns {object} the `activity_snapshot` wire message
+   */
+  getActivitySnapshot() {
+    return this._activity.getSnapshotMessage()
+  }
+
+  /**
    * #4307: emit the current pending-shells snapshot on the
    * `background_work_changed` event. Pulled into a helper so both
    * `trackBackgroundShell` and `clearBackgroundShell` use one shape.
@@ -714,6 +791,11 @@ export class BaseSession extends EventEmitter {
   _destroyPendingBackgroundShells() {
     this._pendingBackgroundShells.clear()
     this._pendingBackgroundCommands.clear()
+    // #5160: tear down the activity registry alongside the other transient
+    // per-session work maps. Ends every remaining node (the session is gone,
+    // so nothing is still in flight) and empties the registry — no leak, and
+    // a late session-list snapshot can't surface a destroyed session's tree.
+    this._activity.clear()
   }
 
   /** Current thinking level. Override in subclasses that support it. */
@@ -1157,6 +1239,15 @@ export class BaseSession extends EventEmitter {
       }
       this._activeAgents.clear()
     }
+
+    // #5160: turn-end reconciliation for the activity registry. Ends any
+    // tool/agent/blocked node still marked running/blocked (orphans the
+    // model abandoned at turn end), mirroring _sweepUnresolvedToolStarts.
+    // Runs AFTER the agent_completed fan-out above so those completions
+    // terminate their nodes first; reset() is the belt-and-braces sweep for
+    // anything the canonical signals didn't clear. Shell nodes survive
+    // turn-end (#4307) and clear via background_work_changed.
+    this._activity.reset()
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)

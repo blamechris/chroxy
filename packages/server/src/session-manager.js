@@ -1766,7 +1766,11 @@ export class SessionManager extends EventEmitter {
     // events (tool_start / tool_result / tool_input_delta / stream_delta)
     // tagged with the parent's toolUseId. Transient (not replayed on
     // reconnect — the canonical Task tool_result fold lands in history).
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped']
+    // #5160: `activity_delta` / `activity_snapshot` carry the Control Room
+    // activity tree (ActivityRegistry on BaseSession). Transient — not
+    // replayed from history; a reconnecting client gets the full tree from
+    // the snapshot-on-subscribe in ws-history.sendSessionInfo.
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
