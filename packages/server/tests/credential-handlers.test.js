@@ -9,8 +9,8 @@ import { getStoredCredential, setStoredCredential } from '../src/credential-stor
 /**
  * #3855: WS handler tests for the Provider Credentials messages.
  *   - get_credentials_status: returns masked status, never a raw value
- *   - set_credential: persists at 0600, replies masked, broadcasts, validates
- *   - delete_credential: removes the value, replies, broadcasts
+ *   - set_credential: persists at 0600, replies masked to requester, validates
+ *   - delete_credential: removes the value, replies to requester (no broadcast)
  *   - test_credential: returns a result keyed by credential
  *
  * Auth gating note: these handlers are only dispatched after the WS layer sets
@@ -90,7 +90,7 @@ describe('credential WS handlers (#3855)', () => {
   })
 
   describe('set_credential', () => {
-    it('persists a valid key at 0600, replies masked, and broadcasts', () => {
+    it('persists a valid key at 0600 and replies masked to the requester only (no broadcast)', () => {
       const ws = makeWs()
       const ctx = makeCtx()
       settingsHandlers.set_credential(ws, {}, {
@@ -104,8 +104,10 @@ describe('credential WS handlers (#3855)', () => {
       const reply = lastReply(ws, ctx)
       assert.equal(reply.type, 'credentials_status')
       assert.equal(reply.requestId, 'r2')
-      // Broadcast fired (no requestId) so other dashboards refresh.
-      assert.equal(ctx.broadcast.mock.callCount(), 1)
+      // #3855: credentials are admin state — sent ONLY to the requester, never
+      // broadcast (would leak configured-provider + masked previews to other
+      // authenticated clients).
+      assert.equal(ctx.broadcast.mock.callCount(), 0)
       assert.equal(JSON.stringify(reply).includes('sk-openai-abc'), false)
     })
 
@@ -140,7 +142,7 @@ describe('credential WS handlers (#3855)', () => {
   })
 
   describe('delete_credential', () => {
-    it('removes the stored value and replies + broadcasts', () => {
+    it('removes the stored value and replies to the requester only (no broadcast)', () => {
       setStoredCredential('GEMINI_API_KEY', 'gem-1')
       const ws = makeWs()
       const ctx = makeCtx()
@@ -148,7 +150,7 @@ describe('credential WS handlers (#3855)', () => {
       assert.equal(getStoredCredential('GEMINI_API_KEY'), null)
       const reply = lastReply(ws, ctx)
       assert.equal(reply.type, 'credentials_status')
-      assert.equal(ctx.broadcast.mock.callCount(), 1)
+      assert.equal(ctx.broadcast.mock.callCount(), 0)
     })
 
     it('rejects an unknown key', () => {

@@ -558,14 +558,15 @@ const CREDENTIAL_OAUTH_HELPERS = Object.freeze({
   hasCodexOAuthCreds,
 })
 
-function _sendCredentialsStatus(ctx, ws, requestId, { broadcast } = {}) {
+// #3855 (Copilot review): the status is sent ONLY to the requesting client —
+// no broadcast. The issue acceptance criteria require "no broadcast —
+// credentials are admin state, sent only to the requester." Broadcasting (even
+// masked) would leak which providers are configured + masked previews to other
+// authenticated clients, including pairing-bound ones. Other dashboards refresh
+// their own view on open via get_credentials_status instead.
+function _sendCredentialsStatus(ctx, ws, requestId) {
   const status = getCredentialsStatus(CREDENTIAL_OAUTH_HELPERS)
   ctx.send(ws, { type: 'credentials_status', requestId: requestId ?? null, ...status })
-  if (broadcast && typeof ctx.broadcast === 'function') {
-    // No requestId so other dashboards / tabs refresh too. Status is masked
-    // and value-free — safe to broadcast to all authenticated clients.
-    ctx.broadcast({ type: 'credentials_status', ...status })
-  }
 }
 
 function handleGetCredentialsStatus(ws, client, msg, ctx) {
@@ -592,7 +593,7 @@ function handleSetCredential(ws, client, msg, ctx) {
     sendError(ws, msg?.requestId, 'CREDENTIAL_WRITE_FAILED', err?.message || 'write failed')
     return
   }
-  _sendCredentialsStatus(ctx, ws, msg?.requestId, { broadcast: true })
+  _sendCredentialsStatus(ctx, ws, msg?.requestId)
 }
 
 function handleDeleteCredential(ws, client, msg, ctx) {
@@ -607,7 +608,7 @@ function handleDeleteCredential(ws, client, msg, ctx) {
     sendError(ws, msg?.requestId, 'CREDENTIAL_CLEAR_FAILED', err?.message || 'clear failed')
     return
   }
-  _sendCredentialsStatus(ctx, ws, msg?.requestId, { broadcast: true })
+  _sendCredentialsStatus(ctx, ws, msg?.requestId)
 }
 
 async function handleTestCredential(ws, client, msg, ctx) {

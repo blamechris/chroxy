@@ -87,8 +87,9 @@ function CredentialRow({ entry }: { entry: ProviderCredentialEntry }) {
 
       {envWins && (
         <p className="settings-hint" data-testid={`credential-env-hint-${entry.key}`}>
-          Defined in your shell environment. Override by setting it here, or unset the
-          env var. (The shell export takes precedence over a stored value.)
+          Defined in your shell environment, which takes precedence over a stored value —
+          so it can&apos;t be changed or removed here. To manage this key from the dashboard,
+          unset the environment variable and reconnect.
         </p>
       )}
 

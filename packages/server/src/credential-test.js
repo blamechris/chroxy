@@ -131,7 +131,10 @@ async function geminiProbe(value, fetchImpl, signal) {
 }
 
 async function openaiProbe(value, fetchImpl, signal) {
-  const res = await fetchImpl('https://api.openai.com/v1/models?limit=1', {
+  // GET /v1/models does not support a `limit` query param — passing one returns
+  // 400 and would mis-report a valid key as failing (Copilot review). The auth
+  // test is based on the response status, so the plain list endpoint suffices.
+  const res = await fetchImpl('https://api.openai.com/v1/models', {
     method: 'GET',
     signal,
     headers: { authorization: `Bearer ${value}` },

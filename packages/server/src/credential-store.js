@@ -4,8 +4,10 @@
  * Backs the dashboard "Provider Credentials" Settings pane. Stores per-provider
  * API keys and OAuth tokens in `~/.chroxy/credentials.json`, mode 0600,
  * owner-only. Never stores plaintext world-readable; refuses to read a file
- * that is more permissive than 0600 (security boundary inherited from the
- * #4052 BYOK store this generalizes — see byok-credentials.js).
+ * whose mode is not exactly 0600 — anything else (more permissive like 0644,
+ * OR stricter like 0400) is rejected, matching the #4052 BYOK store this
+ * generalizes (see byok-credentials.js). The strict-equality check keeps the
+ * boundary simple and predictable; operators always set 0600.
  *
  * Resolution order for each known credential env var (used by spawn-env.js):
  *   1. process.env.<KEY>   — explicit shell export wins (power users keep control)
@@ -124,8 +126,9 @@ function readStore() {
     return { data: {}, fileExists: false, error: `unable to stat ${file}: ${err.message}` }
   }
 
-  // Refuse anything more permissive than 0600 (POSIX). On win32 the mode bits
-  // don't reflect NTFS ACLs, so skip the check there (matches #4144).
+  // Refuse any mode that is not exactly 0600 (POSIX) — both more-permissive
+  // (e.g. 0644) and stricter (e.g. 0400) modes are rejected. On win32 the mode
+  // bits don't reflect NTFS ACLs, so skip the check there (matches #4144).
   if (process.platform !== 'win32') {
     const perms = stat.mode & 0o777
     if (perms !== 0o600) {

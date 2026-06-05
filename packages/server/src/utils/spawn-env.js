@@ -22,7 +22,7 @@
  * ANTHROPIC_API_KEY (subscription-default behaviour is preserved); only the
  * non-denylisted credential keys are eligible for store injection.
  */
-import { resolveCredential, isKnownCredentialKey, KNOWN_CREDENTIALS } from '../credential-store.js'
+import { resolveCredential, isKnownCredentialKey } from '../credential-store.js'
 
 // Standard vars every child process needs for its runtime to function.
 // Shell PATH, locale, TERM, TMPDIR, user/home identity.
@@ -101,6 +101,15 @@ const PROVIDERS = {
     denylist: [
       'ANTHROPIC_API_KEY',
     ],
+    // #3855: credential-store keys this provider may pull from the store when
+    // the shell hasn't exported them. Scoped to the Claude provider's OWN
+    // credential only — never other providers' keys (cross-provider isolation:
+    // an OpenAI/Gemini key stored for those providers must not leak into the
+    // Claude subprocess env). ANTHROPIC_API_KEY is deliberately excluded so
+    // the CLI keeps using subscription/OAuth auth.
+    storeInjectKeys: [
+      'CLAUDE_CODE_OAUTH_TOKEN',
+    ],
   },
 }
 
@@ -144,12 +153,16 @@ export function buildSpawnEnv(provider, extras = {}) {
   for (const key of config.denylist) {
     delete parentEnv[key]
   }
-  // #3855: inject stored credential keys that the shell did not export and
-  // that are NOT denylisted (e.g. CLAUDE_CODE_OAUTH_TOKEN). ANTHROPIC_API_KEY
-  // stays denylisted so the Claude CLI keeps using subscription/OAuth auth.
+  // #3855: inject ONLY this provider's own credential-store keys that the
+  // shell did not export (e.g. CLAUDE_CODE_OAUTH_TOKEN for claude). Scoped via
+  // the per-provider `storeInjectKeys` allowlist so other providers' stored
+  // secrets (OPENAI_API_KEY, GEMINI_API_KEY) never leak into this subprocess.
+  // ANTHROPIC_API_KEY is excluded from storeInjectKeys AND denylisted, so the
+  // CLI keeps using subscription/OAuth auth.
   const denySet = new Set(config.denylist)
-  for (const { key } of KNOWN_CREDENTIALS) {
+  for (const key of config.storeInjectKeys || []) {
     if (denySet.has(key)) continue
+    if (!isKnownCredentialKey(key)) continue
     if (parentEnv[key] !== undefined) continue
     const resolved = resolveCredential(key)
     if (resolved.value) parentEnv[key] = resolved.value
