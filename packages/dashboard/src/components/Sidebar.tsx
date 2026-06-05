@@ -179,10 +179,16 @@ export function Sidebar({
     {
       id: 'tokens',
       label: 'Tokens',
-      render: () => <SidebarTokenView sessions={sessions} />,
+      render: () => (
+        <SidebarTokenView
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSessionClick={onSessionClick}
+        />
+      ),
       collapsedHeaderMetric: () => tokenViewCollapsedMetric(sessions),
     },
-  ]), [sessions])
+  ]), [sessions, activeSessionId, onSessionClick])
 
   const toggleRepo = useCallback((path: string) => {
     setCollapsed(prev => ({ ...prev, [path]: !prev[path] }))

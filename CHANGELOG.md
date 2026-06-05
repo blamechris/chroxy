@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sidebar token-usage view: cache-hit ratio + per-session breakdown (#4303):** the bottom sidebar panel's token view now surfaces a cache-hit ratio in the aggregate strip (`cacheRead / (input + cacheRead + cacheCreation)` — the visible signal of prompt-caching effectiveness, hidden when there's no input surface) and a per-session breakdown sorted by total tokens. Per-session rows are click-to-activate (parity with the sidebar tree) and float the active session to the top with `aria-current`. claude-tui sessions remain excluded from the per-session list since they expose no token counts. Pure helper `cacheHitRatio(usage)` is unit-tested independently of React.
+
 ## [0.9.43] - 2026-06-03
 
 Two-day backlog-sweep release: 52 PRs landed. The headline additions are two brand-new features — a `docker-byok` container provider that sandboxes file/Bash tool execution inside a Docker container while the model loop stays host-side, and a `Task` subagent tool in `claude-byok` that lets the model delegate work to focused child agents. The rest is the v0.9.40 / v0.9.41 / v0.9.42 follow-up tail: ResumeUnknownChip mobile parity + escalation, SESSION_NOT_FOUND consumer wiring, intervention notifications widget, voice-permission reset affordance, extended Tauri menu bar, a real Windows CI runner, the auto-tag release-PR safety net, and a stack of polish across both dashboard and store-core.

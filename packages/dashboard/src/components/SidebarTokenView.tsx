@@ -69,6 +69,26 @@ function addUsage(a: CumulativeUsage, b: CumulativeUsage): CumulativeUsage {
 }
 
 /**
+ * Cache-hit ratio = cacheRead / (input + cacheRead + cacheCreation).
+ *
+ * "Input" on the wire is split three ways: brand-new input tokens, tokens
+ * read from the prompt cache (cacheRead), and tokens written into the cache
+ * (cacheCreation). The ratio of cacheRead to the total input surface is the
+ * visible signal of prompt-caching effectiveness (decision in #4303 token
+ * view). Returns null when there's no input surface at all so the renderer
+ * can hide the row rather than show a meaningless 0%.
+ */
+export function cacheHitRatio(usage: CumulativeUsage): number | null {
+  const denom = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
+  if (denom <= 0) return null
+  return usage.cacheReadTokens / denom
+}
+
+function formatPercent(ratio: number): string {
+  return `${Math.round(ratio * 100)}%`
+}
+
+/**
  * Aggregate `cumulativeUsage` across sessions, grouped by provider.
  *
  * Untracked providers (currently just claude-tui) are excluded from the
@@ -299,11 +319,47 @@ const TUI_UNTRACKED_EXPLANATION =
 export interface SidebarTokenViewProps {
   /** All known sessions across active + resumable + background. */
   sessions: SessionInfo[]
+  /** Currently-active session id, so its per-session row can be highlighted. */
+  activeSessionId?: string | null
+  /**
+   * Click-to-activate parity with the sidebar tree (decision in #4303): a
+   * click on a per-session row activates that session. Omitting it renders
+   * the rows as static (no click affordance).
+   */
+  onSessionClick?: (sessionId: string) => void
 }
 
-export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
+export function SidebarTokenView({
+  sessions,
+  activeSessionId = null,
+  onSessionClick,
+}: SidebarTokenViewProps) {
   const agg = useMemo(() => aggregateUsage(sessions), [sessions])
   const totalTokens = agg.totals.inputTokens + agg.totals.outputTokens
+  const hitRatio = cacheHitRatio(agg.totals)
+
+  // Per-session rows: tracked providers only (untracked providers have no
+  // tokens to show), sorted by total tokens desc. The active session is
+  // highlighted and floated to the top so the user's current context is
+  // always visible without scrolling.
+  const sessionRows = useMemo(() => {
+    return sessions
+      .filter((s) => !UNTRACKED_PROVIDERS.has(s.provider ?? 'unknown'))
+      .map((s) => {
+        const usage = s.cumulativeUsage ?? EMPTY_USAGE
+        return {
+          session: s,
+          tokens: usage.inputTokens + usage.outputTokens,
+          costUsd: usage.costUsd,
+        }
+      })
+      .sort((a, b) => {
+        const aActive = a.session.sessionId === activeSessionId
+        const bActive = b.session.sessionId === activeSessionId
+        if (aActive !== bActive) return aActive ? -1 : 1
+        return b.tokens - a.tokens
+      })
+  }, [sessions, activeSessionId])
 
   return (
     <div className="sidebar-token-view" data-testid="sidebar-token-view">
@@ -323,6 +379,17 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
             {formatTokens(agg.totals.inputTokens)} · {formatTokens(agg.totals.outputTokens)}
           </span>
         </div>
+        {hitRatio !== null && (
+          <div className="sidebar-token-view-aggregate-row">
+            <span className="sidebar-token-view-label">Cache hit</span>
+            <span
+              className="sidebar-token-view-value-secondary"
+              data-testid="sidebar-token-view-cache-hit"
+            >
+              {formatPercent(hitRatio)}
+            </span>
+          </div>
+        )}
         {agg.totals.costUsd > 0 && (
           <div className="sidebar-token-view-aggregate-row">
             <span className="sidebar-token-view-label">
@@ -386,6 +453,59 @@ export function SidebarTokenView({ sessions }: SidebarTokenViewProps) {
           </ul>
         )}
       </div>
+
+      {sessionRows.length > 0 && (
+        <div className="sidebar-token-view-section" data-testid="sidebar-token-view-by-session">
+          <div className="sidebar-token-view-section-header">By session</div>
+          <ul className="sidebar-token-view-session-list">
+            {sessionRows.map(({ session, tokens, costUsd }) => {
+              const isActive = session.sessionId === activeSessionId
+              const tokensLabel = (
+                <span className="sidebar-token-view-session-tokens">
+                  {formatTokens(tokens)}
+                  {costUsd > 0 && (
+                    <span className="sidebar-token-view-provider-cost">
+                      {' '}({formatCostBadge(costUsd)})
+                    </span>
+                  )}
+                </span>
+              )
+              const rowClass = `sidebar-token-view-session-row${isActive ? ' active' : ''}`
+              const testId = `sidebar-token-view-session-${session.sessionId}`
+              // Click-to-activate parity with the sidebar tree (#4303). When no
+              // handler is supplied, render a static row instead of a button so
+              // we don't advertise an affordance that does nothing.
+              if (onSessionClick) {
+                return (
+                  <li key={session.sessionId}>
+                    <button
+                      type="button"
+                      className={rowClass}
+                      data-testid={testId}
+                      aria-current={isActive ? 'true' : undefined}
+                      onClick={() => onSessionClick(session.sessionId)}
+                    >
+                      <span className="sidebar-token-view-session-name">{session.name}</span>
+                      {tokensLabel}
+                    </button>
+                  </li>
+                )
+              }
+              return (
+                <li
+                  key={session.sessionId}
+                  className={rowClass}
+                  data-testid={testId}
+                  aria-current={isActive ? 'true' : undefined}
+                >
+                  <span className="sidebar-token-view-session-name">{session.name}</span>
+                  {tokensLabel}
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

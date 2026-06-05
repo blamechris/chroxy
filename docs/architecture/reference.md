@@ -473,7 +473,9 @@ The web dashboard is a React + Vite SPA served by the Node.js server. It shares 
 | `src/components/InputBar.tsx` | Text input with slash commands, file attachments |
 | `src/components/TerminalView.tsx` | xterm.js terminal emulator |
 | `src/components/MultiTerminalView.tsx` | Multi-tab terminal container |
-| `src/components/Sidebar.tsx` | Session list, navigation, resize |
+| `src/components/Sidebar.tsx` | Session list, navigation, resize; hosts the pluggable bottom panel slot |
+| `src/components/SidebarPanelSlot.tsx` | Pluggable bottom-panel slot (tab strip, collapse, drag/keyboard resize) — see "Sidebar panel slot" below |
+| `src/components/SidebarTokenView.tsx` | First slot occupant: token-usage view (aggregate totals, cache-hit ratio, per-provider + per-session breakdown) |
 | `src/components/SessionBar.tsx` | Session tab strip |
 | `src/components/StatusBar.tsx` | Connection status, cost, model info |
 | `src/components/FooterBar.tsx` | Bottom bar with actions |
@@ -533,6 +535,38 @@ The web dashboard is a React + Vite SPA served by the Node.js server. It shares 
 | `src/utils/image-utils.ts` | Image processing utilities |
 | **Theme** | |
 | `src/theme/tokens.ts` | Generated design tokens (colors, spacing) |
+
+#### Sidebar panel slot (#4303)
+
+The left sidebar is split into two stacked sections: the existing session tree
+on top and a **pluggable panel slot** (`SidebarPanelSlot`) below it. The slot
+manages the tab strip, collapse toggle, collapsed-header live metric, and
+drag/keyboard resize so individual views don't have to.
+
+Views are registered **declaratively** — adding one is a one-entry append to the
+`panelViews` array in `Sidebar.tsx`, with no changes to slot code. Each view is a
+`SidebarPanelView`:
+
+```ts
+interface SidebarPanelView {
+  id: string                                 // stable id, used for persistence + selection
+  label: string                              // tab strip label
+  render: () => ReactNode                    // body, rendered only when selected
+  collapsedHeaderMetric?: () => ReactNode    // one live metric shown when the panel is collapsed
+}
+```
+
+Slot state — selected view id, collapsed flag, and height — is persisted through
+the existing scoped-persistence layer (`chroxy_persist_sidebar_panel_{view,collapsed,height}`)
+so it survives reload. A stale `selectedViewId` (e.g. a view removed in a later
+build) falls back to the first registered view rather than rendering empty.
+
+The **token-usage view** (`SidebarTokenView`) is the first occupant: it reads the
+in-memory `cumulativeUsage` carried on each `SessionInfo` (no new wire/event work)
+and renders aggregate totals, a cache-hit ratio, a per-provider breakdown, and a
+click-to-activate per-session breakdown. claude-tui sessions surface `—` with a
+tooltip since their PTY interface exposes no token counts. Future occupants (MCP
+status, skills registry, slash-command palette, etc.) slot in the same way.
 
 ### Store Core (`packages/store-core/`)
 
