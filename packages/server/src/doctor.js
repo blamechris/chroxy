@@ -46,8 +46,14 @@ export function parseLeadingSemver(str) {
  * Compare two semver values. `found` may be a string or a parsed
  * `[major, minor, patch]` tuple; `required` is a semver string. Returns a
  * negative number when `found` < `required`, 0 when equal (on the numeric
- * core), positive when greater. An unparseable `found` sorts as less-than
- * so a malformed version never silently satisfies a floor. (#3953)
+ * core), positive when greater.
+ *
+ * Both sides fail CLOSED: an unparseable `found` OR an unparseable
+ * `required` sorts as less-than (returns negative) so the floor is treated
+ * as NOT satisfied. This matters for `required` too — a provider that
+ * accidentally supplies a non-`major.minor.patch` floor (e.g. ">=2.1.80"
+ * or "2.1.80-beta") must not silently disable minVersion enforcement
+ * (Copilot review on #3953). (#3953)
  *
  * @param {string | [number, number, number]} found
  * @param {string} required
@@ -56,7 +62,10 @@ export function parseLeadingSemver(str) {
 export function compareSemver(found, required) {
   const a = Array.isArray(found) ? found : parseLeadingSemver(found)
   const b = parseLeadingSemver(required)
-  if (!a || !b) return a ? 1 : -1
+  // Fail closed on either side: a malformed floor (b) or version (a) is
+  // treated as "not satisfied" so an enforcement gate can never pass by
+  // accident. Returns negative (found < required) in every invalid case.
+  if (!a || !b) return -1
   for (let i = 0; i < 3; i++) {
     if (a[i] !== b[i]) return a[i] - b[i]
   }

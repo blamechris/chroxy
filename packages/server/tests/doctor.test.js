@@ -303,6 +303,28 @@ describe('parseLeadingSemver / compareSemver helpers (#3953)', () => {
   it('sorts an unparseable found-version as less-than the floor', () => {
     assert.ok(compareSemver('garbage', '2.1.80') < 0)
   })
+
+  // Copilot review on #3953: a malformed `required` floor must also fail
+  // closed, otherwise a provider that supplies ">=2.1.80" / "2.1.80-beta"
+  // would silently disable minVersion enforcement (compareSemver returning
+  // positive → "satisfied").
+  it('fails closed when the required floor has no parseable leading semver', () => {
+    // No leading `major.minor.patch` → parseLeadingSemver returns null →
+    // fail closed (less-than), so the floor is never silently satisfied.
+    assert.ok(compareSemver('2.1.163', '>=2.1.80') < 0)
+    assert.ok(compareSemver('2.1.163', 'v2') < 0)
+    assert.ok(compareSemver('2.1.163', 'not-a-version') < 0)
+    // Both sides invalid is still less-than.
+    assert.ok(compareSemver('garbage', 'also-garbage') < 0)
+  })
+
+  it('still satisfies a floor that carries a pre-release/build suffix after a valid core', () => {
+    // "2.1.80-beta" HAS a parseable leading core (2.1.80), so a higher
+    // found version legitimately satisfies it — the suffix is ignored, not
+    // treated as unparseable.
+    assert.ok(compareSemver('2.1.163', '2.1.80-beta') > 0)
+    assert.ok(compareSemver('2.1.80', '2.1.80-beta') === 0)
+  })
 })
 
 describe('runDoctorChecks — bundled .app context (issue #2897)', () => {
