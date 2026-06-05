@@ -9,7 +9,7 @@ import type { CumulativeUsage, SessionInfo, SessionVisualStatus } from '@chroxy/
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
-import { SidebarPanelSlot, type SidebarPanelView } from './SidebarPanelSlot'
+import { SidebarPanelSlot, type SidebarPanelView, type SidebarPanelLauncher } from './SidebarPanelSlot'
 import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
 import type { SearchResult } from '../store/types'
 import {
@@ -96,6 +96,10 @@ export interface SidebarProps {
   // them up.
   onReorderRepos?: (orderedRepoPaths: string[]) => void
   onReorderSessions?: (repoPath: string, orderedSessionIds: string[]) => void
+  // #5200 — open the Control Room (a wide host/repo table) in the main
+  // content area, launched from the bottom panel slot's header. Optional so
+  // existing tests/callers don't need to wire it.
+  onOpenControlRoom?: () => void
 }
 
 function abbreviateTunnel(url: string): string {
@@ -133,6 +137,7 @@ export function Sidebar({
   initialPanelCollapsed = false,
   onReorderRepos,
   onReorderSessions,
+  onOpenControlRoom,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [focusedIndex, setFocusedIndex] = useState(0)
@@ -192,6 +197,15 @@ export function Sidebar({
     // the per-session activity tree now drills down inside the main-tab
     // ControlRoomSection (mapped repo → active session → activity tree).
   ]), [sessions, activeSessionId, onSessionClick])
+
+  // #5200 — Control Room launcher in the slot header. The host/repo table is
+  // wide, so the launcher opens it in the main content area (via
+  // onOpenControlRoom) rather than rendering in the narrow slot.
+  const panelLaunchers = useMemo<SidebarPanelLauncher[]>(() => (
+    onOpenControlRoom
+      ? [{ id: 'control-room', label: 'Control Room', title: 'Open the Control Room', onClick: onOpenControlRoom }]
+      : []
+  ), [onOpenControlRoom])
 
   const toggleRepo = useCallback((path: string) => {
     setCollapsed(prev => ({ ...prev, [path]: !prev[path] }))
@@ -934,6 +948,7 @@ export function Sidebar({
               want simultaneously with whatever lives in the slot). */}
           <SidebarPanelSlot
             views={panelViews}
+            launchers={panelLaunchers}
             selectedViewId={panelView}
             onSelectView={handlePanelViewChange}
             collapsed={panelCollapsed}

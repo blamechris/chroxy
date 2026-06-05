@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Sidebar token-usage view: cache-hit ratio + per-session breakdown (#4303):** the bottom sidebar panel's token view now surfaces a cache-hit ratio in the aggregate strip (`cacheRead / (input + cacheRead + cacheCreation)` — the visible signal of prompt-caching effectiveness, hidden when there's no input surface) and a per-session breakdown sorted by total tokens. Per-session rows are click-to-activate (parity with the sidebar tree) and float the active session to the top with `aria-current`. claude-tui sessions remain excluded from the per-session list since they expose no token counts. Pure helper `cacheHitRatio(usage)` is unit-tested independently of React.
 
+## [0.9.44] - 2026-06-05
+
+Control Room v2: a navigable host/repo status section plus a round of top-bar polish.
+
+### Added
+
+- **Control Room section (epic #5159 / #5170):** a new main-content view that surveys every managed repo (config `repos` ∪ auto-discovered git repos under a configurable root, default `~/Projects`) and renders a host/fleet status table — triage verdict (live / investigate / likely-abandoned / recent / onboarded), tree state, worktree count, open PRs, attribution, last-touched, and live-agent detection (a chroxy session bound to the repo, or a dirty-tree + recently-touched heuristic). Launched from a button in the sidebar bottom-panel slot header (#5200); the wide table opens in the main content area. On-demand Refresh snapshot over a new `host_status_request` / `host_status_snapshot` WS contract (#5171–#5175). Per-session activity (running agents/shells/tools) folds in as a per-repo drill-down (#5176), replacing the v1 sidebar panel.
+- **Configurable header cost badge (#5184):** the badge display is chosen in Settings — provider/model (default), cost, tokens, % context used, or session-type — persisted locally.
+- **Running indicator on the projects/explorer header (#5183).**
+
+### Changed
+
+- **Top status dot now reflects Connected (tunnel), not Running (#5182).**
+- **Top-bar layout pass (#5179–#5181 + #5197 + #5200):** the header is now two stacked rows — the model/permission selectors on top, the cost/token cluster on its own row below — so the main bar is never crowded and the permission selector is no longer pushed past overflow; the token usage bar sits under the token count; the model dropdown is responsive and the cost badge truncates so the token count never clips. The Control Room moved off the top tab bar to a sidebar launcher (#5200), freeing the tab row.
+
+### Fixed
+
+- **Background-work banner no longer sticks forever (#5177 / #5178):** completed background shells are reaped (output-file quiesce sweep) so the "Waiting on background work" indicator clears instead of hanging after the command exits.
+
 ## [0.9.43] - 2026-06-03
 
 Two-day backlog-sweep release: 52 PRs landed. The headline additions are two brand-new features — a `docker-byok` container provider that sandboxes file/Bash tool execution inside a Docker container while the model loop stays host-side, and a `Task` subagent tool in `claude-byok` that lets the model delegate work to focused child agents. The rest is the v0.9.40 / v0.9.41 / v0.9.42 follow-up tail: ResumeUnknownChip mobile parity + escalation, SESSION_NOT_FOUND consumer wiring, intervention notifications widget, voice-permission reset affordance, extended Tauri menu bar, a real Windows CI runner, the auto-tag release-PR safety net, and a stack of polish across both dashboard and store-core.
@@ -119,8 +138,6 @@ Single-fix release. Voice input on macOS desktop finally produces transcripts �
 ### Follow-up issues filed during this sweep
 
 - #4986 — `speech.rs` 3-second SIGTERM kill-fallback in `stop()` previously masked this bug (helper "exited cleanly" via SIGKILL after Tauri timed out). The fallback should log a warning when it fires, so future bugs of this shape don't slip past local testing.
-
-
 
 ## [0.9.41] - 2026-06-02
 

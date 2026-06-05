@@ -29,8 +29,24 @@ export interface SidebarPanelView {
   collapsedHeaderMetric?: () => ReactNode
 }
 
+/**
+ * A launcher is an action button shown in the slot header next to the view
+ * tabs. Unlike a view, it does NOT render a body in the slot — clicking it
+ * fires `onClick` (e.g. to open a wide view in the main content area). Added
+ * for #5200: the Control Room (a wide host/repo table) is launched from here
+ * rather than crammed into the narrow slot.
+ */
+export interface SidebarPanelLauncher {
+  id: string
+  label: string
+  onClick: () => void
+  title?: string
+}
+
 export interface SidebarPanelSlotProps {
   views: SidebarPanelView[]
+  /** Optional action buttons in the header that open something elsewhere. */
+  launchers?: SidebarPanelLauncher[]
   selectedViewId: string | null
   onSelectView: (viewId: string) => void
   collapsed: boolean
@@ -49,6 +65,7 @@ const HEADER_HEIGHT_PX = 28
 
 export function SidebarPanelSlot({
   views,
+  launchers,
   selectedViewId,
   onSelectView,
   collapsed,
@@ -240,6 +257,22 @@ export function SidebarPanelSlot({
             )
           })}
         </div>
+        {launchers && launchers.length > 0 && (
+          <div className="sidebar-panel-slot-launchers">
+            {launchers.map((l) => (
+              <button
+                key={l.id}
+                type="button"
+                className="sidebar-panel-slot-launcher"
+                data-testid={`sidebar-panel-slot-launcher-${l.id}`}
+                title={l.title ?? l.label}
+                onClick={l.onClick}
+              >
+                {l.label}
+              </button>
+            ))}
+          </div>
+        )}
         {collapsed && activeView?.collapsedHeaderMetric && (
           <div
             className="sidebar-panel-slot-collapsed-metric"

@@ -117,6 +117,20 @@ describe('Sidebar', () => {
     expect(onResumeSession).toHaveBeenCalledWith('c1')
   })
 
+  it('#5200: shows a Control Room launcher in the panel slot that calls onOpenControlRoom', () => {
+    const onOpenControlRoom = vi.fn()
+    renderSidebar({ onOpenControlRoom })
+    const launcher = screen.getByTestId('sidebar-panel-slot-launcher-control-room')
+    expect(launcher).toBeInTheDocument()
+    fireEvent.click(launcher)
+    expect(onOpenControlRoom).toHaveBeenCalledTimes(1)
+  })
+
+  it('#5200: no Control Room launcher when onOpenControlRoom is not provided', () => {
+    renderSidebar()
+    expect(screen.queryByTestId('sidebar-panel-slot-launcher-control-room')).toBeNull()
+  })
+
   it('calls onNewSession when new session button clicked', () => {
     const onNewSession = vi.fn()
     renderSidebar({ onNewSession })

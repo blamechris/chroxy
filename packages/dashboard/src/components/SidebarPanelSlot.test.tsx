@@ -27,6 +27,33 @@ const baseProps = {
 }
 
 describe('SidebarPanelSlot (#4303)', () => {
+  describe('launchers (#5200)', () => {
+    it('renders launcher buttons in the header and fires onClick (no in-slot body)', () => {
+      const onClick = vi.fn()
+      render(
+        <SidebarPanelSlot
+          {...baseProps}
+          views={[makeView('tokens', 'Tokens', 'Token body')]}
+          launchers={[{ id: 'control-room', label: 'Control Room', onClick }]}
+        />,
+      )
+      const btn = screen.getByTestId('sidebar-panel-slot-launcher-control-room')
+      expect(btn).toBeInTheDocument()
+      expect(btn).toHaveTextContent('Control Room')
+      fireEvent.click(btn)
+      expect(onClick).toHaveBeenCalledTimes(1)
+      // It is NOT a view — no body is rendered for it; the token view stays.
+      expect(screen.getByTestId('view-body-tokens')).toBeInTheDocument()
+    })
+
+    it('renders no launcher region when launchers is omitted', () => {
+      render(
+        <SidebarPanelSlot {...baseProps} views={[makeView('tokens', 'Tokens', 'Token body')]} />,
+      )
+      expect(screen.queryByTestId('sidebar-panel-slot-launcher-control-room')).toBeNull()
+    })
+  })
+
   describe('view selection', () => {
     it('renders nothing when zero views registered', () => {
       const { container } = render(
