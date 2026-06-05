@@ -95,12 +95,9 @@ describe('WS protocol schema coverage', () => {
       'key_exchange',  // E2E encryption handshake, handled before dispatch
       'ping',          // keepalive, handled at connection layer
       'encrypted',     // envelope unwrapped before dispatch
-      // #5171 (epic #5170): the Host/Repo Status wire contract lands ahead of
-      // its server handler — A1 ships only the @chroxy/protocol schema so the
-      // dashboard/store-core siblings can build against a stable type. The
-      // server handler (the survey emitter) lands in a sibling #5170 issue,
-      // which removes this line and registers a real handler.
-      'host_status_request',
+      // #5174 (epic #5170): host_status_request now has a real handler
+      // (control-room-handlers.js), so it is covered by the forward
+      // schema-coverage check and no longer belongs in KNOWN_PRE_REGISTRY.
     ])
 
     const unexplained = schemaOnly.filter((t) => !KNOWN_PRE_REGISTRY.has(t))

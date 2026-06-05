@@ -49,6 +49,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'activity_snapshot' / 'activity_delta' removed — the dashboard now handles
   // them (Control Room panel #5163); they moved to PLATFORM_SPECIFIC as
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5159.
+  'host_status_snapshot', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter) — the server handler lands ahead of its consumer; the dashboard panel handler is a sibling #5170 issue, after which this moves to PLATFORM_SPECIFIC as 'dashboard'. Mobile parity is Phase-2 per epic #5159.
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
