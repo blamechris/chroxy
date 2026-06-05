@@ -26,6 +26,53 @@ const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 const DEFAULT_PROVIDER = 'claude-sdk'
 
 /**
+ * Parse the leading `major.minor.patch` semver out of an arbitrary version
+ * string (e.g. "2.1.163 (Claude Code)" → [2, 1, 163]). Returns null when no
+ * leading semver is present so callers can degrade gracefully rather than
+ * hard-fail on an unexpected version format. Pre-release / build suffixes
+ * are ignored — only the numeric core is compared. (#3953)
+ *
+ * @param {string} str
+ * @returns {[number, number, number] | null}
+ */
+export function parseLeadingSemver(str) {
+  if (typeof str !== 'string') return null
+  const m = str.trim().match(/^v?(\d+)\.(\d+)\.(\d+)/)
+  if (!m) return null
+  return [Number(m[1]), Number(m[2]), Number(m[3])]
+}
+
+/**
+ * Compare two semver values. `found` may be a string or a parsed
+ * `[major, minor, patch]` tuple; `required` is a semver string. Returns a
+ * negative number when `found` < `required`, 0 when equal (on the numeric
+ * core), positive when greater.
+ *
+ * Both sides fail CLOSED: an unparseable `found` OR an unparseable
+ * `required` sorts as less-than (returns negative) so the floor is treated
+ * as NOT satisfied. This matters for `required` too — a provider that
+ * accidentally supplies a non-`major.minor.patch` floor (e.g. ">=2.1.80"
+ * or "2.1.80-beta") must not silently disable minVersion enforcement
+ * (Copilot review on #3953). (#3953)
+ *
+ * @param {string | [number, number, number]} found
+ * @param {string} required
+ * @returns {number}
+ */
+export function compareSemver(found, required) {
+  const a = Array.isArray(found) ? found : parseLeadingSemver(found)
+  const b = parseLeadingSemver(required)
+  // Fail closed on either side: a malformed floor (b) or version (a) is
+  // treated as "not satisfied" so an enforcement gate can never pass by
+  // accident. Returns negative (found < required) in every invalid case.
+  if (!a || !b) return -1
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i]
+  }
+  return 0
+}
+
+/**
  * Detect whether the server is running inside a bundled .app (Tauri) or
  * under the supervisor process. In either case, the end user cannot fix
  * a missing dependency / broken install themselves by running `npm install`
@@ -244,6 +291,11 @@ function checkProvider(providerName) {
       required: true,
       candidates: spec.binary.candidates || [],
       installHint: spec.binary.installHint || `install ${spec.binary.name}`,
+      // #3953: providers may declare a minimum binary version (e.g.
+      // claude-channel needs `claude` ≥ 2.1.80 for the --channels MCP
+      // transport). checkBinary parses the leading semver out of the
+      // version output and fails when it's below the floor.
+      minVersion: spec.binary.minVersion || null,
     })
     bin.provider = providerName
     out.push(bin)
@@ -282,13 +334,36 @@ function checkProvider(providerName) {
  *
  * Exported for tests — callers in production should use `runDoctorChecks`.
  */
-export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [] }) {
+export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null }) {
   const resolved = resolveBinary(name, candidates)
   try {
     const output = execFileSync(resolved, args, {
       encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
     })
-    return { name, status: 'pass', message: parseVersion(output) }
+    const message = parseVersion(output)
+    // #3953: when the provider declares a minimum version, parse the
+    // leading semver out of the (already pretty-printed) version message
+    // and fail the check below the floor. If the version can't be parsed
+    // we don't block the user — we surface a warn so a format change in
+    // the upstream CLI doesn't hard-fail an otherwise-working install.
+    if (minVersion) {
+      const found = parseLeadingSemver(message)
+      if (found === null) {
+        return {
+          name,
+          status: 'warn',
+          message: `${message} — could not parse version to verify ≥ ${minVersion}`,
+        }
+      }
+      if (compareSemver(found, minVersion) < 0) {
+        return {
+          name,
+          status: required ? 'fail' : 'warn',
+          message: `${message} — requires ${name} ≥ ${minVersion}; ${installHint}`,
+        }
+      }
+    }
+    return { name, status: 'pass', message }
   } catch (err) {
     if (err.killed || err.signal === 'SIGTERM') {
       // Timeout — binary exists but hung

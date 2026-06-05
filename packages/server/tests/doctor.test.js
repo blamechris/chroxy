@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, parse as parsePath, relative } from 'node:path'
-import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext } from '../src/doctor.js'
+import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver } from '../src/doctor.js'
 
 /**
  * Integration tests for doctor.js.
@@ -211,6 +211,119 @@ describe('runDoctorChecks', () => {
         process.env.PATH = originalPath
       }
     }
+  })
+})
+
+// #3953 — provider preflight can declare a minimum binary version (e.g.
+// claude-channel needs `claude` ≥ 2.1.80). checkBinary parses the leading
+// semver and fails below the floor.
+describe('checkBinary minVersion gate (#3953)', () => {
+  it('passes when the binary version meets the floor', () => {
+    // Node prints `v22.x.y`; any floor at-or-below the running Node passes.
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '18.0.0',
+    })
+    assert.equal(result.status, 'pass',
+      `expected pass for floor 18.0.0 vs running ${process.versions.node}, got ${result.status}: ${result.message}`)
+  })
+
+  it('fails when the binary version is below the floor', () => {
+    // A floor far above any plausible Node major forces the fail branch.
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node ≥ 999.0.0',
+      minVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'fail')
+    assert.match(result.message, /requires node ≥ 999\.0\.0/)
+    assert.match(result.message, /install node ≥ 999\.0\.0/)
+  })
+
+  it('downgrades a below-floor optional binary to warn (not fail)', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: false,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'warn')
+  })
+
+  it('warns (does not hard-fail) when the version cannot be parsed', () => {
+    const result = checkBinary('node', ['--version'], {
+      // Intentionally return an unparseable version string.
+      parseVersion: () => 'some weird build identifier',
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '2.1.80',
+    })
+    assert.equal(result.status, 'warn')
+    assert.match(result.message, /could not parse version/)
+  })
+
+  it('ignores minVersion when not declared (back-compat)', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+    })
+    assert.equal(result.status, 'pass')
+  })
+})
+
+describe('parseLeadingSemver / compareSemver helpers (#3953)', () => {
+  it('parses a leading semver out of a decorated version string', () => {
+    assert.deepEqual(parseLeadingSemver('2.1.163 (Claude Code)'), [2, 1, 163])
+    assert.deepEqual(parseLeadingSemver('v22.14.0'), [22, 14, 0])
+  })
+
+  it('returns null for unparseable input', () => {
+    assert.equal(parseLeadingSemver('not a version'), null)
+    assert.equal(parseLeadingSemver(''), null)
+    assert.equal(parseLeadingSemver(null), null)
+  })
+
+  it('orders versions correctly', () => {
+    assert.ok(compareSemver('2.1.79', '2.1.80') < 0)
+    assert.ok(compareSemver('2.1.80', '2.1.80') === 0)
+    assert.ok(compareSemver('2.1.163', '2.1.80') > 0)
+    assert.ok(compareSemver('3.0.0', '2.9.9') > 0)
+    assert.ok(compareSemver('2.0.0', '2.1.0') < 0)
+  })
+
+  it('sorts an unparseable found-version as less-than the floor', () => {
+    assert.ok(compareSemver('garbage', '2.1.80') < 0)
+  })
+
+  // Copilot review on #3953: a malformed `required` floor must also fail
+  // closed, otherwise a provider that supplies ">=2.1.80" / "2.1.80-beta"
+  // would silently disable minVersion enforcement (compareSemver returning
+  // positive → "satisfied").
+  it('fails closed when the required floor has no parseable leading semver', () => {
+    // No leading `major.minor.patch` → parseLeadingSemver returns null →
+    // fail closed (less-than), so the floor is never silently satisfied.
+    assert.ok(compareSemver('2.1.163', '>=2.1.80') < 0)
+    assert.ok(compareSemver('2.1.163', 'v2') < 0)
+    assert.ok(compareSemver('2.1.163', 'not-a-version') < 0)
+    // Both sides invalid is still less-than.
+    assert.ok(compareSemver('garbage', 'also-garbage') < 0)
+  })
+
+  it('still satisfies a floor that carries a pre-release/build suffix after a valid core', () => {
+    // "2.1.80-beta" HAS a parseable leading core (2.1.80), so a higher
+    // found version legitimately satisfies it — the suffix is ignored, not
+    // treated as unparseable.
+    assert.ok(compareSemver('2.1.163', '2.1.80-beta') > 0)
+    assert.ok(compareSemver('2.1.80', '2.1.80-beta') === 0)
   })
 })
 

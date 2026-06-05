@@ -16,6 +16,7 @@
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { ClaudeTuiSession } from './claude-tui-session.js'
+import { ClaudeChannelSession } from './claude-channel-session.js'
 import { ClaudeByokSession } from './byok-session.js'
 import { DeepSeekSession } from './deepseek-session.js'
 import { GeminiSession } from './gemini-session.js'
@@ -33,6 +34,12 @@ const PROVIDERS = {
   'claude-cli': CliSession,
   'claude-sdk': SdkSession,
   'claude-tui': ClaudeTuiSession,
+  // #3953 — research-preview `claude --channels` MCP transport. Scaffold
+  // only: ClaudeChannelSession.start() throws until the bridge lands in
+  // #3954. Registered so the dashboard can list it + `chroxy doctor` runs
+  // its preflight; gated as a preview option (never default — server-cli's
+  // default stays `claude-sdk`).
+  'claude-channel': ClaudeChannelSession,
   'claude-byok': ClaudeByokSession,
   'deepseek': DeepSeekSession,
   'gemini': GeminiSession,
