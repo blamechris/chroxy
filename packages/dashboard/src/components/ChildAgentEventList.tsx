@@ -35,10 +35,31 @@
  *   reducer trivial (append) and lets us style nested rows distinctly
  *   ("this is sub-tool progress, not top-level work").
  *
+ * Child permission requests (#5061):
+ *   - When the subagent fires an MCP tool under `approve` mode, the
+ *     child's `PermissionManager` raises a `permission_request` that the
+ *     parent relays to the dashboard as
+ *     `agent_event{eventType: 'permission_request'}` (byok-session.js
+ *     #5056). The relay also registers the child's `requestId` in the
+ *     WsServer `permissionSessionMap` against the PARENT session id, and
+ *     records `requestId -> childSession` in the parent's routing table.
+ *   - The reducer surfaces one permission row per pending request; the
+ *     row carries inline Allow / Deny affordances. Tapping a button
+ *     calls the store's `sendPermissionResponse(requestId, decision)` —
+ *     the exact same wire path a top-level prompt uses. ws-permissions
+ *     authorises against the parent session id, the parent forwards the
+ *     decision to the child that actually holds the pending entry. No new
+ *     trust boundary (see byok-session.js authority note).
+ *   - The resolved decision is read from the store
+ *     (`resolvedPermissions[requestId]`) so a tab switch that remounts
+ *     this list preserves the answered state, and a server-side
+ *     `permission_resolved` relay (timeout / abort / auto) also flips the
+ *     row to its terminal state via the reducer.
+ *
  * What this does NOT render in v2:
- *   - `permission_request` from the child (the server gates these on
- *     the parent's permission manager today; deferred until the child
- *     gets its own per-launch permission_mode override surface).
+ *   - An "Allow for Session" affordance — session-scoped rules are a
+ *     parent-session concept; the child's permission is a transient
+ *     per-dispatch decision, so the nested row offers Allow / Deny only.
  *   - Errors from the child are surfaced via the parent's Task
  *     tool_result `is_error: true` content (the byok-session.js
  *     fold), so a child error renders in the parent bubble's normal
@@ -48,6 +69,7 @@
 import { useMemo, useState } from 'react'
 import type { ChildAgentEvent } from '@chroxy/store-core'
 import { formatToolName, getInputSummary, getPartialSummary } from '@chroxy/store-core'
+import { useConnectionStore } from '../store/connection'
 
 interface ChildAgentEventListProps {
   events: ChildAgentEvent[]
@@ -77,6 +99,45 @@ interface ChildToolRow {
 }
 
 /**
+ * One pending (or server-resolved) permission request raised by the
+ * child agent and relayed up as `agent_event{eventType:
+ * 'permission_request'}`. The row carries inline Allow / Deny
+ * affordances; the answered state is read from the dashboard store, but
+ * a `permission_resolved` relay (timeout / abort / auto) records a
+ * terminal `serverDecision` here too so the row settles even when the
+ * user never tapped a button.
+ */
+/**
+ * Server-relayed terminal decision from `permission_resolved`. This is
+ * the WIRE decision set (`'allow' | 'allowAlways' | 'deny'`, see
+ * `PermissionResponseSchema` in @chroxy/protocol) plus a `'denied'`
+ * sentinel for resolutions that carry no explicit decision (timeout /
+ * abort / malformed relay), which we fail-safe to denied. Deliberately
+ * NOT `PermissionDecision` (a UI-only type that includes `'allowSession'`
+ * and excludes `'allowAlways'`) so the server set can't drift into it.
+ */
+type ServerPermissionDecision = 'allow' | 'allowAlways' | 'deny' | 'denied'
+
+/** Wire decisions the server may relay; anything else is treated as denied. */
+const WIRE_PERMISSION_DECISIONS = new Set<ServerPermissionDecision>(['allow', 'allowAlways', 'deny'])
+
+interface ChildPermissionRow {
+  /** Permission requestId — store key + wire key for the response. */
+  requestId: string
+  /** Tool the child wants to run (`Bash`, an MCP tool, etc.). */
+  tool: string
+  /** Human-readable description from the child's PermissionManager. */
+  description: string
+  /**
+   * Terminal decision relayed by the server via `permission_resolved`
+   * (e.g. `'deny'` on timeout/abort). Distinct from the user's own
+   * decision in `resolvedPermissions` — either flips the row to its
+   * answered state.
+   */
+  serverDecision?: ServerPermissionDecision
+}
+
+/**
  * Reduce the flat `agent_event` log into a structured per-tool list +
  * one concatenated assistant-text block (or null when the child
  * produced no streaming text). Pure — recomputed via `useMemo` when
@@ -94,9 +155,12 @@ interface ChildToolRow {
 function reduceEvents(events: ChildAgentEvent[]): {
   tools: ChildToolRow[]
   assistantText: string
+  permissions: ChildPermissionRow[]
 } {
   const tools: ChildToolRow[] = []
   const byId = new Map<string, ChildToolRow>()
+  const permissions: ChildPermissionRow[] = []
+  const permById = new Map<string, ChildPermissionRow>()
   let assistantText = ''
   // Track the messageId of the last stream_delta we appended so we can
   // insert a blank-line boundary on transition. Without this, multi-
@@ -170,13 +234,52 @@ function reduceEvents(events: ChildAgentEvent[]): {
         assistantText += delta
         if (messageId) lastStreamMessageId = messageId
       }
+    } else if (ev.type === 'permission_request') {
+      // #5061: child raised a permission prompt (relayed via agent_event).
+      const requestId = typeof p.requestId === 'string' ? p.requestId : null
+      if (!requestId) continue
+      const tool = typeof p.tool === 'string' ? p.tool : 'tool'
+      const description = typeof p.description === 'string' ? p.description : ''
+      const existing = permById.get(requestId)
+      if (existing) {
+        // Idempotent replay — refresh display fields, keep terminal state.
+        existing.tool = tool
+        existing.description = description || existing.description
+        continue
+      }
+      const row: ChildPermissionRow = { requestId, tool, description }
+      permById.set(requestId, row)
+      permissions.push(row)
+    } else if (ev.type === 'permission_resolved') {
+      // #5061: server-side resolution (user response echo, timeout, abort,
+      // auto-mode). Settle the matching row so the affordance disappears
+      // even when no local decision was recorded.
+      const requestId = typeof p.requestId === 'string' ? p.requestId : null
+      if (!requestId) continue
+      // Normalise to a known wire decision; anything unexpected (or a
+      // resolution with no decision: timeout / abort) fails safe to denied
+      // so an unrecognised value can never read as "Allowed".
+      const decision: ServerPermissionDecision =
+        WIRE_PERMISSION_DECISIONS.has(p.decision as ServerPermissionDecision)
+          ? (p.decision as ServerPermissionDecision)
+          : 'denied'
+      let row = permById.get(requestId)
+      if (!row) {
+        // Defensive: resolved arrived without a preceding request (replay
+        // gap / out-of-order relay). Synthesise so the terminal state is
+        // still visible rather than dropping it silently.
+        row = { requestId, tool: 'tool', description: '' }
+        permById.set(requestId, row)
+        permissions.push(row)
+      }
+      row.serverDecision = decision
     }
     // Unknown types fall through silently and are NOT rendered.
-    // Adding a new surface (e.g. nested permission_request rows) means
-    // adding an explicit branch above AND a styled row in the JSX —
-    // a generic "unknown event" line would just be noise to users.
+    // Adding a new surface means adding an explicit branch above AND a
+    // styled row in the JSX — a generic "unknown event" line would just
+    // be noise to users.
   }
-  return { tools, assistantText }
+  return { tools, assistantText, permissions }
 }
 
 export function ChildAgentEventList({ events, parentToolUseId }: ChildAgentEventListProps) {
@@ -185,7 +288,18 @@ export function ChildAgentEventList({ events, parentToolUseId }: ChildAgentEvent
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const toggle = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }))
 
-  if (reduced.tools.length === 0 && !reduced.assistantText) {
+  // #5061: locally-recorded decisions (so an answered nested prompt stays
+  // answered across remounts), plus the wire path for responses. The
+  // response routes through the parent session id exactly like a top-level
+  // prompt — the server's #5056 routing table forwards it to the child.
+  const resolvedPermissions = useConnectionStore((s) => s.resolvedPermissions)
+  const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse)
+
+  if (
+    reduced.tools.length === 0
+    && !reduced.assistantText
+    && reduced.permissions.length === 0
+  ) {
     // Render nothing — the parent ToolBubble only mounts us when
     // there is at least one event, so this branch is the
     // safety-net for an all-`stream_delta`-empty payload.
@@ -248,6 +362,66 @@ export function ChildAgentEventList({ events, parentToolUseId }: ChildAgentEvent
                 onClick={(e) => e.stopPropagation()}
               >
                 <pre>{row.result}</pre>
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {reduced.permissions.map((perm) => {
+        // The row is answered when EITHER the user recorded a local
+        // decision OR the server relayed a terminal resolution.
+        const localDecision = resolvedPermissions?.[perm.requestId] ?? null
+        const answered = localDecision ?? perm.serverDecision ?? null
+        const answerLabel = answered === 'deny' || answered === 'denied'
+          ? 'Denied'
+          : answered
+            ? 'Allowed'
+            : null
+        return (
+          <div
+            key={perm.requestId}
+            className={`child-agent-permission${answered ? ' answered' : ''}`}
+            data-testid={`child-agent-permission-${perm.requestId}`}
+            onClick={(e) => e.stopPropagation()}
+            role="presentation"
+          >
+            <div className="child-agent-permission-desc">
+              <span className="child-agent-permission-tool">{perm.tool}</span>
+              {perm.description ? `: ${perm.description}` : ': Permission requested'}
+            </div>
+            {answered ? (
+              <div
+                className="child-agent-permission-answer"
+                data-testid={`child-agent-permission-answer-${perm.requestId}`}
+              >
+                {answerLabel}
+              </div>
+            ) : (
+              <div className="child-agent-permission-buttons">
+                <button
+                  className="btn-allow"
+                  type="button"
+                  data-testid={`child-agent-permission-allow-${perm.requestId}`}
+                  aria-label={`Allow ${perm.tool} for subagent`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    sendPermissionResponse(perm.requestId, 'allow')
+                  }}
+                >
+                  Allow
+                </button>
+                <button
+                  className="btn-deny"
+                  type="button"
+                  data-testid={`child-agent-permission-deny-${perm.requestId}`}
+                  aria-label={`Deny ${perm.tool} for subagent`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    sendPermissionResponse(perm.requestId, 'deny')
+                  }}
+                >
+                  Deny
+                </button>
               </div>
             )}
           </div>
