@@ -352,3 +352,51 @@ describe('selectSessionEntries', () => {
     expect(selectSessionEntries(createEmptyActivityState(), 'nope')).toEqual([])
   })
 })
+
+describe('prototype-key safety (wire-controlled ids/sessionIds)', () => {
+  // `byId` / `bySession` are keyed off wire strings. Plain `{}` + `in` would
+  // misdetect inherited Object.prototype members as present and let
+  // `obj["__proto__"] = entry` mutate the prototype. These lock in the
+  // null-prototype hardening.
+  const PROTO_KEYS = ['__proto__', 'toString', 'constructor', 'hasOwnProperty']
+
+  for (const key of PROTO_KEYS) {
+    it(`delta appends an id of "${key}" to order and upserts it`, () => {
+      let s = applyActivityDelta(createEmptyActivityState(), delta('s1', 'started', entry({ id: key, label: 'v1' })))
+      expect(selectSessionEntries(s, 's1').map((e) => e.id)).toEqual([key])
+      // a second started for the same proto-key id replaces in place (no dupe in order)
+      s = applyActivityDelta(s, delta('s1', 'started', entry({ id: key, label: 'v2' })))
+      expect(selectSessionEntries(s, 's1').map((e) => e.id)).toEqual([key])
+      expect(selectSessionEntries(s, 's1')[0]!.label).toBe('v2')
+    })
+
+    it(`snapshot dedupes a proto-key id "${key}" via own-property check`, () => {
+      const s = applyActivitySnapshot(createEmptyActivityState(), snapshot('s1', [
+        entry({ id: key, label: 'first' }),
+        entry({ id: key, label: 'second' }),
+        entry({ id: 'normal' }),
+      ]))
+      expect(selectSessionEntries(s, 's1').map((e) => e.id)).toEqual([key, 'normal'])
+      expect(selectSessionEntries(s, 's1')[0]!.label).toBe('second')
+    })
+
+    it(`a parentId of "${key}" that is not a real entry re-roots the child`, () => {
+      const s = applyActivityDelta(createEmptyActivityState(), delta('s1', 'started', entry({ id: 'child', parentId: key })))
+      const tree = selectActivityTree(s, 's1')
+      expect(tree.map((n) => n.entry.id)).toEqual(['child'])
+    })
+
+    it(`a sessionId of "${key}" is isolated and clearable`, () => {
+      let s = applyActivityDelta(createEmptyActivityState(), delta(key, 'started', entry({ id: 'a' })))
+      expect(selectSessionEntries(s, key).map((e) => e.id)).toEqual(['a'])
+      s = clearSessionActivity(s, key)
+      expect(selectSessionEntries(s, key)).toEqual([])
+    })
+  }
+
+  it('does not pollute Object.prototype when an id is "__proto__"', () => {
+    applyActivityDelta(createEmptyActivityState(), delta('s1', 'started', entry({ id: '__proto__', label: 'x' })))
+    // If the prototype were mutated, {}.label would be 'x'.
+    expect(({} as Record<string, unknown>).label).toBeUndefined()
+  })
+})
