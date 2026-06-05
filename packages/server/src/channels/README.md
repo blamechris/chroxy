@@ -7,7 +7,10 @@ de-risk the channel protocol before the provider scaffold (#3953) and bridge
 (#3954) are built on top of it.
 
 See [`docs/architecture/claude-channels-provider-spike.md`](../../../../docs/architecture/claude-channels-provider-spike.md)
-(the #3951 spike) for the verified protocol contract and the go/no-go rationale.
+(the #3951 spike) for the verified protocol contract and the go/no-go rationale,
+and [`PACKAGING.md`](./PACKAGING.md) for the plan to ship this as a
+marketplace-approved Claude plugin (which removes the
+`--dangerously-load-development-channels` requirement).
 
 ## What it does
 
