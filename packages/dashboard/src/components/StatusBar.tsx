@@ -41,7 +41,7 @@ export interface StatusBarProps {
    * legacy `$X.XXXX` span. Left undefined by callers that don't wire the
    * setting (and by the existing test suite) so the legacy behaviour stays
    * the render fallback. The live app always passes the store value, whose
-   * own default is `provider-model`.
+   * own default is `cost` (#5203).
    */
   costBadgeMode?: CostBadgeMode
 }
@@ -132,7 +132,7 @@ export function StatusBar({
       )}
       {costBadgeMode ? (
         // #5184: configurable badge. The display mode comes from Settings
-        // (store-backed, default `provider-model`); the host still owns the
+        // (store-backed, default `cost` since #5203); the host still owns the
         // tooltip so the hover breakdown is unchanged. `className` adds
         // `status-cost` so existing layout/selectors keep working.
         <SidebarCostBadge

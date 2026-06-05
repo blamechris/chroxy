@@ -107,11 +107,13 @@
   gap: 16px;
 }
 
-/* #5200: row 2 — the cost/token cluster on its own line, right-aligned, with
-   the full header width to itself so it never collides with the selectors. */
+/* #5200/#5203: row 2 — the status bar on its own line with the full header
+   width to itself so it never collides with the selectors. The bar fills the
+   row (`.status-bar { width: 100% }`) and distributes its own left/right groups
+   via `space-between`, so this container just lays it out as a single flex
+   child with no extra justification. */
 .header-meta {
   display: flex;
-  justify-content: flex-end;
   align-items: center;
   min-width: 0;
 }
@@ -378,12 +380,6 @@
    the FULL header width, space-betweening two groups — identity (type badge +
    model) on the left, metrics (configurable cost badge + token meter) on the
    right. */
-.header-meta {
-  /* override the #5200 flex-end: the status-bar fills the row and distributes
-     its own groups */
-  justify-content: stretch;
-}
-
 .header-meta .status-bar {
   width: 100%;
   justify-content: space-between;

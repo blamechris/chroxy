@@ -9,8 +9,8 @@
  * so existing component-level imports keep working.
  *
  * Modes:
- *   - `provider-model`  (DEFAULT) — "Claude Code (SDK) · Sonnet 4.6"
- *   - `cost`            — the dollar cost ("$0.2903"), the legacy behaviour
+ *   - `cost`            (DEFAULT) — the dollar cost ("$0.2903"), the legacy behaviour
+ *   - `provider-model`  — "Claude Code (SDK) · Sonnet 4.6"
  *   - `tokens`          — total input+output tokens for the turn ("30.0k tokens")
  *   - `context-pct`     — percent of the model context window used ("45%")
  *   - `session-type`    — the SDK/CLI/TUI/BYOK session-type tag ("SDK")
@@ -78,7 +78,7 @@ export const COST_BADGE_MODE_LABELS: Record<CostBadgeMode, string> = {
 const NBSP = ' '
 
 export interface CostBadgeContentInput {
-  /** Which piece of info to render. Defaults to `provider-model`. */
+  /** Which piece of info to render. Defaults to `DEFAULT_COST_BADGE_MODE` (`cost`). */
   mode?: CostBadgeMode
   /** Total session cost in USD (drives `cost` mode). */
   cost?: number | null
