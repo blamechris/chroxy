@@ -28,7 +28,7 @@
  * additional requests until the current one settles.
  */
 import { createLogger } from '../logger.js'
-import { resolveRepoSet } from '../control-room/repo-set.js'
+import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-set.js'
 import { surveyRepos } from '../control-room/survey.js'
 
 const log = createLogger('ws')
@@ -37,6 +37,31 @@ const log = createLogger('ws')
 // never leak entries when a client disconnects (the client object is GC'd) and
 // we never need an explicit cleanup path.
 const inFlight = new WeakSet()
+
+/**
+ * Build a schema-conformant `host_status_snapshot` carrying an error. The
+ * survey fields are present and valid (empty repos, zeroed summary, the real
+ * discovery root + a fresh timestamp) so the payload satisfies
+ * `ServerHostStatusSnapshotSchema`; the extra `error` (and echoed `requestId`)
+ * are additive annotations the dashboard branches on. Keeping the error shape a
+ * valid snapshot means the consumer never has to special-case a malformed reply.
+ *
+ * @param {string} root - effective discovery root to report.
+ * @param {string|null} requestId - correlation id to echo, or null.
+ * @param {{ code: string, message: string }} error
+ * @returns {object} a `host_status_snapshot` message.
+ */
+function errorSnapshot(root, requestId, error) {
+  return {
+    type: 'host_status_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    root,
+    summary: { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 },
+    repos: [],
+    error,
+  }
+}
 
 /**
  * Derive the set of cwds for currently-active chroxy sessions, used by the
@@ -64,38 +89,34 @@ function activeSessionCwds(sessionManager) {
 async function handleHostStatusRequest(ws, client, msg, ctx) {
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
 
+  const config = ctx?.config || {}
+  // Effective discovery root: the configured root, else resolveRepoSet's own
+  // default (~/Projects). Resolve it HERE — not as an undefined passed down —
+  // so the snapshot's `root` reports the directory we actually scanned rather
+  // than '' when controlRoomRoot is unset.
+  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+    ? config.controlRoomRoot
+    : DEFAULT_CONTROL_ROOM_ROOT
+  const repos = Array.isArray(config.repos) ? config.repos : []
+
   // Authority gate: host-wide survey is for host-level (unbound) clients only.
   // A pairing-bound (share-a-session) token is scoped to one session.
   if (client?.boundSessionId) {
-    ctx.send(ws, {
-      type: 'host_status_snapshot',
-      requestId,
-      error: {
-        code: 'FORBIDDEN',
-        message: 'host_status_request requires host-level authority (a session-bound token cannot survey the host)',
-      },
-    })
+    ctx.send(ws, errorSnapshot(root, requestId, {
+      code: 'FORBIDDEN',
+      message: 'host_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
     return
   }
 
   // In-flight guard: one survey per client at a time.
   if (inFlight.has(client)) {
-    ctx.send(ws, {
-      type: 'host_status_snapshot',
-      requestId,
-      error: {
-        code: 'SURVEY_IN_PROGRESS',
-        message: 'A host status survey is already in progress for this client',
-      },
-    })
+    ctx.send(ws, errorSnapshot(root, requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A host status survey is already in progress for this client',
+    }))
     return
   }
-
-  const config = ctx?.config || {}
-  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
-    ? config.controlRoomRoot
-    : undefined
-  const repos = Array.isArray(config.repos) ? config.repos : []
 
   // Tests can inject `ctx.surveyRepos` / `ctx.resolveRepoSet` to stub the
   // filesystem + git/gh calls without patching modules. Production never sets
@@ -108,7 +129,7 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
     const repoSet = resolveFn({ repos, root })
     const snapshot = await surveyFn(repoSet, {
       activeSessionCwds: activeSessionCwds(ctx?.sessionManager),
-      root: root || '',
+      root,
     })
 
     ctx.send(ws, {
@@ -121,14 +142,10 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
     })
   } catch (err) {
     log.warn(`host_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.send(ws, {
-      type: 'host_status_snapshot',
-      requestId,
-      error: {
-        code: 'SURVEY_FAILED',
-        message: err && err.message ? err.message : 'host status survey failed',
-      },
-    })
+    ctx.send(ws, errorSnapshot(root, requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'host status survey failed',
+    }))
   } finally {
     inFlight.delete(client)
   }

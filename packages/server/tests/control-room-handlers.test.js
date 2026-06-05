@@ -135,7 +135,7 @@ describe('host_status_request handler', () => {
     assert.equal(payload.requestId, null)
   })
 
-  it('rejects a session-bound client with FORBIDDEN', async () => {
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
     client.boundSessionId = 'sess-1'
     const handler = controlRoomHandlers.host_status_request
     await handler(ws, client, { type: 'host_status_request', requestId: 'r1' }, ctx)
@@ -145,6 +145,23 @@ describe('host_status_request handler', () => {
     assert.equal(payload.type, 'host_status_snapshot')
     assert.equal(payload.error.code, 'FORBIDDEN')
     assert.equal(payload.requestId, 'r1')
+    // Error replies must still satisfy the snapshot schema (empty survey).
+    const { requestId, error, ...rest } = payload
+    assert.ok(ServerHostStatusSnapshotSchema.safeParse(rest).success, 'FORBIDDEN reply must be a valid snapshot')
+    assert.deepEqual(payload.repos, [])
+    assert.deepEqual(payload.summary, { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 })
+  })
+
+  it('reports the default discovery root when controlRoomRoot is unset', async () => {
+    ctx = makeCtx({ config: { repos: [] } })
+    const handler = controlRoomHandlers.host_status_request
+    await handler(ws, client, { type: 'host_status_request' }, ctx)
+
+    // resolveRepoSet + surveyRepos both receive a non-empty resolved root.
+    const [arg] = ctx.resolveRepoSet.lastCall
+    assert.ok(typeof arg.root === 'string' && arg.root.length > 0, 'resolveRepoSet root must be resolved, not empty')
+    const [, opts] = ctx.surveyRepos.lastCall
+    assert.equal(opts.root, arg.root)
   })
 
   it('debounces concurrent requests from the same client', async () => {
@@ -163,6 +180,8 @@ describe('host_status_request handler', () => {
     const rejected = ctx._send.calls.find(c => c[1].requestId === 'b')
     assert.ok(rejected, 'second request should get a reply')
     assert.equal(rejected[1].error.code, 'SURVEY_IN_PROGRESS')
+    const { requestId: _rid, error: _err, ...rest } = rejected[1]
+    assert.ok(ServerHostStatusSnapshotSchema.safeParse(rest).success, 'in-progress reply must be a valid snapshot')
 
     // Release the first survey; it completes and a later request is allowed.
     release()
@@ -181,6 +200,8 @@ describe('host_status_request handler', () => {
     assert.equal(payload.error.code, 'SURVEY_FAILED')
     assert.match(payload.error.message, /git exploded/)
     assert.equal(payload.requestId, 'e1')
+    const { requestId, error, ...rest } = payload
+    assert.ok(ServerHostStatusSnapshotSchema.safeParse(rest).success, 'survey-failed reply must be a valid snapshot')
   })
 
   it('dispatches through the registry via handleSessionMessage', async () => {
