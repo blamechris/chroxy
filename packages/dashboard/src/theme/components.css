@@ -73,16 +73,16 @@
 }
 
 /* ---- Header ---- */
-/* Header is a 3-column grid (auto | 1fr | auto). Switching from flex
-   space-between fixed a class of overlap bugs: with flex, header-center
-   could spill into header-right's space (overflow: visible was needed for
-   native select dropdowns), causing Skills to underlap the gear button and
-   long model names to underlap the status dot. Grid gives each zone its
-   own cell with explicit gap; only the center column flexes. */
-/* #5200: the header is now two stacked rows — .header-main (selectors) on
-   top and .header-meta (cost/token cluster) below — so the main bar is never
-   crowded. #header is the flex-column wrapper; the 3-column grid moved to
-   .header-main. */
+/* #5200: the header is two stacked rows — #header is the flex-column wrapper;
+   row 1 (.header-main) is the 3-column main bar (selectors), row 2
+   (.header-meta) holds the cost/token cluster below it — so the main bar is
+   never crowded.
+   History: .header-main's 3-column grid (auto | 1fr | auto) replaced an
+   earlier flex space-between layout that let header-center spill into
+   header-right's space (overflow: visible is needed for native select
+   dropdowns), causing Skills to underlap the gear button and long model
+   names to underlap the status dot. The grid gives each zone its own cell
+   with explicit gap; only the center column flexes. */
 #header {
   display: flex;
   flex-direction: column;
