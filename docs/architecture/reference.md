@@ -10,7 +10,9 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | BaseSession | `src/base-session.js` | Shared session logic (model, permissions, lifecycle) |
 | BaseTunnelAdapter | `src/tunnel/base.js` | Base class with shared recovery logic (backoff, events) |
 | CheckpointManager | `src/checkpoint-manager.js` | Checkpoint creation/restore with git state |
+| ChroxyChannelServer | `src/channels/chroxy-channel-server.js` | Stdio MCP channel server (`claude --channels` prototype, #3952) — research preview |
 | CLI | `src/cli.js` | `init`, `start`, `config`, `tunnel setup` commands |
+| ClaudeChannelSession | `src/claude-channel-session.js` | `claude --channels` MCP-transport provider (research preview, #3953 scaffold — `start()` throws until #3954 bridge) |
 | CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
 | CloudflareTunnelAdapter | `src/tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
 | Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
@@ -356,7 +358,9 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | File | Purpose |
 |------|---------|
 | `base-session.js` | Shared session logic (model, permissions, lifecycle) |
+| `channels/chroxy-channel-server.js` | Stdio MCP channel server (`claude --channels` prototype, #3952) — research preview |
 | `checkpoint-manager.js` | Checkpoint creation/restore with git state |
+| `claude-channel-session.js` | `claude --channels` MCP-transport provider (research-preview scaffold, #3953) |
 | `cli.js` | CLI commands (init, start, config, tunnel setup) |
 | `cli-session.js` | Claude Code headless executor (stream-json) |
 | `config.js` | Config schema validation + merge precedence |
@@ -603,6 +607,8 @@ Tauri tray application wrapping the web dashboard with native integrations.
 | `CLAUDE.md` | Essential dev workflow and conventions |
 | `docs/architecture/reference.md` | This file — detailed component/protocol reference |
 | `docs/architecture/claude-channels-provider-spike.md` | Spike findings + go/no-go for the proposed `claude-channel` provider (#3951) |
+| `packages/server/src/channels/PACKAGING.md` | Plugin-packaging plan for `chroxy-channel` (marketplace path that removes the dev flag, #3956) |
+| `docs/providers.md` | Per-provider setup, capability matrix, and known limits (incl. `claude-channel` research preview) |
 | `docs/named-tunnel-guide.md` | Named tunnel setup guide |
 | `docs/self-hosting-guide.md` | Self-hosting requirements and deployment |
 | `docs/guides/container-isolation.md` | Container isolation guide (sandbox, Docker, combined) |

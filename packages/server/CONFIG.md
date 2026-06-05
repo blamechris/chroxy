@@ -17,7 +17,7 @@ Configuration values are resolved in the following order (highest priority first
 |-----|------|----------|---------------------|-------------|
 | `apiToken` | string | - | `API_TOKEN` | Authentication token for clients |
 | `port` | number | - | `PORT` | Local WebSocket port (default: 8765) |
-| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default), `claude-cli`, `claude-tui`, `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. See [../../docs/providers.md](../../docs/providers.md) for per-provider setup and env var requirements. |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default), `claude-cli`, `claude-tui`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. See [../../docs/providers.md](../../docs/providers.md) for per-provider setup and env var requirements. |
 | `shell` | string | - | `SHELL_CMD` | Shell to use (default: `$SHELL` or `/bin/zsh`) |
 | `cwd` | string | `--cwd <path>` | `CHROXY_CWD` | Working directory (CLI mode) |
 | `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
@@ -25,7 +25,7 @@ Configuration values are resolved in the following order (highest priority first
 | `resume` | boolean | `--resume` / `-r` | `CHROXY_RESUME` | Resume existing session |
 | `noAuth` | boolean | `--no-auth` | `CHROXY_NO_AUTH` | Disable authentication (localhost only) |
 | `costBudget` | number | `--cost-budget <dollars>` | `CHROXY_COST_BUDGET` | Per-session cost budget in dollars. Applied independently to each session (not a shared pool across sessions). Warns at 80%, pauses the session at 100%. |
-| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Session provider (default `claude-sdk`). Built-in: `claude-sdk`, `claude-cli`, `claude-tui`, `codex`, `gemini`. See [docs/providers.md](../../docs/providers.md) for setup, env vars (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), and capability matrix. |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Session provider (default `claude-sdk`). Built-in: `claude-sdk`, `claude-cli`, `claude-tui`, `claude-channel` (research preview), `codex`, `gemini`. See [docs/providers.md](../../docs/providers.md) for setup, env vars (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), and capability matrix. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection, but not yet runnable (bridge lands in #3954). See [`claude-channel`](#claude-channel-research-preview) below. |
 | `promptEvaluatorSkipPattern` | string | - | - | Per-session regex source (case-insensitive) extending the default skip list used by the prompt evaluator's trivial-message heuristic. See [Prompt evaluator skip heuristic](#prompt-evaluator-skip-heuristic) below. |
 | `maxSkillBytes` | number | - | - | Per-skill byte cap. Skills exceeding this size are rejected with a sanitised log warning. Default `32768` (32KB). Set to `0` to disable the per-skill cap. |
 | `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
@@ -262,11 +262,73 @@ The `provider` key picks which AI CLI backs a session by default:
 |-------|----------------------|--------------|
 | `claude-sdk` (default) | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
 | `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login (CLI intentionally strips `ANTHROPIC_API_KEY` from its environment) |
+| `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | Claude Code subscription login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 |
 | `gemini` | `gemini -p` CLI | `GEMINI_API_KEY` |
 | `codex` | `codex exec` CLI | `OPENAI_API_KEY` |
 | `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |
 
 Clients can override the default per-session by passing `provider` in a `create_session` WebSocket message. See [../../docs/providers.md](../../docs/providers.md) for capability differences (plan mode, permission handling, resume, attachments) and troubleshooting.
+
+### `claude-channel` (research preview)
+
+`claude-channel` drives Claude through Anthropic's first-party **channels MCP
+protocol** (`claude --channels`) instead of scraping the interactive TUI
+(`claude-tui`) or calling the SDK / `claude -p` (`claude-sdk` / `claude-cli`).
+A *channel* is a stdio MCP server that **pushes** events into a running
+interactive `claude` session; chroxy bridges those events onto its normal
+WebSocket/event pipeline. It bills the same way `claude-tui` does — against your
+Claude subscription's **interactive allowance**, bypassing the programmatic
+credit pool — because the events arrive in a real interactive session, not a
+`claude -p` subprocess.
+
+> **Status — scaffold only.** As of this writing the provider is a registered
+> scaffold (#3953): it is listed by the registry and runs its `chroxy doctor`
+> preflight, but `start()` throws "not yet implemented". The live bridge
+> (spawn + IPC round-trip) lands in #3954. Selecting `claude-channel` today
+> fails fast with a clear error rather than spawning anything.
+
+**When to pick it over `claude-tui` / `claude-sdk`:**
+
+- Over **`claude-tui`**: once the bridge lands, the channel transport replaces
+  the fragile ANSI-scrape + PTY-keystroke approach with a documented MCP
+  contract, and adds **live streaming** plus a **first-party permission relay**
+  (Anthropic's `claude/channel/permission`, instead of the sidecar
+  `permission-hook.sh`). Same subscription billing surface.
+- Over **`claude-sdk` / `claude-cli`**: pick the channel path (like
+  `claude-tui`) only when you want sessions to bill against your Claude.ai Pro /
+  Max / Team **subscription** rather than the programmatic credit pool. The SDK
+  remains the default and most-featured backend for programmatic billing.
+- It is **not a strict superset of `claude-tui`**: the channel surface does
+  **not** expose model switching or permission-mode switching (those stay the
+  same gap `claude-tui` has), and resume / plan mode / thinking-level are not in
+  the channel contract.
+
+**Requirements and caveats:**
+
+- **`claude` ≥ 2.1.80.** The `--channels` transport ships from this version
+  (the locally-installed CLI used for the spike was v2.1.163). Permission relay
+  additionally needs ≥ 2.1.81, but that surface lands with #3955; the scaffold
+  preflight gates on the 2.1.80 channel-transport floor only. The dashboard
+  picker should disable the option with an explanatory tooltip below 2.1.80
+  (deferred — see [`docs/providers.md`](../../docs/providers.md#claude-channel-research-preview)).
+- **`--dangerously-load-development-channels` is required during the preview.**
+  Custom (non-allowlisted) channels are not on Anthropic's approved channels
+  allowlist, so chroxy must pass this flag to load `chroxy-channel`. The flag
+  bypasses **only** the channel allowlist, not org policy. A
+  marketplace-approved `chroxy-channel` plugin removes the need for it — see
+  [`packages/server/src/channels/PACKAGING.md`](src/channels/PACKAGING.md).
+- **Protocol instability (preview).** Anthropic documents the channels contract
+  as a research preview that "may change based on feedback". Treat each Claude
+  Code minor bump as a smoke-test trigger for this provider; `claude-tui`
+  remains the stable subscription-billed fallback.
+- **Org / platform gating.** Channels are **not** available on Bedrock / Vertex
+  / Foundry, and Team/Enterprise orgs must enable `channelsEnabled` in managed
+  settings. `chroxy doctor` surfaces the binary + version preflight; org-policy
+  failures surface at session start.
+
+For the verified protocol contract, the capability matrix, and the go/no-go
+rationale, see the spike:
+[`docs/architecture/claude-channels-provider-spike.md`](../../docs/architecture/claude-channels-provider-spike.md).
 
 ### Kubernetes workspace PVC (`environments.k8s.workspace`)
 

@@ -56,6 +56,8 @@ Credits reset each billing cycle and don't roll over. When the credit is exhaust
 
 **Or stay on the subscription:** the `claude-tui` provider drives the interactive `claude` TUI under a PTY instead of the SDK / `claude -p`, so each turn bills against your subscription's interactive allowance — the same pool `claude` uses when you run it locally — rather than the programmatic credit pool. Pick it per session with `--provider claude-tui` or `CHROXY_PROVIDER=claude-tui`. Trade-off: no live token streaming, no live model switch, no plan mode, no resume — see [docs/providers.md#claude-tui](docs/providers.md#claude-tui).
 
+A second subscription-billed path, `claude-channel`, is in **research preview**: it drives Claude through Anthropic's first-party channels MCP protocol (`claude --channels`) rather than scraping the TUI, and adds live streaming plus a first-party permission relay. It currently requires `claude` ≥ 2.1.80 and the `--dangerously-load-development-channels` flag, and is a scaffold whose session backend isn't runnable yet (the bridge lands in a follow-up) — see [docs/providers.md#claude-channel-research-preview](docs/providers.md#claude-channel-research-preview).
+
 Chroxy includes cost controls to help you stay within budget — see `CHROXY_COST_BUDGET` and `CHROXY_SESSION_TIMEOUT` in [packages/server/CONFIG.md](packages/server/CONFIG.md). Prompt caching is enabled by default and typically reduces credit burn 5–10x on long sessions.
 
 ## Features

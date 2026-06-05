@@ -2,11 +2,12 @@
 
 Chroxy runs AI coding sessions through pluggable **providers**. Each provider wraps a different AI backend (Claude Code, OpenAI Codex, Google Gemini) behind the same WebSocket/event contract, so the mobile app and desktop dashboard work identically regardless of which one you pick.
 
-Five first-party providers ship built-in:
+Six first-party providers ship built-in (one, `claude-channel`, is a research-preview scaffold):
 
 - `claude-sdk` — **default**. Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process).
 - `claude-cli` — Legacy `claude -p` subprocess. Use if the SDK is unavailable or you need plan mode.
 - `claude-tui` — Interactive `claude` TUI driven under a PTY. Bills as your Claude subscription's interactive allowance and bypasses the programmatic credit pool. See [Billing & API usage](../README.md#billing--api-usage).
+- `claude-channel` — **Research preview.** Drives Claude through Anthropic's first-party channels MCP protocol (`claude --channels`). Same subscription billing as `claude-tui`, but a documented protocol instead of a TUI scrape — plus live streaming and a first-party permission relay. Scaffold only today (not yet runnable). See [`claude-channel`](#claude-channel-research-preview).
 - `gemini` — Google Gemini CLI (`gemini -p`).
 - `codex` — OpenAI Codex CLI (`codex exec`).
 
@@ -31,6 +32,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-sdk` *(default)* | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | Deferred to SDK | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support |
 | `claude-cli` | `claude` (Claude Code CLI) | `ANTHROPIC_API_KEY` (or `claude` CLI login) | Deferred to `claude` CLI | Anthropic API key or subscription login | Subprocess, required for plan mode; permission hook via HTTP |
 | `claude-tui` | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription |
+| `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
 | `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
@@ -106,6 +108,63 @@ Pick by billing surface and required features:
 - **GUI launch on macOS**: Tauri-spawned servers start with `cwd=/` and a minimal PATH. Chroxy probes absolute paths, but custom install locations need credentials supplied out-of-band. The simplest fix is the **Settings → Provider Credentials** pane (see [Setting credentials from the dashboard](#setting-credentials-from-the-dashboard)) — the server reads from its own `~/.chroxy/credentials.json` store, so you no longer have to rely on shell rc files, `~/.zshenv`, or `launchctl setenv`. A working `claude login` also satisfies the Claude providers.
 - **Model names**: pass short aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`). Aliases are resolved to their full ID by `resolveModelId()` in `models.js` — but note this only runs in `BaseSession.setModel()` (i.e. live `set_model` messages from the mobile app / dashboard). On initial session creation, whatever string you set via `--model` / config is forwarded to the provider verbatim. Both the SDK and the `claude` CLI accept aliases directly, so this is fine in practice — but if you're writing a custom provider that doesn't accept aliases, canonicalize in the constructor.
 - **Permission prompts never arrive (claude-cli only)**: the PreToolUse hook requires `CHROXY_PORT` and the per-session hook secret injected via `~/.claude/settings.json`. Restarting the server re-registers it.
+
+## Claude channel (research preview)
+
+`claude-channel` is a fourth Claude-family backend, in **research preview**. It
+drives Claude through Anthropic's first-party **channels MCP protocol**
+(`claude --channels`) — a documented protocol — instead of scraping the
+interactive TUI (`claude-tui`). It bills the same way `claude-tui` does (against
+your Claude subscription's interactive allowance) but trades the fragile visual
+contract for a structured MCP event stream, adds **live streaming**, and uses
+Anthropic's **first-party permission relay** (`claude/channel/permission`)
+instead of a sidecar hook script.
+
+> **Status — scaffold only (#3953).** The provider is registered so the registry
+> lists it and `chroxy doctor` runs its preflight, but the session backend is a
+> no-op: `start()` throws "not yet implemented". The live bridge — spawn
+> `claude --channels`, wire the stdio MCP child + IPC socket, normalize outbound
+> events — lands in #3954. Do not select it for real work yet. The dashboard
+> provider-picker entry is deliberately deferred until the bridge exists (a
+> picker that surfaces a provider whose `start()` throws would be bad UX).
+
+### How it works
+
+A *channel* is a stdio MCP server, spawned by an interactive `claude` session,
+that **pushes** events into the running session (unlike a normal MCP server,
+which Claude pulls from on demand). chroxy's channel server
+([`packages/server/src/channels/chroxy-channel-server.js`](../packages/server/src/channels/chroxy-channel-server.js))
+declares the `experimental: { 'claude/channel': {} }` capability and a two-way
+`reply` tool; the bridge (future #3954) will route events between that MCP child
+and chroxy's normal WebSocket/event pipeline. See the spike,
+[`docs/architecture/claude-channels-provider-spike.md`](architecture/claude-channels-provider-spike.md),
+for the verified protocol contract.
+
+### When to pick it
+
+- **Over `claude-tui`** — once the bridge lands, the channel transport is the
+  more robust subscription-billed path: a documented protocol rather than an
+  ANSI scrape, plus live streaming and a first-party permission relay. Same
+  billing.
+- **Over `claude-sdk` / `claude-cli`** — only when you want **subscription**
+  billing rather than the programmatic credit pool (the same reason you'd pick
+  `claude-tui`). The SDK stays the default for programmatic billing and the most
+  features (live model/mode switch, resume, thinking level, attachments, cost).
+
+It is **not a strict superset of `claude-tui`** — see [Known limits →
+`claude-channel`](#claude-channel).
+
+### Requirements
+
+- **`claude` ≥ 2.1.80** (the `--channels` transport floor; the spike verified it
+  against v2.1.163). Permission relay needs ≥ 2.1.81, landing with #3955.
+- **`--dangerously-load-development-channels`** during the preview — custom
+  channels are not on Anthropic's approved allowlist. The flag bypasses only the
+  allowlist, not org policy. A marketplace-approved plugin removes the need for
+  it: see [`PACKAGING.md`](../packages/server/src/channels/PACKAGING.md).
+- **Subscription login** (`claude login`); `ANTHROPIC_API_KEY` is not accepted.
+- Channels are **not available on Bedrock / Vertex / Foundry**; Team/Enterprise
+  orgs must enable `channelsEnabled`.
 
 ## Codex
 
@@ -293,24 +352,35 @@ Older configs use `legacyCli: true` to force the `claude-cli` provider. This sti
 
 Rows marked **(capability)** come directly from each session class's `static get capabilities()` object — those are the keys the provider registry inspects at runtime. The remaining rows are **(behavioural)** — derived from reading the session class's implementation (attachment handling, agent-tracking events, cost parsing, continuity across `sendMessage` calls). Behavioural rows are not currently part of the `capabilities` contract and may change if the class is refactored.
 
-| Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `codex` | `gemini` |
-|------------|:-:|:-:|:-:|:-:|:-:|
-| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | — | — |
-| **(capability)** In-process permissions | Yes | — | — | — | — |
-| **(capability)** Live model switch | Yes | Yes | — | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — |
-| **(capability)** Plan mode | — | **Yes** | — | — | — |
-| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — |
-| **(capability)** Terminal (raw PTY) | — | — | — | — | — |
-| **(capability)** Thinking level control | Yes | — | — | — | — |
-| **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | Yes | Yes |
-| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — |
-| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — |
-| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — |
-| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes |
-| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | **No** | **No** |
+| Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `claude-channel` | `codex` | `gemini` |
+|------------|:-:|:-:|:-:|:-:|:-:|:-:|
+| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — |
+| **(capability)** In-process permissions | Yes | — | — | — | — | — |
+| **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — | — |
+| **(capability)** Plan mode | — | **Yes** | — | — | — | — |
+| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — | — |
+| **(capability)** Terminal (raw PTY) | — | — | — | — | — | — |
+| **(capability)** Thinking level control | Yes | — | — | — | — | — |
+| **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes |
+| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — |
+| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — |
+| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — |
+| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes |
+| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | **No** | **No** |
 
 For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
+
+> The `claude-channel` column reflects the provider's declared `capabilities`
+> object and the spike's verified protocol contract — **not** runtime behaviour,
+> since the session backend is a scaffold that doesn't run yet (`start()`
+> throws). The `permissions` / `streaming` cells describe what the channel
+> protocol provides once the bridge (#3954) and permission relay (#3955) land.
+> Behavioural cells (attachments, agent tracking, cost reporting) are listed as
+> unimplemented because nothing exercises them yet. Conversation continuity is
+> inherent to the channel transport (it pushes into one persistent interactive
+> session). See [`claude-channel`](#claude-channel-research-preview) and the
+> [spike's capability matrix](architecture/claude-channels-provider-spike.md#capability-matrix-proposed-from-sub-2).
 
 ## Known limits
 
@@ -333,6 +403,35 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - **One PTY per session** — pays a ~3.5s warmup cost on `start()`, then every `sendMessage` writes to the same PTY. Concurrent sessions in the same `cwd` are not protected against each other; treat as one session per repo.
 - **Tool events are reconstructed from `PreToolUse` / `PostToolUse` hooks** — `tool_use_id` is taken from the hook payload when present, otherwise synthesized per turn (`<messageId>-tool-N`). Pre/Post pairing breaks if tool calls overlap or a Pre fires without a matching Post.
 - **Hook payloads write to a per-session directory under `tmpdir()/chroxy-claude-tui/s-<uuid>/`**. Cleaned up on `destroy()`.
+
+### `claude-channel`
+
+- **Scaffold — not yet runnable.** The provider is registered (#3953) so the
+  registry lists it and `chroxy doctor` runs its preflight, but `start()` /
+  `sendMessage()` / `interrupt()` throw "not yet implemented". The live bridge
+  (spawn `claude --channels` + IPC round-trip) lands in #3954. Selecting it
+  today fails fast with a clear error — it never spawns a PTY or MCP child.
+- **Research preview, protocol may change.** Anthropic documents the channels
+  contract as a research preview that "may change based on feedback". Treat each
+  Claude Code minor bump as a smoke-test trigger; `claude-tui` is the stable
+  subscription-billed fallback.
+- **Requires `claude` ≥ 2.1.80** for the `--channels` transport (≥ 2.1.81 for
+  the permission relay, which lands with #3955). The scaffold preflight gates on
+  the 2.1.80 floor only.
+- **Requires `--dangerously-load-development-channels`** until a
+  marketplace-approved `chroxy-channel` plugin exists. The flag bypasses only
+  the channel allowlist, not org policy. See
+  [`PACKAGING.md`](../packages/server/src/channels/PACKAGING.md) for the path
+  that removes it.
+- **Subscription only** — `ANTHROPIC_API_KEY` is not accepted (subscription /
+  OAuth auth, same as `claude-tui`). Bills against the interactive allowance.
+- **No live model switch, no permission-mode switch, no plan mode, no resume,
+  no thinking-level control** — the channel surface does not expose these
+  (same gaps as `claude-tui`, except `claude-tui` fakes permission-mode via a
+  sidecar file). The channel's wins over `claude-tui` are live streaming and a
+  documented first-party permission relay.
+- **Not available on Bedrock / Vertex / Foundry**, and Team/Enterprise orgs
+  must enable `channelsEnabled` in managed settings.
 
 ### `codex`
 
