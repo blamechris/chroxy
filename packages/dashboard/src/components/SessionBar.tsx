@@ -47,6 +47,25 @@ export interface SessionTabData {
   stdinForwardingDisabled?: boolean
 }
 
+/**
+ * #5204 — the Control Room is a special, session-independent top-level tab
+ * that lives in the same strip as the session pills. It is NOT a session:
+ * it can't be renamed, dragged, or reordered, and its close is always
+ * available (and exempt from the session close-confirmation, #5206). When
+ * `open`, it renders as a pinned tab at the left of the strip; clicking it
+ * activates the host/repo table view, clicking its × closes it.
+ */
+export interface ControlRoomTabState {
+  /** Whether the Control Room tab exists in the strip. */
+  open: boolean
+  /** Whether the Control Room tab is the focused view. */
+  active: boolean
+  /** Focus the Control Room tab (show the host/repo table). */
+  onActivate: () => void
+  /** Close the Control Room tab (returns to the prior session; no confirm). */
+  onClose: () => void
+}
+
 export interface SessionBarProps {
   sessions: SessionTabData[]
   onSwitch: (sessionId: string) => void
@@ -60,6 +79,11 @@ export interface SessionBarProps {
    * callers continue to compile without reorder support.
    */
   onReorder?: (nextOrder: string[]) => void
+  /**
+   * #5204 — optional Control Room top-level tab. When provided and
+   * `open`, a pinned non-session tab renders at the left of the strip.
+   */
+  controlRoom?: ControlRoomTabState
 }
 
 function shortenModel(model: string): string {
@@ -121,7 +145,7 @@ export function reorderTabs(ids: string[], fromIndex: number, toIndex: number): 
   return next
 }
 
-export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession, onReorder }: SessionBarProps) {
+export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession, onReorder, controlRoom }: SessionBarProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -240,6 +264,41 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
   return (
     <div className="session-bar" data-testid="session-bar">
       <div className="session-tabs" role="tablist">
+        {/* #5204 — pinned, session-independent Control Room tab. Rendered
+            first so it sits at the left edge; not draggable / not renamable /
+            not a drop target, and its close is always shown (exempt from the
+            session close-confirmation). */}
+        {controlRoom?.open && (
+          <div
+            className={`session-tab control-room-tab${controlRoom.active ? ' active' : ''}`}
+            data-testid="control-room-tab"
+            role="tab"
+            aria-selected={controlRoom.active}
+            tabIndex={0}
+            onClick={() => { if (!controlRoom.active) controlRoom.onActivate() }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                if (!controlRoom.active) controlRoom.onActivate()
+              }
+            }}
+          >
+            <span className="control-room-tab-icon" aria-hidden="true">⌘</span>
+            <span className="tab-name">Control Room</span>
+            <button
+              className="tab-close"
+              data-testid="control-room-tab-close"
+              aria-label="Close Control Room"
+              onClick={e => {
+                e.stopPropagation()
+                controlRoom.onClose()
+              }}
+              type="button"
+            >
+              &times;
+            </button>
+          </div>
+        )}
         {sessions.map(session => {
           const isDragging = draggingId === session.sessionId
           const isDragOver = dragOverId === session.sessionId && draggingId !== null && draggingId !== session.sessionId

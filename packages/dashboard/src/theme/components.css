@@ -1490,6 +1490,26 @@ button.sidebar-token-view-session-row:hover {
   outline-offset: -2px;
 }
 
+/* #5204 — the pinned, session-independent Control Room tab. Distinct
+ * blue-accented styling so it reads as a different kind of tab from the
+ * session pills, and a left margin/divider separating it from sessions. */
+.control-room-tab {
+  border-color: color-mix(in srgb, var(--accent-blue) 35%, transparent);
+  color: var(--text-secondary);
+  margin-right: 4px;
+  padding-right: 8px;
+}
+.control-room-tab.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.control-room-tab-icon {
+  pointer-events: none;
+  color: var(--accent-blue);
+  font-size: var(--text-sm);
+}
+
 .tab-name {
   pointer-events: none;
 }

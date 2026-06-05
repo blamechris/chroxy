@@ -125,7 +125,10 @@ function formatContext(usage: { inputTokens: number; outputTokens: number } | nu
   return `${formatTokensCompact(total)} tokens`
 }
 
-type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool' | 'control-room'
+// #5204 — 'control-room' is no longer a per-session viewMode; the Control
+// Room is a dedicated session-independent top-level tab (see `controlRoomOpen`
+// / `controlRoomActive` in App).
+type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool'
 
 /** Scrollable tab bar with arrow buttons when overflowing */
 function ViewSwitcher({
@@ -220,10 +223,10 @@ function ViewSwitcher({
       >
         <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
         <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
-        {/* #5200: the Control Room is launched from the bottom sidebar panel
-            slot (its header "Control Room" button), not a top tab — the wide
-            host/repo table gets the full main content area. The 'control-room'
-            viewMode still renders below; it just has no top-tab entry now. */}
+        {/* #5200/#5204: the Control Room is launched from the bottom sidebar
+            panel slot (its header "Control Room" button) and opens as its own
+            session-independent top-level tab in the SessionBar strip — not a
+            per-session view tab here. */}
         <button
           className={`view-tab${splitMode ? ' active' : ''}`}
           onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
@@ -609,6 +612,27 @@ export function App() {
   } | null>(null)
   const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
+  // #5204 — Control Room top-level tab. `controlRoomOpen` is whether the
+  // pinned tab exists in the SessionBar strip; `controlRoomActive` is whether
+  // it's the focused view. Both are local (not persisted) — opening the CR is
+  // cheap (the host/repo snapshot lives in the store, so closing/reopening
+  // doesn't wipe it) and it should not survive a reload. Switching to a
+  // session deactivates it; switching back re-activates without re-fetching.
+  const [controlRoomOpen, setControlRoomOpen] = useState(false)
+  const [controlRoomActive, setControlRoomActive] = useState(false)
+  const openControlRoom = useCallback(() => {
+    setControlRoomOpen(true)
+    setControlRoomActive(true)
+    setSplitMode(null)
+    persistSplitMode(null)
+  }, [])
+  const closeControlRoom = useCallback(() => {
+    // Closing is non-destructive: the tab disappears and we fall back to the
+    // prior session (activeSessionId is untouched). The store-held snapshot
+    // survives, so reopening re-renders from cache.
+    setControlRoomOpen(false)
+    setControlRoomActive(false)
+  }, [])
 
   // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
   const [transcriptCopied, setTranscriptCopied] = useState(false)
@@ -661,6 +685,10 @@ export function App() {
   }, [activeSessionId])
 
   const handleSwitchSession = useCallback((sessionId: string) => {
+    // #5204 — clicking any session tab returns from the Control Room view.
+    // This must run even when the clicked session is already the active one
+    // (CR is overlaid on top of it), so it sits before the no-op early return.
+    setControlRoomActive(false)
     if (sessionId === activeSessionId) return
     setIsSwitchingSession(true)
     switchSession(sessionId)
@@ -2214,7 +2242,7 @@ export function App() {
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}
-          onOpenControlRoom={() => { setViewMode('control-room'); setSplitMode(null); persistSplitMode(null) }}
+          onOpenControlRoom={openControlRoom}
           onNewSession={(cwd) => {
             setPendingCwd(cwd || null)
             setShowCreateSession(true)
@@ -2238,8 +2266,10 @@ export function App() {
 
       {/* Main content wrapper (when sidebar present) */}
       <div className={sidebarRepos.length > 0 ? 'main-wrapper' : undefined}>
-        {/* Session bar */}
-        {sessionTabs.length > 0 && (
+        {/* Session bar. #5204 — also rendered when the Control Room tab is
+            open even if there are no sessions, so the pinned CR tab (and its
+            close) is always reachable. */}
+        {(sessionTabs.length > 0 || controlRoomOpen) && (
           <SessionBar
             sessions={sessionTabs}
             onSwitch={handleSwitchSession}
@@ -2247,6 +2277,12 @@ export function App() {
             onRename={renameSession}
             onNewSession={handleNewSession}
             onReorder={handleReorderTabs}
+            controlRoom={{
+              open: controlRoomOpen,
+              active: controlRoomActive,
+              onActivate: openControlRoom,
+              onClose: closeControlRoom,
+            }}
           />
         )}
 
@@ -2300,8 +2336,19 @@ export function App() {
           </div>
         )}
 
+        {/* #5204 — Control Room top-level view. Session-independent: it
+            renders in place of the session UI / welcome screen while active,
+            and switching back to a session restores it untouched. Takes
+            precedence over the welcome screen so the operator can open the CR
+            even with zero sessions. */}
+        {controlRoomActive && connectionPhase !== 'connecting' && (
+          <div className="main-content" data-testid="control-room-main">
+            <ControlRoomSection />
+          </div>
+        )}
+
         {/* Welcome screen — shown when connected but no sessions */}
-        {showWelcome && (
+        {showWelcome && !controlRoomActive && (
           <WelcomeScreen
             onNewSession={handleNewSession}
             recentSessions={recentSessions}
@@ -2321,8 +2368,9 @@ export function App() {
           />
         )}
 
-        {/* Normal session UI */}
-        {!showWelcome && (
+        {/* Normal session UI. #5204 — suppressed while the Control Room tab
+            is active (the CR view above takes the main content area). */}
+        {!showWelcome && !controlRoomActive && (
           <>
             {/* View switcher */}
             <ViewSwitcher
@@ -2464,9 +2512,8 @@ export function App() {
                 {viewMode === 'pool' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <PoolStatsPanel />
                 )}
-                {viewMode === 'control-room' && connectionPhase !== 'connecting' && (
-                  <ControlRoomSection />
-                )}
+                {/* #5204 — the Control Room moved out of the per-session view
+                    area into a dedicated top-level tab (rendered above). */}
               </div>
               {checkpointsOpen && (
                 <div className="checkpoint-panel">
