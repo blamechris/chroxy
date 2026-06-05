@@ -1848,6 +1848,16 @@ function handleActivitySnapshot(msg: Record<string, unknown>, get: MsgGet, set: 
  * into its session by id. `op` is advisory — the full entry drives the result,
  * so a dropped earlier delta is self-healed by the next one. Validated +
  * no-op-short-circuited like the snapshot handler above.
+ *
+ * Copilot review: an `activity_delta` is a genuine live state change (a
+ * background shell / subagent / tool started, progressed, or ended), so it
+ * also counts as activity-bearing — bump `lastClientActivityAt` and clear any
+ * outstanding `inactivityWarning` for the delta's session so the "Working… last
+ * activity Ns ago" indicator and the inactivity chip don't go stale while only
+ * Control Room traffic is flowing. Gated on `_replayingSessions` exactly like
+ * the dispatch-level bump (#4466) so a session switch's history replay doesn't
+ * reset the timestamp. NOTE: `activity_snapshot` deliberately does NOT bump —
+ * it's a full-state resync emitted on subscribe / reconnect, not fresh work.
  */
 function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerActivityDeltaSchema.safeParse(msg);
@@ -1856,6 +1866,15 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
   const next = applyActivityDelta(prev, parsed.data);
   if (next === prev) return;
   set({ activity: next });
+
+  const sessionId = parsed.data.sessionId;
+  if (get().sessionStates[sessionId] && !_replayingSessions.has(sessionId)) {
+    updateSession(sessionId, (ss) => {
+      const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
+      if (ss.inactivityWarning) patch.inactivityWarning = null;
+      return patch;
+    });
+  }
 }
 
 /**

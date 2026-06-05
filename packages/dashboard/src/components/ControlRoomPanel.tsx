@@ -247,6 +247,13 @@ export function ControlRoomPanel({ activity, activeSessionId, now = Date.now }: 
   const tick = useTick(live, now)
 
   const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set())
+  // Copilot review: `ActivityEntry.id` is only unique WITHIN a session, so the
+  // expansion set must be scoped to the active session — otherwise switching
+  // sessions could auto-expand a colliding id in the new session or carry UI
+  // state across unrelated sessions. Reset on every active-session change.
+  useEffect(() => {
+    setExpandedIds(new Set())
+  }, [activeSessionId])
   const handleToggleExpand = useCallback((id: string) => {
     setExpandedIds((prev) => {
       const next = new Set(prev)

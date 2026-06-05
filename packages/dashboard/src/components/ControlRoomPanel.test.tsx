@@ -135,6 +135,22 @@ describe('ControlRoomPanel (#5163)', () => {
     expect(screen.queryByTestId('control-room-output-a')).toBeNull()
   })
 
+  it('resets expansion state when the active session changes (id collision guard)', () => {
+    // Two sessions each have an entry with the SAME id 'a' (ids are only
+    // unique within a session). Expanding it in session 1 must NOT carry over
+    // and auto-expand the colliding id when switching to session 2.
+    const s1 = buildActivity([entry('a', { outputRef: { kind: 'tool_use', id: 't1' } })], 's1')
+    const s2 = buildActivity([entry('a', { outputRef: { kind: 'tool_use', id: 't2' } })], 's2')
+    const { rerender } = render(
+      <ControlRoomPanel activity={s1} activeSessionId="s1" now={() => 1000} />,
+    )
+    fireEvent.click(screen.getByTestId('control-room-entry-toggle-a'))
+    expect(screen.getByTestId('control-room-output-a')).toBeInTheDocument()
+
+    rerender(<ControlRoomPanel activity={s2} activeSessionId="s2" now={() => 1000} />)
+    expect(screen.queryByTestId('control-room-output-a')).toBeNull()
+  })
+
   it('shows a "no linked output" message when an entry has no outputRef', () => {
     const activity = buildActivity([entry('a')])
     render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 1000} />)

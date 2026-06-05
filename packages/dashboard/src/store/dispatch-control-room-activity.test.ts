@@ -205,6 +205,35 @@ describe('Control Room activity dispatch (#5163)', () => {
     expect(store.getState().activity).toBe(after)
   })
 
+  it('bumps lastClientActivityAt and clears inactivityWarning on activity_delta', () => {
+    // Seed the active session with a stale activity timestamp + an outstanding
+    // inactivity warning, then deliver a delta. The handler treats the delta as
+    // activity-bearing: it bumps lastClientActivityAt and clears the warning.
+    const seeded = createEmptySessionState()
+    store.setState({
+      sessionStates: {
+        [SESSION_ID]: {
+          ...seeded,
+          lastClientActivityAt: 1,
+          inactivityWarning: { idleMs: 1000, prefab: 'quiet', receivedAt: 1 },
+        },
+      },
+    })
+    handleMessage(delta('started', runningEntry('z')), ctx() as never)
+    const ss = store.getState().sessionStates[SESSION_ID]!
+    expect(ss.lastClientActivityAt).toBeGreaterThan(1)
+    expect(ss.inactivityWarning).toBeNull()
+  })
+
+  it('does NOT bump activity on activity_snapshot (resync, not fresh work)', () => {
+    const seeded = createEmptySessionState()
+    store.setState({
+      sessionStates: { [SESSION_ID]: { ...seeded, lastClientActivityAt: 1 } },
+    })
+    handleMessage(snapshot([runningEntry('a')]), ctx() as never)
+    expect(store.getState().sessionStates[SESSION_ID]!.lastClientActivityAt).toBe(1)
+  })
+
   it('clears a session activity tree when session_list drops it', () => {
     handleMessage(snapshot([runningEntry('a')], SESSION_ID), ctx() as never)
     handleMessage(snapshot([runningEntry('b')], OTHER_SESSION_ID), ctx() as never)
