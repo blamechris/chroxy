@@ -1,12 +1,13 @@
 /**
  * SidebarTokenView v0 tests (#4303).
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, cleanup, screen, fireEvent } from '@testing-library/react'
 import type { SessionInfo, CumulativeUsage } from '@chroxy/store-core'
 import {
   SidebarTokenView,
   aggregateUsage,
+  cacheHitRatio,
   tokenViewCollapsedMetric,
 } from './SidebarTokenView'
 
@@ -21,6 +22,22 @@ function makeUsage(input: number, output: number, costUsd = 0): CumulativeUsage 
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     costUsd,
+    turnsBilled: 1,
+  }
+}
+
+function makeUsageWithCache(
+  input: number,
+  output: number,
+  cacheRead: number,
+  cacheCreation: number,
+): CumulativeUsage {
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    cacheReadTokens: cacheRead,
+    cacheCreationTokens: cacheCreation,
+    costUsd: 0,
     turnsBilled: 1,
   }
 }
@@ -144,6 +161,105 @@ describe('SidebarTokenView (#4303 v0)', () => {
   // @chroxy/store-core (#5058 / #5094); its unit tests now live in
   // store-core/src/cost-format.test.ts. The render-level assertions below
   // (today-total, by-provider) still exercise the formatter end-to-end.
+
+  describe('cacheHitRatio (pure)', () => {
+    it('returns null when there is no input surface', () => {
+      expect(cacheHitRatio(makeUsage(0, 0))).toBeNull()
+      expect(cacheHitRatio(makeUsageWithCache(0, 5000, 0, 0))).toBeNull()
+    })
+
+    it('computes cacheRead / (input + cacheRead + cacheCreation)', () => {
+      // cacheRead=80, input=10, cacheCreation=10 -> 80/100 = 0.8
+      expect(cacheHitRatio(makeUsageWithCache(10, 0, 80, 10))).toBeCloseTo(0.8)
+    })
+
+    it('is 0 when nothing was read from cache', () => {
+      expect(cacheHitRatio(makeUsageWithCache(100, 0, 0, 0))).toBe(0)
+    })
+
+    it('does not count output tokens in the denominator', () => {
+      // Large output should not dilute the ratio.
+      expect(cacheHitRatio(makeUsageWithCache(50, 1_000_000, 50, 0))).toBeCloseTo(0.5)
+    })
+  })
+
+  describe('cache-hit row render', () => {
+    it('renders the cache-hit row when there is an input surface', () => {
+      const sessions = [
+        makeSession('s1', 'claude-byok', makeUsageWithCache(20, 10, 80, 0)),
+      ]
+      render(<SidebarTokenView sessions={sessions} />)
+      // 80 / (20 + 80 + 0) = 80%
+      expect(screen.getByTestId('sidebar-token-view-cache-hit')).toHaveTextContent('80%')
+    })
+
+    it('hides the cache-hit row when there is no input surface', () => {
+      const sessions = [makeSession('sub', 'claude-sdk', makeUsage(0, 0, 0))]
+      render(<SidebarTokenView sessions={sessions} />)
+      expect(screen.queryByTestId('sidebar-token-view-cache-hit')).toBeNull()
+    })
+  })
+
+  describe('per-session breakdown', () => {
+    it('lists tracked sessions sorted by tokens desc', () => {
+      const sessions = [
+        makeSession('small', 'claude-sdk', makeUsage(100, 50)),
+        makeSession('big', 'claude-byok', makeUsage(5000, 1000, 0.2)),
+      ]
+      render(<SidebarTokenView sessions={sessions} />)
+      const list = screen.getByTestId('sidebar-token-view-by-session')
+      const rows = list.querySelectorAll('[data-testid^="sidebar-token-view-session-"]')
+      expect(rows[0]).toHaveTextContent('big')
+      expect(rows[1]).toHaveTextContent('small')
+    })
+
+    it('excludes untracked (TUI) sessions from the per-session list', () => {
+      const sessions = [
+        makeSession('sdk', 'claude-sdk', makeUsage(100, 50)),
+        makeSession('tui', 'claude-tui', makeUsage(0, 0)),
+      ]
+      render(<SidebarTokenView sessions={sessions} />)
+      expect(screen.getByTestId('sidebar-token-view-session-sdk')).toBeInTheDocument()
+      expect(screen.queryByTestId('sidebar-token-view-session-tui')).toBeNull()
+    })
+
+    it('hides the section entirely when no tracked sessions exist', () => {
+      const sessions = [makeSession('tui', 'claude-tui', makeUsage(0, 0))]
+      render(<SidebarTokenView sessions={sessions} />)
+      expect(screen.queryByTestId('sidebar-token-view-by-session')).toBeNull()
+    })
+
+    it('floats the active session to the top and marks it current', () => {
+      const sessions = [
+        makeSession('big', 'claude-byok', makeUsage(5000, 1000)),
+        makeSession('active', 'claude-sdk', makeUsage(10, 5)),
+      ]
+      render(<SidebarTokenView sessions={sessions} activeSessionId="active" />)
+      const list = screen.getByTestId('sidebar-token-view-by-session')
+      const rows = list.querySelectorAll('[data-testid^="sidebar-token-view-session-"]')
+      // Active session floats to top despite lower token count.
+      expect(rows[0]).toHaveTextContent('active')
+      const activeRow = screen.getByTestId('sidebar-token-view-session-active')
+      expect(activeRow.getAttribute('aria-current')).toBe('true')
+    })
+
+    it('renders rows as buttons and activates on click when handler supplied', () => {
+      const onSessionClick = vi.fn()
+      const sessions = [makeSession('s1', 'claude-sdk', makeUsage(100, 50))]
+      render(<SidebarTokenView sessions={sessions} onSessionClick={onSessionClick} />)
+      const row = screen.getByTestId('sidebar-token-view-session-s1')
+      expect(row.tagName).toBe('BUTTON')
+      fireEvent.click(row)
+      expect(onSessionClick).toHaveBeenCalledWith('s1')
+    })
+
+    it('renders static (non-button) rows when no click handler is supplied', () => {
+      const sessions = [makeSession('s1', 'claude-sdk', makeUsage(100, 50))]
+      render(<SidebarTokenView sessions={sessions} />)
+      const row = screen.getByTestId('sidebar-token-view-session-s1')
+      expect(row.tagName).toBe('LI')
+    })
+  })
 
   describe('tokenViewCollapsedMetric', () => {
     it('returns the same total as the expanded view', () => {

@@ -1002,6 +1002,68 @@
   font-size: 11px;
 }
 
+/* #4303 per-session breakdown. Rows are buttons when click-to-activate is
+ * wired (parity with the sidebar tree), so reset button chrome to match the
+ * provider-row layout. */
+.sidebar-token-view-session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-token-view-session-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  font-size: 12px;
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  margin: 0;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+/* Only the <button> variant (rendered when click-to-activate is wired) is
+ * interactive — the static <li> variant must NOT show a pointer cursor or a
+ * hover affordance, or it advertises a click that does nothing. */
+button.sidebar-token-view-session-row {
+  cursor: pointer;
+}
+
+button.sidebar-token-view-session-row:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.sidebar-token-view-session-row.active {
+  background: var(--bg-selected, rgba(255, 255, 255, 0.1));
+  font-weight: 600;
+}
+
+.sidebar-token-view-session-row:focus-visible {
+  outline: 1px dotted var(--text-muted);
+  outline-offset: 2px;
+}
+
+.sidebar-token-view-session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sidebar-token-view-session-tokens {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
 .sidebar-status-dot {
   width: 6px;
   height: 6px;
