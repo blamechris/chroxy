@@ -1284,6 +1284,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }));
   },
 
+  // #4973 — record a multi-question form submission. Stores the
+  // comma-joined human-readable summary in `answered` (for chat history
+  // and legacy single-question renderers) AND the structured per-question
+  // answers map in `answeredAnswers` so the multi-question summary chip
+  // can map chosen values back to option labels without re-parsing the
+  // delimited summary string.
+  markPromptAnsweredMulti: (
+    messageId: string,
+    answers: Record<string, string | string[]>,
+  ) => {
+    const now = Date.now();
+    const summary = formatQuestionAnswerSummary(answers);
+    updateActiveSession((ss) => ({
+      messages: ss.messages.map((m) =>
+        m.id === messageId
+          ? { ...m, answered: summary, answeredAnswers: answers, answeredAt: now }
+          : m
+      ),
+    }));
+  },
+
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => {
     const { sessionStates } = get();
     const now = Date.now();

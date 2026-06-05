@@ -24,6 +24,8 @@ import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
 import { StreamStallChip } from '../StreamStallChip';
 import { ResumeUnknownChip } from '../ResumeUnknownChip';
+import { MultiQuestionForm } from './MultiQuestionForm';
+import type { MultiQuestionAnswersMap } from './MultiQuestionForm';
 
 /**
  * #4755 — single-question Other / freeform answer payload (mobile parity
@@ -50,9 +52,25 @@ export type { OtherFreeformAnswer };
 
 export type SelectOptionValue = string | OtherFreeformAnswer;
 
-export function MessageBubble({ message, onSelectOption, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall }: {
+export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall }: {
   message: ChatMessage;
   onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
+  /**
+   * #4973 — submit handler for the multi-question form. Fires with the
+   * per-question answers map (`Record<string, string | string[]>`) plus
+   * the message + toolUseId so SessionScreen can forward it to
+   * `sendUserQuestionResponse` (widened in #4761) and record the
+   * comma-joined summary via `markPromptAnswered`.
+   */
+  onSubmitMultiQuestion?: (answersMap: MultiQuestionAnswersMap, messageId: string, toolUseId?: string) => void;
+  /**
+   * #4973 / #4735 — opt-in flag for SDK-mode sessions to render the
+   * interactive `MultiQuestionForm` instead of falling back to the legacy
+   * single-question Q[0] UI. TUI / CLI sessions leave this false because
+   * the permission-hook (#4648) denies combined multi-question tool_uses
+   * there. Mirrors the dashboard's `allowMultiQuestionForm` gate.
+   */
+  allowMultiQuestion?: boolean;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -110,6 +128,53 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
       setOtherText('');
     }
   }, [isPrompt, message.answered, otherActive]);
+  // #4973 — multi-question AskUserQuestion: render the interactive
+  // `MultiQuestionForm` (all N questions) instead of the legacy
+  // single-question Q[0] UI when (a) the payload carries more than one
+  // question, (b) the session is SDK-mode (`allowMultiQuestion`, mirrors
+  // the dashboard's `allowMultiQuestionForm` gate), and (c) the prompt is
+  // unanswered. Once answered we render the comma-joined summary chip
+  // instead. TUI / CLI sessions (`allowMultiQuestion` false) fall through
+  // to the legacy single-question render of Q[0] so the existing
+  // single-question pins keep passing.
+  const isMultiQuestion =
+    isPrompt && Array.isArray(message.questions) && message.questions.length > 1;
+  const showMultiQuestionForm =
+    isMultiQuestion && !!allowMultiQuestion && message.answered == null && !isExpired;
+  // #4973 — the per-question structured summary chip needs the
+  // `answeredAnswers` map (recorded by `markPromptAnsweredMulti` on the
+  // client that submitted). When a multi-question prompt is answered but
+  // that map is absent — e.g. it was answered on another client, or
+  // rehydrated from history before this field existed — fall back to the
+  // flat `message.answered` summary text (Copilot review) so the answer
+  // is never shown as blank.
+  const hasMultiQuestionAnswers =
+    isMultiQuestion &&
+    !!allowMultiQuestion &&
+    message.answered != null &&
+    message.answeredAnswers != null;
+  const showMultiQuestionFallbackSummary =
+    isMultiQuestion &&
+    !!allowMultiQuestion &&
+    message.answered != null &&
+    message.answeredAnswers == null;
+  const showMultiQuestionSummary =
+    isMultiQuestion && !!allowMultiQuestion && message.answered != null;
+  // #4973 — per-question display labels for the post-answer summary chip.
+  // Maps each question's chosen value(s) (from the structured
+  // `answeredAnswers` map) back to its option label(s), comma-joined for
+  // multi-select. Falls back to the raw value when no matching option is
+  // found (defensive — covers free-form values older servers might echo).
+  const multiQuestionAnswerLabels = hasMultiQuestionAnswers
+    ? (message.questions ?? []).map((q) => {
+        const value = message.answeredAnswers?.[q.question];
+        const toLabel = (v: string) =>
+          q.options.find((o) => o.value === v)?.label ?? v;
+        if (Array.isArray(value)) return value.map(toLabel).join(', ');
+        if (typeof value === 'string') return toLabel(value);
+        return '';
+      })
+    : [];
   const hasOptions = isPrompt && !!message.options && message.options.length > 0;
   const answeredIsFreeText =
     hasOptions && message.answered != null &&
@@ -120,6 +185,9 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
   // another client answers while local Other mode is open).
   const showOptionButtons =
     hasOptions && !answeredIsFreeText &&
+    // #4973 — suppress the legacy Q[0] option buttons when the
+    // interactive multi-question form / summary is rendering.
+    !showMultiQuestionForm && !showMultiQuestionSummary &&
     (message.answered != null || !otherActive);
   const showFreetextInput = isPrompt && otherActive && !message.answered && !isExpired;
 
@@ -241,7 +309,13 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
           <PermissionCountdown expiresAt={message.expiresAt} onExpire={() => setIsExpired(true)} />
         )}
       </View>
-      {isPrompt && message.toolInput ? (
+      {/* #4973 — when the multi-question form / summary renders, suppress
+          the body content Text. The top-level `message.content` mirrors
+          Q[0]'s question (store-core handleUserQuestion), so rendering it
+          here would duplicate Q[0] above the form. The form / summary
+          renders every question itself. */}
+      {showMultiQuestionForm || showMultiQuestionSummary ? null :
+        isPrompt && message.toolInput ? (
         <PermissionDetailOrFallback tool={message.tool} toolInput={message.toolInput} fallback={message.content?.trim() || ''} />
       ) : !isUser && !isPrompt && !isError && !isSystem ? (
         <FormattedResponse content={message.content?.trim() || ''} messageTextStyle={styles.messageText} />
@@ -264,6 +338,44 @@ export function MessageBubble({ message, onSelectOption, isSelected, isSelecting
               </View>
             )
           ))}
+        </View>
+      )}
+      {showMultiQuestionForm && (
+        <MultiQuestionForm
+          questions={message.questions!}
+          onSubmit={(answersMap) => {
+            if (submittedRef.current) return;
+            submittedRef.current = true;
+            onSubmitMultiQuestion?.(answersMap, message.id, message.toolUseId);
+          }}
+        />
+      )}
+      {hasMultiQuestionAnswers && (
+        <View style={styles.multiQuestionSummary} testID="question-multi-summary">
+          {message.questions!.map((q, i) => (
+            <View key={`s-${i}`} style={styles.multiQuestionSummaryRow}>
+              <Icon name="check" size={14} color={COLORS.accentGreen} />
+              <Text
+                style={styles.multiQuestionSummaryText}
+                testID={`question-multi-summary-${i}`}
+              >
+                {q.question}: {multiQuestionAnswerLabels[i]}
+              </Text>
+            </View>
+          ))}
+        </View>
+      )}
+      {showMultiQuestionFallbackSummary && (
+        // #4973 — answered elsewhere / rehydrated without the structured
+        // `answeredAnswers` map: render the flat comma-joined summary so
+        // the answer is never blank (Copilot review).
+        <View style={styles.multiQuestionSummary} testID="question-multi-summary">
+          <View style={styles.multiQuestionSummaryRow}>
+            <Icon name="check" size={14} color={COLORS.accentGreen} />
+            <Text style={styles.multiQuestionSummaryText} testID="question-multi-summary-flat">
+              {message.answered}
+            </Text>
+          </View>
         </View>
       )}
       {showOptionButtons && (
@@ -555,6 +667,21 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 14,
     fontStyle: 'italic',
+  },
+  multiQuestionSummary: {
+    marginTop: 10,
+    gap: 6,
+  },
+  multiQuestionSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+  },
+  multiQuestionSummaryText: {
+    flex: 1,
+    color: COLORS.textChatMessage,
+    fontSize: 14,
+    lineHeight: 20,
   },
   errorBubble: {
     backgroundColor: COLORS.accentRedLight,

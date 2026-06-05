@@ -222,8 +222,27 @@ export function SessionScreen() {
   const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
   const sendUserQuestionResponse = useConnectionStore((s) => s.sendUserQuestionResponse);
   const markPromptAnswered = useConnectionStore((s) => s.markPromptAnswered);
+  const markPromptAnsweredMulti = useConnectionStore((s) => s.markPromptAnsweredMulti);
 
   const sessions = useConnectionStore((s) => s.sessions);
+  // #4973 / #4735 — allow the interactive multi-question form only for
+  // SDK-mode sessions. TUI / CLI sessions (`claude-tui` / `claude-cli`)
+  // leave it off because the permission-hook (#4648) denies combined
+  // multi-question tool_uses there and answers would misroute through
+  // `_pendingUserAnswer`; SDK / BYOK / Codex / Gemini sessions accept
+  // per-question answers natively (#4731). Mirrors the dashboard's
+  // `allowMultiQuestionForm` (App.tsx).
+  const activeSessionProvider = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
+  });
+  const allowMultiQuestion = useMemo(
+    () =>
+      activeSessionProvider != null &&
+      activeSessionProvider !== 'claude-tui' &&
+      activeSessionProvider !== 'claude-cli',
+    [activeSessionProvider],
+  );
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
   const savedConnection = useConnectionLifecycleStore((s) => s.savedConnection);
@@ -731,6 +750,26 @@ export function SessionScreen() {
       // the answered-state UI renders the user's actual answer.
       const summary = freeform ? value.freeformText : value;
       markPromptAnswered(messageId, summary);
+    }
+  };
+
+  // #4973 — submit handler for the multi-question AskUserQuestion form.
+  // Forwards the per-question answers map (`Record<string, string |
+  // string[]>`) to `sendUserQuestionResponse` (widened in #4761), which
+  // serializes the `answers` map + a comma-joined `answer` summary on the
+  // wire. On success we record the structured map via
+  // `markPromptAnsweredMulti` so the post-answer summary chip can map
+  // chosen values back to option labels. Mirrors the dashboard's
+  // App.tsx + `formatQuestionAnswerSummary` multi-question path (#4760).
+  const handleSubmitMultiQuestion = (
+    answersMap: Record<string, string | string[]>,
+    messageId: string,
+    toolUseId?: string,
+  ) => {
+    if (!toolUseId) return;
+    const sent = sendUserQuestionResponse(answersMap, toolUseId);
+    if (sent === 'sent') {
+      markPromptAnsweredMulti(messageId, answersMap);
     }
   };
 
@@ -1318,6 +1357,8 @@ export function SessionScreen() {
                   scrollViewRef={scrollViewRef}
                   claudeReady={claudeReady}
                   onSelectOption={handleSelectOption}
+                  onSubmitMultiQuestion={handleSubmitMultiQuestion}
+                  allowMultiQuestion={allowMultiQuestion}
                   isCliMode={isCliMode}
                   selectedIds={selectedIds}
                   isSelecting={isSelecting}
@@ -1349,6 +1390,8 @@ export function SessionScreen() {
               scrollViewRef={scrollViewRef}
               claudeReady={claudeReady}
               onSelectOption={handleSelectOption}
+              onSubmitMultiQuestion={handleSubmitMultiQuestion}
+              allowMultiQuestion={allowMultiQuestion}
               isCliMode={isCliMode}
               selectedIds={selectedIds}
               isSelecting={isSelecting}
@@ -1374,6 +1417,8 @@ export function SessionScreen() {
               scrollViewRef={scrollViewRef}
               claudeReady={claudeReady}
               onSelectOption={handleSelectOption}
+              onSubmitMultiQuestion={handleSubmitMultiQuestion}
+              allowMultiQuestion={allowMultiQuestion}
               isCliMode={isCliMode}
               selectedIds={selectedIds}
               isSelecting={isSelecting}

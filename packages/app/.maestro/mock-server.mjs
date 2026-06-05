@@ -548,17 +548,17 @@ wss.on('connection', (ws) => {
           break
         }
 
-        // #4762: trigger phrase 'show-multi-question' emits the four
-        // wedge shapes #4735 / #4604 Chunk B require coverage for —
-        // mixed (single-select + multi-select + with-Other in one
-        // payload). The dashboard's MultiQuestionForm exercises every
-        // branch in a single payload because the dashboard renders
-        // all N questions inline (#4760 lifted the suppression for
-        // SDK-mode sessions). The mobile MessageBubble currently
-        // renders only `questions[0]` so this flow pins the wire→Q[0]
-        // path for the mixed payload — when the mobile multi-question
-        // renderer lands the flow extends to iterate every question
-        // (`approval-question-1` / `approval-question-2`).
+        // #4762 / #4973: trigger phrase 'show-multi-question' emits the
+        // mixed wedge shape #4735 / #4604 Chunk B require coverage for —
+        // single-select + multi-select + with-Other in one payload. Both
+        // the dashboard's MultiQuestionForm AND the mobile React Native
+        // MultiQuestionForm (#4973) render all N questions inline for
+        // SDK-mode sessions (#4760 / #4731 lifted the suppression). The
+        // mock session reports `provider: 'claude-sdk'`, so chat-multi-
+        // question.yaml drives the full interactive form: tap every
+        // `question-multi-option-<idx>-<value>`, submit via
+        // `question-multi-submit`, and assert the post-answer summary
+        // chip's comma-joined multi-select labels.
         //
         // The mixed shape exercises three independent wire branches
         // in a single payload:

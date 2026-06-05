@@ -1849,6 +1849,67 @@ describe('markPromptAnsweredByRequestId', () => {
   });
 });
 
+describe('markPromptAnsweredMulti (#4973)', () => {
+  it('stores the structured answers map and a comma-joined summary on the active session message', () => {
+    const promptMsg = {
+      id: 'mq-1',
+      type: 'prompt' as const,
+      content: 'Q1?',
+      toolUseId: 'toolu_multi',
+      timestamp: 1,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [promptMsg] },
+      },
+    });
+
+    const answers = {
+      'Q1 — deploy to production?': 'approve',
+      'Q2 — which areas to verify?': ['app', 'server'],
+    };
+    useConnectionStore.getState().markPromptAnsweredMulti('mq-1', answers);
+
+    const msg = useConnectionStore.getState().getActiveSessionState().messages[0] as any;
+    // Structured map preserved verbatim (multi-select stays a string[]).
+    expect(msg.answeredAnswers).toEqual(answers);
+    // Flat `answered` holds the human-readable comma-joined summary.
+    expect(msg.answered).toBe(
+      'Q1 — deploy to production?: approve | Q2 — which areas to verify?: app, server',
+    );
+    expect(typeof msg.answeredAt).toBe('number');
+  });
+
+  it('leaves other messages untouched', () => {
+    const promptMsg = {
+      id: 'mq-2',
+      type: 'prompt' as const,
+      content: 'Q?',
+      toolUseId: 'toolu_x',
+      timestamp: 1,
+    };
+    const otherMsg = {
+      id: 'resp-1',
+      type: 'response' as const,
+      content: 'Hi',
+      timestamp: 2,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [promptMsg, otherMsg] },
+      },
+    });
+
+    useConnectionStore.getState().markPromptAnsweredMulti('mq-2', { 'Q?': 'yes' });
+
+    const msgs = useConnectionStore.getState().getActiveSessionState().messages;
+    expect((msgs[1] as any).answered).toBeUndefined();
+    expect((msgs[1] as any).answeredAnswers).toBeUndefined();
+  });
+});
+
 describe('inactivityWarning cleanup (#3899)', () => {
   const WARNING = { idleMs: 1_800_000, prefab: 'Status update?', receivedAt: 1 };
 
