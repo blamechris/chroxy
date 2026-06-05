@@ -71,8 +71,8 @@
  *   K8sBackend — Docker and other backends silently ignore this field. A bare URL string is shorthand
  *   for `{ url }`. K8sBackend provisions an `emptyDir` workspace populated by a `git clone` init
  *   container. Mutually exclusive with `opts.cwd` and `opts.workspacePVC` (passing more than one
- *   throws — see `K8sBackend.validateGitRepo`). `emptyDir` is ephemeral; PVC-backed persistence for
- *   the git-clone strategy is the follow-up (#3385).
+ *   throws — see the `validateGitRepo` helper in k8s.js). `emptyDir` is ephemeral; PVC-backed
+ *   persistence for the git-clone strategy is the follow-up (#3385).
  * @param {string}  opts.gitRepo.url        - Repo URL to clone (required; must not start with "-").
  * @param {string}  [opts.gitRepo.branch]   - Branch/tag checked out at clone time.
  * @param {string}  [opts.gitRepo.commit]   - Exact commit SHA pinned via a follow-up checkout step.

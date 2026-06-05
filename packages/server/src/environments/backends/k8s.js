@@ -275,6 +275,19 @@ function validateGitRepo(gitRepo, cwd, workspacePVC) {
     if (typeof spec.mountPath !== 'string' || spec.mountPath.length === 0) {
       throw new Error('createEnvironment: opts.gitRepo.mountPath must be a non-empty string')
     }
+    // K8s requires volumeMount.mountPath to be absolute; a relative value would
+    // be rejected at Pod-create time with an opaque API error. Reject `.`/`..`
+    // segments too so the path can't escape the intended workspace root.
+    if (!spec.mountPath.startsWith('/')) {
+      throw new Error(
+        'createEnvironment: opts.gitRepo.mountPath must be an absolute path (start with "/")',
+      )
+    }
+    if (spec.mountPath.split('/').some((seg) => seg === '.' || seg === '..')) {
+      throw new Error(
+        'createEnvironment: opts.gitRepo.mountPath must not contain "." or ".." segments',
+      )
+    }
     mountPath = spec.mountPath
   }
 
@@ -575,6 +588,14 @@ export class K8sBackend {
    *      Pod is deleted the cloned tree is gone. PVC-backed persistence for the
    *      git-clone strategy is the explicit follow-up (#3385); until then a
    *      git-clone workspace is for ephemeral, single-Pod sessions only.
+   *
+   *      mountPath caveat (#3193 phase 1): the default `mountPath` of
+   *      `/workspace` aligns with `streamCliInEnvironment`'s host→Pod cwd
+   *      remap, so exec sessions land on the cloned tree automatically. A
+   *      NON-default `mountPath` is supported in the Pod manifest, but the cwd
+   *      remap still targets `/workspace` — callers that override `mountPath`
+   *      must pass the matching `cwd` to `streamCliInEnvironment` themselves.
+   *      Per-Pod workspace-root tracking is left as follow-up.
    *
    * **Security warning — hostPath privilege escalation:**
    *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the

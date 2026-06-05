@@ -1410,6 +1410,35 @@ describe('K8sBackend.createEnvironment() — git-clone workspace strategy (#3193
     }
   })
 
+  it('throws when gitRepo.mountPath is relative (must be absolute)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'rel-mountpath',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', mountPath: 'src' },
+      }),
+      /mountPath must be an absolute path/,
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('throws when gitRepo.mountPath contains "." or ".." segments', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    for (const bad of ['/work/../etc', '/work/./x']) {
+      await assert.rejects(
+        () => backend.createEnvironment({
+          envId: 'dotdot-mountpath',
+          image: 'agent:latest',
+          gitRepo: { url: 'https://example.com/r.git', mountPath: bad },
+        }),
+        /must not contain "\." or "\.\." segments/,
+      )
+    }
+  })
+
   it('throws when both opts.cwd and opts.gitRepo are set (mutually exclusive)', async () => {
     const api = createMockApi()
     const backend = new K8sBackend({ _coreV1Api: api })
