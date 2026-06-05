@@ -292,8 +292,21 @@ EOF
     return 1
   }
 
-  # The pending [Unreleased] entry must be preserved (not buried/dropped).
-  grep -q "A pending entry not yet released" "$dir/CHANGELOG.md" || return 1
+  # The pending [Unreleased] entry must be preserved (not buried/dropped) AND
+  # stay above the new version header — i.e. the new section must land below the
+  # [Unreleased] *body*, not immediately after the `## [Unreleased]` line (which
+  # would push the pending entry under the cut release). Assert by line number,
+  # not just existence, so a regression that splices after the header line fails.
+  local pending_line
+  pending_line=$(grep -n "A pending entry not yet released" "$dir/CHANGELOG.md" | head -1 | cut -d: -f1)
+  [ -n "$pending_line" ] || {
+    echo "    pending [Unreleased] entry was dropped" >&2
+    return 1
+  }
+  [ "$pending_line" -lt "$new_line" ] || {
+    echo "    pending [Unreleased] entry landed below the new section (line $pending_line vs $new_line)" >&2
+    return 1
+  }
 }
 
 test_preserves_header_preamble() {
