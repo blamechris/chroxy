@@ -602,6 +602,7 @@ Tauri tray application wrapping the web dashboard with native integrations.
 |------|---------|
 | `CLAUDE.md` | Essential dev workflow and conventions |
 | `docs/architecture/reference.md` | This file — detailed component/protocol reference |
+| `docs/architecture/claude-channels-provider-spike.md` | Spike findings + go/no-go for the proposed `claude-channel` provider (#3951) |
 | `docs/named-tunnel-guide.md` | Named tunnel setup guide |
 | `docs/self-hosting-guide.md` | Self-hosting requirements and deployment |
 | `docs/guides/container-isolation.md` | Container isolation guide (sandbox, Docker, combined) |
