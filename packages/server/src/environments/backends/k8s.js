@@ -645,12 +645,29 @@ export class K8sBackend {
     // at the first createEnvironment call (mirrors defaultResources).
     //   - undefined/null → feature off (no quota / limitrange ensured)
     //   - object         → validated + cached spec, ensured per tenant namespace
-    this._namespaceQuotaSpec = (namespaceQuota == null)
-      ? null
-      : buildResourceQuotaSpec(namespaceQuota)
-    this._namespaceLimitRangeSpec = (namespaceLimitRange == null)
-      ? null
-      : buildLimitRangeSpec(namespaceLimitRange)
+    // Re-scope any builder failure to the constructor option (mirrors how
+    // defaultResources wraps buildResourceBlock above) — the builders blame
+    // `namespaceQuota.*` via _validateResourceQuantity's `createEnvironment:`
+    // prefix, which points at the wrong call site for constructor config. The
+    // original error is preserved as `cause`.
+    if (namespaceQuota == null) {
+      this._namespaceQuotaSpec = null
+    } else {
+      try {
+        this._namespaceQuotaSpec = buildResourceQuotaSpec(namespaceQuota)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.namespaceQuota is invalid — ${err.message}`, { cause: err })
+      }
+    }
+    if (namespaceLimitRange == null) {
+      this._namespaceLimitRangeSpec = null
+    } else {
+      try {
+        this._namespaceLimitRangeSpec = buildLimitRangeSpec(namespaceLimitRange)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.namespaceLimitRange is invalid — ${err.message}`, { cause: err })
+      }
+    }
     // Namespaces whose ResourceQuota / LimitRange we have already ensured this
     // process, so repeated createEnvironment calls for the same tenant skip the
     // read/create roundtrip (mirrors _ensuredNamespaces).

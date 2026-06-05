@@ -5369,6 +5369,25 @@ describe('K8sBackend.ensureResourceQuota() / ensureLimitRange() (#5142)', () => 
     assert.equal(api.calls.createLimitRange.length, 0)
   })
 
+  it('ensureLimitRange re-throws a non-404 read error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ readLimitRange: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await assert.rejects(() => backend.ensureLimitRange('chroxy-user-x'), /boom/)
+  })
+
+  it('ensureLimitRange re-throws a non-409 create error', async () => {
+    const make500 = () => Object.assign(new Error('denied'), { code: 500 })
+    const api = createMockApi({
+      readLimitRange: () => { throw make404Error() },
+      createLimitRange: () => { throw make500() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await assert.rejects(() => backend.ensureLimitRange('chroxy-user-x'), /denied/)
+  })
+
   it('ensureLimitRange swallows 409 AlreadyExists on concurrent create', async () => {
     const make409 = () => Object.assign(new Error('Conflict'), { code: 409 })
     const api = createMockApi({

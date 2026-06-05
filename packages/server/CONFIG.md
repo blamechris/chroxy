@@ -421,9 +421,11 @@ At least one field is required. `cpu`/`memory` become the LimitRange
 
 Both blocks accept the same quantity grammar as the per-pod `resources` opt
 (CPU as a decimal/milli-cpu string, memory as a binary-SI quantity; Docker-style
-suffixes are normalised). Malformed quantities are rejected at startup. The ensure
-is idempotent (read-or-create, already-exists swallowed) and cached per process,
-so it adds a single API roundtrip the first time a tenant namespace is used.
+suffixes are normalised). Malformed quantities are rejected at startup. Each
+configured object's ensure is idempotent (read-or-create, already-exists
+swallowed) and cached per process, so it adds one read (plus a create if the
+object is missing) per configured object the first time a tenant namespace is
+used, and nothing on subsequent calls for that namespace.
 
 ## Examples
 
