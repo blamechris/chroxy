@@ -721,6 +721,7 @@ export class BaseSession extends EventEmitter {
     this.on('permission_request', (d) => this._activity.onPermissionRequest(d))
     this.on('user_question', (d) => this._activity.onUserQuestion(d))
     this.on('permission_resolved', (d) => this._activity.onPermissionResolved(d))
+    this.on('permission_expired', (d) => this._activity.onPermissionExpired(d))
   }
 
   /**

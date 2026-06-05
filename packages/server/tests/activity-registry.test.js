@@ -14,7 +14,7 @@
  *   - emitted deltas validate against the @chroxy/protocol wire schemas
  *   - BaseSession wiring: events feed the registry and re-emit activity_*
  */
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -283,6 +283,15 @@ describe('ActivityRegistry — blocked (permission / question)', () => {
     r.onPermissionResolved({ toolUseId: 'ask-1', reason: 'aborted' })
     assert.equal(lastEntry(deltas).status, 'failed')
   })
+
+  it('permission_expired ends the blocked node as failed (not done)', () => {
+    const { r, deltas } = makeRegistry()
+    r.onPermissionRequest({ requestId: 'req1', tool: 'Bash' })
+    r.onPermissionExpired({ requestId: 'req1' })
+    assert.equal(deltas.at(-1).op, 'ended')
+    assert.equal(lastEntry(deltas).status, 'failed')
+    assert.equal(r.getEntries().length, 0)
+  })
 })
 
 describe('ActivityRegistry — reset (turn-end) and clear (destroy)', () => {
@@ -356,6 +365,12 @@ describe('ActivityRegistry — BaseSession wiring', () => {
     skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-activity-skills-'))
   })
 
+  // Cleanup in a hook so the temp dir is removed even when an assertion
+  // throws mid-test (an inline rmSync would leak the dir on early failure).
+  afterEach(() => {
+    if (skillsDir) rmSync(skillsDir, { recursive: true, force: true })
+  })
+
   function makeSession() {
     return new BaseSession({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
   }
@@ -371,8 +386,6 @@ describe('ActivityRegistry — BaseSession wiring', () => {
     assert.deepEqual(ops(deltas), ['started', 'ended'])
     assert.equal(deltas[0].entry.kind, 'tool')
     assert.equal(deltas[1].entry.status, 'done')
-
-    rmSync(skillsDir, { recursive: true, force: true })
   })
 
   it('getActivitySnapshot reflects in-flight work', () => {
@@ -382,8 +395,6 @@ describe('ActivityRegistry — BaseSession wiring', () => {
     assert.equal(snap.type, 'activity_snapshot')
     assert.equal(snap.entries.length, 1)
     assert.equal(snap.entries[0].kind, 'agent')
-
-    rmSync(skillsDir, { recursive: true, force: true })
   })
 
   it('background_work_changed feeds shell nodes into the registry', () => {
@@ -399,8 +410,6 @@ describe('ActivityRegistry — BaseSession wiring', () => {
     session.clearBackgroundShell('brk1')
     assert.equal(deltas.at(-1).op, 'ended')
     assert.equal(deltas.at(-1).entry.kind, 'shell')
-
-    rmSync(skillsDir, { recursive: true, force: true })
   })
 
   it('_clearMessageState (turn-end) ends non-shell nodes, shells survive', () => {
@@ -418,8 +427,6 @@ describe('ActivityRegistry — BaseSession wiring', () => {
     const remaining = session.getActivitySnapshot().entries
     assert.equal(remaining.length, 1)
     assert.equal(remaining[0].kind, 'shell')
-
-    rmSync(skillsDir, { recursive: true, force: true })
   })
 
   it('removeAllListeners (destroy chokepoint) clears the registry', () => {
@@ -446,7 +453,5 @@ describe('ActivityRegistry — BaseSession wiring', () => {
     session.trackBackgroundShell({ shellId: 'brk1', command: 'a' })
     session.removeAllListeners('some_other_event')
     assert.equal(session.getActivitySnapshot().entries.length, 1)
-
-    rmSync(skillsDir, { recursive: true, force: true })
   })
 })

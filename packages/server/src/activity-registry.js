@@ -4,18 +4,20 @@
  * A thin UNIFYING layer over the in-flight signals BaseSession already
  * emits. It does NOT track anything the session doesn't already know — it
  * maps the existing lifecycle events into the `ActivityEntry` wire shape
- * (#5161, `@chroxy/protocol`) and emits two events the WS layer forwards
- * verbatim:
+ * (#5161, `@chroxy/protocol`) and produces the two activity-tree messages
+ * the WS layer forwards verbatim, via two distinct mechanisms:
  *
+ *   - `activity_delta { sessionId, schemaVersion, op, entry }` — EMITTED (as
+ *     an `activity_delta` event on the owning session) on every change. `op`
+ *     is `started` / `updated` / `ended`; the FULL entry rides every op so
+ *     the downstream reducer (#5162) is a pure upsert-by-id and self-heals a
+ *     dropped delta.
  *   - `activity_snapshot { sessionId, schemaVersion, entries }` — the full
- *     current tree. Served to a fresh subscriber (snapshot-on-subscribe via
- *     `getSnapshotMessage()`) and on resync, mirroring the
- *     `background_work_changed` full-snapshot philosophy so a late joiner
- *     never reconciles deltas against a separate snapshot.
- *   - `activity_delta { sessionId, schemaVersion, op, entry }` — one
- *     upsert/end per change. `op` is `started` / `updated` / `ended`; the
- *     FULL entry rides every op so the downstream reducer (#5162) is a pure
- *     upsert-by-id and self-heals a dropped delta.
+ *     current tree. NOT emitted as an event; it is BUILT on demand via
+ *     `getSnapshotMessage()` (surfaced as `BaseSession.getActivitySnapshot()`)
+ *     and sent to a fresh subscriber / on resync by `ws-history.sendSessionInfo`,
+ *     mirroring the `background_work_changed` full-snapshot philosophy so a
+ *     late joiner never reconciles deltas against a separate snapshot.
  *
  * The signals it unifies (all already emitted by BaseSession / providers):
  *   - `tool_start` / `tool_result`     → long-running tool calls (#4628)
@@ -326,6 +328,20 @@ export class ActivityRegistry {
       || data?.reason === 'timeout'
       || data?.reason === 'aborted'
     this._end(BLOCKED_ID_PREFIX + key, denied ? 'failed' : 'done')
+  }
+
+  /**
+   * A pending permission request EXPIRED (session hard-timeout force-cleared
+   * it). Ends the blocked node as `failed` — an expired request is an
+   * abandoned one, the same terminal class as a deny/timeout. Without this the
+   * node would only clear via the turn-end `reset()` sweep and be misreported
+   * as `done`.
+   * @param {{ requestId?: string }} data
+   */
+  onPermissionExpired(data) {
+    const requestId = data?.requestId
+    if (!isNonEmptyString(requestId)) return
+    this._end(BLOCKED_ID_PREFIX + requestId, 'failed')
   }
 
   // --- lifecycle ------------------------------------------------------------
