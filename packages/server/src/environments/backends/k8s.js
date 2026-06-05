@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
 import { PassThrough } from 'stream'
 import { KubeConfig, CoreV1Api, PortForward } from '@kubernetes/client-node'
@@ -45,7 +45,6 @@ const NOT_IMPLEMENTED_REASON = {
   createComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   destroyComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   removeImage: 'N/A for K8s — image lifecycle is owned by the cluster registry/CRI',
-  listEnvironments: 'deferred to Phase 2',
   commitEnvironment: 'deferred to Phase 2',
   restoreEnvironment: 'deferred to Phase 2',
 }
@@ -125,6 +124,115 @@ function validateNamespace(ns, context) {
     )
   }
   return ns
+}
+
+/**
+ * Static prefix for per-user/per-project namespaces derived by the default
+ * mapping function (#3194).  Kept short so the sanitized identity gets the
+ * lion's share of the 63-char RFC 1123 budget.
+ */
+const DEFAULT_NAMESPACE_PREFIX = 'chroxy-user-'
+
+/**
+ * Sanitize an arbitrary identity string (userId / projectId) into a fragment
+ * safe to splice into an RFC 1123 DNS label (#3194).
+ *
+ * Multi-tenant safety: the namespace is the tenant-isolation boundary, so the
+ * sanitizer must be *deterministic* (the same identity always maps to the same
+ * namespace) and *collision-resistant* (distinct identities should not silently
+ * collapse onto the same namespace and thereby share another tenant's Pods).
+ *
+ * Transform:
+ *   - Lowercase (RFC 1123 labels are lowercase only).
+ *   - Replace every run of disallowed characters with a single '-'.
+ *   - Strip leading/trailing '-' so the fragment starts/ends alphanumeric.
+ *
+ * Collision handling: because the lossy character replacement above can map two
+ * different identities onto the same fragment (e.g. `a.b` and `a/b` → `a-b`), a
+ * short deterministic hash of the ORIGINAL identity is appended whenever the
+ * sanitized fragment differs from the input or has to be truncated.  Two
+ * identities that sanitize identically will therefore still produce different
+ * namespaces (their hashes differ), preserving tenant isolation.
+ *
+ * Length: the returned fragment is capped at `maxLength` (default 50) leaving
+ * headroom for the caller's prefix; the hash suffix is included within the cap.
+ *
+ * @param {string} identity  - Raw identity (userId or projectId)
+ * @param {Object} [opts]
+ * @param {number} [opts.maxLength=50] - Max length of the returned fragment
+ * @returns {string} An RFC 1123-label-safe fragment (non-empty)
+ * @throws {Error} If `identity` is not a non-empty string
+ */
+export function sanitizeNamespaceLabel(identity, { maxLength = 50 } = {}) {
+  if (typeof identity !== 'string' || identity.length === 0) {
+    throw new Error('sanitizeNamespaceLabel: identity must be a non-empty string')
+  }
+
+  const lowered = identity.toLowerCase()
+  // Collapse every run of non-[a-z0-9] into a single '-', then trim '-' ends.
+  let fragment = lowered.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+
+  // A short deterministic hash of the ORIGINAL identity disambiguates two
+  // identities that sanitize to the same fragment (lossy replacement) and two
+  // that share a truncated prefix.  8 hex chars (32 bits) is ample for the
+  // expected tenant cardinality and keeps the suffix compact.
+  const hash = createHash('sha256').update(identity).digest('hex').slice(0, 8)
+
+  // Decide whether disambiguation is needed: the sanitize step lost information
+  // (the result differs from the ORIGINAL identity — this also catches case
+  // folding, so `alice` and `Alice` map to different namespaces), the fragment
+  // is empty (all-symbol identity), or the raw fragment exceeds the budget.
+  const needsHash = fragment.length === 0 ||
+    fragment !== identity ||
+    fragment.length > maxLength
+
+  if (!needsHash) {
+    return fragment
+  }
+
+  // Reserve room for "-<hash>" within maxLength, then re-trim any '-' the
+  // truncation may have exposed at the boundary.
+  const suffix = `-${hash}`
+  // When maxLength is too small to hold even "<1char>-<hash>", drop the fragment
+  // entirely and return the hash truncated to maxLength. This keeps the
+  // documented length cap a hard guarantee (the `head + suffix` path below would
+  // otherwise overshoot for pathologically small maxLength values).  The hash is
+  // [a-f0-9], so any prefix of it is still a valid RFC 1123 label.
+  if (maxLength <= suffix.length) {
+    return hash.slice(0, Math.max(1, maxLength))
+  }
+  const budget = maxLength - suffix.length
+  const head = fragment.slice(0, budget).replace(/-+$/g, '')
+  // `head` can be empty when the identity was all symbols; fall back to the
+  // hash alone (always [a-f0-9], a valid label).
+  return head.length > 0 ? `${head}${suffix}` : hash
+}
+
+/**
+ * Default namespace mapping function (#3194).
+ *
+ * Maps a per-call identity to a Kubernetes namespace name:
+ *   - `userId`    → `chroxy-user-<sanitized-userId>`
+ *   - `projectId` (no userId) → `chroxy-user-<sanitized-projectId>`
+ *   - neither     → `null` (caller falls back to the static default namespace)
+ *
+ * The result is validated by `validateNamespace()` at the call site, so this
+ * function only needs to produce a candidate; the sanitizer guarantees a valid
+ * RFC 1123 label fragment and the short prefix keeps the total within 63 chars.
+ *
+ * @param {Object} identity
+ * @param {string} [identity.userId]    - User identity
+ * @param {string} [identity.projectId] - Project identity (used when no userId)
+ * @returns {string|null} Namespace name, or null when no identity was supplied
+ */
+function defaultNamespaceFor({ userId, projectId } = {}) {
+  const id = (typeof userId === 'string' && userId.length > 0)
+    ? userId
+    : (typeof projectId === 'string' && projectId.length > 0 ? projectId : null)
+  if (id == null) return null
+  // Reserve the prefix length out of the 63-char budget for the fragment.
+  const maxLength = RFC_1123_MAX_LENGTH - DEFAULT_NAMESPACE_PREFIX.length
+  return `${DEFAULT_NAMESPACE_PREFIX}${sanitizeNamespaceLabel(id, { maxLength })}`
 }
 
 /**
@@ -379,18 +487,28 @@ function buildGitCloneInitContainers(descriptor, gitImage) {
  * (Pod name) from the caller's in-memory record.  The "handle" stored by
  * EnvironmentManager for a K8s environment is the Pod name string.
  *
- * Namespace contract (#3571):
- *   - `_resolveNamespace(callNs)` returns `callNs ?? this._namespace` so an
- *     explicit empty string from the caller is preserved verbatim (#3493).
+ * Namespace contract (#3571, #3194):
+ *   - `_resolveNamespace(callNs, identity)` precedence: explicit `callNs`
+ *     (`callNs != null`, so an empty string is preserved verbatim — #3493) >
+ *     identity-derived namespace (`namespaceFor({ userId, projectId })`, #3194) >
+ *     the static `this._namespace`.
  *   - `_validateNamespace(ns, context)` enforces the RFC 1123 DNS label rules
  *     the K8s API server applies: 1-63 chars, lowercase alphanumeric + hyphens,
  *     start/end alphanumeric.  Throws with a `${context}:` prefix.
- *   - The five per-call sites (createEnvironment, destroyEnvironment,
- *     getEnvironmentStatus, streamCliInEnvironment, reconnectAgentToken) call
- *     `_validateNamespace(_resolveNamespace(opts.namespace), '<method>')` so
- *     bad namespaces (empty, uppercase, too long, bad characters, leading or
- *     trailing dashes) are rejected client-side before any K8s API call is
- *     issued.
+ *   - Per-call sites call `_namespaceForCall(opts, '<method>')` which resolves
+ *     (explicit > identity > static) and validates in one step, so bad
+ *     namespaces (empty, uppercase, too long, bad characters, leading/trailing
+ *     dashes) are rejected client-side before any K8s API call is issued.
+ *
+ * Multi-tenant isolation (#3194):
+ *   - The constructor `namespaceFor` mapping turns a per-call `userId`/`projectId`
+ *     into a deterministic, sanitized, collision-resistant namespace name
+ *     (default `chroxy-user-<sanitized-id>`).
+ *   - `createEnvironment` calls `ensureNamespace(ns)` (idempotent read-or-create;
+ *     409 AlreadyExists swallowed) so each tenant's namespace exists on demand.
+ *   - `listEnvironments` is scoped to exactly one namespace and label-filtered to
+ *     `app.kubernetes.io/managed-by=chroxy`, so a tenant never sees another
+ *     tenant's Pods.  destroy/status/stream all target the resolved namespace.
  *
  * Connection modes for streamCliInEnvironment (constructor-gated):
  *   'portforward' (default) — uses @kubernetes/client-node PortForward to tunnel
@@ -402,7 +520,14 @@ function buildGitCloneInitContainers(descriptor, gitImage) {
 export class K8sBackend {
   /**
    * @param {Object} [opts]
-   * @param {string} [opts.namespace='default']         - Kubernetes namespace for all Pods
+   * @param {string} [opts.namespace='default']         - Static fallback namespace, used when a
+   *   per-call invocation carries no identity (no userId/projectId) and no explicit `opts.namespace`.
+   * @param {Function} [opts.namespaceFor]              - Namespace mapping function (#3194):
+   *   `({ userId, projectId }) => string|null`. Called per createEnvironment/destroy/etc. to derive
+   *   the tenant-isolated namespace from caller identity. Default maps `userId` (or `projectId`) to
+   *   `chroxy-user-<sanitized-id>` and returns `null` when neither is present (→ static fallback).
+   *   The returned name is validated against RFC 1123 before any K8s API call. Pass a custom function
+   *   to project namespaces differently (e.g. `chroxy-proj-<projectId>`).
    * @param {boolean} [opts.inCluster]                  - Force in-cluster auth (default: auto-detect via KUBERNETES_SERVICE_HOST)
    * @param {string}  [opts.kubeconfigPath]             - Path to kubeconfig file (overrides default search)
    * @param {string}  [opts.sidecarImage]               - Sidecar image to use in createEnvironment (default: chroxy-pod-agent:latest)
@@ -423,12 +548,21 @@ export class K8sBackend {
    * @param {Function} [opts._setTimeout]               - Override setTimeout for deterministic testing
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
-  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, gitImage, imagePullPolicy,
+  constructor({ namespace, namespaceFor, inCluster, kubeconfigPath, sidecarImage, gitImage, imagePullPolicy,
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
     this._namespace = namespace ?? 'default'
+    // Namespace mapping function (#3194). A non-function override is rejected
+    // up-front rather than blowing up later inside _resolveNamespace.
+    if (namespaceFor != null && typeof namespaceFor !== 'function') {
+      throw new TypeError('K8sBackend: opts.namespaceFor must be a function')
+    }
+    this._namespaceFor = namespaceFor || defaultNamespaceFor
+    // Namespaces we have already ensured exist this process, so repeated
+    // createEnvironment calls for the same tenant skip the read/create roundtrip.
+    this._ensuredNamespaces = new Set()
     this._sidecarImage = sidecarImage ?? DEFAULT_SIDECAR_IMAGE
     this._gitImage = gitImage ?? DEFAULT_GIT_IMAGE
     this._imagePullPolicy = imagePullPolicy ?? null
@@ -503,16 +637,91 @@ export class K8sBackend {
   /**
    * Resolve the effective namespace for a per-call invocation.
    *
-   * Returns the per-call override when provided (including the empty string —
-   * see #3493), otherwise falls back to the constructor-stored namespace.
-   * Uses `??` so an explicit `''` is preserved verbatim and surfaces to the
-   * K8s API rather than being silently rewritten to the default.
+   * Precedence (highest first):
+   *   1. Explicit per-call `callNamespace` — including the empty string (#3493).
+   *      `??` preserves `''` verbatim so it surfaces to the K8s API (and is
+   *      rejected by `_validateNamespace`) rather than being silently rewritten.
+   *   2. Identity-derived namespace (#3194) — when `callNamespace` is
+   *      null/undefined and `identity` carries a userId/projectId, the
+   *      constructor-supplied `namespaceFor` mapping derives a tenant-isolated
+   *      namespace. A `null` from the mapping means "no identity" → fall through.
+   *   3. The constructor-stored static `namespace` (default 'default').
+   *
+   * The mapping function runs only on the fall-through path so an explicit
+   * namespace always wins and an identity-less call keeps the legacy behaviour.
    *
    * @param {string|undefined|null} callNamespace - Per-call namespace override
+   * @param {Object} [identity]            - Per-call tenant identity (#3194)
+   * @param {string} [identity.userId]     - User identity for namespace mapping
+   * @param {string} [identity.projectId]  - Project identity for namespace mapping
    * @returns {string} Resolved namespace
    */
-  _resolveNamespace(callNamespace) {
-    return callNamespace ?? this._namespace
+  _resolveNamespace(callNamespace, identity) {
+    if (callNamespace != null) return callNamespace
+    if (identity && (identity.userId != null || identity.projectId != null)) {
+      const mapped = this._namespaceFor(identity)
+      if (mapped != null) return mapped
+    }
+    return this._namespace
+  }
+
+  /**
+   * Idempotently ensure a namespace exists (#3194).
+   *
+   * Multi-tenant isolation requires the per-user/per-project namespace to be
+   * present before any Pod/Secret is created in it.  This method is safe to call
+   * repeatedly and concurrently:
+   *   - The first call reads the namespace; a 404 triggers a create.
+   *   - A create that races another creator (409 AlreadyExists) is swallowed —
+   *     the namespace exists, which is the post-condition we want.
+   *   - Once ensured, the name is cached for the process so subsequent calls are
+   *     a no-op (no API roundtrip).
+   *
+   * The static default namespace ('default', or any operator-supplied static
+   * `namespace`) is treated as pre-existing and never created — it is part of the
+   * cluster bootstrap, and a chroxy service account is unlikely to hold
+   * cluster-scoped namespace-create RBAC for it. Only namespaces *derived* from
+   * tenant identity are created on demand.
+   *
+   * @param {string} ns - A namespace name already validated as an RFC 1123 label
+   * @returns {Promise<void>}
+   */
+  async ensureNamespace(ns) {
+    if (this._ensuredNamespaces.has(ns)) return
+    // Never attempt to create the static fallback namespace — it is assumed to
+    // exist (cluster bootstrap) and chroxy may lack RBAC to create it.
+    if (ns === this._namespace) {
+      this._ensuredNamespaces.add(ns)
+      return
+    }
+
+    try {
+      await this._api.readNamespace({ name: ns })
+      this._ensuredNamespaces.add(ns)
+      return
+    } catch (err) {
+      if (!_isNotFound(err)) throw err
+      // 404 → fall through and create it.
+    }
+
+    const body = {
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: {
+        name: ns,
+        labels: { 'app.kubernetes.io/managed-by': 'chroxy' },
+      },
+    }
+    try {
+      log.info(`Creating namespace ${ns}`)
+      await this._api.createNamespace({ body })
+    } catch (err) {
+      // Another creator won the race (or it already existed) — AlreadyExists is
+      // success for an idempotent ensure, not an error.
+      if (!_isAlreadyExists(err)) throw err
+      log.info(`Namespace ${ns} already exists (concurrent create)`)
+    }
+    this._ensuredNamespaces.add(ns)
   }
 
   /**
@@ -529,6 +738,28 @@ export class K8sBackend {
    */
   _validateNamespace(ns, context) {
     return validateNamespace(ns, context)
+  }
+
+  /**
+   * Resolve + validate the namespace for a per-call invocation in one step
+   * (#3194).  Reads `namespace`, `userId`, and `projectId` from the caller's
+   * opts, runs them through `_resolveNamespace` (explicit > identity > static),
+   * then validates the result against RFC 1123.  Used by every per-call site so
+   * identity-based isolation and validation stay consistent.
+   *
+   * @param {Object} opts             - The method's opts object
+   * @param {string} [opts.namespace] - Explicit namespace override
+   * @param {string} [opts.userId]    - Tenant identity
+   * @param {string} [opts.projectId] - Project identity
+   * @param {string} context          - Call-site label for the error message
+   * @returns {string} Validated namespace
+   */
+  _namespaceForCall(opts, context) {
+    const resolved = this._resolveNamespace(opts.namespace, {
+      userId: opts.userId,
+      projectId: opts.projectId,
+    })
+    return this._validateNamespace(resolved, context)
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -652,7 +883,14 @@ export class K8sBackend {
    *   `hostPath` volume + corresponding `volumeMount`.  The volume name is derived
    *   from the entry index ("extra-vol-0", "extra-vol-1", …).
    * @param {Object.<string,string>} [opts.containerEnv] - Extra environment variables
-   * @param {string}   [opts.namespace]    - Overrides the constructor default namespace
+   * @param {string}   [opts.namespace]    - Explicit namespace; overrides both the identity mapping
+   *   and the constructor default.
+   * @param {string}   [opts.userId]       - Tenant identity for namespace isolation (#3194). When set
+   *   (and no explicit `opts.namespace`), the Pod/Secret are created in the namespace produced by the
+   *   constructor `namespaceFor` mapping (default `chroxy-user-<userId>`). The namespace is created
+   *   on demand if it does not yet exist.
+   * @param {string}   [opts.projectId]    - Project identity for namespace isolation (#3194), used by
+   *   the default mapping only when no `userId` is supplied.
    * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Per-call override for the
    *   container imagePullPolicy. Falls back to the constructor-level option when unset.
    * @returns {Promise<{ containerId: string, containerCliPath: string, agentToken: string, secretName: string }>}
@@ -663,7 +901,7 @@ export class K8sBackend {
    */
   async createEnvironment(opts) {
     const {
-      envId, cwd, containerEnv, namespace,
+      envId, cwd, containerEnv, namespace, userId, projectId,
       memoryLimit, cpuLimit, forwardPorts, mounts,
       imagePullPolicy: callImagePullPolicy,
       workspacePVC, gitRepo,
@@ -678,7 +916,10 @@ export class K8sBackend {
     // be a silent precedence rule that hides operator intent.
     validateWorkspacePVC(workspacePVC, cwd)
     const gitClone = validateGitRepo(gitRepo, cwd, workspacePVC)
-    const ns = this._validateNamespace(this._resolveNamespace(namespace), 'createEnvironment')
+    const ns = this._namespaceForCall({ namespace, userId, projectId }, 'createEnvironment')
+    // Ensure the tenant namespace exists before provisioning any resource in it
+    // (#3194). Idempotent + cached; a no-op for the static default namespace.
+    await this.ensureNamespace(ns)
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
     // K8sBackend ALWAYS runs the chroxy-pod-agent sidecar — the sidecar is
@@ -950,12 +1191,14 @@ export class K8sBackend {
    *
    * @param {string} podName - Pod name (the containerId handle stored by EnvironmentManager)
    * @param {Object} [opts]
-   * @param {string} [opts.namespace]   - Overrides the constructor default namespace
+   * @param {string} [opts.namespace]   - Explicit namespace override
+   * @param {string} [opts.userId]      - Tenant identity for namespace isolation (#3194)
+   * @param {string} [opts.projectId]   - Project identity for namespace isolation (#3194)
    * @param {string} [opts.secretName]  - Per-Pod Secret to delete (default: derived from podName)
    * @returns {Promise<void>}
    */
   async destroyEnvironment(podName, opts = {}) {
-    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'destroyEnvironment')
+    const ns = this._namespaceForCall(opts, 'destroyEnvironment')
     const secretName = opts.secretName || _deriveSecretName(podName)
 
     // Always drop the cached token first so a partial failure can't leave
@@ -1011,12 +1254,14 @@ export class K8sBackend {
    *
    * @param {string} podName
    * @param {Object} [opts]
-   * @param {string} [opts.namespace]
+   * @param {string} [opts.namespace]  - Explicit namespace override
+   * @param {string} [opts.userId]     - Tenant identity for namespace isolation (#3194)
+   * @param {string} [opts.projectId]  - Project identity for namespace isolation (#3194)
    * @returns {Promise<boolean>}
    * @throws {Error} If the Pod does not exist
    */
   async getEnvironmentStatus(podName, opts = {}) {
-    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'getEnvironmentStatus')
+    const ns = this._namespaceForCall(opts, 'getEnvironmentStatus')
     const result = await this._api.readNamespacedPod({ name: podName, namespace: ns })
     const phase = result?.status?.phase
     return phase === 'Running'
@@ -1143,16 +1388,18 @@ export class K8sBackend {
    * @param {string}   [opts.agentToken] - Override the registered bearer token (test seam)
    * @param {string}   [opts.containerCliPath] - Pod-side cli.js path (default fallback)
    * @param {string}   [opts.hostCwd]   - Host CWD mount root for path remapping
-   * @param {string}   [opts.namespace] - Namespace override
+   * @param {string}   [opts.namespace] - Explicit namespace override
+   * @param {string}   [opts.userId]    - Tenant identity for namespace isolation (#3194)
+   * @param {string}   [opts.projectId] - Project identity for namespace isolation (#3194)
    * @returns {SidecarProcess} ChildProcess-shaped handle
    */
   streamCliInEnvironment(podName, opts = {}) {
     const {
-      cmd, args = [], env, cwd, signal, namespace,
+      cmd, args = [], env, cwd, signal,
       containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
       hostCwd,
     } = opts
-    const ns = this._validateNamespace(this._resolveNamespace(namespace), 'streamCliInEnvironment')
+    const ns = this._namespaceForCall(opts, 'streamCliInEnvironment')
 
     // Prefer explicit token (test seam), fall back to the in-memory cache, and
     // lazily fetch from the K8s Secret when neither is available (e.g. after a
@@ -1262,11 +1509,13 @@ export class K8sBackend {
    *
    * @param {string} podName - Pod name (the containerId handle)
    * @param {Object} [opts]
-   * @param {string} [opts.namespace] - Overrides the constructor default namespace
+   * @param {string} [opts.namespace]  - Explicit namespace override
+   * @param {string} [opts.userId]     - Tenant identity for namespace isolation (#3194)
+   * @param {string} [opts.projectId]  - Project identity for namespace isolation (#3194)
    * @returns {Promise<boolean>}
    */
   async reconnectAgentToken(podName, opts = {}) {
-    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'reconnectAgentToken')
+    const ns = this._namespaceForCall(opts, 'reconnectAgentToken')
     const token = await this._readAgentToken(podName, ns)
     return token !== null
   }
@@ -1287,8 +1536,48 @@ export class K8sBackend {
     return Promise.reject(notImplemented('removeImage'))
   }
 
-  listEnvironments() {
-    return Promise.reject(notImplemented('listEnvironments'))
+  // ─────────────────────────────────────────────────────────────────────────
+  // listEnvironments — list chroxy-managed Pods, scoped to one namespace (#3194)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * List the names of chroxy-managed Pods in a single namespace (#3194).
+   *
+   * Multi-tenant isolation: the list is scoped to exactly one namespace — the
+   * one resolved from the caller's identity (or the explicit/static namespace) —
+   * and filtered by the `app.kubernetes.io/managed-by=chroxy` label so it never
+   * returns Pods belonging to other tenants or unrelated workloads in the same
+   * namespace.  There is intentionally no cluster-wide list: a tenant must only
+   * ever see its own environments.
+   *
+   * A brand-new tenant whose namespace has not been created yet has, by
+   * definition, no environments.  The K8s API returns 404 ("namespace not
+   * found") for `listNamespacedPod` in that case, which we translate to an empty
+   * list rather than surfacing as an error.
+   *
+   * @param {Object} [opts]
+   * @param {string} [opts.namespace]  - Explicit namespace to list
+   * @param {string} [opts.userId]     - Tenant identity for namespace resolution
+   * @param {string} [opts.projectId]  - Project identity for namespace resolution
+   * @returns {Promise<string[]>} Pod names (the containerId handles) in the namespace
+   */
+  async listEnvironments(opts = {}) {
+    const ns = this._namespaceForCall(opts, 'listEnvironments')
+    let result
+    try {
+      result = await this._api.listNamespacedPod({
+        namespace: ns,
+        labelSelector: 'app.kubernetes.io/managed-by=chroxy',
+      })
+    } catch (err) {
+      // The tenant namespace does not exist yet → no environments.
+      if (_isNotFound(err)) return []
+      throw err
+    }
+    const items = result?.items || []
+    return items
+      .map((pod) => pod?.metadata?.name)
+      .filter((name) => typeof name === 'string' && name.length > 0)
   }
 
   commitEnvironment(_containerId, _imageTag) {
@@ -2138,6 +2427,16 @@ function _isNotFound(err) {
     err?.statusCode === 404 ||
     err?.response?.statusCode === 404 ||
     err?.body?.code === 404
+}
+
+// Detects a Kubernetes 409 Conflict (AlreadyExists) across the client shapes,
+// mirroring _isNotFound. Used to make namespace create idempotent: a 409 from
+// createNamespace means another creator won the race (#3194).
+function _isAlreadyExists(err) {
+  return err?.code === 409 ||
+    err?.statusCode === 409 ||
+    err?.response?.statusCode === 409 ||
+    err?.body?.code === 409
 }
 
 function _sleep(ms) {
