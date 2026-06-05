@@ -511,6 +511,163 @@ export declare const ServerActivityDeltaSchema: z.ZodObject<{
         }, z.core.$strip>>;
     }, z.core.$strip>;
 }, z.core.$strip>;
+/**
+ * Verdict for a repo — the survey's classification of "what is this repo's
+ * current state". Drives the colour-coded tag in the Control Room table:
+ *   - `'live'`        — actively worked (a chroxy session is/was recently running).
+ *   - `'investigate'` — ambiguous state worth a human look (e.g. dirty tree on a
+ *                       repo with no recent activity).
+ *   - `'abandoned'`   — likely abandoned (no recent activity, nothing in flight).
+ *   - `'recent'`      — touched recently but not classified as live.
+ *   - `'onboarded'`   — set up / onboarded (has the expected chroxy scaffolding)
+ *                       but not currently active.
+ *
+ * Declared as a named enum so downstream consumers can switch exhaustively.
+ */
+export declare const RepoVerdictSchema: z.ZodEnum<{
+    live: "live";
+    investigate: "investigate";
+    abandoned: "abandoned";
+    recent: "recent";
+    onboarded: "onboarded";
+}>;
+/**
+ * Working-tree cleanliness summary for a repo:
+ *   - `state`     — `'clean'` (nothing to commit) or `'dirty'` (anything staged,
+ *                   modified, or untracked).
+ *   - `untracked` — count of untracked files.
+ *   - `modified`  — count of tracked-but-modified (unstaged) files.
+ *   - `staged`    — count of staged (index) changes.
+ *
+ * Counts are non-negative integers. `state` is carried explicitly (rather than
+ * derived from the counts) so the server's notion of clean/dirty is the
+ * authority — e.g. a repo may be "dirty" for a reason the three counts don't
+ * capture, and the consumer should not re-derive it.
+ */
+export declare const RepoTreeSchema: z.ZodObject<{
+    state: z.ZodEnum<{
+        clean: "clean";
+        dirty: "dirty";
+    }>;
+    untracked: z.ZodNumber;
+    modified: z.ZodNumber;
+    staged: z.ZodNumber;
+}, z.core.$strip>;
+/**
+ * One row in the Host/Repo Status table.
+ *
+ * Fields:
+ *   - `name`        — display name for the repo (typically the directory name).
+ *   - `path`        — absolute path on the host.
+ *   - `branch`      — current branch (or detached-HEAD description).
+ *   - `verdict`     — see `RepoVerdictSchema`.
+ *   - `live`        — true while a chroxy session is actively running in this
+ *                     repo. Distinct from `verdict === 'live'`: `verdict` is the
+ *                     survey's classification (may persist after the session
+ *                     ends), `live` is the instantaneous "session running now"
+ *                     state that drives the green dot.
+ *   - `tree`        — see `RepoTreeSchema`.
+ *   - `worktrees`   — count of git worktrees attached to this repo.
+ *   - `openPRs`     — number of open PRs, or `null` when unknown (e.g. no GitHub
+ *                     remote, or the lookup was skipped/failed). `null` ≠ 0.
+ *   - `attribution` — whether commits carry the expected author attribution, or
+ *                     `null` when not evaluated. `null` ≠ false.
+ *   - `onboarding`  — human-readable onboarding state (free-form so the survey
+ *                     can describe partial/odd setups without a wire change).
+ *   - `lastTouched` — ISO-8601 timestamp of the most recent activity used to
+ *                     classify the verdict.
+ *   - `note?`       — optional annotation rendered as the `↳` sub-row under the
+ *                     repo (e.g. "dirty tree, last touched 3 weeks ago").
+ */
+export declare const RepoStatusSchema: z.ZodObject<{
+    name: z.ZodString;
+    path: z.ZodString;
+    branch: z.ZodString;
+    verdict: z.ZodEnum<{
+        live: "live";
+        investigate: "investigate";
+        abandoned: "abandoned";
+        recent: "recent";
+        onboarded: "onboarded";
+    }>;
+    live: z.ZodBoolean;
+    tree: z.ZodObject<{
+        state: z.ZodEnum<{
+            clean: "clean";
+            dirty: "dirty";
+        }>;
+        untracked: z.ZodNumber;
+        modified: z.ZodNumber;
+        staged: z.ZodNumber;
+    }, z.core.$strip>;
+    worktrees: z.ZodNumber;
+    openPRs: z.ZodNullable<z.ZodNumber>;
+    attribution: z.ZodNullable<z.ZodBoolean>;
+    onboarding: z.ZodString;
+    lastTouched: z.ZodString;
+    note: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
+ * Aggregate counts across the surveyed repos, one per verdict bucket. Carried
+ * alongside `repos` so the Control Room's summary chips don't have to re-tally
+ * the array (and stay consistent with the server's own count even if a future
+ * server truncates the `repos` list). All non-negative integers.
+ */
+export declare const HostStatusSummarySchema: z.ZodObject<{
+    live: z.ZodNumber;
+    onboarded: z.ZodNumber;
+    abandoned: z.ZodNumber;
+    investigate: z.ZodNumber;
+    recent: z.ZodNumber;
+}, z.core.$strip>;
+/**
+ * #5171 — full Host/Repo Status snapshot. Emitted in reply to a
+ * `host_status_request` (see client.ts). Carries the survey root, the aggregate
+ * `summary`, and the per-repo `repos` rows. `generatedAt` is the ISO-8601 time
+ * the survey ran so the Control Room can render "generated Nm ago" and detect a
+ * stale snapshot. An empty `repos` array is the valid "no repos found under the
+ * root" state — never omitted.
+ */
+export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"host_status_snapshot">;
+    generatedAt: z.ZodString;
+    root: z.ZodString;
+    summary: z.ZodObject<{
+        live: z.ZodNumber;
+        onboarded: z.ZodNumber;
+        abandoned: z.ZodNumber;
+        investigate: z.ZodNumber;
+        recent: z.ZodNumber;
+    }, z.core.$strip>;
+    repos: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        path: z.ZodString;
+        branch: z.ZodString;
+        verdict: z.ZodEnum<{
+            live: "live";
+            investigate: "investigate";
+            abandoned: "abandoned";
+            recent: "recent";
+            onboarded: "onboarded";
+        }>;
+        live: z.ZodBoolean;
+        tree: z.ZodObject<{
+            state: z.ZodEnum<{
+                clean: "clean";
+                dirty: "dirty";
+            }>;
+            untracked: z.ZodNumber;
+            modified: z.ZodNumber;
+            staged: z.ZodNumber;
+        }, z.core.$strip>;
+        worktrees: z.ZodNumber;
+        openPRs: z.ZodNullable<z.ZodNumber>;
+        attribution: z.ZodNullable<z.ZodBoolean>;
+        onboarding: z.ZodString;
+        lastTouched: z.ZodString;
+        note: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
 export declare const ServerClientFocusChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_focus_changed">;
     clientId: z.ZodString;
@@ -1124,3 +1281,8 @@ export type ActivityOutputRef = z.infer<typeof ActivityOutputRefSchema>;
 export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;
 export type ServerActivitySnapshotMessage = z.infer<typeof ServerActivitySnapshotSchema>;
 export type ServerActivityDeltaMessage = z.infer<typeof ServerActivityDeltaSchema>;
+export type RepoVerdict = z.infer<typeof RepoVerdictSchema>;
+export type RepoTree = z.infer<typeof RepoTreeSchema>;
+export type RepoStatus = z.infer<typeof RepoStatusSchema>;
+export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>;
+export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>;

@@ -2038,4 +2038,239 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(ACTIVITY_SCHEMA_VERSION, 1)
     })
   })
+
+  describe('Host/Repo Status Control Room (#5171)', () => {
+    const cleanRepo = {
+      name: 'chroxy',
+      path: '/Users/dev/Projects/chroxy',
+      branch: 'main',
+      verdict: 'live',
+      live: true,
+      tree: { state: 'clean', untracked: 0, modified: 0, staged: 0 },
+      worktrees: 2,
+      openPRs: 3,
+      attribution: true,
+      onboarding: 'fully onboarded',
+      lastTouched: '2026-06-05T12:00:00.000Z',
+    }
+
+    const dirtyRepo = {
+      name: 'old-experiment',
+      path: '/Users/dev/Projects/old-experiment',
+      branch: 'wip/spike',
+      verdict: 'investigate',
+      live: false,
+      tree: { state: 'dirty', untracked: 4, modified: 2, staged: 1 },
+      worktrees: 0,
+      openPRs: null,
+      attribution: null,
+      onboarding: 'not onboarded',
+      lastTouched: '2026-01-02T09:30:00.000Z',
+      note: 'dirty tree, last touched 5 months ago',
+    }
+
+    describe('RepoVerdictSchema', () => {
+      it('accepts every verdict', async () => {
+        const { RepoVerdictSchema } = await import('../src/schemas/server.ts')
+        for (const v of ['live', 'investigate', 'abandoned', 'recent', 'onboarded']) {
+          assert.ok(RepoVerdictSchema.safeParse(v).success, `verdict ${v} should validate`)
+        }
+      })
+
+      it('rejects an unknown verdict', async () => {
+        const { RepoVerdictSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoVerdictSchema.safeParse('archived').success, 'unknown verdict must reject')
+      })
+    })
+
+    describe('RepoTreeSchema', () => {
+      it('validates a clean tree', async () => {
+        const { RepoTreeSchema } = await import('../src/schemas/server.ts')
+        const result = RepoTreeSchema.safeParse({ state: 'clean', untracked: 0, modified: 0, staged: 0 })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+      })
+
+      it('validates a dirty tree with counts', async () => {
+        const { RepoTreeSchema } = await import('../src/schemas/server.ts')
+        const result = RepoTreeSchema.safeParse({ state: 'dirty', untracked: 4, modified: 2, staged: 1 })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+      })
+
+      it('rejects an unknown state', async () => {
+        const { RepoTreeSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoTreeSchema.safeParse({ state: 'conflicted', untracked: 0, modified: 0, staged: 0 }).success)
+      })
+
+      it('rejects negative counts', async () => {
+        const { RepoTreeSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoTreeSchema.safeParse({ state: 'dirty', untracked: -1, modified: 0, staged: 0 }).success)
+      })
+
+      it('rejects non-integer counts', async () => {
+        const { RepoTreeSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoTreeSchema.safeParse({ state: 'dirty', untracked: 1.5, modified: 0, staged: 0 }).success)
+      })
+    })
+
+    describe('RepoStatusSchema', () => {
+      it('validates a well-formed live repo', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        const result = RepoStatusSchema.safeParse(cleanRepo)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.verdict, 'live')
+        assert.equal(result.data.note, undefined)
+      })
+
+      it('validates a repo with note and null openPRs/attribution', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        const result = RepoStatusSchema.safeParse(dirtyRepo)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.openPRs, null)
+        assert.equal(result.data.attribution, null)
+        assert.equal(result.data.note, 'dirty tree, last touched 5 months ago')
+      })
+
+      it('accepts openPRs as a non-negative integer or null', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, openPRs: 0 }).success)
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, openPRs: null }).success)
+      })
+
+      it('rejects a negative openPRs', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, openPRs: -1 }).success)
+      })
+
+      it('accepts attribution true / false / null', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, attribution: true }).success)
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, attribution: false }).success)
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, attribution: null }).success)
+      })
+
+      it('rejects an unknown verdict', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, verdict: 'archived' }).success)
+      })
+
+      it('rejects a non-ISO lastTouched', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, lastTouched: 'yesterday' }).success)
+      })
+
+      it('rejects a non-boolean live', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, live: 'yes' }).success)
+      })
+
+      it('strips unknown fields for forward compat', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        const result = RepoStatusSchema.safeParse({ ...cleanRepo, futureField: 'x' })
+        assert.ok(result.success)
+        assert.equal(result.data.futureField, undefined)
+      })
+    })
+
+    describe('ServerHostStatusSnapshotSchema', () => {
+      const snapshot = {
+        type: 'host_status_snapshot',
+        generatedAt: '2026-06-05T12:00:00.000Z',
+        root: '/Users/dev/Projects',
+        summary: { live: 1, onboarded: 0, abandoned: 0, investigate: 1, recent: 0 },
+        repos: [cleanRepo, dirtyRepo],
+      }
+
+      it('round-trips a full snapshot', async () => {
+        const { ServerHostStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerHostStatusSnapshotSchema.safeParse(snapshot)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.repos.length, 2)
+        assert.equal(result.data.summary.investigate, 1)
+      })
+
+      it('accepts an empty repos array (no repos under root)', async () => {
+        const { ServerHostStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerHostStatusSnapshotSchema.safeParse({
+          ...snapshot,
+          repos: [],
+          summary: { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 },
+        })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+      })
+
+      it('rejects the wrong type literal', async () => {
+        const { ServerHostStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!ServerHostStatusSnapshotSchema.safeParse({ ...snapshot, type: 'host_status' }).success)
+      })
+
+      it('rejects a non-ISO generatedAt', async () => {
+        const { ServerHostStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!ServerHostStatusSnapshotSchema.safeParse({ ...snapshot, generatedAt: '2026' }).success)
+      })
+
+      it('rejects a missing summary bucket', async () => {
+        const { ServerHostStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerHostStatusSnapshotSchema.safeParse({
+          ...snapshot,
+          summary: { live: 1, onboarded: 0, abandoned: 0, investigate: 1 },
+        })
+        assert.ok(!result.success, 'summary must carry all five buckets')
+      })
+
+      it('rejects an invalid repo inside repos', async () => {
+        const { ServerHostStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerHostStatusSnapshotSchema.safeParse({
+          ...snapshot,
+          repos: [{ ...cleanRepo, verdict: 'archived' }],
+        })
+        assert.ok(!result.success, 'an invalid repo must fail the whole snapshot')
+      })
+
+      it('strips unknown top-level fields for forward compat', async () => {
+        const { ServerHostStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerHostStatusSnapshotSchema.safeParse({ ...snapshot, futureField: 'x' })
+        assert.ok(result.success)
+        assert.equal(result.data.futureField, undefined)
+      })
+
+      it('is re-exported from the schemas entry point', async () => {
+        const mod = await import('../src/schemas/index.ts')
+        assert.ok(mod.ServerHostStatusSnapshotSchema, 'snapshot schema should be exported')
+        assert.ok(mod.RepoStatusSchema, 'RepoStatusSchema should be exported')
+        assert.ok(mod.HostStatusRequestSchema, 'HostStatusRequestSchema should be exported')
+      })
+    })
+
+    describe('HostStatusRequestSchema (client→server)', () => {
+      it('validates a bare request', async () => {
+        const { HostStatusRequestSchema } = await import('../src/schemas/client.ts')
+        const result = HostStatusRequestSchema.safeParse({ type: 'host_status_request' })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+      })
+
+      it('validates a request with requestId', async () => {
+        const { HostStatusRequestSchema } = await import('../src/schemas/client.ts')
+        const result = HostStatusRequestSchema.safeParse({ type: 'host_status_request', requestId: 'abc' })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.requestId, 'abc')
+      })
+
+      it('rejects the wrong type literal', async () => {
+        const { HostStatusRequestSchema } = await import('../src/schemas/client.ts')
+        assert.ok(!HostStatusRequestSchema.safeParse({ type: 'host_status' }).success)
+      })
+
+      it('rejects an over-long requestId', async () => {
+        const { HostStatusRequestSchema } = await import('../src/schemas/client.ts')
+        assert.ok(!HostStatusRequestSchema.safeParse({ type: 'host_status_request', requestId: 'x'.repeat(129) }).success)
+      })
+
+      it('is accepted by the ClientMessageSchema union', async () => {
+        const { ClientMessageSchema } = await import('../src/schemas/client.ts')
+        const result = ClientMessageSchema.safeParse({ type: 'host_status_request', requestId: 'r1' })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.type, 'host_status_request')
+      })
+    })
+  })
 })
