@@ -30,11 +30,20 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/)
   })
 
-  it('.header-meta is the right-aligned second row holding the cost/token cluster (#5200)', () => {
+  it('.header-meta is the full-width second row; the status bar fills it and space-betweens its own groups (#5200/#5203)', () => {
+    // #5203: the container no longer right-aligns its child (the old #5200
+    // `justify-content: flex-end`). The status bar now spans the full row
+    // (`.status-bar { width: 100% }`) and distributes its own left/right
+    // groups via `space-between`, so the container is a plain flex parent.
     const block = css.match(/\.header-meta\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/display:\s*flex/)
-    expect(block![0]).toMatch(/justify-content:\s*flex-end/)
+    expect(block![0]).not.toMatch(/justify-content:\s*flex-end/)
+    // the bar itself owns the full width + the space-between split
+    const barBlock = css.match(/\.header-meta \.status-bar\s*\{[^}]*\}/s)
+    expect(barBlock).toBeTruthy()
+    expect(barBlock![0]).toMatch(/width:\s*100%/)
+    expect(barBlock![0]).toMatch(/justify-content:\s*space-between/)
   })
 
   it('#header has overflow: visible (native selects render outside header bounds)', () => {

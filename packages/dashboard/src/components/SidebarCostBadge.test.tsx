@@ -196,8 +196,8 @@ describe('SidebarCostBadge mode union (#5184)', () => {
     )
   })
 
-  it('defaults to provider-model', () => {
-    expect(DEFAULT_COST_BADGE_MODE).toBe('provider-model')
+  it('defaults to cost (#5203: identity moved to the header-meta left group)', () => {
+    expect(DEFAULT_COST_BADGE_MODE).toBe('cost')
   })
 
   it('has a human-readable label for every mode', () => {
@@ -247,8 +247,8 @@ describe('formatCostBadgeContent per mode (#5184)', () => {
       .toBe('Claude Code (SDK)')
   })
 
-  it('defaults to provider-model when mode is omitted', () => {
-    expect(formatCostBadgeContent(full)).toBe('Claude Code (SDK) · Sonnet 4.6')
+  it('defaults to cost when mode is omitted (#5203)', () => {
+    expect(formatCostBadgeContent(full)).toBe('$0.2903')
   })
 
   it('cost: legacy "$0.2903" 4-decimal form', () => {
@@ -302,11 +302,11 @@ describe('SidebarCostBadge render (#5184)', () => {
     expect(badge.getAttribute('aria-label')).toBe('Total session cost')
   })
 
-  it('defaults to provider-model when no mode prop is given', () => {
-    render(<SidebarCostBadge provider="claude-sdk" model="Sonnet 4.6" />)
+  it('defaults to cost when no mode prop is given (#5203)', () => {
+    render(<SidebarCostBadge provider="claude-sdk" model="Sonnet 4.6" cost={0.2903} />)
     const badge = screen.getByTestId('sidebar-cost-badge')
-    expect(badge.getAttribute('data-cost-badge-mode')).toBe('provider-model')
-    expect(badge.textContent).toBe('Claude Code (SDK) · Sonnet 4.6')
+    expect(badge.getAttribute('data-cost-badge-mode')).toBe('cost')
+    expect(badge.textContent).toBe('$0.2903')
   })
 
   it('appends an extra className alongside the base cost-badge class', () => {

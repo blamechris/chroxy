@@ -176,6 +176,17 @@ describe('ControlRoomSection (#5175)', () => {
     expect(screen.queryByTestId('cr-note-row-no-it-all')).toBeNull()
   })
 
+  it('#5201: branch + onboarding cells carry the full text as a title for hover-reveal when ellipsis-truncated', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    const branch = screen.getByTestId('cr-branch-medlens')
+    expect(branch).toHaveClass('cr-branch')
+    expect(branch).toHaveAttribute('title', 'docs/app-store-prep')
+    // onboarding cell carries its full value as a title too
+    const onboarding = screen.getByText('skipped — dirty tree')
+    expect(onboarding).toHaveClass('cr-onboarding')
+    expect(onboarding).toHaveAttribute('title', 'skipped — dirty tree')
+  })
+
   it('shows the live green dot only for live repos', () => {
     render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
     expect(screen.getByTestId('cr-live-dot-chroxy')).toBeTruthy()
