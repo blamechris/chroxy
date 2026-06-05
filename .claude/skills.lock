@@ -1,0 +1,85 @@
+{
+  "registry": "blamechris/skill-templates",
+  "skills": {
+    "agent-review": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "autonomous-dev-flow": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "batch-merge": {
+      "hash": "0a76684",
+      "installed": "2026-06-03"
+    },
+    "bug-hunt": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "check-pr": {
+      "hash": "cc062bc",
+      "installed": "2026-06-03"
+    },
+    "create-issue": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "create-pr": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "decompose-issue": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "fix-ci": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "full-review": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "learn": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "manual-testing-mode": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "merge": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "parallel-dev": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "recon": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "skill": {
+      "hash": "18b9f3e",
+      "installed": "2026-06-04"
+    },
+    "smoke-test": {
+      "hash": "21fa678",
+      "installed": "2026-06-03"
+    },
+    "start-working": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "swarm-audit": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "tackle-issues": {
+      "hash": "21fa678",
+      "installed": "2026-06-03"
+    }
+  }
+}
