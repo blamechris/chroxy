@@ -382,6 +382,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // mirrors the resolved status (set/missing) + a masked preview. Updates
   // arrive via byok_credentials_status WS messages.
   byokCredentialsStatus: null,
+  // #3855: generalized provider-credential state. Server-of-truth lives in
+  // ~/.chroxy/credentials.json + env vars + OAuth detection; the dashboard
+  // mirrors the masked status snapshot. The raw value is never stored.
+  credentialsStatus: null,
+  credentialTestResults: {},
   // #4542: per-category notification prefs. Server-of-truth lives in
   // ~/.chroxy/notification-prefs.json; the dashboard mirrors the latest
   // `notification_prefs` snapshot. The Settings panel sends
@@ -542,6 +547,46 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'byok_clear_credentials' });
+      return true;
+    }
+    return false;
+  },
+
+  // #3855: generalized provider-credential actions. As with BYOK, the raw
+  // value is sent on the wire but NEVER stored in the dashboard — the store
+  // only mirrors the masked server reply. Each action returns whether the WS
+  // message went on the wire (false = socket closed; caller surfaces an error).
+  refreshCredentialsStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'get_credentials_status' });
+      return true;
+    }
+    return false;
+  },
+
+  setCredential: (key: string, value: string): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'set_credential', key, value });
+      return true;
+    }
+    return false;
+  },
+
+  deleteCredential: (key: string): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'delete_credential', key });
+      return true;
+    }
+    return false;
+  },
+
+  testCredential: (key: string): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'test_credential', key });
       return true;
     }
     return false;

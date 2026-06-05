@@ -254,7 +254,8 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 See [docs/providers.md](providers.md) for Gemini CLI installation and supported models.
 
 **Symptom:** `GEMINI_API_KEY environment variable is not set`
-- The `gemini` provider refuses to start without an API key. Export it before launching Chroxy:
+- The simplest fix is to set the key in **Settings → Provider Credentials** in the dashboard — it's saved to `~/.chroxy/credentials.json` (mode 0600) and used automatically, no shell export needed. See [Setting credentials from the dashboard](providers.md#setting-credentials-from-the-dashboard).
+- Or export it before launching Chroxy (an exported env var takes precedence over a stored value):
   ```bash
   export GEMINI_API_KEY=your-key-here
   npx chroxy start --provider gemini
@@ -273,7 +274,8 @@ See [docs/providers.md](providers.md) for Gemini CLI installation and supported 
 See [docs/providers.md](providers.md) for Codex CLI installation and supported models.
 
 **Symptom:** `OPENAI_API_KEY environment variable is not set`
-- The `codex` provider refuses to start without an API key. Export it before launching Chroxy:
+- The simplest fix is to set the key in **Settings → Provider Credentials** in the dashboard — it's saved to `~/.chroxy/credentials.json` (mode 0600) and used automatically, no shell export needed. See [Setting credentials from the dashboard](providers.md#setting-credentials-from-the-dashboard).
+- Or export it before launching Chroxy (an exported env var takes precedence over a stored value):
   ```bash
   export OPENAI_API_KEY=your-key-here
   npx chroxy start --provider codex

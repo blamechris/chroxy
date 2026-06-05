@@ -20,6 +20,18 @@ import {
   writeAnthropicApiKey,
   clearAnthropicApiKey,
 } from '../byok-credentials.js'
+import {
+  getCredentialsStatus,
+  setStoredCredential,
+  deleteStoredCredential,
+  isKnownCredentialKey,
+} from '../credential-store.js'
+import { testCredential } from '../credential-test.js'
+import {
+  hasClaudeOAuthCreds,
+  hasGeminiOAuthCreds,
+  hasCodexOAuthCreds,
+} from '../auth-probes.js'
 import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -518,6 +530,110 @@ function handleByokClearCredentials(ws, client, msg, ctx) {
   if (typeof ctx.broadcast === 'function') {
     ctx.broadcast({ type: 'byok_credentials_status', ...status })
   }
+}
+
+/**
+ * Provider Credentials handlers (#3855).
+ *
+ * Generalizes the BYOK handlers above to every known provider credential key
+ * (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, GEMINI_API_KEY, OPENAI_API_KEY)
+ * plus read-only OAuth status. The raw value is NEVER sent back — set/delete
+ * reply with the same masked `credentials_status` snapshot the status query
+ * returns.
+ *
+ * Auth posture: identical to the BYOK handlers — any authenticated WS client
+ * (primary or pairing-bound token) reaches these because chroxy isn't
+ * multi-tenant and the operator owns their own credential file. The WS auth
+ * gate in ws-server.js (`client.authenticated`) is the access control; these
+ * handlers never run for an unauthenticated connection. Per the bearer-token
+ * authority doc, credential management is global state — but unlike the
+ * privilege-escalating auto-mode flip, reading/writing one's own provider keys
+ * is within the authority both token classes already hold (a bound token can
+ * already use whatever credentials a session resolves), so no bound-token
+ * rejection is required here.
+ */
+const CREDENTIAL_OAUTH_HELPERS = Object.freeze({
+  hasClaudeOAuthCreds,
+  hasGeminiOAuthCreds,
+  hasCodexOAuthCreds,
+})
+
+function _sendCredentialsStatus(ctx, ws, requestId, { broadcast } = {}) {
+  const status = getCredentialsStatus(CREDENTIAL_OAUTH_HELPERS)
+  ctx.send(ws, { type: 'credentials_status', requestId: requestId ?? null, ...status })
+  if (broadcast && typeof ctx.broadcast === 'function') {
+    // No requestId so other dashboards / tabs refresh too. Status is masked
+    // and value-free — safe to broadcast to all authenticated clients.
+    ctx.broadcast({ type: 'credentials_status', ...status })
+  }
+}
+
+function handleGetCredentialsStatus(ws, client, msg, ctx) {
+  _sendCredentialsStatus(ctx, ws, msg?.requestId)
+}
+
+function handleSetCredential(ws, client, msg, ctx) {
+  const key = typeof msg?.key === 'string' ? msg.key : ''
+  if (!isKnownCredentialKey(key)) {
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)
+    return
+  }
+  if (typeof msg?.value !== 'string' || msg.value.trim().length === 0) {
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'value is required')
+    return
+  }
+  try {
+    // setStoredCredential trims + validates the value (e.g. sk-ant- / sk-
+    // prefix) and persists atomically at mode 0600.
+    setStoredCredential(key, msg.value)
+  } catch (err) {
+    // err.message is validation text or a file-mode reason — never the value.
+    log.warn(`set_credential failed for ${key}: ${err?.message}`)
+    sendError(ws, msg?.requestId, 'CREDENTIAL_WRITE_FAILED', err?.message || 'write failed')
+    return
+  }
+  _sendCredentialsStatus(ctx, ws, msg?.requestId, { broadcast: true })
+}
+
+function handleDeleteCredential(ws, client, msg, ctx) {
+  const key = typeof msg?.key === 'string' ? msg.key : ''
+  if (!isKnownCredentialKey(key)) {
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)
+    return
+  }
+  try {
+    deleteStoredCredential(key)
+  } catch (err) {
+    sendError(ws, msg?.requestId, 'CREDENTIAL_CLEAR_FAILED', err?.message || 'clear failed')
+    return
+  }
+  _sendCredentialsStatus(ctx, ws, msg?.requestId, { broadcast: true })
+}
+
+async function handleTestCredential(ws, client, msg, ctx) {
+  const key = typeof msg?.key === 'string' ? msg.key : ''
+  if (!isKnownCredentialKey(key)) {
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)
+    return
+  }
+  let result
+  try {
+    result = await testCredential(key)
+  } catch (err) {
+    // testCredential is defensive and shouldn't throw, but never let a raw
+    // error escape unmasked.
+    log.warn(`test_credential threw for ${key}: ${err?.message}`)
+    result = { ok: false, error: 'Credential test failed unexpectedly.' }
+  }
+  ctx.send(ws, {
+    type: 'credential_test_result',
+    requestId: msg?.requestId ?? null,
+    key,
+    ok: Boolean(result.ok),
+    ...(result.error ? { error: result.error } : {}),
+    ...(result.model ? { model: result.model } : {}),
+    ...(typeof result.latencyMs === 'number' ? { latencyMs: result.latencyMs } : {}),
+  })
 }
 
 /**
@@ -1317,6 +1433,10 @@ export const settingsHandlers = {
   byok_get_credentials_status: handleByokGetCredentialsStatus,
   byok_set_credentials: handleByokSetCredentials,
   byok_clear_credentials: handleByokClearCredentials,
+  get_credentials_status: handleGetCredentialsStatus,
+  set_credential: handleSetCredential,
+  delete_credential: handleDeleteCredential,
+  test_credential: handleTestCredential,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }

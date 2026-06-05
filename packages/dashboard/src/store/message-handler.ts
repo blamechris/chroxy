@@ -109,7 +109,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -3040,6 +3040,62 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           fileExists: payload.fileExists,
         },
       });
+      break;
+    }
+
+    case 'credentials_status': {
+      // #3855: generalized provider-credential snapshot. Emitted in reply to
+      // get_credentials_status and broadcast after every set/delete. The
+      // masked previews are the only key-shaped strings we ever store — never
+      // a raw value. Validate the wire payload via the protocol Zod schema so
+      // a malformed server can't poison the store.
+      const parsed = ServerCredentialsStatusSchema.safeParse(msg);
+      if (!parsed.success) {
+        // eslint-disable-next-line no-console
+        console.warn('credentials_status: invalid payload from server', parsed.error.issues);
+        break;
+      }
+      const payload = parsed.data;
+      set({
+        credentialsStatus: {
+          credentials: payload.credentials.map((c) => ({
+            key: c.key,
+            provider: c.provider,
+            label: c.label,
+            kind: c.kind,
+            status: c.status,
+            source: c.source,
+            masked: c.masked,
+            oauth: c.oauth,
+          })),
+          fileExists: payload.fileExists,
+          fileError: payload.fileError ?? null,
+        },
+      });
+      break;
+    }
+
+    case 'credential_test_result': {
+      // #3855: per-key test outcome. Store keyed by credential key so each row
+      // renders its own inline result.
+      const parsed = ServerCredentialTestResultSchema.safeParse(msg);
+      if (!parsed.success) {
+        // eslint-disable-next-line no-console
+        console.warn('credential_test_result: invalid payload from server', parsed.error.issues);
+        break;
+      }
+      const payload = parsed.data;
+      set((state) => ({
+        credentialTestResults: {
+          ...state.credentialTestResults,
+          [payload.key]: {
+            ok: payload.ok,
+            error: payload.error,
+            model: payload.model,
+            latencyMs: payload.latencyMs,
+          },
+        },
+      }));
       break;
     }
 

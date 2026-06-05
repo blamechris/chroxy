@@ -76,6 +76,14 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     refreshByokCredentialsStatus: vi.fn().mockReturnValue(true),
     setByokCredentials: vi.fn().mockReturnValue(true),
     clearByokCredentials: vi.fn().mockReturnValue(true),
+    // #3855: generalized Provider Credentials pane is rendered inside the
+    // SettingsPanel, so its store selectors must resolve in this mock too.
+    credentialsStatus: null,
+    credentialTestResults: {},
+    refreshCredentialsStatus: vi.fn().mockReturnValue(true),
+    setCredential: vi.fn().mockReturnValue(true),
+    deleteCredential: vi.fn().mockReturnValue(true),
+    testCredential: vi.fn().mockReturnValue(true),
     // #4542: per-category notification toggles. `notificationPrefs` mirrors
     // the latest snapshot received over the WS connection (null until the
     // first `notification_prefs` arrives).

@@ -853,6 +853,44 @@ export const ServerByokCredentialsStatusSchema = z.object({
   fileExists: z.boolean().optional(),
 }).passthrough()
 
+// #3855: generalized provider-credential status. One entry per known
+// credential env var. The raw value is NEVER on the wire — only `masked`
+// (a redacted preview) when status === 'set'. `source` adds 'store' (the
+// ~/.chroxy/credentials.json store) and 'oauth' (a detected OAuth credential
+// for the provider) to the BYOK set. Sent only to the requesting client
+// (admin state, no broadcast) plus a no-requestId broadcast after set/delete
+// so additional dashboards stay in sync.
+const ServerCredentialEntrySchema = z.object({
+  key: z.string(),
+  provider: z.string(),
+  label: z.string(),
+  kind: z.enum(['api-key', 'oauth-token']),
+  status: z.enum(['set', 'missing']),
+  source: z.enum(['env', 'store', 'oauth', 'none']),
+  masked: z.string().optional(),
+  oauth: z.boolean(),
+}).passthrough()
+
+export const ServerCredentialsStatusSchema = z.object({
+  type: z.literal('credentials_status'),
+  requestId: z.string().nullable().optional(),
+  credentials: z.array(ServerCredentialEntrySchema),
+  fileExists: z.boolean().optional(),
+  fileError: z.string().nullable().optional(),
+}).passthrough()
+
+// #3855: result of a `test_credential` ping. `ok` true means the provider
+// accepted the credential. Never carries the raw value.
+export const ServerCredentialTestResultSchema = z.object({
+  type: z.literal('credential_test_result'),
+  requestId: z.string().nullable().optional(),
+  key: z.string(),
+  ok: z.boolean(),
+  error: z.string().optional(),
+  model: z.string().optional(),
+  latencyMs: z.number().optional(),
+}).passthrough()
+
 // #3544: cumulative stdin_dropped totals broadcast to clients bound to the
 // session whenever a SidecarProcess pre-dial-cap drop occurs. Operators not
 // tailing the server log (mobile users, dashboard-only operators) see a live
@@ -1197,3 +1235,6 @@ export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGran
 export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>
 // #4141: typed BYOK credentials status payload.
 export type ServerByokCredentialsStatusMessage = z.infer<typeof ServerByokCredentialsStatusSchema>
+// #3855: generalized provider-credential status + test-result payloads.
+export type ServerCredentialsStatusMessage = z.infer<typeof ServerCredentialsStatusSchema>
+export type ServerCredentialTestResultMessage = z.infer<typeof ServerCredentialTestResultSchema>
