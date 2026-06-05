@@ -101,16 +101,19 @@ export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 5 * 60 * 1000
 // pending output file is negligible. Only armed while shells are pending.
 export const BACKGROUND_SHELL_SWEEP_MS = 15 * 1000
 
-// #5177: quiescence window (ms). A pending shell whose output file has not
-// been modified for at least this long is treated as complete and reaped.
-// 30s is conservative — comfortably longer than the inter-line gap of a
-// typical periodic background command (e.g. a 2s-sleep loop) so a command
-// that is merely slow between writes is not reaped while still running. A
-// command that genuinely stalls for >30s with no output reaps as "done";
-// that is acceptable — the agent re-discovers reality on its next
-// BashOutput poll, and an over-eager clear is a far smaller UX harm than
-// the banner sticking forever (the bug this fixes).
-export const BACKGROUND_SHELL_QUIESCE_MS = 30 * 1000
+// #5177: quiescence window (ms). A pending shell whose NON-EMPTY output
+// file has not been modified for at least this long is treated as complete
+// and reaped. 60s is conservative — comfortably longer than the inter-line
+// gap of a typical periodic background command (e.g. a 2s-sleep loop) so a
+// command that is merely slow between writes is not reaped while still
+// running. Combined with the non-empty guard in `_isBackgroundShellComplete`
+// (a silent command that emits no output is NEVER reaped via the file path),
+// the false-positive surface is small: only a command that produced output,
+// then went silent for >60s, then is still running, would be reaped early —
+// and even then the agent re-discovers reality on its next BashOutput poll.
+// An over-eager clear is a far smaller UX harm than the banner sticking
+// forever (the bug this fixes).
+export const BACKGROUND_SHELL_QUIESCE_MS = 60 * 1000
 
 // Default per-provider injection mode (#3200). Subprocess providers without
 // a system-prompt flag (Codex, Gemini) prepend skills to the first user
@@ -912,13 +915,15 @@ export class BaseSession extends EventEmitter {
    * Tests inject `_backgroundShellCompletionCheck` for deterministic control
    * without touching the filesystem or real time. The production default
    * uses the shell's output file mtime: claude tails the command's
-   * stdout/stderr into the file named in the tool_result, so a file that has
-   * not been written to for `_backgroundShellQuiesceMs` means the command
-   * has stopped producing output — the strongest completion signal available
-   * given chroxy never holds the shell's PID (the id is opaque, owned by
-   * claude). A shell with no known output path can't be reaped this way and
-   * stays pending until BashOutput / destroy — the existing #4307 behaviour,
-   * preserved as the fallback.
+   * stdout/stderr into the file named in the tool_result, so a NON-EMPTY
+   * file that has not been written to for `_backgroundShellQuiesceMs` means
+   * the command produced output and then stopped — the strongest completion
+   * signal available given chroxy never holds the shell's PID (the id is
+   * opaque, owned by claude). A shell with no known output path, or whose
+   * output file is still empty (a silent command like `sleep 600`), can't be
+   * reaped this way and stays pending until BashOutput / destroy — the
+   * existing #4307 behaviour, preserved as the conservative fallback so a
+   * long, silent job is never flipped to idle while still running.
    *
    * Defensive: a stat() error (file removed, races) is treated as NOT
    * complete so a transient FS hiccup can't reap a still-running shell. The
@@ -937,6 +942,18 @@ export class BaseSession extends EventEmitter {
     }
     try {
       const st = statSync(entry.outputPath)
+      // #5177 (review): a SILENT command — one that produces no output and
+      // only exits much later (`sleep 600`, a long compute that prints only
+      // at the end) — leaves the output file empty and untouched after
+      // creation. Reaping on mtime alone would clear it ~quiesceMs after
+      // start while it is still running, flipping isRunning to false and
+      // letting SessionTimeoutManager treat the session as idle. Guard with
+      // a non-empty check: an empty output file is NEVER reaped via this
+      // path, so silent shells fall back to the existing BashOutput /
+      // destroy clear (the conservative #4307 behaviour). The sweep only
+      // reaps shells that demonstrably produced output and then went quiet —
+      // the strong signal that the command ran and finished.
+      if (st.size <= 0) return false
       const lastWrite = st.mtimeMs
       return Date.now() - lastWrite >= this._backgroundShellQuiesceMs
     } catch {

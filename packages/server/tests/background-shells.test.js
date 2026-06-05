@@ -337,6 +337,29 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('default completion check does NOT reap a silent shell whose output file is empty (#5177 review)', () => {
+    // A silent command (e.g. `sleep 600`) leaves an empty, quiesced output
+    // file. Reaping on mtime alone would flip isRunning to false while it is
+    // still running; the non-empty guard prevents that.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-empty-'))
+    const outputPath = join(dir, 'shell.output')
+    writeFileSync(outputPath, '') // empty
+    session._backgroundShellQuiesceMs = 5000
+    // Backdate well past the quiescence window.
+    const old = Date.now() / 1000 - 600
+    utimesSync(outputPath, old, old)
+
+    session.trackBackgroundShell({ shellId: 'a', outputPath })
+    const entry = session._pendingBackgroundShells.get('a')
+    assert.equal(
+      session._isBackgroundShellComplete(entry),
+      false,
+      'empty output file is never reaped (silent shell stays pending)',
+    )
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('default completion check treats a shell with no output path as not complete (#4307 fallback)', () => {
     session._backgroundShellQuiesceMs = 5000
     session.trackBackgroundShell({ shellId: 'a', command: 'x' })
