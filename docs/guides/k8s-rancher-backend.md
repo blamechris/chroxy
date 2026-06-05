@@ -15,11 +15,11 @@ adapter.
 
 ## When to pick K8s vs Rancher
 
-| | `K8sBackend` (plain K8s) | `RancherBackend` (optional adapter) |
+| Aspect | `K8sBackend` (plain K8s) | `RancherBackend` (optional adapter) |
 |---|---|---|
 | **Authentication** | In-cluster service account, or kubeconfig | Rancher bearer token, proxied through the Rancher server |
 | **Connectivity** | Direct to the kube API server | Through `<rancher-url>/k8s/clusters/<clusterId>` |
-| **Namespace model** | Plain namespaces (assumed to pre-exist) | Plain namespaces **plus** Rancher Project binding (`ensureProjectNamespace`) |
+| **Namespace model** | Plain namespaces — the backend creates Pods/Secrets in a namespace it assumes already exists (it does not create namespaces) | Adds `ensureProjectNamespace`, which creates a namespace bound to a Rancher Project |
 | **RBAC / quotas** | Whatever you define directly in K8s | Inherits the Rancher **Project**'s RBAC + resource quotas |
 | **Best for** | You run/operate the cluster directly, or use a managed kube control plane (EKS/GKE/AKS) and already manage kubeconfig/RBAC yourself | You self-host on Rancher and want org-level Projects, fleet management, and centralised RBAC without handing every operator raw kube credentials |
 

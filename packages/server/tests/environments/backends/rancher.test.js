@@ -208,6 +208,24 @@ describe('RancherBackend constructor', () => {
     const backend = new RancherBackend({ _coreV1Api: api, namespace: 'team-a', clusterId: 'c-m-1' })
     assert.equal(backend._namespace, 'team-a')
   })
+
+  it('validates clusterId on the injected-client seam when provided (rejects malformed)', () => {
+    assert.throws(
+      () => new RancherBackend({ _coreV1Api: createMockApi(), clusterId: 'bad' }),
+      /cluster-ID format/,
+    )
+  })
+
+  it('validates defaultProjectId on the injected-client seam when provided (rejects malformed)', () => {
+    assert.throws(
+      () => new RancherBackend({ _coreV1Api: createMockApi(), clusterId: 'c-m-1', defaultProjectId: 'bad' }),
+      /project-ID format/,
+    )
+  })
+
+  it('tolerates omitted Rancher identity on the injected-client seam', () => {
+    assert.doesNotThrow(() => new RancherBackend({ _coreV1Api: createMockApi() }))
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -241,12 +259,15 @@ describe('ensureProjectNamespace', () => {
     assert.equal(result.projectId, 'p-default')
   })
 
-  it('is idempotent — a 409 AlreadyExists is treated as success (created:false)', async () => {
+  it('is idempotent — a 409 AlreadyExists is treated as success (created:false) and does NOT claim an unverified binding', async () => {
     const api = createMockApi({ createNamespace: () => { throw makeConflictError() } })
     const backend = new RancherBackend({ _coreV1Api: api, clusterId: 'c-m-abc123' })
 
+    // Even though a projectId was requested, the namespace pre-existed so this
+    // call did not apply the annotation — projectId must come back null so the
+    // caller does not assume a binding we didn't make.
     const result = await backend.ensureProjectNamespace('team-alpha', { projectId: 'p-xyz789' })
-    assert.deepEqual(result, { namespace: 'team-alpha', projectId: 'p-xyz789', created: false })
+    assert.deepEqual(result, { namespace: 'team-alpha', projectId: null, created: false })
   })
 
   it('rethrows non-conflict API errors', async () => {

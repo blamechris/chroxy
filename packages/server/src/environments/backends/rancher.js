@@ -188,10 +188,18 @@ export class RancherBackend extends K8sBackend {
 
     if (_coreV1Api) {
       // Test / pre-built-client seam: skip Rancher kube-client construction and
-      // hand the injected api straight to K8sBackend. We still record the
-      // Rancher identity fields (validated leniently) so ensureProjectNamespace
-      // can form the projectId annotation, but we tolerate their absence here so
-      // unit tests can exercise pod logic without a full Rancher config.
+      // hand the injected api straight to K8sBackend. The Rancher identity
+      // fields are optional here (so unit tests can exercise inherited pod logic
+      // without a full Rancher config), but when present they are validated to
+      // the same format rules as the live path — a malformed clusterId /
+      // defaultProjectId would otherwise be spliced verbatim into the
+      // `field.cattle.io/projectId` annotation.
+      if (clusterId != null && !RANCHER_CLUSTER_ID.test(clusterId)) {
+        throw new Error(`RancherBackend: clusterId must match the Rancher cluster-ID format (c-...), got "${clusterId}"`)
+      }
+      if (defaultProjectId != null && !RANCHER_PROJECT_ID.test(defaultProjectId)) {
+        throw new Error(`RancherBackend: defaultProjectId must match the Rancher project-ID format (p-...), got "${defaultProjectId}"`)
+      }
       super({ ...k8sOpts, _coreV1Api })
       this._rancher = {
         rancherUrl,
@@ -237,6 +245,12 @@ export class RancherBackend extends K8sBackend {
    * is no separate Rancher REST call.
    *
    * Idempotent: a 409 Conflict (namespace already exists) is treated as success.
+   * Because the namespace already existed, we did NOT apply the project
+   * annotation in this call, so the returned `projectId` is `null` even when a
+   * binding was requested — the caller must not assume the pre-existing
+   * namespace carries the requested Rancher Project binding (it may have a
+   * different binding, or none). Verifying/patching the annotation on an
+   * existing namespace is intentionally out of scope here (see #5144).
    *
    * Fallback: if Rancher is not configured with a usable clusterId (e.g. the
    * test/injected-client path) the annotation is omitted and a plain namespace
@@ -246,6 +260,10 @@ export class RancherBackend extends K8sBackend {
    * @param {Object} [opts]
    * @param {string} [opts.projectId] - Rancher project ID (p-...); defaults to defaultProjectId
    * @returns {Promise<{ namespace: string, projectId: string|null, created: boolean }>}
+   *   `projectId` reflects the binding this call actually applied: the requested
+   *   project when the namespace was freshly created with the annotation, or
+   *   `null` when the namespace already existed (binding unverified) or no
+   *   project was requested.
    */
   async ensureProjectNamespace(namespace, opts = {}) {
     const ns = this._validateNamespace(this._resolveNamespace(namespace), 'ensureProjectNamespace')
@@ -279,8 +297,15 @@ export class RancherBackend extends K8sBackend {
       return { namespace: ns, projectId: boundProjectId, created: true }
     } catch (err) {
       if (isAlreadyExists(err)) {
-        log.info(`Namespace ${ns} already exists — treating as success`)
-        return { namespace: ns, projectId: boundProjectId, created: false }
+        // The namespace pre-existed, so this call did not apply the annotation.
+        // Report projectId:null so callers don't assume a binding we didn't make
+        // (the existing namespace may carry a different binding, or none).
+        if (boundProjectId) {
+          log.warn(`Namespace ${ns} already exists — project binding ${boundProjectId} NOT applied (pre-existing namespace; binding unverified)`)
+        } else {
+          log.info(`Namespace ${ns} already exists — treating as success`)
+        }
+        return { namespace: ns, projectId: null, created: false }
       }
       // Do not include err details that could echo the request body / token.
       log.warn(`Failed to create namespace ${ns}: ${err.message}`)
