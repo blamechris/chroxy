@@ -274,6 +274,9 @@ export function App() {
   const sessions = useConnectionStore(s => s.sessions)
   const sessionStates = useConnectionStore(s => s.sessionStates)
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
+  // #5163 (epic #5159) — Control Room activity tree, rendered by the sidebar
+  // panel slot's Control Room view.
+  const activity = useConnectionStore(s => s.activity)
   const viewMode = useConnectionStore(s => s.viewMode)
   const availableModels = useConnectionStore(s => s.availableModels)
   const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
@@ -2189,6 +2192,7 @@ export function App() {
           searchConversations={searchConversations}
           clearSearchResults={clearSearchResults}
           sessions={sessions}
+          activity={activity}
           initialPanelHeight={loadPersistedSidebarPanelHeight() ?? 200}
           initialPanelView={loadPersistedSidebarPanelView()}
           initialPanelCollapsed={loadPersistedSidebarPanelCollapsed()}

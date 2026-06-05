@@ -215,6 +215,17 @@ export type {
   ActivityTreeNode,
 } from './activity-reducer'
 
+// #5163: re-export the wire-level activity types from the protocol through the
+// store-core surface so the dashboard panel + future mobile parity consume the
+// activity entry/kind/status types from the same single import as the reducer
+// and selector (rather than reaching into @chroxy/protocol directly).
+export type {
+  ActivityEntry,
+  ActivityKind,
+  ActivityStatus,
+  ActivityOutputRef,
+} from '@chroxy/protocol'
+
 export {
   MAX_TERMINAL_ENTRIES_PER_SESSION,
   createEmptyActivityState,

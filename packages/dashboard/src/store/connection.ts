@@ -127,6 +127,9 @@ import {
   // narrowing lets the post-detection `as { otherLabel, freeformText }`
   // casts drop out.
   isFreeformAnswer,
+  // #5163 (epic #5159): seed the Control Room activity state empty so the
+  // reducer can apply snapshots/deltas immutably from the first message.
+  createEmptyActivityState,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 import {
@@ -358,6 +361,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
+  // #5163 (epic #5159): Control Room activity tree, fed by the store-core
+  // reducer from activity_snapshot / activity_delta.
+  activity: createEmptyActivityState(),
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -1355,6 +1361,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessions: [],
       activeSessionId: null,
       sessionStates: {},
+      // #5163: drop the Control Room tree on disconnect/forget — a fresh
+      // connection re-seeds it from activity_snapshot on subscribe.
+      activity: createEmptyActivityState(),
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -1381,6 +1390,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessions: [],
       activeSessionId: null,
       sessionStates: {},
+      // #5163: drop the Control Room tree on disconnect/forget — a fresh
+      // connection re-seeds it from activity_snapshot on subscribe.
+      activity: createEmptyActivityState(),
       wsUrl: null,
       apiToken: null,
       serverMode: null,
