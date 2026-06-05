@@ -1029,6 +1029,12 @@
   color: inherit;
   font: inherit;
   text-align: left;
+}
+
+/* Only the <button> variant (rendered when click-to-activate is wired) is
+ * interactive — the static <li> variant must NOT show a pointer cursor or a
+ * hover affordance, or it advertises a click that does nothing. */
+button.sidebar-token-view-session-row {
   cursor: pointer;
 }
 
