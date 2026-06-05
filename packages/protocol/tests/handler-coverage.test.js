@@ -46,6 +46,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
+  'activity_snapshot', // #5161 schema-only — Control Room activity tree wire contract. No handler yet: the server emitter is #5160, the store-core reducer is #5162, and the dashboard panel that consumes it is #5163. Becomes dashboard-handled (move to PLATFORM_SPECIFIC) when #5163 lands; mobile parity is a Phase-2 fast-follow per epic #5159.
+  'activity_delta',    // #5161 schema-only — see activity_snapshot above. Handler lands with the dashboard Control Room panel (#5163).
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
