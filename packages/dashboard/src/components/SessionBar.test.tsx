@@ -1269,5 +1269,83 @@ describe('SessionBar', () => {
       const crTab = screen.getByTestId('control-room-tab')
       expect(crTab.getAttribute('draggable')).not.toBe('true')
     })
+
+    it('does not activate the CR tab when Enter/Space bubbles from its close ×', () => {
+      const onActivate = vi.fn()
+      const onClose = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate, onClose }}
+        />
+      )
+      // A key event originating on the close button must not reach the tab's
+      // activate handler (guarded by target === currentTarget).
+      const closeBtn = screen.getByTestId('control-room-tab-close')
+      fireEvent.keyDown(closeBtn, { key: 'Enter' })
+      fireEvent.keyDown(closeBtn, { key: ' ' })
+      expect(onActivate).not.toHaveBeenCalled()
+    })
+
+    it('clears the active session tab selection while the CR tab is active (single selected tab)', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: true, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      // s1 is the active session, but the CR tab is the focused view — only
+      // the CR tab should report aria-selected, never two tabs at once.
+      const crTab = screen.getByTestId('control-room-tab')
+      const sessionTab = screen.getByTestId('session-tab-s1')
+      expect(crTab).toHaveAttribute('aria-selected', 'true')
+      expect(sessionTab).toHaveAttribute('aria-selected', 'false')
+      expect(sessionTab.className).not.toContain('active')
+      const selected = screen
+        .getAllByRole('tab')
+        .filter(t => t.getAttribute('aria-selected') === 'true')
+      expect(selected).toHaveLength(1)
+    })
+
+    it('restores the active session selection when the CR tab is open but not active', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: false, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      const sessionTab = screen.getByTestId('session-tab-s1')
+      expect(sessionTab).toHaveAttribute('aria-selected', 'true')
+      expect(sessionTab.className).toContain('active')
+    })
+
+    it('fires onSwitch when clicking the underlying-active session while CR is active', () => {
+      const onSwitch = vi.fn()
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={onSwitch}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: true, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      // Clicking the active session while CR is overlaid must return to it.
+      fireEvent.click(screen.getByTestId('session-tab-s1'))
+      expect(onSwitch).toHaveBeenCalledWith('s1')
+    })
   })
 })

@@ -277,6 +277,10 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             tabIndex={0}
             onClick={() => { if (!controlRoom.active) controlRoom.onActivate() }}
             onKeyDown={e => {
+              // Only act on key events that originate on the tab itself, not
+              // ones bubbling up from the close × button — otherwise pressing
+              // Enter/Space to close the tab would also re-activate it.
+              if (e.target !== e.currentTarget) return
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
                 if (!controlRoom.active) controlRoom.onActivate()
@@ -304,18 +308,23 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
           const isDragOver = dragOverId === session.sessionId && draggingId !== null && draggingId !== session.sessionId
           const isLifted = keyboardLiftId === session.sessionId
           const reorderDisabled = !onReorder
+          // #5204 — while the Control Room tab is the focused view, it is the
+          // single selected tab in the tablist. Suppress the active session's
+          // selected state so we never report two aria-selected tabs (and the
+          // dual-active highlight) at once.
+          const isActive = session.isActive && !controlRoom?.active
           return (
           <div
             key={session.sessionId}
             className={
-              `session-tab${session.isActive ? ' active' : ''}` +
+              `session-tab${isActive ? ' active' : ''}` +
               `${isDragging ? ' dragging' : ''}` +
               `${isDragOver ? ' drag-over' : ''}` +
               `${isLifted ? ' lifted' : ''}`
             }
             data-testid={`session-tab-${session.sessionId}`}
             role="tab"
-            aria-selected={session.isActive}
+            aria-selected={isActive}
             // #4951 — aria-grabbed (and aria-dropeffect) were removed in
             // WAI-ARIA 1.1; the lift state is conveyed via the `lifted`
             // CSS class (visual) + the live-region announcement (SR).
@@ -395,7 +404,10 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               setDragOverId(null)
             }}
             onClick={() => {
-              if (!session.isActive) onSwitch(session.sessionId)
+              // Use the CR-aware `isActive`: while the Control Room is the
+              // focused view, even the underlying-active session should fire
+              // onSwitch so clicking it returns from the CR to that session.
+              if (!isActive) onSwitch(session.sessionId)
             }}
             onKeyDown={e => {
               if (renamingId === session.sessionId) return
@@ -466,7 +478,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               }
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
-                if (!session.isActive) onSwitch(session.sessionId)
+                if (!isActive) onSwitch(session.sessionId)
               } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
                 e.preventDefault()
                 const tabs = (e.currentTarget.parentElement as HTMLElement)?.querySelectorAll<HTMLElement>('[role="tab"]')
