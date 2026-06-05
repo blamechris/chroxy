@@ -4554,6 +4554,20 @@ describe('K8sBackend namespace isolation (#3194)', () => {
     assert.notEqual(apiA.calls.create[0].namespace, apiB.calls.create[0].namespace)
   })
 
+  it('case-only differences map to DIFFERENT namespaces (case folding is disambiguated)', async () => {
+    const apiA = createMockApi()
+    const apiB = createMockApi()
+    const bA = new K8sBackend({ _coreV1Api: apiA })
+    const bB = new K8sBackend({ _coreV1Api: apiB })
+
+    // RFC 1123 labels are lowercase-only; without the hash suffix 'alice' and
+    // 'Alice' would collapse onto the same namespace and share Pods.
+    await bA.createEnvironment({ envId: 'e1', image: 'a', userId: 'alice' })
+    await bB.createEnvironment({ envId: 'e2', image: 'a', userId: 'Alice' })
+
+    assert.notEqual(apiA.calls.create[0].namespace, apiB.calls.create[0].namespace)
+  })
+
   it('truncates very long identities to within the 63-char RFC 1123 limit', async () => {
     const api = createMockApi()
     const backend = new K8sBackend({ _coreV1Api: api })

@@ -179,10 +179,11 @@ function sanitizeNamespaceLabel(identity, { maxLength = 50 } = {}) {
   const hash = createHash('sha256').update(identity).digest('hex').slice(0, 8)
 
   // Decide whether disambiguation is needed: the sanitize step lost information
-  // (fragment !== lowered), the fragment is empty (all-symbol identity), or the
-  // raw fragment alone would exceed the budget.
+  // (the result differs from the ORIGINAL identity — this also catches case
+  // folding, so `alice` and `Alice` map to different namespaces), the fragment
+  // is empty (all-symbol identity), or the raw fragment exceeds the budget.
   const needsHash = fragment.length === 0 ||
-    fragment !== lowered ||
+    fragment !== identity ||
     fragment.length > maxLength
 
   if (!needsHash) {
