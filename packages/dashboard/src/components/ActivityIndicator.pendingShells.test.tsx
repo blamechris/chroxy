@@ -148,6 +148,95 @@ describe('ActivityIndicator — pending background shells (#4418)', () => {
     expect(label.textContent).not.toMatch(/Waiting on background work/)
   })
 
+  it('clears the banner when a completion snapshot drops the previously-pending shell (#5178)', () => {
+    // B1 (#5187) reaps a finished background shell server-side and re-emits the
+    // `background_work_changed` snapshot WITHOUT it. The dashboard reconciles
+    // that snapshot via snapshot-replace, so the shell drops out of
+    // `pendingBackgroundShells` and the "Waiting on background work" banner
+    // must disappear. Without B1 the shell stayed pending forever and the
+    // banner stuck — this pins the clear path.
+    const now = Date.now()
+    storeState = {
+      activeSessionId: 'sess-1',
+      serverResultTimeoutMs: 30 * 60 * 1000,
+      sessionStates: {
+        'sess-1': {
+          isIdle: true,
+          lastClientActivityAt: now - 2_000,
+          messages: [],
+          activeTools: [],
+          activeAgents: [],
+          pendingBackgroundShells: [
+            { shellId: 'brk57kt6pm', command: 'npm run build', startedAt: now - 10_000 },
+          ],
+          inactivityWarning: null,
+        },
+      },
+    }
+    const { container, rerender } = render(<ActivityIndicator />)
+    // Banner is up while the shell is pending.
+    expect(screen.getByTestId('activity-indicator-label').textContent).toMatch(
+      /Waiting on background work/,
+    )
+
+    // Server reaps the shell and re-broadcasts an empty snapshot. The store's
+    // snapshot-replace reconciliation leaves `pendingBackgroundShells` empty.
+    ;(storeState.sessionStates as Record<string, { pendingBackgroundShells: unknown[] }>)[
+      'sess-1'
+    ]!.pendingBackgroundShells = []
+    rerender(<ActivityIndicator />)
+
+    // Banner must be gone — no stale entry left behind.
+    expect(screen.queryByTestId('activity-indicator-label')).toBeNull()
+    expect(container.firstChild).toBeNull()
+  })
+
+  it('reconciles a multi-shell snapshot down to the survivors when one completes (#5178)', () => {
+    // Defensive reconciliation: a completion snapshot that still lists OTHER
+    // shells must keep the banner but drop only the finished one. The banner
+    // can only ever reflect shells present in the latest snapshot — no stale
+    // headline survives a shell's completion.
+    const now = Date.now()
+    storeState = {
+      activeSessionId: 'sess-1',
+      serverResultTimeoutMs: 30 * 60 * 1000,
+      sessionStates: {
+        'sess-1': {
+          isIdle: true,
+          lastClientActivityAt: now - 2_000,
+          messages: [],
+          activeTools: [],
+          activeAgents: [],
+          pendingBackgroundShells: [
+            { shellId: 'old01', command: 'sleep 60', startedAt: now - 30_000 },
+            { shellId: 'new02', command: 'npm test', startedAt: now - 5_000 },
+          ],
+          inactivityWarning: null,
+        },
+      },
+    }
+    const { rerender } = render(<ActivityIndicator />)
+    // Newest shell headlines while both are pending.
+    expect(screen.getByTestId('activity-indicator-label').textContent).toMatch(/npm test/)
+
+    // `npm test` finishes; the next snapshot lists only the still-running one.
+    ;(
+      storeState.sessionStates as Record<string, { pendingBackgroundShells: unknown[] }>
+    )['sess-1']!.pendingBackgroundShells = [
+      { shellId: 'old01', command: 'sleep 60', startedAt: now - 30_000 },
+    ]
+    rerender(<ActivityIndicator />)
+
+    // Banner stays up, now headlining the survivor — the completed shell is
+    // gone, not stuck as a stale headline.
+    const label = screen.getByTestId('activity-indicator-label')
+    expect(label.textContent).toMatch(/Waiting on background work/)
+    expect(label.textContent).toMatch(/sleep 60/)
+    expect(label.textContent).not.toMatch(/npm test/)
+    // Single survivor ⇒ no overflow disclosure.
+    expect(screen.queryByTestId('activity-indicator-more-badge')).toBeNull()
+  })
+
   it('renders nothing when idle with no pending background shells (regression)', () => {
     // Pre-#4418 behaviour: idle session renders nothing. Pin this so the new
     // surface only activates when shells are actually pending.
