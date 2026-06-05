@@ -2016,6 +2016,11 @@ export function App() {
 
       {/* Header */}
       <header id="header">
+        {/* #5200: two-row header — row 1 (.header-main) is the 3-column main
+            bar (logo/status | model+permission selects | bell + ⋯); the
+            cost/token cluster moved to row 2 (.header-meta) so the main bar
+            is never crowded and the permission selector isn't pushed out. */}
+        <div className="header-main">
         <div className="header-left">
           <span className="logo">Chroxy</span>
           {/* #4630 — version + status-dot were bare spans with no
@@ -2166,6 +2171,9 @@ export function App() {
             ]
             return <HeaderOverflowMenu items={overflowItems} />
           })()}
+        </div>
+        </div>
+        <div className="header-meta">
           <StatusBar
             cost={sessionCost ?? undefined}
             context={formatContext(contextUsage)}

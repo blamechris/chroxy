@@ -79,15 +79,14 @@
    native select dropdowns), causing Skills to underlap the gear button and
    long model names to underlap the status dot. Grid gives each zone its
    own cell with explicit gap; only the center column flexes. */
+/* #5200: the header is now two stacked rows — .header-main (selectors) on
+   top and .header-meta (cost/token cluster) below — so the main bar is never
+   crowded. #header is the flex-column wrapper; the 3-column grid moved to
+   .header-main. */
 #header {
-  display: grid;
-  /* #5197: the right column is `minmax(0, auto)` (not bare `auto`) so it can
-     shrink below its content's max width when the window is narrow — letting
-     the cost badge truncate in place instead of the whole cluster (token
-     count + usage bar) clipping off the right edge of the window. */
-  grid-template-columns: auto minmax(0, 1fr) minmax(0, auto);
-  align-items: center;
-  gap: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 10px 16px;
   background: var(--bg-header);
   border-bottom: 1px solid var(--border-primary);
@@ -95,6 +94,26 @@
   overflow: visible;
   position: relative;
   z-index: 10;
+}
+
+/* #5200: row 1 — the 3-column main bar (logo/status | model+permission
+   selects | bell + ⋯). With the cost/token cluster gone to row 2, the
+   center column has room for every selector again (the permission select
+   was being pushed past overflow:hidden before). */
+.header-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+/* #5200: row 2 — the cost/token cluster on its own line, right-aligned, with
+   the full header width to itself so it never collides with the selectors. */
+.header-meta {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 0;
 }
 
 .header-left {
@@ -355,12 +374,11 @@
   flex-shrink: 0;
 }
 
-/* #5197: the status bar (provider badge + cost + token meter) is the ONE
-   right-cluster child allowed to shrink, so the long provider/model cost
-   badge can truncate instead of shoving the token count off-screen. The
-   token meter and provider badge inside it stay fixed (rules below); only
-   the cost badge absorbs the squeeze. */
-.header-right .status-bar {
+/* #5200: the status bar (provider badge + cost + token meter) now lives on
+   its own row (.header-meta), right-aligned with the full header width — so
+   it rarely needs to shrink. min-width: 0 + the cost badge's ellipsis keep
+   it graceful if the window is ever narrower than the cluster. */
+.header-meta .status-bar {
   flex-shrink: 1;
   min-width: 0;
   white-space: nowrap;

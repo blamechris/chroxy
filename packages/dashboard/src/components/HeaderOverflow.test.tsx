@@ -16,14 +16,25 @@ import { resolve } from 'path'
 const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
 
 describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
-  it('#header is a 3-column grid (auto | 1fr | minmax(0,auto)) so zones cannot overlap', () => {
+  it('#header is a flex column (two rows: .header-main + .header-meta) (#5200)', () => {
     const block = css.match(/#header\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/display:\s*flex/)
+    expect(block![0]).toMatch(/flex-direction:\s*column/)
+  })
+
+  it('.header-main is the 3-column main bar grid (auto | 1fr | auto) so zones cannot overlap (#5200)', () => {
+    const block = css.match(/\.header-main\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
     expect(block![0]).toMatch(/display:\s*grid/)
-    // #5197: the right column is minmax(0, auto) — it can shrink below its
-    // content's max width so the cost badge truncates rather than the whole
-    // cluster clipping off the right edge of the window.
-    expect(block![0]).toMatch(/grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+minmax\(0,\s*auto\)/)
+    expect(block![0]).toMatch(/grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/)
+  })
+
+  it('.header-meta is the right-aligned second row holding the cost/token cluster (#5200)', () => {
+    const block = css.match(/\.header-meta\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/display:\s*flex/)
+    expect(block![0]).toMatch(/justify-content:\s*flex-end/)
   })
 
   it('#header has overflow: visible (native selects render outside header bounds)', () => {
@@ -64,11 +75,12 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/flex-shrink:\s*0/)
   })
 
-  it('.header-right .status-bar may shrink (#5197) so the cost badge truncates while the token meter stays fixed', () => {
-    // #5197: status-bar is the ONE right-cluster child allowed to shrink
-    // (flex-shrink: 1 + min-width: 0) so the long provider/model cost badge
-    // can ellipsis-truncate instead of pushing the token count off-screen.
-    const block = css.match(/\.header-right \.status-bar\s*\{[^}]*\}/s)
+  it('.header-meta .status-bar may shrink (#5200) so the cost badge truncates while the token meter stays fixed', () => {
+    // #5200: status-bar lives on its own row (.header-meta) now. It can still
+    // shrink (flex-shrink: 1 + min-width: 0) so the long provider/model cost
+    // badge ellipsis-truncates rather than the token count clipping if the
+    // window is ever narrower than the cluster.
+    const block = css.match(/\.header-meta \.status-bar\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/flex-shrink:\s*1/)
     expect(block![0]).toMatch(/min-width:\s*0/)
