@@ -171,6 +171,11 @@ export function startHttpControlSurface({ mcp, port = DEFAULT_PORT, log = (...a)
 
   const httpServer = createServer((req, res) => {
     const chunks = []
+    // Body is read fully into memory: fine for a localhost debug prototype, not
+    // for the real bridge. No size cap by design — the surface is trusted-local.
+    req.on('error', err => {
+      log('request error:', err && err.message ? err.message : err)
+    })
     req.on('data', chunk => chunks.push(chunk))
     req.on('end', async () => {
       const body = Buffer.concat(chunks).toString('utf8')
