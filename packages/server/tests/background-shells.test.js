@@ -14,14 +14,15 @@
  *   - turn-end (`_clearMessageState`) does NOT clear pending shells
  *   - the BashOutput tool clears the matching entry
  */
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { BaseSession } from '../src/base-session.js'
 import {
   parseBackgroundShellId,
+  parseBackgroundShellOutputPath,
   isRunInBackgroundInput,
 } from '../src/background-shells.js'
 import { SessionTimeoutManager } from '../src/session-timeout-manager.js'
@@ -70,6 +71,32 @@ describe('background-shells helpers (#4307)', () => {
         parseBackgroundShellId('Command running in background with ID:    \n\n'),
         null,
       )
+    })
+  })
+
+  describe('parseBackgroundShellOutputPath (#5177)', () => {
+    it('extracts the output file path from the canonical message', () => {
+      const text =
+        'Command running in background with ID: brk57kt6pm. Output is being ' +
+        'written to: /private/tmp/claude-501/x/tasks/brk57kt6pm.output. You ' +
+        'will be notified when it completes.'
+      assert.equal(
+        parseBackgroundShellOutputPath(text),
+        '/private/tmp/claude-501/x/tasks/brk57kt6pm.output',
+      )
+    })
+
+    it('strips a single trailing period when no space precedes the sentence end', () => {
+      const text = 'Output is being written to: /tmp/tasks/abc.output.'
+      assert.equal(parseBackgroundShellOutputPath(text), '/tmp/tasks/abc.output')
+    })
+
+    it('returns null when the message has no output path', () => {
+      assert.equal(parseBackgroundShellOutputPath('Command running in background with ID: x'), null)
+      assert.equal(parseBackgroundShellOutputPath(''), null)
+      assert.equal(parseBackgroundShellOutputPath(null), null)
+      assert.equal(parseBackgroundShellOutputPath(undefined), null)
+      assert.equal(parseBackgroundShellOutputPath(42), null)
     })
   })
 
@@ -224,6 +251,146 @@ describe('BaseSession background-shell tracking (#4307)', () => {
       session._destroyPendingBackgroundShells()
       assert.equal(session._pendingBackgroundShells.size, 0)
     })
+  })
+})
+
+describe('BaseSession background-shell completion sweep (#5177)', () => {
+  let session
+
+  beforeEach(() => {
+    emptySkillsDir = mkdtempSync(join(tmpdir(), 'chroxy-bg-skills-'))
+    session = makeSession()
+    // Tighten the sweep interval so fake timers advance predictably.
+    session._backgroundShellSweepMs = 1000
+  })
+
+  afterEach(() => {
+    mock.timers.reset()
+    session._destroyPendingBackgroundShells()
+    if (emptySkillsDir) rmSync(emptySkillsDir, { recursive: true, force: true })
+    emptySkillsDir = null
+  })
+
+  it('reaps a completed shell on the next sweep tick WITHOUT a BashOutput poll', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    // Deterministic completion check: this shell is "done".
+    session._backgroundShellCompletionCheck = () => true
+
+    const events = []
+    session.on('background_work_changed', (d) => events.push(d))
+
+    session.trackBackgroundShell({ shellId: 'a', command: 'sleep 5', outputPath: '/tmp/a.output' })
+    assert.equal(session.isRunning, true, 'running while pending')
+    assert.equal(events.length, 1, 'track emitted once')
+
+    // Advance one sweep interval — the sweep should reap the shell.
+    mock.timers.tick(1000)
+
+    assert.equal(session._pendingBackgroundShells.size, 0, 'shell reaped')
+    assert.equal(session.isRunning, false, 'no longer running')
+    // The reap must emit the SAME background_work_changed snapshot the
+    // dashboard consumes (empty pending) — this is the #5178 clear signal.
+    assert.equal(events.length, 2, 'reap emitted a second change')
+    assert.equal(events[1].pending.length, 0, 'snapshot shows no pending shells')
+  })
+
+  it('leaves a still-running shell pending across sweep ticks', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    session._backgroundShellCompletionCheck = () => false
+
+    session.trackBackgroundShell({ shellId: 'a', command: 'sleep 600', outputPath: '/tmp/a.output' })
+    mock.timers.tick(1000)
+    mock.timers.tick(1000)
+    assert.equal(session._pendingBackgroundShells.size, 1, 'still pending')
+    assert.equal(session.isRunning, true)
+  })
+
+  it('does not arm a sweep timer until a shell is tracked, and stops it when the map drains', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    assert.equal(session._backgroundShellSweepTimer, null, 'no timer when idle')
+
+    session._backgroundShellCompletionCheck = () => false
+    session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
+    assert.ok(session._backgroundShellSweepTimer, 'timer armed once pending')
+
+    // Clearing the last shell stops the timer.
+    session.clearBackgroundShell('a')
+    assert.equal(session._backgroundShellSweepTimer, null, 'timer stopped when map drains')
+  })
+
+  it('default completion check uses the output file mtime (real fs, no real timers)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-out-'))
+    const outputPath = join(dir, 'shell.output')
+    writeFileSync(outputPath, 'hi\n')
+    session._backgroundShellQuiesceMs = 5000
+
+    // Freshly written → not quiesced → not complete.
+    session.trackBackgroundShell({ shellId: 'a', outputPath })
+    const fresh = session._pendingBackgroundShells.get('a')
+    assert.equal(session._isBackgroundShellComplete(fresh), false, 'fresh write is not complete')
+
+    // Backdate the mtime past the quiescence window → complete.
+    const old = Date.now() / 1000 - 60
+    utimesSync(outputPath, old, old)
+    assert.equal(session._isBackgroundShellComplete(fresh), true, 'quiesced file is complete')
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('default completion check does NOT reap a silent shell whose output file is empty (#5177 review)', () => {
+    // A silent command (e.g. `sleep 600`) leaves an empty, quiesced output
+    // file. Reaping on mtime alone would flip isRunning to false while it is
+    // still running; the non-empty guard prevents that.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-empty-'))
+    const outputPath = join(dir, 'shell.output')
+    writeFileSync(outputPath, '') // empty
+    session._backgroundShellQuiesceMs = 5000
+    // Backdate well past the quiescence window.
+    const old = Date.now() / 1000 - 600
+    utimesSync(outputPath, old, old)
+
+    session.trackBackgroundShell({ shellId: 'a', outputPath })
+    const entry = session._pendingBackgroundShells.get('a')
+    assert.equal(
+      session._isBackgroundShellComplete(entry),
+      false,
+      'empty output file is never reaped (silent shell stays pending)',
+    )
+
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('default completion check treats a shell with no output path as not complete (#4307 fallback)', () => {
+    session._backgroundShellQuiesceMs = 5000
+    session.trackBackgroundShell({ shellId: 'a', command: 'x' })
+    const entry = session._pendingBackgroundShells.get('a')
+    assert.equal(entry.outputPath, null, 'no path captured')
+    assert.equal(session._isBackgroundShellComplete(entry), false, 'cannot reap without a path')
+  })
+
+  it('default completion check treats a stat() error as not complete (defensive)', () => {
+    session._backgroundShellQuiesceMs = 5000
+    session.trackBackgroundShell({ shellId: 'a', outputPath: '/no/such/file/at/all.output' })
+    const entry = session._pendingBackgroundShells.get('a')
+    assert.equal(session._isBackgroundShellComplete(entry), false, 'missing file is not reaped')
+  })
+
+  it('outputPath is NOT leaked onto the wire snapshot', () => {
+    session.trackBackgroundShell({ shellId: 'a', command: 'x', outputPath: '/tmp/a.output' })
+    const snap = session.getPendingBackgroundShells()
+    assert.equal(snap.length, 1)
+    assert.deepEqual(Object.keys(snap[0]).sort(), ['command', 'shellId', 'startedAt'])
+    assert.equal('outputPath' in snap[0], false, 'internal field stripped')
+  })
+
+  it('destroy stops the sweep timer (no leak)', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    session._backgroundShellCompletionCheck = () => false
+    session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
+    assert.ok(session._backgroundShellSweepTimer)
+    session._destroyPendingBackgroundShells()
+    assert.equal(session._backgroundShellSweepTimer, null, 'timer cleared on destroy')
+    assert.equal(session._pendingBackgroundShells.size, 0)
   })
 })
 

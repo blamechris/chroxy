@@ -12,6 +12,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import {
   parseBackgroundShellId,
+  parseBackgroundShellOutputPath,
   isRunInBackgroundInput,
   parseBashOutputShellId,
 } from './background-shells.js'
@@ -1803,7 +1804,10 @@ export class ClaudeTuiSession extends BaseSession {
     if (shellId) {
       const command = this._pendingBackgroundCommands.get(toolUseId) || ''
       this._pendingBackgroundCommands.delete(toolUseId)
-      this.trackBackgroundShell({ shellId, command })
+      // #5177: capture the output file path so the completion sweep can reap
+      // the shell on quiescence without an explicit BashOutput poll.
+      const outputPath = parseBackgroundShellOutputPath(result)
+      this.trackBackgroundShell({ shellId, command, outputPath })
     }
   }
 

@@ -8,6 +8,7 @@
  */
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
+import { statSync } from 'fs'
 import { resolveModelId } from './models.js'
 import {
   loadActiveSkillsLayered,
@@ -91,6 +92,28 @@ export const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000
 // via config.streamStallTimeoutMs or CHROXY_STREAM_STALL_TIMEOUT_MS, or set
 // to 0 to disable.
 export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 5 * 60 * 1000
+
+// #5177: how often the background-shell sweep runs (ms). A completed
+// background shell that the agent never polls via `BashOutput` is reaped on
+// the next tick after its output file quiesces. 15s is a tradeoff: snappy
+// enough that the dashboard banner clears within a sensible window of the
+// command actually finishing, slow enough that the per-tick stat() of each
+// pending output file is negligible. Only armed while shells are pending.
+export const BACKGROUND_SHELL_SWEEP_MS = 15 * 1000
+
+// #5177: quiescence window (ms). A pending shell whose NON-EMPTY output
+// file has not been modified for at least this long is treated as complete
+// and reaped. 60s is conservative — comfortably longer than the inter-line
+// gap of a typical periodic background command (e.g. a 2s-sleep loop) so a
+// command that is merely slow between writes is not reaped while still
+// running. Combined with the non-empty guard in `_isBackgroundShellComplete`
+// (a silent command that emits no output is NEVER reaped via the file path),
+// the false-positive surface is small: only a command that produced output,
+// then went silent for >60s, then is still running, would be reaped early —
+// and even then the agent re-discovers reality on its next BashOutput poll.
+// An over-eager clear is a far smaller UX harm than the banner sticking
+// forever (the bug this fixes).
+export const BACKGROUND_SHELL_QUIESCE_MS = 60 * 1000
 
 // Default per-provider injection mode (#3200). Subprocess providers without
 // a system-prompt flag (Codex, Gemini) prepend skills to the first user
@@ -288,6 +311,29 @@ export class BaseSession extends EventEmitter {
     // also reconcile with the (unknown) post-restart claude side —
     // blindly restoring a stale Map will lock the indicator on forever.
     this._pendingBackgroundShells = new Map()
+    // #5177: periodic sweep that reaps COMPLETED background shells without
+    // waiting for the agent to call `BashOutput`. Before #5177 a shell that
+    // finished (e.g. `for i in $(seq 1 30); …`, exit 0) stayed pending
+    // forever — `isRunning` never returned to false and the dashboard's
+    // "Waiting on background work" banner stuck, because the only clear
+    // signal was an explicit BashOutput poll that never comes after the
+    // turn ends. The sweep observes completion via the output file claude
+    // names in the tool_result (`Output is being written to: <path>`): a
+    // finished command stops appending, so a quiesced mtime reaps it. The
+    // timer is armed only while the pending map is non-empty (lazy) and
+    // stopped when it drains or the session is destroyed (no leak / no idle
+    // wakeups). Interval + completion check are injectable for tests.
+    this._backgroundShellSweepTimer = null
+    this._backgroundShellSweepMs = BACKGROUND_SHELL_SWEEP_MS
+    // Quiescence window: a shell whose output file has not been written to
+    // for this long is treated as complete. Conservative so a command that
+    // pauses output mid-run is not reaped prematurely; the agent's own
+    // BashOutput poll still clears faster when it happens.
+    this._backgroundShellQuiesceMs = BACKGROUND_SHELL_QUIESCE_MS
+    // Injectable completion check — `(entry) => boolean`. Default reads the
+    // output file's mtime; tests override this to drive deterministic
+    // completion without touching the filesystem or real timers.
+    this._backgroundShellCompletionCheck = null
     // #4307: ephemeral map of recent `Bash` tool_uses dispatched with
     // `run_in_background: true`, keyed by toolUseId. Used to recover the
     // command string when the matching tool_result lands carrying the
@@ -653,7 +699,11 @@ export class BaseSession extends EventEmitter {
    * objects so the caller can stringify directly onto a wire payload.
    */
   getPendingBackgroundShells() {
-    return Array.from(this._pendingBackgroundShells.values())
+    // #5177: project to the stable wire shape — `outputPath` is an internal
+    // sweep detail and must not leak onto the snapshot the dashboard caches.
+    return Array.from(this._pendingBackgroundShells.values()).map(
+      ({ shellId, startedAt, command }) => ({ shellId, startedAt, command }),
+    )
   }
 
   /**
@@ -667,17 +717,25 @@ export class BaseSession extends EventEmitter {
    * after a change. `SessionManager` proxies this transient event onto
    * the WS wire (see `customEvents`-style integration).
    *
-   * @param {{ shellId: string, command?: string }} opts
+   * #5177: `outputPath` (when known — parsed from the canonical
+   * tool_result) is stashed so the completion sweep can observe the shell
+   * finishing via the output file's mtime. It is internal-only and is NOT
+   * surfaced on the wire snapshot (see getPendingBackgroundShells).
+   *
+   * @param {{ shellId: string, command?: string, outputPath?: string }} opts
    * @returns {boolean} true if a new entry was added
    */
-  trackBackgroundShell({ shellId, command } = {}) {
+  trackBackgroundShell({ shellId, command, outputPath } = {}) {
     if (typeof shellId !== 'string' || shellId.length === 0) return false
     if (this._pendingBackgroundShells.has(shellId)) return false
     this._pendingBackgroundShells.set(shellId, {
       shellId,
       startedAt: Date.now(),
       command: typeof command === 'string' ? command : '',
+      outputPath: typeof outputPath === 'string' && outputPath.length > 0 ? outputPath : null,
     })
+    // #5177: start the reaping sweep now that there is work to watch.
+    this._ensureBackgroundShellSweep()
     this._emitBackgroundWorkChanged()
     return true
   }
@@ -697,6 +755,10 @@ export class BaseSession extends EventEmitter {
   clearBackgroundShell(shellId) {
     if (typeof shellId !== 'string' || shellId.length === 0) return false
     if (!this._pendingBackgroundShells.delete(shellId)) return false
+    // #5177: stop the sweep once the last shell drains so an idle session
+    // has no recurring timer (no wakeups, no leak). Re-armed by the next
+    // trackBackgroundShell.
+    if (this._pendingBackgroundShells.size === 0) this._stopBackgroundShellSweep()
     this._emitBackgroundWorkChanged()
     return true
   }
@@ -746,6 +808,11 @@ export class BaseSession extends EventEmitter {
     // shape with the right argument count.
     if (eventName === undefined) {
       this._activity.clear()
+      // #5177: stop the background-shell sweep on full teardown too. Most
+      // providers (cli/jsonl/gemini/codex) destroy via removeAllListeners()
+      // and never call _destroyPendingBackgroundShells, so this is the
+      // chokepoint that guarantees no provider leaks the recurring timer.
+      this._stopBackgroundShellSweep()
       return super.removeAllListeners()
     }
     return super.removeAllListeners(eventName)
@@ -787,6 +854,114 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #5177: arm the periodic reaping sweep if it is not already running and
+   * there is pending work to watch. Idempotent — a second call while the
+   * timer is live is a no-op, so every `trackBackgroundShell` can call it
+   * unconditionally. The interval is `unref()`'d so a lone pending shell
+   * can never keep the process alive on its own (mirrors how chroxy treats
+   * its other background timers — the shell is owned by claude, not us).
+   *
+   * @private
+   */
+  _ensureBackgroundShellSweep() {
+    if (this._backgroundShellSweepTimer) return
+    if (this._pendingBackgroundShells.size === 0) return
+    if (!(this._backgroundShellSweepMs > 0)) return
+    this._backgroundShellSweepTimer = setInterval(
+      () => this._sweepCompletedBackgroundShells(),
+      this._backgroundShellSweepMs,
+    )
+    // unref so the sweep never blocks process exit on its own.
+    if (typeof this._backgroundShellSweepTimer.unref === 'function') {
+      this._backgroundShellSweepTimer.unref()
+    }
+  }
+
+  /**
+   * #5177: stop the reaping sweep. Idempotent.
+   * @private
+   */
+  _stopBackgroundShellSweep() {
+    if (!this._backgroundShellSweepTimer) return
+    clearInterval(this._backgroundShellSweepTimer)
+    this._backgroundShellSweepTimer = null
+  }
+
+  /**
+   * #5177: one sweep tick — reap every pending shell that has completed.
+   * Completion is decided by `_isBackgroundShellComplete`. Reaping a shell
+   * goes through `clearBackgroundShell`, so it emits the SAME
+   * `background_work_changed` snapshot the BashOutput / destroy paths emit —
+   * the dashboard's "Waiting on background work" indicator consumes that
+   * snapshot and clears with no new wire contract. Iterating over a copied
+   * key list keeps the mutation (clearBackgroundShell deletes from the map)
+   * safe.
+   *
+   * @private
+   */
+  _sweepCompletedBackgroundShells() {
+    for (const shellId of Array.from(this._pendingBackgroundShells.keys())) {
+      const entry = this._pendingBackgroundShells.get(shellId)
+      if (!entry) continue
+      if (this._isBackgroundShellComplete(entry)) {
+        this.clearBackgroundShell(shellId)
+      }
+    }
+  }
+
+  /**
+   * #5177: decide whether a pending background shell has completed.
+   *
+   * Tests inject `_backgroundShellCompletionCheck` for deterministic control
+   * without touching the filesystem or real time. The production default
+   * uses the shell's output file mtime: claude tails the command's
+   * stdout/stderr into the file named in the tool_result, so a NON-EMPTY
+   * file that has not been written to for `_backgroundShellQuiesceMs` means
+   * the command produced output and then stopped — the strongest completion
+   * signal available given chroxy never holds the shell's PID (the id is
+   * opaque, owned by claude). A shell with no known output path, or whose
+   * output file is still empty (a silent command like `sleep 600`), can't be
+   * reaped this way and stays pending until BashOutput / destroy — the
+   * existing #4307 behaviour, preserved as the conservative fallback so a
+   * long, silent job is never flipped to idle while still running.
+   *
+   * Defensive: a stat() error (file removed, races) is treated as NOT
+   * complete so a transient FS hiccup can't reap a still-running shell. The
+   * banner sticking briefly is recoverable; a false clear is worse.
+   *
+   * @param {{ shellId: string, outputPath?: string|null, startedAt: number }} entry
+   * @returns {boolean}
+   * @private
+   */
+  _isBackgroundShellComplete(entry) {
+    if (typeof this._backgroundShellCompletionCheck === 'function') {
+      return this._backgroundShellCompletionCheck(entry) === true
+    }
+    if (!entry || typeof entry.outputPath !== 'string' || entry.outputPath.length === 0) {
+      return false
+    }
+    try {
+      const st = statSync(entry.outputPath)
+      // #5177 (review): a SILENT command — one that produces no output and
+      // only exits much later (`sleep 600`, a long compute that prints only
+      // at the end) — leaves the output file empty and untouched after
+      // creation. Reaping on mtime alone would clear it ~quiesceMs after
+      // start while it is still running, flipping isRunning to false and
+      // letting SessionTimeoutManager treat the session as idle. Guard with
+      // a non-empty check: an empty output file is NEVER reaped via this
+      // path, so silent shells fall back to the existing BashOutput /
+      // destroy clear (the conservative #4307 behaviour). The sweep only
+      // reaps shells that demonstrably produced output and then went quiet —
+      // the strong signal that the command ran and finished.
+      if (st.size <= 0) return false
+      const lastWrite = st.mtimeMs
+      return Date.now() - lastWrite >= this._backgroundShellQuiesceMs
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * #4307: clear the pending map on session destroy. Pulled into a
    * helper so subclasses can call it from their own `destroy()` after
    * the existing teardown — keeping the map alive past destroy would
@@ -795,6 +970,9 @@ export class BaseSession extends EventEmitter {
    * @private
    */
   _destroyPendingBackgroundShells() {
+    // #5177: stop the reaping sweep before clearing the map so no tick can
+    // fire against a half-torn-down session.
+    this._stopBackgroundShellSweep()
     this._pendingBackgroundShells.clear()
     this._pendingBackgroundCommands.clear()
     // #5160: tear down the activity registry alongside the other transient
