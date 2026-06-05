@@ -13,6 +13,10 @@
 // puts it on the public surface but doesn't bring it into this file's
 // type-name scope).
 import type { PermissionMode } from '@chroxy/store-core'
+// #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
+// holds the latest `host_status_snapshot` so the Control Room section can render
+// the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
+import type { ServerHostStatusSnapshotMessage } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -536,6 +540,21 @@ export interface ConnectionState {
    */
   activity: import('@chroxy/store-core').ActivityState;
 
+  /**
+   * #5175 (epic #5170) — Host/Repo Status Control Room: the latest
+   * `host_status_snapshot` the server sent in reply to a `host_status_request`.
+   * `null` until the first snapshot lands (the Control Room section renders an
+   * empty/loading state). Replaced wholesale on each snapshot — the survey is a
+   * full picture, not a delta stream.
+   */
+  hostStatus: ServerHostStatusSnapshotMessage | null;
+  /**
+   * #5175 — true between dispatching a `host_status_request` and the matching
+   * `host_status_snapshot` arriving, so the Refresh button can show a spinner /
+   * disabled state. Cleared when a snapshot lands.
+   */
+  hostStatusLoading: boolean;
+
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
   streamingMessageId: string | null;
@@ -685,7 +704,7 @@ export interface ConnectionState {
   pairingRefreshedCount: number;
 
   // View mode
-  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool';
+  viewMode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool' | 'control-room';
 
   // Input settings
   inputSettings: InputSettings;
@@ -704,7 +723,7 @@ export interface ConnectionState {
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
-  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool') => void;
+  setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool' | 'control-room') => void;
   addMessage: (message: ChatMessage) => void;
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
   appendTerminalData: (data: string) => void;
@@ -961,6 +980,14 @@ export interface ConnectionState {
   setCredential: (key: string, value: string) => boolean;
   deleteCredential: (key: string) => boolean;
   testCredential: (key: string) => boolean;
+
+  // #5175 (epic #5170): request a Host/Repo Status survey. Dispatches a
+  // `host_status_request`; the server replies with a single
+  // `host_status_snapshot` handled into `hostStatus`. Returns whether the
+  // message went on the wire (false = socket closed; the Control Room Refresh
+  // button surfaces a "not connected" state). Sets `hostStatusLoading` while in
+  // flight so the button can show a spinner.
+  requestHostStatus: () => boolean;
 
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the
