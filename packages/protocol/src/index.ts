@@ -58,5 +58,22 @@ export type {
   ServerActivityDeltaMessage,
 } from './schemas/server.ts'
 
+// #5171: pin the Host/Repo Status Control Room contract (#5170 epic) at the
+// package entry point so sibling issues import `RepoStatus` /
+// `ServerHostStatusSnapshotMessage` etc. as a stable public contract — the named
+// re-export makes `tsc --build` fail loudly if any alias is removed from
+// `./schemas/server.ts` (same rationale as the #4192 / #5161 lines above).
+export type {
+  RepoVerdict,
+  RepoTree,
+  RepoStatus,
+  HostStatusSummary,
+  ServerHostStatusSnapshotMessage,
+} from './schemas/server.ts'
+
+// #5171: the client→server request type is pinned at the entry point too so
+// consumers can import the alias without reaching into `./schemas/client.ts`.
+export type { HostStatusRequestMessage } from './schemas/client.ts'
+
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'

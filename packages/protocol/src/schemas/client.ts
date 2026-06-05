@@ -773,6 +773,17 @@ export const EvaluateDraftSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #5171: Control Room v2 — request a Host/Repo Status survey. The server runs
+// the survey across `config.repos ∪ auto-discovered repos under the configured
+// root` and replies with a single `host_status_snapshot` (see server.ts). This
+// is a pull (the Refresh button) — the snapshot is not pushed on a timer. The
+// optional `requestId` lets the dashboard correlate a particular Refresh click
+// to the snapshot it produced (same pattern as `evaluate_draft` above).
+export const HostStatusRequestSchema = z.object({
+  type: z.literal('host_status_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
@@ -859,6 +870,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   DestroyEnvironmentSchema,
   GetEnvironmentSchema,
   EvaluateDraftSchema,
+  HostStatusRequestSchema,
 ])
 
 // -- Inferred TypeScript types --
@@ -872,5 +884,6 @@ export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>
 export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>
+export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>

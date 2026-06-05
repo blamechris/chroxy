@@ -665,6 +665,16 @@ export const EvaluateDraftSchema = z.object({
     // specific Evaluate click that triggered it.
     requestId: z.string().max(128).optional(),
 });
+// #5171: Control Room v2 — request a Host/Repo Status survey. The server runs
+// the survey across `config.repos ∪ auto-discovered repos under the configured
+// root` and replies with a single `host_status_snapshot` (see server.ts). This
+// is a pull (the Refresh button) — the snapshot is not pushed on a timer. The
+// optional `requestId` lets the dashboard correlate a particular Refresh click
+// to the snapshot it produced (same pattern as `evaluate_draft` above).
+export const HostStatusRequestSchema = z.object({
+    type: z.literal('host_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // -- Encrypted envelope --
 export const EncryptedEnvelopeSchema = z.object({
     type: z.literal('encrypted'),
@@ -749,4 +759,5 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     DestroyEnvironmentSchema,
     GetEnvironmentSchema,
     EvaluateDraftSchema,
+    HostStatusRequestSchema,
 ]);

@@ -634,6 +634,144 @@ export const ServerActivityDeltaSchema = z.object({
   }
 })
 
+// ───────────────────────────────────────────────────────────────────────────
+// Host/Repo Status Control Room (#5170 epic, #5171 protocol contract)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Wire contract for the Host/Repo Status survey: a one-shot, pull-driven picture
+// of every repo the host knows about — `config.repos` unioned with repos
+// auto-discovered under a configurable root (default `~/Projects`). Each repo is
+// classified into a `verdict` (live / investigate / abandoned / recent /
+// onboarded) so the Control Room can colour-code the table and surface "needs
+// attention" repos without the client re-deriving the heuristic.
+//
+// This file defines ONLY the schemas/types (issue #5171). The server emitter,
+// store-core reducer, and dashboard panel consume these in sibling issues of the
+// #5170 epic.
+//
+// Flow: the client sends `host_status_request` (see client.ts) — typically the
+// Refresh button — and the server replies with exactly one
+// `host_status_snapshot`. There is no delta stream (unlike the activity tree):
+// the survey is cheap-enough-to-resend and the table is small, so a full
+// snapshot per refresh keeps both sides trivial.
+//
+// Forward/back compat: all schemas strip unknown fields (Zod default) so an
+// older client parsing a newer server's payload silently ignores fields it
+// doesn't recognise, and a client predating these message types ignores the
+// unknown `type` at the dispatch layer.
+
+/**
+ * Verdict for a repo — the survey's classification of "what is this repo's
+ * current state". Drives the colour-coded tag in the Control Room table:
+ *   - `'live'`        — actively worked (a chroxy session is/was recently running).
+ *   - `'investigate'` — ambiguous state worth a human look (e.g. dirty tree on a
+ *                       repo with no recent activity).
+ *   - `'abandoned'`   — likely abandoned (no recent activity, nothing in flight).
+ *   - `'recent'`      — touched recently but not classified as live.
+ *   - `'onboarded'`   — set up / onboarded (has the expected chroxy scaffolding)
+ *                       but not currently active.
+ *
+ * Declared as a named enum so downstream consumers can switch exhaustively.
+ */
+export const RepoVerdictSchema = z.enum([
+  'live',
+  'investigate',
+  'abandoned',
+  'recent',
+  'onboarded',
+])
+
+/**
+ * Working-tree cleanliness summary for a repo:
+ *   - `state`     — `'clean'` (nothing to commit) or `'dirty'` (anything staged,
+ *                   modified, or untracked).
+ *   - `untracked` — count of untracked files.
+ *   - `modified`  — count of tracked-but-modified (unstaged) files.
+ *   - `staged`    — count of staged (index) changes.
+ *
+ * Counts are non-negative integers. `state` is carried explicitly (rather than
+ * derived from the counts) so the server's notion of clean/dirty is the
+ * authority — e.g. a repo may be "dirty" for a reason the three counts don't
+ * capture, and the consumer should not re-derive it.
+ */
+export const RepoTreeSchema = z.object({
+  state: z.enum(['clean', 'dirty']),
+  untracked: z.number().int().nonnegative().finite(),
+  modified: z.number().int().nonnegative().finite(),
+  staged: z.number().int().nonnegative().finite(),
+})
+
+/**
+ * One row in the Host/Repo Status table.
+ *
+ * Fields:
+ *   - `name`        — display name for the repo (typically the directory name).
+ *   - `path`        — absolute path on the host.
+ *   - `branch`      — current branch (or detached-HEAD description).
+ *   - `verdict`     — see `RepoVerdictSchema`.
+ *   - `live`        — true while a chroxy session is actively running in this
+ *                     repo. Distinct from `verdict === 'live'`: `verdict` is the
+ *                     survey's classification (may persist after the session
+ *                     ends), `live` is the instantaneous "session running now"
+ *                     state that drives the green dot.
+ *   - `tree`        — see `RepoTreeSchema`.
+ *   - `worktrees`   — count of git worktrees attached to this repo.
+ *   - `openPRs`     — number of open PRs, or `null` when unknown (e.g. no GitHub
+ *                     remote, or the lookup was skipped/failed). `null` ≠ 0.
+ *   - `attribution` — whether commits carry the expected author attribution, or
+ *                     `null` when not evaluated. `null` ≠ false.
+ *   - `onboarding`  — human-readable onboarding state (free-form so the survey
+ *                     can describe partial/odd setups without a wire change).
+ *   - `lastTouched` — ISO-8601 timestamp of the most recent activity used to
+ *                     classify the verdict.
+ *   - `note?`       — optional annotation rendered as the `↳` sub-row under the
+ *                     repo (e.g. "dirty tree, last touched 3 weeks ago").
+ */
+export const RepoStatusSchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  branch: z.string(),
+  verdict: RepoVerdictSchema,
+  live: z.boolean(),
+  tree: RepoTreeSchema,
+  worktrees: z.number().int().nonnegative().finite(),
+  openPRs: z.number().int().nonnegative().finite().nullable(),
+  attribution: z.boolean().nullable(),
+  onboarding: z.string(),
+  lastTouched: z.string().datetime(),
+  note: z.string().optional(),
+})
+
+/**
+ * Aggregate counts across the surveyed repos, one per verdict bucket. Carried
+ * alongside `repos` so the Control Room's summary chips don't have to re-tally
+ * the array (and stay consistent with the server's own count even if a future
+ * server truncates the `repos` list). All non-negative integers.
+ */
+export const HostStatusSummarySchema = z.object({
+  live: z.number().int().nonnegative().finite(),
+  onboarded: z.number().int().nonnegative().finite(),
+  abandoned: z.number().int().nonnegative().finite(),
+  investigate: z.number().int().nonnegative().finite(),
+  recent: z.number().int().nonnegative().finite(),
+})
+
+/**
+ * #5171 — full Host/Repo Status snapshot. Emitted in reply to a
+ * `host_status_request` (see client.ts). Carries the survey root, the aggregate
+ * `summary`, and the per-repo `repos` rows. `generatedAt` is the ISO-8601 time
+ * the survey ran so the Control Room can render "generated Nm ago" and detect a
+ * stale snapshot. An empty `repos` array is the valid "no repos found under the
+ * root" state — never omitted.
+ */
+export const ServerHostStatusSnapshotSchema = z.object({
+  type: z.literal('host_status_snapshot'),
+  generatedAt: z.string().datetime(),
+  root: z.string(),
+  summary: HostStatusSummarySchema,
+  repos: z.array(RepoStatusSchema),
+})
+
 export const ServerClientFocusChangedSchema = z.object({
   type: z.literal('client_focus_changed'),
   clientId: z.string(),
@@ -1479,3 +1617,10 @@ export type ActivityOutputRef = z.infer<typeof ActivityOutputRefSchema>
 export type ActivityEntry = z.infer<typeof ActivityEntrySchema>
 export type ServerActivitySnapshotMessage = z.infer<typeof ServerActivitySnapshotSchema>
 export type ServerActivityDeltaMessage = z.infer<typeof ServerActivityDeltaSchema>
+// #5171: Host/Repo Status Control Room wire contract (#5170 epic). Consumed by
+// the server emitter, store-core reducer, and dashboard panel in sibling issues.
+export type RepoVerdict = z.infer<typeof RepoVerdictSchema>
+export type RepoTree = z.infer<typeof RepoTreeSchema>
+export type RepoStatus = z.infer<typeof RepoStatusSchema>
+export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>
+export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>
