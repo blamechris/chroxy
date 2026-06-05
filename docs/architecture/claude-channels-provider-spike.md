@@ -286,4 +286,3 @@ Conditions on the GO:
 - Sibling provider — `packages/server/src/claude-tui-session.js`
 - Provider registry — `packages/server/src/providers.js`
 - Original PTY/TUI workaround — #3902
-</content>
