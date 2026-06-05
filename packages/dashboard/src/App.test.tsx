@@ -2139,6 +2139,85 @@ describe('App', () => {
     })
   })
 
+  // #5182 (D1) — the top-bar status dot must track the CONNECTED state
+  // (the app's WS/tunnel connection), not a daemon "running" state. It is
+  // driven by `connectionPhase`: green `.connected` only when
+  // connectionPhase === 'connected', and a non-connected class otherwise.
+  // The separate "Running" indicator lives on the sidebar/explorer header
+  // (#5192) and is deliberately not wired into this dot.
+  describe('top status dot reflects Connected state (#5182)', () => {
+    const oneSession = [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }]
+
+    it('is .connected (green) when connectionPhase is connected', () => {
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1' }
+      const { container } = render(<App />)
+      const dot = container.querySelector('#header .status-dot')
+      expect(dot, 'header status-dot must exist').toBeTruthy()
+      expect(dot!.classList.contains('connected'), 'dot must be .connected when connected').toBe(true)
+      expect(dot!.getAttribute('aria-label')).toMatch(/connected/i)
+    })
+
+    it('is NOT .connected when disconnected', () => {
+      stateOverrides = { connectionPhase: 'disconnected', sessions: [], activeSessionId: null }
+      const { container } = render(<App />)
+      const dot = container.querySelector('#header .status-dot')
+      expect(dot, 'header status-dot must exist').toBeTruthy()
+      expect(dot!.classList.contains('connected'), 'dot must NOT be .connected when disconnected').toBe(false)
+      expect(dot!.classList.contains('disconnected')).toBe(true)
+    })
+
+    it('shows the connecting state (not connected) while reconnecting', () => {
+      stateOverrides = { connectionPhase: 'reconnecting', sessions: oneSession, activeSessionId: 's1' }
+      const { container } = render(<App />)
+      const dot = container.querySelector('#header .status-dot')
+      expect(dot!.classList.contains('connected')).toBe(false)
+      expect(dot!.classList.contains('reconnecting')).toBe(true)
+    })
+  })
+
+  // #5180 (C2) — every control in the top bar must be present (and thus
+  // not occluded into nonexistence) when connected: the model dropdown,
+  // the permission (Approve) select, the notification bell, the ⋯
+  // overflow trigger, the cost badge, and the token/status cluster. This
+  // is the render-level guard that pairs with the CSS layout fix (the
+  // right cluster is content-pinned and its children never shrink to
+  // overlap one another).
+  describe('top-bar controls all render without occlusion (#5180)', () => {
+    const connectedModelState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: 'sonnet', permissionMode: 'approve', isBusy: false, createdAt: Date.now(), conversationId: null }],
+      activeSessionId: 's1',
+      availableModels: [
+        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200000 },
+        { id: 'opus', label: 'Opus 4.7', fullId: 'claude-opus-4-7', contextWindow: 200000 },
+      ],
+      availablePermissionModes: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'auto', label: 'Auto Approve' },
+      ],
+    }
+
+    it('renders the model dropdown, permission select, bell, overflow, and cost slot together', () => {
+      stateOverrides = connectedModelState
+      const { container } = render(<App />)
+      const header = container.querySelector('#header')
+      expect(header, '#header must render').toBeTruthy()
+      // Model dropdown (header-center)
+      expect(within(header as HTMLElement).getByTestId('chat-settings-trigger')).toBeInTheDocument()
+      // Permission-mode (Approve) select
+      expect(header!.querySelector('select[data-kind="permission"]'), 'permission select must render').toBeTruthy()
+      // Notification bell trigger
+      expect(within(header as HTMLElement).getByTestId('notifications-widget-trigger')).toBeInTheDocument()
+      // Overflow (⋯) trigger
+      expect(within(header as HTMLElement).getByTestId('header-overflow-trigger')).toBeInTheDocument()
+      // Cost slot (legacy .status-cost or configurable badge — at least one)
+      const costSlot = header!.querySelector('.status-cost, [data-testid="sidebar-cost-badge"]')
+      expect(costSlot, 'cost slot must render').toBeTruthy()
+      // Status bar cluster (tokens live here)
+      expect(within(header as HTMLElement).getByTestId('status-bar')).toBeInTheDocument()
+    })
+  })
+
   // #4695 / #5062 — discoverable chrome-level "New Session" entry point.
   //
   // The per-project sidebar button (`sidebar-new-session-<path>`) and the

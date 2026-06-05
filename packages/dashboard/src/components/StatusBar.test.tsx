@@ -305,6 +305,59 @@ describe('StatusBar', () => {
       expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
     })
 
+    // #5179 (C1): the fill bar sits BENEATH the `used / total tokens`
+    // label, not inline to its left. We assert both the stacked layout
+    // hook (`status-context-meter--stacked`) AND the DOM order (label
+    // before bar) so the visual stacking can't silently regress.
+    describe('#5179 — fill bar stacked beneath the token label', () => {
+      it('applies the stacked layout class to the meter', () => {
+        render(
+          <StatusBar
+            contextPercent={30}
+            inputTokens={60000}
+            outputTokens={0}
+            contextWindow={200_000}
+          />,
+        )
+        const meter = screen.getByTestId('status-context-meter')
+        expect(meter.className).toContain('status-context-meter--stacked')
+      })
+
+      it('renders the label BEFORE the bar in DOM order (label on top, bar below)', () => {
+        render(
+          <StatusBar
+            contextPercent={30}
+            inputTokens={60000}
+            outputTokens={0}
+            contextWindow={200_000}
+          />,
+        )
+        const meter = screen.getByTestId('status-context-meter')
+        const children = Array.from(meter.children)
+        const labelIdx = children.findIndex(c =>
+          c.classList.contains('status-context-label'))
+        const barIdx = children.findIndex(c =>
+          c.classList.contains('status-context-bar'))
+        expect(labelIdx).toBeGreaterThanOrEqual(0)
+        expect(barIdx).toBeGreaterThanOrEqual(0)
+        // Label must come first so it stacks on top of the bar.
+        expect(labelIdx).toBeLessThan(barIdx)
+      })
+
+      it('keeps the progressbar a11y semantics intact in the stacked layout', () => {
+        render(
+          <StatusBar
+            contextPercent={45}
+            inputTokens={90000}
+            outputTokens={0}
+            contextWindow={200_000}
+          />,
+        )
+        const bar = screen.getByRole('progressbar', { name: /context window usage/i })
+        expect(bar.getAttribute('aria-valuenow')).toBe('45')
+      })
+    })
+
     it('inherits the contextTooltip on the meter (same in/out breakdown as the text chip)', () => {
       render(
         <StatusBar

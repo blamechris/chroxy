@@ -145,12 +145,27 @@ export function StatusBar({
         </span>
       )}
       {showMeter ? (
+        // #5179: stack the fill bar BENEATH the `used / total tokens`
+        // label rather than inline to its left. The label reads first
+        // (it's the at-a-glance number); the bar is a secondary, visual
+        // reinforcement that aligns to the label's left edge and spans
+        // the label width. `status-context-meter--stacked` flips the
+        // flex direction to column so the two children stack.
         <span
-          className="status-context-meter"
+          className="status-context-meter status-context-meter--stacked"
           data-testid="status-context-meter"
           title={contextTip}
           aria-label={contextTip}
         >
+          <span
+            className="status-context-label"
+            data-testid="status-context-label"
+          >
+            {formatTokensCompact(usedTokens)}
+            {' / '}
+            {formatTokensCompact(contextWindow)}
+            {' tokens'}
+          </span>
           <span
             className={`status-context-bar${meterClass}`}
             role="progressbar"
@@ -163,15 +178,6 @@ export function StatusBar({
               className="status-context-fill"
               style={{ width: `${meterFillWidth}%` }}
             />
-          </span>
-          <span
-            className="status-context-label"
-            data-testid="status-context-label"
-          >
-            {formatTokensCompact(usedTokens)}
-            {' / '}
-            {formatTokensCompact(contextWindow)}
-            {' tokens'}
           </span>
         </span>
       ) : (

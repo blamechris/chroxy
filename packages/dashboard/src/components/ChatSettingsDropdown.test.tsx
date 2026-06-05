@@ -164,6 +164,64 @@ describe('ChatSettingsDropdown', () => {
   })
 
   // #3888 — header model-picker tooltip surfaces model + context-window
+  // #5181 (C3): the model dropdown must be robust to any-length model
+  // name. The actual truncation is CSS (`text-overflow: ellipsis` +
+  // min/max-width keyed off `data-kind="model"`), which jsdom doesn't
+  // apply — so these tests pin the contract the CSS relies on: the
+  // `data-kind="model"` selector hook is present, short and long labels
+  // both render without disturbing the option set, and the full model id
+  // stays discoverable via title/aria-label so a visually-truncated
+  // label is never lost to AT users.
+  describe('#5181 — responsive model dropdown', () => {
+    it('model select carries the data-kind="model" sizing hook', () => {
+      renderDropdown()
+      const modelSelect = screen.getByTestId('chat-settings-trigger')
+      expect(modelSelect.getAttribute('data-kind')).toBe('model')
+    })
+
+    it('renders a very long model label without dropping options', () => {
+      const longModels = [
+        {
+          id: 'long',
+          label: 'Claude Opus 4.7 Extended Thinking (1M context, preview build)',
+          fullId: 'claude-opus-4-7-extended-thinking-1m-preview',
+          contextWindow: 1_000_000,
+        },
+        { id: 'short', label: 'Auto', fullId: 'auto' },
+      ]
+      renderDropdown({ availableModels: longModels, activeModel: 'long', defaultModelId: null })
+      const modelSelect = screen.getByTestId('chat-settings-trigger') as HTMLSelectElement
+      // Default option + both models present — the long label doesn't
+      // crowd out or collapse the others.
+      expect(modelSelect.querySelectorAll('option').length).toBe(3)
+      expect(modelSelect.value).toBe('long')
+    })
+
+    it('renders a very short model label cleanly', () => {
+      const shortModels = [{ id: 'auto', label: 'Auto', fullId: 'auto' }]
+      renderDropdown({ availableModels: shortModels, activeModel: 'auto', defaultModelId: null })
+      const modelSelect = screen.getByTestId('chat-settings-trigger') as HTMLSelectElement
+      expect(modelSelect.value).toBe('auto')
+    })
+
+    it('keeps the full model id in title + aria-label so a truncated label stays discoverable', () => {
+      const longModels = [
+        {
+          id: 'long',
+          label: 'Claude Opus 4.7 Extended',
+          fullId: 'claude-opus-4-7-extended-thinking-1m-preview',
+          contextWindow: 1_000_000,
+        },
+      ]
+      renderDropdown({ availableModels: longModels, activeModel: 'long', defaultModelId: null })
+      const modelSelect = screen.getByTestId('chat-settings-trigger')
+      const title = modelSelect.getAttribute('title') ?? ''
+      const aria = modelSelect.getAttribute('aria-label') ?? ''
+      expect(title).toContain('claude-opus-4-7-extended-thinking-1m-preview')
+      expect(aria).toContain('claude-opus-4-7-extended-thinking-1m-preview')
+    })
+  })
+
   describe('active-model tooltip (#3888)', () => {
     it('exposes model id and context-window via title attribute', () => {
       renderDropdown({ activeModel: 'opus' })
