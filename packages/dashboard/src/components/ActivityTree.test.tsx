@@ -1,10 +1,13 @@
 /**
- * ControlRoomPanel tests (#5163, epic #5159).
+ * ActivityTree tests (#5176, epic #5170).
  *
- * Covers the read-only live tree rendering: hierarchy/indentation, status
- * badges, live + frozen elapsed timers, the blocked-state highlight, and
- * expand-to-output. The store wiring is covered separately in
- * dispatch-control-room-activity.test.ts.
+ * The reusable per-session activity tree extracted from the retired Control
+ * Room v1 sidebar panel. Covers the read-only live tree rendering:
+ * hierarchy/indentation, status badges, live + frozen elapsed timers, the
+ * blocked-state highlight, expand-to-output, and the session-scoped expansion
+ * reset (id collision guard). The store wiring is covered separately in
+ * dispatch-control-room-activity.test.ts; the drill-down integration into the
+ * Control Room section is covered in ControlRoomSection.test.tsx.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
@@ -15,7 +18,7 @@ import {
   type ActivityEntry,
   type ActivityState,
 } from '@chroxy/store-core'
-import { ControlRoomPanel, controlRoomCollapsedMetric, formatElapsed } from './ControlRoomPanel'
+import { ActivityTree, formatElapsed } from './ActivityTree'
 
 const SESSION_ID = 'sess-1'
 
@@ -44,14 +47,14 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('ControlRoomPanel (#5163)', () => {
-  it('renders the empty state when there is no active session', () => {
-    render(<ControlRoomPanel activity={createEmptyActivityState()} activeSessionId={null} />)
+describe('ActivityTree (#5176)', () => {
+  it('renders the empty state when there is no session', () => {
+    render(<ActivityTree activity={createEmptyActivityState()} sessionId={null} />)
     expect(screen.getByTestId('control-room-empty')).toHaveTextContent('No active session')
   })
 
-  it('renders the empty state when the active session has no activity', () => {
-    render(<ControlRoomPanel activity={createEmptyActivityState()} activeSessionId={SESSION_ID} />)
+  it('renders the empty state when the session has no activity', () => {
+    render(<ActivityTree activity={createEmptyActivityState()} sessionId={SESSION_ID} />)
     expect(screen.getByTestId('control-room-empty')).toHaveTextContent('No activity in flight')
   })
 
@@ -61,7 +64,7 @@ describe('ControlRoomPanel (#5163)', () => {
       entry('b', { status: 'done', endedAt: 2000, label: 'Done thing' }),
       entry('c', { status: 'failed', endedAt: 3000, label: 'Failed thing' }),
     ])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 1000} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} />)
 
     expect(screen.getByTestId('control-room-entry-label-a')).toHaveTextContent('Run a search')
     expect(screen.getByTestId('control-room-status-a')).toHaveTextContent('Running')
@@ -76,7 +79,7 @@ describe('ControlRoomPanel (#5163)', () => {
       entry('parent', { kind: 'agent' }),
       entry('child', { kind: 'tool', parentId: 'parent' }),
     ])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 1000} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} />)
 
     const parentToggle = screen.getByTestId('control-room-entry-toggle-parent')
     const childToggle = screen.getByTestId('control-room-entry-toggle-child')
@@ -90,7 +93,7 @@ describe('ControlRoomPanel (#5163)', () => {
       entry('live', { status: 'running', startedAt: 0 }),
       entry('done', { status: 'done', startedAt: 0, endedAt: 5000 }),
     ])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 10_000} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 10_000} />)
     // Live entry: 10s elapsed against the injected clock.
     expect(screen.getByTestId('control-room-elapsed-live')).toHaveTextContent('10s')
     // Terminal entry: frozen at endedAt - startedAt = 5s, ignoring the clock.
@@ -101,7 +104,7 @@ describe('ControlRoomPanel (#5163)', () => {
     vi.useFakeTimers()
     let clock = 1000
     const activity = buildActivity([entry('live', { status: 'running', startedAt: 1000 })])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => clock} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => clock} />)
     expect(screen.getByTestId('control-room-elapsed-live')).toHaveTextContent('0s')
 
     act(() => {
@@ -113,7 +116,7 @@ describe('ControlRoomPanel (#5163)', () => {
 
   it('highlights blocked entries with the blocked class', () => {
     const activity = buildActivity([entry('blk', { status: 'blocked', label: 'Waiting on you' })])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 1000} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} />)
     const toggle = screen.getByTestId('control-room-entry-toggle-blk')
     expect(toggle.className).toContain('control-room-entry-blocked')
     expect(toggle).toHaveAttribute('data-status', 'blocked')
@@ -123,7 +126,7 @@ describe('ControlRoomPanel (#5163)', () => {
     const activity = buildActivity([
       entry('a', { outputRef: { kind: 'tool_use', id: 'tool-42' } }),
     ])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 1000} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} />)
     expect(screen.queryByTestId('control-room-output-a')).toBeNull()
 
     fireEvent.click(screen.getByTestId('control-room-entry-toggle-a'))
@@ -135,25 +138,25 @@ describe('ControlRoomPanel (#5163)', () => {
     expect(screen.queryByTestId('control-room-output-a')).toBeNull()
   })
 
-  it('resets expansion state when the active session changes (id collision guard)', () => {
+  it('resets expansion state when the session changes (id collision guard)', () => {
     // Two sessions each have an entry with the SAME id 'a' (ids are only
     // unique within a session). Expanding it in session 1 must NOT carry over
     // and auto-expand the colliding id when switching to session 2.
     const s1 = buildActivity([entry('a', { outputRef: { kind: 'tool_use', id: 't1' } })], 's1')
     const s2 = buildActivity([entry('a', { outputRef: { kind: 'tool_use', id: 't2' } })], 's2')
     const { rerender } = render(
-      <ControlRoomPanel activity={s1} activeSessionId="s1" now={() => 1000} />,
+      <ActivityTree activity={s1} sessionId="s1" now={() => 1000} />,
     )
     fireEvent.click(screen.getByTestId('control-room-entry-toggle-a'))
     expect(screen.getByTestId('control-room-output-a')).toBeInTheDocument()
 
-    rerender(<ControlRoomPanel activity={s2} activeSessionId="s2" now={() => 1000} />)
+    rerender(<ActivityTree activity={s2} sessionId="s2" now={() => 1000} />)
     expect(screen.queryByTestId('control-room-output-a')).toBeNull()
   })
 
   it('shows a "no linked output" message when an entry has no outputRef', () => {
     const activity = buildActivity([entry('a')])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 1000} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} />)
     fireEvent.click(screen.getByTestId('control-room-entry-toggle-a'))
     expect(screen.getByTestId('control-room-output-empty-a')).toHaveTextContent('No linked output yet')
   })
@@ -162,7 +165,7 @@ describe('ControlRoomPanel (#5163)', () => {
     vi.useFakeTimers()
     const setIntervalSpy = vi.spyOn(window, 'setInterval')
     const activity = buildActivity([entry('done', { status: 'done', endedAt: 2000 })])
-    render(<ControlRoomPanel activity={activity} activeSessionId={SESSION_ID} now={() => 5000} />)
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 5000} />)
     expect(setIntervalSpy).not.toHaveBeenCalled()
     setIntervalSpy.mockRestore()
   })
@@ -178,30 +181,5 @@ describe('formatElapsed', () => {
 
   it('clamps negative input to 0', () => {
     expect(formatElapsed(-1000)).toBe('0s')
-  })
-})
-
-describe('controlRoomCollapsedMetric', () => {
-  it('returns null when no active session', () => {
-    expect(controlRoomCollapsedMetric(createEmptyActivityState(), null)).toBeNull()
-  })
-
-  it('returns null when nothing is live', () => {
-    const activity = buildActivity([entry('done', { status: 'done', endedAt: 2000 })])
-    expect(controlRoomCollapsedMetric(activity, SESSION_ID)).toBeNull()
-  })
-
-  it('counts live entries and blocked entries', () => {
-    const activity = buildActivity([
-      entry('a', { status: 'running' }),
-      entry('b', { status: 'blocked' }),
-      entry('c', { status: 'done', endedAt: 2000 }),
-    ])
-    expect(controlRoomCollapsedMetric(activity, SESSION_ID)).toBe('2 live · 1 blocked')
-  })
-
-  it('omits the blocked suffix when nothing is blocked', () => {
-    const activity = buildActivity([entry('a', { status: 'running' })])
-    expect(controlRoomCollapsedMetric(activity, SESSION_ID)).toBe('1 live')
   })
 })
