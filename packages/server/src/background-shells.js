@@ -30,6 +30,20 @@
 // narrow: malformed payloads return null and the wait is invisible.
 const SHELL_ID_RE = /Command running in background with ID:\s+([A-Za-z0-9_-]+)/
 
+// #5177: the canonical tool_result also names the file claude tails the
+// background command's stdout/stderr into:
+//
+//   "Output is being written to: /private/tmp/claude-501/…/tasks/<id>.output"
+//
+// We capture the path so the periodic sweep (see BaseSession) can observe
+// the shell's completion WITHOUT the agent ever calling `BashOutput`: a
+// finished command stops appending to this file, so a quiesced mtime is a
+// reap signal. Match a run of non-whitespace after the colon — the path is
+// always a single token and any trailing sentence punctuation (". You will
+// be notified…") is whitespace-separated. Strip a single trailing period
+// defensively in case a future claude build drops the space before it.
+const SHELL_OUTPUT_PATH_RE = /Output is being written to:\s+(\S+)/
+
 /**
  * Parse the shell id from a tool_result text. Returns the id when the
  * canonical pattern matches, else null.
@@ -44,6 +58,28 @@ export function parseBackgroundShellId(text) {
   if (typeof text !== 'string' || text.length === 0) return null
   const m = SHELL_ID_RE.exec(text)
   return m ? m[1] : null
+}
+
+/**
+ * #5177: parse the output file path from a tool_result text. Returns the
+ * path when the canonical `Output is being written to: <path>` pattern
+ * matches, else null. A single trailing period is stripped so a build that
+ * emits `…<id>.output.` (no space before the sentence end) still yields a
+ * clean path.
+ *
+ * Defensive against non-string / empty inputs so callers can hand the raw
+ * `tool_result.result` field through without pre-checking. Returning null
+ * is non-fatal: the shell is still tracked, the sweep just can't reap it
+ * via the output file and falls back to the BashOutput / destroy paths.
+ *
+ * @param {unknown} text
+ * @returns {string | null}
+ */
+export function parseBackgroundShellOutputPath(text) {
+  if (typeof text !== 'string' || text.length === 0) return null
+  const m = SHELL_OUTPUT_PATH_RE.exec(text)
+  if (!m) return null
+  return m[1].replace(/\.$/, '')
 }
 
 /**

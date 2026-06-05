@@ -8,6 +8,7 @@ import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import {
   parseBackgroundShellId,
+  parseBackgroundShellOutputPath,
   isRunInBackgroundInput,
   parseBashOutputShellId,
 } from './background-shells.js'
@@ -1232,7 +1233,10 @@ export class SdkSession extends BaseSession {
       if (!shellId) continue
       const command = this._pendingBackgroundCommands.get(block.tool_use_id) || ''
       this._pendingBackgroundCommands.delete(block.tool_use_id)
-      this.trackBackgroundShell({ shellId, command })
+      // #5177: capture the output file path from the same tool_result so the
+      // completion sweep can reap the shell on quiescence without a poll.
+      const outputPath = parseBackgroundShellOutputPath(text)
+      this.trackBackgroundShell({ shellId, command, outputPath })
     }
   }
 
