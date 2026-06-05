@@ -1770,4 +1770,272 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(!result.success)
     })
   })
+
+  describe('Control Room activity tree (#5161)', () => {
+    const runningEntry = {
+      id: 'act-1',
+      kind: 'agent',
+      label: 'Refactor auth module',
+      status: 'running',
+      startedAt: 1_700_000_000_000,
+    }
+
+    const terminalEntry = {
+      id: 'act-2',
+      kind: 'shell',
+      label: 'npm test',
+      status: 'done',
+      startedAt: 1_700_000_000_000,
+      endedAt: 1_700_000_005_000,
+      parentId: 'act-1',
+      outputRef: { kind: 'shell', id: 'brk57kt6pm' },
+    }
+
+    describe('ActivityEntrySchema', () => {
+      it('validates a well-formed running entry (no endedAt)', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse(runningEntry)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.kind, 'agent')
+        assert.equal(result.data.endedAt, undefined)
+      })
+
+      it('validates a terminal entry with endedAt, parentId, outputRef', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse(terminalEntry)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.parentId, 'act-1')
+        assert.equal(result.data.outputRef.kind, 'shell')
+      })
+
+      it('accepts all three kinds', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        for (const kind of ['agent', 'shell', 'tool']) {
+          const result = ActivityEntrySchema.safeParse({ ...runningEntry, kind })
+          assert.ok(result.success, `kind ${kind} should validate`)
+        }
+      })
+
+      it('rejects an unknown kind', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({ ...runningEntry, kind: 'process' })
+        assert.ok(!result.success, 'unknown kind must reject')
+      })
+
+      it('accepts all four statuses (with endedAt where terminal)', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        assert.ok(ActivityEntrySchema.safeParse({ ...runningEntry, status: 'running' }).success)
+        assert.ok(ActivityEntrySchema.safeParse({ ...runningEntry, status: 'blocked' }).success)
+        assert.ok(ActivityEntrySchema.safeParse({ ...runningEntry, status: 'done', endedAt: 1_700_000_001_000 }).success)
+        assert.ok(ActivityEntrySchema.safeParse({ ...runningEntry, status: 'failed', endedAt: 1_700_000_001_000 }).success)
+      })
+
+      it('rejects a done/failed entry without endedAt', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        assert.ok(!ActivityEntrySchema.safeParse({ ...runningEntry, status: 'done' }).success, 'done requires endedAt')
+        assert.ok(!ActivityEntrySchema.safeParse({ ...runningEntry, status: 'failed' }).success, 'failed requires endedAt')
+      })
+
+      it('rejects a running/blocked entry that carries endedAt', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const running = ActivityEntrySchema.safeParse({ ...runningEntry, status: 'running', endedAt: 1_700_000_001_000 })
+        const blocked = ActivityEntrySchema.safeParse({ ...runningEntry, status: 'blocked', endedAt: 1_700_000_001_000 })
+        assert.ok(!running.success, 'running must not carry endedAt')
+        assert.ok(!blocked.success, 'blocked must not carry endedAt')
+      })
+
+      it('rejects endedAt earlier than startedAt', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({
+          ...runningEntry,
+          status: 'done',
+          startedAt: 1_700_000_005_000,
+          endedAt: 1_700_000_000_000,
+        })
+        assert.ok(!result.success, 'endedAt must be >= startedAt')
+      })
+
+      it('allows startedAt of 0 (clock-skew tolerance)', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({ ...runningEntry, startedAt: 0 })
+        assert.ok(result.success, 'startedAt=0 must validate')
+      })
+
+      it('allows an empty label', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({ ...runningEntry, label: '' })
+        assert.ok(result.success, 'empty label must validate (label not known yet)')
+      })
+
+      it('rejects an empty id', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({ ...runningEntry, id: '' })
+        assert.ok(!result.success, 'id must be non-empty')
+      })
+
+      it('rejects a non-integer startedAt', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({ ...runningEntry, startedAt: 1.5 })
+        assert.ok(!result.success, 'startedAt must be an integer ms epoch')
+      })
+
+      it('accepts a future/unknown outputRef kind (open string for forward compat)', async () => {
+        // #5161 (Copilot review): outputRef.kind is an OPEN non-empty string,
+        // not a closed enum — a newer server introducing a new channel kind
+        // must NOT reject the whole message at an older client. The consumer
+        // switches on the known kinds and degrades to "no drill-in" otherwise.
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({
+          ...runningEntry,
+          outputRef: { kind: 'pty', id: 'x' },
+        })
+        assert.ok(result.success, 'unknown outputRef kind must parse (degrade gracefully, not reject)')
+        assert.equal(result.data.outputRef.kind, 'pty')
+      })
+
+      it('accepts all three known outputRef kinds', async () => {
+        const { ActivityEntrySchema, ACTIVITY_OUTPUT_REF_KINDS } = await import('../src/schemas/server.ts')
+        assert.deepEqual([...ACTIVITY_OUTPUT_REF_KINDS], ['tool_use', 'shell', 'message'])
+        for (const kind of ACTIVITY_OUTPUT_REF_KINDS) {
+          const result = ActivityEntrySchema.safeParse({ ...runningEntry, outputRef: { kind, id: 'x' } })
+          assert.ok(result.success, `known outputRef kind ${kind} should validate`)
+        }
+      })
+
+      it('rejects an empty outputRef id', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({
+          ...runningEntry,
+          outputRef: { kind: 'shell', id: '' },
+        })
+        assert.ok(!result.success, 'outputRef.id must be non-empty')
+      })
+
+      it('strips unknown fields for forward compat', async () => {
+        const { ActivityEntrySchema } = await import('../src/schemas/server.ts')
+        const result = ActivityEntrySchema.safeParse({ ...runningEntry, futureField: { x: 1 } })
+        assert.ok(result.success, 'unknown fields must not reject (newer server, older client)')
+        assert.equal(result.data.futureField, undefined, 'Zod strips unknown fields')
+      })
+    })
+
+    describe('ServerActivitySnapshotSchema', () => {
+      it('validates a snapshot with entries', async () => {
+        const { ServerActivitySnapshotSchema, ACTIVITY_SCHEMA_VERSION } = await import('../src/schemas/server.ts')
+        const result = ServerActivitySnapshotSchema.safeParse({
+          type: 'activity_snapshot',
+          sessionId: 'sess-1',
+          schemaVersion: ACTIVITY_SCHEMA_VERSION,
+          entries: [runningEntry, terminalEntry],
+        })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.entries.length, 2)
+      })
+
+      it('validates an empty-tree snapshot', async () => {
+        const { ServerActivitySnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivitySnapshotSchema.safeParse({
+          type: 'activity_snapshot',
+          sessionId: 'sess-1',
+          schemaVersion: 1,
+          entries: [],
+        })
+        assert.ok(result.success, 'empty entries is the valid no-activity state')
+      })
+
+      it('rejects a wrong type literal', async () => {
+        const { ServerActivitySnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivitySnapshotSchema.safeParse({
+          type: 'activity', sessionId: 'sess-1', schemaVersion: 1, entries: [],
+        })
+        assert.ok(!result.success)
+      })
+
+      it('rejects a missing entries array', async () => {
+        const { ServerActivitySnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivitySnapshotSchema.safeParse({
+          type: 'activity_snapshot', sessionId: 'sess-1', schemaVersion: 1,
+        })
+        assert.ok(!result.success, 'entries must never be omitted')
+      })
+
+      it('rejects a non-positive schemaVersion', async () => {
+        const { ServerActivitySnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivitySnapshotSchema.safeParse({
+          type: 'activity_snapshot', sessionId: 'sess-1', schemaVersion: 0, entries: [],
+        })
+        assert.ok(!result.success, 'schemaVersion must be a positive int')
+      })
+
+      it('propagates entry-level refinements (terminal without endedAt)', async () => {
+        const { ServerActivitySnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivitySnapshotSchema.safeParse({
+          type: 'activity_snapshot',
+          sessionId: 'sess-1',
+          schemaVersion: 1,
+          entries: [{ ...runningEntry, status: 'done' }],
+        })
+        assert.ok(!result.success, 'invalid entry inside the array must reject the whole snapshot')
+      })
+    })
+
+    describe('ServerActivityDeltaSchema', () => {
+      it('validates a started delta', async () => {
+        const { ServerActivityDeltaSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivityDeltaSchema.safeParse({
+          type: 'activity_delta', sessionId: 'sess-1', schemaVersion: 1, op: 'started', entry: runningEntry,
+        })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.op, 'started')
+      })
+
+      it('validates an updated delta', async () => {
+        const { ServerActivityDeltaSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivityDeltaSchema.safeParse({
+          type: 'activity_delta', sessionId: 'sess-1', schemaVersion: 1, op: 'updated',
+          entry: { ...runningEntry, status: 'blocked' },
+        })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+      })
+
+      it('validates an ended delta carrying a terminal entry', async () => {
+        const { ServerActivityDeltaSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivityDeltaSchema.safeParse({
+          type: 'activity_delta', sessionId: 'sess-1', schemaVersion: 1, op: 'ended', entry: terminalEntry,
+        })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+      })
+
+      it('rejects an ended delta whose entry is non-terminal', async () => {
+        const { ServerActivityDeltaSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivityDeltaSchema.safeParse({
+          type: 'activity_delta', sessionId: 'sess-1', schemaVersion: 1, op: 'ended', entry: runningEntry,
+        })
+        assert.ok(!result.success, 'an ended op requires a done/failed entry')
+      })
+
+      it('rejects an unknown op', async () => {
+        const { ServerActivityDeltaSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivityDeltaSchema.safeParse({
+          type: 'activity_delta', sessionId: 'sess-1', schemaVersion: 1, op: 'removed', entry: runningEntry,
+        })
+        assert.ok(!result.success, 'op must be started/updated/ended')
+      })
+
+      it('strips unknown top-level fields for forward compat', async () => {
+        const { ServerActivityDeltaSchema } = await import('../src/schemas/server.ts')
+        const result = ServerActivityDeltaSchema.safeParse({
+          type: 'activity_delta', sessionId: 'sess-1', schemaVersion: 1, op: 'started',
+          entry: runningEntry, futureField: 'x',
+        })
+        assert.ok(result.success)
+        assert.equal(result.data.futureField, undefined)
+      })
+    })
+
+    it('ACTIVITY_SCHEMA_VERSION is 1', async () => {
+      const { ACTIVITY_SCHEMA_VERSION } = await import('../src/schemas/server.ts')
+      assert.equal(ACTIVITY_SCHEMA_VERSION, 1)
+    })
+  })
 })

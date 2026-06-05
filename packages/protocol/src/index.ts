@@ -44,5 +44,19 @@ export * from './schemas/index.ts'
 // line for any future type alias whose existence is a public contract.
 export type { ServerErrorEnvelopeMessage } from './schemas/server.ts'
 
+// #5161: pin the Control Room activity-tree contract at the package entry point
+// so #5160/#5162/#5163 import `ActivityEntry` / `ServerActivitySnapshotMessage`
+// / `ServerActivityDeltaMessage` etc. as a stable public contract — the named
+// re-export makes `tsc --build` fail loudly if any alias is removed from
+// `./schemas/server.ts` (same rationale as the #4192 line above).
+export type {
+  ActivityKind,
+  ActivityStatus,
+  ActivityOutputRef,
+  ActivityEntry,
+  ServerActivitySnapshotMessage,
+  ServerActivityDeltaMessage,
+} from './schemas/server.ts'
+
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'
