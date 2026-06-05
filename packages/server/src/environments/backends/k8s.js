@@ -567,6 +567,22 @@ export class K8sBackend {
    *   An object is merged over the built-in {@link DEFAULT_RESOURCES} (so partial overrides are fine)
    *   and validated at construction. Pass `null` to disable defaults entirely — then only explicit
    *   per-call resource values produce a `resources` block. Omit to use the built-in defaults.
+   * @param {Object|null} [opts.namespaceQuota] - Per-tenant aggregate ResourceQuota spec (#5142).
+   *   When set, a namespace-scoped `ResourceQuota` capping the tenant's TOTAL CPU/memory (and
+   *   optionally Pod count) across all their Pods is ensured (idempotent create) whenever a tenant
+   *   namespace is ensured. Shape: `{ cpu, memory, cpuLimit, memoryLimit, pods }` — `cpu`/`memory`
+   *   map to aggregate `requests.*`, `cpuLimit`/`memoryLimit` to aggregate `limits.*`, `pods` to the
+   *   max object count. At least one field is required. Quantities are validated at construction.
+   *   Distinct from per-pod `defaultResources` (#3195), which limits each individual Pod. Omit (or
+   *   `null`) to skip — the namespace-ensure path is unchanged. Never applied to the static default
+   *   namespace.
+   * @param {Object|null} [opts.namespaceLimitRange] - Per-tenant LimitRange defaults (#5142).
+   *   When set, a namespace-scoped `LimitRange` is ensured so Pods created WITHOUT explicit
+   *   requests/limits inherit namespace defaults at the cluster level (defence-in-depth on top of
+   *   `defaultResources`). Same flat shape as `defaultResources`: `{ cpu, memory, cpuLimit,
+   *   memoryLimit }` — `cpu`/`memory` become `defaultRequest.*`, `cpuLimit`/`memoryLimit` become
+   *   `default.*`. At least one field required. Quantities validated at construction. Omit (or
+   *   `null`) to skip. Never applied to the static default namespace.
    * @param {'portforward'|'clusterip'} [opts.connectMode='portforward'] - How to reach the sidecar
    * @param {object}  [opts._coreV1Api]                 - Injected CoreV1Api for testing
    * @param {object}  [opts._portForward]               - Injected PortForward for testing
@@ -578,7 +594,7 @@ export class K8sBackend {
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
   constructor({ namespace, namespaceFor, inCluster, kubeconfigPath, sidecarImage, gitImage, imagePullPolicy,
-    defaultResources, connectMode, _coreV1Api, _portForward, _dialWs, _net,
+    defaultResources, namespaceQuota, namespaceLimitRange, connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
@@ -622,6 +638,42 @@ export class K8sBackend {
     } else {
       throw new TypeError('K8sBackend: opts.defaultResources must be an object or null')
     }
+
+    // Namespace-level (per-tenant) ResourceQuota / LimitRange (#5142). These are
+    // OPT-IN: when unset the namespace-ensure path is unchanged. Build the canonical
+    // K8s spec up-front so a malformed quantity surfaces at construction rather than
+    // at the first createEnvironment call (mirrors defaultResources).
+    //   - undefined/null → feature off (no quota / limitrange ensured)
+    //   - object         → validated + cached spec, ensured per tenant namespace
+    // Re-scope any builder failure to the constructor option (mirrors how
+    // defaultResources wraps buildResourceBlock above) — the builders blame
+    // `namespaceQuota.*` via _validateResourceQuantity's `createEnvironment:`
+    // prefix, which points at the wrong call site for constructor config. The
+    // original error is preserved as `cause`.
+    if (namespaceQuota == null) {
+      this._namespaceQuotaSpec = null
+    } else {
+      try {
+        this._namespaceQuotaSpec = buildResourceQuotaSpec(namespaceQuota)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.namespaceQuota is invalid — ${err.message}`, { cause: err })
+      }
+    }
+    if (namespaceLimitRange == null) {
+      this._namespaceLimitRangeSpec = null
+    } else {
+      try {
+        this._namespaceLimitRangeSpec = buildLimitRangeSpec(namespaceLimitRange)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.namespaceLimitRange is invalid — ${err.message}`, { cause: err })
+      }
+    }
+    // Namespaces whose ResourceQuota / LimitRange we have already ensured this
+    // process, so repeated createEnvironment calls for the same tenant skip the
+    // read/create roundtrip (mirrors _ensuredNamespaces).
+    this._ensuredQuotas = new Set()
+    this._ensuredLimitRanges = new Set()
+
     this._connectMode = connectMode ?? 'portforward'
 
     if (_coreV1Api) {
@@ -778,6 +830,119 @@ export class K8sBackend {
       log.info(`Namespace ${ns} already exists (concurrent create)`)
     }
     this._ensuredNamespaces.add(ns)
+  }
+
+  /**
+   * Idempotently ensure a per-tenant `ResourceQuota` exists in `ns` (#5142).
+   *
+   * A namespace-scoped ResourceQuota caps the AGGREGATE CPU/memory (and
+   * optionally Pod count) a tenant may consume across ALL their Pods — distinct
+   * from the per-pod requests/limits #3195 sets on each container. It is the
+   * tenant-level guardrail that becomes meaningful now that #3194 gives every
+   * tenant their own namespace.
+   *
+   * Opt-in + safe by construction:
+   *   - No-op when the backend was constructed without `namespaceQuota`.
+   *   - No-op for the static default namespace (treated as cluster bootstrap,
+   *     chroxy is unlikely to hold RBAC there) — mirrors ensureNamespace.
+   *   - Read-or-create, idempotent, safe to call repeatedly/concurrently: a 404
+   *     read triggers a create; a 409 AlreadyExists on create is swallowed.
+   *   - Once ensured, the namespace is cached so subsequent calls are a no-op.
+   *
+   * @param {string} ns - A namespace name already validated as an RFC 1123 label
+   * @returns {Promise<void>}
+   */
+  async ensureResourceQuota(ns) {
+    if (this._namespaceQuotaSpec == null) return
+    if (this._ensuredQuotas.has(ns)) return
+    // Never touch the static default namespace — assumed pre-existing, and chroxy
+    // may lack RBAC to write ResourceQuota objects there.
+    if (ns === this._namespace) {
+      this._ensuredQuotas.add(ns)
+      return
+    }
+
+    const name = 'chroxy-quota'
+    try {
+      await this._api.readNamespacedResourceQuota({ name, namespace: ns })
+      this._ensuredQuotas.add(ns)
+      return
+    } catch (err) {
+      if (!_isNotFound(err)) throw err
+      // 404 → fall through and create it.
+    }
+
+    const body = {
+      apiVersion: 'v1',
+      kind: 'ResourceQuota',
+      metadata: {
+        name,
+        labels: { 'app.kubernetes.io/managed-by': 'chroxy' },
+      },
+      spec: { hard: this._namespaceQuotaSpec },
+    }
+    try {
+      log.info(`Creating ResourceQuota ${name} in namespace ${ns}`)
+      await this._api.createNamespacedResourceQuota({ namespace: ns, body })
+    } catch (err) {
+      // Another creator won the race (or it already existed) — AlreadyExists is
+      // success for an idempotent ensure, not an error.
+      if (!_isAlreadyExists(err)) throw err
+      log.info(`ResourceQuota ${name} already exists in ${ns} (concurrent create)`)
+    }
+    this._ensuredQuotas.add(ns)
+  }
+
+  /**
+   * Idempotently ensure a per-tenant `LimitRange` exists in `ns` (#5142).
+   *
+   * A namespace-scoped LimitRange supplies cluster-level DEFAULT requests/limits
+   * so Pods created WITHOUT explicit resources inherit sane values — a
+   * defence-in-depth layer on top of the backend's own DEFAULT_RESOURCES.
+   *
+   * Same opt-in + idempotency semantics as {@link ensureResourceQuota}:
+   *   - No-op when constructed without `namespaceLimitRange`.
+   *   - No-op for the static default namespace.
+   *   - Read-or-create (404 → create, 409 → swallowed), cached per process.
+   *
+   * @param {string} ns - A namespace name already validated as an RFC 1123 label
+   * @returns {Promise<void>}
+   */
+  async ensureLimitRange(ns) {
+    if (this._namespaceLimitRangeSpec == null) return
+    if (this._ensuredLimitRanges.has(ns)) return
+    if (ns === this._namespace) {
+      this._ensuredLimitRanges.add(ns)
+      return
+    }
+
+    const name = 'chroxy-limits'
+    try {
+      await this._api.readNamespacedLimitRange({ name, namespace: ns })
+      this._ensuredLimitRanges.add(ns)
+      return
+    } catch (err) {
+      if (!_isNotFound(err)) throw err
+      // 404 → fall through and create it.
+    }
+
+    const body = {
+      apiVersion: 'v1',
+      kind: 'LimitRange',
+      metadata: {
+        name,
+        labels: { 'app.kubernetes.io/managed-by': 'chroxy' },
+      },
+      spec: { limits: [this._namespaceLimitRangeSpec] },
+    }
+    try {
+      log.info(`Creating LimitRange ${name} in namespace ${ns}`)
+      await this._api.createNamespacedLimitRange({ namespace: ns, body })
+    } catch (err) {
+      if (!_isAlreadyExists(err)) throw err
+      log.info(`LimitRange ${name} already exists in ${ns} (concurrent create)`)
+    }
+    this._ensuredLimitRanges.add(ns)
   }
 
   /**
@@ -989,6 +1154,12 @@ export class K8sBackend {
     // Ensure the tenant namespace exists before provisioning any resource in it
     // (#3194). Idempotent + cached; a no-op for the static default namespace.
     await this.ensureNamespace(ns)
+    // Ensure per-tenant namespace-level guardrails (#5142). Both are opt-in
+    // (no-op unless the backend was constructed with namespaceQuota /
+    // namespaceLimitRange) and idempotent + cached. Run after ensureNamespace so
+    // the namespace is guaranteed to exist before the quota/limitrange is written.
+    await this.ensureResourceQuota(ns)
+    await this.ensureLimitRange(ns)
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
     // K8sBackend ALWAYS runs the chroxy-pod-agent sidecar — the sidecar is
@@ -2746,4 +2917,114 @@ export function buildResourceBlock(resources, legacyCpuLimit, legacyMemoryLimit,
   if (Object.keys(requests).length > 0) block.requests = requests
   if (Object.keys(limits).length > 0) block.limits = limits
   return block
+}
+
+/**
+ * Map a tenant-friendly quota spec to the K8s `ResourceQuota.spec.hard` keys
+ * (#5142).
+ *
+ * The operator supplies a small, intention-revealing object; this builder
+ * translates it into the canonical `hard` map the API server understands and
+ * validates every quantity through the same grammar the per-pod path uses
+ * (`_validateResourceQuantity`). CPU/memory values become the standard
+ * `requests.*` / `limits.*` aggregate keys, and the pod count maps to the
+ * `pods` object-count quota.
+ *
+ *   { cpu, memory }             → requests.cpu / requests.memory
+ *   { cpuLimit, memoryLimit }   → limits.cpu   / limits.memory
+ *   { pods }                    → pods         (max object count, integer)
+ *
+ * @param {Object} spec
+ * @param {string} [spec.cpu]         - Aggregate CPU request cap (e.g. "8")
+ * @param {string} [spec.memory]      - Aggregate memory request cap (e.g. "16Gi")
+ * @param {string} [spec.cpuLimit]    - Aggregate CPU limit cap (e.g. "16")
+ * @param {string} [spec.memoryLimit] - Aggregate memory limit cap (e.g. "32Gi")
+ * @param {number} [spec.pods]        - Max number of Pods in the namespace
+ * @returns {Object} A `ResourceQuota.spec.hard` map (at least one entry)
+ * @throws {Error} If the spec is malformed or yields no caps
+ */
+export function buildResourceQuotaSpec(spec) {
+  if (spec == null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error('K8sBackend: namespaceQuota must be an object')
+  }
+  const hard = {}
+  if (spec.cpu != null) {
+    hard['requests.cpu'] = _validateResourceQuantity(spec.cpu, 'cpu', 'namespaceQuota.cpu')
+  }
+  if (spec.memory != null) {
+    hard['requests.memory'] = _validateResourceQuantity(spec.memory, 'memory', 'namespaceQuota.memory')
+  }
+  if (spec.cpuLimit != null) {
+    hard['limits.cpu'] = _validateResourceQuantity(spec.cpuLimit, 'cpu', 'namespaceQuota.cpuLimit')
+  }
+  if (spec.memoryLimit != null) {
+    hard['limits.memory'] = _validateResourceQuantity(spec.memoryLimit, 'memory', 'namespaceQuota.memoryLimit')
+  }
+  if (spec.pods != null) {
+    if (!Number.isInteger(spec.pods) || spec.pods < 1) {
+      throw new Error('K8sBackend: namespaceQuota.pods must be a positive integer')
+    }
+    // ResourceQuota `hard` values are all quantity strings, including counts.
+    hard.pods = String(spec.pods)
+  }
+  if (Object.keys(hard).length === 0) {
+    throw new Error(
+      'K8sBackend: namespaceQuota must set at least one of ' +
+      'cpu, memory, cpuLimit, memoryLimit, pods',
+    )
+  }
+  return hard
+}
+
+/**
+ * Map a tenant-friendly LimitRange spec to a single container-scoped
+ * `LimitRange.spec.limits[]` entry (#5142).
+ *
+ * A LimitRange supplies *namespace-level* defaults so Pods created WITHOUT
+ * explicit requests/limits inherit sane values at the cluster level — a
+ * defence-in-depth layer on top of the backend's own DEFAULT_RESOURCES. The
+ * operator supplies the same flat shape as `defaultResources`; this builder
+ * splits it into the `default` (limits) and `defaultRequest` (requests) maps a
+ * container-type LimitRange item expects, validating every quantity.
+ *
+ *   { cpu, memory }           → defaultRequest.cpu / defaultRequest.memory
+ *   { cpuLimit, memoryLimit } → default.cpu        / default.memory
+ *
+ * @param {Object} spec
+ * @param {string} [spec.cpu]         - Default CPU request (e.g. "250m")
+ * @param {string} [spec.memory]      - Default memory request (e.g. "256Mi")
+ * @param {string} [spec.cpuLimit]    - Default CPU limit (e.g. "1")
+ * @param {string} [spec.memoryLimit] - Default memory limit (e.g. "1Gi")
+ * @returns {{ type: 'Container', default?: Object, defaultRequest?: Object }}
+ *   A single LimitRange item (at least one of default/defaultRequest set)
+ * @throws {Error} If the spec is malformed or yields no defaults
+ */
+export function buildLimitRangeSpec(spec) {
+  if (spec == null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error('K8sBackend: namespaceLimitRange must be an object')
+  }
+  const defaultRequest = {}
+  const defaultLimit = {}
+  if (spec.cpu != null) {
+    defaultRequest.cpu = _validateResourceQuantity(spec.cpu, 'cpu', 'namespaceLimitRange.cpu')
+  }
+  if (spec.memory != null) {
+    defaultRequest.memory = _validateResourceQuantity(spec.memory, 'memory', 'namespaceLimitRange.memory')
+  }
+  if (spec.cpuLimit != null) {
+    defaultLimit.cpu = _validateResourceQuantity(spec.cpuLimit, 'cpu', 'namespaceLimitRange.cpuLimit')
+  }
+  if (spec.memoryLimit != null) {
+    defaultLimit.memory = _validateResourceQuantity(spec.memoryLimit, 'memory', 'namespaceLimitRange.memoryLimit')
+  }
+  const item = { type: 'Container' }
+  if (Object.keys(defaultLimit).length > 0) item.default = defaultLimit
+  if (Object.keys(defaultRequest).length > 0) item.defaultRequest = defaultRequest
+  if (item.default == null && item.defaultRequest == null) {
+    throw new Error(
+      'K8sBackend: namespaceLimitRange must set at least one of ' +
+      'cpu, memory, cpuLimit, memoryLimit',
+    )
+  }
+  return item
 }
