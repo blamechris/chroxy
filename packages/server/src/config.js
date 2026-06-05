@@ -186,6 +186,153 @@ const CONFIG_SCHEMA = {
 const SENSITIVE_KEYS = ['apiToken', 'pushToken']
 
 /**
+ * #5144: recognised values for `environments.backend`. 'docker' is the default
+ * when the key is absent so existing single-node setups are unchanged.
+ */
+const ENVIRONMENT_BACKENDS = new Set(['docker', 'k8s', 'rancher'])
+
+/** #5144: valid Kubernetes imagePullPolicy values (mirrors k8s.js). */
+const VALID_K8S_PULL_POLICIES = new Set(['Always', 'IfNotPresent', 'Never'])
+
+/** #5144: valid K8sBackend connectMode values (mirrors k8s.js). */
+const VALID_K8S_CONNECT_MODES = new Set(['portforward', 'clusterip'])
+
+/**
+ * #5144: Rancher cluster-/project-ID formats. Kept in sync with the canonical
+ * regexes in rancher.js (RANCHER_CLUSTER_ID / RANCHER_PROJECT_ID). Duplicated
+ * here rather than imported to keep config.js free of any cluster-client
+ * dependency (rancher.js eagerly imports @kubernetes/client-node), so loading
+ * config never pulls in the kube SDK.
+ */
+const RANCHER_CLUSTER_ID_RE = /^c-[a-z0-9-]+$/
+const RANCHER_PROJECT_ID_RE = /^p-[a-z0-9-]+$/
+
+/**
+ * #5144: validate the `environments.k8s` connection sub-block at config-load
+ * time. The `workspace` sub-block has its own validation (#4556); this covers
+ * the remaining fields the wiring layer forwards to `K8sBackend`. Every field
+ * is optional — only the fields actually present are checked — so a partial
+ * block (or one carrying only `workspace`) passes cleanly.
+ *
+ * Pushes human-readable warnings onto `warnings`; never throws.
+ *
+ * @param {object} k8s - The `environments.k8s` object (already known to be a plain object)
+ * @param {string[]} warnings - Accumulator the caller logs/returns
+ */
+function validateK8sBlock(k8s, warnings) {
+  const stringFields = ['namespace', 'kubeconfigPath', 'sidecarImage']
+  for (const field of stringFields) {
+    if (Object.prototype.hasOwnProperty.call(k8s, field) && typeof k8s[field] !== 'string') {
+      warnings.push(
+        `Invalid type for 'environments.k8s.${field}': expected string, got ${Array.isArray(k8s[field]) ? 'array' : typeof k8s[field]}`,
+      )
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(k8s, 'inCluster') && typeof k8s.inCluster !== 'boolean') {
+    warnings.push(
+      `Invalid type for 'environments.k8s.inCluster': expected boolean, got ${typeof k8s.inCluster}`,
+    )
+  }
+  if (Object.prototype.hasOwnProperty.call(k8s, 'imagePullPolicy')) {
+    const v = k8s.imagePullPolicy
+    if (typeof v !== 'string' || !VALID_K8S_PULL_POLICIES.has(v)) {
+      warnings.push(
+        `Invalid value for 'environments.k8s.imagePullPolicy': '${v}' (must be one of: ${[...VALID_K8S_PULL_POLICIES].join(', ')})`,
+      )
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(k8s, 'connectMode')) {
+    const v = k8s.connectMode
+    if (typeof v !== 'string' || !VALID_K8S_CONNECT_MODES.has(v)) {
+      warnings.push(
+        `Invalid value for 'environments.k8s.connectMode': '${v}' (must be one of: ${[...VALID_K8S_CONNECT_MODES].join(', ')})`,
+      )
+    }
+  }
+}
+
+/**
+ * #5144: validate the `environments.rancher` connection block at config-load
+ * time. Mirrors `validateRancherOptions` in rancher.js (URL shape, cluster-ID
+ * format, presence of a bearer token) so the operator sees the same error at
+ * startup that RancherBackend's constructor would throw — without ever logging
+ * the token value itself.
+ *
+ * Gated on `isRancherConfigured` semantics: a block missing any of rancherUrl /
+ * clusterId / token is treated as "Rancher not yet configured" and only its
+ * top-level shape (must be a plain object) is checked. This keeps a
+ * half-filled-in block from spamming warnings during setup while still
+ * catching a genuinely malformed complete config.
+ *
+ * Pushes human-readable warnings onto `warnings`; never throws. The token value
+ * is never echoed into a warning.
+ *
+ * @param {*} rancher - The `environments.rancher` value (any type)
+ * @param {string[]} warnings - Accumulator the caller logs/returns
+ */
+function validateRancherBlock(rancher, warnings) {
+  if (typeof rancher !== 'object' || rancher === null || Array.isArray(rancher)) {
+    warnings.push(
+      `Invalid type for 'environments.rancher': expected object, got ${Array.isArray(rancher) ? 'array' : typeof rancher}`,
+    )
+    return
+  }
+
+  const { rancherUrl, clusterId, token, caData, skipTLSVerify, defaultProjectId } = rancher
+
+  // Presence gate (mirrors isRancherConfigured): unless all three identity
+  // fields are present, treat as "not configured yet" — only shape was checked.
+  const configured = Boolean(rancherUrl && clusterId && token)
+  if (!configured) return
+
+  if (typeof rancherUrl !== 'string' || rancherUrl.length === 0) {
+    warnings.push(`Invalid value for 'environments.rancher.rancherUrl': must be a non-empty string`)
+  } else {
+    let parsed
+    try {
+      parsed = new URL(rancherUrl)
+    } catch {
+      parsed = null
+      warnings.push(`Invalid URL format for 'environments.rancher.rancherUrl': ${rancherUrl}`)
+    }
+    if (parsed && parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      warnings.push(
+        `Invalid value for 'environments.rancher.rancherUrl': must use http:// or https://, got '${parsed.protocol}'`,
+      )
+    }
+  }
+
+  if (typeof clusterId !== 'string' || !RANCHER_CLUSTER_ID_RE.test(clusterId)) {
+    warnings.push(
+      `Invalid value for 'environments.rancher.clusterId': must match the Rancher cluster-ID format (c-...), got '${clusterId}'`,
+    )
+  }
+
+  if (typeof token !== 'string' || token.length === 0) {
+    // Never echo the token value.
+    warnings.push(`Invalid value for 'environments.rancher.token': must be a non-empty bearer token string`)
+  }
+
+  if (caData != null && (typeof caData !== 'string' || caData.length === 0)) {
+    warnings.push(
+      `Invalid value for 'environments.rancher.caData': when provided, must be a non-empty base64-encoded PEM string`,
+    )
+  }
+
+  if (skipTLSVerify != null && typeof skipTLSVerify !== 'boolean') {
+    warnings.push(
+      `Invalid type for 'environments.rancher.skipTLSVerify': expected boolean, got ${typeof skipTLSVerify}`,
+    )
+  }
+
+  if (defaultProjectId != null && (typeof defaultProjectId !== 'string' || !RANCHER_PROJECT_ID_RE.test(defaultProjectId))) {
+    warnings.push(
+      `Invalid value for 'environments.rancher.defaultProjectId': must match the Rancher project-ID format (p-...), got '${defaultProjectId}'`,
+    )
+  }
+}
+
+/**
  * Return a copy of config with sensitive fields replaced by '***'.
  * Use this whenever the config object is serialized to logs or debug output.
  *
@@ -357,8 +504,31 @@ export function validateConfig(config, verbose = false) {
   // operators without any k8s key, or with other k8s settings but no
   // workspace block) passes through untouched.
   if (config.environments && typeof config.environments === 'object' && !Array.isArray(config.environments)) {
+    // #5144: backend selector. One of 'docker' (default) | 'k8s' | 'rancher'.
+    // When absent the wiring layer falls back to Docker, so the common
+    // single-node setup is unchanged. A bad value is warn-only (not fatal):
+    // the wiring layer treats an unrecognised selector as Docker, mirroring
+    // the "drop bad value, keep the safe default" contract used elsewhere.
+    if (Object.prototype.hasOwnProperty.call(config.environments, 'backend')) {
+      const backend = config.environments.backend
+      if (typeof backend !== 'string') {
+        warnings.push(
+          `Invalid type for 'environments.backend': expected string, got ${Array.isArray(backend) ? 'array' : typeof backend}`,
+        )
+      } else if (!ENVIRONMENT_BACKENDS.has(backend)) {
+        warnings.push(
+          `Invalid value for 'environments.backend': '${backend}' (must be one of: ${[...ENVIRONMENT_BACKENDS].join(', ')})`,
+        )
+      }
+    }
+
     const k8sBlock = config.environments.k8s
     if (k8sBlock && typeof k8sBlock === 'object' && !Array.isArray(k8sBlock)) {
+      // #5144: validate the K8s connection sub-block (the `workspace` block
+      // below already had its own validation from #4556). Only fields the
+      // wiring layer actually forwards to K8sBackend are checked; each is
+      // optional so a partial block (or just the workspace sub-block) passes.
+      validateK8sBlock(k8sBlock, warnings)
       if (Object.prototype.hasOwnProperty.call(k8sBlock, 'workspace')) {
         const ws = k8sBlock.workspace
         if (typeof ws !== 'object' || ws === null || Array.isArray(ws)) {
@@ -391,6 +561,18 @@ export function validateConfig(config, verbose = false) {
           }
         }
       }
+    }
+
+    // #5144: validate the Rancher connection block. Mirrors
+    // `validateRancherOptions` in rancher.js so an operator never sees one
+    // message at config-load time and a different one when RancherBackend is
+    // constructed. Gated on `isRancherConfigured` (presence of rancherUrl +
+    // clusterId + token): a block that does not yet carry a complete Rancher
+    // config is treated as "Rancher not configured" and only its shape (object,
+    // not array) is checked — partial blocks during setup don't spam warnings.
+    const rancherBlock = config.environments.rancher
+    if (rancherBlock !== undefined) {
+      validateRancherBlock(rancherBlock, warnings)
     }
   }
 
@@ -648,6 +830,143 @@ export function resolveSkipPermissions(config) {
     source: null,
     deprecationWarning: null,
   }
+}
+
+/**
+ * #5144: resolve the selected environment backend from a merged config object.
+ *
+ * Returns 'docker' for an absent, malformed, or unrecognised
+ * `environments.backend` (validateConfig already surfaces the warning), so the
+ * wiring layer never crashes on a typo and the default single-node path is
+ * preserved. Pure — no side effects, no logging.
+ *
+ * @param {object|null|undefined} config - Merged config
+ * @returns {'docker'|'k8s'|'rancher'}
+ */
+export function resolveEnvironmentBackend(config) {
+  const selected = config?.environments?.backend
+  if (typeof selected === 'string' && ENVIRONMENT_BACKENDS.has(selected)) {
+    return selected
+  }
+  return 'docker'
+}
+
+/**
+ * #5144: resolve a Rancher bearer token from a secret-friendly source.
+ *
+ * Precedence (highest first):
+ *   1. `tokenEnv` — name of an env var holding the token (e.g. RANCHER_TOKEN).
+ *      Keeps the secret out of the on-disk config file.
+ *   2. `tokenFile` — path to a file whose trimmed contents are the token
+ *      (e.g. a mounted secret).
+ *   3. `token` — inline token (discouraged but supported for parity with
+ *      validateRancherOptions).
+ *
+ * The resolved value is never logged. Returns `undefined` when none resolve so
+ * the caller / RancherBackend constructor produces the canonical "token must be
+ * a non-empty bearer token string" error.
+ *
+ * @param {object} rancher - The `environments.rancher` block
+ * @returns {string|undefined}
+ */
+export function resolveRancherToken(rancher = {}) {
+  if (typeof rancher.tokenEnv === 'string' && rancher.tokenEnv.length > 0) {
+    const fromEnv = process.env[rancher.tokenEnv]
+    if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv
+  }
+  if (typeof rancher.tokenFile === 'string' && rancher.tokenFile.length > 0) {
+    try {
+      const fromFile = readFileSync(rancher.tokenFile, 'utf-8').trim()
+      if (fromFile.length > 0) return fromFile
+    } catch {
+      // Fall through to inline token / undefined. Do not log the path's
+      // contents; the eventual "token required" error is enough signal.
+    }
+  }
+  if (typeof rancher.token === 'string' && rancher.token.length > 0) return rancher.token
+  return undefined
+}
+
+/**
+ * #5144: construct the environment backend selected by config.
+ *
+ * - 'docker' (default): `new DockerBackend({ _execFile })` — unchanged behaviour.
+ * - 'k8s'             : `new K8sBackend({ ...environments.k8s })`.
+ * - 'rancher'         : `new RancherBackend({ ...environments.k8s, ...rancher })`
+ *                       with the token resolved from a secret-friendly source.
+ *
+ * Backend modules are imported lazily so loading config never eagerly pulls in
+ * `@kubernetes/client-node` (only the K8s/Rancher paths need it). The selected
+ * backend's construction validates its own options and throws on a malformed
+ * block — the caller (server-cli) surfaces that as a fatal startup error.
+ *
+ * @param {object} config - Merged config
+ * @param {object} [deps] - Injection seam for testing
+ * @param {Function} [deps._execFile] - Forwarded to DockerBackend
+ * @param {Function} [deps._loadBackends] - Override the lazy module loader
+ *   (returns `{ DockerBackend, K8sBackend, RancherBackend }`). Lets unit tests
+ *   assert which class is instantiated with which options without importing the
+ *   kube SDK.
+ * @returns {Promise<{ backend: object, type: 'docker'|'k8s'|'rancher' }>}
+ */
+export async function buildEnvironmentBackend(config, { _execFile, _loadBackends } = {}) {
+  const type = resolveEnvironmentBackend(config)
+  const envs = config?.environments || {}
+
+  const loadBackends = _loadBackends || (async () => {
+    if (type === 'docker') {
+      const { DockerBackend } = await import('./environments/backends/docker.js')
+      return { DockerBackend }
+    }
+    if (type === 'k8s') {
+      const { K8sBackend } = await import('./environments/backends/k8s.js')
+      return { K8sBackend }
+    }
+    const { RancherBackend } = await import('./environments/backends/rancher.js')
+    return { RancherBackend }
+  })
+
+  const mods = await loadBackends()
+
+  if (type === 'k8s') {
+    const k8s = (envs.k8s && typeof envs.k8s === 'object' && !Array.isArray(envs.k8s)) ? envs.k8s : {}
+    const backend = new mods.K8sBackend({
+      namespace: k8s.namespace,
+      inCluster: k8s.inCluster,
+      kubeconfigPath: k8s.kubeconfigPath,
+      sidecarImage: k8s.sidecarImage,
+      imagePullPolicy: k8s.imagePullPolicy,
+      connectMode: k8s.connectMode,
+    })
+    return { backend, type }
+  }
+
+  if (type === 'rancher') {
+    const k8s = (envs.k8s && typeof envs.k8s === 'object' && !Array.isArray(envs.k8s)) ? envs.k8s : {}
+    const rancher = (envs.rancher && typeof envs.rancher === 'object' && !Array.isArray(envs.rancher)) ? envs.rancher : {}
+    const token = resolveRancherToken(rancher)
+    const backend = new mods.RancherBackend({
+      // K8s connection/runtime knobs shared with the plain K8s path.
+      namespace: k8s.namespace,
+      inCluster: k8s.inCluster,
+      kubeconfigPath: k8s.kubeconfigPath,
+      sidecarImage: k8s.sidecarImage,
+      imagePullPolicy: k8s.imagePullPolicy,
+      connectMode: k8s.connectMode,
+      // Rancher connection block. Token is resolved from a secret-friendly
+      // source and never logged.
+      rancherUrl: rancher.rancherUrl,
+      clusterId: rancher.clusterId,
+      token,
+      caData: rancher.caData,
+      skipTLSVerify: rancher.skipTLSVerify,
+      defaultProjectId: rancher.defaultProjectId,
+    })
+    return { backend, type }
+  }
+
+  const backend = new mods.DockerBackend({ _execFile })
+  return { backend, type }
 }
 
 const DEFAULT_CONFIG_PATH = join(homedir(), '.chroxy', 'config.json')
