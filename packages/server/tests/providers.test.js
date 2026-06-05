@@ -670,6 +670,68 @@ describe('Provider Registry', () => {
   })
 })
 
+// #3953 — claude-channel provider scaffold. Registered in providers.js so
+// the dashboard can list it + `chroxy doctor` runs its preflight; the
+// session itself is a no-op until the bridge lands in #3954.
+describe('claude-channel provider scaffold (#3953)', () => {
+  it('is registered and resolvable via getProvider', async () => {
+    const { ClaudeChannelSession } = await import('../src/claude-channel-session.js')
+    assert.equal(getProvider('claude-channel'), ClaudeChannelSession)
+  })
+
+  it('appears in listProviders() with the expected capability matrix', () => {
+    const list = listProviders()
+    const entry = list.find(p => p.name === 'claude-channel')
+    assert.ok(entry, 'claude-channel must appear in listProviders()')
+    assert.equal(entry.capabilities.permissions, true)
+    assert.equal(entry.capabilities.inProcessPermissions, false)
+    assert.equal(entry.capabilities.modelSwitch, false)
+    assert.equal(entry.capabilities.permissionModeSwitch, false)
+    assert.equal(entry.capabilities.planMode, false)
+    assert.equal(entry.capabilities.resume, false)
+    assert.equal(entry.capabilities.terminal, false)
+    assert.equal(entry.capabilities.thinkingLevel, false)
+    assert.equal(entry.capabilities.streaming, true)
+    assert.equal(entry.capabilities.tools, true)
+    // Derived: scaffold does not implement setPermissionRules.
+    assert.equal(entry.capabilities.sessionRules, false)
+  })
+
+  it('exposes auth detail mentioning subscription + research preview', () => {
+    const list = listProviders()
+    const entry = list.find(p => p.name === 'claude-channel')
+    assert.ok(entry?.auth)
+    assert.equal(entry.auth.ready, true)
+    assert.equal(entry.auth.source, 'oauth')
+    assert.match(entry.auth.detail, /research preview/i)
+    assert.match(entry.auth.detail, /channel/i)
+  })
+
+  it('passes validateProviderClass (no inProcessPermissions methods required)', async () => {
+    const { validateProviderClass } = await import('../src/providers.js')
+    const { ClaudeChannelSession } = await import('../src/claude-channel-session.js')
+    // Should not throw — start/destroy/sendMessage/interrupt/setModel/
+    // setPermissionMode all inherited from BaseSession.
+    validateProviderClass(ClaudeChannelSession, 'claude-channel')
+  })
+
+  it('exposes a non-empty displayLabel via resolveProviderLabel', async () => {
+    const { resolveProviderLabel } = await import('../src/providers.js')
+    const label = resolveProviderLabel('claude-channel')
+    assert.match(label, /channel/i)
+  })
+
+  it('shares the ~/.claude dataDir without duplicating it in getProviderDataDirs', async () => {
+    const { getProviderDataDirs } = await import('../src/providers.js')
+    const { homedir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dirs = getProviderDataDirs()
+    const claudeDir = join(homedir(), '.claude')
+    assert.equal(dirs.filter(d => d === claudeDir).length, 1,
+      '~/.claude must appear exactly once even with claude-channel registered')
+  })
+})
+
 describe('Docker Provider Naming (#2475)', () => {
   it('registerDockerProvider skips when environments not enabled', async () => {
     const before = listProviders().length
