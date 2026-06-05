@@ -109,14 +109,12 @@ describe('worktree-gc unit: parseWorktreeList', () => {
 
 describe('worktree-gc integration (real git repo)', () => {
   let repo
-  const made = []
 
   function addWorktree(name, { lockReason, dirty } = {}) {
     const wtPath = join(repo, '.claude', 'worktrees', name)
     git(repo, ['worktree', 'add', '--detach', wtPath, 'HEAD'])
     if (dirty) writeFileSync(join(wtPath, 'scratch.txt'), 'uncommitted work')
     if (lockReason) git(repo, ['worktree', 'lock', '--reason', lockReason, wtPath])
-    made.push(wtPath)
     return wtPath
   }
 
@@ -202,6 +200,68 @@ describe('worktree-gc integration (real git repo)', () => {
     const wt = addWorktree('clean-dead', { lockReason: `claude agent a1 (pid ${DEAD_PID})` })
     const reason = readLockReasonFromAdmin(wt)
     assert.match(reason, new RegExp(`pid ${DEAD_PID}`))
+  })
+})
+
+describe('worktree-gc unit: applyPlan prune reporting (injected git)', () => {
+  it('reports a prune item as failed when its pre-prune unlock fails', () => {
+    const calls = []
+    const git = (cwd, args) => {
+      calls.push(args.join(' '))
+      if (args[0] === 'worktree' && args[1] === 'unlock') {
+        const e = new Error('fatal: cannot unlock'); e.code = 1; throw e
+      }
+      return '' // prune succeeds
+    }
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/gone', action: 'prune', locked: true }],
+    }, { git })
+
+    assert.equal(results.length, 1)
+    assert.equal(results[0].ok, false)
+    assert.match(results[0].error, /unlock failed/)
+    // prune still runs (it reclaims any other unlocked dir-gone refs).
+    assert.ok(calls.includes('worktree prune'))
+  })
+
+  it('reports prune ok when unlock+prune both succeed', () => {
+    const git = () => ''
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/gone', action: 'prune', locked: true }],
+    }, { git })
+    assert.equal(results[0].ok, true)
+  })
+})
+
+describe('worktree-gc unit: readLockReasonFromAdmin (injected fs)', () => {
+  it('resolves a RELATIVE gitdir pointer against the worktree dir', () => {
+    // git may write `gitdir:` as a path relative to the worktree (e.g. with
+    // extensions.relativeWorktrees). The resolved admin/locked file must hang
+    // off the worktree path, not the cwd.
+    const wtPath = '/repos/proj/.claude/worktrees/agent-x'
+    const expectedLocked = '/repos/proj/.git/worktrees/agent-x/locked'
+    const files = {
+      [`${wtPath}/.git`]: 'gitdir: ../../../.git/worktrees/agent-x',
+      [expectedLocked]: 'claude agent agent-x (pid 4242)',
+    }
+    const reason = readLockReasonFromAdmin(wtPath, {
+      exists: (p) => p in files,
+      read: (p) => files[p],
+    })
+    assert.equal(reason, 'claude agent agent-x (pid 4242)')
+  })
+
+  it('still handles an absolute gitdir pointer', () => {
+    const wtPath = '/repos/proj/.claude/worktrees/agent-y'
+    const files = {
+      [`${wtPath}/.git`]: 'gitdir: /repos/proj/.git/worktrees/agent-y',
+      '/repos/proj/.git/worktrees/agent-y/locked': 'claude agent agent-y (pid 99)',
+    }
+    const reason = readLockReasonFromAdmin(wtPath, {
+      exists: (p) => p in files,
+      read: (p) => files[p],
+    })
+    assert.equal(reason, 'claude agent agent-y (pid 99)')
   })
 })
 

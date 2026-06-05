@@ -23,6 +23,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { GIT } from './git.js'
 
 /**
@@ -108,7 +109,12 @@ export function readLockReasonFromAdmin(worktreePath, deps = {}) {
     const pointer = String(read(dotGit, 'utf8')).trim()
     const m = /^gitdir:\s*(.+)$/m.exec(pointer)
     if (!m) return ''
-    const lockedFile = `${m[1].trim()}/locked`
+    // git may write the gitdir pointer as a path RELATIVE to the worktree dir
+    // (e.g. with extensions.relativeWorktrees); resolve it against worktreePath
+    // so we read the right `locked` file rather than one off the cwd.
+    const gitdir = m[1].trim()
+    const adminDir = isAbsolute(gitdir) ? gitdir : resolvePath(worktreePath, gitdir)
+    const lockedFile = `${adminDir}/locked`
     if (!exists(lockedFile)) return ''
     return String(read(lockedFile, 'utf8')).trim()
   } catch {
@@ -207,7 +213,8 @@ function isClean(git, worktreePath) {
 export function applyPlan(repoPath, plan, deps = {}) {
   const { git = (cwd, args) => execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' }) } = deps
   const results = []
-  let needPrune = false
+  const pruneItems = []
+  const unlockErrors = new Map() // item.path -> error message when its pre-prune unlock failed
 
   for (const item of plan.items) {
     if (item.action === 'remove') {
@@ -219,23 +226,36 @@ export function applyPlan(repoPath, plan, deps = {}) {
         results.push({ path: item.path, action: 'remove', ok: false, error: (err && err.message) || String(err) })
       }
     } else if (item.action === 'prune') {
-      // A locked, dir-gone worktree must be unlocked before prune will reclaim it.
+      // A locked, dir-gone worktree must be unlocked before prune will reclaim
+      // it. If the unlock fails the entry stays locked and prune cannot reclaim
+      // it, so record the failure and report this item as not-ok rather than
+      // claiming success off the back of a prune that skipped it.
       if (item.locked) {
-        try { git(repoPath, ['worktree', 'unlock', item.path]) } catch { /* best-effort */ }
+        try {
+          git(repoPath, ['worktree', 'unlock', item.path])
+        } catch (err) {
+          unlockErrors.set(item.path, (err && err.message) || String(err))
+        }
       }
-      needPrune = true
+      pruneItems.push(item)
     }
   }
 
-  if (needPrune) {
+  if (pruneItems.length > 0) {
+    let pruneError = null
     try {
       git(repoPath, ['worktree', 'prune'])
-      for (const item of plan.items) {
-        if (item.action === 'prune') results.push({ path: item.path, action: 'prune', ok: true })
-      }
     } catch (err) {
-      for (const item of plan.items) {
-        if (item.action === 'prune') results.push({ path: item.path, action: 'prune', ok: false, error: (err && err.message) || String(err) })
+      pruneError = (err && err.message) || String(err)
+    }
+    for (const item of pruneItems) {
+      const unlockErr = unlockErrors.get(item.path)
+      if (unlockErr) {
+        results.push({ path: item.path, action: 'prune', ok: false, error: `unlock failed (entry still locked): ${unlockErr}` })
+      } else if (pruneError) {
+        results.push({ path: item.path, action: 'prune', ok: false, error: pruneError })
+      } else {
+        results.push({ path: item.path, action: 'prune', ok: true })
       }
     }
   }
