@@ -284,6 +284,19 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
                 if (!controlRoom.active) controlRoom.onActivate()
+              } else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                // #5210 — mirror the session tabs' roving-tabindex arrow ladder
+                // so a keyboard user who arrows onto the CR tab can arrow back
+                // off it (it shares role="tab" with the session pills). Without
+                // this, focus would be stranded here.
+                e.preventDefault()
+                const tabs = (e.currentTarget.parentElement as HTMLElement)?.querySelectorAll<HTMLElement>('[role="tab"]')
+                if (!tabs) return
+                const idx = Array.from(tabs).indexOf(e.currentTarget)
+                const next = e.key === 'ArrowRight'
+                  ? (idx + 1) % tabs.length
+                  : (idx - 1 + tabs.length) % tabs.length
+                tabs[next]?.focus()
               }
             }}
           >

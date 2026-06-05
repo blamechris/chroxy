@@ -2326,4 +2326,30 @@ describe('App', () => {
       expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
     })
   })
+
+  describe('#5211 Control Room view vs disconnected/startup screens', () => {
+    const sessionWithCwd = [
+      { sessionId: 's1', name: 'One', cwd: '/tmp/a', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+    ]
+
+    it('keeps the CR view and suppresses the disconnected screen when the connection drops while CR is active', () => {
+      stateOverrides = { connectionPhase: 'connected', sessions: sessionWithCwd, activeSessionId: 's1' }
+      const { rerender } = render(<App />)
+      // Open the Control Room via the sidebar launcher (sessions-with-cwd
+      // render the sidebar, which hosts the launcher).
+      fireEvent.click(screen.getByTestId('sidebar-panel-slot-launcher-control-room'))
+      expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
+
+      // Connection drops with no sessions left — the disconnected screen would
+      // normally render. controlRoomActive is local state and survives the
+      // rerender, so the CR is still active.
+      stateOverrides = { connectionPhase: 'disconnected', sessions: [], activeSessionId: null }
+      rerender(<App />)
+
+      // #5211 — the CR owns the main area; the disconnected screen does NOT
+      // also render (mutually exclusive).
+      expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
+      expect(screen.queryByTestId('disconnected-screen')).not.toBeInTheDocument()
+    })
+  })
 })

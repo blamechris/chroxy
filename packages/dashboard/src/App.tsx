@@ -821,6 +821,9 @@ export function App() {
         })
       },
       openCreateSessionAt: (cwd) => {
+        // #5214 — opening the picker at a context-menu cwd is not an
+        // Investigate launch; clear any stashed seed so it can't leak.
+        pendingSeedPromptRef.current = null
         setPendingCwd(cwd)
         setShowCreateSession(true)
       },
@@ -879,6 +882,11 @@ export function App() {
         recordMruCommand(cmd.id)
         // Override commands that need App-level state
         if (cmd.id === 'new-session') {
+          // #5214 — a plain new session: reset cwd and clear any stashed
+          // Investigate seed so it can't leak into this session's composer
+          // (matches handleNewSession; this path previously diverged on both).
+          setPendingCwd(null)
+          pendingSeedPromptRef.current = null
           setShowCreateSession(true)
         } else if (cmd.id === 'toggle-sidebar') {
           setSidebarOpen(prev => !prev)
@@ -2293,6 +2301,9 @@ export function App() {
           onResumeSession={resumeConversation}
           onOpenControlRoom={openControlRoom}
           onNewSession={(cwd) => {
+            // #5214 — sidebar new-session is not an Investigate launch; clear
+            // any stashed seed so it can't leak into this session's composer.
+            pendingSeedPromptRef.current = null
             setPendingCwd(cwd || null)
             setShowCreateSession(true)
           }}
@@ -2346,8 +2357,12 @@ export function App() {
           onRestart={handleRestartSession}
         />
 
-        {/* Startup error screen — shown when server failed to start (Tauri) */}
-        {isStartupError && (
+        {/* Startup error screen — shown when server failed to start (Tauri).
+            #5211 — suppressed while the Control Room tab is active so the two
+            don't double-render; the CR shows its own not-connected affordance
+            (disabled Refresh + hint) and the operator can close it to reach
+            this screen. */}
+        {isStartupError && !controlRoomActive && (
           <StartupErrorScreen
             error={connectionError}
             logs={serverStartupLogs}
@@ -2356,8 +2371,11 @@ export function App() {
           />
         )}
 
-        {/* Disconnected screen — shown when not connected with no error (e.g. server stopped) */}
-        {connectionPhase === 'disconnected' && !connectionError && !isConnected && sessions.length === 0 && (
+        {/* Disconnected screen — shown when not connected with no error (e.g.
+            server stopped). #5211 — suppressed while the Control Room tab is
+            active (mutually exclusive with the CR view, which renders its own
+            not-connected state). */}
+        {connectionPhase === 'disconnected' && !connectionError && !isConnected && sessions.length === 0 && !controlRoomActive && (
           <div className="startup-error-screen" data-testid="disconnected-screen">
             <div className="startup-error-content">
               <h2 className="startup-error-title">Disconnected</h2>
@@ -2390,7 +2408,11 @@ export function App() {
             and switching back to a session restores it untouched. Takes
             precedence over the welcome screen so the operator can open the CR
             even with zero sessions. */}
-        {controlRoomActive && connectionPhase !== 'connecting' && (
+        {/* #5211 — the CR owns the main area whenever active (any connection
+            phase). It renders its own empty/loading + not-connected states, so
+            it stays put across reconnects instead of blanking or
+            double-rendering with the disconnected/startup screens. */}
+        {controlRoomActive && (
           <div className="main-content" data-testid="control-room-main">
             <ControlRoomSection onInvestigate={handleInvestigate} />
           </div>

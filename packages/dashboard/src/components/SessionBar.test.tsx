@@ -1270,6 +1270,30 @@ describe('SessionBar', () => {
       expect(crTab.getAttribute('draggable')).not.toBe('true')
     })
 
+    it('#5210 arrows off the CR tab onto an adjacent session tab and back', () => {
+      render(
+        <SessionBar
+          sessions={makeSessions()}
+          onSwitch={vi.fn()}
+          onClose={vi.fn()}
+          onRename={vi.fn()}
+          onNewSession={vi.fn()}
+          controlRoom={{ open: true, active: true, onActivate: vi.fn(), onClose: vi.fn() }}
+        />
+      )
+      const crTab = screen.getByTestId('control-room-tab')
+      const firstSession = screen.getByTestId('session-tab-s1')
+      // The CR tab is pinned first; ArrowRight moves to the first session tab.
+      crTab.focus()
+      fireEvent.keyDown(crTab, { key: 'ArrowRight' })
+      expect(document.activeElement).toBe(firstSession)
+      // And ArrowLeft from the first session tab returns to the CR tab
+      // (the session tabs' own roving ladder), proving the boundary is
+      // traversable both ways.
+      fireEvent.keyDown(firstSession, { key: 'ArrowLeft' })
+      expect(document.activeElement).toBe(crTab)
+    })
+
     it('does not activate the CR tab when Enter/Space bubbles from its close ×', () => {
       const onActivate = vi.fn()
       const onClose = vi.fn()
