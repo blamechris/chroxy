@@ -220,6 +220,9 @@ function ViewSwitcher({
       >
         <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
         <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
+        {/* #5197: Control Room sits right after Output (marquee feature) so it's
+            always visible instead of overflowing off the end of the tab bar. */}
+        <button className={`view-tab${viewMode === 'control-room' ? ' active' : ''}`} onClick={() => { setViewMode('control-room'); setSplitMode(null); persistSplitMode(null) }} type="button">Control Room</button>
         <button
           className={`view-tab${splitMode ? ' active' : ''}`}
           onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
@@ -235,7 +238,6 @@ function ViewSwitcher({
         <button className={`view-tab${viewMode === 'environments' ? ' active' : ''}`} onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }} type="button">Envs</button>
         <button className={`view-tab${viewMode === 'snapshots' ? ' active' : ''}`} onClick={() => { setViewMode('snapshots'); setSplitMode(null); persistSplitMode(null) }} type="button">Snapshots</button>
         <button className={`view-tab${viewMode === 'pool' ? ' active' : ''}`} onClick={() => { setViewMode('pool'); setSplitMode(null); persistSplitMode(null) }} type="button">Pool</button>
-        <button className={`view-tab${viewMode === 'control-room' ? ' active' : ''}`} onClick={() => { setViewMode('control-room'); setSplitMode(null); persistSplitMode(null) }} type="button">Control Room</button>
         <div className="view-switch-spacer" />
         <button className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`} onClick={() => setCheckpointsOpen(prev => !prev)} type="button" title="Toggle checkpoint timeline">Checkpoints</button>
         <button className={`view-tab${viewMode === 'diff' ? ' active' : ''}`} onClick={() => setViewMode('diff')} type="button">Diff</button>

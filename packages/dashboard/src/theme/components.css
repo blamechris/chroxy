@@ -81,7 +81,11 @@
    own cell with explicit gap; only the center column flexes. */
 #header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  /* #5197: the right column is `minmax(0, auto)` (not bare `auto`) so it can
+     shrink below its content's max width when the window is narrow — letting
+     the cost badge truncate in place instead of the whole cluster (token
+     count + usage bar) clipping off the right edge of the window. */
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, auto);
   align-items: center;
   gap: 16px;
   padding: 10px 16px;
@@ -147,7 +151,12 @@
    overflowing the grid column onto its neighbours. */
 .header-center select[data-kind="model"] {
   width: auto;
-  min-width: 90px;
+  /* #5197: a native <select> with `width: auto` does NOT grow to its label
+     in WebKit — it collapses to `min-width` and ellipsis-truncates the rest
+     (the "Sonnet 4.6" → "Sonnet …" bug). The floor must therefore fit the
+     common model labels; 160px shows "Sonnet 4.6" / "Opus 4.8" in full while
+     the 240px cap still truncates pathologically long ids. */
+  min-width: 160px;
   max-width: 240px;
 }
 .header-center select[data-kind="permission"] {
@@ -180,10 +189,10 @@
   white-space: nowrap;
   text-overflow: ellipsis;
   flex-shrink: 1;
-  /* #5181: mirror the model <select>'s responsive sizing so the
-     read-only TUI pill sits cleanly in the same slot — content-aware
-     width with a small floor and the same 240px truncation cap. */
-  min-width: 90px;
+  /* #5181 + #5197: mirror the model <select>'s sizing so the read-only TUI
+     pill sits cleanly in the same slot — 160px floor (fits "Sonnet 4.6")
+     with the same 240px truncation cap. */
+  min-width: 160px;
   max-width: 240px;
   display: inline-block;
 }
@@ -332,8 +341,12 @@
      the per-child `flex-shrink: 0` below guarantees no individual control
      gets clipped. The center column's `minmax(0, 1fr)` absorbs the
      remaining space, so it (not the right cluster) is what yields when
-     the window narrows. */
-  min-width: max-content;
+     the window narrows.
+     #5197: but `max-content` made the cluster overflow the WINDOW edge once
+     the provider/model cost badge got long — so allow the column to shrink
+     (`min-width: 0`) and push the yield down into the cost badge, which
+     truncates, while the small fixed controls below keep `flex-shrink: 0`. */
+  min-width: 0;
 }
 
 /* #5180: every direct control in the right cluster keeps its intrinsic
@@ -342,13 +355,14 @@
   flex-shrink: 0;
 }
 
-/* Status bar lives inside header-right (cost + tokens). It must NOT shrink
-   below its content — token count truncating to "718 toke..." was the
-   visible symptom. The 3-column grid above already protects the right
-   zone from the center, so the status bar is free to take whatever width
-   its content needs. */
+/* #5197: the status bar (provider badge + cost + token meter) is the ONE
+   right-cluster child allowed to shrink, so the long provider/model cost
+   badge can truncate instead of shoving the token count off-screen. The
+   token meter and provider badge inside it stay fixed (rules below); only
+   the cost badge absorbs the squeeze. */
 .header-right .status-bar {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
   white-space: nowrap;
 }
 
@@ -4117,6 +4131,8 @@ button.sidebar-token-view-session-row:hover {
   border-radius: 3px;
   padding: 1px 6px;
   cursor: help;
+  /* #5197: the SDK/provider tag stays fixed; only the cost text truncates. */
+  flex-shrink: 0;
 }
 .status-provider[data-provider="sdk"] {
   color: var(--accent-orange);
@@ -4134,7 +4150,15 @@ button.sidebar-token-view-session-row:hover {
 .status-cost {
   color: var(--accent-green);
   font-family: var(--font-mono);
-  min-width: 60px;
+  /* #5197: the cost badge (esp. provider/model mode, e.g.
+     "Claude Code (SDK) · Sonnet 4.6") is the flexible element of the right
+     cluster — it truncates with an ellipsis when space is tight so the token
+     count and usage bar stay on-screen. */
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-context {
@@ -4156,6 +4180,9 @@ button.sidebar-token-view-session-row:hover {
   gap: 6px;
   color: var(--text-muted);
   font-family: var(--font-mono);
+  /* #5197: the token count + usage bar never shrink — only the cost badge
+     does — so "61 / 200.0k tokens" is never clipped. */
+  flex-shrink: 0;
 }
 
 /* #5179: stacked variant — label on top, fill bar beneath it, both

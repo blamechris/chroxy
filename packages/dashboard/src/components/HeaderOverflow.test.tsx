@@ -16,11 +16,14 @@ import { resolve } from 'path'
 const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
 
 describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
-  it('#header is a 3-column grid (auto | 1fr | auto) so zones cannot overlap', () => {
+  it('#header is a 3-column grid (auto | 1fr | minmax(0,auto)) so zones cannot overlap', () => {
     const block = css.match(/#header\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/display:\s*grid/)
-    expect(block![0]).toMatch(/grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/)
+    // #5197: the right column is minmax(0, auto) — it can shrink below its
+    // content's max width so the cost badge truncates rather than the whole
+    // cluster clipping off the right edge of the window.
+    expect(block![0]).toMatch(/grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+minmax\(0,\s*auto\)/)
   })
 
   it('#header has overflow: visible (native selects render outside header bounds)', () => {
@@ -40,18 +43,19 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).not.toMatch(/flex-shrink:/)
   })
 
-  it('.header-right is a flex container, content-pinned so it never collapses its children (#5180)', () => {
+  it('.header-right is a flex container that can shrink (min-width: 0) so the cluster never clips off-window (#5180/#5197)', () => {
     const block = css.match(/\.header-right\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/display:\s*flex/)
-    // #5180: the right cluster must keep its intrinsic width so the bell,
-    // ⋯ overflow, cost badge and tokens sit side-by-side instead of
-    // shrinking on top of one another (the occlusion symptom). The grid's
-    // `auto` track plus `min-width: max-content` pin the column to its
-    // content. Strip CSS comments before asserting on declarations so
-    // explanatory prose mentioning `flex-shrink` doesn't trip the regex.
+    // #5197: `min-width: max-content` (the #5180 fix) stopped sibling
+    // overlap but made the cluster overflow the WINDOW edge once the
+    // provider/model cost badge got long. `min-width: 0` lets the column
+    // yield; overlap is still prevented by per-child `flex-shrink: 0` (next
+    // test) while the squeeze is absorbed by the cost badge truncating.
+    // Strip CSS comments so explanatory prose doesn't trip the regex.
     const decls = block![0].replace(/\/\*[\s\S]*?\*\//g, '')
-    expect(decls).toMatch(/min-width:\s*max-content/)
+    expect(decls).toMatch(/min-width:\s*0/)
+    expect(decls).not.toMatch(/min-width:\s*max-content/)
   })
 
   it('every direct child of .header-right is flex-shrink: 0 so no control overlaps a sibling (#5180)', () => {
@@ -60,14 +64,23 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/flex-shrink:\s*0/)
   })
 
-  it('.header-right .status-bar (a flex item inside header-right) gets flex-shrink: 0 + nowrap', () => {
-    // status-bar IS a flex item here (header-right is display: flex), so
-    // flex-shrink: 0 is the right primitive — without it, the cost +
-    // token text could truncate to "718 toke...".
+  it('.header-right .status-bar may shrink (#5197) so the cost badge truncates while the token meter stays fixed', () => {
+    // #5197: status-bar is the ONE right-cluster child allowed to shrink
+    // (flex-shrink: 1 + min-width: 0) so the long provider/model cost badge
+    // can ellipsis-truncate instead of pushing the token count off-screen.
     const block = css.match(/\.header-right \.status-bar\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/flex-shrink:\s*0/)
+    expect(block![0]).toMatch(/flex-shrink:\s*1/)
+    expect(block![0]).toMatch(/min-width:\s*0/)
     expect(block![0]).toMatch(/white-space:\s*nowrap/)
+    // The squeeze is absorbed by the cost badge (truncates), NOT the token
+    // meter or provider tag (both fixed) — so "61 / 200.0k tokens" is never
+    // clipped.
+    const cost = css.match(/\.status-cost\s*\{[^}]*\}/s)
+    expect(cost![0]).toMatch(/text-overflow:\s*ellipsis/)
+    expect(cost![0]).toMatch(/flex-shrink:\s*1/)
+    const meter = css.match(/\.status-context-meter\s*\{[^}]*\}/s)
+    expect(meter![0]).toMatch(/flex-shrink:\s*0/)
   })
 
   it('.header-center has min-width: 0 and overflow: hidden so its column can shrink without spilling', () => {
@@ -98,12 +111,13 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(model).toBeTruthy()
     expect(permission).toBeTruthy()
     expect(thinking).toBeTruthy()
-    // #5181: the model select is content-aware (width: auto) with a small
-    // min-width floor so short ids ("Auto") don't float in an over-wide
-    // box, and a 240px max-width cap so long ids truncate-with-ellipsis
-    // in place rather than overflowing onto the right cluster.
+    // #5197: a native <select> with `width: auto` does NOT grow to its
+    // label in WebKit — it collapses to min-width and truncates the rest
+    // ("Sonnet 4.6" → "Sonnet …"). The floor must fit the common model
+    // labels (160px shows "Sonnet 4.6"); the 240px cap still truncates
+    // pathologically long ids.
     expect(model![0]).toMatch(/width:\s*auto/)
-    expect(model![0]).toMatch(/min-width:\s*90px/)
+    expect(model![0]).toMatch(/min-width:\s*160px/)
     expect(model![0]).toMatch(/max-width:\s*240px/)
     expect(permission![0]).toMatch(/min-width:\s*110px/)
     expect(permission![0]).toMatch(/max-width:\s*160px/)
