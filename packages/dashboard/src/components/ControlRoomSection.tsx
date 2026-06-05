@@ -282,7 +282,11 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now }: R
           <div className="cr-dim cr-mono cr-branch" data-testid={`cr-branch-${repo.name}`} title={repo.branch}>{repo.branch}</div>
         </td>
         <td><VerdictTag verdict={repo.verdict} /></td>
-        <td className="cr-onboarding" title={repo.onboarding}>{repo.onboarding}</td>
+        {/* #5201: ellipsis-truncate on an inner block element, not the <td>
+            itself — text-overflow on display:table-cell is unreliable and can
+            still let long content widen the column. The branch cell already
+            wraps its text in a div for the same reason. */}
+        <td><div className="cr-onboarding" title={repo.onboarding}>{repo.onboarding}</div></td>
         <TreeCell repo={repo} />
         <CountCell value={repo.worktrees} testid={`cr-wt-${repo.name}`} />
         <CountCell value={repo.openPRs} testid={`cr-prs-${repo.name}`} />
