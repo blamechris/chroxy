@@ -391,6 +391,7 @@ function _isSecureRequest(req) {
  *   { type: 'background_work_changed', sessionId, pending } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`)
  *   { type: 'activity_snapshot', sessionId, schemaVersion, entries } — Control Room full activity tree for a session, on subscribe/resync (#5161 schema; emitter #5160; `entries: [{ id, kind, label, status, startedAt, endedAt?, parentId?, outputRef? }, …]`)
  *   { type: 'activity_delta', sessionId, schemaVersion, op, entry } — Control Room incremental activity-entry change (#5161 schema; emitter #5160; `op` is one of `started` / `updated` / `ended`; `entry` is the full node)
+ *   { type: 'host_status_snapshot', requestId?, generatedAt, root, summary, repos } — Control Room Host/Repo Status survey reply (#5171 schema; emitter #5174); reply to a `host_status_request`. On failure carries `{ requestId?, error: { code, message } }` instead of the survey fields.
  *   { type: 'provider_list', providers }                — available providers
  *   { type: 'byok_credentials_status', requestId?, status, source, masked?, reason? } — BYOK credentials state for the dashboard (#4052)
  *   { type: 'credentials_status', requestId?, credentials: [{ key, provider, label, kind, status, source, masked?, oauth }], fileExists?, fileError? } — generalized provider-credential status for the dashboard (#3855); masked, value-free; sent to requester + broadcast after set/delete
