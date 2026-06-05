@@ -165,14 +165,17 @@ export function detectAttribution(contents) {
 
 /**
  * Normalise a repo path into a canonical comparison key for matching against
- * active session cwds. Strips a single trailing slash.
+ * active session cwds. Converts Windows backslashes to forward slashes (a
+ * session `cwd` on Windows uses `\\` separators) and strips a single trailing
+ * slash so prefix comparisons are separator-agnostic.
  *
  * @param {string} p - a path.
  * @returns {string} comparison key.
  */
 function pathKey(p) {
   if (typeof p !== 'string') return ''
-  return p.length > 1 && p.endsWith('/') ? p.slice(0, -1) : p
+  const slashed = p.replace(/\\/g, '/')
+  return slashed.length > 1 && slashed.endsWith('/') ? slashed.slice(0, -1) : slashed
 }
 
 /**
@@ -300,8 +303,18 @@ async function surveyOne(repo, ctx) {
       readSettings(readFn, repo.path),
     ])
 
+    // `git status --porcelain` is the authoritative tree probe. A null here
+    // means the command FAILED (path isn't a git repo, git unavailable, etc.)
+    // — distinct from a successful empty string (a genuinely clean tree). We
+    // must NOT fall back to parseTree('') in that case: it would paint a
+    // false `clean`/`onboarded` row. Surface it as a degraded `investigate`
+    // row instead so the Control Room flags it for a human look.
+    if (statusRaw === null) {
+      return degradedRepo(repo, now, new Error('git status probe failed (not a git repo or git unavailable)'))
+    }
+
     const branch = branchRaw && branchRaw.length > 0 ? branchRaw : 'unknown'
-    const tree = parseTree(statusRaw || '')
+    const tree = parseTree(statusRaw)
     const worktrees = countWorktrees(worktreeRaw || '')
     const openPRs = parseOpenPRs(prRaw)
     const attribution = detectAttribution(settingsRaw)

@@ -259,12 +259,12 @@ describe('surveyRepos — per-repo error tolerance', () => {
   it('one repo whose _readFile/exec throw unexpectedly does not fail the survey', async () => {
     const ok = { name: 'ok', path: '/p/ok' }
     const bad = { name: 'bad', path: '/p/bad' }
-    // exec fake throws a non-Error for /p/bad branch to simulate an unexpected
-    // crash inside surveyOne (Promise.all rejection paths are tolerated, but
-    // we also exercise the outer try/catch via a throwing _readFile).
+    // The exec fake rejects for every command on /p/bad, so its git status
+    // probe returns null — surveyOne's core-probe-failure guard then yields a
+    // degraded `investigate` row (branch 'unknown') rather than a false-clean
+    // row. The /p/bad _readFile also throws, exercising the tolerant read path.
     const exec = async (file, args, opts) => {
       if (opts.cwd === '/p/bad') {
-        // throw synchronously-ish (rejected promise) for every command
         throw new Error('disk on fire')
       }
       const repo = cleanRepo()
@@ -283,6 +283,40 @@ describe('surveyRepos — per-repo error tolerance', () => {
     // still a valid RepoStatus (not dropped).
     assert.ok(badStatus)
     assert.equal(badStatus.branch, 'unknown')
+    // Core git probe failed → degraded `investigate`, NOT a false `onboarded`.
+    assert.equal(badStatus.verdict, 'investigate')
+  })
+
+  it('core git probe failure (status) yields a degraded investigate row, not onboarded', async () => {
+    const repo = { name: 'notgit', path: '/p/notgit' }
+    // `git status` fails (path is not a git repo). Other commands also fail.
+    const exec = makeExec({ '/p/notgit': {} }) // empty map → every command rejects
+    const out = await surveyRepos([repo], { _execFile: exec, _now: now, _readFile: async () => { throw new Error() } })
+    const r = out.repos[0]
+    assert.equal(r.verdict, 'investigate')
+    assert.equal(r.live, false)
+    assert.equal(r.branch, 'unknown')
+    // Did NOT fall through to a false-clean onboarded row.
+    assert.notEqual(r.verdict, 'onboarded')
+    assert.match(r.note, /git status probe failed/)
+    // Still a schema-valid RepoStatus.
+    const parsed = ServerHostStatusSnapshotSchema.safeParse({ type: 'host_status_snapshot', ...out })
+    assert.ok(parsed.success)
+  })
+
+  it('hasBoundSession matches a Windows-style backslash session cwd', async () => {
+    // Repo path uses backslashes (Windows); a bound session cwd under it must
+    // still register as live despite the separator difference.
+    const repo = { name: 'win', path: 'C:\\proj\\app' }
+    const exec = makeExec({ 'C:\\proj\\app': cleanRepo() })
+    const out = await surveyRepos([repo], {
+      _execFile: exec,
+      _now: now,
+      _readFile: async () => { throw new Error() },
+      activeSessionCwds: ['C:\\proj\\app\\packages\\server'],
+    })
+    assert.equal(out.repos[0].verdict, 'live')
+    assert.equal(out.repos[0].live, true)
   })
 })
 
