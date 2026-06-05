@@ -439,6 +439,15 @@ export interface MessageInputActions {
     toolUseId?: string,
   ) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
+  /**
+   * #4973 — record a multi-question form submission: stores the
+   * comma-joined summary in `answered` and the structured per-question
+   * answers map in `answeredAnswers`.
+   */
+  markPromptAnsweredMulti: (
+    messageId: string,
+    answers: Record<string, string | string[]>,
+  ) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
 }
 

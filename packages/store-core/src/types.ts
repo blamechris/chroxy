@@ -141,6 +141,17 @@ export interface ChatMessage {
    */
   toolInputPartialTruncated?: boolean;
   answered?: string;
+  /**
+   * #4973 — structured per-question answers map recorded when the user
+   * submits a multi-question AskUserQuestion form. Keyed by question text,
+   * with single-select values as a `string` and multi-select values as a
+   * `string[]` of chosen option values. The flat `answered` field still
+   * holds the comma-joined human-readable summary (for chat history /
+   * legacy renderers); this field lets the multi-question summary chip
+   * map chosen values back to their option labels per question without
+   * re-parsing the delimited summary string.
+   */
+  answeredAnswers?: Record<string, string | string[]>;
   /** Timestamp when the user answered a permission prompt */
   answeredAt?: number;
   expiresAt?: number;

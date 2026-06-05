@@ -20,6 +20,7 @@ import { ActivityGroup } from './chat/ActivityGroup';
 import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
 import type { SelectOptionValue } from './chat/MessageBubble';
+import type { MultiQuestionAnswersMap } from './chat/MultiQuestionForm';
 import { buildChatViewMessages } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 
@@ -39,6 +40,20 @@ export interface ChatViewProps {
    * `MessageBubble.SelectOptionValue` for the union type.
    */
   onSelectOption: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
+  /**
+   * #4973 — submit handler for the multi-question AskUserQuestion form.
+   * Fires with the per-question answers map; SessionScreen forwards it to
+   * `sendUserQuestionResponse` and records the structured summary.
+   */
+  onSubmitMultiQuestion?: (answersMap: MultiQuestionAnswersMap, messageId: string, toolUseId?: string) => void;
+  /**
+   * #4973 / #4735 — when true, multi-question AskUserQuestion payloads
+   * render the interactive `MultiQuestionForm`. SDK-mode sessions only;
+   * TUI / CLI sessions leave this false (permission-hook denies combined
+   * multi-question tool_uses). Mirrors the dashboard's
+   * `allowMultiQuestionForm` gate.
+   */
+  allowMultiQuestion?: boolean;
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
@@ -114,6 +129,8 @@ export function ChatView({
   scrollViewRef,
   claudeReady,
   onSelectOption,
+  onSubmitMultiQuestion,
+  allowMultiQuestion,
   isCliMode,
   selectedIds,
   isSelecting,
@@ -345,6 +362,8 @@ export function ChatView({
                 <MessageBubble
                   message={msg}
                   onSelectOption={onSelectOption}
+                  onSubmitMultiQuestion={onSubmitMultiQuestion}
+                  allowMultiQuestion={allowMultiQuestion}
                   isSelected={selectedIds.has(msg.id)}
                   isSelecting={isSelecting}
                   onLongPress={() => onToggleSelection(msg.id)}
