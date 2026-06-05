@@ -215,6 +215,16 @@ describe('SidebarCostBadge mode union (#5184)', () => {
     expect(isCostBadgeMode(undefined)).toBe(false)
     expect(isCostBadgeMode(42)).toBe(false)
   })
+
+  it('isCostBadgeMode rejects inherited Object.prototype keys (no prototype pollution)', () => {
+    // The guard must use hasOwnProperty, NOT `in` — otherwise a corrupt
+    // localStorage value of `toString` / `constructor` / `__proto__` would
+    // pass and get stored as a fake CostBadgeMode.
+    expect(isCostBadgeMode('toString')).toBe(false)
+    expect(isCostBadgeMode('constructor')).toBe(false)
+    expect(isCostBadgeMode('hasOwnProperty')).toBe(false)
+    expect(isCostBadgeMode('__proto__')).toBe(false)
+  })
 })
 
 describe('formatCostBadgeContent per mode (#5184)', () => {

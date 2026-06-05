@@ -132,14 +132,15 @@ import {
   createEmptyActivityState,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
-// #5184: header cost-badge mode union, default, and runtime guard. Lives
-// with the badge component (no store dependency) so the type, the rehydrate
-// validation, and the Settings select all share one source of truth.
+// #5184: header cost-badge mode union, default, and runtime guard. Lives in
+// a plain `lib/` module (no React dependency) so the store layer doesn't
+// import a `.tsx` component; the type, the rehydrate validation, and the
+// Settings select all share this one source of truth.
 import {
   DEFAULT_COST_BADGE_MODE,
   isCostBadgeMode,
   type CostBadgeMode,
-} from '../components/SidebarCostBadge';
+} from '../lib/cost-badge-mode';
 import {
   loadPersistedState,
   loadSessionList,

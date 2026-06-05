@@ -13,10 +13,10 @@
 // puts it on the public surface but doesn't bring it into this file's
 // type-name scope).
 import type { PermissionMode } from '@chroxy/store-core'
-// #5184: header cost-badge display mode. Defined alongside the badge
-// component (which owns the union + runtime guard) — the store only needs
-// the type for its state slot.
-import type { CostBadgeMode } from '../components/SidebarCostBadge'
+// #5184: header cost-badge display mode. Defined in a plain lib module
+// (which owns the union + runtime guard) — the store only needs the type
+// for its state slot, and avoids importing a `.tsx` component here.
+import type { CostBadgeMode } from '../lib/cost-badge-mode'
 
 // Re-export shared protocol types from store-core
 export type {
