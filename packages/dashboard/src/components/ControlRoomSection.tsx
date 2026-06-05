@@ -229,6 +229,14 @@ export interface ControlRoomSectionProps {
   snapshot?: ServerHostStatusSnapshotMessage | null
   /** True while a refresh is in flight. Defaults to the store's flag. */
   loading?: boolean
+  /**
+   * Whether the WS connection is up. Defaults to the store's
+   * `connectionPhase === 'connected'`. When false, the Refresh / Run survey
+   * buttons are disabled (a `host_status_request` would be silently dropped by
+   * `requestHostStatus` per the #4559 fail-loud contract) and a "not connected"
+   * hint is shown.
+   */
+  connected?: boolean
   /** Refresh action. Defaults to the store's `requestHostStatus`. */
   onRefresh?: () => void
   /** Injectable clock (epoch ms) for the "generated Nm ago" string. */
@@ -238,16 +246,27 @@ export interface ControlRoomSectionProps {
 export function ControlRoomSection({
   snapshot: snapshotProp,
   loading: loadingProp,
+  connected: connectedProp,
   onRefresh: onRefreshProp,
   now = Date.now,
 }: ControlRoomSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.hostStatus)
   const storeLoading = useConnectionStore((s) => s.hostStatusLoading)
+  const storeConnected = useConnectionStore((s) => s.connectionPhase === 'connected')
   const requestHostStatus = useConnectionStore((s) => s.requestHostStatus)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
+  const connected = connectedProp !== undefined ? connectedProp : storeConnected
   const onRefresh = onRefreshProp ?? requestHostStatus
+
+  // Gate the refresh on connection state: a dropped request would otherwise
+  // spin/no-op silently. Disabled while a refresh is in flight or disconnected.
+  const refreshDisabled = loading || !connected
+  const handleRefresh = () => {
+    if (refreshDisabled) return
+    onRefresh()
+  }
 
   const generatedAtMs = snapshot ? Date.parse(snapshot.generatedAt) : NaN
 
@@ -263,9 +282,10 @@ export function ControlRoomSection({
             type="button"
             className="cr-refresh"
             data-testid="cr-refresh"
-            onClick={onRefresh}
-            disabled={loading}
+            onClick={handleRefresh}
+            disabled={refreshDisabled}
             aria-busy={loading}
+            title={connected ? undefined : 'Not connected — reconnect to run the survey'}
           >
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
@@ -292,9 +312,19 @@ export function ControlRoomSection({
           ) : (
             <>
               <p>No host status survey yet.</p>
-              <button type="button" className="cr-refresh" data-testid="cr-empty-refresh" onClick={onRefresh}>
+              <button
+                type="button"
+                className="cr-refresh"
+                data-testid="cr-empty-refresh"
+                onClick={handleRefresh}
+                disabled={!connected}
+                title={connected ? undefined : 'Not connected — reconnect to run the survey'}
+              >
                 Run survey
               </button>
+              {!connected && (
+                <p className="cr-dim" data-testid="cr-not-connected">Not connected to the server.</p>
+              )}
             </>
           )}
         </div>

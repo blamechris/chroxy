@@ -25,7 +25,12 @@ import type { ServerHostStatusSnapshotMessage } from '@chroxy/protocol'
 // jsdom — invoking it directly trips a null-React-internals error.
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: unknown) => unknown) =>
-    selector({ hostStatus: null, hostStatusLoading: false, requestHostStatus: () => false }),
+    selector({
+      hostStatus: null,
+      hostStatusLoading: false,
+      connectionPhase: 'connected',
+      requestHostStatus: () => false,
+    }),
 }))
 import {
   ControlRoomSection,
@@ -189,6 +194,27 @@ describe('ControlRoomSection (#5175)', () => {
   it('renders a loading message in the empty state while the first survey runs', () => {
     render(<ControlRoomSection snapshot={null} loading={true} onRefresh={() => {}} now={() => NOW} />)
     expect(screen.getByTestId('cr-empty')).toHaveTextContent('Running the host survey')
+  })
+
+  it('disables Refresh and does not dispatch when disconnected', () => {
+    const onRefresh = vi.fn()
+    render(
+      <ControlRoomSection snapshot={makeSnapshot()} loading={false} connected={false} onRefresh={onRefresh} now={() => NOW} />,
+    )
+    const btn = screen.getByTestId('cr-refresh') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    fireEvent.click(btn)
+    expect(onRefresh).not.toHaveBeenCalled()
+  })
+
+  it('disables the empty-state Run survey button and shows a not-connected hint when disconnected', () => {
+    const onRefresh = vi.fn()
+    render(<ControlRoomSection snapshot={null} loading={false} connected={false} onRefresh={onRefresh} now={() => NOW} />)
+    const btn = screen.getByTestId('cr-empty-refresh') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(screen.getByTestId('cr-not-connected')).toBeTruthy()
+    fireEvent.click(btn)
+    expect(onRefresh).not.toHaveBeenCalled()
   })
 
   it('renders a "no repos" row for an empty (but present) survey', () => {
