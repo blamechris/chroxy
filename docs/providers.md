@@ -7,7 +7,7 @@ Six first-party providers ship built-in (one, `claude-channel`, is a research-pr
 - `claude-sdk` — **default**. Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process).
 - `claude-cli` — Legacy `claude -p` subprocess. Use if the SDK is unavailable or you need plan mode.
 - `claude-tui` — Interactive `claude` TUI driven under a PTY. Bills as your Claude subscription's interactive allowance and bypasses the programmatic credit pool. See [Billing & API usage](../README.md#billing--api-usage).
-- `claude-channel` — **Research preview.** Drives Claude through Anthropic's first-party channels MCP protocol (`claude --channels`). Same subscription billing as `claude-tui`, but a documented protocol instead of a TUI scrape — plus live streaming and a first-party permission relay. Scaffold only today (not yet runnable). See [`claude-channel`](#claude-channel-research-preview).
+- `claude-channel` — **Research preview, scaffold only (not yet runnable).** Will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`): same subscription billing as `claude-tui`, but a documented protocol instead of a TUI scrape, and — once the backend lands — live streaming plus a first-party permission relay. See [`claude-channel`](#claude-channel-research-preview).
 - `gemini` — Google Gemini CLI (`gemini -p`).
 - `codex` — OpenAI Codex CLI (`codex exec`).
 
