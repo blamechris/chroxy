@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.44] - 2026-06-05
+
+Control Room v2: a navigable host/repo status section plus a round of top-bar polish.
+
+### Added
+
+- **Control Room section (epic #5159 / #5170):** a new main-content tab that surveys every managed repo (config `repos` ∪ auto-discovered git repos under a configurable root, default `~/Projects`) and renders a host/fleet status table — triage verdict (live / investigate / likely-abandoned / recent / onboarded), tree state, worktree count, open PRs, attribution, last-touched, and live-agent detection (a chroxy session bound to the repo, or a dirty-tree + recently-touched heuristic). On-demand Refresh snapshot over a new `host_status_request` / `host_status_snapshot` WS contract (#5171–#5175). Per-session activity (running agents/shells/tools) folds in as a per-repo drill-down (#5176), replacing the v1 sidebar panel.
+- **Configurable header cost badge (#5184):** the badge display is chosen in Settings — provider/model (default), cost, tokens, % context used, or session-type — persisted locally.
+- **Running indicator on the projects/explorer header (#5183).**
+
+### Changed
+
+- **Top status dot now reflects Connected (tunnel), not Running (#5182).**
+- **Top-bar layout pass (#5179–#5181 + #5197):** token usage bar sits under the token count; right-cluster spacing reworked so controls no longer occlude one another; model dropdown is responsive and the cost badge truncates so the token count never clips; the Control Room tab sits after Output so it's always visible.
+
+### Fixed
+
+- **Background-work banner no longer sticks forever (#5177 / #5178):** completed background shells are reaped (output-file quiesce sweep) so the "Waiting on background work" indicator clears instead of hanging after the command exits.
+
 ## [Unreleased]
 
 ### Added
