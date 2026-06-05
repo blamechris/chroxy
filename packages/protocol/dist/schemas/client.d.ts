@@ -123,6 +123,42 @@ export declare const ByokClearCredentialsSchema: z.ZodObject<{
     type: z.ZodLiteral<"byok_clear_credentials">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
+/**
+ * Request the masked status for every known provider credential. Server replies
+ * with a `credentials_status` server message.
+ */
+export declare const GetCredentialsStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * Persist a credential value. `key` must be one of the server's known
+ * credential keys (validated server-side against credential-store.js); `value`
+ * is the raw secret. No upper length bound — provider key formats evolve.
+ */
+export declare const SetCredentialSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+    value: z.ZodString;
+}, z.core.$loose>;
+/**
+ * Remove a single stored credential. No-op if not present.
+ */
+export declare const DeleteCredentialSchema: z.ZodObject<{
+    type: z.ZodLiteral<"delete_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+}, z.core.$loose>;
+/**
+ * Lightweight credential ping. Server resolves the value (env > store), makes a
+ * minimal provider API call, and replies with `credential_test_result`.
+ */
+export declare const TestCredentialSchema: z.ZodObject<{
+    type: z.ZodLiteral<"test_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+}, z.core.$loose>;
 export declare const SetPermissionRulesSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_permission_rules">;
     rules: z.ZodArray<z.ZodObject<{
@@ -807,6 +843,22 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"byok_clear_credentials">;
     requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"set_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+    value: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"delete_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"test_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_skills">;
 }, z.core.$strip>, z.ZodObject<{

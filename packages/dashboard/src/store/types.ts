@@ -146,6 +146,28 @@ export interface ProviderInfo {
   auth?: ProviderAuth;
 }
 
+// #3855: one provider-credential row in the Settings "Provider Credentials"
+// pane. Mirrors the server's masked, value-free status entry — the raw value
+// is never present here.
+export interface ProviderCredentialEntry {
+  key: string;
+  provider: string;
+  label: string;
+  kind: 'api-key' | 'oauth-token';
+  status: 'set' | 'missing';
+  source: 'env' | 'store' | 'oauth' | 'none';
+  masked?: string;
+  oauth: boolean;
+}
+
+// #3855: result of a `test_credential` ping for one key.
+export interface ProviderCredentialTestResult {
+  ok: boolean;
+  error?: string;
+  model?: string;
+  latencyMs?: number;
+}
+
 export interface DirectoryEntry {
   name: string;
   isDirectory: boolean;
@@ -895,6 +917,23 @@ export interface ConnectionState {
   refreshByokCredentialsStatus: () => boolean;
   setByokCredentials: (anthropicApiKey: string) => boolean;
   clearByokCredentials: () => boolean;
+
+  // #3855: generalized provider-credential state. Mirrors the masked,
+  // value-free `credentials_status` snapshot from the server — one entry per
+  // known provider credential key. The raw value is NEVER stored here. `null`
+  // until the first snapshot lands.
+  credentialsStatus: {
+    credentials: ProviderCredentialEntry[];
+    fileExists?: boolean;
+    fileError?: string | null;
+  } | null;
+  // #3855: latest `credential_test_result` keyed by credential key, so each
+  // row can render its own inline test outcome.
+  credentialTestResults: Record<string, ProviderCredentialTestResult>;
+  refreshCredentialsStatus: () => boolean;
+  setCredential: (key: string, value: string) => boolean;
+  deleteCredential: (key: string) => boolean;
+  testCredential: (key: string) => boolean;
 
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the

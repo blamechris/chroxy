@@ -12,6 +12,16 @@ Five first-party providers ship built-in:
 
 Two additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` (containerized wrappers of `claude-cli` / `claude-sdk`).
 
+## Setting credentials from the dashboard
+
+The **primary** way to supply provider credentials is the **Settings → Provider Credentials** pane in the desktop dashboard (and the browser dashboard — same authenticated WebSocket path). It lets you view, set, rotate, test, and remove an API key per provider without dropping to a terminal to export environment variables:
+
+- Supported keys: `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`.
+- Keys are saved to `~/.chroxy/credentials.json` (mode `0600`, owner-only) and are never shown again after saving — only a masked preview (a short leading prefix followed by `…[N chars redacted]`). Chroxy refuses to read the file unless its mode is exactly `0600`.
+- **Resolution order is env > store > unset.** An exported shell environment variable always wins over a stored value, so power users keep full control; the store fills the gap when no env var is exported.
+- OAuth status (`claude login`) is shown read-only — Chroxy does not manage the OAuth flow from the dashboard. Run `claude login` in a terminal for the subscription path.
+- This retires the macOS GUI-launch footgun below for most users: a Tauri/launchd-spawned server (`cwd=/`, minimal PATH, no shell rc sourced) can spawn a working session from stored credentials alone, because Chroxy injects them into the spawned child env when the shell hasn't exported them. (`ANTHROPIC_API_KEY` stays stripped for the Claude CLI/TUI providers so they keep using subscription/OAuth auth.)
+
 The registry lives in [`packages/server/src/providers.js`](../packages/server/src/providers.js) as a plain object literal mapping provider names to their session classes. To add a provider, edit that literal. Session classes must extend `EventEmitter` and expose `start`/`destroy`/`sendMessage`/`interrupt`/`setModel`/`setPermissionMode` plus a static `capabilities` getter — see [`sdk-session.js`](../packages/server/src/sdk-session.js) or [`cli-session.js`](../packages/server/src/cli-session.js) for a worked example.
 
 ## Provider table
@@ -93,7 +103,7 @@ Pick by billing surface and required features:
 
 ### Common pitfalls
 
-- **GUI launch on macOS**: Tauri-spawned servers start with `cwd=/` and a minimal PATH. Chroxy probes absolute paths, but custom install locations need `ANTHROPIC_API_KEY` or a working `claude login` — don't rely on shell rc files.
+- **GUI launch on macOS**: Tauri-spawned servers start with `cwd=/` and a minimal PATH. Chroxy probes absolute paths, but custom install locations need credentials supplied out-of-band. The simplest fix is the **Settings → Provider Credentials** pane (see [Setting credentials from the dashboard](#setting-credentials-from-the-dashboard)) — the server reads from its own `~/.chroxy/credentials.json` store, so you no longer have to rely on shell rc files, `~/.zshenv`, or `launchctl setenv`. A working `claude login` also satisfies the Claude providers.
 - **Model names**: pass short aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`). Aliases are resolved to their full ID by `resolveModelId()` in `models.js` — but note this only runs in `BaseSession.setModel()` (i.e. live `set_model` messages from the mobile app / dashboard). On initial session creation, whatever string you set via `--model` / config is forwarded to the provider verbatim. Both the SDK and the `claude` CLI accept aliases directly, so this is fine in practice — but if you're writing a custom provider that doesn't accept aliases, canonicalize in the constructor.
 - **Permission prompts never arrive (claude-cli only)**: the PreToolUse hook requires `CHROXY_PORT` and the per-session hook secret injected via `~/.claude/settings.json`. Restarting the server re-registers it.
 

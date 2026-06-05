@@ -103,6 +103,50 @@ export const ByokClearCredentialsSchema = z.object({
     type: z.literal('byok_clear_credentials'),
     requestId: z.string().max(128).optional(),
 }).passthrough();
+// -- Provider credentials (#3855) --
+//
+// Generalizes the single-key BYOK store above to every known provider
+// credential env var (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN,
+// GEMINI_API_KEY, OPENAI_API_KEY). The server's credential-store.js owns the
+// canonical key list; these schemas only constrain the wire shape. All four
+// sit behind the existing WS auth-token gate and the raw value is never echoed
+// back — the server replies with the masked status only.
+/**
+ * Request the masked status for every known provider credential. Server replies
+ * with a `credentials_status` server message.
+ */
+export const GetCredentialsStatusSchema = z.object({
+    type: z.literal('get_credentials_status'),
+    requestId: z.string().max(128).optional(),
+}).passthrough();
+/**
+ * Persist a credential value. `key` must be one of the server's known
+ * credential keys (validated server-side against credential-store.js); `value`
+ * is the raw secret. No upper length bound — provider key formats evolve.
+ */
+export const SetCredentialSchema = z.object({
+    type: z.literal('set_credential'),
+    requestId: z.string().max(128).optional(),
+    key: z.string().min(1).max(128),
+    value: z.string().min(1),
+}).passthrough();
+/**
+ * Remove a single stored credential. No-op if not present.
+ */
+export const DeleteCredentialSchema = z.object({
+    type: z.literal('delete_credential'),
+    requestId: z.string().max(128).optional(),
+    key: z.string().min(1).max(128),
+}).passthrough();
+/**
+ * Lightweight credential ping. Server resolves the value (env > store), makes a
+ * minimal provider API call, and replies with `credential_test_result`.
+ */
+export const TestCredentialSchema = z.object({
+    type: z.literal('test_credential'),
+    requestId: z.string().max(128).optional(),
+    key: z.string().min(1).max(128),
+}).passthrough();
 export const SetPermissionRulesSchema = z.object({
     type: z.literal('set_permission_rules'),
     rules: z.array(PermissionRuleSchema).max(1000),
@@ -690,6 +734,10 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ByokGetCredentialsStatusSchema,
     ByokSetCredentialsSchema,
     ByokClearCredentialsSchema,
+    GetCredentialsStatusSchema,
+    SetCredentialSchema,
+    DeleteCredentialSchema,
+    TestCredentialSchema,
     ListSkillsSchema,
     ListReposSchema,
     AddRepoSchema,

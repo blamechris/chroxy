@@ -98,6 +98,8 @@ const PLATFORM_SPECIFIC = {
   'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'byok_credentials_status': 'dashboard', // paste-API-key form is dashboard-only (#4052); mobile app exposure tracked under the BYOK epic #4047
+  'credentials_status': 'dashboard',   // Provider Credentials pane is dashboard-only (#3855); mobile app exposure tracked under the BYOK epic #4047
+  'credential_test_result': 'dashboard', // Provider Credentials "Test" result is dashboard-only (#3855); mobile app exposure tracked under the BYOK epic #4047
   // 'multi_question_intervention' is now handled by both dashboard (#4758)
   // and mobile app (#4764 / PR #4862); no PLATFORM_SPECIFIC entry needed.
   // Coverage test passes because each handler has a

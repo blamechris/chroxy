@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
+import { ProviderCredentialsPane } from './ProviderCredentialsPane'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
@@ -1447,6 +1448,10 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               )}
             </div>
           </section>
+
+          {/* #3855: generalized Provider Credentials pane — manage API keys +
+              OAuth status for every known provider from the dashboard. */}
+          <ProviderCredentialsPane isOpen={isOpen} />
 
           {/* #4542: per-category notification opt-in/out. Snapshot lands via
               `notification_prefs`; toggling a checkbox patches one category

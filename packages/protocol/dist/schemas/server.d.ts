@@ -608,6 +608,42 @@ export declare const ServerByokCredentialsStatusSchema: z.ZodObject<{
     reason: z.ZodOptional<z.ZodString>;
     fileExists: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>;
+export declare const ServerCredentialsStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"credentials_status">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    credentials: z.ZodArray<z.ZodObject<{
+        key: z.ZodString;
+        provider: z.ZodString;
+        label: z.ZodString;
+        kind: z.ZodEnum<{
+            "api-key": "api-key";
+            "oauth-token": "oauth-token";
+        }>;
+        status: z.ZodEnum<{
+            set: "set";
+            missing: "missing";
+        }>;
+        source: z.ZodEnum<{
+            none: "none";
+            env: "env";
+            oauth: "oauth";
+            store: "store";
+        }>;
+        masked: z.ZodOptional<z.ZodString>;
+        oauth: z.ZodBoolean;
+    }, z.core.$loose>>;
+    fileExists: z.ZodOptional<z.ZodBoolean>;
+    fileError: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, z.core.$loose>;
+export declare const ServerCredentialTestResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"credential_test_result">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    key: z.ZodString;
+    ok: z.ZodBoolean;
+    error: z.ZodOptional<z.ZodString>;
+    model: z.ZodOptional<z.ZodString>;
+    latencyMs: z.ZodOptional<z.ZodNumber>;
+}, z.core.$loose>;
 export declare const ServerStdinDroppedTotalsSchema: z.ZodObject<{
     type: z.ZodLiteral<"stdin_dropped_totals">;
     sessionId: z.ZodNullable<z.ZodString>;
@@ -853,3 +889,5 @@ export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarif
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>;
 export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>;
 export type ServerByokCredentialsStatusMessage = z.infer<typeof ServerByokCredentialsStatusSchema>;
+export type ServerCredentialsStatusMessage = z.infer<typeof ServerCredentialsStatusSchema>;
+export type ServerCredentialTestResultMessage = z.infer<typeof ServerCredentialTestResultSchema>;

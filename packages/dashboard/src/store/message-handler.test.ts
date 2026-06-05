@@ -81,6 +81,11 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     socket: null,
     sessions: [],
     activeSessionId: null,
+    // #3855: generalized provider-credential state defaults so the
+    // credentials_status / credential_test_result dispatch tests start from a
+    // clean, well-typed baseline.
+    credentialsStatus: null,
+    credentialTestResults: {},
     sessionStates: {},
     messages: [],
     terminalBuffer: '',
@@ -3460,6 +3465,65 @@ describe('dashboard message-handler dispatch', () => {
       )
       const cost = (store.getState() as any).sessionStates['s-byok'].lastResultCost
       expect(cost).toBeNull()
+    })
+  })
+
+  describe('credentials_status dispatch (#3855)', () => {
+    it('stores the masked, value-free snapshot', () => {
+      handleMessage(
+        {
+          type: 'credentials_status',
+          requestId: 'r1',
+          credentials: [
+            { key: 'OPENAI_API_KEY', provider: 'OpenAI / Codex', label: 'OpenAI API key', kind: 'api-key', status: 'set', source: 'store', masked: 'sk...[3 chars redacted]', oauth: false },
+            { key: 'ANTHROPIC_API_KEY', provider: 'Anthropic', label: 'Anthropic API key', kind: 'api-key', status: 'missing', source: 'oauth', oauth: true },
+          ],
+          fileExists: true,
+          fileError: null,
+        } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.credentialsStatus.credentials).toHaveLength(2)
+      expect(state.credentialsStatus.credentials[0].source).toBe('store')
+      expect(state.credentialsStatus.credentials[1].oauth).toBe(true)
+      expect(state.credentialsStatus.fileExists).toBe(true)
+      expect(state.credentialsStatus.fileError).toBeNull()
+    })
+
+    it('ignores a malformed payload (leaves the store unchanged)', () => {
+      handleMessage(
+        // Missing the required `credentials` array.
+        { type: 'credentials_status', requestId: 'r2' } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.credentialsStatus).toBeNull()
+    })
+  })
+
+  describe('credential_test_result dispatch (#3855)', () => {
+    it('stores the result keyed by credential', () => {
+      handleMessage(
+        { type: 'credential_test_result', requestId: 'r3', key: 'OPENAI_API_KEY', ok: true, model: 'models.list', latencyMs: 42 } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.credentialTestResults.OPENAI_API_KEY).toEqual({ ok: true, error: undefined, model: 'models.list', latencyMs: 42 })
+    })
+
+    it('keeps results for other keys when a new one arrives', () => {
+      handleMessage(
+        { type: 'credential_test_result', key: 'OPENAI_API_KEY', ok: true } as any,
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'credential_test_result', key: 'GEMINI_API_KEY', ok: false, error: 'bad key' } as any,
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.credentialTestResults.OPENAI_API_KEY.ok).toBe(true)
+      expect(state.credentialTestResults.GEMINI_API_KEY.ok).toBe(false)
     })
   })
 
