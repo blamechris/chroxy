@@ -123,11 +123,13 @@ function playChirp(): void {
     // interventions don't grow the audio graph / retain orphaned nodes (#4891
     // review). onended fires when the last oscillator reaches its stop time.
     const lastOsc = oscs[oscs.length - 1]
-    lastOsc.onended = () => {
-      for (const osc of oscs) {
-        try { osc.disconnect() } catch { /* already gone */ }
+    if (lastOsc) {
+      lastOsc.onended = () => {
+        for (const osc of oscs) {
+          try { osc.disconnect() } catch { /* already gone */ }
+        }
+        try { gain.disconnect() } catch { /* already gone */ }
       }
-      try { gain.disconnect() } catch { /* already gone */ }
     }
   } catch {
     // Audio unavailable — fail soft.
