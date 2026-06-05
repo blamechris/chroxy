@@ -165,6 +165,208 @@ function validateWorkspacePVC(workspacePVC, cwd) {
   }
 }
 
+/** Default git image used by the clone init container — overridable via opts. */
+const DEFAULT_GIT_IMAGE = 'alpine/git:latest'
+
+/** Default mount path the workspace volume is exposed at inside the Pod. */
+const DEFAULT_WORKSPACE_MOUNT_PATH = '/workspace'
+
+/**
+ * Reject argv values that git would interpret as an option rather than a
+ * positional argument (argument-injection hardening, #3193).
+ *
+ * git-clone argv is NOT passed through a shell — the init container runs
+ * `command: ['git']` with an explicit `args` array — so classic shell
+ * metacharacter injection (`;`, `|`, `$()`, backticks) is structurally
+ * impossible. The residual risk is *argument* injection: a value beginning
+ * with `-` (e.g. `--upload-pack=…`, `--config=…`) would be parsed by git as a
+ * flag. We reject any value whose first character is `-`; the clone argv also
+ * uses `--` to terminate option parsing as belt-and-braces.
+ *
+ * @param {string} value
+ * @param {string} field - Field name for the error message
+ * @throws {Error} If the value starts with '-'
+ */
+function rejectGitOptionLike(value, field) {
+  if (typeof value === 'string' && value.startsWith('-')) {
+    throw new Error(
+      `createEnvironment: opts.gitRepo.${field} must not start with "-" ` +
+      '(rejected to prevent git argument injection)',
+    )
+  }
+}
+
+/**
+ * Validate + normalise `opts.gitRepo` for createEnvironment (#3193).
+ *
+ * The git-clone workspace strategy (Phase 1) provisions the Pod's workspace by
+ * cloning a repo into an `emptyDir` volume via an init container, instead of
+ * mounting a host path (`opts.cwd`) or referencing a pre-provisioned PVC
+ * (`opts.workspacePVC`). It is the K8s-native answer to "the pod is on a remote
+ * node and can't see the operator's filesystem" without requiring an
+ * out-of-band PVC seed step.
+ *
+ * Accepts:
+ *   - `undefined` / `null` — git-clone strategy not requested.
+ *   - A non-empty string — shorthand for `{ url: <string> }`.
+ *   - `{ url, branch?, commit?, depth?, mountPath? }` — `url` is required and
+ *     must be a non-empty string. `branch` / `commit` pin the checkout. `depth`
+ *     (positive integer) requests a shallow clone. `mountPath` overrides the
+ *     pod-side mount (default `/workspace`).
+ *
+ * Enforces mutual exclusion with the other two workspace strategies (`opts.cwd`
+ * and `opts.workspacePVC`): exactly one strategy may be chosen. The alternative
+ * — a silent precedence rule — would hide operator intent.
+ *
+ * branch + commit may both be supplied: git supports `clone --branch <branch>`
+ * followed by a `checkout <commit>`, so the clone fetches the branch tip and a
+ * second step pins the exact commit.
+ *
+ * @param {*} gitRepo - Raw opts.gitRepo value
+ * @param {*} cwd     - opts.cwd value (mutual-exclusion check)
+ * @param {*} workspacePVC - opts.workspacePVC value (mutual-exclusion check)
+ * @returns {{ url: string, branch: string|null, commit: string|null, depth: number|null, mountPath: string }|null}
+ *   Normalised descriptor, or null when no git-clone strategy was requested.
+ * @throws {Error} If the value is malformed or conflicts with another strategy.
+ */
+function validateGitRepo(gitRepo, cwd, workspacePVC) {
+  if (gitRepo == null) return null
+
+  // Normalise the string shorthand to the object form.
+  const spec = typeof gitRepo === 'string' ? { url: gitRepo } : gitRepo
+
+  if (typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error(
+      'createEnvironment: opts.gitRepo must be a non-empty URL string or ' +
+      'an object with a url property',
+    )
+  }
+  if (typeof spec.url !== 'string' || spec.url.length === 0) {
+    throw new Error(
+      'createEnvironment: opts.gitRepo.url must be a non-empty string',
+    )
+  }
+  rejectGitOptionLike(spec.url, 'url')
+
+  if (spec.branch != null) {
+    if (typeof spec.branch !== 'string' || spec.branch.length === 0) {
+      throw new Error('createEnvironment: opts.gitRepo.branch must be a non-empty string')
+    }
+    rejectGitOptionLike(spec.branch, 'branch')
+  }
+
+  if (spec.commit != null) {
+    if (typeof spec.commit !== 'string' || spec.commit.length === 0) {
+      throw new Error('createEnvironment: opts.gitRepo.commit must be a non-empty string')
+    }
+    rejectGitOptionLike(spec.commit, 'commit')
+  }
+
+  let depth = null
+  if (spec.depth != null) {
+    if (!Number.isInteger(spec.depth) || spec.depth < 1) {
+      throw new Error('createEnvironment: opts.gitRepo.depth must be a positive integer')
+    }
+    depth = spec.depth
+  }
+
+  let mountPath = DEFAULT_WORKSPACE_MOUNT_PATH
+  if (spec.mountPath != null) {
+    if (typeof spec.mountPath !== 'string' || spec.mountPath.length === 0) {
+      throw new Error('createEnvironment: opts.gitRepo.mountPath must be a non-empty string')
+    }
+    // K8s requires volumeMount.mountPath to be absolute; a relative value would
+    // be rejected at Pod-create time with an opaque API error. Reject `.`/`..`
+    // segments too so the path can't escape the intended workspace root.
+    if (!spec.mountPath.startsWith('/')) {
+      throw new Error(
+        'createEnvironment: opts.gitRepo.mountPath must be an absolute path (start with "/")',
+      )
+    }
+    if (spec.mountPath.split('/').some((seg) => seg === '.' || seg === '..')) {
+      throw new Error(
+        'createEnvironment: opts.gitRepo.mountPath must not contain "." or ".." segments',
+      )
+    }
+    mountPath = spec.mountPath
+  }
+
+  // Mutual exclusion with the other two strategies.
+  if (cwd != null && cwd !== '') {
+    throw new Error(
+      'createEnvironment: opts.cwd and opts.gitRepo are mutually exclusive — ' +
+      'choose exactly one workspace strategy (hostPath, PVC, or git-clone)',
+    )
+  }
+  if (workspacePVC != null) {
+    throw new Error(
+      'createEnvironment: opts.workspacePVC and opts.gitRepo are mutually exclusive — ' +
+      'choose exactly one workspace strategy (hostPath, PVC, or git-clone)',
+    )
+  }
+
+  return { url: spec.url, branch: spec.branch ?? null, commit: spec.commit ?? null, depth, mountPath }
+}
+
+/**
+ * Build the git-clone init container spec(s) for the git-clone workspace
+ * strategy (#3193).
+ *
+ * Each container runs `git` with an explicit argv array (never a shell string),
+ * cloning `descriptor.url` into the shared `emptyDir` workspace volume mounted
+ * at `descriptor.mountPath`. Branch / commit pinning and shallow depth are
+ * honoured:
+ *   - `--branch <branch>` checks out the named branch/tag at clone time.
+ *   - `--depth <n>` requests a shallow clone.
+ *   - `commit` pins the exact SHA via a SECOND init container running
+ *     `git -C <dir> checkout --detach <commit>`. K8s runs init containers
+ *     sequentially over the shared emptyDir, so the clone completes before the
+ *     checkout starts. Splitting into two containers keeps every value in an
+ *     argv slot — no shell is ever invoked, so neither the URL nor the SHA can
+ *     be interpreted as a command.
+ *
+ * @param {{ url: string, branch: string|null, commit: string|null, depth: number|null, mountPath: string }} descriptor
+ * @param {string} gitImage - Image providing the `git` binary
+ * @returns {Array<object>} One or two init container specs (clone, optional checkout)
+ */
+function buildGitCloneInitContainers(descriptor, gitImage) {
+  const { url, branch, commit, depth, mountPath } = descriptor
+
+  const cloneArgs = ['clone']
+  if (depth != null) {
+    cloneArgs.push('--depth', String(depth))
+  }
+  if (branch != null) {
+    cloneArgs.push('--branch', branch)
+  }
+  // `--` terminates option parsing so url/mountPath can never be read as flags.
+  cloneArgs.push('--', url, mountPath)
+
+  const volumeMount = { name: 'workspace', mountPath }
+
+  const containers = [{
+    name: 'git-clone',
+    image: gitImage,
+    command: ['git'],
+    args: cloneArgs,
+    volumeMounts: [volumeMount],
+  }]
+
+  if (commit != null) {
+    containers.push({
+      name: 'git-checkout',
+      image: gitImage,
+      command: ['git'],
+      // `-C <dir>` runs git in the cloned tree; `checkout --detach` pins the
+      // exact commit. `--` terminates option parsing before the SHA.
+      args: ['-C', mountPath, 'checkout', '--detach', '--', commit],
+      volumeMounts: [volumeMount],
+    })
+  }
+
+  return containers
+}
+
 /**
  * K8sBackend implements the Backend interface (see types.js) using the
  * Kubernetes API via @kubernetes/client-node.
@@ -204,6 +406,9 @@ export class K8sBackend {
    * @param {boolean} [opts.inCluster]                  - Force in-cluster auth (default: auto-detect via KUBERNETES_SERVICE_HOST)
    * @param {string}  [opts.kubeconfigPath]             - Path to kubeconfig file (overrides default search)
    * @param {string}  [opts.sidecarImage]               - Sidecar image to use in createEnvironment (default: chroxy-pod-agent:latest)
+   * @param {string}  [opts.gitImage]                   - Image providing `git` for the git-clone workspace
+   *   init container (default: alpine/git:latest). Used only when a createEnvironment call passes
+   *   `opts.gitRepo` (#3193).
    * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - imagePullPolicy applied to all
    *   containers in the Pod spec. When unset the field is omitted and Kubernetes applies its own default
    *   ('Always' for :latest tags, 'IfNotPresent' otherwise). Set to 'IfNotPresent' for air-gapped
@@ -218,13 +423,14 @@ export class K8sBackend {
    * @param {Function} [opts._setTimeout]               - Override setTimeout for deterministic testing
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
-  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, imagePullPolicy,
+  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, gitImage, imagePullPolicy,
     connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
     this._namespace = namespace ?? 'default'
     this._sidecarImage = sidecarImage ?? DEFAULT_SIDECAR_IMAGE
+    this._gitImage = gitImage ?? DEFAULT_GIT_IMAGE
     this._imagePullPolicy = imagePullPolicy ?? null
     this._connectMode = connectMode ?? 'portforward'
 
@@ -368,6 +574,29 @@ export class K8sBackend {
    *        - `opts.cwd` and `opts.workspacePVC` are mutually exclusive — passing
    *          both throws.  Operators must explicitly choose one strategy.
    *
+   * 3. git-clone (Phase 1, #3193) — pass `opts.gitRepo`:
+   *      `opts.gitRepo = { url, branch?, commit?, depth?, mountPath? }` (or a bare
+   *      URL string) provisions an ephemeral `emptyDir` workspace that a
+   *      `git clone` init container populates before the main container starts.
+   *      This is the K8s-native answer to "the Pod runs on a remote node that
+   *      can't see the operator's filesystem" without requiring an out-of-band
+   *      PVC seed step. Branch / commit pinning and shallow `depth` are honoured.
+   *      The git binary comes from the constructor `gitImage` (default
+   *      `alpine/git:latest`).
+   *
+   *      Persistence caveat: `emptyDir` is tied to the Pod lifecycle — when the
+   *      Pod is deleted the cloned tree is gone. PVC-backed persistence for the
+   *      git-clone strategy is the explicit follow-up (#3385); until then a
+   *      git-clone workspace is for ephemeral, single-Pod sessions only.
+   *
+   *      mountPath caveat (#3193 phase 1): the default `mountPath` of
+   *      `/workspace` aligns with `streamCliInEnvironment`'s host→Pod cwd
+   *      remap, so exec sessions land on the cloned tree automatically. A
+   *      NON-default `mountPath` is supported in the Pod manifest, but the cwd
+   *      remap still targets `/workspace` — callers that override `mountPath`
+   *      must pass the matching `cwd` to `streamCliInEnvironment` themselves.
+   *      Per-Pod workspace-root tracking is left as follow-up.
+   *
    * **Security warning — hostPath privilege escalation:**
    *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
    *   Pod direct access to the underlying node's filesystem. This is a
@@ -400,6 +629,14 @@ export class K8sBackend {
    * @param {string}   opts.workspacePVC.claimName   - Name of a pre-provisioned PVC in the target namespace
    * @param {string}   [opts.workspacePVC.mountPath] - Pod-side mount path (default: `/workspace`)
    * @param {boolean}  [opts.workspacePVC.readOnly]  - Mount the PVC read-only (default: false)
+   * @param {string|Object} [opts.gitRepo]  - git-clone workspace strategy (#3193). A bare URL string is
+   *   shorthand for `{ url }`. Provisions an `emptyDir` workspace populated by a `git clone` init container.
+   *   Mutually exclusive with `opts.cwd` and `opts.workspacePVC` — passing more than one throws.
+   * @param {string}   opts.gitRepo.url        - Repo URL to clone (required; must not start with "-")
+   * @param {string}   [opts.gitRepo.branch]   - Branch/tag to check out at clone time (`--branch`)
+   * @param {string}   [opts.gitRepo.commit]   - Exact commit SHA to pin via a follow-up checkout init container
+   * @param {number}   [opts.gitRepo.depth]    - Positive integer for a shallow clone (`--depth`)
+   * @param {string}   [opts.gitRepo.mountPath] - Pod-side workspace mount path (default: `/workspace`)
    * @param {string}   [opts.image]        - Overrides the constructor sidecarImage
    * @param {string}   [opts.memoryLimit]  - K8s memory quantity string (e.g. "2Gi").
    *   Applied to both `resources.limits.memory` and `resources.requests.memory`.
@@ -429,14 +666,18 @@ export class K8sBackend {
       envId, cwd, containerEnv, namespace,
       memoryLimit, cpuLimit, forwardPorts, mounts,
       imagePullPolicy: callImagePullPolicy,
-      workspacePVC,
+      workspacePVC, gitRepo,
     } = opts
     validateImagePullPolicy(callImagePullPolicy, 'createEnvironment opts')
-    // Workspace-strategy validation (#3385): `opts.cwd` (hostPath) and
-    // `opts.workspacePVC` (PVC) are two competing strategies for what to mount
-    // at /workspace. Accept either, never both — the alternative would be
-    // a silent precedence rule that hides operator intent.
+    // Workspace-strategy validation: three mutually-exclusive strategies decide
+    // what backs /workspace:
+    //   - opts.cwd          → hostPath volume      (single-node clusters, #3316)
+    //   - opts.workspacePVC → persistentVolumeClaim (multi-node clusters, #3385)
+    //   - opts.gitRepo      → git-clone init container into an emptyDir (#3193)
+    // Accept exactly one — passing more than one throws. The alternative would
+    // be a silent precedence rule that hides operator intent.
     validateWorkspacePVC(workspacePVC, cwd)
+    const gitClone = validateGitRepo(gitRepo, cwd, workspacePVC)
     const ns = this._validateNamespace(this._resolveNamespace(namespace), 'createEnvironment')
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
@@ -504,15 +745,32 @@ export class K8sBackend {
     const imagePullPolicy = callImagePullPolicy || this._imagePullPolicy
 
     // 4. Build volumes + volumeMounts
-    // 4a. Workspace volume — one of two mutually-exclusive strategies (#3385):
-    //   - `opts.cwd`          → hostPath volume (single-node clusters)
-    //   - `opts.workspacePVC` → persistentVolumeClaim volume (multi-node clusters)
+    // 4a. Workspace volume — one of three mutually-exclusive strategies:
+    //   - `opts.cwd`          → hostPath volume (single-node clusters, #3316)
+    //   - `opts.workspacePVC` → persistentVolumeClaim volume (multi-node clusters, #3385)
+    //   - `opts.gitRepo`      → emptyDir populated by a git-clone init container (#3193)
     //   See the createEnvironment JSDoc for the strategy comparison and migration
-    //   guidance. validateWorkspacePVC() above already rejected the both-set case.
+    //   guidance. The validators above already rejected any both-set combination.
     const volumes = []
     const volumeMounts = []
+    // Init containers populate the workspace before the main container starts
+    // (git-clone strategy). Empty for the other strategies.
+    const initContainers = []
 
-    if (workspacePVC) {
+    if (gitClone) {
+      // git-clone strategy: an emptyDir is shared between the clone init
+      // container(s) and the main container. The init container clones the repo
+      // into the emptyDir; the main container then sees the populated tree.
+      // emptyDir is ephemeral — PVC-backed persistence is the explicit
+      // follow-up (#3385); see the createEnvironment JSDoc.
+      volumes.push({ name: 'workspace', emptyDir: {} })
+      volumeMounts.push({ name: 'workspace', mountPath: gitClone.mountPath })
+      const cloneContainers = buildGitCloneInitContainers(gitClone, this._gitImage)
+      if (imagePullPolicy) {
+        for (const c of cloneContainers) c.imagePullPolicy = imagePullPolicy
+      }
+      initContainers.push(...cloneContainers)
+    } else if (workspacePVC) {
       const mountPath = workspacePVC.mountPath || '/workspace'
       volumes.push({
         name: 'workspace',
@@ -625,6 +883,10 @@ export class K8sBackend {
     const podSpec = {
       restartPolicy: 'Never',
       containers: [containerSpec],
+    }
+
+    if (initContainers.length > 0) {
+      podSpec.initContainers = initContainers
     }
 
     if (volumes.length > 0) {

@@ -1105,6 +1105,384 @@ describe('K8sBackend.createEnvironment() — PVC workspace strategy (#3385)', ()
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — git-clone workspace strategy (#3193)
+//
+// Phase 1: provision the Pod workspace by cloning the repo into an emptyDir via
+// a git-clone init container, since a remote-node Pod can't bind-mount the
+// operator's host filesystem. PVC-backed persistence is the follow-up (#3385).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — git-clone workspace strategy (#3193)', () => {
+  it('provisions an emptyDir workspace + a git-clone init container', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-test',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://github.com/example/repo.git' },
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const wsVol = volumes.find(v => v.name === 'workspace')
+    assert.ok(wsVol, 'must have a volume named "workspace"')
+    assert.deepEqual(wsVol.emptyDir, {}, 'git-clone workspace must be an emptyDir')
+    assert.equal(wsVol.hostPath, undefined, 'git-clone workspace must NOT set hostPath')
+    assert.equal(wsVol.persistentVolumeClaim, undefined, 'git-clone workspace must NOT set a PVC')
+
+    const initContainers = body.spec.initContainers
+    assert.ok(Array.isArray(initContainers), 'spec.initContainers must be an array')
+    assert.equal(initContainers.length, 1, 'no commit pin → single clone init container')
+    const clone = initContainers[0]
+    assert.equal(clone.name, 'git-clone')
+    assert.deepEqual(clone.command, ['git'])
+    assert.deepEqual(
+      clone.args,
+      ['clone', '--', 'https://github.com/example/repo.git', '/workspace'],
+    )
+    const cloneMount = clone.volumeMounts.find(m => m.name === 'workspace')
+    assert.ok(cloneMount, 'init container must mount the workspace volume')
+    assert.equal(cloneMount.mountPath, '/workspace')
+  })
+
+  it('the main container also mounts the cloned workspace at /workspace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-main-mount',
+      image: 'agent:latest',
+      gitRepo: 'https://github.com/example/repo.git', // string shorthand
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount, 'main container must mount the workspace volume')
+    assert.equal(wsMount.mountPath, '/workspace')
+  })
+
+  it('accepts a bare URL string as shorthand for { url }', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-shorthand',
+      image: 'agent:latest',
+      gitRepo: 'git@github.com:example/repo.git',
+    })
+
+    const clone = api.calls.create[0].body.spec.initContainers[0]
+    assert.deepEqual(clone.args, ['clone', '--', 'git@github.com:example/repo.git', '/workspace'])
+  })
+
+  it('honours branch pinning via --branch', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-branch',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', branch: 'develop' },
+    })
+
+    const clone = api.calls.create[0].body.spec.initContainers[0]
+    assert.deepEqual(
+      clone.args,
+      ['clone', '--branch', 'develop', '--', 'https://example.com/r.git', '/workspace'],
+    )
+  })
+
+  it('honours shallow depth via --depth', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-depth',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', depth: 1 },
+    })
+
+    const clone = api.calls.create[0].body.spec.initContainers[0]
+    assert.deepEqual(
+      clone.args,
+      ['clone', '--depth', '1', '--', 'https://example.com/r.git', '/workspace'],
+    )
+  })
+
+  it('pins an exact commit via a second checkout init container', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-commit',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'deadbeef' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.equal(initContainers.length, 2, 'commit pin → clone + checkout init containers')
+    assert.equal(initContainers[0].name, 'git-clone')
+    const checkout = initContainers[1]
+    assert.equal(checkout.name, 'git-checkout')
+    assert.deepEqual(checkout.command, ['git'])
+    assert.deepEqual(
+      checkout.args,
+      ['-C', '/workspace', 'checkout', '--detach', '--', 'deadbeef'],
+    )
+    const checkoutMount = checkout.volumeMounts.find(m => m.name === 'workspace')
+    assert.ok(checkoutMount)
+    assert.equal(checkoutMount.mountPath, '/workspace')
+  })
+
+  it('combines branch + commit (clone branch tip, then pin commit)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-branch-commit',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', branch: 'main', commit: 'abc123' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.deepEqual(
+      initContainers[0].args,
+      ['clone', '--branch', 'main', '--', 'https://example.com/r.git', '/workspace'],
+    )
+    assert.deepEqual(
+      initContainers[1].args,
+      ['-C', '/workspace', 'checkout', '--detach', '--', 'abc123'],
+    )
+  })
+
+  it('honours a custom mountPath for clone, main mount, and checkout', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-mountpath',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'c0ffee', mountPath: '/src' },
+    })
+
+    const { body } = api.calls.create[0]
+    assert.equal(
+      body.spec.containers[0].volumeMounts.find(m => m.name === 'workspace').mountPath,
+      '/src',
+    )
+    assert.deepEqual(
+      body.spec.initContainers[0].args,
+      ['clone', '--', 'https://example.com/r.git', '/src'],
+    )
+    assert.deepEqual(
+      body.spec.initContainers[1].args,
+      ['-C', '/src', 'checkout', '--detach', '--', 'c0ffee'],
+    )
+  })
+
+  it('uses the constructor gitImage for init containers', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, gitImage: 'my-registry/git:2.44' })
+
+    await backend.createEnvironment({
+      envId: 'git-image',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'x' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.equal(initContainers[0].image, 'my-registry/git:2.44')
+    assert.equal(initContainers[1].image, 'my-registry/git:2.44')
+  })
+
+  it('defaults the git image to alpine/git:latest', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-default-image',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git' },
+    })
+
+    assert.equal(
+      api.calls.create[0].body.spec.initContainers[0].image,
+      'alpine/git:latest',
+    )
+  })
+
+  it('propagates imagePullPolicy to init containers', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'IfNotPresent' })
+
+    await backend.createEnvironment({
+      envId: 'git-pull-policy',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'x' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.equal(initContainers[0].imagePullPolicy, 'IfNotPresent')
+    assert.equal(initContainers[1].imagePullPolicy, 'IfNotPresent')
+  })
+
+  it('git-clone workspace coexists with extra opts.mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-plus-mounts',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git' },
+      mounts: ['/host/certs:/certs:ro'],
+    })
+
+    const volumes = api.calls.create[0].body.spec.volumes
+    assert.ok(volumes.find(v => v.name === 'workspace' && v.emptyDir))
+    assert.ok(volumes.find(v => v.name === 'extra-vol-0' && v.hostPath?.path === '/host/certs'))
+    assert.equal(volumes.length, 2)
+  })
+
+  // ─── Validation / mutual exclusion ───────────────────────────────────────
+
+  it('throws when gitRepo.url is missing', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({ envId: 'no-url', image: 'agent:latest', gitRepo: {} }),
+      /gitRepo\.url must be a non-empty string/,
+    )
+    assert.equal(api.calls.create.length, 0, 'no Pod created on validation failure')
+  })
+
+  it('throws when gitRepo.url starts with "-" (argument injection guard)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-url',
+        image: 'agent:latest',
+        gitRepo: { url: '--upload-pack=touch /tmp/pwned' },
+      }),
+      /must not start with "-"/,
+    )
+  })
+
+  it('throws when gitRepo.branch starts with "-"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-branch',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', branch: '--config=core.fsmonitor=evil' },
+      }),
+      /branch must not start with "-"/,
+    )
+  })
+
+  it('throws when gitRepo.commit starts with "-"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-commit',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', commit: '--evil' },
+      }),
+      /commit must not start with "-"/,
+    )
+  })
+
+  it('throws when gitRepo.depth is not a positive integer', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    for (const bad of [0, -1, 1.5, '1']) {
+      await assert.rejects(
+        () => backend.createEnvironment({
+          envId: 'bad-depth',
+          image: 'agent:latest',
+          gitRepo: { url: 'https://example.com/r.git', depth: bad },
+        }),
+        /depth must be a positive integer/,
+      )
+    }
+  })
+
+  it('throws when gitRepo.mountPath is relative (must be absolute)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'rel-mountpath',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', mountPath: 'src' },
+      }),
+      /mountPath must be an absolute path/,
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('throws when gitRepo.mountPath contains "." or ".." segments', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    for (const bad of ['/work/../etc', '/work/./x']) {
+      await assert.rejects(
+        () => backend.createEnvironment({
+          envId: 'dotdot-mountpath',
+          image: 'agent:latest',
+          gitRepo: { url: 'https://example.com/r.git', mountPath: bad },
+        }),
+        /must not contain "\." or "\.\." segments/,
+      )
+    }
+  })
+
+  it('throws when both opts.cwd and opts.gitRepo are set (mutually exclusive)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'cwd-and-git',
+        image: 'agent:latest',
+        cwd: '/home/user/proj',
+        gitRepo: { url: 'https://example.com/r.git' },
+      }),
+      /cwd and opts\.gitRepo are mutually exclusive/,
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('throws when both opts.workspacePVC and opts.gitRepo are set (mutually exclusive)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'pvc-and-git',
+        image: 'agent:latest',
+        workspacePVC: { claimName: 'my-pvc' },
+        gitRepo: { url: 'https://example.com/r.git' },
+      }),
+      /workspacePVC and opts\.gitRepo are mutually exclusive/,
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('omits initContainers when no git-clone strategy is requested', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-git', image: 'agent:latest' })
+
+    assert.equal(
+      api.calls.create[0].body.spec.initContainers, undefined,
+      'initContainers must be absent without a git-clone strategy',
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — resource limits (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 

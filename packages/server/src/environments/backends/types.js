@@ -67,6 +67,17 @@
  *   target namespace. Required when `workspacePVC` is set; must be a non-empty string.
  * @param {string}  [opts.workspacePVC.mountPath] - Pod-side mount path (default: `/workspace`).
  * @param {boolean} [opts.workspacePVC.readOnly]  - Mount the PVC read-only (default: false).
+ * @param {string|Object} [opts.gitRepo] - git-clone workspace strategy (#3193). Honoured only by
+ *   K8sBackend — Docker and other backends silently ignore this field. A bare URL string is shorthand
+ *   for `{ url }`. K8sBackend provisions an `emptyDir` workspace populated by a `git clone` init
+ *   container. Mutually exclusive with `opts.cwd` and `opts.workspacePVC` (passing more than one
+ *   throws — see the `validateGitRepo` helper in k8s.js). `emptyDir` is ephemeral; PVC-backed
+ *   persistence for the git-clone strategy is the follow-up (#3385).
+ * @param {string}  opts.gitRepo.url        - Repo URL to clone (required; must not start with "-").
+ * @param {string}  [opts.gitRepo.branch]   - Branch/tag checked out at clone time.
+ * @param {string}  [opts.gitRepo.commit]   - Exact commit SHA pinned via a follow-up checkout step.
+ * @param {number}  [opts.gitRepo.depth]    - Positive integer for a shallow clone.
+ * @param {string}  [opts.gitRepo.mountPath] - Pod-side workspace mount path (default: `/workspace`).
  * @returns {Promise<{ containerId: string, containerCliPath: string }>}
  *   containerId — the full container ID string returned by the runtime
  *   containerCliPath — absolute path inside the container where the CLI binary was installed
