@@ -339,8 +339,14 @@ export class ActivityRegistry {
    * via `onBackgroundWorkChanged`).
    */
   reset() {
+    // Snapshot the ids first so `_end`'s delete-while-iterate is safe even if
+    // a delta listener re-enters the registry.
+    const toEnd = []
     for (const [id, entry] of this._entries) {
       if (entry.kind === 'shell') continue
+      toEnd.push(id)
+    }
+    for (const id of toEnd) {
       this._end(id, 'done')
     }
   }
