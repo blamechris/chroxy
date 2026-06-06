@@ -220,10 +220,11 @@ if (fs.promises) {
 // keychain analogue of the #4633 home-write contamination the fs guard above
 // blocks. Set the escape-hatch env so every server test exercises the
 // plaintext-0600 fallback (deterministic on every host, zero real-keychain
-// access). credential-store reads this lazily at call time, so — unlike
-// importing the module here — it does NOT pull keychain.js into the graph early
-// and therefore does not defeat `mock.module('child_process')` in the keychain
-// unit tests. The encryption suite injects an in-memory keychain via
+// access). Critically, this bootstrap sets an ENV flag rather than importing
+// credential-store/keychain: it must NOT pull `keychain.js` into the module
+// graph, or `keychain-mock.test.js` could no longer `mock.module('child_process')`
+// before it imports keychain. credential-store reads this flag lazily at call
+// time. The encryption suite injects an in-memory keychain via
 // `_setCredentialKeychainForTests(...)`, which takes precedence over this flag.
 process.env.CHROXY_CRED_DISABLE_KEYCHAIN = '1'
 

@@ -85,6 +85,22 @@ describe('credential-cipher: encrypt/decrypt round-trip', () => {
   it('rejects decrypting a non-envelope', () => {
     assert.throws(() => decryptEnvelope({ not: 'an envelope' }, key32()), /not a valid encrypted envelope/)
   })
+
+  it('fails predictably on a malformed nonce (no tweetnacl "bad nonce size" leak)', () => {
+    const key = key32()
+    const env = encryptJson({ x: 1 }, key)
+    // A too-short nonce would make tweetnacl throw 'bad nonce size'; we must
+    // surface the friendly decryption-failed error instead.
+    const badNonce = { ...env, nonce: Buffer.from('short').toString('base64') }
+    assert.throws(() => decryptEnvelope(badNonce, key), /decryption failed/)
+  })
+
+  it('fails predictably on truncated ciphertext', () => {
+    const key = key32()
+    const env = encryptJson({ x: 1 }, key)
+    const truncated = { ...env, data: Buffer.from('xx').toString('base64') }
+    assert.throws(() => decryptEnvelope(truncated, key), /decryption failed/)
+  })
 })
 
 describe('credential-cipher: master key via keychain', () => {

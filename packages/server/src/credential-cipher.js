@@ -119,7 +119,22 @@ export function decryptEnvelope(envelope, key) {
   }
   const nonce = new Uint8Array(Buffer.from(envelope.nonce, 'base64'))
   const box = new Uint8Array(Buffer.from(envelope.data, 'base64'))
-  const opened = nacl.secretbox.open(box, nonce, key)
+  // Guard the decoded lengths before handing them to tweetnacl: a malformed /
+  // truncated envelope can decode to a wrong-size nonce, and nacl.secretbox
+  // throws 'bad nonce size' rather than returning null — surface a predictable
+  // error instead. A short ciphertext (< the Poly1305 tag) likewise can't be a
+  // valid box.
+  if (nonce.length !== NONCE_BYTES || box.length <= nacl.secretbox.overheadLength) {
+    throw new Error('credential decryption failed (wrong key or corrupt data)')
+  }
+  // secretbox.open returns null on auth failure, but defensively wrap it so any
+  // unexpected throw from a corrupt envelope still becomes the same friendly error.
+  let opened
+  try {
+    opened = nacl.secretbox.open(box, nonce, key)
+  } catch {
+    opened = null
+  }
   if (!opened) {
     throw new Error('credential decryption failed (wrong key or corrupt data)')
   }

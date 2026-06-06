@@ -64,9 +64,12 @@ let _keychainOverride = null
 
 /**
  * Resolve the keychain to use for at-rest encryption, evaluated lazily per call
- * (NOT captured at import) so it never forces `keychain.js` into the module
- * graph early — that would defeat `mock.module('child_process')` in the keychain
- * unit tests.
+ * (NOT captured at import). `keychain.js` is imported at the top of this file,
+ * but no OS-keychain call (or `process.env` read) happens until a store
+ * operation actually runs — so importing `credential-store.js` never triggers a
+ * `child_process` keychain probe at module-load time. (Test isolation against
+ * `mock.module('child_process')` is owned by `_setup.mjs`, which deliberately
+ * imports neither this module nor `keychain.js`.)
  *
  *   1. an explicit test injection wins (the encryption suite's in-memory key);
  *   2. else `CHROXY_CRED_DISABLE_KEYCHAIN=1` forces the plaintext fallback —
