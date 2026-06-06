@@ -31,7 +31,7 @@
  *   - recent      → warn  (amber)  — recent uncommitted work; eyeball before touching.
  *   - onboarded   → ok    (green)  — on the pull-model; just needs a checkout+pull.
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { RepoStatus, RepoVerdict, ServerHostStatusSnapshotMessage } from '@chroxy/protocol'
 import type { ActivityState, SessionInfo } from '@chroxy/store-core'
@@ -181,6 +181,60 @@ export function sortRepos(repos: readonly RepoStatus[], sortKey: RepoSortKey): R
 function parseTime(iso: string): number {
   const ms = Date.parse(iso)
   return Number.isNaN(ms) ? 0 : ms
+}
+
+/**
+ * #5226 — persist the operator's table lens (filters + sort) across reloads via
+ * localStorage, so a refresh doesn't drop back to the unfiltered server order.
+ * Values are validated against the known keys on read, so a stale/garbage entry
+ * (or one from a future build with a renamed key) degrades to the default
+ * instead of throwing. All access is try/catch-guarded — localStorage can throw
+ * (privacy mode, disabled storage) and a dashboard panel must never crash on it.
+ */
+const CR_FILTERS_STORAGE_KEY = 'chroxy_cr_filters'
+const CR_SORT_STORAGE_KEY = 'chroxy_cr_sort'
+
+const VALID_FILTER_KEYS: ReadonlySet<string> = new Set(REPO_FILTERS.map((f) => f.key))
+const VALID_SORT_KEYS: ReadonlySet<string> = new Set(REPO_SORT_OPTIONS.map((o) => o.key))
+
+function loadPersistedFilters(): ReadonlySet<RepoFilterKey> {
+  try {
+    const raw = localStorage.getItem(CR_FILTERS_STORAGE_KEY)
+    if (!raw) return new Set()
+    const keys = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((k): k is RepoFilterKey => VALID_FILTER_KEYS.has(k))
+    return new Set(keys)
+  } catch {
+    return new Set()
+  }
+}
+
+function persistFilters(active: ReadonlySet<RepoFilterKey>): void {
+  try {
+    localStorage.setItem(CR_FILTERS_STORAGE_KEY, [...active].join(','))
+  } catch {
+    /* noop — storage unavailable */
+  }
+}
+
+function loadPersistedSort(): RepoSortKey {
+  try {
+    const raw = localStorage.getItem(CR_SORT_STORAGE_KEY)
+    if (raw && VALID_SORT_KEYS.has(raw)) return raw as RepoSortKey
+  } catch {
+    /* noop — storage unavailable */
+  }
+  return 'default'
+}
+
+function persistSort(sortKey: RepoSortKey): void {
+  try {
+    localStorage.setItem(CR_SORT_STORAGE_KEY, sortKey)
+  } catch {
+    /* noop — storage unavailable */
+  }
 }
 
 /**
@@ -597,11 +651,15 @@ export function ControlRoomSection({
   }, [])
 
   // #5216 — repo-table view controls. Filters narrow the table (AND across
-  // active filters); sort reorders it. Both are ephemeral view state (not
-  // persisted) so a refresh keeps the operator's current lens but a reload
-  // starts from the server's default order with no filters.
-  const [activeFilters, setActiveFilters] = useState<ReadonlySet<RepoFilterKey>>(() => new Set())
-  const [sortKey, setSortKey] = useState<RepoSortKey>('default')
+  // active filters); sort reorders it. #5226 — both are persisted to
+  // localStorage (lazy-initialised from it, written on change) so a reload
+  // keeps the operator's lens instead of snapping back to the unfiltered
+  // server order.
+  const [activeFilters, setActiveFilters] = useState<ReadonlySet<RepoFilterKey>>(loadPersistedFilters)
+  const [sortKey, setSortKey] = useState<RepoSortKey>(loadPersistedSort)
+
+  useEffect(() => { persistFilters(activeFilters) }, [activeFilters])
+  useEffect(() => { persistSort(sortKey) }, [sortKey])
 
   const toggleFilter = useCallback((key: RepoFilterKey) => {
     setActiveFilters((prev) => {
