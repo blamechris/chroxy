@@ -39,6 +39,9 @@ import {
   formatGeneratedAgo,
   sessionIdForRepoPath,
   HIGH_COUNT_THRESHOLD,
+  filterRepos,
+  sortRepos,
+  type RepoFilterKey,
 } from './ControlRoomSection'
 
 // Minimal SessionInfo factory — only the fields the repo→session mapping reads
@@ -278,6 +281,150 @@ describe('ControlRoomSection (#5175)', () => {
       />,
     )
     expect(screen.getByTestId('cr-no-repos')).toBeTruthy()
+  })
+})
+
+// Helper: read the DOM order of rendered repo rows (top-level rows only).
+function renderedRepoOrder(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('[data-testid^="cr-row-"]')).map((el) =>
+    (el.getAttribute('data-testid') ?? '').replace('cr-row-', ''),
+  )
+}
+
+describe('filterRepos (#5216)', () => {
+  const repos = makeSnapshot().repos
+
+  it('returns all repos (a copy) for an empty filter set', () => {
+    const out = filterRepos(repos, new Set())
+    expect(out.map((r) => r.name)).toEqual(['chroxy', 'medlens', 'no-it-all'])
+    expect(out).not.toBe(repos) // a copy, not the original array
+  })
+
+  it('dirty → only repos with a dirty tree', () => {
+    expect(filterRepos(repos, new Set<RepoFilterKey>(['dirty'])).map((r) => r.name)).toEqual(['medlens'])
+  })
+
+  it('live → only live repos', () => {
+    expect(filterRepos(repos, new Set<RepoFilterKey>(['live'])).map((r) => r.name)).toEqual(['chroxy'])
+  })
+
+  it('prs → repos with >0 open PRs (null counts as 0)', () => {
+    expect(filterRepos(repos, new Set<RepoFilterKey>(['prs'])).map((r) => r.name)).toEqual(['medlens', 'no-it-all'])
+  })
+
+  it('triage → only investigate/abandoned/recent verdicts', () => {
+    expect(filterRepos(repos, new Set<RepoFilterKey>(['triage'])).map((r) => r.name)).toEqual(['medlens'])
+  })
+
+  it('combines filters with AND (intersection)', () => {
+    // medlens is both dirty and has PRs.
+    expect(filterRepos(repos, new Set<RepoFilterKey>(['dirty', 'prs'])).map((r) => r.name)).toEqual(['medlens'])
+    // No repo is both dirty AND live (medlens is dirty-not-live, chroxy is live-not-dirty).
+    expect(filterRepos(repos, new Set<RepoFilterKey>(['dirty', 'live']))).toEqual([])
+  })
+})
+
+describe('sortRepos (#5216)', () => {
+  const repos = makeSnapshot().repos
+
+  it('default preserves server order and does not mutate the input', () => {
+    const out = sortRepos(repos, 'default')
+    expect(out.map((r) => r.name)).toEqual(['chroxy', 'medlens', 'no-it-all'])
+    expect(out).not.toBe(repos)
+    // original untouched
+    expect(repos.map((r) => r.name)).toEqual(['chroxy', 'medlens', 'no-it-all'])
+  })
+
+  it('recent sorts most-recently-touched first', () => {
+    // chroxy 11:47 > no-it-all 11:12 > medlens 2026-05-28
+    expect(sortRepos(repos, 'recent').map((r) => r.name)).toEqual(['chroxy', 'no-it-all', 'medlens'])
+  })
+
+  it('worktrees sorts highest count first', () => {
+    expect(sortRepos(repos, 'worktrees').map((r) => r.name)).toEqual(['medlens', 'chroxy', 'no-it-all'])
+  })
+
+  it('prs sorts highest open-PR count first, unknown (null) last', () => {
+    // medlens 16 > no-it-all 1 > chroxy null
+    expect(sortRepos(repos, 'prs').map((r) => r.name)).toEqual(['medlens', 'no-it-all', 'chroxy'])
+  })
+
+  it('verdict sorts by priority (live first, onboarded last)', () => {
+    expect(sortRepos(repos, 'verdict').map((r) => r.name)).toEqual(['chroxy', 'medlens', 'no-it-all'])
+  })
+
+  it('tree sorts most uncommitted changes first, ties broken by name', () => {
+    // medlens has 2 changes; chroxy & no-it-all are clean (0) → name tiebreak.
+    expect(sortRepos(repos, 'tree').map((r) => r.name)).toEqual(['medlens', 'chroxy', 'no-it-all'])
+  })
+})
+
+describe('ControlRoomSection sort/filter controls (#5216)', () => {
+  it('renders the controls bar with filter chips, a sort select, and a count', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    expect(screen.getByTestId('cr-controls')).toBeTruthy()
+    expect(screen.getByTestId('cr-filter-dirty')).toBeTruthy()
+    expect(screen.getByTestId('cr-filter-live')).toBeTruthy()
+    expect(screen.getByTestId('cr-filter-prs')).toBeTruthy()
+    expect(screen.getByTestId('cr-filter-triage')).toBeTruthy()
+    expect(screen.getByTestId('cr-sort')).toBeTruthy()
+    // No filter active → plain "N repos" and no Clear button.
+    expect(screen.getByTestId('cr-visible-count')).toHaveTextContent('3 repos')
+    expect(screen.queryByTestId('cr-clear-filters')).toBeNull()
+  })
+
+  it('filtering by dirty narrows the table and updates the count', () => {
+    const { container } = render(
+      <ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />,
+    )
+    fireEvent.click(screen.getByTestId('cr-filter-dirty'))
+    expect(renderedRepoOrder(container)).toEqual(['medlens'])
+    expect(screen.getByTestId('cr-filter-dirty')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('cr-visible-count')).toHaveTextContent('1 of 3 repos')
+  })
+
+  it('Clear resets the filters', () => {
+    const { container } = render(
+      <ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />,
+    )
+    fireEvent.click(screen.getByTestId('cr-filter-dirty'))
+    fireEvent.click(screen.getByTestId('cr-clear-filters'))
+    expect(renderedRepoOrder(container)).toEqual(['chroxy', 'medlens', 'no-it-all'])
+    expect(screen.getByTestId('cr-visible-count')).toHaveTextContent('3 repos')
+    expect(screen.getByTestId('cr-filter-dirty')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('shows a no-matches row (with a clear action) when filters exclude everything', () => {
+    const { container } = render(
+      <ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />,
+    )
+    // dirty + live → no repo matches both.
+    fireEvent.click(screen.getByTestId('cr-filter-dirty'))
+    fireEvent.click(screen.getByTestId('cr-filter-live'))
+    expect(renderedRepoOrder(container)).toEqual([])
+    expect(screen.getByTestId('cr-no-matches')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('cr-no-matches-clear'))
+    expect(renderedRepoOrder(container)).toEqual(['chroxy', 'medlens', 'no-it-all'])
+  })
+
+  it('changing the sort reorders the rendered rows', () => {
+    const { container } = render(
+      <ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />,
+    )
+    fireEvent.change(screen.getByTestId('cr-sort'), { target: { value: 'worktrees' } })
+    expect(renderedRepoOrder(container)).toEqual(['medlens', 'chroxy', 'no-it-all'])
+  })
+
+  it('does not render the controls bar when there are no repos', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot({ repos: [], summary: { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 } })}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+      />,
+    )
+    expect(screen.queryByTestId('cr-controls')).toBeNull()
   })
 })
 

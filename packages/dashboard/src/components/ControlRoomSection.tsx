@@ -31,7 +31,7 @@
  *   - recent      → warn  (amber)  — recent uncommitted work; eyeball before touching.
  *   - onboarded   → ok    (green)  — on the pull-model; just needs a checkout+pull.
  */
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { RepoStatus, RepoVerdict, ServerHostStatusSnapshotMessage } from '@chroxy/protocol'
 import type { ActivityState, SessionInfo } from '@chroxy/store-core'
@@ -59,6 +59,128 @@ const VERDICT_LABEL: Record<RepoVerdict, string> = {
   abandoned: 'Likely abandoned',
   recent: 'Recent / your call',
   onboarded: 'Onboarded',
+}
+
+/**
+ * #5216 — repo-table filters. Each is an independent predicate the operator can
+ * toggle to narrow the survey to "what needs my attention". Mirrors the brief's
+ * facets: dirty · live · has-PRs · needs-triage.
+ *
+ *   - dirty   → working tree has uncommitted changes.
+ *   - live    → a chroxy session is running in the repo right now.
+ *   - prs     → the repo has at least one open PR (unknown `null` counts as 0).
+ *   - triage  → the verdict is one of the amber "a human should look" buckets
+ *               (investigate / abandoned / recent). LIVE (working now) and
+ *               onboarded (green, fine) are deliberately excluded.
+ */
+export type RepoFilterKey = 'dirty' | 'live' | 'prs' | 'triage'
+
+interface RepoFilterDef {
+  key: RepoFilterKey
+  label: string
+  test: (repo: RepoStatus) => boolean
+}
+
+// Order here is the order the filter chips render in.
+export const REPO_FILTERS: readonly RepoFilterDef[] = [
+  { key: 'dirty', label: 'Dirty', test: (r) => r.tree.state === 'dirty' },
+  { key: 'live', label: 'Live', test: (r) => r.live },
+  { key: 'prs', label: 'Has PRs', test: (r) => (r.openPRs ?? 0) > 0 },
+  {
+    key: 'triage',
+    label: 'Needs triage',
+    test: (r) => r.verdict === 'investigate' || r.verdict === 'abandoned' || r.verdict === 'recent',
+  },
+]
+
+/**
+ * #5216 — sort keys for the repo table. `default` preserves the server's order
+ * (the survey already returns repos in a sensible order); the rest are operator
+ * overrides. Every non-default sort breaks ties on `name` so the order is
+ * deterministic regardless of the incoming array order.
+ */
+export type RepoSortKey = 'default' | 'verdict' | 'name' | 'recent' | 'worktrees' | 'prs' | 'tree'
+
+export interface RepoSortOption {
+  key: RepoSortKey
+  label: string
+}
+
+export const REPO_SORT_OPTIONS: readonly RepoSortOption[] = [
+  { key: 'default', label: 'Server order' },
+  { key: 'verdict', label: 'Verdict (priority)' },
+  { key: 'name', label: 'Name (A–Z)' },
+  { key: 'recent', label: 'Last touched' },
+  { key: 'worktrees', label: 'Worktrees' },
+  { key: 'prs', label: 'Open PRs' },
+  { key: 'tree', label: 'Tree changes' },
+]
+
+// Verdict → sort weight (lower sorts first): the "stop, look now" buckets float
+// to the top, onboarded sinks. Drives the `verdict` sort.
+const VERDICT_PRIORITY: Record<RepoVerdict, number> = {
+  live: 0,
+  investigate: 1,
+  abandoned: 2,
+  recent: 3,
+  onboarded: 4,
+}
+
+/** Total uncommitted changes in a repo's tree (0 when clean). */
+function treeChangeCount(repo: RepoStatus): number {
+  if (repo.tree.state === 'clean') return 0
+  return repo.tree.untracked + repo.tree.modified + repo.tree.staged
+}
+
+/**
+ * Filter repos to those matching EVERY active filter (intersection / AND). An
+ * empty `active` set is the identity — all repos pass. Pure; returns a new
+ * array. Exported for direct unit testing.
+ */
+export function filterRepos(
+  repos: readonly RepoStatus[],
+  active: ReadonlySet<RepoFilterKey>,
+): RepoStatus[] {
+  if (active.size === 0) return repos.slice()
+  const predicates = REPO_FILTERS.filter((f) => active.has(f.key))
+  return repos.filter((repo) => predicates.every((f) => f.test(repo)))
+}
+
+/**
+ * Return a new array of repos ordered by `sortKey`. `default` keeps the server's
+ * incoming order (a stable copy). Every other key sorts descending on its metric
+ * with a `name` (then `path`) tiebreaker so the order is fully deterministic.
+ * Pure; never mutates the input. Exported for direct unit testing.
+ */
+export function sortRepos(repos: readonly RepoStatus[], sortKey: RepoSortKey): RepoStatus[] {
+  const copy = repos.slice()
+  if (sortKey === 'default') return copy
+
+  const byName = (a: RepoStatus, b: RepoStatus) =>
+    a.name.localeCompare(b.name) || a.path.localeCompare(b.path)
+
+  const compare: Record<Exclude<RepoSortKey, 'default'>, (a: RepoStatus, b: RepoStatus) => number> = {
+    // Ascending priority (live first), then name.
+    verdict: (a, b) => VERDICT_PRIORITY[a.verdict] - VERDICT_PRIORITY[b.verdict] || byName(a, b),
+    // A–Z.
+    name: (a, b) => byName(a, b),
+    // Most-recently-touched first. Unparseable timestamps sink (treated as 0).
+    recent: (a, b) => (parseTime(b.lastTouched) - parseTime(a.lastTouched)) || byName(a, b),
+    // Highest worktree count first.
+    worktrees: (a, b) => (b.worktrees - a.worktrees) || byName(a, b),
+    // Highest open-PR count first; unknown (`null`) sinks below 0.
+    prs: (a, b) => ((b.openPRs ?? -1) - (a.openPRs ?? -1)) || byName(a, b),
+    // Most uncommitted changes first.
+    tree: (a, b) => (treeChangeCount(b) - treeChangeCount(a)) || byName(a, b),
+  }
+
+  return copy.sort(compare[sortKey])
+}
+
+/** Parse an ISO timestamp to epoch ms, or 0 when unparseable (sinks in sorts). */
+function parseTime(iso: string): number {
+  const ms = Date.parse(iso)
+  return Number.isNaN(ms) ? 0 : ms
 }
 
 /**
@@ -474,6 +596,29 @@ export function ControlRoomSection({
     })
   }, [])
 
+  // #5216 — repo-table view controls. Filters narrow the table (AND across
+  // active filters); sort reorders it. Both are ephemeral view state (not
+  // persisted) so a refresh keeps the operator's current lens but a reload
+  // starts from the server's default order with no filters.
+  const [activeFilters, setActiveFilters] = useState<ReadonlySet<RepoFilterKey>>(() => new Set())
+  const [sortKey, setSortKey] = useState<RepoSortKey>('default')
+
+  const toggleFilter = useCallback((key: RepoFilterKey) => {
+    setActiveFilters((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
+  const clearFilters = useCallback(() => setActiveFilters(new Set()), [])
+
+  const allRepos = snapshot ? snapshot.repos : []
+  const visibleRepos = useMemo(
+    () => sortRepos(filterRepos(allRepos, activeFilters), sortKey),
+    [allRepos, activeFilters, sortKey],
+  )
+
   // Gate the refresh on connection state: a dropped request would otherwise
   // spin/no-op silently. Disabled while a refresh is in flight or disconnected.
   const refreshDisabled = loading || !connected
@@ -563,6 +708,56 @@ export function ControlRoomSection({
             local clone may just need a checkout+pull.
           </div>
 
+          {snapshot.repos.length > 0 && (
+            <div className="cr-controls" data-testid="cr-controls">
+              <div className="cr-filters" role="group" aria-label="Filter repos">
+                {REPO_FILTERS.map((f) => {
+                  const on = activeFilters.has(f.key)
+                  return (
+                    <button
+                      key={f.key}
+                      type="button"
+                      className={`cr-filter${on ? ' cr-filter-on' : ''}`}
+                      data-testid={`cr-filter-${f.key}`}
+                      aria-pressed={on}
+                      onClick={() => toggleFilter(f.key)}
+                    >
+                      {f.label}
+                    </button>
+                  )
+                })}
+                {activeFilters.size > 0 && (
+                  <button
+                    type="button"
+                    className="cr-filter-clear"
+                    data-testid="cr-clear-filters"
+                    onClick={clearFilters}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <label className="cr-sort-label">
+                Sort
+                <select
+                  className="cr-sort"
+                  data-testid="cr-sort"
+                  value={sortKey}
+                  onChange={(e) => setSortKey(e.target.value as RepoSortKey)}
+                >
+                  {REPO_SORT_OPTIONS.map((opt) => (
+                    <option key={opt.key} value={opt.key}>{opt.label}</option>
+                  ))}
+                </select>
+              </label>
+              <span className="cr-dim cr-visible-count" data-testid="cr-visible-count">
+                {activeFilters.size > 0
+                  ? `${visibleRepos.length} of ${snapshot.repos.length} repos`
+                  : `${snapshot.repos.length} repos`}
+              </span>
+            </div>
+          )}
+
           <section className="cr-table-wrap">
             <table className="cr-table" data-testid="cr-table">
               <thead>
@@ -582,8 +777,17 @@ export function ControlRoomSection({
                   <tr data-testid="cr-no-repos">
                     <td colSpan={8} className="cr-dim">No repos found under {snapshot.root}.</td>
                   </tr>
+                ) : visibleRepos.length === 0 ? (
+                  <tr data-testid="cr-no-matches">
+                    <td colSpan={8} className="cr-dim">
+                      No repos match the active filters.{' '}
+                      <button type="button" className="cr-link-btn" data-testid="cr-no-matches-clear" onClick={clearFilters}>
+                        Clear filters
+                      </button>
+                    </td>
+                  </tr>
                 ) : (
-                  snapshot.repos.map((repo) => (
+                  visibleRepos.map((repo) => (
                     <RepoRows
                       key={repo.path}
                       repo={repo}
