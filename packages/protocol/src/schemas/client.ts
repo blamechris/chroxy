@@ -76,7 +76,7 @@ export const InterruptSchema = z.object({
 export const CancelActivitySchema = z.object({
   type: z.literal('cancel_activity'),
   activityId: z.string().min(1).max(512),
-  sessionId: z.string().optional(),
+  sessionId: z.string().max(256).optional(),
 }).passthrough()
 
 export const SetModelSchema = z.object({

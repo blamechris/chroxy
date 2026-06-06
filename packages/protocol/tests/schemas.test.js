@@ -49,6 +49,7 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!CancelActivitySchema.safeParse({ type: 'cancel_activity' }).success, 'missing activityId rejected')
     assert.ok(!CancelActivitySchema.safeParse({ type: 'cancel_activity', activityId: '' }).success, 'empty activityId rejected')
     assert.ok(!CancelActivitySchema.safeParse({ type: 'cancel_activity', activityId: 'x'.repeat(513) }).success, 'over-long activityId rejected')
+    assert.ok(!CancelActivitySchema.safeParse({ type: 'cancel_activity', activityId: 'tu-1', sessionId: 'x'.repeat(257) }).success, 'over-long sessionId rejected')
   })
 
   it('resolves cancel_activity through the ClientMessageSchema union by discriminator', async () => {
