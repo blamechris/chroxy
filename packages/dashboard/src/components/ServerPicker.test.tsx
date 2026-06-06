@@ -10,6 +10,7 @@ let storeState: Record<string, unknown> = {}
 const mockAddServer = vi.fn(() => ({ id: 'srv_new', name: 'New', wsUrl: 'wss://new/ws', token: 't', lastConnectedAt: null }))
 const mockRemoveServer = vi.fn()
 const mockSwitchServer = vi.fn()
+const mockConnectLocal = vi.fn()
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
@@ -17,9 +18,11 @@ vi.mock('../store/connection', () => ({
       serverRegistry: storeState.serverRegistry ?? [],
       activeServerId: storeState.activeServerId ?? null,
       connectionPhase: storeState.connectionPhase ?? 'disconnected',
+      hasLocalServer: storeState.hasLocalServer ?? false,
       addServer: mockAddServer,
       removeServer: mockRemoveServer,
       switchServer: mockSwitchServer,
+      connectLocal: mockConnectLocal,
     }
     return selector(store)
   },
@@ -49,6 +52,49 @@ describe('ServerPicker', () => {
     render(<ServerPicker />)
     expect(screen.getByTestId('server-empty')).toBeTruthy()
     expect(screen.getByText('No servers configured.')).toBeTruthy()
+  })
+
+  it('pins a "This machine" local item when a local server is available', () => {
+    storeState.hasLocalServer = true
+    storeState.activeServerId = null
+    storeState.connectionPhase = 'connected'
+    render(<ServerPicker />)
+    const local = screen.getByTestId('server-item-local')
+    expect(local).toBeTruthy()
+    expect(screen.getByText('This machine')).toBeTruthy()
+    // active (activeServerId === null) + connected → shows Connected
+    expect(local.className).toContain('active')
+    expect(screen.getByText('Connected')).toBeTruthy()
+  })
+
+  it('does not pin a local item when no local server is available', () => {
+    storeState.hasLocalServer = false
+    render(<ServerPicker />)
+    expect(screen.queryByTestId('server-item-local')).toBeNull()
+  })
+
+  it('hides empty state when only the local server is available', () => {
+    storeState.hasLocalServer = true
+    storeState.serverRegistry = []
+    render(<ServerPicker />)
+    expect(screen.queryByTestId('server-empty')).toBeNull()
+    expect(screen.getByTestId('server-item-local')).toBeTruthy()
+  })
+
+  it('local item is inactive when a remote server is active', () => {
+    storeState.hasLocalServer = true
+    storeState.serverRegistry = SERVERS
+    storeState.activeServerId = 'srv_1'
+    storeState.connectionPhase = 'connected'
+    render(<ServerPicker />)
+    expect(screen.getByTestId('server-item-local').className).not.toContain('active')
+  })
+
+  it('calls connectLocal when clicking the local item', () => {
+    storeState.hasLocalServer = true
+    render(<ServerPicker />)
+    fireEvent.click(screen.getByText('This machine'))
+    expect(mockConnectLocal).toHaveBeenCalledTimes(1)
   })
 
   it('shows server list', () => {
