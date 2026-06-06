@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import {
   getStoredCredential,
   setStoredCredential,
@@ -11,6 +12,7 @@ import {
   _setCredentialLoggerForTests,
   _resetKeychainWarningsForTests,
 } from '../src/credential-store.js'
+import { CRED_KEY_SERVICE } from '../src/credential-cipher.js'
 
 /**
  * #5242 — the spawn path must not SILENTLY resolve an encrypted credential to
@@ -116,5 +118,23 @@ describe('credential-store — encrypted-keychain-unavailable warning (#5242)', 
     // Same keychain still holds the data key → decrypts fine.
     assert.equal(getStoredCredential('ANTHROPIC_API_KEY'), 'sk-ant-ok')
     assert.equal(logger._warns.length, 0)
+  })
+
+  // #5242 (review nitpick): an encrypted envelope that fails to DECRYPT — the
+  // keychain is available and HAS a data key, but it's the wrong key (or a
+  // corrupt envelope) — is NOT the recoverable keychain-unavailable case. The
+  // keychain-unavailable warning must not fire here; the error is already
+  // surfaced via getCredentialsStatus.fileError.
+  it('does NOT warn when an encrypted envelope fails to decrypt (corrupt/wrong key)', () => {
+    const k1 = inMemoryKeychain()
+    _setCredentialKeychainForTests(k1)
+    setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-corrupt-case')
+    // Swap to a keychain that IS available and DOES hold a data key, but a
+    // different one — so getMasterKey returns a key yet decryptEnvelope throws.
+    const k2 = inMemoryKeychain()
+    k2.setToken(Buffer.from(randomBytes(32)).toString('base64'), CRED_KEY_SERVICE)
+    _setCredentialKeychainForTests(k2)
+    assert.equal(getStoredCredential('ANTHROPIC_API_KEY'), null)
+    assert.equal(logger._warns.length, 0, 'a decrypt failure is not the recoverable keychain-unavailable case')
   })
 })
