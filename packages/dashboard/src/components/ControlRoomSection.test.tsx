@@ -81,7 +81,12 @@ function activityEntry(id: string, over: Partial<ActivityEntry> = {}): ActivityE
   }
 }
 
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  // #5226 persists filters/sort to localStorage — clear so view state from one
+  // case never leaks into the next (which assumes the default unfiltered view).
+  try { localStorage.clear() } catch { /* noop */ }
+})
 
 const NOW = Date.parse('2026-06-04T12:00:00.000Z')
 
@@ -425,6 +430,66 @@ describe('ControlRoomSection sort/filter controls (#5216)', () => {
       />,
     )
     expect(screen.queryByTestId('cr-controls')).toBeNull()
+  })
+})
+
+describe('ControlRoomSection sort/filter persistence (#5226)', () => {
+  it('persists an active filter to localStorage', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    fireEvent.click(screen.getByTestId('cr-filter-dirty'))
+    expect(localStorage.getItem('chroxy_cr_filters')).toBe('dirty')
+  })
+
+  it('persists the chosen sort to localStorage', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    fireEvent.change(screen.getByTestId('cr-sort'), { target: { value: 'worktrees' } })
+    expect(localStorage.getItem('chroxy_cr_sort')).toBe('worktrees')
+  })
+
+  it('restores persisted filter + sort on a fresh mount', () => {
+    localStorage.setItem('chroxy_cr_filters', 'dirty')
+    localStorage.setItem('chroxy_cr_sort', 'worktrees')
+    const { container } = render(
+      <ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />,
+    )
+    // dirty filter restored → only medlens, and chip shows pressed.
+    expect(screen.getByTestId('cr-filter-dirty')).toHaveAttribute('aria-pressed', 'true')
+    expect(renderedRepoOrder(container)).toEqual(['medlens'])
+    // sort restored → the select reflects it.
+    expect((screen.getByTestId('cr-sort') as HTMLSelectElement).value).toBe('worktrees')
+  })
+
+  it('round-trips through unmount/remount (a reload survives)', () => {
+    const first = render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    fireEvent.click(screen.getByTestId('cr-filter-live'))
+    first.unmount()
+    // Re-mount fresh (simulating a page reload reading from localStorage).
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    expect(screen.getByTestId('cr-filter-live')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('cr-visible-count')).toHaveTextContent('1 of 3 repos')
+  })
+
+  it('ignores garbage / unknown persisted values, falling back to defaults', () => {
+    localStorage.setItem('chroxy_cr_filters', 'dirty,bogus,,live')
+    localStorage.setItem('chroxy_cr_sort', 'not-a-real-sort')
+    const { container } = render(
+      <ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />,
+    )
+    // Only the valid keys (dirty, live) survive — and they AND to nothing here.
+    expect(screen.getByTestId('cr-filter-dirty')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('cr-filter-live')).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByTestId('cr-filter-prs')).toHaveAttribute('aria-pressed', 'false')
+    // Invalid sort → default (server order).
+    expect((screen.getByTestId('cr-sort') as HTMLSelectElement).value).toBe('default')
+    expect(renderedRepoOrder(container)).toEqual([]) // dirty AND live matches nothing
+  })
+
+  it('clearing filters empties the persisted value', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    fireEvent.click(screen.getByTestId('cr-filter-dirty'))
+    expect(localStorage.getItem('chroxy_cr_filters')).toBe('dirty')
+    fireEvent.click(screen.getByTestId('cr-clear-filters'))
+    expect(localStorage.getItem('chroxy_cr_filters')).toBe('')
   })
 })
 
