@@ -309,4 +309,66 @@ describe('worktree-gc CLI (runWorktreeGc against a real repo)', () => {
     assert.equal(existsSync(cleanDead), false)
     assert.equal(existsSync(dirtyDead), true)
   })
+
+  it('#5221 scans the config.repos set when no --repo is given', async () => {
+    const { collectWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
+    // A config that lists the temp repo explicitly — exercises the
+    // readConfigSoft → resolveRepoSet({ repos }) path (vs the --repo shortcut).
+    const configPath = join(repo, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ repos: [{ name: 'cfg-repo', path: repo }] }))
+
+    const report = collectWorktreeGc(
+      {}, // no --repo
+      {
+        configPath,
+        withSizes: false,
+        planDeps: { kill: fakeKill },
+        // Stub auto-discovery so the default ~/Projects root isn't walked —
+        // isolates the assertion to the explicit config.repos entry.
+        repoSetSeams: { _readdir: () => [] },
+      },
+    )
+    assert.equal(report.repoCount, 1)
+    assert.equal(report.reclaimableCount, 1) // clean-dead
+    assert.equal(report.skippedCount, 1) // dirty-dead
+    assert.ok(report.repos.some((r) => r.path === repo), 'config repo was not scanned')
+  })
+})
+
+describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () => {
+  let root, repo, cleanDead
+
+  beforeEach(() => {
+    // A dedicated discovery root holding one repo, so resolveRepoSet's
+    // auto-discovery has a deterministic tree to walk (not all of tmpdir).
+    root = mkdtempSync(join(tmpdir(), 'chroxy-wtgc-root-'))
+    repo = join(root, 'project-a')
+    mkdirSync(repo, { recursive: true })
+    git(repo, ['init', '--initial-branch=main', '.'])
+    git(repo, ['config', 'user.email', 'test@test'])
+    git(repo, ['config', 'user.name', 'Test'])
+    git(repo, ['commit', '--allow-empty', '-m', 'init'])
+    cleanDead = join(repo, '.claude', 'worktrees', 'clean-dead')
+    git(repo, ['worktree', 'add', '--detach', cleanDead, 'HEAD'])
+    git(repo, ['worktree', 'lock', '--reason', `claude agent a1 (pid ${DEAD_PID})`, cleanDead])
+  })
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  it('discovers repos under config.controlRoomRoot when no --repo is given', async () => {
+    const { collectWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
+    const configPath = join(root, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ controlRoomRoot: root }))
+
+    const report = collectWorktreeGc(
+      {},
+      { configPath, withSizes: false, planDeps: { kill: fakeKill } },
+    )
+    // Exact count: the temp root holds exactly one repo, so a stronger guard
+    // than `>= 1` catches a regression that unions in the default ~/Projects set.
+    assert.equal(report.repoCount, 1)
+    assert.equal(report.repos[0].path, repo, 'project-a was not the discovered repo')
+    assert.equal(report.reclaimableCount, 1) // clean-dead
+    assert.equal(report.skippedCount, 0) // only a clean-dead worktree in this fixture
+  })
 })
