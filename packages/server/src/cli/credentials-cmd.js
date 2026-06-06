@@ -12,7 +12,7 @@ import { createLogger } from '../logger.js'
 
 const REKEY_MESSAGES = {
   rekeyed: 'Rotated the credential data key and re-encrypted credentials.json.',
-  'no-keychain': 'No OS keychain available — nothing to rotate (credentials are stored as plaintext 0600).',
+  'no-keychain': 'No OS keychain available to hold a data key — nothing to rotate.',
   'no-file': 'No credentials.json found — nothing to rotate.',
   empty: 'credentials.json holds no credentials — nothing to rotate.',
   'read-error': 'Could not read credentials.json safely — aborted without changing anything.',
