@@ -364,8 +364,11 @@ describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () =>
       {},
       { configPath, withSizes: false, planDeps: { kill: fakeKill } },
     )
-    assert.ok(report.repoCount >= 1, 'no repos discovered under controlRoomRoot')
-    assert.ok(report.repos.some((r) => r.path === repo), 'project-a was not discovered')
-    assert.equal(report.reclaimableCount, 1)
+    // Exact count: the temp root holds exactly one repo, so a stronger guard
+    // than `>= 1` catches a regression that unions in the default ~/Projects set.
+    assert.equal(report.repoCount, 1)
+    assert.equal(report.repos[0].path, repo, 'project-a was not the discovered repo')
+    assert.equal(report.reclaimableCount, 1) // clean-dead
+    assert.equal(report.skippedCount, 0) // only a clean-dead worktree in this fixture
   })
 })
