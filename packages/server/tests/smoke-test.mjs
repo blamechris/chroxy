@@ -332,6 +332,83 @@ async function run() {
       }
     }
 
+    // ---- Control Room ----
+    log('')
+    log('--- Control Room ---')
+
+    // Open the Control Room from the sidebar panel-slot launcher (#5200/#5204).
+    const crLauncher = await page.$('[data-testid="sidebar-panel-slot-launcher-control-room"]')
+    if (crLauncher && await crLauncher.isVisible()) {
+      await crLauncher.click()
+      await page.waitForTimeout(600)
+
+      // The section owns the main content area when active.
+      const crSection = await page.$('[data-testid="control-room-section"]')
+      if (crSection && await crSection.isVisible()) {
+        pass('Control Room opens', 'launcher → control-room-section visible')
+        await screenshot(page, '06-control-room')
+      } else {
+        fail('Control Room opens', 'control-room-section not visible after launcher click')
+      }
+
+      // It registers a session-independent top-level tab (#5204).
+      const crTab = await page.$('[data-testid="control-room-tab"]')
+      if (crTab && await crTab.isVisible()) {
+        pass('Control Room tab present')
+      } else {
+        fail('Control Room tab present', 'control-room-tab not found')
+      }
+
+      // Renders either the populated repo table or the empty/not-yet-surveyed state.
+      const crTable = await page.$('[data-testid="cr-table"]')
+      const crEmpty = await page.$('[data-testid="cr-empty"]')
+      const tableVisible = crTable && await crTable.isVisible()
+      const emptyVisible = crEmpty && await crEmpty.isVisible()
+      if (tableVisible) {
+        pass('Control Room renders', 'repo table (cr-table)')
+      } else if (emptyVisible) {
+        pass('Control Room renders', 'empty/not-yet-surveyed state (cr-empty)')
+      } else {
+        fail('Control Room renders', 'neither cr-table nor cr-empty visible')
+      }
+
+      // With a populated table, the sort/filter controls (#5225) should also render.
+      if (tableVisible) {
+        const crControls = await page.$('[data-testid="cr-controls"]')
+        if (crControls && await crControls.isVisible()) {
+          pass('Control Room sort/filter controls')
+        } else {
+          fail('Control Room sort/filter controls', 'cr-controls not visible with a populated table')
+        }
+      }
+
+      // Best-effort: trigger a refresh (read-only git/gh survey) and screenshot the result.
+      // Non-fatal — the survey can be slow or rate-limited; we only verify the button wires up
+      // and the section stays mounted afterward, not any specific repo data.
+      try {
+        const refreshBtn = await page.$(
+          '[data-testid="cr-refresh"]:not([disabled]), [data-testid="cr-empty-refresh"]:not([disabled])'
+        )
+        if (refreshBtn) {
+          await refreshBtn.click()
+          await page.waitForTimeout(4000)
+          await screenshot(page, '07-control-room-survey')
+          const stillThere = await page.$('[data-testid="control-room-section"]')
+          if (stillThere && await stillThere.isVisible()) {
+            pass('Control Room refresh', 'section stable after survey request')
+          } else {
+            fail('Control Room refresh', 'section disappeared after refresh')
+          }
+        } else {
+          log('  (refresh button disabled/absent — skipping survey trigger)')
+        }
+      } catch (e) {
+        log(`  (refresh trigger skipped: ${e.message})`)
+      }
+    } else {
+      fail('Control Room opens', 'sidebar-panel-slot-launcher-control-room not found')
+    }
+
     // ---- Console errors ----
     log('')
     log('--- Health ---')
@@ -363,9 +440,20 @@ async function run() {
   if (browser) await browser.close()
   if (managedServer) {
     log('Stopping managed server...')
-    managedServer.kill('SIGTERM')
-    await new Promise(r => setTimeout(r, 1000))
-    if (managedServer.exitCode === null) managedServer.kill('SIGKILL')
+    // Give the server time to flush session-state.json on SIGTERM before escalating.
+    // SIGKILL bypasses the flush handler and can wipe state (feedback_sigterm_not_sigkill):
+    // wait for a clean exit, only force-kill if the process is genuinely hung.
+    await new Promise((resolve) => {
+      const grace = setTimeout(() => {
+        if (managedServer.exitCode === null && managedServer.signalCode === null) {
+          log('  server did not exit within 8s of SIGTERM — escalating to SIGKILL')
+          managedServer.kill('SIGKILL')
+        }
+        resolve()
+      }, 8000)
+      managedServer.once('exit', () => { clearTimeout(grace); resolve() })
+      managedServer.kill('SIGTERM')
+    })
   }
 
   process.exit(failed > 0 ? 1 : 0)
@@ -374,6 +462,7 @@ async function run() {
 run().catch(err => {
   console.error('Fatal:', err)
   if (browser) browser.close()
+  // SIGTERM (never SIGKILL) so the server flushes session-state on the way out.
   if (managedServer) managedServer.kill('SIGTERM')
   process.exit(1)
 })

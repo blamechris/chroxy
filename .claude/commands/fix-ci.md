@@ -99,7 +99,7 @@ gh api repos/${REPO}/actions/runs/${RUN_ID}/jobs --jq '.jobs[] | select(.conclus
 Chroxy-specific patterns:
 - `npm test` failures in server tests → check for missing test fixtures or mock setup issues
 - `npx tsc --noEmit` failures in app → TypeScript strict mode violations (check for `any` types, platform-specific issues)
-- `npm run dashboard:build` failures → Vite build errors, missing CSS, or theme issues
+- `npm run build -w @chroxy/dashboard` failures → Vite build errors, missing CSS, or theme issues
 - `npx jest` failures in dashboard tests → component rendering or mock issues
 - WebSocket protocol test failures → check WS message format or auth flow issues
 

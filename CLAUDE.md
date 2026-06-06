@@ -65,18 +65,24 @@ npx chroxy tunnel setup
 3. Review open PRs, **separated by author** so external contributions don't get lost in your own queue:
    - Yours: `gh pr list --state open --author @me`
    - **External:** `gh pr list --state open --search "-author:@me"` — flag any results for review attention before starting new marathons (an open external PR may already cover an issue you'd otherwise queue)
-4. Check for skill template updates: `~/Projects/skill-templates/sync.sh chroxy`
+4. Check for skill drift: `/skill outdated` (then `/skill update [name]` to refresh)
 
-### Skill Templates
+### Skills (pull-based registry)
 
-Reusable skill templates (check-pr, agent-review, etc.) are maintained in the private repo `blamechris/skill-templates`. When the sync script reports drift, review the generic template and customization notes, then update local skills as needed.
+Skills live in the `blamechris/skill-templates` **registry** and install **on demand** via the
+`/skill` client — think `npm`/`brew` for `.claude/commands/*.md`. There is no push-deploy and no
+`sync.sh`; the old push/`customizations/` workflow is retired.
 
-```
-~/Projects/skill-templates/
-├── generic/           # Gold standard templates
-├── customizations/    # Per-repo adaptation notes (chroxy.md)
-└── sync.sh           # Drift detection
-```
+- **`/skill add <name>`** — resolve from the registry → fetch `generic/<name>.md` → fill its
+  `{{CUSTOMIZE: ...}}` markers from this repo's `CLAUDE.md` + `.claude/skill-profile.md` + code →
+  write a version-stamped `.claude/commands/<name>.md` → record in `.claude/skills.lock`.
+- **`/skill list` / `outdated` / `update [name]` / `remove <name>`** — manage installed skills.
+- **Install-on-miss is a rule:** if `/X` is requested but absent from `.claude/commands/`, run
+  `/skill add X` first, then invoke it.
+
+This repo carries `.claude/skill-profile.md` (the customization profile) and `.claude/skills.lock`
+(what's installed, at which template hash). Maintainers edit templates in the registry's `generic/`
+and run its `scripts/build-index.sh`; consumers pick changes up on the next `/skill update`.
 
 ## Git Workflow
 
