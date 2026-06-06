@@ -10,6 +10,7 @@ describe('validateConfig', () => {
     const config = {
       apiToken: 'abc123',
       port: 8765,
+      host: '127.0.0.1',
       cwd: '/home/user',
       model: 'sonnet',
       allowedTools: ['bash', 'read'],
@@ -283,7 +284,7 @@ describe('validateConfig', () => {
 
 describe('mergeConfig', () => {
   let originalEnv
-  const envKeys = ['API_TOKEN', 'PORT', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS', 'CHROXY_RESULT_TIMEOUT_MS', 'CHROXY_STREAM_STALL_TIMEOUT_MS', 'CHROXY_MCP_TOOL_CALL_TIMEOUT_MS', 'CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS']
+  const envKeys = ['API_TOKEN', 'PORT', 'CHROXY_HOST', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS', 'CHROXY_RESULT_TIMEOUT_MS', 'CHROXY_STREAM_STALL_TIMEOUT_MS', 'CHROXY_MCP_TOOL_CALL_TIMEOUT_MS', 'CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS']
 
   beforeEach(() => {
     originalEnv = {}
@@ -475,6 +476,18 @@ describe('mergeConfig', () => {
     process.env.CHROXY_SHOW_TOKEN = '1'
     const merged = mergeConfig({ defaults: { showToken: false } })
     assert.equal(merged.showToken, true)
+  })
+
+  it('reads host from CHROXY_HOST env var', () => {
+    process.env.CHROXY_HOST = '127.0.0.1'
+    const merged = mergeConfig({ defaults: {} })
+    assert.equal(merged.host, '127.0.0.1')
+  })
+
+  it('CLI host override beats CHROXY_HOST env var', () => {
+    process.env.CHROXY_HOST = '127.0.0.1'
+    const merged = mergeConfig({ cliOverrides: { host: '0.0.0.0' }, defaults: {} })
+    assert.equal(merged.host, '0.0.0.0')
   })
 
   it('reads repos from CHROXY_REPOS env var as comma-separated (#1924)', () => {

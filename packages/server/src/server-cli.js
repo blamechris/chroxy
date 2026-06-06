@@ -19,6 +19,7 @@ import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
+import { resolveBindHost, isLoopbackHost, formatHostForUrl } from './bind-host.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
@@ -799,8 +800,11 @@ export async function startCliServer(config) {
     // enforce the 2026-04-11 audit blocker 1 workspace allowlist.
     config,
   })
-  // Bind to localhost-only when auth is disabled
-  wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
+  // Resolve the bind address. --no-auth forces loopback; otherwise an explicit
+  // config.host (e.g. --host 127.0.0.1) binds that interface with auth still
+  // on, and the default (undefined) binds 0.0.0.0 as before.
+  const bindHost = resolveBindHost({ noAuth: NO_AUTH, host: config.host })
+  wsServer.start(bindHost)
 
   // #5053: wire the pool stats aggregator to the shared pool so the
   // dashboard's GET /api/pool/stats has rolling counters (hit rate,
@@ -816,10 +820,15 @@ export async function startCliServer(config) {
   sessionManager.setActiveViewersFn((sid) => wsServer.hasActiveViewersForSession(sid))
   sessionManager.startSessionTimeouts()
 
-  // Advertise via mDNS/Bonjour for local network discovery
+  // Advertise via mDNS/Bonjour for local network discovery. Skipped on a
+  // loopback bind — nothing on the LAN can reach it, so an _chroxy._tcp
+  // advertisement would be misleading. (Auth-off already skips both branches
+  // below via the pre-existing !NO_AUTH guards.)
   let mdnsService = null
   let bonjourInstance = null
-  if (!NO_AUTH) {
+  if (!NO_AUTH && isLoopbackHost(bindHost)) {
+    log.info('Loopback bind — skipping mDNS advertisement (server not LAN-reachable)')
+  } else if (!NO_AUTH) {
     try {
       const { Bonjour } = await import('bonjour-service')
       bonjourInstance = new Bonjour()
@@ -1004,10 +1013,17 @@ export async function startCliServer(config) {
   } else if (externalUrl) {
     // Ready message already printed above
   } else if (!tunnelArg && !NO_AUTH) {
-    const lanIp = getLanIp()
-    const host = lanIp || 'localhost'
-    currentWsUrl = `ws://${host}:${PORT}`
-    await displayQr(`ws://${host}:${PORT}`, `http://${host}:${PORT}`, 'none')
+    // When bound to loopback the LAN IP is not reachable — advertise localhost.
+    // When bound to a specific non-loopback interface, advertise that exact
+    // address (getLanIp() returns the first NIC, which may not be the bound
+    // one). Otherwise (default 0.0.0.0 bind) fall back to the discovered LAN IP.
+    const host = isLoopbackHost(bindHost)
+      ? 'localhost'
+      : (bindHost && bindHost !== '0.0.0.0' ? bindHost : (getLanIp() || 'localhost'))
+    // Bracket IPv6 literals so the URL authority is well-formed.
+    const authority = `${formatHostForUrl(host)}:${PORT}`
+    currentWsUrl = `ws://${authority}`
+    await displayQr(`ws://${authority}`, `http://${authority}`, 'none')
   } else if (!NO_AUTH) {
     // tunnelArg is set but SKIP_TUNNEL is true due to externalUrl — already handled above
   } else {
