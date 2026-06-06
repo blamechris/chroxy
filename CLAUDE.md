@@ -76,7 +76,7 @@ Skills live in the `blamechris/skill-templates` **registry** and install **on de
 - **`/skill add <name>`** — resolve from the registry → fetch `generic/<name>.md` → fill its
   `{{CUSTOMIZE: ...}}` markers from this repo's `CLAUDE.md` + `.claude/skill-profile.md` + code →
   write a version-stamped `.claude/commands/<name>.md` → record in `.claude/skills.lock`.
-- **`/skill list` / `outdated` / `update [name]` / `remove <name>`** — manage installed skills.
+- **`/skill list` / `/skill outdated` / `/skill update [name]` / `/skill remove <name>`** — manage installed skills.
 - **Install-on-miss is a rule:** if `/X` is requested but absent from `.claude/commands/`, run
   `/skill add X` first, then invoke it.
 

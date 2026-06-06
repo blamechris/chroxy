@@ -444,14 +444,16 @@ async function run() {
     // SIGKILL bypasses the flush handler and can wipe state (feedback_sigterm_not_sigkill):
     // wait for a clean exit, only force-kill if the process is genuinely hung.
     await new Promise((resolve) => {
+      // Resolve only once the child has actually exited so we never leave a
+      // zombie/port-holding process behind. The 'exit' listener fires for both
+      // the graceful SIGTERM flush and a forced SIGKILL.
+      managedServer.once('exit', () => { clearTimeout(grace); resolve() })
       const grace = setTimeout(() => {
         if (managedServer.exitCode === null && managedServer.signalCode === null) {
           log('  server did not exit within 8s of SIGTERM — escalating to SIGKILL')
           managedServer.kill('SIGKILL')
         }
-        resolve()
       }, 8000)
-      managedServer.once('exit', () => { clearTimeout(grace); resolve() })
       managedServer.kill('SIGTERM')
     })
   }
@@ -462,7 +464,9 @@ async function run() {
 run().catch(err => {
   console.error('Fatal:', err)
   if (browser) browser.close()
-  // SIGTERM (never SIGKILL) so the server flushes session-state on the way out.
+  // Fatal path: send only SIGTERM (no SIGKILL escalation here) so the server
+  // gets a chance to flush session-state on the way out. The graceful cleanup
+  // path above is the one that may escalate to SIGKILL if the process hangs.
   if (managedServer) managedServer.kill('SIGTERM')
   process.exit(1)
 })
