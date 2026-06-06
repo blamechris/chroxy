@@ -87,12 +87,8 @@ describe('WS protocol schema coverage', () => {
     const handlerTypes = new Set([...registeredMessageTypes, ...SCHEMA_EXEMPT])
     const schemaOnly = [...schemaTypes].filter((t) => !handlerTypes.has(t))
 
-    // Known schema-only types, in two categories:
-    //   1. Handled at the connection/auth layer (ws-server.js) before messages
-    //      reach the handler registry (auth, pair, key_exchange, ping, encrypted).
-    //   2. Temporary: the schema landed ahead of its handler and the type is
-    //      currently unhandled (cancel_activity, see #5270/#5271). Each such
-    //      entry carries its own removal note below.
+    // These are known schema-only types handled at the connection/auth layer
+    // (ws-server.js) before messages reach the handler registry.
     const KNOWN_PRE_REGISTRY = new Set([
       'auth',          // handled in ws-auth.js before registry dispatch
       'pair',          // pairing flow, handled at connection layer
@@ -102,11 +98,8 @@ describe('WS protocol schema coverage', () => {
       // #5174 (epic #5170): host_status_request now has a real handler
       // (control-room-handlers.js), so it is covered by the forward
       // schema-coverage check and no longer belongs in KNOWN_PRE_REGISTRY.
-      // #5270 (Control Room Phase 2a): cancel_activity schema lands ahead of
-      // its handler. TEMPORARY — remove this entry in #5271 when the
-      // cancel_activity WS handler is registered (it will then be covered by
-      // the forward check above).
-      'cancel_activity',
+      // #5271 (Control Room Phase 2a): cancel_activity likewise now has a real
+      // handler (input-handlers.js), so its temporary entry was removed here.
     ])
 
     const unexplained = schemaOnly.filter((t) => !KNOWN_PRE_REGISTRY.has(t))
