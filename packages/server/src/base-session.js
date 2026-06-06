@@ -101,18 +101,15 @@ export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 5 * 60 * 1000
 // pending output file is negligible. Only armed while shells are pending.
 export const BACKGROUND_SHELL_SWEEP_MS = 15 * 1000
 
-// #5177: quiescence window (ms). A pending shell whose NON-EMPTY output
-// file has not been modified for at least this long is treated as complete
-// and reaped. 60s is conservative — comfortably longer than the inter-line
-// gap of a typical periodic background command (e.g. a 2s-sleep loop) so a
-// command that is merely slow between writes is not reaped while still
-// running. Combined with the non-empty guard in `_isBackgroundShellComplete`
-// (a silent command that emits no output is NEVER reaped via the file path),
-// the false-positive surface is small: only a command that produced output,
-// then went silent for >60s, then is still running, would be reaped early —
-// and even then the agent re-discovers reality on its next BashOutput poll.
-// An over-eager clear is a far smaller UX harm than the banner sticking
-// forever (the bug this fixes).
+// #5177: quiescence window (ms). A pending shell whose NON-EMPTY output file
+// has not been modified for at least this long is treated as QUIESCED.
+// #5247: quiescence is ADVISORY — it clears the dashboard "Waiting on
+// background work" banner but does NOT reap the shell or flip `isRunning`,
+// because a non-empty-then-idle output file is indistinguishable from a live
+// dev server / file-watcher / `tail -f` that logged once and now waits. The
+// old behaviour (reap + flip isRunning on quiescence) idle-timed those live
+// sessions out — re-opening #4307. Liveness is released only by a BashOutput
+// poll or destroy. 60s is still a reasonable banner-clear delay.
 export const BACKGROUND_SHELL_QUIESCE_MS = 60 * 1000
 
 // Default per-provider injection mode (#3200). Subprocess providers without
@@ -686,6 +683,16 @@ export class BaseSession extends EventEmitter {
    * indistinguishable from a finished session — `_isBusy` had cleared
    * at turn-end. Now it stays "running" until the agent acknowledges
    * the shell (via a `BashOutput` call) or the session is destroyed.
+   *
+   * #5247: the map size counts shells the mtime sweep has marked
+   * `quiesced` too. The sweep is ADVISORY — it clears the dashboard
+   * banner (see `getPendingBackgroundShells`) but must NOT flip liveness,
+   * because mtime quiescence can't tell "finished" from "idle but alive"
+   * (a dev server that logs once then waits for connections). Letting it
+   * flip `isRunning` reaped live processes and let `SessionTimeoutManager`
+   * time the session out as idle — re-opening #4307. Liveness authority is
+   * therefore BashOutput / destroy only, exactly as #4307 intended; the
+   * sweep just affects what the banner shows.
    */
   get isRunning() {
     if (this._isBusy) return true
@@ -701,9 +708,13 @@ export class BaseSession extends EventEmitter {
   getPendingBackgroundShells() {
     // #5177: project to the stable wire shape — `outputPath` is an internal
     // sweep detail and must not leak onto the snapshot the dashboard caches.
-    return Array.from(this._pendingBackgroundShells.values()).map(
-      ({ shellId, startedAt, command }) => ({ shellId, startedAt, command }),
-    )
+    // #5247: a shell the mtime sweep marked `quiesced` (output went idle) is
+    // dropped from this banner snapshot — the dashboard "Waiting on background
+    // work" indicator clears — but it stays in `_pendingBackgroundShells` so
+    // `isRunning` is unaffected (the sweep is advisory; see isRunning).
+    return Array.from(this._pendingBackgroundShells.values())
+      .filter((e) => !e.quiesced)
+      .map(({ shellId, startedAt, command }) => ({ shellId, startedAt, command }))
   }
 
   /**
@@ -900,34 +911,58 @@ export class BaseSession extends EventEmitter {
    * @private
    */
   _sweepCompletedBackgroundShells() {
+    let changed = false
+    let anyActive = false
     for (const shellId of Array.from(this._pendingBackgroundShells.keys())) {
       const entry = this._pendingBackgroundShells.get(shellId)
       if (!entry) continue
+      if (entry.quiesced) continue // already advisory-cleared from the banner
       if (this._isBackgroundShellComplete(entry)) {
-        this.clearBackgroundShell(shellId)
+        // #5247: ADVISORY only — mark the shell quiesced so it drops out of the
+        // banner snapshot, but DO NOT clearBackgroundShell / remove it from the
+        // map. mtime quiescence can't distinguish "finished" from "idle but
+        // alive" (a dev server that logs once then waits), so flipping liveness
+        // here reaped live processes and let SessionTimeoutManager idle-time the
+        // session out — re-opening #4307. Real liveness is released only by a
+        // BashOutput poll or destroy.
+        entry.quiesced = true
+        changed = true
+      } else {
+        anyActive = true
       }
     }
+    // The banner snapshot changed (a shell dropped out) — emit the same
+    // background_work_changed the BashOutput / destroy paths emit so the
+    // dashboard indicator clears with no new wire contract.
+    if (changed) this._emitBackgroundWorkChanged()
+    // Nothing left that could still transition → stop the recurring stat()
+    // sweep. A future trackBackgroundShell re-arms it. (clearBackgroundShell
+    // also stops it when the map fully drains via BashOutput / destroy.)
+    if (!anyActive) this._stopBackgroundShellSweep()
   }
 
   /**
-   * #5177: decide whether a pending background shell has completed.
+   * #5177: decide whether a pending background shell's output has QUIESCED —
+   * i.e. it can be dropped from the dashboard banner.
+   *
+   * #5247: this is NOT "the command finished". Its NON-EMPTY-then-idle output
+   * file is indistinguishable from a live-but-quiet process (a dev server that
+   * logs "listening on :3000" then waits, a file watcher, `tail -f`, a build in
+   * a long silent link phase). chroxy never holds the shell's PID (the id is
+   * opaque, owned by claude), so mtime quiescence is the best the BANNER can do
+   * — and the caller (`_sweepCompletedBackgroundShells`) treats a `true` here as
+   * ADVISORY (clears the banner only). Liveness / `SessionTimeoutManager` is
+   * governed solely by BashOutput / destroy (#4307), so a false "quiesced" here
+   * can no longer idle-time a live session out.
    *
    * Tests inject `_backgroundShellCompletionCheck` for deterministic control
-   * without touching the filesystem or real time. The production default
-   * uses the shell's output file mtime: claude tails the command's
-   * stdout/stderr into the file named in the tool_result, so a NON-EMPTY
-   * file that has not been written to for `_backgroundShellQuiesceMs` means
-   * the command produced output and then stopped — the strongest completion
-   * signal available given chroxy never holds the shell's PID (the id is
-   * opaque, owned by claude). A shell with no known output path, or whose
-   * output file is still empty (a silent command like `sleep 600`), can't be
-   * reaped this way and stays pending until BashOutput / destroy — the
-   * existing #4307 behaviour, preserved as the conservative fallback so a
-   * long, silent job is never flipped to idle while still running.
+   * without touching the filesystem or real time. A shell with no known output
+   * path, or whose output file is still empty (a silent command like
+   * `sleep 600`), is never marked quiesced via this path and stays in the
+   * banner until BashOutput / destroy.
    *
-   * Defensive: a stat() error (file removed, races) is treated as NOT
-   * complete so a transient FS hiccup can't reap a still-running shell. The
-   * banner sticking briefly is recoverable; a false clear is worse.
+   * Defensive: a stat() error (file removed, races) is treated as NOT quiesced
+   * so a transient FS hiccup can't drop a shell from the banner early.
    *
    * @param {{ shellId: string, outputPath?: string|null, startedAt: number }} entry
    * @returns {boolean}

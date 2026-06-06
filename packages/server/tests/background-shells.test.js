@@ -271,27 +271,49 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     emptySkillsDir = null
   })
 
-  it('reaps a completed shell on the next sweep tick WITHOUT a BashOutput poll', () => {
+  it('#5247: the sweep is advisory — clears the banner but does NOT flip isRunning', () => {
     mock.timers.enable({ apis: ['setInterval'] })
-    // Deterministic completion check: this shell is "done".
+    // Deterministic completion check: this shell's output has "quiesced".
     session._backgroundShellCompletionCheck = () => true
 
     const events = []
     session.on('background_work_changed', (d) => events.push(d))
 
-    session.trackBackgroundShell({ shellId: 'a', command: 'sleep 5', outputPath: '/tmp/a.output' })
+    session.trackBackgroundShell({ shellId: 'a', command: 'npm run dev', outputPath: '/tmp/a.output' })
     assert.equal(session.isRunning, true, 'running while pending')
     assert.equal(events.length, 1, 'track emitted once')
 
-    // Advance one sweep interval — the sweep should reap the shell.
+    // Advance one sweep interval — the sweep marks the shell quiesced.
     mock.timers.tick(1000)
 
-    assert.equal(session._pendingBackgroundShells.size, 0, 'shell reaped')
-    assert.equal(session.isRunning, false, 'no longer running')
-    // The reap must emit the SAME background_work_changed snapshot the
-    // dashboard consumes (empty pending) — this is the #5178 clear signal.
-    assert.equal(events.length, 2, 'reap emitted a second change')
-    assert.equal(events[1].pending.length, 0, 'snapshot shows no pending shells')
+    // The banner clears: the snapshot drops the quiesced shell, emitting the
+    // SAME background_work_changed the dashboard consumes.
+    assert.equal(events.length, 2, 'sweep emitted a banner change')
+    assert.equal(events[1].pending.length, 0, 'banner snapshot shows no pending shells')
+    assert.equal(session.getPendingBackgroundShells().length, 0, 'banner empty')
+
+    // But liveness is NOT flipped: the shell stays in the map and isRunning is
+    // still true — mtime quiescence can't tell a finished command from a live,
+    // idle dev server, so SessionTimeoutManager must not idle-time it out
+    // (#5247 / #4307). The OLD code reaped here and flipped isRunning false.
+    assert.equal(session._pendingBackgroundShells.size, 1, 'shell retained for liveness')
+    assert.equal(session.isRunning, true, 'still running after an advisory sweep')
+
+    // The recurring stat() sweep stops once nothing can still transition.
+    assert.equal(session._backgroundShellSweepTimer, null, 'sweep stops when all quiesced')
+  })
+
+  it('#5247: an authoritative clear (BashOutput / destroy) releases liveness after a sweep', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    session._backgroundShellCompletionCheck = () => true
+    session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
+    mock.timers.tick(1000) // advisory quiesce — banner clears, liveness retained
+    assert.equal(session.isRunning, true, 'sweep alone keeps it running')
+
+    // The agent polls BashOutput → clearBackgroundShell → liveness released.
+    assert.equal(session.clearBackgroundShell('a'), true)
+    assert.equal(session._pendingBackgroundShells.size, 0)
+    assert.equal(session.isRunning, false, 'now idle once the shell is acknowledged')
   })
 
   it('leaves a still-running shell pending across sweep ticks', () => {
