@@ -19,7 +19,10 @@ const LOOPBACK_HOSTS = new Set(['localhost', '::1'])
 export function isLoopbackHost(host) {
   if (typeof host !== 'string' || host.length === 0) return false
   if (LOOPBACK_HOSTS.has(host)) return true
-  return host.startsWith('127.')
+  if (host.startsWith('127.')) return true
+  // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1.
+  if (host.startsWith('::ffff:127.') || host.startsWith('::ffff:7f')) return true
+  return false
 }
 
 /**

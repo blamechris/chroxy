@@ -820,9 +820,10 @@ export async function startCliServer(config) {
   sessionManager.setActiveViewersFn((sid) => wsServer.hasActiveViewersForSession(sid))
   sessionManager.startSessionTimeouts()
 
-  // Advertise via mDNS/Bonjour for local network discovery. Skipped when the
-  // server is bound to loopback (nothing on the LAN can reach it, so an
-  // _chroxy._tcp advertisement would be misleading) or when auth is off.
+  // Advertise via mDNS/Bonjour for local network discovery. Skipped on a
+  // loopback bind — nothing on the LAN can reach it, so an _chroxy._tcp
+  // advertisement would be misleading. (Auth-off already skips both branches
+  // below via the pre-existing !NO_AUTH guards.)
   let mdnsService = null
   let bonjourInstance = null
   if (!NO_AUTH && isLoopbackHost(bindHost)) {
@@ -1013,7 +1014,12 @@ export async function startCliServer(config) {
     // Ready message already printed above
   } else if (!tunnelArg && !NO_AUTH) {
     // When bound to loopback the LAN IP is not reachable — advertise localhost.
-    const host = isLoopbackHost(bindHost) ? 'localhost' : (getLanIp() || 'localhost')
+    // When bound to a specific non-loopback interface, advertise that exact
+    // address (getLanIp() returns the first NIC, which may not be the bound
+    // one). Otherwise (default 0.0.0.0 bind) fall back to the discovered LAN IP.
+    const host = isLoopbackHost(bindHost)
+      ? 'localhost'
+      : (bindHost && bindHost !== '0.0.0.0' ? bindHost : (getLanIp() || 'localhost'))
     currentWsUrl = `ws://${host}:${PORT}`
     await displayQr(`ws://${host}:${PORT}`, `http://${host}:${PORT}`, 'none')
   } else if (!NO_AUTH) {
