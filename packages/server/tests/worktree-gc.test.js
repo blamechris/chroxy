@@ -265,6 +265,53 @@ describe('worktree-gc unit: applyPlan prune reporting (injected git)', () => {
     }, { git })
     assert.equal(results[0].ok, true)
   })
+
+  // #5246: a transient stat failure can misclassify a PRESENT worktree as
+  // dir-gone → 'prune'. `git worktree prune` leaves it intact, so applyPlan
+  // must NOT report ok:true for it. Verified by re-listing worktrees after the
+  // prune and checking the entry is genuinely gone.
+  it('reports a prune item as not-ok when the worktree is still present after prune (#5246)', () => {
+    const git = (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        // The "reclaimed" path is STILL listed → prune reclaimed nothing.
+        return 'worktree /repo\nHEAD a\nbranch refs/heads/main\n\nworktree /repo/wt/present\nHEAD b\nbranch refs/heads/x\n'
+      }
+      return '' // prune succeeds
+    }
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/present', action: 'prune', locked: false }],
+    }, { git })
+    assert.equal(results[0].ok, false)
+    assert.match(results[0].error, /still present after prune/)
+  })
+
+  it('reports prune ok when the worktree is genuinely gone after prune (#5246)', () => {
+    const git = (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        // Only the main worktree remains — the pruned entry is gone.
+        return 'worktree /repo\nHEAD a\nbranch refs/heads/main\n'
+      }
+      return ''
+    }
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/gone', action: 'prune', locked: false }],
+    }, { git })
+    assert.equal(results[0].ok, true)
+  })
+
+  it('falls back to ok (best-effort) when the post-prune re-list fails (#5246)', () => {
+    const git = (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        const e = new Error('fatal: re-list failed'); e.code = 1; throw e
+      }
+      return '' // prune succeeds
+    }
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/gone', action: 'prune', locked: false }],
+    }, { git })
+    // Can't verify, but prune succeeded — don't manufacture a failure.
+    assert.equal(results[0].ok, true)
+  })
 })
 
 describe('worktree-gc unit: readLockReasonFromAdmin (injected fs)', () => {

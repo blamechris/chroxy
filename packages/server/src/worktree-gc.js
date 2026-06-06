@@ -259,12 +259,38 @@ export function applyPlan(repoPath, plan, deps = {}) {
     } catch (err) {
       pruneError = (err && err.message) || String(err)
     }
+
+    // #5246: verify per-entry that prune actually reclaimed the worktree. The
+    // plan classifies an unlocked worktree as 'prune' when `dirGone` is true,
+    // and `dirGone` includes `!exists(e.path)` — but `existsSync` returns false
+    // on ANY stat error (an unmounted/temporarily-unavailable mount, a TOCTOU
+    // race), not only genuine absence. `git worktree prune` correctly leaves a
+    // still-present worktree intact, so reporting ok:true off the back of the
+    // single global prune would over-count reclamations. Re-list the worktrees
+    // and only claim success for items whose admin ref is genuinely gone.
+    let remaining = null
+    if (!pruneError) {
+      try {
+        remaining = new Set(parseWorktreeList(git(repoPath, ['worktree', 'list', '--porcelain'])).map(e => e.path))
+      } catch {
+        // Can't verify — fall back to best-effort (the prune call succeeded).
+        remaining = null
+      }
+    }
+
     for (const item of pruneItems) {
       const unlockErr = unlockErrors.get(item.path)
       if (unlockErr) {
         results.push({ path: item.path, action: 'prune', ok: false, error: `unlock failed (entry still locked): ${unlockErr}` })
       } else if (pruneError) {
         results.push({ path: item.path, action: 'prune', ok: false, error: pruneError })
+      } else if (remaining && remaining.has(item.path)) {
+        results.push({
+          path: item.path,
+          action: 'prune',
+          ok: false,
+          error: 'still present after prune (not reclaimed) — a transient stat failure likely misclassified a present worktree as dir-gone',
+        })
       } else {
         results.push({ path: item.path, action: 'prune', ok: true })
       }
