@@ -213,6 +213,21 @@ if (fs.promises) {
   }
 }
 
+// --- Default the credential-store to "no keychain" ----------------------------
+// #5154: the credential store encrypts credentials.json with an OS-keychain
+// data key when a keychain is available. On a developer's macOS box that means
+// tests would shell out to `security` and pollute the REAL login keychain — the
+// keychain analogue of the #4633 home-write contamination the fs guard above
+// blocks. Set the escape-hatch env so every server test exercises the
+// plaintext-0600 fallback (deterministic on every host, zero real-keychain
+// access). Critically, this bootstrap sets an ENV flag rather than importing
+// credential-store/keychain: it must NOT pull `keychain.js` into the module
+// graph, or `keychain-mock.test.js` could no longer `mock.module('child_process')`
+// before it imports keychain. credential-store reads this flag lazily at call
+// time. The encryption suite injects an in-memory keychain via
+// `_setCredentialKeychainForTests(...)`, which takes precedence over this flag.
+process.env.CHROXY_CRED_DISABLE_KEYCHAIN = '1'
+
 // --- Diagnostic ---------------------------------------------------------------
 // Quiet by default; set CHROXY_TEST_SANDBOX_DEBUG=1 to see the protected
 // paths once per process.
