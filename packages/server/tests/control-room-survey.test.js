@@ -190,14 +190,20 @@ describe('parseGithubPrsUrl', () => {
     assert.equal(parseGithubPrsUrl('https://github.com/owner/repo.git'), PRS)
     assert.equal(parseGithubPrsUrl('https://github.com/owner/repo'), PRS)
   })
-  it('parses ssh:// remotes', () => {
+  it('parses ssh:// remotes, including ssh-over-:443', () => {
     assert.equal(parseGithubPrsUrl('ssh://git@github.com/owner/repo.git'), PRS)
+    assert.equal(parseGithubPrsUrl('ssh://git@github.com:443/owner/repo.git'), PRS)
   })
   it('returns null for non-GitHub or missing remotes', () => {
     assert.equal(parseGithubPrsUrl('git@gitlab.com:owner/repo.git'), null)
     assert.equal(parseGithubPrsUrl('https://example.com/x/y.git'), null)
     assert.equal(parseGithubPrsUrl(null), null)
     assert.equal(parseGithubPrsUrl(''), null)
+  })
+  it('returns null for remotes with extra path segments (not owner/repo)', () => {
+    // Must NOT mint a bogus `.../pulls` for a non-repo path.
+    assert.equal(parseGithubPrsUrl('git@github.com:owner/repo/extra.git'), null)
+    assert.equal(parseGithubPrsUrl('https://github.com/owner/repo/extra'), null)
   })
 })
 

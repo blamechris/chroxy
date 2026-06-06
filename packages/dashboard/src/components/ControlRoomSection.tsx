@@ -37,6 +37,7 @@ import type { RepoStatus, RepoVerdict, ServerHostStatusSnapshotMessage } from '@
 import type { ActivityState, SessionInfo } from '@chroxy/store-core'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import { ActivityTree } from './ActivityTree'
+import { writeText } from '../utils/clipboard'
 
 // Verdict → semantic accent. The three buckets map onto the dashboard's
 // ok/warn/bad theme accents (green/amber/red). A single named map keeps the tag
@@ -579,18 +580,15 @@ function AttributionCell({ attribution }: { attribution: boolean | null }) {
 function RowActions({ repo }: { repo: RepoStatus }) {
   const [copied, setCopied] = useState(false)
   const copyPath = useCallback(() => {
-    const done = () => {
+    // Route through the shared clipboard helper, which uses the Tauri plugin
+    // under the desktop shell — navigator.clipboard.writeText resolves WITHOUT
+    // writing in WKWebView (#4673), so it would lie "Copied". Only flash the
+    // confirmation when the write genuinely succeeded.
+    writeText(repo.path).then((ok) => {
+      if (!ok) return
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1500)
-    }
-    try {
-      const cb = navigator.clipboard
-      if (cb && typeof cb.writeText === 'function') {
-        cb.writeText(repo.path).then(done, () => { /* clipboard denied — no-op */ })
-      }
-    } catch {
-      /* clipboard unavailable — no-op */
-    }
+    })
   }, [repo.path])
 
   return (

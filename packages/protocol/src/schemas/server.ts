@@ -764,7 +764,13 @@ export const RepoStatusSchema = z.object({
       changesRequested: z.number().int().nonnegative().finite(),
     })
     .nullable(),
-  prsUrl: z.string().url().nullable(),
+  // Constrained to the GitHub pulls-page shape (not a generic URL): this value
+  // is rendered into an <a href>, and `z.string().url()` would accept dangerous
+  // schemes like `javascript:`. Owner/repo are single path segments.
+  prsUrl: z
+    .string()
+    .regex(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pulls$/, 'must be a GitHub pull-requests URL')
+    .nullable(),
   attribution: z.boolean().nullable(),
   onboarding: z.string(),
   lastTouched: z.string().datetime(),

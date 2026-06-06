@@ -155,10 +155,14 @@ export function parseOpenPRs(json) {
 export function parseGithubPrsUrl(remote) {
   if (!remote || typeof remote !== 'string') return null
   const trimmed = remote.trim()
+  // owner + repo are each a single path segment ([^/]+) so an extra segment
+  // (e.g. `owner/repo/extra`) does NOT match (returns null rather than minting
+  // a bogus `.../pulls`). The ssh URL form allows an optional port (e.g. the
+  // common ssh-over-:443 remote).
   const patterns = [
-    /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/, // scp-style ssh
-    /^ssh:\/\/git@github\.com\/([^/]+)\/(.+?)(?:\.git)?$/, // ssh url
-    /^https:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?$/, // https
+    /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/, // scp-style ssh
+    /^ssh:\/\/git@github\.com(?::\d+)?\/([^/]+)\/([^/]+?)(?:\.git)?$/, // ssh url (optional port)
+    /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/, // https
   ]
   for (const re of patterns) {
     const m = re.exec(trimmed)
