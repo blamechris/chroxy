@@ -141,6 +141,73 @@ export function parseOpenPRs(json) {
 }
 
 /**
+ * Conclusions/states from a `gh` statusCheckRollup entry that count as a failed
+ * check. `gh pr list --json statusCheckRollup` mixes two node shapes: CheckRun
+ * (GitHub Actions etc., carries `status` + `conclusion`) and StatusContext
+ * (legacy commit statuses, carries `state`). We treat either field uniformly.
+ */
+const CI_FAIL_VALUES = new Set([
+  'FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE',
+])
+const CI_PENDING_STATUSES = new Set(['QUEUED', 'IN_PROGRESS', 'WAITING', 'PENDING', 'REQUESTED'])
+
+/**
+ * Reduce one PR's `statusCheckRollup` array to a single CI state.
+ *
+ * @param {Array|undefined} rollup
+ * @returns {'failing'|'pending'|'passing'|'none'} 'none' when there are no checks.
+ */
+function rollupCiState(rollup) {
+  if (!Array.isArray(rollup) || rollup.length === 0) return 'none'
+  let anyPending = false
+  for (const c of rollup) {
+    const conclusion = (c && (c.conclusion || c.state)) || ''
+    const status = (c && c.status) || ''
+    if (CI_FAIL_VALUES.has(conclusion)) return 'failing'
+    if (CI_PENDING_STATUSES.has(status) || conclusion === 'PENDING') anyPending = true
+  }
+  return anyPending ? 'pending' : 'passing'
+}
+
+/**
+ * Roll up CI + review state across a repo's open PRs from
+ * `gh pr list --json number,reviewDecision,statusCheckRollup` output.
+ *
+ * Returns counts of open PRs that are CI-failing, CI-pending, review-approved,
+ * and changes-requested, or `null` when the command failed / output is
+ * unparseable (same null semantics as `parseOpenPRs`). All-zero counts mean
+ * none of these tracked signals are present — which covers the no-open-PRs case
+ * AND PRs that only carry untracked states (e.g. passing CI with a
+ * `REVIEW_REQUIRED` decision). `null` ≠ all-zero.
+ *
+ * @param {string|null} json
+ * @returns {{ failing: number, pending: number, approved: number, changesRequested: number }|null}
+ */
+export function parsePrChecks(json) {
+  if (json === null || json === undefined) return null
+  let arr
+  try {
+    arr = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(arr)) return null
+  let failing = 0
+  let pending = 0
+  let approved = 0
+  let changesRequested = 0
+  for (const pr of arr) {
+    if (!pr || typeof pr !== 'object') continue
+    const ci = rollupCiState(pr.statusCheckRollup)
+    if (ci === 'failing') failing++
+    else if (ci === 'pending') pending++
+    if (pr.reviewDecision === 'APPROVED') approved++
+    else if (pr.reviewDecision === 'CHANGES_REQUESTED') changesRequested++
+  }
+  return { failing, pending, approved, changesRequested }
+}
+
+/**
  * Parse `git rev-list --left-right --count @{u}...HEAD` output into ahead/behind
  * counts relative to the upstream tracking branch.
  *
@@ -323,7 +390,8 @@ async function surveyOne(repo, ctx) {
       tryExec(execFn, 'git', ['log', '-1', '--format=%cI'], cwd),
       // No upstream / detached HEAD makes this fail → null → ahead/behind null.
       tryExec(execFn, 'git', ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd),
-      tryExec(execFn, 'gh', ['pr', 'list', '--json', 'number'], cwd),
+      // One gh call serves both the open-PR count and the CI/review rollup.
+      tryExec(execFn, 'gh', ['pr', 'list', '--json', 'number,reviewDecision,statusCheckRollup'], cwd),
       readSettings(readFn, repo.path),
     ])
 
@@ -342,6 +410,7 @@ async function surveyOne(repo, ctx) {
     const worktrees = countWorktrees(worktreeRaw || '')
     const { ahead, behind } = parseAheadBehind(aheadBehindRaw)
     const openPRs = parseOpenPRs(prRaw)
+    const prChecks = parsePrChecks(prRaw)
     const attribution = detectAttribution(settingsRaw)
 
     const lastTouchedDate = lastRaw ? parseIsoDate(lastRaw) : null
@@ -367,6 +436,7 @@ async function surveyOne(repo, ctx) {
       ahead,
       behind,
       openPRs,
+      prChecks,
       attribution,
       onboarding,
       lastTouched,
@@ -426,6 +496,7 @@ function degradedRepo(repo, now, err) {
     ahead: null,
     behind: null,
     openPRs: null,
+    prChecks: null,
     attribution: null,
     onboarding: 'skipped — survey failed',
     lastTouched: now.toISOString(),

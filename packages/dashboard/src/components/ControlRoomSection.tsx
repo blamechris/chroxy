@@ -470,6 +470,77 @@ function CountCell({ value, testid }: { value: number | null; testid: string }) 
   )
 }
 
+/**
+ * #5216 — compact CI/review rollup across a repo's open PRs, shown under the
+ * open-PR count. Renders only the signals that are non-zero, so a repo whose
+ * PRs are all green-and-unreviewed shows nothing extra. Hidden entirely when
+ * `prChecks` is null (PR lookup skipped/failed) or all counts are zero.
+ *
+ *   ✗N  open PRs with failing CI        (bad)
+ *   ●N  open PRs with CI in progress    (dim)
+ *   ✎N  open PRs with changes requested (warn)
+ *   ✓N  approved open PRs               (ok)
+ */
+function PrChecksBadge({ repo }: { repo: RepoStatus }) {
+  const checks = repo.prChecks
+  if (!checks) return null
+  const { failing, pending, approved, changesRequested } = checks
+  if (failing === 0 && pending === 0 && approved === 0 && changesRequested === 0) return null
+  const plural = (n: number) => (n === 1 ? '' : 's')
+  const failLabel = failing > 0 ? `${failing} open PR${plural(failing)} with failing CI` : ''
+  const pendLabel = pending > 0 ? `${pending} open PR${plural(pending)} with CI in progress` : ''
+  const changesLabel = changesRequested > 0 ? `${changesRequested} open PR${plural(changesRequested)} with changes requested` : ''
+  const approvedLabel = approved > 0 ? `${approved} approved open PR${plural(approved)}` : ''
+  // Spell out the rollup for assistive tech rather than leaving it to announce
+  // the raw ✗/●/✎/✓ glyphs (mirrors AheadBehindBadge / the live-dot role=img +
+  // aria-label). The glyph spans are aria-hidden so they aren't read twice.
+  const ariaLabel = [failLabel, pendLabel, changesLabel, approvedLabel].filter(Boolean).join(', ')
+  return (
+    <span className="cr-prchecks" data-testid={`cr-prchecks-${repo.name}`} role="img" aria-label={ariaLabel}>
+      {failing > 0 && (
+        <span className="cr-pr-fail" data-testid={`cr-pr-fail-${repo.name}`} title={failLabel} aria-hidden="true">
+          ✗{failing}
+        </span>
+      )}
+      {pending > 0 && (
+        <span className="cr-pr-pending" title={pendLabel} aria-hidden="true">
+          ●{pending}
+        </span>
+      )}
+      {changesRequested > 0 && (
+        <span className="cr-pr-changes" title={changesLabel} aria-hidden="true">
+          ✎{changesRequested}
+        </span>
+      )}
+      {approved > 0 && (
+        <span className="cr-pr-approved" data-testid={`cr-pr-approved-${repo.name}`} title={approvedLabel} aria-hidden="true">
+          ✓{approved}
+        </span>
+      )}
+    </span>
+  )
+}
+
+/** The open-PR count cell, with the #5216 CI/review rollup beneath it. */
+function PrCell({ repo }: { repo: RepoStatus }) {
+  if (repo.openPRs === null) {
+    return (
+      <td className="cr-num">
+        <span className="cr-dim">—</span>
+      </td>
+    )
+  }
+  const high = repo.openPRs >= HIGH_COUNT_THRESHOLD
+  return (
+    <td className="cr-num">
+      <span className={high ? 'cr-bad' : undefined} data-testid={`cr-prs-${repo.name}`} data-high={high ? 'true' : 'false'}>
+        {repo.openPRs}
+      </span>
+      <PrChecksBadge repo={repo} />
+    </td>
+  )
+}
+
 function TreeCell({ repo }: { repo: RepoStatus }) {
   if (repo.tree.state === 'clean') {
     return <td className="cr-tree" data-testid={`cr-tree-${repo.name}`}>clean</td>
@@ -564,7 +635,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
         <td><div className="cr-onboarding" title={repo.onboarding}>{repo.onboarding}</div></td>
         <TreeCell repo={repo} />
         <CountCell value={repo.worktrees} testid={`cr-wt-${repo.name}`} />
-        <CountCell value={repo.openPRs} testid={`cr-prs-${repo.name}`} />
+        <PrCell repo={repo} />
         <AttributionCell attribution={repo.attribution} />
         <td className="cr-dim cr-last">{relativeLast(repo.lastTouched)}</td>
       </tr>

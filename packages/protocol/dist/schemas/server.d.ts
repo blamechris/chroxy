@@ -575,6 +575,14 @@ export declare const RepoTreeSchema: z.ZodObject<{
  *                     `null` semantics as `ahead`. `null` ≠ 0.
  *   - `openPRs`     — number of open PRs, or `null` when unknown (e.g. no GitHub
  *                     remote, or the lookup was skipped/failed). `null` ≠ 0.
+ *   - `prChecks`    — rollup of CI + review state across this repo's open PRs
+ *                     (counts of open PRs that are CI-failing / CI-pending /
+ *                     review-approved / changes-requested), or `null` when the
+ *                     PR lookup was skipped/failed (same condition as a `null`
+ *                     `openPRs`). All-zero counts mean none of the tracked
+ *                     signals are present — this covers both "no open PRs" and
+ *                     PRs that only carry untracked states (e.g. passing CI with
+ *                     a `REVIEW_REQUIRED` decision). `null` ≠ all-zero.
  *   - `attribution` — whether commits carry the expected author attribution, or
  *                     `null` when not evaluated. `null` ≠ false.
  *   - `onboarding`  — human-readable onboarding state (free-form so the survey
@@ -609,6 +617,12 @@ export declare const RepoStatusSchema: z.ZodObject<{
     ahead: z.ZodNullable<z.ZodNumber>;
     behind: z.ZodNullable<z.ZodNumber>;
     openPRs: z.ZodNullable<z.ZodNumber>;
+    prChecks: z.ZodNullable<z.ZodObject<{
+        failing: z.ZodNumber;
+        pending: z.ZodNumber;
+        approved: z.ZodNumber;
+        changesRequested: z.ZodNumber;
+    }, z.core.$strip>>;
     attribution: z.ZodNullable<z.ZodBoolean>;
     onboarding: z.ZodString;
     lastTouched: z.ZodString;
@@ -671,6 +685,12 @@ export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
         ahead: z.ZodNullable<z.ZodNumber>;
         behind: z.ZodNullable<z.ZodNumber>;
         openPRs: z.ZodNullable<z.ZodNumber>;
+        prChecks: z.ZodNullable<z.ZodObject<{
+            failing: z.ZodNumber;
+            pending: z.ZodNumber;
+            approved: z.ZodNumber;
+            changesRequested: z.ZodNumber;
+        }, z.core.$strip>>;
         attribution: z.ZodNullable<z.ZodBoolean>;
         onboarding: z.ZodString;
         lastTouched: z.ZodString;

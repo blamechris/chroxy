@@ -23,6 +23,7 @@ import {
   parseTree,
   countWorktrees,
   parseOpenPRs,
+  parsePrChecks,
   parseAheadBehind,
   detectAttribution,
   DEFAULT_THRESHOLDS,
@@ -129,6 +130,54 @@ describe('parseOpenPRs', () => {
   })
 })
 
+describe('parsePrChecks', () => {
+  const pr = (over) => ({ number: 1, reviewDecision: null, statusCheckRollup: [], ...over })
+
+  it('returns null when gh failed (null input) or unparseable', () => {
+    assert.equal(parsePrChecks(null), null)
+    assert.equal(parsePrChecks('not json'), null)
+    assert.equal(parsePrChecks('{}'), null) // not an array
+  })
+
+  it('all-zero for an empty PR list', () => {
+    assert.deepEqual(parsePrChecks('[]'), { failing: 0, pending: 0, approved: 0, changesRequested: 0 })
+  })
+
+  it('counts a failing CI rollup (CheckRun conclusion)', () => {
+    const json = JSON.stringify([pr({ statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'FAILURE' }] })])
+    assert.deepEqual(parsePrChecks(json), { failing: 1, pending: 0, approved: 0, changesRequested: 0 })
+  })
+
+  it('counts a failing legacy StatusContext (state)', () => {
+    const json = JSON.stringify([pr({ statusCheckRollup: [{ state: 'ERROR' }] })])
+    assert.equal(parsePrChecks(json).failing, 1)
+  })
+
+  it('counts pending CI (in-progress, no failure)', () => {
+    const json = JSON.stringify([pr({ statusCheckRollup: [{ status: 'IN_PROGRESS' }, { status: 'COMPLETED', conclusion: 'SUCCESS' }] })])
+    assert.deepEqual(parsePrChecks(json), { failing: 0, pending: 1, approved: 0, changesRequested: 0 })
+  })
+
+  it('a failure dominates a pending check on the same PR', () => {
+    const json = JSON.stringify([pr({ statusCheckRollup: [{ status: 'IN_PROGRESS' }, { conclusion: 'FAILURE' }] })])
+    assert.deepEqual(parsePrChecks(json), { failing: 1, pending: 0, approved: 0, changesRequested: 0 })
+  })
+
+  it('counts review decisions independently of CI', () => {
+    const json = JSON.stringify([
+      pr({ reviewDecision: 'APPROVED', statusCheckRollup: [{ conclusion: 'SUCCESS' }] }),
+      pr({ reviewDecision: 'CHANGES_REQUESTED', statusCheckRollup: [{ conclusion: 'FAILURE' }] }),
+      pr({ reviewDecision: 'REVIEW_REQUIRED', statusCheckRollup: [] }),
+    ])
+    assert.deepEqual(parsePrChecks(json), { failing: 1, pending: 0, approved: 1, changesRequested: 1 })
+  })
+
+  it('a PR with no checks counts as neither failing nor pending', () => {
+    const json = JSON.stringify([pr({ statusCheckRollup: [] })])
+    assert.deepEqual(parsePrChecks(json), { failing: 0, pending: 0, approved: 0, changesRequested: 0 })
+  })
+})
+
 describe('parseAheadBehind', () => {
   it('parses "<behind>\\t<ahead>" (left=behind, right=ahead)', () => {
     // git rev-list --left-right --count @{u}...HEAD → "<behind>\t<ahead>"
@@ -184,6 +233,31 @@ describe('surveyRepos — ahead/behind', () => {
     const r = out.repos[0]
     assert.equal(r.ahead, null)
     assert.equal(r.behind, null)
+  })
+})
+
+describe('surveyRepos — prChecks rollup', () => {
+  it('rolls up CI + review state from the gh probe into the RepoStatus', async () => {
+    const prJson = JSON.stringify([
+      { number: 1, reviewDecision: 'APPROVED', statusCheckRollup: [{ conclusion: 'SUCCESS' }] },
+      { number: 2, reviewDecision: 'CHANGES_REQUESTED', statusCheckRollup: [{ conclusion: 'FAILURE' }] },
+    ])
+    const repo = { name: 'app', path: '/p/app' }
+    const exec = makeExec({ '/p/app': cleanRepo({ pr: prJson }) })
+    const out = await surveyRepos([repo], { _execFile: exec, _now: now, _readFile: async () => { throw new Error() } })
+    const r = out.repos[0]
+    assert.equal(r.openPRs, 2) // same gh call still feeds the count
+    assert.deepEqual(r.prChecks, { failing: 1, pending: 0, approved: 1, changesRequested: 1 })
+  })
+
+  it('prChecks is null when the gh probe fails (mirrors openPRs null)', async () => {
+    const repo = { name: 'app', path: '/p/app' }
+    // gh missing → makeExec rejects the 'pr' command (undefined value).
+    const exec = makeExec({ '/p/app': { ...cleanRepo(), pr: undefined } })
+    const out = await surveyRepos([repo], { _execFile: exec, _now: now, _readFile: async () => { throw new Error() } })
+    const r = out.repos[0]
+    assert.equal(r.openPRs, null)
+    assert.equal(r.prChecks, null)
   })
 })
 
