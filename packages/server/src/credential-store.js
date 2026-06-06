@@ -292,8 +292,13 @@ function readStore() {
  * session-state-persistence._rotateToBak's one-shot retry: snapshot the live
  * target, clear it, then retry the rename once. The unlink happens ONLY after
  * the atomic attempt already failed (never a pre-delete — that was the #5243
- * data-loss bug), and the snapshot lets us restore the live credentials if the
- * retry ALSO fails, so a crash can't leave zero credentials.
+ * data-loss bug). The in-memory snapshot lets us restore the live credentials
+ * if the *retry* also fails. It does NOT make the unlink→re-rename window
+ * crash-safe: a hard process crash in that window leaves `target` gone with the
+ * new payload only on the on-disk `.tmp` (no automated reader recovers it). To
+ * keep that window from ever destroying the only copy, we refuse to unlink when
+ * the snapshot read failed but the file is still present (see below) — so the
+ * worst pre-crash state is "live file intact, replace not applied".
  *
  * fs ops are injectable for testing (defaults are the real fs calls).
  *
@@ -316,8 +321,15 @@ export function replaceFileAtomically(tmp, target, deps = {}) {
     // Non-Windows, or an error that isn't a Windows held-handle lock: surface
     // it unchanged (no unlink — preserves the #5243 no-pre-delete guarantee).
     if (platform !== 'win32' || !err || !CRED_WINDOWS_LOCK_CODES.has(err.code)) throw err
+    // Snapshot the live target so we can restore it if the retry also fails.
     let snapshot = null
     try { snapshot = readFile(target) } catch { /* target may already be gone */ }
+    // If the snapshot failed but the target is still on disk (e.g. readFile threw
+    // EACCES/EPERM because the same held handle is blocking the read), unlinking
+    // it here would destroy the only copy with no way to restore — re-introducing
+    // the #5243 data-loss path. Keep the live file intact and surface the ORIGINAL
+    // lock error instead; the caller is no worse off than before the retry.
+    if (snapshot === null && existsSync(target)) throw err
     try { unlink(target) } catch { /* best-effort — target may be gone */ }
     try {
       rename(tmp, target)

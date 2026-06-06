@@ -112,6 +112,31 @@ describe('credential-store — replaceFileAtomically (#5243)', () => {
     assert.equal(readFileSync(target, 'utf8'), 'LIVE', 'prior credentials survive a doubly-failed replace')
   })
 
+  it('#5258: win32 does NOT unlink when the snapshot read fails but the target still exists', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'LIVE')
+    writeFileSync(tmp, 'NEW')
+    // The held handle also blocks the snapshot read (readFile throws EACCES) while
+    // the file is still present on disk. Unlinking it here would destroy the only
+    // copy with no restore possible — so we must surface the ORIGINAL lock error
+    // and leave the live file untouched (no unlink, no retry).
+    let unlinkCalled = false
+    let retryAttempts = 0
+    assert.throws(() => {
+      replaceFileAtomically(tmp, target, {
+        platform: 'win32',
+        rename: () => { retryAttempts++; const e = new Error('EPERM: locked'); e.code = 'EPERM'; throw e },
+        readFile: () => { const e = new Error('EACCES: read blocked'); e.code = 'EACCES'; throw e },
+        unlink: () => { unlinkCalled = true },
+      })
+    }, /EPERM/)
+    assert.equal(retryAttempts, 1, 'only the initial atomic attempt — no destructive retry')
+    assert.equal(unlinkCalled, false, 'must not unlink a present target it could not snapshot')
+    assert.ok(existsSync(target), 'live file untouched')
+    assert.equal(readFileSync(target, 'utf8'), 'LIVE', 'prior credentials survive when the snapshot fails')
+  })
+
   it('#5258: win32 does NOT retry a non-lock error (e.g. ENOSPC) — surfaces immediately', () => {
     const target = join(dir, 'c.json')
     const tmp = join(dir, 'c.json.tmp')
