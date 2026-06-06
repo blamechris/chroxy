@@ -223,4 +223,46 @@ describe('byok credentials handlers (#4052)', () => {
       }
     })
   })
+
+  // #5155: BYOK credential WRITES require host-level authority. A pairing-bound
+  // session token (client.boundSessionId set) can READ masked status but must
+  // NOT be able to set or clear the operator's key.
+  describe('#5155 bound-client write gate', () => {
+    const boundClient = { id: 'c-bound', boundSessionId: 'sess-1' }
+    const credPath = () => join(tmpHome, '.chroxy', 'credentials.json')
+
+    it('rejects byok_set_credentials from a pairing-bound client and writes nothing', () => {
+      const longKey = 'sk-ant-api03-' + 'f'.repeat(95)
+      const ws = makeWs()
+      const ctx = makeCtx()
+      settingsHandlers.byok_set_credentials(ws, boundClient, { requestId: 'rb1', anthropicApiKey: longKey }, ctx)
+      const reply = ws._messages[0]
+      assert.equal(reply.type, 'error')
+      assert.equal(reply.code, 'CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT')
+      assert.equal(reply.requestId, 'rb1')
+      assert.equal(existsSync(credPath()), false, 'no credentials file written')
+      assert.equal(ctx.broadcast.calls.length, 0)
+    })
+
+    it('rejects byok_clear_credentials from a pairing-bound client and leaves the file intact', () => {
+      // Seed via an unbound (primary) client.
+      const longKey = 'sk-ant-api03-' + 'g'.repeat(95)
+      settingsHandlers.byok_set_credentials(makeWs(), { id: 'c-primary' }, { anthropicApiKey: longKey }, makeCtx())
+      assert.ok(existsSync(credPath()), 'precondition: file exists after set')
+
+      const ws = makeWs()
+      const ctx = makeCtx()
+      settingsHandlers.byok_clear_credentials(ws, boundClient, { requestId: 'rb2' }, ctx)
+      const reply = ws._messages[0]
+      assert.equal(reply.type, 'error')
+      assert.equal(reply.code, 'CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT')
+      assert.ok(existsSync(credPath()), 'credentials file must survive a rejected clear')
+    })
+
+    it('still allows a pairing-bound client to READ status', () => {
+      const ctx = makeCtx()
+      settingsHandlers.byok_get_credentials_status(makeWs(), boundClient, { requestId: 'rb3' }, ctx)
+      assert.equal(ctx._sent[0].type, 'byok_credentials_status')
+    })
+  })
 })

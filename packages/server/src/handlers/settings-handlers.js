@@ -466,6 +466,35 @@ function handleListProviders(ws, client, msg, ctx) {
 }
 
 /**
+ * #5155: gate credential WRITES (set/delete/clear) behind the primary token.
+ *
+ * Reads are safe (status is masked, value-free) and stay open to every
+ * authenticated client. But a WRITE lets the caller swap in or clear the
+ * operator's provider keys — a pairing-bound (share-a-session) token doing so is
+ * a billing-redirection / integrity / DoS risk distinct from "use the existing
+ * credentials". So credential mutations now require host-level authority: a
+ * pairing-issued session token (client.boundSessionId set) is rejected, exactly
+ * like the auto-permission-mode escalation gate above. Only the primary API
+ * token (or an unbound linking-mode pairing token, both with boundSessionId
+ * unset) can write.
+ *
+ * Returns true and sends the rejection if the client is bound (caller must
+ * early-return); false to proceed. See docs/security/bearer-token-authority.md.
+ *
+ * @param {object} ws
+ * @param {object} client
+ * @param {object} msg
+ * @returns {boolean} true if the write was rejected.
+ */
+function rejectCredentialWriteIfBound(ws, client, msg) {
+  if (!client?.boundSessionId) return false
+  loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to modify provider credentials — rejected`)
+  sendError(ws, msg?.requestId, 'CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT',
+    'Pairing-issued session tokens cannot modify provider credentials. Use the primary API token from a device with physical access to this machine.')
+  return true
+}
+
+/**
  * BYOK credentials handlers (#4052).
  *
  * Three message types: get status, set the key, clear the key. The full
@@ -474,9 +503,9 @@ function handleListProviders(ws, client, msg, ctx) {
  * success replies go back to the calling ws AND broadcast to all
  * authenticated clients so additional dashboards / tabs stay in sync.
  *
- * Auth posture: any authenticated WS client can call these. chroxy isn't
- * multi-tenant — the user controls their own credentials file. The
- * existing WS auth gate is sufficient.
+ * Auth posture: status reads are open to any authenticated WS client. WRITES
+ * (set/clear) require host-level authority — a pairing-bound session token is
+ * rejected via `rejectCredentialWriteIfBound` (#5155).
  */
 function handleByokGetCredentialsStatus(ws, client, msg, ctx) {
   const status = getAnthropicApiKeyStatus()
@@ -484,6 +513,7 @@ function handleByokGetCredentialsStatus(ws, client, msg, ctx) {
 }
 
 function handleByokSetCredentials(ws, client, msg, ctx) {
+  if (rejectCredentialWriteIfBound(ws, client, msg)) return
   // Trim leading/trailing whitespace — pastes often carry surrounding
   // spaces/newlines that would otherwise be persisted into the credentials
   // file and silently fail when the SDK tries to use the key.
@@ -519,6 +549,7 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
 }
 
 function handleByokClearCredentials(ws, client, msg, ctx) {
+  if (rejectCredentialWriteIfBound(ws, client, msg)) return
   try {
     clearAnthropicApiKey()
   } catch (err) {
@@ -541,16 +572,14 @@ function handleByokClearCredentials(ws, client, msg, ctx) {
  * reply with the same masked `credentials_status` snapshot the status query
  * returns.
  *
- * Auth posture: identical to the BYOK handlers — any authenticated WS client
- * (primary or pairing-bound token) reaches these because chroxy isn't
- * multi-tenant and the operator owns their own credential file. The WS auth
- * gate in ws-server.js (`client.authenticated`) is the access control; these
- * handlers never run for an unauthenticated connection. Per the bearer-token
- * authority doc, credential management is global state — but unlike the
- * privilege-escalating auto-mode flip, reading/writing one's own provider keys
- * is within the authority both token classes already hold (a bound token can
- * already use whatever credentials a session resolves), so no bound-token
- * rejection is required here.
+ * Auth posture (#5155): status reads are open to any authenticated WS client
+ * (the snapshot is masked and value-free). WRITES (set/delete) require
+ * host-level authority — a pairing-bound session token is rejected via
+ * `rejectCredentialWriteIfBound`, mirroring the auto-permission-mode escalation
+ * gate. Overwriting the operator's provider keys is a billing/integrity/DoS
+ * vector distinct from "use the existing credentials a session resolves", so a
+ * bound token must not be able to swap or clear them. See
+ * docs/security/bearer-token-authority.md.
  */
 const CREDENTIAL_OAUTH_HELPERS = Object.freeze({
   hasClaudeOAuthCreds,
@@ -574,6 +603,7 @@ function handleGetCredentialsStatus(ws, client, msg, ctx) {
 }
 
 function handleSetCredential(ws, client, msg, ctx) {
+  if (rejectCredentialWriteIfBound(ws, client, msg)) return
   const key = typeof msg?.key === 'string' ? msg.key : ''
   if (!isKnownCredentialKey(key)) {
     sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)
@@ -597,6 +627,7 @@ function handleSetCredential(ws, client, msg, ctx) {
 }
 
 function handleDeleteCredential(ws, client, msg, ctx) {
+  if (rejectCredentialWriteIfBound(ws, client, msg)) return
   const key = typeof msg?.key === 'string' ? msg.key : ''
   if (!isKnownCredentialKey(key)) {
     sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)

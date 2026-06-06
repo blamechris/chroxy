@@ -71,6 +71,15 @@ When `ws-auth.js` accepts a pair-issued token, it sets `client.boundSessionId` o
 
 Bound tokens cannot create, destroy, switch, or list sibling sessions. They can chat into their bound session and answer permissions for it. That's it.
 
+### Host-level writes a bound token must NOT reach
+
+Two host-level mutations are gated against bound tokens even though they arrive on the same WS surface, because each one escalates beyond a single session's scope:
+
+- **Auto permission mode** (`set_permission_mode` with `mode: 'auto'`, [`settings-handlers.js`](../../packages/server/src/handlers/settings-handlers.js)) — flipping a session to auto-approve is a privilege escalation, so a bound token is rejected with `AUTO_MODE_FORBIDDEN_BOUND_CLIENT`. Only the primary token (and only when `allowAutoPermissionMode` is set in the local config) can enable it.
+- **Provider credential writes** (`set_credential` / `delete_credential` and the BYOK `byok_set_credentials` / `byok_clear_credentials`, [`settings-handlers.js`](../../packages/server/src/handlers/settings-handlers.js) — `rejectCredentialWriteIfBound`) — a bound token can READ masked, value-free status, but writing lets the caller swap in a key it controls (billing redirection) or clear keys (DoS). That integrity risk is distinct from "use the credentials a session already resolves", so writes are rejected with `CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT` (#5155). Reads stay open to any authenticated client.
+
+Both gates branch on `client.boundSessionId` and reject via `sendError` (a generic `error` message) — the canonical pattern for "this operation requires host-level authority" on the WS path. New credential-touching or config-mutating handlers should follow it (see §8).
+
 ## 5. Per-Session Hook Secrets
 
 Each `CliSession` mints a 32-byte hex secret in its constructor ([`cli-session.js`](../../packages/server/src/cli-session.js) ~line 193) and exports it to the spawned `claude` CLI subprocess as `CHROXY_HOOK_SECRET`. The CLI uses it on outbound `POST /permission` callbacks.
@@ -104,6 +113,7 @@ Each step here tightened a real bug. Read the PRs in order if extending any of t
 - **#4788 / #4794** — closed gaps where bound tokens could resolve cross-session permissions
 - **#4798** — unified `SESSION_TOKEN_MISMATCH` payload across WS and HTTP error surfaces
 - **#4820** — P0 fix for cross-session `permission_response` hijack on the WS path; the review of that PR is what motivated this doc (issue #4830)
+- **#5155** — gated provider-credential WRITES (set/delete/clear, both the #3855 generalized and #4052 BYOK paths) behind host-level authority; bound tokens can read masked status but not overwrite or clear keys
 
 ## 8. Adding a New Endpoint or Message Type — Checklist
 
