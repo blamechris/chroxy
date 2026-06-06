@@ -178,20 +178,26 @@ describe('ActivityTree control actions (#5272)', () => {
     expect(screen.queryByTestId('control-room-cancel-a')).toBeNull()
   })
 
-  it('shows a cancel button only on running SUBAGENT nodes', () => {
+  it('shows a cancel button only on non-terminal (running OR blocked) SUBAGENT nodes', () => {
     const activity = buildActivity([
       entry('agent-run', { kind: 'agent', status: 'running' }),
+      entry('agent-blocked', { kind: 'agent', status: 'blocked' }),
       entry('agent-done', { kind: 'agent', status: 'done', endedAt: 2000 }),
+      entry('agent-failed', { kind: 'agent', status: 'failed', endedAt: 2000 }),
       entry('shell-run', { kind: 'shell', status: 'running' }),
       entry('tool-run', { kind: 'tool', status: 'running' }),
     ])
     render(
       <ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} onCancelActivity={() => {}} />,
     )
-    // Only the running agent is cancellable.
+    // Both the running AND the blocked agent are cancellable — a blocked subagent
+    // is stuck/waiting and is exactly what an operator wants to abort.
     expect(screen.getByTestId('control-room-cancel-agent-run')).toBeInTheDocument()
-    // Not the finished agent, nor shells/tools (chroxy can't cancel those).
+    expect(screen.getByTestId('control-room-cancel-agent-blocked')).toBeInTheDocument()
+    // Not the terminal agents (done / failed), nor shells/tools (chroxy can't
+    // cancel those).
     expect(screen.queryByTestId('control-room-cancel-agent-done')).toBeNull()
+    expect(screen.queryByTestId('control-room-cancel-agent-failed')).toBeNull()
     expect(screen.queryByTestId('control-room-cancel-shell-run')).toBeNull()
     expect(screen.queryByTestId('control-room-cancel-tool-run')).toBeNull()
   })

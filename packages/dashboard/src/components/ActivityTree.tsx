@@ -37,9 +37,11 @@ export interface ActivityTreeProps {
    */
   now?: () => number
   /**
-   * #5272: cancel a running subagent node by its entry id. When omitted the tree
-   * is read-only (no cancel buttons). Only ever invoked for `agent` nodes that
-   * are still running.
+   * #5272: cancel a non-terminal subagent node by its entry id. When omitted the
+   * tree is read-only (no cancel buttons). Only ever invoked for `agent` nodes
+   * that are still live — i.e. `running` OR `blocked` (a blocked/waiting subagent
+   * is exactly the kind an operator wants to abort). Terminal agents (done /
+   * failed) and non-agent nodes (shells / tools) never get a cancel affordance.
    */
   onCancelActivity?: (activityId: string) => void
 }
@@ -142,10 +144,13 @@ function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivit
   const rowClass =
     `control-room-entry status-${entry.status}` + (blocked ? ' control-room-entry-blocked' : '')
 
-  // #5272: only running SUBAGENTS are individually cancellable. Shells/tools
-  // aren't (chroxy doesn't own them) and terminal nodes are already done, so
-  // they get no button. The cancel button is a SIBLING of the toggle button
-  // (not nested — that would be invalid HTML and swallow its own click).
+  // #5272: only non-terminal SUBAGENTS are individually cancellable — i.e.
+  // `running` OR `blocked` (a blocked subagent is stuck/waiting and is exactly
+  // what an operator wants to abort, so it stays cancellable). Shells/tools
+  // aren't cancellable (chroxy doesn't own them) and terminal nodes (done /
+  // failed) are already finished, so they get no button. The cancel button is a
+  // SIBLING of the toggle button (not nested — that would be invalid HTML and
+  // swallow its own click).
   const canCancel = onCancelActivity !== undefined && entry.kind === 'agent' && !terminal
 
   return (
