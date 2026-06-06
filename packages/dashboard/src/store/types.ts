@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -555,6 +555,20 @@ export interface ConnectionState {
    */
   hostStatusLoading: boolean;
 
+  /**
+   * #5253 — Control Room self-hosted runner survey: the latest
+   * `runner_status_snapshot` from the server. `null` until the first snapshot
+   * lands (the runner section renders an empty/loading state). Replaced
+   * wholesale on each snapshot (full picture, no delta stream).
+   */
+  runnerStatus: ServerRunnerStatusSnapshotMessage | null;
+  /**
+   * #5253 — true between dispatching a `runner_status_request` and the matching
+   * `runner_status_snapshot` arriving, so the runner-tab Refresh button can
+   * spin. Cleared when a snapshot lands.
+   */
+  runnerStatusLoading: boolean;
+
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
   streamingMessageId: string | null;
@@ -994,6 +1008,13 @@ export interface ConnectionState {
   // button surfaces a "not connected" state). Sets `hostStatusLoading` while in
   // flight so the button can show a spinner.
   requestHostStatus: () => boolean;
+
+  // #5253: request a self-hosted runner survey. Dispatches a
+  // `runner_status_request`; the server replies with a single
+  // `runner_status_snapshot` handled into `runnerStatus`. Returns whether the
+  // message went on the wire (false = socket closed). Sets `runnerStatusLoading`
+  // while in flight.
+  requestRunnerStatus: () => boolean;
 
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the

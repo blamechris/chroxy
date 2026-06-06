@@ -115,7 +115,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerHostStatusSnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -1897,6 +1897,18 @@ function handleHostStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, se
 }
 
 /**
+ * #5253 — self-hosted runner survey `runner_status_snapshot`: REPLACE the
+ * stored runner survey and clear the loading flag. Same defensive,
+ * full-replace, clear-loading-only-on-valid-parse contract as the host survey
+ * handler above.
+ */
+function handleRunnerStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerRunnerStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ runnerStatus: parsed.data, runnerStatusLoading: false });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
@@ -1952,6 +1964,8 @@ const HANDLERS: Record<string, Handler> = {
   activity_delta: handleActivityDelta,
   // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
   host_status_snapshot: handleHostStatusSnapshot,
+  // #5253: self-hosted runner Control Room survey snapshot.
+  runner_status_snapshot: handleRunnerStatusSnapshot,
 };
 
 // ---------------------------------------------------------------------------

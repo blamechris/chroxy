@@ -73,6 +73,11 @@ const CONFIG_SCHEMA = {
   // of this root that contain a `.git` entry. Defaults to ~/Projects when
   // unset. Mirrored by the CHROXY_CONTROL_ROOM_ROOT env var.
   controlRoomRoot: 'string',
+  // #5253 (Control Room): filesystem root the self-hosted runner survey
+  // (control-room/runners.js) scans for GitHub Actions runner installs (dirs
+  // containing a `.runner` config). Defaults to ~/github-runners when unset.
+  // Mirrored by the CHROXY_RUNNER_ROOT env var.
+  controlRoomRunnerRoot: 'string',
   maxSessions: 'number',
   maxHistory: 'number',
   maxMessages: 'number',
@@ -763,6 +768,8 @@ function envKeyForConfig(key) {
     repos: 'CHROXY_REPOS',
     // #5172: discovery root for the Control Room Host Status repo survey.
     controlRoomRoot: 'CHROXY_CONTROL_ROOM_ROOT',
+    // #5253: discovery root for the Control Room self-hosted runner survey.
+    controlRoomRunnerRoot: 'CHROXY_RUNNER_ROOT',
     logFormat: 'CHROXY_LOG_FORMAT',
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',

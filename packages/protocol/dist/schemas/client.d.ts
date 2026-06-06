@@ -565,6 +565,10 @@ export declare const HostStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"host_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const RunnerStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"runner_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const EncryptedEnvelopeSchema: z.ZodObject<{
     type: z.ZodLiteral<"encrypted">;
     d: z.ZodString;
@@ -912,6 +916,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"host_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"runner_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>], "type">;
 export type AuthMessage = z.infer<typeof AuthSchema>;
 export type PairMessage = z.infer<typeof PairSchema>;
@@ -923,5 +930,6 @@ export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>;
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>;
 export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>;
+export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>;

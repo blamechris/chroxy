@@ -30,6 +30,7 @@
 import { createLogger } from '../logger.js'
 import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-set.js'
 import { surveyRepos } from '../control-room/survey.js'
+import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
 
 const log = createLogger('ws')
 
@@ -37,6 +38,9 @@ const log = createLogger('ws')
 // never leak entries when a client disconnects (the client object is GC'd) and
 // we never need an explicit cleanup path.
 const inFlight = new WeakSet()
+// #5253: a separate in-flight guard for the runner survey, so a runner refresh
+// and a host refresh don't block each other (they shell out to different tools).
+const runnerInFlight = new WeakSet()
 
 /**
  * Build a schema-conformant `host_status_snapshot` carrying an error. The
@@ -151,6 +155,85 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #5253 — build a schema-conformant `runner_status_snapshot` carrying an error.
+ * Same posture as `errorSnapshot`: a valid (empty) snapshot plus an additive
+ * `error` annotation, so the dashboard never special-cases a malformed reply.
+ *
+ * @param {string} root - effective runner-install root to report.
+ * @param {string|null} requestId
+ * @param {{ code: string, message: string }} error
+ * @returns {object} a `runner_status_snapshot` message.
+ */
+function runnerErrorSnapshot(root, requestId, error) {
+  return {
+    type: 'runner_status_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    root,
+    summary: { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 },
+    repos: [],
+    error,
+  }
+}
+
+/**
+ * #5253 — self-hosted runner status survey handler. Same authority +
+ * in-flight + degraded-reply contract as `handleHostStatusRequest`: the survey
+ * exposes host-wide runner metadata, so it is served only to host-level
+ * (unbound) clients, one survey per client at a time.
+ */
+async function handleRunnerStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+
+  const config = ctx?.config || {}
+  const root = typeof config.controlRoomRunnerRoot === 'string' && config.controlRoomRunnerRoot.length > 0
+    ? config.controlRoomRunnerRoot
+    : DEFAULT_RUNNER_ROOT
+
+  // Authority gate: a host-wide runner survey is for host-level clients only.
+  if (client?.boundSessionId) {
+    ctx.send(ws, runnerErrorSnapshot(root, requestId, {
+      code: 'FORBIDDEN',
+      message: 'runner_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+
+  if (runnerInFlight.has(client)) {
+    ctx.send(ws, runnerErrorSnapshot(root, requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A runner status survey is already in progress for this client',
+    }))
+    return
+  }
+
+  // Tests inject `ctx.surveyRunners` to stub the fs/exec calls.
+  const surveyFn = typeof ctx?.surveyRunners === 'function' ? ctx.surveyRunners : surveyRunners
+
+  runnerInFlight.add(client)
+  try {
+    const snapshot = await surveyFn({ root })
+    ctx.send(ws, {
+      type: 'runner_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      root: snapshot.root,
+      summary: snapshot.summary,
+      repos: snapshot.repos,
+    })
+  } catch (err) {
+    log.warn(`runner_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.send(ws, runnerErrorSnapshot(root, requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'runner status survey failed',
+    }))
+  } finally {
+    runnerInFlight.delete(client)
+  }
+}
+
 export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
+  runner_status_request: handleRunnerStatusRequest,
 }
