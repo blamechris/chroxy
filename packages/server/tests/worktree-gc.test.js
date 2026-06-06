@@ -196,6 +196,29 @@ describe('worktree-gc integration (real git repo)', () => {
     assert.equal(existsSync(join(dirtyDead, 'scratch.txt')), true)
   })
 
+  it('#5245: re-locks a worktree when removal fails after planning (preserves lock provenance)', () => {
+    const cleanDead = addWorktree('clean-dead', { lockReason: `claude agent a1 (pid ${DEAD_PID})` })
+    // Plan while clean → action 'remove'.
+    const plan = planRepoGc(repo, { kill: fakeKill })
+    assert.equal(plan.items.find((i) => i.path.endsWith('/clean-dead')).action, 'remove')
+
+    // TOCTOU: the tree goes dirty AFTER planning, so `git worktree remove`
+    // (no --force) refuses on apply (untracked file).
+    writeFileSync(join(cleanDead, 'scratch.txt'), 'became dirty after planning')
+
+    const results = applyPlan(repo, { items: plan.items })
+    const res = results.find((r) => r.path.endsWith('/clean-dead'))
+    assert.equal(res.ok, false) // remove failed as expected
+
+    // The worktree must be left LOCKED (not silently unlocked), with its
+    // dead-pid provenance intact.
+    const entry = parseWorktreeList(git(repo, ['worktree', 'list', '--porcelain']))
+      .find((e) => e.path.endsWith('/clean-dead'))
+    assert.ok(entry, 'clean-dead still present')
+    assert.equal(entry.locked, true)
+    assert.match(readLockReasonFromAdmin(cleanDead), new RegExp(`pid ${DEAD_PID}`))
+  })
+
   it('readLockReasonFromAdmin recovers the reason when porcelain omits it', () => {
     const wt = addWorktree('clean-dead', { lockReason: `claude agent a1 (pid ${DEAD_PID})` })
     const reason = readLockReasonFromAdmin(wt)
