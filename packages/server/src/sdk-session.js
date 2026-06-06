@@ -319,6 +319,15 @@ export class SdkSession extends BaseSession {
     this._thinkingLevel = null
     this._pendingInput = []
 
+    // #5269 (Control Room Phase 2a): map a Task subagent's tool_use_id (the id
+    // chroxy keys activity/agent nodes by) → the SDK's separate `task_id`,
+    // captured from `task_started` system messages. cancelActivity() needs the
+    // task_id to call query.stopTask(); the wire/activity layer only knows the
+    // tool_use_id. Cleared per entry on the terminal `task_notification` and
+    // wholesale at the start of each new turn (after `_callQuery`) and in
+    // destroy().
+    this._taskIdByToolUseId = new Map()
+
     // Permission handling — delegated to PermissionManager
     this._permissions = new PermissionManager({ log })
     this._permissions.on('permission_request', (data) => {
@@ -689,6 +698,10 @@ export class SdkSession extends BaseSession {
         queryArgs.prompt = buildContentBlocks(promptWithSkills, attachments)
       }
       this._query = this._callQuery(queryArgs)
+      // #5269: a fresh turn — drop any task_id mappings left over from a prior
+      // turn (every subagent should clear via task_notification, but a turn
+      // aborted before its notifications would otherwise strand entries).
+      this._taskIdByToolUseId.clear()
 
       // _callQuery returned an iterable without throwing — the prepend
       // bucket is committed to this turn's prompt, so flip the flag (#3225).
@@ -735,6 +748,23 @@ export class SdkSession extends BaseSession {
               }
               // Fetch dynamic model list from SDK (non-blocking)
               this._fetchSupportedModels()
+            } else if (msg.subtype === 'task_started') {
+              // #5269: a Task subagent started. The SDK message carries BOTH
+              // the subagent's `task_id` (needed by query.stopTask) and the
+              // originating `tool_use_id` (the id chroxy keys agent nodes by).
+              // Capture the mapping so cancelActivity() can translate an
+              // activity id back to a stoppable task. No client-facing emit —
+              // the agent node already exists via agent_spawned.
+              this._captureTaskId(msg.tool_use_id, msg.task_id)
+              break
+            } else if (msg.subtype === 'task_notification') {
+              // #5269: a Task subagent reached a terminal state (completed /
+              // failed / stopped — the last one is what query.stopTask emits).
+              // Finalize the agent node promptly and drop the task mapping so a
+              // cancel feels responsive instead of waiting for the turn-end
+              // sweep. Idempotent (no-op if already finalized).
+              this._finalizeAgentByToolUseId(msg.tool_use_id)
+              break
             } else {
               // Forward non-init system events (e.g. /usage, /cost, other
               // slash command responses) as system messages to the client
@@ -1374,6 +1404,91 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * #5269: record a Task subagent's `task_id ↔ tool_use_id` mapping. Tolerant
+   * of either id arriving missing (the SDK marks `tool_use_id` optional on
+   * task messages) and of `task_started` racing ahead of `agent_spawned` — the
+   * map is keyed by tool_use_id and read lazily at cancel time, so order does
+   * not matter.
+   * @param {unknown} toolUseId
+   * @param {unknown} taskId
+   * @private
+   */
+  _captureTaskId(toolUseId, taskId) {
+    if (typeof toolUseId !== 'string' || !toolUseId) return
+    if (typeof taskId !== 'string' || !taskId) return
+    this._taskIdByToolUseId.set(toolUseId, taskId)
+  }
+
+  /**
+   * #5269: finalize a Task subagent identified by its `tool_use_id` — drop the
+   * task-id mapping and, if the agent is still tracked, balance the
+   * `agent_spawned` with a matching `agent_completed` + `_activeAgents` delete
+   * so the activity node terminates immediately (the turn-end sweep would
+   * otherwise be the only finalizer on the SDK path). Idempotent.
+   * @param {unknown} toolUseId
+   * @private
+   */
+  _finalizeAgentByToolUseId(toolUseId) {
+    if (typeof toolUseId !== 'string' || !toolUseId) return
+    this._taskIdByToolUseId.delete(toolUseId)
+    if (this._activeAgents.has(toolUseId)) {
+      this._activeAgents.delete(toolUseId)
+      this.emit('agent_completed', { toolUseId })
+    }
+  }
+
+  /**
+   * #5269 (Control Room Phase 2a): cancel a single in-flight subagent by its
+   * activity id (which, for an `agent` node, IS the Task's `tool_use_id`).
+   * Translates the id to the SDK `task_id` and calls `query.stopTask()`. The
+   * SDK responds with a `task_notification` (status `stopped`), which
+   * `_finalizeAgentByToolUseId` turns into the terminal activity delta; we also
+   * finalize optimistically on success so the node clears without waiting.
+   *
+   * Only `agent` nodes are cancellable — shells/tools are not individually
+   * stoppable (chroxy doesn't own them). Returns a structured result rather
+   * than throwing so the WS handler can map it to a reply.
+   *
+   * @param {string} activityId
+   * @returns {Promise<{ ok: boolean, reason?: string, error?: string }>}
+   */
+  async cancelActivity(activityId) {
+    if (typeof activityId !== 'string' || !activityId) return { ok: false, reason: 'invalid-id' }
+    const entry = this._activity.getEntry(activityId)
+    if (!entry) return { ok: false, reason: 'not-found' }
+    if (entry.kind !== 'agent') {
+      // Shells and tool calls have no per-node cancel surface. Distinguish the
+      // shell case so the UI can explain "use Interrupt turn" rather than
+      // implying a transient error.
+      return { ok: false, reason: entry.kind === 'shell' ? 'shell-not-cancellable' : 'not-cancellable' }
+    }
+    // A finished agent isn't retained in the registry (terminal nodes are
+    // dropped on _end), so a stale cancel for one resolves as not-found above —
+    // no separate already-finished branch is reachable here.
+    const taskId = this._taskIdByToolUseId.get(activityId)
+    if (!taskId) {
+      // agent_spawned landed but task_started hasn't (or this SDK build doesn't
+      // emit task lifecycle messages) — we have no id to stop.
+      return { ok: false, reason: 'no-task-id' }
+    }
+    // Feature-detect stopTask (mirrors the supportedModels / setMaxThinkingTokens
+    // guards) — older SDK builds may not expose it even though interrupt() works.
+    if (!this._query || typeof this._query.stopTask !== 'function') {
+      return { ok: false, reason: 'not-supported' }
+    }
+    ;(this._log || log).info(`Cancelling subagent ${activityId} (task ${taskId})`)
+    try {
+      await this._query.stopTask(taskId)
+    } catch (err) {
+      ;(this._log || log).warn(`stopTask failed for ${activityId}: ${err.message}`)
+      return { ok: false, reason: 'stop-failed', error: err.message }
+    }
+    // Optimistic finalize — idempotent with the incoming task_notification.
+    this._finalizeAgentByToolUseId(activityId)
+    return { ok: true }
+  }
+
+  /**
    * Interrupt the current query.
    */
   async interrupt() {
@@ -1593,6 +1708,8 @@ export class SdkSession extends BaseSession {
     // #4881: clear so a teardown after interrupt() never leaks the flag past
     // this session instance. Mirrors CliSession.destroy() (#4602).
     this._intentionalStop = false
+    // #5269: drop subagent task-id mappings on teardown.
+    this._taskIdByToolUseId.clear()
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
