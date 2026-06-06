@@ -222,6 +222,30 @@ function readStore() {
 }
 
 /**
+ * Atomically move `tmp` over `target`.
+ *
+ * #5243: relies on `renameSync`'s atomic replace — on win32 Node's
+ * `fs.renameSync` uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING |
+ * MOVEFILE_WRITE_THROUGH` since v16 (see platform.js), so it already replaces an
+ * existing target without a separate delete. The previous win32 path
+ * `unlinkSync(target)` immediately BEFORE the rename — a crash in that window
+ * left no `credentials.json` at all (the live file deleted, the replacement
+ * never moved in). We now never pre-delete the live file; this matches the
+ * sibling `writeFileRestricted` (platform.js), which goes straight from
+ * `writeFileSync(tmp)` to `renameSync`.
+ *
+ * fs ops are injectable for testing (defaults are the real fs calls).
+ *
+ * @param {string} tmp - source temp path.
+ * @param {string} target - destination path.
+ * @param {{ rename?: Function }} [deps]
+ */
+export function replaceFileAtomically(tmp, target, deps = {}) {
+  const { rename = renameSync } = deps
+  rename(tmp, target)
+}
+
+/**
  * Serialize + atomically write the store to `target`, encrypting the blob when
  * a keychain-backed data key is available (#5154) and otherwise writing 0600
  * plaintext. Preserves the temp-file → chmod 0600 → rename crash-safety and the
@@ -237,10 +261,8 @@ function writeStoreAtomically(target, nextObj) {
   try {
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 })
     if (process.platform !== 'win32') chmodSync(tmp, 0o600)
-    if (process.platform === 'win32' && existsSync(target)) {
-      try { unlinkSync(target) } catch { /* */ }
-    }
-    renameSync(tmp, target)
+    // #5243: atomic replace — never unlink the live target first.
+    replaceFileAtomically(tmp, target)
     renamed = true
     if (process.platform !== 'win32') {
       const perms = statSync(target).mode & 0o777
