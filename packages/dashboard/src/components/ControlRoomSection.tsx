@@ -487,25 +487,33 @@ function PrChecksBadge({ repo }: { repo: RepoStatus }) {
   const { failing, pending, approved, changesRequested } = checks
   if (failing === 0 && pending === 0 && approved === 0 && changesRequested === 0) return null
   const plural = (n: number) => (n === 1 ? '' : 's')
+  const failLabel = failing > 0 ? `${failing} open PR${plural(failing)} with failing CI` : ''
+  const pendLabel = pending > 0 ? `${pending} open PR${plural(pending)} with CI in progress` : ''
+  const changesLabel = changesRequested > 0 ? `${changesRequested} open PR${plural(changesRequested)} with changes requested` : ''
+  const approvedLabel = approved > 0 ? `${approved} approved open PR${plural(approved)}` : ''
+  // Spell out the rollup for assistive tech rather than leaving it to announce
+  // the raw ✗/●/✎/✓ glyphs (mirrors AheadBehindBadge / the live-dot role=img +
+  // aria-label). The glyph spans are aria-hidden so they aren't read twice.
+  const ariaLabel = [failLabel, pendLabel, changesLabel, approvedLabel].filter(Boolean).join(', ')
   return (
-    <span className="cr-prchecks" data-testid={`cr-prchecks-${repo.name}`}>
+    <span className="cr-prchecks" data-testid={`cr-prchecks-${repo.name}`} role="img" aria-label={ariaLabel}>
       {failing > 0 && (
-        <span className="cr-pr-fail" data-testid={`cr-pr-fail-${repo.name}`} title={`${failing} open PR${plural(failing)} with failing CI`}>
+        <span className="cr-pr-fail" data-testid={`cr-pr-fail-${repo.name}`} title={failLabel} aria-hidden="true">
           ✗{failing}
         </span>
       )}
       {pending > 0 && (
-        <span className="cr-pr-pending" title={`${pending} open PR${plural(pending)} with CI in progress`}>
+        <span className="cr-pr-pending" title={pendLabel} aria-hidden="true">
           ●{pending}
         </span>
       )}
       {changesRequested > 0 && (
-        <span className="cr-pr-changes" title={`${changesRequested} open PR${plural(changesRequested)} with changes requested`}>
+        <span className="cr-pr-changes" title={changesLabel} aria-hidden="true">
           ✎{changesRequested}
         </span>
       )}
       {approved > 0 && (
-        <span className="cr-pr-approved" data-testid={`cr-pr-approved-${repo.name}`} title={`${approved} approved open PR${plural(approved)}`}>
+        <span className="cr-pr-approved" data-testid={`cr-pr-approved-${repo.name}`} title={approvedLabel} aria-hidden="true">
           ✓{approved}
         </span>
       )}

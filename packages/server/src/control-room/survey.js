@@ -175,8 +175,10 @@ function rollupCiState(rollup) {
  *
  * Returns counts of open PRs that are CI-failing, CI-pending, review-approved,
  * and changes-requested, or `null` when the command failed / output is
- * unparseable (same null semantics as `parseOpenPRs`). All-zero counts mean PRs
- * exist but none currently need attention.
+ * unparseable (same null semantics as `parseOpenPRs`). All-zero counts mean
+ * none of these tracked signals are present — which covers the no-open-PRs case
+ * AND PRs that only carry untracked states (e.g. passing CI with a
+ * `REVIEW_REQUIRED` decision). `null` ≠ all-zero.
  *
  * @param {string|null} json
  * @returns {{ failing: number, pending: number, approved: number, changesRequested: number }|null}

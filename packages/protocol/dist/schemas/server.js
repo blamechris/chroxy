@@ -683,8 +683,10 @@ export const RepoTreeSchema = z.object({
  *                     (counts of open PRs that are CI-failing / CI-pending /
  *                     review-approved / changes-requested), or `null` when the
  *                     PR lookup was skipped/failed (same condition as a `null`
- *                     `openPRs`). All-zero counts = PRs exist but none need
- *                     attention; `null` ≠ all-zero.
+ *                     `openPRs`). All-zero counts mean none of the tracked
+ *                     signals are present — this covers both "no open PRs" and
+ *                     PRs that only carry untracked states (e.g. passing CI with
+ *                     a `REVIEW_REQUIRED` decision). `null` ≠ all-zero.
  *   - `attribution` — whether commits carry the expected author attribution, or
  *                     `null` when not evaluated. `null` ≠ false.
  *   - `onboarding`  — human-readable onboarding state (free-form so the survey
