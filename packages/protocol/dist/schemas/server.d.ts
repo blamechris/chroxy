@@ -568,6 +568,11 @@ export declare const RepoTreeSchema: z.ZodObject<{
  *                     state that drives the green dot.
  *   - `tree`        — see `RepoTreeSchema`.
  *   - `worktrees`   — count of git worktrees attached to this repo.
+ *   - `ahead`       — commits the current branch is AHEAD of its upstream, or
+ *                     `null` when there is no upstream / it can't be determined
+ *                     (detached HEAD, no tracking branch). `null` ≠ 0.
+ *   - `behind`      — commits the current branch is BEHIND its upstream, same
+ *                     `null` semantics as `ahead`. `null` ≠ 0.
  *   - `openPRs`     — number of open PRs, or `null` when unknown (e.g. no GitHub
  *                     remote, or the lookup was skipped/failed). `null` ≠ 0.
  *   - `attribution` — whether commits carry the expected author attribution, or
@@ -601,6 +606,8 @@ export declare const RepoStatusSchema: z.ZodObject<{
         staged: z.ZodNumber;
     }, z.core.$strip>;
     worktrees: z.ZodNumber;
+    ahead: z.ZodNullable<z.ZodNumber>;
+    behind: z.ZodNullable<z.ZodNumber>;
     openPRs: z.ZodNullable<z.ZodNumber>;
     attribution: z.ZodNullable<z.ZodBoolean>;
     onboarding: z.ZodString;
@@ -661,6 +668,8 @@ export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
             staged: z.ZodNumber;
         }, z.core.$strip>;
         worktrees: z.ZodNumber;
+        ahead: z.ZodNullable<z.ZodNumber>;
+        behind: z.ZodNullable<z.ZodNumber>;
         openPRs: z.ZodNullable<z.ZodNumber>;
         attribution: z.ZodNullable<z.ZodBoolean>;
         onboarding: z.ZodString;

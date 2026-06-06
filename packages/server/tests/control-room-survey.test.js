@@ -23,6 +23,7 @@ import {
   parseTree,
   countWorktrees,
   parseOpenPRs,
+  parseAheadBehind,
   detectAttribution,
   DEFAULT_THRESHOLDS,
 } from '../src/control-room/survey.js'
@@ -59,13 +60,18 @@ function cmdKey(file, args) {
   if (file === 'git' && args[0] === 'status') return 'status'
   if (file === 'git' && args[0] === 'worktree') return 'worktree'
   if (file === 'git' && args[0] === 'log') return 'log'
+  if (file === 'git' && args[0] === 'rev-list') return 'aheadbehind'
   if (file === 'gh') return 'pr'
   return 'unknown'
 }
 
 /** A clean, onboarded repo command map. */
-function cleanRepo({ branch = 'main', log = iso(40 * 24 * 60 * 60 * 1000), pr = '[]', worktree = 'worktree /x\nHEAD abc\nbranch refs/heads/main\n' } = {}) {
-  return { branch, status: '', worktree, log, pr }
+function cleanRepo({ branch = 'main', log = iso(40 * 24 * 60 * 60 * 1000), pr = '[]', worktree = 'worktree /x\nHEAD abc\nbranch refs/heads/main\n', aheadbehind } = {}) {
+  const repo = { branch, status: '', worktree, log, pr }
+  // Only define the ahead/behind probe when a test supplies it; leaving it
+  // undefined makes makeExec reject (as if there's no upstream) → null/null.
+  if (aheadbehind !== undefined) repo.aheadbehind = aheadbehind
+  return repo
 }
 
 describe('parseTree', () => {
@@ -123,6 +129,25 @@ describe('parseOpenPRs', () => {
   })
 })
 
+describe('parseAheadBehind', () => {
+  it('parses "<behind>\\t<ahead>" (left=behind, right=ahead)', () => {
+    // git rev-list --left-right --count @{u}...HEAD → "<behind>\t<ahead>"
+    assert.deepEqual(parseAheadBehind('1\t2'), { behind: 1, ahead: 2 })
+  })
+  it('parses space-separated counts too', () => {
+    assert.deepEqual(parseAheadBehind('0 5'), { behind: 0, ahead: 5 })
+  })
+  it('up-to-date branch is 0/0', () => {
+    assert.deepEqual(parseAheadBehind('0\t0'), { behind: 0, ahead: 0 })
+  })
+  it('returns null/null when the command failed (no upstream / detached)', () => {
+    assert.deepEqual(parseAheadBehind(null), { ahead: null, behind: null })
+  })
+  it('returns null/null for unparseable output', () => {
+    assert.deepEqual(parseAheadBehind('fatal: no upstream configured'), { ahead: null, behind: null })
+  })
+})
+
 describe('detectAttribution', () => {
   it('includeCoAuthoredBy:false → true (attribution suppressed)', () => {
     assert.equal(detectAttribution('{"includeCoAuthoredBy": false}'), true)
@@ -138,6 +163,27 @@ describe('detectAttribution', () => {
   })
   it('unparseable → null', () => {
     assert.equal(detectAttribution('{ bad json'), null)
+  })
+})
+
+describe('surveyRepos — ahead/behind', () => {
+  it('parses ahead/behind from the rev-list probe into the RepoStatus', async () => {
+    const repo = { name: 'app', path: '/p/app' }
+    const exec = makeExec({ '/p/app': cleanRepo({ aheadbehind: '1\t3' }) })
+    const out = await surveyRepos([repo], { _execFile: exec, _now: now, _readFile: async () => { throw new Error() } })
+    const r = out.repos[0]
+    assert.equal(r.behind, 1)
+    assert.equal(r.ahead, 3)
+  })
+
+  it('ahead/behind are null when there is no upstream (rev-list fails)', async () => {
+    const repo = { name: 'app', path: '/p/app' }
+    // cleanRepo() leaves `aheadbehind` undefined → makeExec rejects → null.
+    const exec = makeExec({ '/p/app': cleanRepo() })
+    const out = await surveyRepos([repo], { _execFile: exec, _now: now, _readFile: async () => { throw new Error() } })
+    const r = out.repos[0]
+    assert.equal(r.ahead, null)
+    assert.equal(r.behind, null)
   })
 })
 
@@ -389,10 +435,11 @@ describe('surveyRepos — concurrency cap', () => {
       _readFile: async () => { throw new Error() },
       concurrency: 3,
     })
-    // Each repo fires up to 5 concurrent commands internally; the cap bounds
-    // how many repos run at once, so observed parallel commands stays bounded
-    // by cap * (commands per repo). The key invariant: not all 12 repos ran at
-    // once. With cap 3 and 5 cmds/repo, ceiling is 15 commands in flight.
-    assert.ok(maxInFlight <= 3 * 5, `maxInFlight=${maxInFlight}`)
+    // Each repo fires up to 6 concurrent commands internally (rev-parse,
+    // status, worktree, log, rev-list ahead/behind, gh pr); the cap bounds how
+    // many repos run at once, so observed parallel commands stays bounded by
+    // cap * (commands per repo). The key invariant: not all 12 repos ran at
+    // once. With cap 3 and 6 cmds/repo, ceiling is 18 commands in flight.
+    assert.ok(maxInFlight <= 3 * 6, `maxInFlight=${maxInFlight}`)
   })
 })

@@ -2048,6 +2048,8 @@ describe('@chroxy/protocol schemas', () => {
       live: true,
       tree: { state: 'clean', untracked: 0, modified: 0, staged: 0 },
       worktrees: 2,
+      ahead: 0,
+      behind: 0,
       openPRs: 3,
       attribution: true,
       onboarding: 'fully onboarded',
@@ -2062,6 +2064,8 @@ describe('@chroxy/protocol schemas', () => {
       live: false,
       tree: { state: 'dirty', untracked: 4, modified: 2, staged: 1 },
       worktrees: 0,
+      ahead: null,
+      behind: null,
       openPRs: null,
       attribution: null,
       onboarding: 'not onboarded',
@@ -2139,6 +2143,26 @@ describe('@chroxy/protocol schemas', () => {
       it('rejects a negative openPRs', async () => {
         const { RepoStatusSchema } = await import('../src/schemas/server.ts')
         assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, openPRs: -1 }).success)
+      })
+
+      it('#5216: accepts ahead/behind as a non-negative integer or null', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, ahead: 5, behind: 2 }).success)
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, ahead: 0, behind: 0 }).success)
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, ahead: null, behind: null }).success)
+      })
+
+      it('#5216: rejects a negative or non-integer ahead/behind', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, ahead: -1 }).success)
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, behind: 1.5 }).success)
+      })
+
+      it('#5216: requires ahead/behind to be present', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        const { ahead, behind, ...withoutAheadBehind } = cleanRepo
+        void ahead; void behind
+        assert.ok(!RepoStatusSchema.safeParse(withoutAheadBehind).success)
       })
 
       it('accepts attribution true / false / null', async () => {

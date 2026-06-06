@@ -141,6 +141,28 @@ export function parseOpenPRs(json) {
 }
 
 /**
+ * Parse `git rev-list --left-right --count @{u}...HEAD` output into ahead/behind
+ * counts relative to the upstream tracking branch.
+ *
+ * The command prints `<left>\t<right>` where, for `@{u}...HEAD`, the left side
+ * counts commits the upstream has that HEAD lacks (= BEHIND) and the right side
+ * counts commits HEAD has that the upstream lacks (= AHEAD).
+ *
+ * Returns `{ ahead: null, behind: null }` when the input is null (no upstream /
+ * detached HEAD / command failed) or doesn't match the expected two-number
+ * shape — never throws.
+ *
+ * @param {string|null} raw - raw stdout, or null on command failure.
+ * @returns {{ ahead: number|null, behind: number|null }}
+ */
+export function parseAheadBehind(raw) {
+  if (raw === null || raw === undefined) return { ahead: null, behind: null }
+  const m = /^(\d+)\s+(\d+)$/.exec(String(raw).trim())
+  if (!m) return { ahead: null, behind: null }
+  return { behind: Number(m[1]), ahead: Number(m[2]) }
+}
+
+/**
  * Detect project-level attribution policy from `.claude/settings.json`.
  *
  * @param {string|null} contents - raw settings.json text, or null if absent.
@@ -294,11 +316,13 @@ async function surveyOne(repo, ctx) {
     const sessionBound = hasBoundSession(repo.path, activeSessionCwds)
 
     // Run the independent git probes concurrently.
-    const [branchRaw, statusRaw, worktreeRaw, lastRaw, prRaw, settingsRaw] = await Promise.all([
+    const [branchRaw, statusRaw, worktreeRaw, lastRaw, aheadBehindRaw, prRaw, settingsRaw] = await Promise.all([
       tryExec(execFn, 'git', ['rev-parse', '--abbrev-ref', 'HEAD'], cwd),
       tryExec(execFn, 'git', ['status', '--porcelain'], cwd),
       tryExec(execFn, 'git', ['worktree', 'list', '--porcelain'], cwd),
       tryExec(execFn, 'git', ['log', '-1', '--format=%cI'], cwd),
+      // No upstream / detached HEAD makes this fail → null → ahead/behind null.
+      tryExec(execFn, 'git', ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd),
       tryExec(execFn, 'gh', ['pr', 'list', '--json', 'number'], cwd),
       readSettings(readFn, repo.path),
     ])
@@ -316,6 +340,7 @@ async function surveyOne(repo, ctx) {
     const branch = branchRaw && branchRaw.length > 0 ? branchRaw : 'unknown'
     const tree = parseTree(statusRaw)
     const worktrees = countWorktrees(worktreeRaw || '')
+    const { ahead, behind } = parseAheadBehind(aheadBehindRaw)
     const openPRs = parseOpenPRs(prRaw)
     const attribution = detectAttribution(settingsRaw)
 
@@ -339,6 +364,8 @@ async function surveyOne(repo, ctx) {
       live,
       tree,
       worktrees,
+      ahead,
+      behind,
       openPRs,
       attribution,
       onboarding,
@@ -396,6 +423,8 @@ function degradedRepo(repo, now, err) {
     live: false,
     tree: { state: 'clean', untracked: 0, modified: 0, staged: 0 },
     worktrees: 0,
+    ahead: null,
+    behind: null,
     openPRs: null,
     attribution: null,
     onboarding: 'skipped — survey failed',
