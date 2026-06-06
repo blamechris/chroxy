@@ -79,6 +79,11 @@ const CONFIG_SCHEMA = {
   showToken: 'boolean',
   logFormat: 'string',
   environments: 'object',
+  // #5158: worktree garbage-collection. `{ autoReap: boolean }` — when true,
+  // the server reclaims orphaned, dead-pid-locked agent worktrees on startup
+  // (clean trees only, never --force). Defaults to off; the `chroxy worktree
+  // gc` CLI is always available for manual/dry-run use.
+  worktreeGc: 'object',
   sandbox: 'object',
   // Optional allowlist of absolute directory paths that sessions may use
   // as their working directory. When set (non-empty array), session
@@ -607,6 +612,19 @@ export function validateConfig(config, verbose = false) {
     const rancherBlock = config.environments.rancher
     if (rancherBlock !== undefined) {
       validateRancherBlock(rancherBlock, warnings)
+    }
+  }
+
+  // #5158: worktree GC block. Only the shape (object, not array) and the
+  // `autoReap` boolean are checked; an unset block means "auto-reaper off".
+  if (config.worktreeGc !== undefined) {
+    if (typeof config.worktreeGc !== 'object' || config.worktreeGc === null || Array.isArray(config.worktreeGc)) {
+      warnings.push(`Invalid type for 'worktreeGc': expected object, got ${Array.isArray(config.worktreeGc) ? 'array' : typeof config.worktreeGc}`)
+    } else if (
+      Object.prototype.hasOwnProperty.call(config.worktreeGc, 'autoReap') &&
+      typeof config.worktreeGc.autoReap !== 'boolean'
+    ) {
+      warnings.push(`Invalid type for 'worktreeGc.autoReap': expected boolean, got ${typeof config.worktreeGc.autoReap}`)
     }
   }
 
