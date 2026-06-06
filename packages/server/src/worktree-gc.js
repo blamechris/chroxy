@@ -229,11 +229,25 @@ export function applyPlan(repoPath, plan, deps = {}) {
 
   for (const item of plan.items) {
     if (item.action === 'remove') {
+      let unlocked = false
       try {
-        if (item.locked) git(repoPath, ['worktree', 'unlock', item.path])
+        if (item.locked) { git(repoPath, ['worktree', 'unlock', item.path]); unlocked = true }
         git(repoPath, ['worktree', 'remove', item.path]) // NO --force
         results.push({ path: item.path, action: 'remove', ok: true })
       } catch (err) {
+        // #5245 — if we unlocked but the remove then failed (e.g. the tree went
+        // dirty between plan and apply, so `worktree remove` refuses), re-lock
+        // with the original reason so a failed reclaim leaves the worktree's
+        // lock state — and its dead-pid provenance — exactly as we found it.
+        // Best-effort: a re-lock failure must not mask the original error.
+        if (unlocked) {
+          try {
+            const lockArgs = item.lockReason
+              ? ['worktree', 'lock', '--reason', item.lockReason, item.path]
+              : ['worktree', 'lock', item.path]
+            git(repoPath, lockArgs)
+          } catch { /* best-effort re-lock */ }
+        }
         results.push({ path: item.path, action: 'remove', ok: false, error: (err && err.message) || String(err) })
       }
     } else if (item.action === 'prune') {
