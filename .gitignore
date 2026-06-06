@@ -1,5 +1,9 @@
 # Dependencies
-node_modules/
+# No trailing slash: must also match a `node_modules` SYMLINK (not just a real
+# directory), or an accidentally-created symlink slips past the ignore and can
+# be committed (see the #5154 worktree mishap that tracked self-referential
+# node_modules symlinks into main).
+node_modules
 
 # Environment
 .env
