@@ -18,12 +18,19 @@ const localStorageMock = {
 }
 Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, writable: true })
 
+// Control getAuthToken so connectLocal's same-origin path is testable.
+let mockToken: string | null = null
+vi.mock('../utils/auth', () => ({
+  getAuthToken: () => mockToken,
+}))
+
 // Must import after localStorage mock is set up
 const { useConnectionStore } = await import('./connection')
 
 beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(store)) delete store[k]
+  mockToken = null
   // Reset store state relevant to server registry
   useConnectionStore.setState({
     serverRegistry: [],
@@ -84,6 +91,31 @@ describe('store server registry actions', () => {
     const entry = useConnectionStore.getState().addServer('Dev', 'wss://dev/ws', 'token1')
     useConnectionStore.getState().connectToServer(entry.id)
     expect(useConnectionStore.getState().activeServerId).toBe(entry.id)
+  })
+
+  it('connectLocal is a no-op when no same-origin token is available', () => {
+    mockToken = null
+    // Pretend we are on a remote server; connectLocal must not touch it.
+    useConnectionStore.setState({ activeServerId: 'srv_remote', connectionPhase: 'connected' })
+    useConnectionStore.getState().connectLocal()
+    expect(useConnectionStore.getState().activeServerId).toBe('srv_remote')
+    expect(useConnectionStore.getState().connectionPhase).toBe('connected')
+  })
+
+  it('connectLocal switches from a remote server back to local (activeServerId → null)', () => {
+    mockToken = 'local-token'
+    useConnectionStore.setState({ activeServerId: 'srv_remote', connectionPhase: 'connected' })
+    useConnectionStore.getState().connectLocal()
+    // connect() does async work — verify the scope flipped to local synchronously.
+    expect(useConnectionStore.getState().activeServerId).toBeNull()
+  })
+
+  it('connectLocal is a no-op when already connected to local', () => {
+    mockToken = 'local-token'
+    useConnectionStore.setState({ activeServerId: null, connectionPhase: 'connected' })
+    useConnectionStore.getState().connectLocal()
+    // Already local + connected → must not tear down the connection.
+    expect(useConnectionStore.getState().connectionPhase).toBe('connected')
   })
 
   it('multiple servers can coexist in registry', () => {
