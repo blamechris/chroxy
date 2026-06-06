@@ -644,6 +644,18 @@ export function App() {
   // state) so it survives without re-renders and is read at the transition.
   const pendingSeedPromptRef = useRef<string | null>(null)
 
+  // #5217 — single owner of the create-session picker open path. Every opener
+  // routes through this so none can diverge on the three things that must stay
+  // in lockstep: the pre-filled cwd, the Investigate seed ref (#5202 — only the
+  // Investigate opener passes a non-null seed; everyone else clears it so a
+  // stale reason can't leak into an unrelated session, #5214), and showing the
+  // modal. Stable identity ([] deps) so effects/handlers can depend on it freely.
+  const openCreateSession = useCallback(({ cwd = null, seed = null }: { cwd?: string | null; seed?: string | null } = {}) => {
+    pendingSeedPromptRef.current = seed || null
+    setPendingCwd(cwd)
+    setShowCreateSession(true)
+  }, [])
+
   // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
   const [transcriptCopied, setTranscriptCopied] = useState(false)
   const transcriptResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -821,11 +833,9 @@ export function App() {
         })
       },
       openCreateSessionAt: (cwd) => {
-        // #5214 — opening the picker at a context-menu cwd is not an
-        // Investigate launch; clear any stashed seed so it can't leak.
-        pendingSeedPromptRef.current = null
-        setPendingCwd(cwd)
-        setShowCreateSession(true)
+        // #5214/#5217 — context-menu opener; not an Investigate launch (seed
+        // cleared by the shared helper).
+        openCreateSession({ cwd })
       },
       confirmCloseSession: handleCloseSession,
     })
@@ -836,6 +846,7 @@ export function App() {
     createSession,
     resumeConversation,
     handleCloseSession,
+    openCreateSession,
   ])
 
   /**
@@ -882,12 +893,9 @@ export function App() {
         recordMruCommand(cmd.id)
         // Override commands that need App-level state
         if (cmd.id === 'new-session') {
-          // #5214 — a plain new session: reset cwd and clear any stashed
-          // Investigate seed so it can't leak into this session's composer
-          // (matches handleNewSession; this path previously diverged on both).
-          setPendingCwd(null)
-          pendingSeedPromptRef.current = null
-          setShowCreateSession(true)
+          // #5217 — plain new session via the shared opener (resets cwd +
+          // clears any stashed Investigate seed).
+          openCreateSession()
         } else if (cmd.id === 'toggle-sidebar') {
           setSidebarOpen(prev => !prev)
         } else {
@@ -1427,22 +1435,17 @@ export function App() {
   }, [sendInterrupt])
 
   const handleNewSession = useCallback(() => {
-    setPendingCwd(null)
-    // #5202 — a plain new session carries no investigation seed; clear any
-    // stale one so it can't leak into this session's composer.
-    pendingSeedPromptRef.current = null
-    setShowCreateSession(true)
-  }, [])
+    // #5217 — plain new session via the shared opener (no investigation seed).
+    openCreateSession()
+  }, [openCreateSession])
 
   // #5202 — open the create-session picker pre-filled for an Investigate
-  // action: cwd = the repo path, and the reason note stashed for seeding into
-  // the new session's composer once it's created. The user still picks
+  // action: cwd = the repo path, and the reason note seeded into the new
+  // session's composer once it's created. The user still picks
   // model/provider/options in the modal before creating.
   const handleInvestigate = useCallback((req: RepoInvestigateRequest) => {
-    pendingSeedPromptRef.current = req.reason || null
-    setPendingCwd(req.cwd)
-    setShowCreateSession(true)
-  }, [])
+    openCreateSession({ cwd: req.cwd, seed: req.reason })
+  }, [openCreateSession])
 
   // #4695 / #4942 — bridge the macOS menu bar items to App-state
   // handlers. See the `useTauriMenuEvents` call below `handleShowQr`
@@ -2300,13 +2303,7 @@ export function App() {
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}
           onOpenControlRoom={openControlRoom}
-          onNewSession={(cwd) => {
-            // #5214 — sidebar new-session is not an Investigate launch; clear
-            // any stashed seed so it can't leak into this session's composer.
-            pendingSeedPromptRef.current = null
-            setPendingCwd(cwd || null)
-            setShowCreateSession(true)
-          }}
+          onNewSession={(cwd) => openCreateSession({ cwd: cwd || null })}
           onToggle={() => setSidebarOpen(prev => !prev)}
           onWidthChange={(w: number) => { setSidebarWidth(w); persistSidebarWidth(w) }}
           onContextMenu={handleSidebarContextMenu}
