@@ -88,7 +88,8 @@ import { ConsolePage } from './components/ConsolePage'
 import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
-import { ControlRoomSection, type RepoInvestigateRequest } from './components/ControlRoomSection'
+import { type RepoInvestigateRequest } from './components/ControlRoomSection'
+import { ControlRoomView } from './components/ControlRoomView'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -2411,7 +2412,7 @@ export function App() {
             double-rendering with the disconnected/startup screens. */}
         {controlRoomActive && (
           <div className="main-content" data-testid="control-room-main">
-            <ControlRoomSection onInvestigate={handleInvestigate} />
+            <ControlRoomView onInvestigate={handleInvestigate} />
           </div>
         )}
 

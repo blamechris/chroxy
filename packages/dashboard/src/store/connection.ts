@@ -377,6 +377,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // host_status_snapshot handler. Null until the first survey lands.
   hostStatus: null,
   hostStatusLoading: false,
+  // #5253: Control Room self-hosted runner snapshot, fed by the
+  // runner_status_snapshot handler. Null until the first survey lands.
+  runnerStatus: null,
+  runnerStatusLoading: false,
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -648,6 +652,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ hostStatusLoading: true });
       wsSend(socket, { type: 'host_status_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #5253: request a self-hosted runner survey. Mirrors requestHostStatus —
+  // flips runnerStatusLoading and sends a runner_status_request; the reply is a
+  // single runner_status_snapshot handled into runnerStatus. Returns false (and
+  // does NOT set loading) when the socket is closed.
+  requestRunnerStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ runnerStatusLoading: true });
+      wsSend(socket, { type: 'runner_status_request' });
       return true;
     }
     return false;
