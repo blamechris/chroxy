@@ -63,7 +63,7 @@ export function ControlRoomView({ onInvestigate, initialTab }: ControlRoomViewPr
   return (
     <div className="cr-view" data-testid="control-room-view">
       <div className="cr-tabs" role="tablist" aria-label="Control Room sections" data-testid="cr-tabs">
-        {TABS.map((t) => {
+        {TABS.map((t, i) => {
           const active = tab === t.key
           return (
             <button
@@ -71,9 +71,27 @@ export function ControlRoomView({ onInvestigate, initialTab }: ControlRoomViewPr
               type="button"
               role="tab"
               aria-selected={active}
+              // Roving tabindex: only the active tab is in the tab order; the
+              // others are reached with ArrowLeft/ArrowRight (matches the
+              // SessionBar tab convention so keyboard nav is consistent).
+              tabIndex={active ? 0 : -1}
               className={`cr-tab${active ? ' cr-tab-active' : ''}`}
               data-testid={`cr-tab-${t.key}`}
               onClick={() => selectTab(t.key)}
+              onKeyDown={(e) => {
+                if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+                e.preventDefault()
+                const next =
+                  e.key === 'ArrowRight'
+                    ? (i + 1) % TABS.length
+                    : (i - 1 + TABS.length) % TABS.length
+                const target = TABS[next]!
+                selectTab(target.key)
+                const tabs = (e.currentTarget.parentElement as HTMLElement)?.querySelectorAll<HTMLElement>(
+                  '[role="tab"]',
+                )
+                tabs?.[next]?.focus()
+              }}
             >
               {t.label}
             </button>
