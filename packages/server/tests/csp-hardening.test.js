@@ -117,6 +117,16 @@ describe('CSP hardening', () => {
     const scriptSrc = csp.split(';').find(d => d.trim().startsWith('script-src'))
     assert.ok(scriptSrc && !scriptSrc.includes("'unsafe-inline'") && !scriptSrc.includes("'unsafe-eval'"),
       'script-src must stay locked to self (no inline/eval) even with a widened connect-src')
+
+    // A broad connect-src is only safe while the directives that gate PASSIVE
+    // exfil stay 'self'-scoped. Lock them in so a future "also widen img-src"
+    // can't silently open a CSS/beacon/form exfil channel.
+    const directive = (name) => csp.split(';').find(d => d.trim().startsWith(name))
+    assert.ok(directive("default-src 'self'"), "default-src must stay 'self'")
+    assert.ok(directive("form-action 'self'"), "form-action must stay 'self'")
+    const imgSrc = directive('img-src')
+    assert.ok(imgSrc && !/https?:/.test(imgSrc),
+      "img-src must not allow remote http(s) origins (no beacon exfil) while connect-src is broad")
   })
 
   it('server config injection uses meta tag in dashboard HTML (not inline script)', async () => {
