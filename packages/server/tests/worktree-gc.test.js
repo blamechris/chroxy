@@ -11,7 +11,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { GIT } from '../src/git.js'
@@ -110,10 +110,22 @@ describe('worktree-gc unit: parseWorktreeList', () => {
 describe('worktree-gc integration (real git repo)', () => {
   let repo
 
-  function addWorktree(name, { lockReason, dirty } = {}) {
+  function addWorktree(name, { lockReason, dirty, ignored } = {}) {
     const wtPath = join(repo, '.claude', 'worktrees', name)
     git(repo, ['worktree', 'add', '--detach', wtPath, 'HEAD'])
     if (dirty) writeFileSync(join(wtPath, 'scratch.txt'), 'uncommitted work')
+    if (ignored) {
+      // A worktree whose ONLY non-tracked content is gitignored: clean to
+      // `git status --porcelain`, but `git worktree remove` (no --force) would
+      // still delete the whole dir incl. these files (#5244). Commit the
+      // .gitignore so the only non-clean signal is the ignored entries.
+      writeFileSync(join(wtPath, '.gitignore'), 'node_modules/\n.env.local\n')
+      git(wtPath, ['add', '.gitignore'])
+      git(wtPath, ['commit', '-m', 'add gitignore'])
+      mkdirSync(join(wtPath, 'node_modules'), { recursive: true })
+      writeFileSync(join(wtPath, 'node_modules', '.env.local'), 'PRECIOUS local-only secret')
+      writeFileSync(join(wtPath, '.env.local'), 'TOKEN=secret')
+    }
     if (lockReason) git(repo, ['worktree', 'lock', '--reason', lockReason, wtPath])
     return wtPath
   }
@@ -194,6 +206,28 @@ describe('worktree-gc integration (real git repo)', () => {
     applyPlan(repo, { items: reclaimable })
     assert.equal(existsSync(dirtyDead), true)
     assert.equal(existsSync(join(dirtyDead, 'scratch.txt')), true)
+  })
+
+  it('#5244: never removes a worktree whose only content is gitignored (plans skip)', () => {
+    addWorktree('ignored-dead', { lockReason: `claude agent a5 (pid ${DEAD_PID})`, ignored: true })
+    const plan = planRepoGc(repo, { kill: fakeKill })
+    const item = plan.items.find((i) => basename(i.path) === 'ignored-dead')
+    assert.ok(item, 'expected a plan item for the ignored-dead worktree')
+    // Tracked status is clean, but the gitignored node_modules/.env must keep it skipped.
+    assert.equal(item.action, 'skip')
+    assert.match(item.skipReason, /gitignored|ignored|untracked/)
+  })
+
+  it('#5244: apply preserves an ignored-only worktree and its gitignored files', () => {
+    const ignoredDead = addWorktree('ignored-dead', { lockReason: `claude agent a5 (pid ${DEAD_PID})`, ignored: true })
+    const plan = planRepoGc(repo, { kill: fakeKill })
+    // Apply the FULL plan (mirrors the reaper): a regression would mark this
+    // 'remove' and applyPlan would delete the dir + the precious secret.
+    const reclaimable = plan.items.filter((i) => i.action !== 'skip')
+    applyPlan(repo, { items: reclaimable })
+    assert.equal(existsSync(ignoredDead), true)
+    assert.equal(existsSync(join(ignoredDead, 'node_modules', '.env.local')), true)
+    assert.equal(existsSync(join(ignoredDead, '.env.local')), true)
   })
 
   it('readLockReasonFromAdmin recovers the reason when porcelain omits it', () => {
