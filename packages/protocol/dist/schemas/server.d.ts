@@ -583,6 +583,11 @@ export declare const RepoTreeSchema: z.ZodObject<{
  *                     signals are present — this covers both "no open PRs" and
  *                     PRs that only carry untracked states (e.g. passing CI with
  *                     a `REVIEW_REQUIRED` decision). `null` ≠ all-zero.
+ *   - `prsUrl`      — the repo's GitHub pull-requests URL
+ *                     (`https://github.com/<owner>/<repo>/pulls`), derived from
+ *                     the `origin` remote, or `null` when there's no GitHub
+ *                     `origin` remote / it couldn't be determined. Powers the
+ *                     "View PRs" row action.
  *   - `attribution` — whether commits carry the expected author attribution, or
  *                     `null` when not evaluated. `null` ≠ false.
  *   - `onboarding`  — human-readable onboarding state (free-form so the survey
@@ -623,6 +628,7 @@ export declare const RepoStatusSchema: z.ZodObject<{
         approved: z.ZodNumber;
         changesRequested: z.ZodNumber;
     }, z.core.$strip>>;
+    prsUrl: z.ZodNullable<z.ZodString>;
     attribution: z.ZodNullable<z.ZodBoolean>;
     onboarding: z.ZodString;
     lastTouched: z.ZodString;
@@ -691,6 +697,7 @@ export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
             approved: z.ZodNumber;
             changesRequested: z.ZodNumber;
         }, z.core.$strip>>;
+        prsUrl: z.ZodNullable<z.ZodString>;
         attribution: z.ZodNullable<z.ZodBoolean>;
         onboarding: z.ZodString;
         lastTouched: z.ZodString;

@@ -2052,6 +2052,7 @@ describe('@chroxy/protocol schemas', () => {
       behind: 0,
       openPRs: 3,
       prChecks: { failing: 0, pending: 0, approved: 1, changesRequested: 0 },
+      prsUrl: 'https://github.com/dev/chroxy/pulls',
       attribution: true,
       onboarding: 'fully onboarded',
       lastTouched: '2026-06-05T12:00:00.000Z',
@@ -2069,6 +2070,7 @@ describe('@chroxy/protocol schemas', () => {
       behind: null,
       openPRs: null,
       prChecks: null,
+      prsUrl: null,
       attribution: null,
       onboarding: 'not onboarded',
       lastTouched: '2026-01-02T09:30:00.000Z',
@@ -2183,6 +2185,35 @@ describe('@chroxy/protocol schemas', () => {
         const { RepoStatusSchema } = await import('../src/schemas/server.ts')
         const { prChecks, ...without } = cleanRepo
         void prChecks
+        assert.ok(!RepoStatusSchema.safeParse(without).success)
+      })
+
+      it('#5216: accepts a GitHub pulls URL or null', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, prsUrl: 'https://github.com/o/r/pulls' }).success)
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, prsUrl: null }).success)
+      })
+
+      it('#5216: rejects non-URL, non-GitHub, and dangerous-scheme prsUrl values', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        // prsUrl is rendered into an <a href>; it must be locked to the GitHub
+        // pulls shape so a script URL can never slip through.
+        for (const bad of [
+          'not-a-url',
+          'javascript:alert(1)',
+          'https://github.com/o/r', // not the /pulls page
+          'https://evil.com/o/r/pulls', // wrong host
+          'http://github.com/o/r/pulls', // not https
+          'https://github.com/o/r/pulls/extra',
+        ]) {
+          assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, prsUrl: bad }).success, `should reject ${bad}`)
+        }
+      })
+
+      it('#5216: requires prsUrl to be present', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        const { prsUrl, ...without } = cleanRepo
+        void prsUrl
         assert.ok(!RepoStatusSchema.safeParse(without).success)
       })
 
