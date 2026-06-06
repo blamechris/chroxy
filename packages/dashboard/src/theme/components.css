@@ -8625,6 +8625,95 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-blue);
 }
 
+/* #5216 — repo-table view controls (filter chips + sort + visible count) */
+.cr-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 16px 0 0;
+}
+
+.cr-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cr-filter {
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.cr-filter:hover {
+  border-color: var(--accent-blue);
+  color: var(--text-primary);
+}
+
+.cr-filter-on {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+}
+
+.cr-filter-clear {
+  appearance: none;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-decoration: underline;
+  padding: 4px 6px;
+}
+
+.cr-filter-clear:hover {
+  color: var(--text-primary);
+}
+
+.cr-sort-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.cr-sort {
+  appearance: auto;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+
+.cr-visible-count {
+  margin-left: auto;
+  font-size: 12.5px;
+}
+
+.cr-link-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--accent-blue);
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+  padding: 0;
+}
+
 /* Table */
 .cr-table-wrap {
   background: var(--bg-secondary);
