@@ -11,7 +11,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { GIT } from '../src/git.js'
@@ -211,7 +211,8 @@ describe('worktree-gc integration (real git repo)', () => {
   it('#5244: never removes a worktree whose only content is gitignored (plans skip)', () => {
     addWorktree('ignored-dead', { lockReason: `claude agent a5 (pid ${DEAD_PID})`, ignored: true })
     const plan = planRepoGc(repo, { kill: fakeKill })
-    const item = plan.items.find((i) => i.path.endsWith('/ignored-dead'))
+    const item = plan.items.find((i) => basename(i.path) === 'ignored-dead')
+    assert.ok(item, 'expected a plan item for the ignored-dead worktree')
     // Tracked status is clean, but the gitignored node_modules/.env must keep it skipped.
     assert.equal(item.action, 'skip')
     assert.match(item.skipReason, /gitignored|ignored|untracked/)
