@@ -339,7 +339,7 @@ describe('selectActivityTree — hierarchy build', () => {
     expect(tree.map((n) => n.entry.id)).toEqual(['kid'])
   })
 
-  it('#5247: does not overflow the stack on a deep parentId chain', () => {
+  it('#5248: does not overflow the stack on a deep parentId chain', () => {
     // A fully wire-controlled deep chain n0 ← n1 ← … would overflow a recursive
     // descent (RangeError, ~5k deep) inside the Control Room render. The iterative
     // build must handle it without throwing and still produce the full-depth tree.

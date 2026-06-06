@@ -303,10 +303,11 @@ export function selectActivityTree(state: ActivityState, sessionId: string): rea
   // Iterative (explicit-stack) DFS rather than recursion: a pathological deep
   // parentId chain (n0 ← n1 ← n2 ← …) is fully wire-controlled and would overflow
   // the JS call stack with a recursive descent, throwing RangeError inside the
-  // Control Room render that calls this directly (#5247). The heap-backed stack
-  // removes that ceiling. Output is identical to the former recursion: pre-order,
-  // children in bucket (first-seen) order, every entry visited exactly once;
-  // `visited` still breaks cycles (a child already on the walk is skipped).
+  // Control Room render that calls this directly (#5248). The heap-backed stack
+  // removes that ceiling. Output is identical to the former recursion: nodes are
+  // emitted in pre-order visitation order, children in bucket (first-seen) order,
+  // every entry visited exactly once; `visited` still breaks cycles (a child
+  // already on the walk is skipped).
   const visited = new Set<string>()
   // Post-order build: each frame collects its children into a mutable array and
   // only constructs the (readonly-`children`) node when its subtree is fully
