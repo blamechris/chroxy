@@ -913,9 +913,8 @@ export function App() {
   useEffect(() => {
     const token = getAuthToken()
     if (token) {
-      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-      const wsUrl = `${proto}://${window.location.host}/ws`
-      connect(wsUrl, token)
+      // Served by a local daemon — connect to "this machine" (scope null).
+      useConnectionStore.getState().connectLocal()
       return
     }
     const { activeServerId: savedId, serverRegistry: registry, connectToServer: connectSrv } = useConnectionStore.getState()

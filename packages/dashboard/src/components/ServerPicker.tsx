@@ -185,9 +185,11 @@ export function ServerPicker() {
   const serverRegistry = useConnectionStore(s => s.serverRegistry)
   const activeServerId = useConnectionStore(s => s.activeServerId)
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
+  const hasLocalServer = useConnectionStore(s => s.hasLocalServer)
   const addServer = useConnectionStore(s => s.addServer)
   const removeServer = useConnectionStore(s => s.removeServer)
   const switchServer = useConnectionStore(s => s.switchServer)
+  const connectLocal = useConnectionStore(s => s.connectLocal)
 
   const [showAddForm, setShowAddForm] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
@@ -227,7 +229,33 @@ export function ServerPicker() {
         />
       )}
 
-      {serverRegistry.length === 0 && !showAddForm && (
+      {hasLocalServer && (
+        <div
+          className={`server-item${activeServerId === null ? ' active' : ''}`}
+          data-testid="server-item-local"
+        >
+          <button
+            type="button"
+            className="server-item-main"
+            onClick={() => connectLocal()}
+            title="Connect to the daemon on this machine"
+          >
+            <span
+              className={statusDot(connectionPhase, activeServerId === null)}
+              aria-label={activeServerId === null ? statusLabel(connectionPhase, true) : 'Idle'}
+            />
+            <div className="server-item-info">
+              <span className="server-item-name">This machine</span>
+              <span className="server-item-url">local daemon</span>
+            </div>
+            <span className="server-item-status">
+              {activeServerId === null ? statusLabel(connectionPhase, true) : 'Idle'}
+            </span>
+          </button>
+        </div>
+      )}
+
+      {serverRegistry.length === 0 && !showAddForm && !hasLocalServer && (
         <div className="server-empty" data-testid="server-empty">
           No servers configured.
         </div>

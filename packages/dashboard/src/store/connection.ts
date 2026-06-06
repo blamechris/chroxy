@@ -75,6 +75,7 @@ import {
 } from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
+import { getAuthToken } from '../utils/auth';
 import {
   setStore,
   wsSend,
@@ -356,6 +357,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   socket: null,
   serverRegistry: loadServerRegistry(),
   activeServerId: _initialServerId,
+  // True when this dashboard was served by a local daemon with a same-origin
+  // token — i.e. a "this machine" connection is available alongside any remote
+  // LAN servers in the registry. Lets the ServerPicker pin a local entry so the
+  // user can switch local↔remote (desktop LAN-client, #5281 ①.2).
+  hasLocalServer: typeof window !== 'undefined' && !!getAuthToken(),
   serverMode: null,
   sessionCwd: null,
   defaultCwd: null,
@@ -2693,6 +2699,35 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setServerScope(serverId);
     set({ activeServerId: serverId });
     get().connect(server.wsUrl, server.token);
+  },
+
+  /**
+   * Connect to the local same-origin daemon ("this machine"). Mirrors
+   * switchServer but for the registry-less local target (scope `null`), so a
+   * desktop/LAN-client user can switch back from a remote LAN server to their
+   * own host. No-op when no same-origin token is available. (#5281 ①.2)
+   */
+  connectLocal: () => {
+    const token = getAuthToken();
+    if (!token) return;
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${proto}://${window.location.host}/ws`;
+    // Already on local and connected — nothing to do.
+    if (get().activeServerId === null && get().connectionPhase === 'connected') return;
+    if (get().connectionPhase !== 'disconnected') {
+      get().disconnect();
+    }
+    // Switch persistence scope to local (null) before resetting in-memory state,
+    // so subscriber side-effects target the local scope (same ordering as
+    // switchServer).
+    setServerScope(null);
+    get()._resetSessionMemory();
+    set({ activeServerId: null, userDisconnected: false });
+    const persisted = loadPersistedState();
+    if (persisted.activeSessionId) {
+      set({ activeSessionId: persisted.activeSessionId });
+    }
+    get().connect(wsUrl, token);
   },
 }));
 

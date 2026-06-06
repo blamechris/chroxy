@@ -491,6 +491,8 @@ export interface ConnectionState {
   // Multi-server registry
   serverRegistry: ServerEntry[];
   activeServerId: string | null;
+  /** A same-origin local daemon connection is available ("this machine"). */
+  hasLocalServer: boolean;
 
   // User explicitly disconnected — prevents auto-reconnect on ConnectScreen mount
   userDisconnected: boolean;
@@ -1129,6 +1131,8 @@ export interface ConnectionState {
   switchServer: (serverId: string) => void;
   /** Reconnect to a server without clearing session state (auto-reconnect/startup). */
   connectToServer: (serverId: string) => void;
+  /** Connect to the local same-origin daemon ("this machine"); registry-less local target. */
+  connectLocal: () => void;
 
   // Environment actions
   requestEnvironments: () => void;
