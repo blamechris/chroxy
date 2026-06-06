@@ -63,7 +63,9 @@ It does **not** derive a key from machine identifiers and "encrypt" with that. S
 
 ### Operator escape hatch
 
-`CHROXY_CRED_DISABLE_KEYCHAIN=1` forces the plaintext path even when a keychain is present. Use it only when the keychain is unreliable (e.g. flaky `secret-tool` in a container) and you accept plaintext-at-rest. Setting it does **not** decrypt an already-encrypted file; it only governs future writes and the startup migration.
+`CHROXY_CRED_DISABLE_KEYCHAIN=1` forces the plaintext path even when a keychain is present. Use it only when the keychain is unreliable (e.g. flaky `secret-tool` in a container) and you accept plaintext-at-rest. Setting it does **not** decrypt an already-encrypted file; future writes and the startup migration use plaintext.
+
+**Caution — it disables keychain access entirely, including on read.** If the file is *already encrypted* and you set this flag, the read path can no longer reach the data key, so the store fails closed (`encrypted but its decryption key is unavailable`) and the credentials read as missing until you either unset the flag or re-enter them as plaintext. Only set it on a host whose `credentials.json` is still plaintext, or accept that you must re-enter the credentials.
 
 ## 6. Failure modes
 
