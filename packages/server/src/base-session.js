@@ -849,6 +849,26 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #5269 (Control Room Phase 2a): cancel a single in-flight activity node by
+   * its `activityId` (an `activity_snapshot`/`activity_delta` entry id).
+   *
+   * Default (base) behavior: not supported. Only providers that expose a
+   * per-task control surface override this — today that is the Agent-SDK path
+   * (`SdkSession`, which maps an `agent` node to the SDK's `query.stopTask`).
+   * Background shells and individual tool calls are NOT individually
+   * cancellable (chroxy does not own the OS process; see activity-registry.js),
+   * and CLI/TUI providers have no per-subagent control surface — they fall
+   * through to this default. Whole-turn interruption stays on the existing
+   * `interrupt()` path, unchanged.
+   *
+   * @param {string} _activityId
+   * @returns {Promise<{ ok: boolean, reason?: string, error?: string }>}
+   */
+  async cancelActivity(_activityId) {
+    return { ok: false, reason: 'not-supported' }
+  }
+
+  /**
    * #4307: emit the current pending-shells snapshot on the
    * `background_work_changed` event. Pulled into a helper so both
    * `trackBackgroundShell` and `clearBackgroundShell` use one shape.

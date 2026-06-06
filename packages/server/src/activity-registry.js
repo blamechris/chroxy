@@ -97,6 +97,18 @@ export class ActivityRegistry {
   }
 
   /**
+   * #5269: a single entry by id (a defensive copy), or null. Used by the
+   * control-action path to map an `activityId` from the client back to a
+   * tracked node so it can decide whether/how the node is cancellable.
+   * @param {string} id
+   * @returns {ActivityEntry|null}
+   */
+  getEntry(id) {
+    const entry = this._entries.get(id)
+    return entry ? { ...entry } : null
+  }
+
+  /**
    * Build the `activity_snapshot` message for a fresh subscriber / resync.
    * Always returns a valid message (empty `entries` is the legitimate
    * "no in-flight activity" state, never omitted).
