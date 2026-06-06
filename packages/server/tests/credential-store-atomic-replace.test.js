@@ -75,19 +75,24 @@ describe('credential-store — replaceFileAtomically (#5243)', () => {
 })
 
 describe('credential-store — set overwrites an existing file safely (#5243)', () => {
-  let tmpHome, originalHome
+  // os.homedir() reads HOME on POSIX but USERPROFILE on win32, so point both at
+  // the tmp dir (and restore both) to keep the suite off the real home on every
+  // platform. Save/restore must delete a var that was originally unset rather
+  // than assign `undefined` (which would set the literal string "undefined").
+  let tmpHome
+  const HOME_ENV_VARS = ['HOME', 'USERPROFILE']
   const CRED_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI_API_KEY', 'OPENAI_API_KEY']
   const saved = {}
+  const restoreEnv = (k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k] }
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-cred-set-'))
-    originalHome = process.env.HOME
-    process.env.HOME = tmpHome
+    for (const k of HOME_ENV_VARS) { saved[k] = process.env[k]; process.env[k] = tmpHome }
     for (const k of CRED_ENV_VARS) { saved[k] = process.env[k]; delete process.env[k] }
   })
   afterEach(() => {
-    process.env.HOME = originalHome
-    for (const k of CRED_ENV_VARS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k] }
+    for (const k of HOME_ENV_VARS) restoreEnv(k)
+    for (const k of CRED_ENV_VARS) restoreEnv(k)
     try { rmSync(tmpHome, { recursive: true, force: true }) } catch { /* */ }
   })
 
