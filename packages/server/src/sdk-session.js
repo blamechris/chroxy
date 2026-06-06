@@ -324,7 +324,8 @@ export class SdkSession extends BaseSession {
     // captured from `task_started` system messages. cancelActivity() needs the
     // task_id to call query.stopTask(); the wire/activity layer only knows the
     // tool_use_id. Cleared per entry on the terminal `task_notification` and
-    // wholesale on turn finalize / destroy.
+    // wholesale at the start of each new turn (after `_callQuery`) and in
+    // destroy().
     this._taskIdByToolUseId = new Map()
 
     // Permission handling — delegated to PermissionManager
