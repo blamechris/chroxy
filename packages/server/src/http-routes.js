@@ -610,7 +610,15 @@ export function createHttpHandler(server) {
       const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
       const securityHeaders = {
-        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        // connect-src allows http:/https: alongside ws:/wss: so the dashboard
+        // can reach a REMOTE LAN daemon — both its pre-WS HTTP health-check
+        // (connection.ts) and the WebSocket itself. This is what unlocks the
+        // desktop acting as a LAN client + joining a shared session on another
+        // host. script-src stays 'self' (no inline/eval), so a widened
+        // connect-src is not script-exploitable; ws:/wss: was already open, so
+        // adding http:/https: is symmetric. The narrower 127.0.0.1/localhost
+        // entries are now subsumed by the scheme-only sources.
+        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http: https:; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer',

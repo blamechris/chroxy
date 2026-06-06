@@ -90,6 +90,35 @@ describe('CSP hardening', () => {
     )
   })
 
+  it('dashboard CSP connect-src permits remote http/ws so the desktop can reach a LAN daemon', async () => {
+    // ① LAN-client connect: the dashboard's pre-WS HTTP health-check + the
+    // WebSocket itself must be allowed to a remote host. connect-src carries
+    // scheme-only sources (ws: wss: http: https:) for exactly that, while
+    // script-src stays locked to 'self'.
+    const mock = createMockServer()
+    await startWith(mock)
+
+    const res = await globalThis.fetch(
+      `http://127.0.0.1:${port}/dashboard?token=wrong-token`
+    )
+    const csp = res.headers.get('content-security-policy')
+    assert.ok(csp, 'dashboard response should include a CSP header')
+
+    const connectSrc = csp.split(';').find(d => d.trim().startsWith('connect-src'))
+    assert.ok(connectSrc, 'CSP should contain a connect-src directive')
+    for (const scheme of ['ws:', 'wss:', 'http:', 'https:']) {
+      assert.ok(
+        connectSrc.includes(` ${scheme}`),
+        `connect-src must allow ${scheme} so a remote LAN daemon is reachable`
+      )
+    }
+
+    // The widened connect-src must NOT come at the cost of an open script-src.
+    const scriptSrc = csp.split(';').find(d => d.trim().startsWith('script-src'))
+    assert.ok(scriptSrc && !scriptSrc.includes("'unsafe-inline'") && !scriptSrc.includes("'unsafe-eval'"),
+      'script-src must stay locked to self (no inline/eval) even with a widened connect-src')
+  })
+
   it('server config injection uses meta tag in dashboard HTML (not inline script)', async () => {
     // Behavioral: verify the actual HTTP response body for the dashboard HTML.
     // This test requires index.html to exist; if not built, the server returns 404.
