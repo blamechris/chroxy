@@ -17,6 +17,7 @@ Configuration values are resolved in the following order (highest priority first
 |-----|------|----------|---------------------|-------------|
 | `apiToken` | string | - | `API_TOKEN` | Authentication token for clients |
 | `port` | number | - | `PORT` | Local WebSocket port (default: 8765) |
+| `host` | string | `--host <address>` | `CHROXY_HOST` | Bind address for the server socket. Unset binds `0.0.0.0` (all interfaces) so the mobile app / LAN clients can reach it. Set to `127.0.0.1` for a loopback-only bind that keeps auth enabled — opt-in defence-in-depth for single-device setups. `--no-auth` always forces loopback regardless of this key. When bound to loopback the mDNS `_chroxy._tcp` advertisement is suppressed (the server is not LAN-reachable). |
 | `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default), `claude-cli`, `claude-tui`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. See [../../docs/providers.md](../../docs/providers.md) for per-provider setup and env var requirements. |
 | `shell` | string | - | `SHELL_CMD` | Shell to use (default: `$SHELL` or `/bin/zsh`) |
 | `cwd` | string | `--cwd <path>` | `CHROXY_CWD` | Working directory (CLI mode) |

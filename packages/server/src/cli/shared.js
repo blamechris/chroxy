@@ -36,6 +36,7 @@ export function prompt(question) {
 export function addServerOptions(cmd) {
   return cmd
     .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
+    .option('--host <address>', 'Bind address (default: 0.0.0.0; use 127.0.0.1 for loopback-only). Auth stays enabled.')
     .option('--cwd <path>', 'Working directory for Claude')
     .option('--model <model>', 'Model to use')
     .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve')
@@ -114,6 +115,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   validateConfig(fileConfig, options.verbose)
 
   const cliOverrides = { ...extraOverrides }
+  if (options.host !== undefined) cliOverrides.host = options.host
   if (options.cwd !== undefined) cliOverrides.cwd = options.cwd
   if (options.model !== undefined) cliOverrides.model = options.model
   if (options.allowedTools !== undefined) {

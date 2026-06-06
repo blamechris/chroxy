@@ -23,6 +23,11 @@ const log = createLogger('config')
 const CONFIG_SCHEMA = {
   apiToken: 'string',
   port: 'number',
+  // Bind address for the server socket. Default (unset) binds 0.0.0.0 so the
+  // mobile app / LAN clients can reach it. Set to '127.0.0.1' for a
+  // loopback-only bind that keeps auth enabled — opt-in defence-in-depth for
+  // single-device setups. `--no-auth` always forces loopback regardless.
+  host: 'string',
   cwd: 'string',
   model: 'string',
   allowedTools: 'array',
@@ -746,6 +751,7 @@ function envKeyForConfig(key) {
   const envMap = {
     apiToken: 'API_TOKEN',
     port: 'PORT',
+    host: 'CHROXY_HOST',
     cwd: 'CHROXY_CWD',
     model: 'CHROXY_MODEL',
     allowedTools: 'CHROXY_ALLOWED_TOOLS',
