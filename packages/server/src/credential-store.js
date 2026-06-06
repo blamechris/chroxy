@@ -38,7 +38,8 @@
  * (Windows, headless Linux without `secret-tool`) the store falls back to 0600
  * plaintext, since a key stored beside the file would be obfuscation, not
  * security. `maybeEncryptCredentialsAtRest()` migrates a legacy plaintext file
- * in place at startup once a keychain is present.
+ * in place at startup once a keychain is present. See
+ * docs/security/credentials-at-rest.md for the full threat model.
  */
 import { readFileSync, statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'fs'
 import { join, dirname } from 'path'

@@ -22,7 +22,8 @@
  * headless Linux without `secret-tool`) there is nowhere safe to put the key,
  * so the store falls back to today's 0600 plaintext and the server logs a
  * one-time warning rather than inventing a machine-derived key (which would be
- * obfuscation, not security). See docs/security for the full model.
+ * obfuscation, not security). See docs/security/credentials-at-rest.md for the
+ * full threat model.
  *
  * The keychain is dependency-injected (every export takes an optional
  * `keychain` arg defaulting to the real module) so callers and tests stay
