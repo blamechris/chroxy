@@ -62,6 +62,12 @@ import {
 // fallback path.
 const NO_KEYCHAIN = { isKeychainAvailable: () => false }
 
+// #5258: Windows rename-failure codes that indicate a held handle (antivirus /
+// Windows Search) on the destination, not a genuine I/O error. Mirrors
+// session-state-persistence.WINDOWS_LOCK_CODES — replaceFileAtomically retries
+// once on these.
+const CRED_WINDOWS_LOCK_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST'])
+
 // #5242: logger for the recoverable encrypted-but-keychain-unavailable warning.
 // Injectable for tests. Credentials are NEVER passed to it — only the key NAME
 // and the fact of the failure (the logger.js redactor scrubs sk-ant/Bearer too).
@@ -280,15 +286,62 @@ function readStore() {
  * sibling `writeFileRestricted` (platform.js), which goes straight from
  * `writeFileSync(tmp)` to `renameSync`.
  *
+ * #5258: on Windows an antivirus / Windows Search held handle on `target` can
+ * make the atomic replace fail with EPERM/EACCES/EBUSY/EEXIST even though
+ * renameSync normally replaces atomically. We mirror
+ * session-state-persistence._rotateToBak's one-shot retry: snapshot the live
+ * target, clear it, then retry the rename once. The unlink happens ONLY after
+ * the atomic attempt already failed (never a pre-delete — that was the #5243
+ * data-loss bug). The in-memory snapshot lets us restore the live credentials
+ * if the *retry* also fails. It does NOT make the unlink→re-rename window
+ * crash-safe: a hard process crash in that window leaves `target` gone with the
+ * new payload only on the on-disk `.tmp` (no automated reader recovers it). To
+ * keep that window from ever destroying the only copy, we refuse to unlink when
+ * the snapshot read failed but the file is still present (see below) — so the
+ * worst pre-crash state is "live file intact, replace not applied".
+ *
  * fs ops are injectable for testing (defaults are the real fs calls).
  *
  * @param {string} tmp - source temp path.
  * @param {string} target - destination path.
- * @param {{ rename?: Function }} [deps]
+ * @param {{ rename?: Function, unlink?: Function, readFile?: Function, writeFile?: Function, platform?: string }} [deps]
  */
 export function replaceFileAtomically(tmp, target, deps = {}) {
-  const { rename = renameSync } = deps
-  rename(tmp, target)
+  const {
+    rename = renameSync,
+    unlink = unlinkSync,
+    readFile = readFileSync,
+    writeFile = writeFileSync,
+    platform = process.platform,
+  } = deps
+  try {
+    rename(tmp, target)
+    return
+  } catch (err) {
+    // Non-Windows, or an error that isn't a Windows held-handle lock: surface
+    // it unchanged (no unlink — preserves the #5243 no-pre-delete guarantee).
+    if (platform !== 'win32' || !err || !CRED_WINDOWS_LOCK_CODES.has(err.code)) throw err
+    // Snapshot the live target so we can restore it if the retry also fails.
+    let snapshot = null
+    try { snapshot = readFile(target) } catch { /* target may already be gone */ }
+    // If the snapshot failed but the target is still on disk (e.g. readFile threw
+    // EACCES/EPERM because the same held handle is blocking the read), unlinking
+    // it here would destroy the only copy with no way to restore — re-introducing
+    // the #5243 data-loss path. Keep the live file intact and surface the ORIGINAL
+    // lock error instead; the caller is no worse off than before the retry.
+    if (snapshot === null && existsSync(target)) throw err
+    try { unlink(target) } catch { /* best-effort — target may be gone */ }
+    try {
+      rename(tmp, target)
+    } catch (retryErr) {
+      // Retry still failed — restore the live bytes (if captured) so the prior
+      // credentials survive, then surface the error to the caller.
+      if (snapshot !== null) {
+        try { writeFile(target, snapshot, { mode: 0o600 }) } catch { /* best-effort restore */ }
+      }
+      throw retryErr
+    }
+  }
 }
 
 /**
