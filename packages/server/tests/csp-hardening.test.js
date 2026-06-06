@@ -113,10 +113,18 @@ describe('CSP hardening', () => {
       )
     }
 
-    // The widened connect-src must NOT come at the cost of an open script-src.
+    // The widened connect-src must NOT come at the cost of an open script-src:
+    // no inline/eval AND no remote origins (a `script-src https:` would let a
+    // remote-loaded script abuse the broad connect-src, defeating the whole
+    // safety argument). Lock it to exactly 'self'.
     const scriptSrc = csp.split(';').find(d => d.trim().startsWith('script-src'))
-    assert.ok(scriptSrc && !scriptSrc.includes("'unsafe-inline'") && !scriptSrc.includes("'unsafe-eval'"),
-      'script-src must stay locked to self (no inline/eval) even with a widened connect-src')
+    assert.ok(scriptSrc, 'CSP should contain a script-src directive')
+    assert.ok(!scriptSrc.includes("'unsafe-inline'") && !scriptSrc.includes("'unsafe-eval'"),
+      'script-src must not allow inline/eval')
+    assert.ok(!/https?:/.test(scriptSrc) && !scriptSrc.includes('*') && !/\bwss?:/.test(scriptSrc),
+      'script-src must not allow remote origins (no http(s)/ws(s)/wildcard) while connect-src is broad')
+    assert.equal(scriptSrc.trim(), "script-src 'self'",
+      'script-src must stay locked to exactly self')
 
     // A broad connect-src is only safe while the directives that gate PASSIVE
     // exfil stay 'self'-scoped. Lock them in so a future "also widen img-src"
