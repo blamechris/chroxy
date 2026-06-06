@@ -85,8 +85,12 @@ export async function maybeAutoReapWorktrees(config, log, deps = {}) {
   const summary = await reapWorktrees({ repos, planDeps: deps.planDeps || {}, yieldFn: deps.yieldFn })
 
   const base = `worktree auto-reap: reclaimed ${summary.reclaimed} worktree(s) across ${summary.repos} repo(s); ${summary.skipped} preserved (live/dirty/unknown)`
-  if (summary.failed > 0) {
-    log.warn(`${base}; ${summary.failed} failed`)
+  // Warn whenever anything went wrong — both per-item failures (counted in
+  // `failed`) and repo-level discovery/plan errors (recorded in `errors`
+  // without incrementing `failed`). Otherwise an unscannable repo would log a
+  // misleading "nothing to reclaim" info line and hide the failure.
+  if (summary.failed > 0 || summary.errors.length > 0) {
+    log.warn(`${base}; ${summary.failed} failed, ${summary.errors.length} error(s)`)
     for (const e of summary.errors) {
       log.warn(`  - ${e.path || e.repo}: ${e.error}`)
     }

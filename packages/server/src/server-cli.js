@@ -1039,10 +1039,10 @@ export async function startCliServer(config) {
   // now that the server is up. Fire-and-forget + lazily imported so a default
   // (disabled) boot pays nothing and a failure here never affects startup; the
   // reaper itself yields between repos so the sweep doesn't starve the loop.
-  if (config.worktreeGc?.autoReap) {
+  if (config.worktreeGc?.autoReap === true) {
     import('./worktree-reaper.js')
       .then(({ maybeAutoReapWorktrees }) => maybeAutoReapWorktrees(config, log))
-      .catch((err) => log.warn(`worktree auto-reaper failed: ${err.message}`))
+      .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
   }
 
   console.log('\nPress Ctrl+C to stop.\n')

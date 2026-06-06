@@ -120,5 +120,10 @@ describe('worktree-reaper', () => {
     )
     assert.equal(summary.reclaimed, 0)
     assert.equal(summary.errors.length, 1)
+    // A repo-level scan error must surface as a warn, not a misleading
+    // "nothing to reclaim" info line (Copilot #5224).
+    assert.equal(log._info.length, 0)
+    assert.ok(log._warn.some((m) => /error\(s\)/.test(m)), `warn logs: ${JSON.stringify(log._warn)}`)
+    assert.ok(log._warn.some((m) => /does-not-exist/.test(m)), `warn logs: ${JSON.stringify(log._warn)}`)
   })
 })
