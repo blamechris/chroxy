@@ -8833,6 +8833,37 @@ button.sidebar-token-view-session-row:hover {
   white-space: nowrap;
 }
 
+/* #5216 — branch name + ahead/behind badge on one row. The branch truncates
+   (min-width:0 lets a flex child shrink so the ellipsis kicks in); the badge
+   never shrinks so the counts stay readable. */
+.cr-branchrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cr-branchrow .cr-branch {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.cr-aheadbehind {
+  display: inline-flex;
+  gap: 5px;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cr-ahead {
+  color: var(--accent-green, #2ea043);
+}
+
+.cr-behind {
+  color: var(--accent-amber, #d29922);
+}
+
 /* Verdict tags */
 .cr-tag {
   display: inline-block;

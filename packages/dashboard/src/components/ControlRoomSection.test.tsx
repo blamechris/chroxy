@@ -105,6 +105,8 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         live: true,
         tree: { state: 'clean', untracked: 0, modified: 0, staged: 0 },
         worktrees: 1,
+        ahead: 0,
+        behind: 0,
         openPRs: null,
         attribution: null,
         onboarding: 'deferred (live)',
@@ -119,6 +121,8 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         live: false,
         tree: { state: 'dirty', untracked: 2, modified: 0, staged: 0 },
         worktrees: 172,
+        ahead: 2,
+        behind: 1,
         openPRs: 16,
         attribution: null,
         onboarding: 'skipped — dirty tree',
@@ -133,6 +137,8 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         live: false,
         tree: { state: 'clean', untracked: 0, modified: 0, staged: 0 },
         worktrees: 0,
+        ahead: null,
+        behind: null,
         openPRs: 1,
         attribution: true,
         onboarding: '✓ onboarded',
@@ -193,6 +199,43 @@ describe('ControlRoomSection (#5175)', () => {
     const onboarding = screen.getByText('skipped — dirty tree')
     expect(onboarding).toHaveClass('cr-onboarding')
     expect(onboarding).toHaveAttribute('title', 'skipped — dirty tree')
+  })
+
+  it('#5216: renders the ahead/behind badge only for diverged branches', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    // medlens is ahead 2 / behind 1 → badge with both arrows.
+    const badge = screen.getByTestId('cr-aheadbehind-medlens')
+    expect(badge).toHaveTextContent('↑2')
+    expect(badge).toHaveTextContent('↓1')
+    // chroxy is up to date (0/0) → no badge; no-it-all has no upstream (null) → no badge.
+    expect(screen.queryByTestId('cr-aheadbehind-chroxy')).toBeNull()
+    expect(screen.queryByTestId('cr-aheadbehind-no-it-all')).toBeNull()
+  })
+
+  it('#5216: shows only the ahead arrow when behind is 0', () => {
+    const snap = makeSnapshot({
+      repos: [
+        {
+          name: 'solo',
+          path: '/Users/me/Projects/solo',
+          branch: 'feature',
+          verdict: 'onboarded',
+          live: false,
+          tree: { state: 'clean', untracked: 0, modified: 0, staged: 0 },
+          worktrees: 0,
+          ahead: 3,
+          behind: 0,
+          openPRs: null,
+          attribution: null,
+          onboarding: '✓ onboarded',
+          lastTouched: '2026-06-04T11:12:00.000Z',
+        },
+      ],
+    })
+    render(<ControlRoomSection snapshot={snap} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    const badge = screen.getByTestId('cr-aheadbehind-solo')
+    expect(badge).toHaveTextContent('↑3')
+    expect(badge).not.toHaveTextContent('↓')
   })
 
   it('shows the live green dot only for live repos', () => {
@@ -697,6 +740,8 @@ describe('ControlRoomSection investigate action (#5202)', () => {
           live: false,
           tree: { state: 'dirty', untracked: 1, modified: 0, staged: 0 },
           worktrees: 99,
+          ahead: null,
+          behind: null,
           openPRs: null,
           attribution: null,
           onboarding: 'skipped',

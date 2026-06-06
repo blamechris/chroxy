@@ -672,6 +672,11 @@ export const RepoTreeSchema = z.object({
  *                     state that drives the green dot.
  *   - `tree`        — see `RepoTreeSchema`.
  *   - `worktrees`   — count of git worktrees attached to this repo.
+ *   - `ahead`       — commits the current branch is AHEAD of its upstream, or
+ *                     `null` when there is no upstream / it can't be determined
+ *                     (detached HEAD, no tracking branch). `null` ≠ 0.
+ *   - `behind`      — commits the current branch is BEHIND its upstream, same
+ *                     `null` semantics as `ahead`. `null` ≠ 0.
  *   - `openPRs`     — number of open PRs, or `null` when unknown (e.g. no GitHub
  *                     remote, or the lookup was skipped/failed). `null` ≠ 0.
  *   - `attribution` — whether commits carry the expected author attribution, or
@@ -691,6 +696,8 @@ export const RepoStatusSchema = z.object({
     live: z.boolean(),
     tree: RepoTreeSchema,
     worktrees: z.number().int().nonnegative().finite(),
+    ahead: z.number().int().nonnegative().finite().nullable(),
+    behind: z.number().int().nonnegative().finite().nullable(),
     openPRs: z.number().int().nonnegative().finite().nullable(),
     attribution: z.boolean().nullable(),
     onboarding: z.string(),

@@ -409,6 +409,33 @@ function VerdictTag({
   )
 }
 
+/**
+ * #5216 — compact ahead/behind-upstream indicator for the branch cell. Renders
+ * `↑N` (ahead) and/or `↓N` (behind) only when the branch has actually diverged;
+ * an up-to-date branch (0/0) or one with no upstream (`null`) renders nothing,
+ * keeping the already-wide table quiet. The whole indicator is omitted when
+ * there's nothing to show.
+ */
+function AheadBehindBadge({ repo }: { repo: RepoStatus }) {
+  const ahead = repo.ahead ?? 0
+  const behind = repo.behind ?? 0
+  if (ahead === 0 && behind === 0) return null
+  return (
+    <span className="cr-aheadbehind" data-testid={`cr-aheadbehind-${repo.name}`}>
+      {ahead > 0 && (
+        <span className="cr-ahead" title={`${ahead} commit${ahead === 1 ? '' : 's'} ahead of upstream`}>
+          ↑{ahead}
+        </span>
+      )}
+      {behind > 0 && (
+        <span className="cr-behind" title={`${behind} commit${behind === 1 ? '' : 's'} behind upstream`}>
+          ↓{behind}
+        </span>
+      )}
+    </span>
+  )
+}
+
 /** A right-aligned count cell that turns "bad" when alarmingly high. */
 function CountCell({ value, testid }: { value: number | null; testid: string }) {
   if (value === null) {
@@ -513,7 +540,10 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
           )}
           {/* #5201: long branch names ellipsis-truncate with the full value on
               hover (title) instead of forcing the table wider / clipping. */}
-          <div className="cr-dim cr-mono cr-branch" data-testid={`cr-branch-${repo.name}`} title={repo.branch}>{repo.branch}</div>
+          <div className="cr-branchrow">
+            <span className="cr-dim cr-mono cr-branch" data-testid={`cr-branch-${repo.name}`} title={repo.branch}>{repo.branch}</span>
+            <AheadBehindBadge repo={repo} />
+          </div>
         </td>
         <td><VerdictTag repo={repo} onInvestigate={onInvestigate} /></td>
         {/* #5201: ellipsis-truncate on an inner block element, not the <td>
