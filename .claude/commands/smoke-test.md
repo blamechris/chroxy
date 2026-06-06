@@ -75,8 +75,9 @@ for arg in $ARGUMENTS; do
 done
 
 # Rebuild dashboard before testing (source changes not visible without rebuild)
-cd packages/server
-npm run dashboard:build
+# The dashboard is its own workspace package (@chroxy/dashboard); the server
+# serves its compiled dist/. There is no `dashboard:build` script.
+npm run build -w @chroxy/dashboard
 
 # Run the smoke test
 cd packages/server && node tests/smoke-test.mjs $PW_FLAGS
@@ -114,14 +115,14 @@ Output a summary table:
 |---|-------|--------|-------|
 | 1 | Dashboard loads | PASS | HTTP 200, WS connects |
 | 2 | Session creation | PASS | Ctrl+N modal opens |
-| 3 | Keyboard shortcuts | PASS | `?` help, `Ctrl+K` palette |
+| 3 | Keyboard shortcuts | PASS | `?` help overlay |
 
 **Screenshots reviewed:** N
 **Visual issues found:** M (describe any issues)
 
 If the test failed, check:
 - Is the server running? (`curl http://localhost:8765/health`)
-- Did the dashboard rebuild? (`npm run dashboard:build`)
+- Did the dashboard rebuild? (`npm run build -w @chroxy/dashboard`)
 - Are there console errors in the browser? (check screenshots or run with `--headed`)
 ```
 
@@ -219,8 +220,9 @@ Organize checks into logical groups:
 | Category | What to Verify |
 |----------|---------------|
 | Dashboard Core | Page loads (HTTP 200), WS connects, version badge, sidebar, session tabs, full-width layout, input bar |
-| Session Creation | Ctrl+N opens modal, session name input, CWD combobox, provider picker (SDK/CLI options) |
-| Keyboard Shortcuts | `?` opens help overlay, `Ctrl+K` command palette, `Ctrl+N` new session |
+| Session Creation | Ctrl+N opens modal, session name input, CWD combobox, provider picker visible (logs option labels) |
+| Keyboard Shortcuts | `?` opens help overlay, `Ctrl+N` new session |
+| Control Room | Sidebar launcher opens the Control Room, `control-room-section` + top-level tab render, repo table or empty state shows, sort/filter controls present (with data), refresh stays stable (best-effort) |
 | Health | No critical console errors |
 
 ## Critical Rules
@@ -231,6 +233,6 @@ Organize checks into logical groups:
 4. **Stable selectors** — Use aria labels and roles, not brittle CSS class names that change with refactors.
 5. **Visual verification is the point** — The automated checks catch DOM presence. Reading screenshots catches visual regressions (z-index, color, spacing).
 6. **Idempotent** — Safe to run repeatedly. Don't create persistent state (sessions, data, etc.) that would affect the next run.
-7. **Rebuild dashboard before testing** — Dashboard serves compiled Vite bundles. Source changes are NOT visible without `npm run dashboard:build`.
+7. **Rebuild dashboard before testing** — Dashboard serves compiled Vite bundles. Source changes are NOT visible without `npm run build -w @chroxy/dashboard`.
 8. **`?` shortcut quirk** — Test fails if textarea has focus (keystroke goes to input, not shortcut handler). Click body first to ensure focus is not in the input bar.
 <!-- skill-templates: smoke-test 21fa678 2026-06-03 -->

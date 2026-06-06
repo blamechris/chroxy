@@ -5,6 +5,10 @@
       "hash": "ebdb14e",
       "installed": "2026-06-02"
     },
+    "agentic-audit": {
+      "hash": "3f616c3",
+      "installed": "2026-06-06"
+    },
     "autonomous-dev-flow": {
       "hash": "ebdb14e",
       "installed": "2026-06-02"
@@ -80,6 +84,10 @@
     "tackle-issues": {
       "hash": "21fa678",
       "installed": "2026-06-03"
+    },
+    "project-audit": {
+      "hash": "aae4d65",
+      "installed": "2026-06-06"
     }
   }
 }

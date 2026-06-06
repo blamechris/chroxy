@@ -307,8 +307,7 @@ If `NEEDS_SMOKE_TEST` is true:
 
 1. **Rebuild dashboard** if needed:
    ```bash
-   cd packages/server
-   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
+   PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run build -w @chroxy/dashboard
    ```
 2. **Run `/smoke-test`** — this launches the app, opens a headless browser, and verifies key UI elements
 3. **Check results:**
