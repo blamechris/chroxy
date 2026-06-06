@@ -11,8 +11,12 @@
  * rendered here. Keeping one implementation means the v1 reducer / protocol /
  * `selectActivityTree` stay the single source of truth for the tree shape.
  *
- * v1 is READ-ONLY: no cancel/kill/jump-to-intervene actions. Control actions
- * and mobile parity are tracked phase-2 fast-follows on the epic (#5159).
+ * Control actions (#5272, epic #5159 Phase 2a): when an `onCancelActivity`
+ * callback is supplied, a Cancel button appears on running SUBAGENT nodes only.
+ * Background shells and tool calls are NOT individually cancellable (chroxy
+ * doesn't own those processes — see activity-registry.js / the #5269 server
+ * work), so they get no cancel affordance; whole-turn interruption lives on the
+ * section heading, not here. Without the callback the tree stays read-only.
  *
  * Blocked-on-input entries are visually prominent and tie into the dashboard's
  * intervention convention (#4891): a blocked entry pulses the same accent the
@@ -32,6 +36,14 @@ export interface ActivityTreeProps {
    * the elapsed timer; production passes nothing.
    */
   now?: () => number
+  /**
+   * #5272: cancel a non-terminal subagent node by its entry id. When omitted the
+   * tree is read-only (no cancel buttons). Only ever invoked for `agent` nodes
+   * that are still live — i.e. `running` OR `blocked` (a blocked/waiting subagent
+   * is exactly the kind an operator wants to abort). Terminal agents (done /
+   * failed) and non-agent nodes (shells / tools) never get a cancel affordance.
+   */
+  onCancelActivity?: (activityId: string) => void
 }
 
 // Stable empty tree for the null-session case so we don't allocate a new array
@@ -120,9 +132,10 @@ interface EntryRowProps {
   now: number
   expanded: boolean
   onToggleExpand: (id: string) => void
+  onCancelActivity?: (activityId: string) => void
 }
 
-function EntryRow({ entry, depth, now, expanded, onToggleExpand }: EntryRowProps) {
+function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivity }: EntryRowProps) {
   const terminal = isTerminal(entry.status)
   const blocked = entry.status === 'blocked'
   // Terminal entries freeze elapsed at endedAt; live entries tick from `now`.
@@ -131,48 +144,71 @@ function EntryRow({ entry, depth, now, expanded, onToggleExpand }: EntryRowProps
   const rowClass =
     `control-room-entry status-${entry.status}` + (blocked ? ' control-room-entry-blocked' : '')
 
+  // #5272: only non-terminal SUBAGENTS are individually cancellable — i.e.
+  // `running` OR `blocked` (a blocked subagent is stuck/waiting and is exactly
+  // what an operator wants to abort, so it stays cancellable). Shells/tools
+  // aren't cancellable (chroxy doesn't own them) and terminal nodes (done /
+  // failed) are already finished, so they get no button. The cancel button is a
+  // SIBLING of the toggle button (not nested — that would be invalid HTML and
+  // swallow its own click).
+  const canCancel = onCancelActivity !== undefined && entry.kind === 'agent' && !terminal
+
   return (
     <li
       className="control-room-entry-row"
       data-testid={`control-room-entry-${entry.id}`}
     >
-      <button
-        type="button"
-        className={rowClass}
-        // Indent children by depth. paddingLeft keeps the whole row clickable
-        // (vs a margin that would leave dead gutter).
-        style={{ paddingLeft: 6 + depth * 14 }}
-        aria-expanded={expanded}
-        data-status={entry.status}
-        data-testid={`control-room-entry-toggle-${entry.id}`}
-        onClick={() => onToggleExpand(entry.id)}
-        title={`${KIND_LABEL[entry.kind]} · ${STATUS_LABEL[entry.status]}`}
-      >
-        <span className="control-room-entry-icon" aria-hidden="true">
-          {KIND_ICON[entry.kind]}
-        </span>
-        <span className="control-room-entry-label" data-testid={`control-room-entry-label-${entry.id}`}>
-          {entry.label || KIND_LABEL[entry.kind]}
-        </span>
-        <span
-          className={`control-room-status-badge status-${entry.status}`}
-          data-testid={`control-room-status-${entry.id}`}
-          // The badge's colour is the only signal of status; an explicit label
-          // keeps it accessible to screen readers and colour-blind users.
-          role="status"
-          aria-label={`Status: ${STATUS_LABEL[entry.status]}`}
+      <div className="control-room-entry-rowline">
+        <button
+          type="button"
+          className={rowClass}
+          // Indent children by depth. paddingLeft keeps the whole row clickable
+          // (vs a margin that would leave dead gutter).
+          style={{ paddingLeft: 6 + depth * 14 }}
+          aria-expanded={expanded}
+          data-status={entry.status}
+          data-testid={`control-room-entry-toggle-${entry.id}`}
+          onClick={() => onToggleExpand(entry.id)}
+          title={`${KIND_LABEL[entry.kind]} · ${STATUS_LABEL[entry.status]}`}
         >
-          {STATUS_LABEL[entry.status]}
-        </span>
-        <span
-          className="control-room-entry-elapsed"
-          data-testid={`control-room-elapsed-${entry.id}`}
-          // Elapsed is decorative against the label; give SR users context.
-          aria-label={`Elapsed ${formatElapsed(elapsedMs)}`}
-        >
-          {formatElapsed(elapsedMs)}
-        </span>
-      </button>
+          <span className="control-room-entry-icon" aria-hidden="true">
+            {KIND_ICON[entry.kind]}
+          </span>
+          <span className="control-room-entry-label" data-testid={`control-room-entry-label-${entry.id}`}>
+            {entry.label || KIND_LABEL[entry.kind]}
+          </span>
+          <span
+            className={`control-room-status-badge status-${entry.status}`}
+            data-testid={`control-room-status-${entry.id}`}
+            // The badge's colour is the only signal of status; an explicit label
+            // keeps it accessible to screen readers and colour-blind users.
+            role="status"
+            aria-label={`Status: ${STATUS_LABEL[entry.status]}`}
+          >
+            {STATUS_LABEL[entry.status]}
+          </span>
+          <span
+            className="control-room-entry-elapsed"
+            data-testid={`control-room-elapsed-${entry.id}`}
+            // Elapsed is decorative against the label; give SR users context.
+            aria-label={`Elapsed ${formatElapsed(elapsedMs)}`}
+          >
+            {formatElapsed(elapsedMs)}
+          </span>
+        </button>
+        {canCancel && (
+          <button
+            type="button"
+            className="control-room-cancel-btn"
+            data-testid={`control-room-cancel-${entry.id}`}
+            onClick={() => onCancelActivity!(entry.id)}
+            title={`Cancel ${entry.label || KIND_LABEL[entry.kind]}`}
+            aria-label={`Cancel subagent ${entry.label || ''}`.trim()}
+          >
+            Cancel
+          </button>
+        )}
+      </div>
       {expanded && (
         <div
           className="control-room-entry-output"
@@ -213,9 +249,10 @@ interface EntryTreeProps {
   now: number
   expandedIds: ReadonlySet<string>
   onToggleExpand: (id: string) => void
+  onCancelActivity?: (activityId: string) => void
 }
 
-function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand }: EntryTreeProps) {
+function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelActivity }: EntryTreeProps) {
   return (
     <ul className="control-room-entry-list" data-testid={depth === 0 ? 'control-room-tree' : undefined}>
       {nodes.map((node) => (
@@ -227,6 +264,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand }: EntryTree
               now={now}
               expanded={expandedIds.has(node.entry.id)}
               onToggleExpand={onToggleExpand}
+              onCancelActivity={onCancelActivity}
             />
           </ul>
           {node.children.length > 0 && (
@@ -236,6 +274,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand }: EntryTree
               now={now}
               expandedIds={expandedIds}
               onToggleExpand={onToggleExpand}
+              onCancelActivity={onCancelActivity}
             />
           )}
         </li>
@@ -244,7 +283,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand }: EntryTree
   )
 }
 
-export function ActivityTree({ activity, sessionId, now = Date.now }: ActivityTreeProps) {
+export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActivity }: ActivityTreeProps) {
   // Only query the reducer for a real session — a null id has no tree, and
   // selecting with an empty-string id would do pointless work (and could match
   // a degenerate "" session key). The empty-state branch below renders for null.
@@ -297,6 +336,7 @@ export function ActivityTree({ activity, sessionId, now = Date.now }: ActivityTr
         now={tick}
         expandedIds={expandedIds}
         onToggleExpand={handleToggleExpand}
+        onCancelActivity={onCancelActivity}
       />
     </div>
   )

@@ -712,6 +712,60 @@ describe('ControlRoomSection activity drill-down (#5176)', () => {
   })
 })
 
+describe('ControlRoomSection control actions (#5272)', () => {
+  const NOW_TICK = () => 5000
+
+  it('wires a subagent cancel button to onCancelActivity(activityId, sessionId)', () => {
+    const sessions = [makeSession('s-chroxy', '/Users/me/Projects/chroxy')]
+    const activity = buildActivity('s-chroxy', [
+      activityEntry('a1', { kind: 'agent', label: 'build agent', status: 'running' }),
+      activityEntry('sh1', { kind: 'shell', label: 'tail logs', status: 'running' }),
+    ])
+    const onCancelActivity = vi.fn()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={NOW_TICK}
+        sessions={sessions}
+        activity={activity}
+        onCancelActivity={onCancelActivity}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('cr-drill-toggle-chroxy'))
+    // The running agent has a cancel button; the shell does not.
+    expect(screen.getByTestId('control-room-cancel-a1')).toBeTruthy()
+    expect(screen.queryByTestId('control-room-cancel-sh1')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('control-room-cancel-a1'))
+    expect(onCancelActivity).toHaveBeenCalledTimes(1)
+    // Bound to the drill-down's mapped session id.
+    expect(onCancelActivity).toHaveBeenCalledWith('a1', 's-chroxy')
+  })
+
+  it('wires the heading "Interrupt turn" button to onInterruptSession(sessionId)', () => {
+    const sessions = [makeSession('s-chroxy', '/Users/me/Projects/chroxy')]
+    const activity = buildActivity('s-chroxy', [activityEntry('a1', { status: 'running' })])
+    const onInterruptSession = vi.fn()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={NOW_TICK}
+        sessions={sessions}
+        activity={activity}
+        onInterruptSession={onInterruptSession}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('cr-drill-toggle-chroxy'))
+    fireEvent.click(screen.getByTestId('cr-interrupt-chroxy'))
+    expect(onInterruptSession).toHaveBeenCalledTimes(1)
+    expect(onInterruptSession).toHaveBeenCalledWith('s-chroxy')
+  })
+})
+
 describe('ControlRoomSection investigate action (#5202)', () => {
   it('renders the investigate verdict as a non-interactive span when no handler is wired', () => {
     render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
