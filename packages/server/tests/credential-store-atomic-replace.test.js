@@ -7,6 +7,7 @@ import {
   replaceFileAtomically,
   setStoredCredential,
   getStoredCredential,
+  _setCredentialLoggerForTests,
 } from '../src/credential-store.js'
 
 /**
@@ -184,5 +185,104 @@ describe('credential-store — set overwrites an existing file safely (#5243)', 
     // existing file. The store must end up with the new value and stay readable.
     setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-second')
     assert.equal(getStoredCredential('ANTHROPIC_API_KEY'), 'sk-ant-second')
+  })
+})
+
+describe('credential-store — replaceFileAtomically win32 warn logging (#5264)', () => {
+  let dir
+  let warnings
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-cred-warn-'))
+    warnings = []
+    // Capture-only logger. warn() records the message so we can assert on it;
+    // the other levels are no-ops. The credential value must never appear here.
+    _setCredentialLoggerForTests({
+      warn: (m) => warnings.push(m),
+      info: () => {},
+      error: () => {},
+      debug: () => {},
+    })
+  })
+  afterEach(() => {
+    _setCredentialLoggerForTests(null)
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* */ }
+  })
+
+  it('warns once on entering the retry after a held-handle lock, then succeeds (no value leaked)', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'LIVE-SECRET-VALUE')
+    writeFileSync(tmp, 'NEW')
+    let attempts = 0
+    replaceFileAtomically(tmp, target, {
+      platform: 'win32',
+      rename: (from, to) => {
+        attempts++
+        if (attempts === 1) { const e = new Error('EBUSY: handle held'); e.code = 'EBUSY'; throw e }
+        renameSync(from, to)
+      },
+    })
+    assert.equal(attempts, 2, 'one retry')
+    const retryWarns = warnings.filter((w) => /one-shot retry/.test(w))
+    assert.equal(retryWarns.length, 1, 'exactly one retry warn')
+    assert.match(retryWarns[0], /EBUSY/, 'logs the error code')
+    // No restore warn on the success path.
+    assert.equal(warnings.filter((w) => /restore/.test(w)).length, 0)
+    // The credential value must never reach the logger.
+    assert.ok(!warnings.some((w) => w.includes('LIVE-SECRET-VALUE')), 'credential value never logged')
+  })
+
+  it('warns on the refuse-to-unlink safety stop when the snapshot read fails', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'LIVE')
+    writeFileSync(tmp, 'NEW')
+    assert.throws(() => {
+      replaceFileAtomically(tmp, target, {
+        platform: 'win32',
+        rename: () => { const e = new Error('EPERM: locked'); e.code = 'EPERM'; throw e },
+        readFile: () => { const e = new Error('EACCES: read blocked'); e.code = 'EACCES'; throw e },
+        unlink: () => { throw new Error('unlink must not be called') },
+      })
+    }, /EPERM/)
+    assert.equal(warnings.filter((w) => /could not snapshot/.test(w)).length, 1, 'one refuse-to-unlink warn')
+    const snapshotWarn = warnings.find((w) => /could not snapshot/.test(w))
+    assert.match(snapshotWarn, /EPERM/, 'logs the original lock code')
+    assert.match(snapshotWarn, /EACCES/, 'logs the snapshot-read code that actually triggered this branch')
+  })
+
+  it('warns when the restore also fails after a failed retry (codes only)', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'LIVE')
+    writeFileSync(tmp, 'NEW')
+    assert.throws(() => {
+      replaceFileAtomically(tmp, target, {
+        platform: 'win32',
+        rename: () => { const e = new Error('EBUSY: locked'); e.code = 'EBUSY'; throw e },
+        // Snapshot succeeds (captures live bytes), unlink succeeds, retry fails,
+        // and the restore write fails too — the worst-case silent path.
+        readFile: () => Buffer.from('LIVE'),
+        unlink: () => {},
+        writeFile: () => { const e = new Error('ENOSPC: disk full'); e.code = 'ENOSPC'; throw e },
+      })
+    }, /EBUSY/)
+    const restoreWarns = warnings.filter((w) => /failed to restore/.test(w))
+    assert.equal(restoreWarns.length, 1, 'one failed-restore warn')
+    assert.match(restoreWarns[0], /ENOSPC/, 'logs the restore error code')
+  })
+
+  it('does not warn at all on a clean non-win32 failure (no retry path entered)', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'LIVE')
+    writeFileSync(tmp, 'NEW')
+    assert.throws(() => {
+      replaceFileAtomically(tmp, target, {
+        platform: 'linux',
+        rename: () => { const e = new Error('EBUSY: locked'); e.code = 'EBUSY'; throw e },
+      })
+    }, /EBUSY/)
+    assert.equal(warnings.length, 0, 'no win32 retry warns on a non-win32 platform')
   })
 })

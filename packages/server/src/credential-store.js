@@ -300,6 +300,10 @@ function readStore() {
  * the snapshot read failed but the file is still present (see below) — so the
  * worst pre-crash state is "live file intact, replace not applied".
  *
+ * #5264: the win32 retry/refuse/restore branches emit credentials-safe
+ * `_log.warn` breadcrumbs (error codes only — never values or snapshot bytes)
+ * for observability parity with `_rotateToBak`.
+ *
  * fs ops are injectable for testing (defaults are the real fs calls).
  *
  * @param {string} tmp - source temp path.
@@ -321,15 +325,23 @@ export function replaceFileAtomically(tmp, target, deps = {}) {
     // Non-Windows, or an error that isn't a Windows held-handle lock: surface
     // it unchanged (no unlink — preserves the #5243 no-pre-delete guarantee).
     if (platform !== 'win32' || !err || !CRED_WINDOWS_LOCK_CODES.has(err.code)) throw err
+    // #5264: surface the recovery attempt for observability parity with
+    // session-state-persistence._rotateToBak. Only the error code is logged —
+    // never the credential value or any snapshot bytes (module invariant).
+    _log.warn(`credentials atomic replace hit a Windows held-handle lock (${err.code}); attempting one-shot retry`)
     // Snapshot the live target so we can restore it if the retry also fails.
     let snapshot = null
-    try { snapshot = readFile(target) } catch { /* target may already be gone */ }
+    let snapshotErr = null
+    try { snapshot = readFile(target) } catch (readErr) { snapshotErr = readErr /* target may already be gone */ }
     // If the snapshot failed but the target is still on disk (e.g. readFile threw
     // EACCES/EPERM because the same held handle is blocking the read), unlinking
     // it here would destroy the only copy with no way to restore — re-introducing
     // the #5243 data-loss path. Keep the live file intact and surface the ORIGINAL
     // lock error instead; the caller is no worse off than before the retry.
-    if (snapshot === null && existsSync(target)) throw err
+    if (snapshot === null && existsSync(target)) {
+      _log.warn(`credentials atomic replace could not snapshot the live target before retry (lock ${err.code}, read ${snapshotErr?.code || 'unknown'}); leaving it intact and surfacing the lock error`)
+      throw err
+    }
     try { unlink(target) } catch { /* best-effort — target may be gone */ }
     try {
       rename(tmp, target)
@@ -337,7 +349,14 @@ export function replaceFileAtomically(tmp, target, deps = {}) {
       // Retry still failed — restore the live bytes (if captured) so the prior
       // credentials survive, then surface the error to the caller.
       if (snapshot !== null) {
-        try { writeFile(target, snapshot, { mode: 0o600 }) } catch { /* best-effort restore */ }
+        try {
+          writeFile(target, snapshot, { mode: 0o600 })
+        } catch (restoreErr) {
+          // Worst case: target deleted, retry failed, restore failed → no
+          // credentials on disk. Leave a breadcrumb (codes only) so the thrown
+          // error isn't the sole signal that a restore was even attempted.
+          _log.warn(`credentials atomic replace failed to restore the prior file after a failed retry (${restoreErr?.code || 'unknown'})`)
+        }
       }
       throw retryErr
     }
