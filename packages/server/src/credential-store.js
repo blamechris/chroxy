@@ -420,13 +420,23 @@ export function maybeEncryptCredentialsAtRest({ log } = {}) {
  * single keychain entry (service `chroxy-cred-key`) is overwritten in place, so
  * no stale key is left dangling.
  *
- * Crash-safety: the new key is written to the keychain first, then the store is
- * re-encrypted with the standard atomic write. If that write throws (disk full,
- * permission, mode re-check), the keychain is rolled back to the prior key (or
- * deleted, if the store had been plaintext) so the existing on-disk envelope
- * stays decryptable. The only unrecoverable window is a hard process crash
- * between the keychain swap and the file rename — unavoidable without a second
- * key slot, and vanishingly small.
+ * Crash-safety: the keychain rotation and the re-encrypting atomic write share a
+ * single try/catch failure domain. If either throws (disk full, permission, OS
+ * keychain write failure, mode re-check), the keychain is rolled back to the
+ * prior key (or deleted, if the store had been plaintext) so the existing on-disk
+ * envelope stays decryptable.
+ *
+ * One narrow exception to "envelope stays decryptable": writeStoreAtomically does
+ * a post-rename 0600 mode re-check, and on failure it unlinks the just-renamed
+ * target before throwing. In that single case the rollback restores the old key
+ * but there is no longer a file to decrypt — the new envelope was already removed.
+ * This is a defensive last resort (the file landed with unexpected perms, which
+ * shouldn't happen given the temp file is created mode 0600); the secrets remain
+ * recoverable from the provider, and the operator can re-run rekey/migrate.
+ *
+ * The only other unrecoverable window is a hard process crash between the keychain
+ * swap and the file rename — unavoidable without a second key slot, and
+ * vanishingly small.
  *
  * No-op (with a reason) when: no keychain is available (nowhere to hold a key),
  * the file is missing, the store can't be safely read (bad mode / corrupt /
@@ -457,14 +467,26 @@ export function rekeyCredentialStore({ log } = {}) {
 
   // Capture the prior key for rollback (null when the store was plaintext).
   const previousKey = getMasterKey(keychain)
-  rotateMasterKey(keychain) // keychain now holds the new key
+  // Treat the keychain rotation AND the re-encrypting file write as one failure
+  // domain: if EITHER throws we roll the keychain back to previousKey so the
+  // still-on-disk envelope stays decryptable. rotateMasterKey lives inside the
+  // try because its keychain write can throw (e.g. execFileSync to the OS
+  // keychain fails) and a partially-applied rotation would otherwise strand the
+  // existing envelope behind an uncaught error.
   try {
+    rotateMasterKey(keychain) // keychain now holds the new key
     writeStoreAtomically(file, data) // getOrCreateMasterKey → encrypts under the new key
     if (log) log.info('Rotated the credential data key and re-encrypted credentials.json')
     return { rekeyed: true, reason: 'rekeyed' }
   } catch (err) {
     // Roll the keychain back so the still-on-disk envelope stays decryptable.
-    setMasterKey(previousKey, keychain)
+    // Best-effort: if rollback itself throws, surface the original error reason
+    // rather than masking it with a secondary keychain failure.
+    try {
+      setMasterKey(previousKey, keychain)
+    } catch (rollbackErr) {
+      if (log) log.warn(`Credential rekey rollback failed: ${rollbackErr.message}`)
+    }
     if (log) log.warn(`Credential rekey failed: ${err.message}`)
     return { rekeyed: false, reason: 'write-error' }
   }
