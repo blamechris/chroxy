@@ -53,6 +53,8 @@ import {
   encryptJson,
   getMasterKey,
   getOrCreateMasterKey,
+  rotateMasterKey,
+  setMasterKey,
 } from './credential-cipher.js'
 
 // A keychain stub that reports "no keychain here" — selects the plaintext
@@ -408,6 +410,63 @@ export function maybeEncryptCredentialsAtRest({ log } = {}) {
   } catch (err) {
     if (log) log.warn(`Credentials at-rest encryption failed: ${err.message}`)
     return { migrated: false, reason: 'write-error' }
+  }
+}
+
+/**
+ * #5229 — rotate the at-rest credential data key. Generates a fresh keychain
+ * data key, re-encrypts the existing store under it, and atomically replaces
+ * credentials.json (temp → chmod 0600 → rename, via writeStoreAtomically). The
+ * single keychain entry (service `chroxy-cred-key`) is overwritten in place, so
+ * no stale key is left dangling.
+ *
+ * Crash-safety: the new key is written to the keychain first, then the store is
+ * re-encrypted with the standard atomic write. If that write throws (disk full,
+ * permission, mode re-check), the keychain is rolled back to the prior key (or
+ * deleted, if the store had been plaintext) so the existing on-disk envelope
+ * stays decryptable. The only unrecoverable window is a hard process crash
+ * between the keychain swap and the file rename — unavoidable without a second
+ * key slot, and vanishingly small.
+ *
+ * No-op (with a reason) when: no keychain is available (nowhere to hold a key),
+ * the file is missing, the store can't be safely read (bad mode / corrupt /
+ * undecryptable), or the store is empty.
+ *
+ * @param {{ log?: { info: Function, warn: Function } }} [opts]
+ * @returns {{ rekeyed: boolean, reason: string }}
+ */
+export function rekeyCredentialStore({ log } = {}) {
+  const file = credentialsFilePath()
+  const keychain = activeKeychain()
+
+  if (!keychain.isKeychainAvailable()) {
+    if (log) log.warn('Credential rekey skipped — no OS keychain available to hold a data key')
+    return { rekeyed: false, reason: 'no-keychain' }
+  }
+  if (!existsSync(file)) return { rekeyed: false, reason: 'no-file' }
+
+  // Decrypt the current store up front: a read error (bad mode / corrupt /
+  // undecryptable) must abort BEFORE we touch the keychain, so we never strand
+  // a readable store behind a rotated key.
+  const { data, error } = readStore()
+  if (error) {
+    if (log) log.warn(`Credential rekey skipped: ${error}`)
+    return { rekeyed: false, reason: 'read-error' }
+  }
+  if (Object.keys(data).length === 0) return { rekeyed: false, reason: 'empty' }
+
+  // Capture the prior key for rollback (null when the store was plaintext).
+  const previousKey = getMasterKey(keychain)
+  rotateMasterKey(keychain) // keychain now holds the new key
+  try {
+    writeStoreAtomically(file, data) // getOrCreateMasterKey → encrypts under the new key
+    if (log) log.info('Rotated the credential data key and re-encrypted credentials.json')
+    return { rekeyed: true, reason: 'rekeyed' }
+  } catch (err) {
+    // Roll the keychain back so the still-on-disk envelope stays decryptable.
+    setMasterKey(previousKey, keychain)
+    if (log) log.warn(`Credential rekey failed: ${err.message}`)
+    return { rekeyed: false, reason: 'write-error' }
   }
 }
 
