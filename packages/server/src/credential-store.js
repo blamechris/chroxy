@@ -46,6 +46,7 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { maskApiKey } from './byok-credentials.js'
 import * as realKeychain from './keychain.js'
+import { createLogger } from './logger.js'
 import {
   CRED_KEY_SERVICE,
   isEncryptedEnvelope,
@@ -58,6 +59,41 @@ import {
 // A keychain stub that reports "no keychain here" — selects the plaintext
 // fallback path.
 const NO_KEYCHAIN = { isKeychainAvailable: () => false }
+
+// #5242: logger for the recoverable encrypted-but-keychain-unavailable warning.
+// Injectable for tests. Credentials are NEVER passed to it — only the key NAME
+// and the fact of the failure (the logger.js redactor scrubs sk-ant/Bearer too).
+let _log = createLogger('credentials')
+export function _setCredentialLoggerForTests(logger) {
+  _log = logger || createLogger('credentials')
+}
+
+// #5242: keys we've already warned about, so the spawn path (which calls
+// resolveCredential on every child launch) warns once per key, not per spawn.
+const _keychainUnavailableWarned = new Set()
+export function _resetKeychainWarningsForTests() {
+  _keychainUnavailableWarned.clear()
+}
+
+/**
+ * #5242: emit a one-time warning that an ENCRYPTED credential exists on disk but
+ * its keychain data key is currently unavailable (locked keychain, transient
+ * `security`/`secret-tool` failure, denied/timed-out unlock prompt) — a
+ * RECOVERABLE condition distinct from a corrupt/bad-mode file. Without this, the
+ * spawn path (resolveCredential → buildSpawnEnv) silently launches a subprocess
+ * provider unauthenticated despite a valid credential on disk. The warning makes
+ * that observable; the value is never logged.
+ *
+ * @param {string} key
+ */
+function warnKeychainUnavailableOnce(key) {
+  if (_keychainUnavailableWarned.has(key)) return
+  _keychainUnavailableWarned.add(key)
+  _log.warn(
+    `${key} is stored (encrypted) but its OS keychain data key is currently unavailable — resolving as unset. ` +
+    `A spawned child may launch unauthenticated. Unlock the OS keychain (or re-store the credential) and retry.`,
+  )
+}
 
 // Explicit test injection (an in-memory keychain), or null to use the resolved
 // default. Takes precedence over the env escape hatch below.
@@ -204,16 +240,24 @@ function readStore() {
   if (isEncryptedEnvelope(parsed)) {
     const key = getMasterKey(activeKeychain())
     if (!key) {
+      // #5242: the RECOVERABLE case — the envelope is intact but the keychain
+      // data key can't be fetched (locked keychain, transient probe failure).
+      // `keychainUnavailable` distinguishes it from a decrypt-throw corruption
+      // below so the spawn-path warning only fires for this recoverable branch.
       return {
         data: {},
         fileExists: true,
         error: `${file} is encrypted but its decryption key is unavailable (OS keychain service "${CRED_KEY_SERVICE}" missing or unreadable)`,
         encrypted: true,
+        keychainUnavailable: true,
       }
     }
     try {
       return { data: decryptEnvelope(parsed, key), fileExists: true, error: null, encrypted: true }
     } catch (err) {
+      // The data key was present but decryption failed — a corrupt/invalid
+      // envelope, NOT a keychain-availability problem. No keychainUnavailable
+      // flag, so this does not trigger the keychain-unavailable warning.
       return { data: {}, fileExists: true, error: `${file} could not be decrypted: ${err.message}`, encrypted: true }
     }
   }
@@ -288,8 +332,17 @@ function writeStoreAtomically(target, nextObj) {
  */
 export function getStoredCredential(key) {
   if (!isKnownCredentialKey(key)) return null
-  const { data, error } = readStore()
-  if (error) return null
+  const { data, error, keychainUnavailable } = readStore()
+  if (error) {
+    // #5242: a read error with `keychainUnavailable: true` is the RECOVERABLE
+    // case — an intact encrypted envelope whose keychain data key can't be
+    // fetched right now. Emit a one-time warning so a silent unauthenticated
+    // spawn is observable. Other read errors (bad mode/JSON, or a corrupt
+    // envelope that fails to decrypt) are already surfaced via
+    // getCredentialsStatus.fileError and are NOT the recoverable case.
+    if (keychainUnavailable) warnKeychainUnavailableOnce(key)
+    return null
+  }
   const canonical = data[key]
   if (typeof canonical === 'string' && canonical.length > 0) return canonical
   const legacyField = LEGACY_FIELD_BY_KEY[key]
