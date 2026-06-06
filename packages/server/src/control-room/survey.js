@@ -44,6 +44,15 @@ const execFileAsync = promisify(execFile)
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024
 
 /**
+ * #5259: bound every git/gh probe so a stuck subprocess (network blip on `gh`,
+ * a wedged git) rejects in finite time instead of hanging the survey forever
+ * (which would also pin the handler's per-client in-flight guard). tryExec
+ * already degrades a rejected probe to null, so the timeout just guarantees the
+ * rejection. Kept consistent with the runner survey (runners.js EXEC_TIMEOUT_MS).
+ */
+const EXEC_TIMEOUT_MS = 20000
+
+/**
  * Cap for `gh pr list` (#5240). `gh pr list` defaults to 30, silently capping
  * the open-PR count AND the CI/review rollup. 200 covers even bot-heavy repos;
  * a repo past it is undercounted, but far less often than at the 30 default.
@@ -80,7 +89,7 @@ export const DEFAULT_THRESHOLDS = {
  */
 async function tryExec(execFn, file, args, cwd) {
   try {
-    const { stdout } = await execFn(file, args, { cwd, maxBuffer: EXEC_MAX_BUFFER })
+    const { stdout } = await execFn(file, args, { cwd, maxBuffer: EXEC_MAX_BUFFER, timeout: EXEC_TIMEOUT_MS })
     return typeof stdout === 'string' ? stdout.trim() : ''
   } catch {
     return null
