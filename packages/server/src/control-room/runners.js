@@ -47,6 +47,20 @@ export const DEFAULT_RUNNER_ROOT = join(homedir(), 'github-runners')
 export const DEFAULT_CONCURRENCY = 5
 
 /**
+ * #5259: bound every probe subprocess so a stuck `gh`/`launchctl`/`systemctl`
+ * (network blip, wedged service manager) rejects in finite time instead of
+ * hanging the survey forever — which would also pin the handler's per-client
+ * in-flight guard. The survey already tolerates a rejected probe (degrades to
+ * not-running / null GitHub view), so a timeout just guarantees it rejects.
+ * Kept consistent with the host survey (survey.js EXEC_TIMEOUT_MS).
+ */
+export const EXEC_TIMEOUT_MS = 20000
+/** Modest output cap for probe subprocesses (runner JSON is small). */
+const EXEC_MAX_BUFFER = 8 * 1024 * 1024
+/** Shared exec options for every probe. */
+const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
+
+/**
  * Parse a runner install's `.runner` config (JSON). The file GitHub writes is
  * UTF-8 with a BOM, which `JSON.parse` rejects — strip a leading BOM first.
  *
@@ -156,14 +170,14 @@ export async function probeService(execFn, service) {
   if (!service || !service.label) return stopped
   try {
     if (service.manager === 'launchd') {
-      const { stdout } = await execFn('launchctl', ['list', service.label], {})
+      const { stdout } = await execFn('launchctl', ['list', service.label], EXEC_OPTS)
       return parseLaunchctlList(stdout)
     }
     if (service.manager === 'systemd') {
       const { stdout } = await execFn('systemctl', [
         'show', service.label,
         '--property=ActiveState', '--property=MainPID', '--property=ExecMainStatus',
-      ], {})
+      ], EXEC_OPTS)
       return parseSystemctlShow(stdout)
     }
     return stopped
@@ -420,7 +434,7 @@ export async function surveyRunners(opts = {}) {
           const path = ghRunnersApiPath(group.target)
           if (!path) return new Map()
           try {
-            const { stdout } = await _execFile('gh', ['api', path], {})
+            const { stdout } = await _execFile('gh', ['api', path], EXEC_OPTS)
             return parseGhRunners(typeof stdout === 'string' ? stdout : '')
           } catch {
             return new Map()

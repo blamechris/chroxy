@@ -600,4 +600,18 @@ describe('survey probes — exec robustness (#5240/#5241)', () => {
       )
     }
   })
+
+  it('#5259: every git/gh probe passes a bounded timeout so a stuck subprocess rejects', async () => {
+    const repo = '/r'
+    const { fn, calls } = capturingExec({ [repo]: cleanRepo() })
+    await surveyRepos([repo], { _execFile: fn, _now: now, _readFile: async () => { throw new Error() } })
+    const probeCalls = calls.filter((c) => c.file === 'git' || c.file === 'gh')
+    assert.ok(probeCalls.length > 0, 'at least one probe ran')
+    for (const c of probeCalls) {
+      assert.ok(
+        c.opts && typeof c.opts.timeout === 'number' && c.opts.timeout > 0,
+        `probe \`${c.file} ${c.args[0]}\` must pass a positive timeout (got ${c.opts && c.opts.timeout})`,
+      )
+    }
+  })
 })

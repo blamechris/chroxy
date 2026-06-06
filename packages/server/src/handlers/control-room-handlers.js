@@ -211,9 +211,14 @@ async function handleRunnerStatusRequest(ws, client, msg, ctx) {
   // Tests inject `ctx.surveyRunners` to stub the fs/exec calls.
   const surveyFn = typeof ctx?.surveyRunners === 'function' ? ctx.surveyRunners : surveyRunners
 
+  // #5260: gh enrichment is on by default; an operator disables it (faster,
+  // local-only survey, or no `gh` auth) by setting controlRoomRunnerIncludeGithub
+  // false. Only an explicit `false` turns it off — unset/undefined stays true.
+  const includeGithub = config.controlRoomRunnerIncludeGithub !== false
+
   runnerInFlight.add(client)
   try {
-    const snapshot = await surveyFn({ root })
+    const snapshot = await surveyFn({ root, includeGithub })
     ctx.send(ws, {
       type: 'runner_status_snapshot',
       requestId,

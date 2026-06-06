@@ -305,6 +305,25 @@ describe('runner_status_request handler (#5253)', () => {
     assert.equal(opts.root, '/home/user/github-runners')
   })
 
+  it('#5260: enables gh enrichment by default (config key unset)', async () => {
+    await controlRoomHandlers.runner_status_request(ws, client, { type: 'runner_status_request' }, ctx)
+    const [opts] = ctx.surveyRunners.lastCall
+    assert.equal(opts.includeGithub, true, 'unset config defaults includeGithub to true')
+  })
+
+  it('#5260: disables gh enrichment when controlRoomRunnerIncludeGithub is false', async () => {
+    ctx = makeRunnerCtx({ config: { controlRoomRunnerIncludeGithub: false } })
+    await controlRoomHandlers.runner_status_request(ws, client, { type: 'runner_status_request' }, ctx)
+    const [opts] = ctx.surveyRunners.lastCall
+    assert.equal(opts.includeGithub, false)
+  })
+
+  it('#5260: a non-false value keeps enrichment on', async () => {
+    ctx = makeRunnerCtx({ config: { controlRoomRunnerIncludeGithub: true } })
+    await controlRoomHandlers.runner_status_request(ws, client, { type: 'runner_status_request' }, ctx)
+    assert.equal(ctx.surveyRunners.lastCall[0].includeGithub, true)
+  })
+
   it('reports a resolved default root when controlRoomRunnerRoot is unset', async () => {
     ctx = makeRunnerCtx({ config: {} })
     await controlRoomHandlers.runner_status_request(ws, client, { type: 'runner_status_request' }, ctx)

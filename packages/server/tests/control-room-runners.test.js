@@ -33,6 +33,7 @@ import {
   ghRunnersApiPath,
   parseGhRunners,
   classifyRunner,
+  EXEC_TIMEOUT_MS,
 } from '../src/control-room/runners.js'
 
 // A Dirent-like for the injected readdir seam.
@@ -128,6 +129,14 @@ describe('control-room/runners — probeService', () => {
     const r = await probeService(exec, { manager: 'none', label: null })
     assert.equal(called, false)
     assert.deepEqual(r, { running: false, pid: null, lastExitCode: null })
+  })
+
+  it('#5259: bounds the probe with a timeout + maxBuffer so a wedged service manager rejects', async () => {
+    let opts = null
+    const exec = async (file, args, o) => { opts = o; return { stdout: '\t"PID" = 1;\n' } }
+    await probeService(exec, { manager: 'launchd', label: 'l' })
+    assert.equal(opts.timeout, EXEC_TIMEOUT_MS, 'launchctl probe must carry the bounded timeout')
+    assert.ok(typeof opts.maxBuffer === 'number' && opts.maxBuffer > 0, 'maxBuffer must be set')
   })
 })
 
@@ -357,5 +366,16 @@ describe('control-room/runners — surveyRunners (end-to-end)', () => {
     const aa1 = aa.runners.find(r => r.name === 'aa-1')
     assert.equal(aa1.verdict, 'idle') // running locally, no gh view
     assert.equal(aa1.githubStatus, null)
+  })
+
+  it('#5259: passes a bounded timeout to the gh enrichment call', async () => {
+    let ghOpts = null
+    const exec = async (file, args, o) => {
+      if (file === 'gh') { ghOpts = o; return { stdout: JSON.stringify({ runners: [] }) } }
+      return execFile(file, args)
+    }
+    await surveyRunners({ ...baseOpts(), _execFile: exec })
+    assert.ok(ghOpts, 'gh enrichment ran')
+    assert.equal(ghOpts.timeout, EXEC_TIMEOUT_MS, 'gh api call must carry the bounded timeout')
   })
 })

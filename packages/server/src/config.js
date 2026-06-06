@@ -78,6 +78,11 @@ const CONFIG_SCHEMA = {
   // containing a `.runner` config). Defaults to ~/github-runners when unset.
   // Mirrored by the CHROXY_RUNNER_ROOT env var.
   controlRoomRunnerRoot: 'string',
+  // #5260 (Control Room): whether the self-hosted runner survey enriches each
+  // runner with GitHub's view via `gh api` (online/busy/labels). Defaults to
+  // true. Set false for a faster local-only survey, or on hosts where `gh`
+  // isn't authenticated. Mirrored by the CHROXY_RUNNER_INCLUDE_GITHUB env var.
+  controlRoomRunnerIncludeGithub: 'boolean',
   maxSessions: 'number',
   maxHistory: 'number',
   maxMessages: 'number',
@@ -770,6 +775,8 @@ function envKeyForConfig(key) {
     controlRoomRoot: 'CHROXY_CONTROL_ROOM_ROOT',
     // #5253: discovery root for the Control Room self-hosted runner survey.
     controlRoomRunnerRoot: 'CHROXY_RUNNER_ROOT',
+    // #5260: toggle gh enrichment of the runner survey.
+    controlRoomRunnerIncludeGithub: 'CHROXY_RUNNER_INCLUDE_GITHUB',
     logFormat: 'CHROXY_LOG_FORMAT',
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
