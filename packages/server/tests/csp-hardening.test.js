@@ -90,6 +90,53 @@ describe('CSP hardening', () => {
     )
   })
 
+  it('dashboard CSP connect-src permits remote http/ws so the desktop can reach a LAN daemon', async () => {
+    // ① LAN-client connect: the dashboard's pre-WS HTTP health-check + the
+    // WebSocket itself must be allowed to a remote host. connect-src carries
+    // scheme-only sources (ws: wss: http: https:) for exactly that, while
+    // script-src stays locked to 'self'.
+    const mock = createMockServer()
+    await startWith(mock)
+
+    const res = await globalThis.fetch(
+      `http://127.0.0.1:${port}/dashboard?token=wrong-token`
+    )
+    const csp = res.headers.get('content-security-policy')
+    assert.ok(csp, 'dashboard response should include a CSP header')
+
+    const connectSrc = csp.split(';').find(d => d.trim().startsWith('connect-src'))
+    assert.ok(connectSrc, 'CSP should contain a connect-src directive')
+    for (const scheme of ['ws:', 'wss:', 'http:', 'https:']) {
+      assert.ok(
+        connectSrc.includes(` ${scheme}`),
+        `connect-src must allow ${scheme} so a remote LAN daemon is reachable`
+      )
+    }
+
+    // The widened connect-src must NOT come at the cost of an open script-src:
+    // no inline/eval AND no remote origins (a `script-src https:` would let a
+    // remote-loaded script abuse the broad connect-src, defeating the whole
+    // safety argument). Lock it to exactly 'self'.
+    const scriptSrc = csp.split(';').find(d => d.trim().startsWith('script-src'))
+    assert.ok(scriptSrc, 'CSP should contain a script-src directive')
+    assert.ok(!scriptSrc.includes("'unsafe-inline'") && !scriptSrc.includes("'unsafe-eval'"),
+      'script-src must not allow inline/eval')
+    assert.ok(!/https?:/.test(scriptSrc) && !scriptSrc.includes('*') && !/\bwss?:/.test(scriptSrc),
+      'script-src must not allow remote origins (no http(s)/ws(s)/wildcard) while connect-src is broad')
+    assert.equal(scriptSrc.trim(), "script-src 'self'",
+      'script-src must stay locked to exactly self')
+
+    // A broad connect-src is only safe while the directives that gate PASSIVE
+    // exfil stay 'self'-scoped. Lock them in so a future "also widen img-src"
+    // can't silently open a CSS/beacon/form exfil channel.
+    const directive = (name) => csp.split(';').find(d => d.trim().startsWith(name))
+    assert.ok(directive("default-src 'self'"), "default-src must stay 'self'")
+    assert.ok(directive("form-action 'self'"), "form-action must stay 'self'")
+    const imgSrc = directive('img-src')
+    assert.ok(imgSrc && !/https?:/.test(imgSrc),
+      "img-src must not allow remote http(s) origins (no beacon exfil) while connect-src is broad")
+  })
+
   it('server config injection uses meta tag in dashboard HTML (not inline script)', async () => {
     // Behavioral: verify the actual HTTP response body for the dashboard HTML.
     // This test requires index.html to exist; if not built, the server returns 404.

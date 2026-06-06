@@ -610,7 +610,25 @@ export function createHttpHandler(server) {
       const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
       const securityHeaders = {
-        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        // connect-src allows http:/https: alongside ws:/wss: so the dashboard
+        // can reach a REMOTE LAN daemon — both its pre-WS HTTP health-check
+        // (connection.ts) and the WebSocket itself. This unlocks the desktop
+        // acting as a LAN client + joining a shared session on another host.
+        //
+        // Why a wide connect-src is safe here:
+        //  - ws:/wss: were already scheme-open (any host), so adding http:/https:
+        //    is symmetric — no NEW reachable hosts beyond what WebSocket allowed.
+        //  - script-src stays 'self' (no inline/eval), so injected content can't
+        //    run a fetch() to abuse connect-src in the first place.
+        //  - The directives that actually gate *passive* exfil — img-src,
+        //    font-src, form-action, and the default-src fallback — all stay
+        //    'self'-scoped (img-src also data:), so a widened connect-src opens
+        //    no CSS/beacon/form exfil channel. Keep them 'self' if connect-src
+        //    is broad. (This CSP also ships on the tunnel-exposed dashboard, not
+        //    just the desktop's local view — acceptable in chroxy's single-
+        //    tenant model; see #5281 for the decision record.)
+        //  - The narrower 127.0.0.1/localhost http sources are subsumed by http:.
+        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http: https:; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer',
