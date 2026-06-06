@@ -200,7 +200,9 @@ describe('worktree-gc integration (real git repo)', () => {
     const cleanDead = addWorktree('clean-dead', { lockReason: `claude agent a1 (pid ${DEAD_PID})` })
     // Plan while clean → action 'remove'.
     const plan = planRepoGc(repo, { kill: fakeKill })
-    assert.equal(plan.items.find((i) => i.path.endsWith('/clean-dead')).action, 'remove')
+    const planned = plan.items.find((i) => i.path.endsWith('/clean-dead'))
+    assert.ok(planned, 'clean-dead was planned for GC')
+    assert.equal(planned.action, 'remove')
 
     // TOCTOU: the tree goes dirty AFTER planning, so `git worktree remove`
     // (no --force) refuses on apply (untracked file).
