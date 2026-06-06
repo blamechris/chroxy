@@ -33,5 +33,7 @@ export * from './schemas/index.ts';
 export type { ServerErrorEnvelopeMessage } from './schemas/server.ts';
 export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, } from './schemas/server.ts';
 export type { RepoVerdict, RepoTree, RepoStatus, HostStatusSummary, ServerHostStatusSnapshotMessage, } from './schemas/server.ts';
+export type { RunnerVerdict, RunnerServiceState, RunnerInfo, RepoRunners, RunnerStatusSummary, ServerRunnerStatusSnapshotMessage, } from './schemas/server.ts';
 export type { HostStatusRequestMessage } from './schemas/client.ts';
+export type { RunnerStatusRequestMessage } from './schemas/client.ts';
 export * from './error-categories.ts';

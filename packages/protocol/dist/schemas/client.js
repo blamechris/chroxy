@@ -675,6 +675,15 @@ export const HostStatusRequestSchema = z.object({
     type: z.literal('host_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #5253: Control Room — request a self-hosted runner status survey. The server
+// scans the runner-install root, probes each runner's service, optionally
+// enriches via `gh`, and replies with a single `runner_status_snapshot` (see
+// server.ts). Pull-on-Refresh, same as `host_status_request`. The optional
+// `requestId` lets the dashboard correlate a Refresh click to its snapshot.
+export const RunnerStatusRequestSchema = z.object({
+    type: z.literal('runner_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // -- Encrypted envelope --
 export const EncryptedEnvelopeSchema = z.object({
     type: z.literal('encrypted'),
@@ -760,4 +769,5 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     GetEnvironmentSchema,
     EvaluateDraftSchema,
     HostStatusRequestSchema,
+    RunnerStatusRequestSchema,
 ]);
