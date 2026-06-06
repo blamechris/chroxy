@@ -954,10 +954,24 @@ export const RunnerStatusSummarySchema = z.object({
  */
 export const ServerRunnerStatusSnapshotSchema = z.object({
   type: z.literal('runner_status_snapshot'),
+  // Echoes the client's `runner_status_request` requestId so the dashboard can
+  // correlate a snapshot to the Refresh click that triggered it. Present (null
+  // when the client omitted one); the handler always sets it.
+  requestId: z.string().nullable().optional(),
   generatedAt: z.string().datetime(),
   root: z.string(),
   summary: RunnerStatusSummarySchema,
   repos: z.array(RepoRunnersSchema),
+  // Additive degraded-snapshot annotation: on a forbidden/in-progress/failed
+  // survey the handler returns an otherwise-valid (empty repos, zeroed summary)
+  // snapshot plus this `error`, so consumers can surface the failure typed
+  // rather than special-casing a malformed reply.
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+    })
+    .optional(),
 })
 
 export const ServerClientFocusChangedSchema = z.object({

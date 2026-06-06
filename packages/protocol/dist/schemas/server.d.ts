@@ -876,6 +876,7 @@ export declare const RunnerStatusSummarySchema: z.ZodObject<{
  */
 export declare const ServerRunnerStatusSnapshotSchema: z.ZodObject<{
     type: z.ZodLiteral<"runner_status_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     generatedAt: z.ZodString;
     root: z.ZodString;
     summary: z.ZodObject<{
@@ -921,6 +922,10 @@ export declare const ServerRunnerStatusSnapshotSchema: z.ZodObject<{
             os: z.ZodNullable<z.ZodString>;
             labels: z.ZodArray<z.ZodString>;
         }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerClientFocusChangedSchema: z.ZodObject<{
