@@ -109,6 +109,7 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         behind: 0,
         openPRs: null,
         prChecks: null,
+        prsUrl: 'https://github.com/me/chroxy/pulls',
         attribution: null,
         onboarding: 'deferred (live)',
         lastTouched: '2026-06-04T11:47:00.000Z',
@@ -126,6 +127,7 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         behind: 1,
         openPRs: 16,
         prChecks: { failing: 1, pending: 0, approved: 2, changesRequested: 1 },
+        prsUrl: 'https://github.com/me/medlens/pulls',
         attribution: null,
         onboarding: 'skipped — dirty tree',
         lastTouched: '2026-05-28T11:00:00.000Z',
@@ -143,6 +145,7 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         behind: null,
         openPRs: 1,
         prChecks: { failing: 0, pending: 0, approved: 0, changesRequested: 0 },
+        prsUrl: null,
         attribution: true,
         onboarding: '✓ onboarded',
         lastTouched: '2026-06-04T11:12:00.000Z',
@@ -230,6 +233,7 @@ describe('ControlRoomSection (#5175)', () => {
           behind: 0,
           openPRs: null,
           prChecks: null,
+          prsUrl: null,
           attribution: null,
           onboarding: '✓ onboarded',
           lastTouched: '2026-06-04T11:12:00.000Z',
@@ -252,6 +256,25 @@ describe('ControlRoomSection (#5175)', () => {
     // no-it-all: all-zero counts → no badge. chroxy: prChecks null → no badge.
     expect(screen.queryByTestId('cr-prchecks-no-it-all')).toBeNull()
     expect(screen.queryByTestId('cr-prchecks-chroxy')).toBeNull()
+  })
+
+  it('#5216: renders row actions — View PRs link (when prsUrl) + Copy path', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    // medlens has a prsUrl → a "View PRs" link to the GitHub PRs page.
+    const prs = screen.getByTestId('cr-action-prs-medlens') as HTMLAnchorElement
+    expect(prs).toHaveAttribute('href', 'https://github.com/me/medlens/pulls')
+    expect(prs).toHaveAttribute('target', '_blank')
+    // no-it-all has prsUrl null → no View PRs link, but Copy path is always there.
+    expect(screen.queryByTestId('cr-action-prs-no-it-all')).toBeNull()
+    expect(screen.getByTestId('cr-action-copy-no-it-all')).toBeTruthy()
+  })
+
+  it('#5216: Copy path writes the repo path to the clipboard', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    fireEvent.click(screen.getByTestId('cr-action-copy-medlens'))
+    expect(writeText).toHaveBeenCalledWith('/Users/me/Projects/medlens')
   })
 
   it('shows the live green dot only for live repos', () => {
@@ -760,6 +783,7 @@ describe('ControlRoomSection investigate action (#5202)', () => {
           behind: null,
           openPRs: null,
           prChecks: null,
+          prsUrl: null,
           attribution: null,
           onboarding: 'skipped',
           lastTouched: '2026-05-28T11:00:00.000Z',

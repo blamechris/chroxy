@@ -141,6 +141,33 @@ export function parseOpenPRs(json) {
 }
 
 /**
+ * Derive a repo's GitHub pull-requests URL from its `origin` remote URL.
+ *
+ * Handles the three forms `git remote get-url origin` can return for a GitHub
+ * remote — SCP-style SSH (`git@github.com:owner/repo.git`), `ssh://` URLs, and
+ * `https://` URLs — with or without a trailing `.git`. Returns
+ * `https://github.com/<owner>/<repo>/pulls`, or `null` for a non-GitHub remote,
+ * an empty/failed lookup, or anything that doesn't match.
+ *
+ * @param {string|null} remote - raw `git remote get-url origin` stdout.
+ * @returns {string|null}
+ */
+export function parseGithubPrsUrl(remote) {
+  if (!remote || typeof remote !== 'string') return null
+  const trimmed = remote.trim()
+  const patterns = [
+    /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/, // scp-style ssh
+    /^ssh:\/\/git@github\.com\/([^/]+)\/(.+?)(?:\.git)?$/, // ssh url
+    /^https:\/\/github\.com\/([^/]+)\/(.+?)(?:\.git)?$/, // https
+  ]
+  for (const re of patterns) {
+    const m = re.exec(trimmed)
+    if (m) return `https://github.com/${m[1]}/${m[2]}/pulls`
+  }
+  return null
+}
+
+/**
  * Conclusions/states from a `gh` statusCheckRollup entry that count as a failed
  * check. `gh pr list --json statusCheckRollup` mixes two node shapes: CheckRun
  * (GitHub Actions etc., carries `status` + `conclusion`) and StatusContext
@@ -383,13 +410,15 @@ async function surveyOne(repo, ctx) {
     const sessionBound = hasBoundSession(repo.path, activeSessionCwds)
 
     // Run the independent git probes concurrently.
-    const [branchRaw, statusRaw, worktreeRaw, lastRaw, aheadBehindRaw, prRaw, settingsRaw] = await Promise.all([
+    const [branchRaw, statusRaw, worktreeRaw, lastRaw, aheadBehindRaw, remoteRaw, prRaw, settingsRaw] = await Promise.all([
       tryExec(execFn, 'git', ['rev-parse', '--abbrev-ref', 'HEAD'], cwd),
       tryExec(execFn, 'git', ['status', '--porcelain'], cwd),
       tryExec(execFn, 'git', ['worktree', 'list', '--porcelain'], cwd),
       tryExec(execFn, 'git', ['log', '-1', '--format=%cI'], cwd),
       // No upstream / detached HEAD makes this fail → null → ahead/behind null.
       tryExec(execFn, 'git', ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd),
+      // origin remote → GitHub PRs URL (null for a non-GitHub / missing remote).
+      tryExec(execFn, 'git', ['remote', 'get-url', 'origin'], cwd),
       // One gh call serves both the open-PR count and the CI/review rollup.
       tryExec(execFn, 'gh', ['pr', 'list', '--json', 'number,reviewDecision,statusCheckRollup'], cwd),
       readSettings(readFn, repo.path),
@@ -411,6 +440,7 @@ async function surveyOne(repo, ctx) {
     const { ahead, behind } = parseAheadBehind(aheadBehindRaw)
     const openPRs = parseOpenPRs(prRaw)
     const prChecks = parsePrChecks(prRaw)
+    const prsUrl = parseGithubPrsUrl(remoteRaw)
     const attribution = detectAttribution(settingsRaw)
 
     const lastTouchedDate = lastRaw ? parseIsoDate(lastRaw) : null
@@ -437,6 +467,7 @@ async function surveyOne(repo, ctx) {
       behind,
       openPRs,
       prChecks,
+      prsUrl,
       attribution,
       onboarding,
       lastTouched,
@@ -497,6 +528,7 @@ function degradedRepo(repo, now, err) {
     behind: null,
     openPRs: null,
     prChecks: null,
+    prsUrl: null,
     attribution: null,
     onboarding: 'skipped — survey failed',
     lastTouched: now.toISOString(),

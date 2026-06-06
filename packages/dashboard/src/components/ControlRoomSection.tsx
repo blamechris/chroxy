@@ -569,6 +569,57 @@ function AttributionCell({ attribution }: { attribution: boolean | null }) {
   )
 }
 
+/**
+ * #5216 — per-row safe actions: "View PRs" (opens the repo's GitHub pull-request
+ * list in a new tab; shown only when `prsUrl` is known) and "Copy path" (copies
+ * the absolute repo path to the clipboard). Both are side-effect-free from the
+ * server's perspective — no local command execution — so they behave identically
+ * in the web dashboard and the desktop app.
+ */
+function RowActions({ repo }: { repo: RepoStatus }) {
+  const [copied, setCopied] = useState(false)
+  const copyPath = useCallback(() => {
+    const done = () => {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    }
+    try {
+      const cb = navigator.clipboard
+      if (cb && typeof cb.writeText === 'function') {
+        cb.writeText(repo.path).then(done, () => { /* clipboard denied — no-op */ })
+      }
+    } catch {
+      /* clipboard unavailable — no-op */
+    }
+  }, [repo.path])
+
+  return (
+    <td className="cr-actions">
+      {repo.prsUrl && (
+        <a
+          className="cr-action"
+          data-testid={`cr-action-prs-${repo.name}`}
+          href={repo.prsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open ${repo.name}'s pull requests on GitHub`}
+        >
+          View PRs
+        </a>
+      )}
+      <button
+        type="button"
+        className="cr-action"
+        data-testid={`cr-action-copy-${repo.name}`}
+        onClick={copyPath}
+        title={`Copy ${repo.path}`}
+      >
+        {copied ? 'Copied' : 'Copy path'}
+      </button>
+    </td>
+  )
+}
+
 interface RepoRowsProps {
   repo: RepoStatus
   /** Whole-store activity state, for the drill-down tree. */
@@ -638,17 +689,18 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
         <PrCell repo={repo} />
         <AttributionCell attribution={repo.attribution} />
         <td className="cr-dim cr-last">{relativeLast(repo.lastTouched)}</td>
+        <RowActions repo={repo} />
       </tr>
       {repo.note && (
         <tr className="cr-act" data-testid={`cr-note-row-${repo.name}`}>
-          <td colSpan={8}>
+          <td colSpan={9}>
             <span className="cr-arrow" aria-hidden="true">↳</span> {repo.note}
           </td>
         </tr>
       )}
       {drillable && expanded && (
         <tr className="cr-activity-row" data-testid={`cr-activity-row-${repo.name}`}>
-          <td colSpan={8}>
+          <td colSpan={9}>
             <div className="cr-activity-drill">
               <div className="cr-activity-heading" data-testid={`cr-activity-heading-${repo.name}`}>
                 Live activity · {repo.name}
@@ -940,16 +992,17 @@ export function ControlRoomSection({
                   <th>PRs</th>
                   <th>Attr</th>
                   <th>Last</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {snapshot.repos.length === 0 ? (
                   <tr data-testid="cr-no-repos">
-                    <td colSpan={8} className="cr-dim">No repos found under {snapshot.root}.</td>
+                    <td colSpan={9} className="cr-dim">No repos found under {snapshot.root}.</td>
                   </tr>
                 ) : visibleRepos.length === 0 ? (
                   <tr data-testid="cr-no-matches">
-                    <td colSpan={8} className="cr-dim">
+                    <td colSpan={9} className="cr-dim">
                       No repos match the active filters.{' '}
                       <button type="button" className="cr-link-btn" data-testid="cr-no-matches-clear" onClick={clearFilters}>
                         Clear filters

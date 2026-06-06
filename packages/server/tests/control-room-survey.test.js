@@ -24,6 +24,7 @@ import {
   countWorktrees,
   parseOpenPRs,
   parsePrChecks,
+  parseGithubPrsUrl,
   parseAheadBehind,
   detectAttribution,
   DEFAULT_THRESHOLDS,
@@ -62,13 +63,14 @@ function cmdKey(file, args) {
   if (file === 'git' && args[0] === 'worktree') return 'worktree'
   if (file === 'git' && args[0] === 'log') return 'log'
   if (file === 'git' && args[0] === 'rev-list') return 'aheadbehind'
+  if (file === 'git' && args[0] === 'remote') return 'remote'
   if (file === 'gh') return 'pr'
   return 'unknown'
 }
 
 /** A clean, onboarded repo command map. */
-function cleanRepo({ branch = 'main', log = iso(40 * 24 * 60 * 60 * 1000), pr = '[]', worktree = 'worktree /x\nHEAD abc\nbranch refs/heads/main\n', aheadbehind } = {}) {
-  const repo = { branch, status: '', worktree, log, pr }
+function cleanRepo({ branch = 'main', log = iso(40 * 24 * 60 * 60 * 1000), pr = '[]', worktree = 'worktree /x\nHEAD abc\nbranch refs/heads/main\n', aheadbehind, remote = 'git@github.com:me/app.git' } = {}) {
+  const repo = { branch, status: '', worktree, log, pr, remote }
   // Only define the ahead/behind probe when a test supplies it; leaving it
   // undefined makes makeExec reject (as if there's no upstream) → null/null.
   if (aheadbehind !== undefined) repo.aheadbehind = aheadbehind
@@ -178,6 +180,27 @@ describe('parsePrChecks', () => {
   })
 })
 
+describe('parseGithubPrsUrl', () => {
+  const PRS = 'https://github.com/owner/repo/pulls'
+  it('parses scp-style ssh remotes', () => {
+    assert.equal(parseGithubPrsUrl('git@github.com:owner/repo.git'), PRS)
+    assert.equal(parseGithubPrsUrl('git@github.com:owner/repo'), PRS)
+  })
+  it('parses https remotes', () => {
+    assert.equal(parseGithubPrsUrl('https://github.com/owner/repo.git'), PRS)
+    assert.equal(parseGithubPrsUrl('https://github.com/owner/repo'), PRS)
+  })
+  it('parses ssh:// remotes', () => {
+    assert.equal(parseGithubPrsUrl('ssh://git@github.com/owner/repo.git'), PRS)
+  })
+  it('returns null for non-GitHub or missing remotes', () => {
+    assert.equal(parseGithubPrsUrl('git@gitlab.com:owner/repo.git'), null)
+    assert.equal(parseGithubPrsUrl('https://example.com/x/y.git'), null)
+    assert.equal(parseGithubPrsUrl(null), null)
+    assert.equal(parseGithubPrsUrl(''), null)
+  })
+})
+
 describe('parseAheadBehind', () => {
   it('parses "<behind>\\t<ahead>" (left=behind, right=ahead)', () => {
     // git rev-list --left-right --count @{u}...HEAD → "<behind>\t<ahead>"
@@ -233,6 +256,22 @@ describe('surveyRepos — ahead/behind', () => {
     const r = out.repos[0]
     assert.equal(r.ahead, null)
     assert.equal(r.behind, null)
+  })
+})
+
+describe('surveyRepos — prsUrl', () => {
+  it('derives the GitHub PRs URL from the origin remote', async () => {
+    const repo = { name: 'app', path: '/p/app' }
+    const exec = makeExec({ '/p/app': cleanRepo({ remote: 'git@github.com:acme/app.git' }) })
+    const out = await surveyRepos([repo], { _execFile: exec, _now: now, _readFile: async () => { throw new Error() } })
+    assert.equal(out.repos[0].prsUrl, 'https://github.com/acme/app/pulls')
+  })
+
+  it('prsUrl is null when origin is missing or not GitHub', async () => {
+    const repo = { name: 'app', path: '/p/app' }
+    const exec = makeExec({ '/p/app': { ...cleanRepo(), remote: undefined } })
+    const out = await surveyRepos([repo], { _execFile: exec, _now: now, _readFile: async () => { throw new Error() } })
+    assert.equal(out.repos[0].prsUrl, null)
   })
 })
 
@@ -509,11 +548,11 @@ describe('surveyRepos — concurrency cap', () => {
       _readFile: async () => { throw new Error() },
       concurrency: 3,
     })
-    // Each repo fires up to 6 concurrent commands internally (rev-parse,
-    // status, worktree, log, rev-list ahead/behind, gh pr); the cap bounds how
-    // many repos run at once, so observed parallel commands stays bounded by
-    // cap * (commands per repo). The key invariant: not all 12 repos ran at
-    // once. With cap 3 and 6 cmds/repo, ceiling is 18 commands in flight.
-    assert.ok(maxInFlight <= 3 * 6, `maxInFlight=${maxInFlight}`)
+    // Each repo fires up to 7 concurrent commands internally (rev-parse,
+    // status, worktree, log, rev-list ahead/behind, remote get-url, gh pr); the
+    // cap bounds how many repos run at once, so observed parallel commands stays
+    // bounded by cap * (commands per repo). The key invariant: not all 12 repos
+    // ran at once. With cap 3 and 7 cmds/repo, ceiling is 21 commands in flight.
+    assert.ok(maxInFlight <= 3 * 7, `maxInFlight=${maxInFlight}`)
   })
 })
