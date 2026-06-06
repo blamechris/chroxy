@@ -338,6 +338,32 @@ describe('selectActivityTree — hierarchy build', () => {
     const tree = selectActivityTree(s, 's1')
     expect(tree.map((n) => n.entry.id)).toEqual(['kid'])
   })
+
+  it('#5247: does not overflow the stack on a deep parentId chain', () => {
+    // A fully wire-controlled deep chain n0 ← n1 ← … would overflow a recursive
+    // descent (RangeError, ~5k deep) inside the Control Room render. The iterative
+    // build must handle it without throwing and still produce the full-depth tree.
+    const N = 20000
+    const entries = Array.from({ length: N }, (_, i) =>
+      entry({ id: `n${i}`, parentId: i === 0 ? undefined : `n${i - 1}` }),
+    )
+    const s = applyActivitySnapshot(createEmptyActivityState(), snapshot('s1', entries))
+
+    let tree: readonly ActivityTreeNode[] = []
+    expect(() => { tree = selectActivityTree(s, 's1') }).not.toThrow()
+
+    // One root, descending the full depth, each entry exactly once and in order.
+    expect(tree).toHaveLength(1)
+    let node: ActivityTreeNode | undefined = tree[0]
+    let depth = 0
+    while (node) {
+      expect(node.entry.id).toBe(`n${depth}`)
+      expect(node.children.length).toBeLessThanOrEqual(1)
+      depth += 1
+      node = node.children[0]
+    }
+    expect(depth).toBe(N)
+  })
 })
 
 describe('selectSessionEntries', () => {
