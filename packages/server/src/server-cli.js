@@ -19,7 +19,7 @@ import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
-import { resolveBindHost, isLoopbackHost } from './bind-host.js'
+import { resolveBindHost, isLoopbackHost, formatHostForUrl } from './bind-host.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
@@ -1020,8 +1020,10 @@ export async function startCliServer(config) {
     const host = isLoopbackHost(bindHost)
       ? 'localhost'
       : (bindHost && bindHost !== '0.0.0.0' ? bindHost : (getLanIp() || 'localhost'))
-    currentWsUrl = `ws://${host}:${PORT}`
-    await displayQr(`ws://${host}:${PORT}`, `http://${host}:${PORT}`, 'none')
+    // Bracket IPv6 literals so the URL authority is well-formed.
+    const authority = `${formatHostForUrl(host)}:${PORT}`
+    currentWsUrl = `ws://${authority}`
+    await displayQr(`ws://${authority}`, `http://${authority}`, 'none')
   } else if (!NO_AUTH) {
     // tunnelArg is set but SKIP_TUNNEL is true due to externalUrl — already handled above
   } else {

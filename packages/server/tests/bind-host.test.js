@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveBindHost, isLoopbackHost } from '../src/bind-host.js'
+import { resolveBindHost, isLoopbackHost, formatHostForUrl } from '../src/bind-host.js'
 
 describe('isLoopbackHost', () => {
   it('treats 127.0.0.1 and the 127.0.0.0/8 range as loopback', () => {
@@ -19,6 +19,17 @@ describe('isLoopbackHost', () => {
     assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
   })
 
+  it('matches localhost case-insensitively', () => {
+    assert.equal(isLoopbackHost('LocalHost'), true)
+    assert.equal(isLoopbackHost('LOCALHOST'), true)
+  })
+
+  it('does not treat a hostname starting with 127. as loopback', () => {
+    // Only valid IPv4 literals in 127.0.0.0/8 count — not arbitrary hostnames.
+    assert.equal(isLoopbackHost('127.example.com'), false)
+    assert.equal(isLoopbackHost('127.0.0.1.nip.io'), false)
+  })
+
   it('does not treat 0.0.0.0, LAN IPs, or undefined as loopback', () => {
     assert.equal(isLoopbackHost('0.0.0.0'), false)
     assert.equal(isLoopbackHost('192.168.1.10'), false)
@@ -26,6 +37,19 @@ describe('isLoopbackHost', () => {
     assert.equal(isLoopbackHost(undefined), false)
     assert.equal(isLoopbackHost(''), false)
     assert.equal(isLoopbackHost(null), false)
+  })
+})
+
+describe('formatHostForUrl', () => {
+  it('brackets IPv6 literals', () => {
+    assert.equal(formatHostForUrl('::1'), '[::1]')
+    assert.equal(formatHostForUrl('fd00::1'), '[fd00::1]')
+  })
+
+  it('leaves IPv4 and hostnames untouched', () => {
+    assert.equal(formatHostForUrl('127.0.0.1'), '127.0.0.1')
+    assert.equal(formatHostForUrl('192.168.1.10'), '192.168.1.10')
+    assert.equal(formatHostForUrl('localhost'), 'localhost')
   })
 })
 

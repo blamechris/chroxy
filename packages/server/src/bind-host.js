@@ -9,20 +9,37 @@
  * want defence-in-depth on top of the bearer token.
  */
 
+import { isIPv4, isIPv6 } from 'node:net'
+
 const LOOPBACK_HOSTS = new Set(['localhost', '::1'])
 
 /**
  * True for any loopback bind address (127.0.0.0/8, ::1, localhost).
+ * Hostname comparison is case-insensitive; the 127.* check applies only to
+ * valid IPv4 literals so a hostname like `127.example.com` is not mistaken
+ * for loopback.
  * @param {*} host
  * @returns {boolean}
  */
 export function isLoopbackHost(host) {
   if (typeof host !== 'string' || host.length === 0) return false
-  if (LOOPBACK_HOSTS.has(host)) return true
-  if (host.startsWith('127.')) return true
+  const h = host.toLowerCase()
+  if (LOOPBACK_HOSTS.has(h)) return true
+  // 127.0.0.0/8, but only for real IPv4 literals.
+  if (isIPv4(h) && h.startsWith('127.')) return true
   // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1.
-  if (host.startsWith('::ffff:127.') || host.startsWith('::ffff:7f')) return true
+  if (h.startsWith('::ffff:127.') || h.startsWith('::ffff:7f')) return true
   return false
+}
+
+/**
+ * Format a host for use in a URL authority — bracketing IPv6 literals so
+ * `ws://[::1]:8765` is well-formed (a bare `ws://::1:8765` is not).
+ * @param {string} host
+ * @returns {string}
+ */
+export function formatHostForUrl(host) {
+  return isIPv6(host) ? `[${host}]` : host
 }
 
 /**
