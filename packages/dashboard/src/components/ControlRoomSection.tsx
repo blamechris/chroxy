@@ -420,15 +420,26 @@ function AheadBehindBadge({ repo }: { repo: RepoStatus }) {
   const ahead = repo.ahead ?? 0
   const behind = repo.behind ?? 0
   if (ahead === 0 && behind === 0) return null
+  // Spell out the divergence for assistive tech instead of leaving it to
+  // announce the raw `↑2`/`↓1` glyphs (mirrors the live-dot's role=img +
+  // aria-label). The glyph spans below are aria-hidden so they aren't read twice.
+  const aheadLabel = ahead > 0 ? `${ahead} commit${ahead === 1 ? '' : 's'} ahead of upstream` : ''
+  const behindLabel = behind > 0 ? `${behind} commit${behind === 1 ? '' : 's'} behind upstream` : ''
+  const ariaLabel = [aheadLabel, behindLabel].filter(Boolean).join(', ')
   return (
-    <span className="cr-aheadbehind" data-testid={`cr-aheadbehind-${repo.name}`}>
+    <span
+      className="cr-aheadbehind"
+      data-testid={`cr-aheadbehind-${repo.name}`}
+      role="img"
+      aria-label={ariaLabel}
+    >
       {ahead > 0 && (
-        <span className="cr-ahead" title={`${ahead} commit${ahead === 1 ? '' : 's'} ahead of upstream`}>
+        <span className="cr-ahead" title={aheadLabel} aria-hidden="true">
           ↑{ahead}
         </span>
       )}
       {behind > 0 && (
-        <span className="cr-behind" title={`${behind} commit${behind === 1 ? '' : 's'} behind upstream`}>
+        <span className="cr-behind" title={behindLabel} aria-hidden="true">
           ↓{behind}
         </span>
       )}
