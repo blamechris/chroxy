@@ -529,6 +529,83 @@ function handleInterrupt(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #5271 (Control Room Phase 2a): cancel a single in-flight activity node
+ * (currently a Task subagent) in a session. Authority mirrors `interrupt` —
+ * acting on your own session, NOT a privilege escalation — so resolveSession's
+ * standard binding check is the only gate: a pairing-bound client may cancel
+ * activity in its OWN bound session but not another's. Whole-turn interruption
+ * stays on the `interrupt` message.
+ *
+ * The session does the work via `cancelActivity(activityId)`, which returns a
+ * structured `{ ok, reason }` (never throws). On success the terminal
+ * `activity_delta` is broadcast through the existing agent_completed → registry
+ * path, so the tree updates live with no extra reply here. Only failures are
+ * surfaced to the caller, as a `session_error` (the same envelope interrupt
+ * uses for binding/stale-id problems).
+ */
+async function handleCancelActivity(ws, client, msg, ctx) {
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    // Disambiguate a binding mismatch from a truly-missing session, exactly as
+    // handleInterrupt/handleInput do (Copilot review #4979) — a bound client
+    // aiming at another session must see SESSION_TOKEN_MISMATCH, not a stale-id
+    // drop.
+    if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
+      log.info(`cancel_activity rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
+      ctx.send(ws, {
+        type: 'session_error',
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessionManager,
+          boundSessionId: client.boundSessionId,
+        }),
+      })
+      return
+    }
+    const sid = msg.sessionId || client.activeSessionId
+    log.info(`cancel_activity dropped: session not found sessionId=${sid} client=${client.id}`)
+    ctx.send(ws, {
+      type: 'session_error',
+      code: 'SESSION_NOT_FOUND',
+      message: `Session not found: ${sid}`,
+      attemptedSessionId: sid,
+    })
+    return
+  }
+
+  const session = entry.session
+  if (typeof session.cancelActivity !== 'function') {
+    // Defensive: every BaseSession defines it (defaulting to not-supported),
+    // but guard so a provider that somehow lacks it can't crash the handler.
+    ctx.send(ws, {
+      type: 'session_error',
+      code: 'CANCEL_ACTIVITY_FAILED',
+      message: 'This session does not support cancelling activity',
+      reason: 'not-supported',
+      activityId: msg.activityId,
+    })
+    return
+  }
+
+  const result = await session.cancelActivity(msg.activityId)
+  if (!result || result.ok !== true) {
+    const reason = (result && result.reason) || 'unknown'
+    log.info(`cancel_activity ${msg.activityId} not actioned (${reason}) client=${client.id}`)
+    ctx.send(ws, {
+      type: 'session_error',
+      code: 'CANCEL_ACTIVITY_FAILED',
+      message: `Could not cancel activity: ${reason}`,
+      reason,
+      activityId: msg.activityId,
+    })
+    return
+  }
+  // Success: the node's terminal activity_delta is broadcast via the session's
+  // agent_completed → registry path; no extra reply needed (mirrors interrupt,
+  // which also acks via the resulting stream change, not a dedicated message).
+  log.info(`cancel_activity ${msg.activityId} actioned by ${client.id}`)
+}
+
 function handleResumeBudget(ws, client, msg, ctx) {
   const budgetSessionId = msg.sessionId || client.activeSessionId
   if (!budgetSessionId || !resolveSession(ctx, msg, client)) {
@@ -742,6 +819,7 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
 export const inputHandlers = {
   input: handleInput,
   interrupt: handleInterrupt,
+  cancel_activity: handleCancelActivity,
   resume_budget: handleResumeBudget,
   register_push_token: handleRegisterPushToken,
   notification_prefs_get: handleNotificationPrefsGet,
