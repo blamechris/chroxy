@@ -784,6 +784,16 @@ export const HostStatusRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #5253: Control Room — request a self-hosted runner status survey. The server
+// scans the runner-install root, probes each runner's service, optionally
+// enriches via `gh`, and replies with a single `runner_status_snapshot` (see
+// server.ts). Pull-on-Refresh, same as `host_status_request`. The optional
+// `requestId` lets the dashboard correlate a Refresh click to its snapshot.
+export const RunnerStatusRequestSchema = z.object({
+  type: z.literal('runner_status_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
@@ -871,6 +881,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   GetEnvironmentSchema,
   EvaluateDraftSchema,
   HostStatusRequestSchema,
+  RunnerStatusRequestSchema,
 ])
 
 // -- Inferred TypeScript types --
@@ -885,5 +896,6 @@ export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>
 export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>
+export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>

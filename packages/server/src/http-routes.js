@@ -623,7 +623,7 @@ export function createHttpHandler(server) {
       const distDir = existsSync(workspaceDist) ? workspaceDist : bundleDist
       if (!existsSync(distDir) && !createHttpHandler._distMissWarned) {
         createHttpHandler._distMissWarned = true
-        log.warn(`Dashboard dist directory not found: ${distDir} — run "npm run dashboard:build"`)
+        log.warn(`Dashboard dist directory not found: ${distDir} — run "npm run build -w @chroxy/dashboard"`)
       }
       const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
 
@@ -675,7 +675,7 @@ export function createHttpHandler(server) {
         res.end(html)
       } else {
         res.writeHead(404)
-        res.end('Dashboard not built. Run: npm run dashboard:build')
+        res.end('Dashboard not built. Run: npm run build -w @chroxy/dashboard')
       }
       return
     }

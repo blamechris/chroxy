@@ -129,7 +129,7 @@ Mindset: "Will this code work reliably over a cellular connection through a tunn
 - **Run:** `cd packages/server && node tests/smoke-test.mjs [--headed]`
 - **Screenshots:** `packages/server/tests/screenshots/` (gitignored)
 - **Requires:** `playwright` as dev dependency, Chromium installed via `npx playwright install chromium`
-- **Rebuild dashboard before testing:** `cd packages/server && npm run dashboard:build`
+- **Rebuild dashboard before testing:** `npm run build -w @chroxy/dashboard`
 
 ### Test Categories
 
@@ -181,8 +181,7 @@ Any PR touching dashboard source files, React components, CSS, or theme files tr
 
 #### UI Rebuild Command
 ```bash
-cd packages/server
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run dashboard:build
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run build -w @chroxy/dashboard
 ```
 Dashboard serves compiled Vite bundles — source changes are NOT visible without rebuild.
 

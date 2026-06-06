@@ -71,9 +71,23 @@ export type {
   ServerHostStatusSnapshotMessage,
 } from './schemas/server.ts'
 
+// #5253: pin the self-hosted runner status contract at the entry point too, so
+// the dashboard panel + store import `RepoRunners` / `RunnerInfo` /
+// `ServerRunnerStatusSnapshotMessage` as a stable public contract.
+export type {
+  RunnerVerdict,
+  RunnerServiceState,
+  RunnerInfo,
+  RepoRunners,
+  RunnerStatusSummary,
+  ServerRunnerStatusSnapshotMessage,
+} from './schemas/server.ts'
+
 // #5171: the client→server request type is pinned at the entry point too so
 // consumers can import the alias without reaching into `./schemas/client.ts`.
 export type { HostStatusRequestMessage } from './schemas/client.ts'
+// #5253: runner survey request alias.
+export type { RunnerStatusRequestMessage } from './schemas/client.ts'
 
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'

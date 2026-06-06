@@ -562,3 +562,42 @@ describe('surveyRepos — concurrency cap', () => {
     assert.ok(maxInFlight <= 3 * 7, `maxInFlight=${maxInFlight}`)
   })
 })
+
+describe('survey probes — exec robustness (#5240/#5241)', () => {
+  // Wrap makeExec to capture every (file, args, opts) call while still returning
+  // clean-repo output.
+  function capturingExec(repoMap) {
+    const calls = []
+    const base = makeExec(repoMap)
+    const fn = async (file, args, opts) => {
+      calls.push({ file, args, opts })
+      return base(file, args, opts)
+    }
+    return { fn, calls }
+  }
+
+  it('#5240: gh pr list is invoked with an explicit --limit (not the silent 30 default)', async () => {
+    const repo = '/r'
+    const { fn, calls } = capturingExec({ [repo]: cleanRepo() })
+    await surveyRepos([repo], { _execFile: fn, _now: now, _readFile: async () => { throw new Error() } })
+    const ghCall = calls.find((c) => c.file === 'gh' && c.args[0] === 'pr' && c.args[1] === 'list')
+    assert.ok(ghCall, 'gh pr list was invoked')
+    const li = ghCall.args.indexOf('--limit')
+    assert.ok(li !== -1, `gh pr list missing --limit; args: ${JSON.stringify(ghCall.args)}`)
+    assert.ok(Number(ghCall.args[li + 1]) >= 100, `--limit should be a high cap, got ${ghCall.args[li + 1]}`)
+  })
+
+  it('#5241: every git/gh probe passes a maxBuffer well above Node\'s 1MB default', async () => {
+    const repo = '/r'
+    const { fn, calls } = capturingExec({ [repo]: cleanRepo() })
+    await surveyRepos([repo], { _execFile: fn, _now: now, _readFile: async () => { throw new Error() } })
+    const probeCalls = calls.filter((c) => c.file === 'git' || c.file === 'gh')
+    assert.ok(probeCalls.length > 0, 'at least one probe ran')
+    for (const c of probeCalls) {
+      assert.ok(
+        c.opts && typeof c.opts.maxBuffer === 'number' && c.opts.maxBuffer > 1024 * 1024,
+        `probe \`${c.file} ${c.args[0]}\` must pass maxBuffer > 1MB (got ${c.opts && c.opts.maxBuffer})`,
+      )
+    }
+  })
+})

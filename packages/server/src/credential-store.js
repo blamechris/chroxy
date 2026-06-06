@@ -46,6 +46,7 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { maskApiKey } from './byok-credentials.js'
 import * as realKeychain from './keychain.js'
+import { createLogger } from './logger.js'
 import {
   CRED_KEY_SERVICE,
   isEncryptedEnvelope,
@@ -53,11 +54,48 @@ import {
   encryptJson,
   getMasterKey,
   getOrCreateMasterKey,
+  rotateMasterKey,
+  setMasterKey,
 } from './credential-cipher.js'
 
 // A keychain stub that reports "no keychain here" — selects the plaintext
 // fallback path.
 const NO_KEYCHAIN = { isKeychainAvailable: () => false }
+
+// #5242: logger for the recoverable encrypted-but-keychain-unavailable warning.
+// Injectable for tests. Credentials are NEVER passed to it — only the key NAME
+// and the fact of the failure (the logger.js redactor scrubs sk-ant/Bearer too).
+let _log = createLogger('credentials')
+export function _setCredentialLoggerForTests(logger) {
+  _log = logger || createLogger('credentials')
+}
+
+// #5242: keys we've already warned about, so the spawn path (which calls
+// resolveCredential on every child launch) warns once per key, not per spawn.
+const _keychainUnavailableWarned = new Set()
+export function _resetKeychainWarningsForTests() {
+  _keychainUnavailableWarned.clear()
+}
+
+/**
+ * #5242: emit a one-time warning that an ENCRYPTED credential exists on disk but
+ * its keychain data key is currently unavailable (locked keychain, transient
+ * `security`/`secret-tool` failure, denied/timed-out unlock prompt) — a
+ * RECOVERABLE condition distinct from a corrupt/bad-mode file. Without this, the
+ * spawn path (resolveCredential → buildSpawnEnv) silently launches a subprocess
+ * provider unauthenticated despite a valid credential on disk. The warning makes
+ * that observable; the value is never logged.
+ *
+ * @param {string} key
+ */
+function warnKeychainUnavailableOnce(key) {
+  if (_keychainUnavailableWarned.has(key)) return
+  _keychainUnavailableWarned.add(key)
+  _log.warn(
+    `${key} is stored (encrypted) but its OS keychain data key is currently unavailable — resolving as unset. ` +
+    `A spawned child may launch unauthenticated. Unlock the OS keychain (or re-store the credential) and retry.`,
+  )
+}
 
 // Explicit test injection (an in-memory keychain), or null to use the resolved
 // default. Takes precedence over the env escape hatch below.
@@ -204,21 +242,53 @@ function readStore() {
   if (isEncryptedEnvelope(parsed)) {
     const key = getMasterKey(activeKeychain())
     if (!key) {
+      // #5242: the RECOVERABLE case — the envelope is intact but the keychain
+      // data key can't be fetched (locked keychain, transient probe failure).
+      // `keychainUnavailable` distinguishes it from a decrypt-throw corruption
+      // below so the spawn-path warning only fires for this recoverable branch.
       return {
         data: {},
         fileExists: true,
         error: `${file} is encrypted but its decryption key is unavailable (OS keychain service "${CRED_KEY_SERVICE}" missing or unreadable)`,
         encrypted: true,
+        keychainUnavailable: true,
       }
     }
     try {
       return { data: decryptEnvelope(parsed, key), fileExists: true, error: null, encrypted: true }
     } catch (err) {
+      // The data key was present but decryption failed — a corrupt/invalid
+      // envelope, NOT a keychain-availability problem. No keychainUnavailable
+      // flag, so this does not trigger the keychain-unavailable warning.
       return { data: {}, fileExists: true, error: `${file} could not be decrypted: ${err.message}`, encrypted: true }
     }
   }
 
   return { data: parsed, fileExists: true, error: null, encrypted: false }
+}
+
+/**
+ * Atomically move `tmp` over `target`.
+ *
+ * #5243: relies on `renameSync`'s atomic replace — on win32 Node's
+ * `fs.renameSync` uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING |
+ * MOVEFILE_WRITE_THROUGH` since v16 (see platform.js), so it already replaces an
+ * existing target without a separate delete. The previous win32 path
+ * `unlinkSync(target)` immediately BEFORE the rename — a crash in that window
+ * left no `credentials.json` at all (the live file deleted, the replacement
+ * never moved in). We now never pre-delete the live file; this matches the
+ * sibling `writeFileRestricted` (platform.js), which goes straight from
+ * `writeFileSync(tmp)` to `renameSync`.
+ *
+ * fs ops are injectable for testing (defaults are the real fs calls).
+ *
+ * @param {string} tmp - source temp path.
+ * @param {string} target - destination path.
+ * @param {{ rename?: Function }} [deps]
+ */
+export function replaceFileAtomically(tmp, target, deps = {}) {
+  const { rename = renameSync } = deps
+  rename(tmp, target)
 }
 
 /**
@@ -237,10 +307,8 @@ function writeStoreAtomically(target, nextObj) {
   try {
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 })
     if (process.platform !== 'win32') chmodSync(tmp, 0o600)
-    if (process.platform === 'win32' && existsSync(target)) {
-      try { unlinkSync(target) } catch { /* */ }
-    }
-    renameSync(tmp, target)
+    // #5243: atomic replace — never unlink the live target first.
+    replaceFileAtomically(tmp, target)
     renamed = true
     if (process.platform !== 'win32') {
       const perms = statSync(target).mode & 0o777
@@ -266,8 +334,17 @@ function writeStoreAtomically(target, nextObj) {
  */
 export function getStoredCredential(key) {
   if (!isKnownCredentialKey(key)) return null
-  const { data, error } = readStore()
-  if (error) return null
+  const { data, error, keychainUnavailable } = readStore()
+  if (error) {
+    // #5242: a read error with `keychainUnavailable: true` is the RECOVERABLE
+    // case — an intact encrypted envelope whose keychain data key can't be
+    // fetched right now. Emit a one-time warning so a silent unauthenticated
+    // spawn is observable. Other read errors (bad mode/JSON, or a corrupt
+    // envelope that fails to decrypt) are already surfaced via
+    // getCredentialsStatus.fileError and are NOT the recoverable case.
+    if (keychainUnavailable) warnKeychainUnavailableOnce(key)
+    return null
+  }
   const canonical = data[key]
   if (typeof canonical === 'string' && canonical.length > 0) return canonical
   const legacyField = LEGACY_FIELD_BY_KEY[key]
@@ -408,6 +485,85 @@ export function maybeEncryptCredentialsAtRest({ log } = {}) {
   } catch (err) {
     if (log) log.warn(`Credentials at-rest encryption failed: ${err.message}`)
     return { migrated: false, reason: 'write-error' }
+  }
+}
+
+/**
+ * #5229 — rotate the at-rest credential data key. Generates a fresh keychain
+ * data key, re-encrypts the existing store under it, and atomically replaces
+ * credentials.json (temp → chmod 0600 → rename, via writeStoreAtomically). The
+ * single keychain entry (service `chroxy-cred-key`) is overwritten in place, so
+ * no stale key is left dangling.
+ *
+ * Crash-safety: the keychain rotation and the re-encrypting atomic write share a
+ * single try/catch failure domain. If either throws (disk full, permission, OS
+ * keychain write failure, mode re-check), the keychain is rolled back to the
+ * prior key (or deleted, if the store had been plaintext) so the existing on-disk
+ * envelope stays decryptable.
+ *
+ * One narrow exception to "envelope stays decryptable": writeStoreAtomically does
+ * a post-rename 0600 mode re-check, and on failure it unlinks the just-renamed
+ * target before throwing. In that single case the rollback restores the old key
+ * but there is no longer a file to decrypt — the new envelope was already removed.
+ * This is a defensive last resort (the file landed with unexpected perms, which
+ * shouldn't happen given the temp file is created mode 0600); the secrets remain
+ * recoverable from the provider, and the operator can re-run rekey/migrate.
+ *
+ * The only other unrecoverable window is a hard process crash between the keychain
+ * swap and the file rename — unavoidable without a second key slot, and
+ * vanishingly small.
+ *
+ * No-op (with a reason) when: no keychain is available (nowhere to hold a key),
+ * the file is missing, the store can't be safely read (bad mode / corrupt /
+ * undecryptable), or the store is empty.
+ *
+ * @param {{ log?: { info: Function, warn: Function } }} [opts]
+ * @returns {{ rekeyed: boolean, reason: string }}
+ */
+export function rekeyCredentialStore({ log } = {}) {
+  const file = credentialsFilePath()
+  const keychain = activeKeychain()
+
+  if (!keychain.isKeychainAvailable()) {
+    if (log) log.warn('Credential rekey skipped — no OS keychain available to hold a data key')
+    return { rekeyed: false, reason: 'no-keychain' }
+  }
+  if (!existsSync(file)) return { rekeyed: false, reason: 'no-file' }
+
+  // Decrypt the current store up front: a read error (bad mode / corrupt /
+  // undecryptable) must abort BEFORE we touch the keychain, so we never strand
+  // a readable store behind a rotated key.
+  const { data, error } = readStore()
+  if (error) {
+    if (log) log.warn(`Credential rekey skipped: ${error}`)
+    return { rekeyed: false, reason: 'read-error' }
+  }
+  if (Object.keys(data).length === 0) return { rekeyed: false, reason: 'empty' }
+
+  // Capture the prior key for rollback (null when the store was plaintext).
+  const previousKey = getMasterKey(keychain)
+  // Treat the keychain rotation AND the re-encrypting file write as one failure
+  // domain: if EITHER throws we roll the keychain back to previousKey so the
+  // still-on-disk envelope stays decryptable. rotateMasterKey lives inside the
+  // try because its keychain write can throw (e.g. execFileSync to the OS
+  // keychain fails) and a partially-applied rotation would otherwise strand the
+  // existing envelope behind an uncaught error.
+  try {
+    rotateMasterKey(keychain) // keychain now holds the new key
+    writeStoreAtomically(file, data) // getOrCreateMasterKey → encrypts under the new key
+    if (log) log.info('Rotated the credential data key and re-encrypted credentials.json')
+    return { rekeyed: true, reason: 'rekeyed' }
+  } catch (err) {
+    // Roll the keychain back so the still-on-disk envelope stays decryptable.
+    // Best-effort: if rollback itself throws, surface the original error reason
+    // rather than masking it with a secondary keychain failure.
+    try {
+      setMasterKey(previousKey, keychain)
+    } catch (rollbackErr) {
+      if (log) log.warn(`Credential rekey rollback failed: ${rollbackErr.message}`)
+    }
+    if (log) log.warn(`Credential rekey failed: ${err.message}`)
+    return { rekeyed: false, reason: 'write-error' }
   }
 }
 

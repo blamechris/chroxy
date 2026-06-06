@@ -20,6 +20,7 @@ import { registerServiceCommand } from './cli/service-cmd.js'
 import { registerUpdateCommand } from './cli/update-cmd.js'
 import { registerStatusCommand } from './cli/status-cmd.js'
 import { registerWorktreeCommand } from './cli/worktree-gc-cmd.js'
+import { registerCredentialsCommand } from './cli/credentials-cmd.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../package.json')
@@ -42,5 +43,6 @@ registerServiceCommand(program)
 registerUpdateCommand(program)
 registerStatusCommand(program)
 registerWorktreeCommand(program)
+registerCredentialsCommand(program)
 
 program.parse()

@@ -2348,5 +2348,124 @@ describe('@chroxy/protocol schemas', () => {
         assert.equal(result.data.type, 'host_status_request')
       })
     })
+
+    // #5253: self-hosted runner status contract.
+    describe('runner status (#5253)', () => {
+      const service = { manager: 'launchd', label: 'actions.runner.o-r.n', running: true, pid: 1778, lastExitCode: 0 }
+      const runner = {
+        name: 'medlens-mac-arm64',
+        dir: '/Users/dev/github-runners/actions-runner-medlens',
+        verdict: 'idle',
+        service,
+        githubStatus: 'online',
+        busy: false,
+        os: 'macOS',
+        labels: ['self-hosted', 'macOS', 'ARM64'],
+      }
+      const repoRunners = {
+        name: 'medlens',
+        owner: 'blamechris',
+        repo: 'medlens',
+        githubUrl: 'https://github.com/blamechris/medlens',
+        runnersUrl: 'https://github.com/blamechris/medlens/settings/actions/runners',
+        runners: [runner],
+      }
+      const snapshot = {
+        type: 'runner_status_snapshot',
+        generatedAt: '2026-06-06T12:00:00.000Z',
+        root: '/Users/dev/github-runners',
+        summary: { total: 1, busy: 0, idle: 1, offline: 0, stopped: 0, unregistered: 0 },
+        repos: [repoRunners],
+      }
+
+      it('accepts every runner verdict and rejects an unknown one', async () => {
+        const { RunnerVerdictSchema } = await import('../src/schemas/server.ts')
+        for (const v of ['busy', 'idle', 'offline', 'stopped', 'unregistered']) {
+          assert.ok(RunnerVerdictSchema.safeParse(v).success, `should accept ${v}`)
+        }
+        assert.ok(!RunnerVerdictSchema.safeParse('dead').success)
+      })
+
+      it('RunnerServiceStateSchema accepts running and stopped shapes', async () => {
+        const { RunnerServiceStateSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RunnerServiceStateSchema.safeParse(service).success)
+        assert.ok(RunnerServiceStateSchema.safeParse({ manager: 'none', label: null, running: false, pid: null, lastExitCode: null }).success)
+        // lastExitCode may be negative (signal-style) — only pid is non-negative.
+        assert.ok(RunnerServiceStateSchema.safeParse({ ...service, running: false, pid: null, lastExitCode: -15 }).success)
+        assert.ok(!RunnerServiceStateSchema.safeParse({ ...service, pid: -1 }).success)
+        assert.ok(!RunnerServiceStateSchema.safeParse({ ...service, manager: 'upstart' }).success)
+      })
+
+      it('RunnerInfoSchema round-trips and enforces null vs value semantics', async () => {
+        const { RunnerInfoSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RunnerInfoSchema.safeParse(runner).success)
+        // GitHub view unavailable → null, not a guess.
+        assert.ok(RunnerInfoSchema.safeParse({ ...runner, githubStatus: null, busy: null, os: null }).success)
+        // labels must be an array, never null.
+        assert.ok(!RunnerInfoSchema.safeParse({ ...runner, labels: null }).success)
+        assert.ok(!RunnerInfoSchema.safeParse({ ...runner, githubStatus: 'busy' }).success)
+      })
+
+      it('RepoRunnersSchema constrains runnersUrl to the settings shape', async () => {
+        const { RepoRunnersSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RepoRunnersSchema.safeParse(repoRunners).success)
+        assert.ok(RepoRunnersSchema.safeParse({ ...repoRunners, runnersUrl: 'https://github.com/organizations/acme/settings/actions/runners', repo: null }).success)
+        assert.ok(RepoRunnersSchema.safeParse({ ...repoRunners, runnersUrl: null }).success)
+        for (const bad of [
+          'javascript:alert(1)',
+          'https://evil.com/o/r/settings/actions/runners',
+          'https://github.com/o/r/pulls',
+          'http://github.com/o/r/settings/actions/runners',
+        ]) {
+          assert.ok(!RepoRunnersSchema.safeParse({ ...repoRunners, runnersUrl: bad }).success, `should reject ${bad}`)
+        }
+      })
+
+      it('ServerRunnerStatusSnapshotSchema round-trips a full snapshot', async () => {
+        const { ServerRunnerStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerRunnerStatusSnapshotSchema.safeParse(snapshot)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.repos[0].runners[0].name, 'medlens-mac-arm64')
+        assert.equal(result.data.summary.idle, 1)
+      })
+
+      it('ServerRunnerStatusSnapshotSchema accepts an empty repos array', async () => {
+        const { ServerRunnerStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        assert.ok(ServerRunnerStatusSnapshotSchema.safeParse({
+          ...snapshot,
+          repos: [],
+          summary: { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 },
+        }).success)
+      })
+
+      it('ServerRunnerStatusSnapshotSchema rejects the wrong type + an invalid nested runner', async () => {
+        const { ServerRunnerStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!ServerRunnerStatusSnapshotSchema.safeParse({ ...snapshot, type: 'runner_status' }).success)
+        assert.ok(!ServerRunnerStatusSnapshotSchema.safeParse({
+          ...snapshot,
+          repos: [{ ...repoRunners, runners: [{ ...runner, verdict: 'dead' }] }],
+        }).success)
+      })
+
+      it('RunnerStatusRequestSchema validates + is accepted by the client union', async () => {
+        const { RunnerStatusRequestSchema, ClientMessageSchema } = await import('../src/schemas/client.ts')
+        assert.ok(RunnerStatusRequestSchema.safeParse({ type: 'runner_status_request' }).success)
+        assert.ok(RunnerStatusRequestSchema.safeParse({ type: 'runner_status_request', requestId: 'r1' }).success)
+        assert.ok(!RunnerStatusRequestSchema.safeParse({ type: 'runner_status_request', requestId: 'x'.repeat(129) }).success)
+        const u = ClientMessageSchema.safeParse({ type: 'runner_status_request', requestId: 'r2' })
+        assert.ok(u.success, JSON.stringify(u.error?.issues))
+        assert.equal(u.data.type, 'runner_status_request')
+      })
+
+      it('pins the runner contract at the package entry point', async () => {
+        const mod = await import('../src/index.ts')
+        // Types are erased at runtime; assert the runtime schemas are reachable
+        // from the schemas entry point (the type re-exports are checked by tsc).
+        const schemas = await import('../src/schemas/index.ts')
+        assert.ok(schemas.ServerRunnerStatusSnapshotSchema)
+        assert.ok(schemas.RunnerStatusRequestSchema)
+        assert.ok(mod.ClientMessageSchema)
+      })
+    })
   })
 })

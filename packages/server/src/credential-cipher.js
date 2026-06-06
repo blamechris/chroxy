@@ -88,6 +88,38 @@ export function getOrCreateMasterKey(keychain = realKeychain) {
 }
 
 /**
+ * #5229 — generate a FRESH data key, persist it to the keychain (replacing any
+ * existing `chroxy-cred-key` entry), and return it as a 32-byte Uint8Array.
+ * Returns null when no keychain is available. Unlike getOrCreateMasterKey this
+ * always mints a new key — callers use it to rotate, and are responsible for
+ * re-encrypting the store under the returned key (and for rolling back via
+ * setMasterKey if that write fails).
+ */
+export function rotateMasterKey(keychain = realKeychain) {
+  if (!keychain.isKeychainAvailable()) return null
+  const key = randomBytes(KEY_BYTES)
+  keychain.setToken(Buffer.from(key).toString('base64'), CRED_KEY_SERVICE)
+  return new Uint8Array(key)
+}
+
+/**
+ * #5229 — restore a specific data key to the keychain (the rekey rollback seam).
+ * Pass a 32-byte Uint8Array to set it, or null to delete the entry entirely
+ * (used when the store had no prior key — i.e. was plaintext — before a failed
+ * rotation). Throws on a wrong-length key.
+ */
+export function setMasterKey(key, keychain = realKeychain) {
+  if (key == null) {
+    keychain.deleteToken(CRED_KEY_SERVICE)
+    return
+  }
+  if (!(key instanceof Uint8Array) || key.length !== KEY_BYTES) {
+    throw new Error('credential cipher: key must be a 32-byte Uint8Array')
+  }
+  keychain.setToken(Buffer.from(key).toString('base64'), CRED_KEY_SERVICE)
+}
+
+/**
  * Encrypt a plain JS object into an envelope using `key` (32-byte Uint8Array).
  * Pure: a fresh random nonce each call. Throws on a bad key length.
  */

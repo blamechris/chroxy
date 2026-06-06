@@ -35,6 +35,21 @@ import { resolveRepoSet } from './repo-set.js'
 
 const execFileAsync = promisify(execFile)
 
+/**
+ * stdout cap for every git/gh probe (#5241). Node's execFile default is 1 MB,
+ * and overflow REJECTS — which `tryExec` turns into `null`, mislabelling a real
+ * repo with a large dirty/untracked tree (>1 MB of `git status --porcelain`) as
+ * "not a git repo". 16 MB is far beyond any realistic porcelain output.
+ */
+const EXEC_MAX_BUFFER = 16 * 1024 * 1024
+
+/**
+ * Cap for `gh pr list` (#5240). `gh pr list` defaults to 30, silently capping
+ * the open-PR count AND the CI/review rollup. 200 covers even bot-heavy repos;
+ * a repo past it is undercounted, but far less often than at the 30 default.
+ */
+const GH_PR_LIST_LIMIT = 200
+
 /** Default concurrency cap for per-repo surveys. */
 export const DEFAULT_CONCURRENCY = 5
 
@@ -65,7 +80,7 @@ export const DEFAULT_THRESHOLDS = {
  */
 async function tryExec(execFn, file, args, cwd) {
   try {
-    const { stdout } = await execFn(file, args, { cwd })
+    const { stdout } = await execFn(file, args, { cwd, maxBuffer: EXEC_MAX_BUFFER })
     return typeof stdout === 'string' ? stdout.trim() : ''
   } catch {
     return null
@@ -424,7 +439,8 @@ async function surveyOne(repo, ctx) {
       // origin remote → GitHub PRs URL (null for a non-GitHub / missing remote).
       tryExec(execFn, 'git', ['remote', 'get-url', 'origin'], cwd),
       // One gh call serves both the open-PR count and the CI/review rollup.
-      tryExec(execFn, 'gh', ['pr', 'list', '--json', 'number,reviewDecision,statusCheckRollup'], cwd),
+      // `--limit` is explicit: gh defaults to 30, which would silently cap both.
+      tryExec(execFn, 'gh', ['pr', 'list', '--limit', String(GH_PR_LIST_LIMIT), '--json', 'number,reviewDecision,statusCheckRollup'], cwd),
       readSettings(readFn, repo.path),
     ])
 

@@ -300,16 +300,41 @@ export function selectActivityTree(state: ActivityState, sessionId: string): rea
   // cycle (every member has a known parent, so none is a root) would otherwise
   // be unreachable — after the root walk we promote each still-unvisited entry
   // to its own root so EVERY entry appears exactly once.
+  // Iterative (explicit-stack) DFS rather than recursion: a pathological deep
+  // parentId chain (n0 ← n1 ← n2 ← …) is fully wire-controlled and would overflow
+  // the JS call stack with a recursive descent, throwing RangeError inside the
+  // Control Room render that calls this directly (#5248). The heap-backed stack
+  // removes that ceiling. Output is identical to the former recursion: nodes are
+  // emitted in pre-order visitation order, children in bucket (first-seen) order,
+  // every entry visited exactly once; `visited` still breaks cycles (a child
+  // already on the walk is skipped).
   const visited = new Set<string>()
-  function build(entry: ActivityEntry): ActivityTreeNode {
-    visited.add(entry.id)
-    const kids = childrenByParent.get(entry.id) ?? []
-    const children: ActivityTreeNode[] = []
-    for (const kid of kids) {
+  // Post-order build: each frame collects its children into a mutable array and
+  // only constructs the (readonly-`children`) node when its subtree is fully
+  // drained, appending it to its parent's collector. Children end up in kids
+  // (first-seen) order, every entry visited once, cycles broken by `visited`.
+  type Frame = { entry: ActivityEntry; kids: readonly ActivityEntry[]; i: number; children: ActivityTreeNode[] }
+  function build(rootEntry: ActivityEntry): ActivityTreeNode {
+    visited.add(rootEntry.id)
+    const stack: Frame[] = [
+      { entry: rootEntry, kids: childrenByParent.get(rootEntry.id) ?? [], i: 0, children: [] },
+    ]
+    for (;;) {
+      const frame = stack[stack.length - 1]!
+      if (frame.i >= frame.kids.length) {
+        stack.pop()
+        const node: ActivityTreeNode = { entry: frame.entry, children: frame.children }
+        const parent = stack[stack.length - 1]
+        if (parent === undefined) return node // root frame finished
+        parent.children.push(node)
+        continue
+      }
+      const kid = frame.kids[frame.i]!
+      frame.i += 1
       if (visited.has(kid.id)) continue
-      children.push(build(kid))
+      visited.add(kid.id)
+      stack.push({ entry: kid, kids: childrenByParent.get(kid.id) ?? [], i: 0, children: [] })
     }
-    return { entry, children }
   }
 
   const result = roots.map((entry) => build(entry))

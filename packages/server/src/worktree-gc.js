@@ -9,7 +9,10 @@
 //
 // Safety contract (do NOT relax — these are the guardrails from #5158):
 //   - Never `git worktree remove --force`. A worktree with uncommitted /
-//     untracked changes is preserved (skipped), never deleted.
+//     untracked / gitignored content is preserved (skipped), never deleted —
+//     `git worktree remove` (no --force) still deletes the whole directory
+//     INCLUDING gitignored files (node_modules, build/, a local .env), so the
+//     clean check counts ignored entries as not-clean (#5244).
 //   - Only auto-unlock locks held by a VERIFIED-DEAD pid. A live pid, or a
 //     lock whose reason has no parseable pid, is skipped (could be the user's
 //     own deliberate lock).
@@ -176,7 +179,7 @@ export function planRepoGc(repoPath, deps = {}) {
         return
       }
       if (!clean) {
-        items.push({ path: e.path, action: 'skip', skipReason: 'has uncommitted/untracked changes (preserved)', pid, lockReason: reason })
+        items.push({ path: e.path, action: 'skip', skipReason: 'has uncommitted/untracked/gitignored content (preserved)', pid, lockReason: reason })
         return
       }
       items.push({ path: e.path, action: 'remove', pid, lockReason: reason, reason: 'clean worktree locked by dead pid', locked: true })
@@ -194,10 +197,18 @@ export function planRepoGc(repoPath, deps = {}) {
   return { repo: repoPath, items }
 }
 
-/** `git -C <worktree> status --porcelain` → clean? null when it can't be run. */
+/**
+ * `git -C <worktree> status --porcelain --ignored` → clean? null when it can't
+ * be run. The `--ignored` flag is load-bearing (#5244): `git worktree remove`
+ * (run here WITHOUT --force) deletes the entire worktree directory including
+ * gitignored content — node_modules, build artifacts, a local `.env` — so a
+ * worktree that reads clean by tracked status alone can still hold precious
+ * un-versioned files. Treating any ignored entry (`!! ...`) as not-clean keeps
+ * such worktrees in the skip set instead of silently deleting their contents.
+ */
 function isClean(git, worktreePath) {
   try {
-    return git(worktreePath, ['status', '--porcelain']).trim().length === 0
+    return git(worktreePath, ['status', '--porcelain', '--ignored']).trim().length === 0
   } catch {
     return null
   }
@@ -262,12 +273,38 @@ export function applyPlan(repoPath, plan, deps = {}) {
     } catch (err) {
       pruneError = (err && err.message) || String(err)
     }
+
+    // #5246: verify per-entry that prune actually reclaimed the worktree. The
+    // plan classifies an unlocked worktree as 'prune' when `dirGone` is true,
+    // and `dirGone` includes `!exists(e.path)` — but `existsSync` returns false
+    // on ANY stat error (an unmounted/temporarily-unavailable mount, a TOCTOU
+    // race), not only genuine absence. `git worktree prune` correctly leaves a
+    // still-present worktree intact, so reporting ok:true off the back of the
+    // single global prune would over-count reclamations. Re-list the worktrees
+    // and only claim success for items whose admin ref is genuinely gone.
+    let remaining = null
+    if (!pruneError) {
+      try {
+        remaining = new Set(parseWorktreeList(git(repoPath, ['worktree', 'list', '--porcelain'])).map(e => e.path))
+      } catch {
+        // Can't verify — fall back to best-effort (the prune call succeeded).
+        remaining = null
+      }
+    }
+
     for (const item of pruneItems) {
       const unlockErr = unlockErrors.get(item.path)
       if (unlockErr) {
         results.push({ path: item.path, action: 'prune', ok: false, error: `unlock failed (entry still locked): ${unlockErr}` })
       } else if (pruneError) {
         results.push({ path: item.path, action: 'prune', ok: false, error: pruneError })
+      } else if (remaining && remaining.has(item.path)) {
+        results.push({
+          path: item.path,
+          action: 'prune',
+          ok: false,
+          error: 'still present after prune (not reclaimed) — a transient stat failure likely misclassified a present worktree as dir-gone',
+        })
       } else {
         results.push({ path: item.path, action: 'prune', ok: true })
       }

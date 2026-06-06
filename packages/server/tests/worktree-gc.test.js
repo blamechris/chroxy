@@ -11,7 +11,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { GIT } from '../src/git.js'
@@ -110,10 +110,22 @@ describe('worktree-gc unit: parseWorktreeList', () => {
 describe('worktree-gc integration (real git repo)', () => {
   let repo
 
-  function addWorktree(name, { lockReason, dirty } = {}) {
+  function addWorktree(name, { lockReason, dirty, ignored } = {}) {
     const wtPath = join(repo, '.claude', 'worktrees', name)
     git(repo, ['worktree', 'add', '--detach', wtPath, 'HEAD'])
     if (dirty) writeFileSync(join(wtPath, 'scratch.txt'), 'uncommitted work')
+    if (ignored) {
+      // A worktree whose ONLY non-tracked content is gitignored: clean to
+      // `git status --porcelain`, but `git worktree remove` (no --force) would
+      // still delete the whole dir incl. these files (#5244). Commit the
+      // .gitignore so the only non-clean signal is the ignored entries.
+      writeFileSync(join(wtPath, '.gitignore'), 'node_modules/\n.env.local\n')
+      git(wtPath, ['add', '.gitignore'])
+      git(wtPath, ['commit', '-m', 'add gitignore'])
+      mkdirSync(join(wtPath, 'node_modules'), { recursive: true })
+      writeFileSync(join(wtPath, 'node_modules', '.env.local'), 'PRECIOUS local-only secret')
+      writeFileSync(join(wtPath, '.env.local'), 'TOKEN=secret')
+    }
     if (lockReason) git(repo, ['worktree', 'lock', '--reason', lockReason, wtPath])
     return wtPath
   }
@@ -221,6 +233,28 @@ describe('worktree-gc integration (real git repo)', () => {
     assert.match(readLockReasonFromAdmin(cleanDead), new RegExp(`pid ${DEAD_PID}`))
   })
 
+  it('#5244: never removes a worktree whose only content is gitignored (plans skip)', () => {
+    addWorktree('ignored-dead', { lockReason: `claude agent a5 (pid ${DEAD_PID})`, ignored: true })
+    const plan = planRepoGc(repo, { kill: fakeKill })
+    const item = plan.items.find((i) => basename(i.path) === 'ignored-dead')
+    assert.ok(item, 'expected a plan item for the ignored-dead worktree')
+    // Tracked status is clean, but the gitignored node_modules/.env must keep it skipped.
+    assert.equal(item.action, 'skip')
+    assert.match(item.skipReason, /gitignored|ignored|untracked/)
+  })
+
+  it('#5244: apply preserves an ignored-only worktree and its gitignored files', () => {
+    const ignoredDead = addWorktree('ignored-dead', { lockReason: `claude agent a5 (pid ${DEAD_PID})`, ignored: true })
+    const plan = planRepoGc(repo, { kill: fakeKill })
+    // Apply the FULL plan (mirrors the reaper): a regression would mark this
+    // 'remove' and applyPlan would delete the dir + the precious secret.
+    const reclaimable = plan.items.filter((i) => i.action !== 'skip')
+    applyPlan(repo, { items: reclaimable })
+    assert.equal(existsSync(ignoredDead), true)
+    assert.equal(existsSync(join(ignoredDead, 'node_modules', '.env.local')), true)
+    assert.equal(existsSync(join(ignoredDead, '.env.local')), true)
+  })
+
   it('readLockReasonFromAdmin recovers the reason when porcelain omits it', () => {
     const wt = addWorktree('clean-dead', { lockReason: `claude agent a1 (pid ${DEAD_PID})` })
     const reason = readLockReasonFromAdmin(wt)
@@ -254,6 +288,53 @@ describe('worktree-gc unit: applyPlan prune reporting (injected git)', () => {
     const results = applyPlan('/repo', {
       items: [{ path: '/repo/wt/gone', action: 'prune', locked: true }],
     }, { git })
+    assert.equal(results[0].ok, true)
+  })
+
+  // #5246: a transient stat failure can misclassify a PRESENT worktree as
+  // dir-gone → 'prune'. `git worktree prune` leaves it intact, so applyPlan
+  // must NOT report ok:true for it. Verified by re-listing worktrees after the
+  // prune and checking the entry is genuinely gone.
+  it('reports a prune item as not-ok when the worktree is still present after prune (#5246)', () => {
+    const git = (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        // The "reclaimed" path is STILL listed → prune reclaimed nothing.
+        return 'worktree /repo\nHEAD a\nbranch refs/heads/main\n\nworktree /repo/wt/present\nHEAD b\nbranch refs/heads/x\n'
+      }
+      return '' // prune succeeds
+    }
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/present', action: 'prune', locked: false }],
+    }, { git })
+    assert.equal(results[0].ok, false)
+    assert.match(results[0].error, /still present after prune/)
+  })
+
+  it('reports prune ok when the worktree is genuinely gone after prune (#5246)', () => {
+    const git = (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        // Only the main worktree remains — the pruned entry is gone.
+        return 'worktree /repo\nHEAD a\nbranch refs/heads/main\n'
+      }
+      return ''
+    }
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/gone', action: 'prune', locked: false }],
+    }, { git })
+    assert.equal(results[0].ok, true)
+  })
+
+  it('falls back to ok (best-effort) when the post-prune re-list fails (#5246)', () => {
+    const git = (cwd, args) => {
+      if (args[0] === 'worktree' && args[1] === 'list') {
+        const e = new Error('fatal: re-list failed'); e.code = 1; throw e
+      }
+      return '' // prune succeeds
+    }
+    const results = applyPlan('/repo', {
+      items: [{ path: '/repo/wt/gone', action: 'prune', locked: false }],
+    }, { git })
+    // Can't verify, but prune succeeded — don't manufacture a failure.
     assert.equal(results[0].ok, true)
   })
 })

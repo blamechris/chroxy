@@ -92,8 +92,24 @@ vi.mock('./components/PermissionPrompt', () => ({
 // without dragging in directory-browser store wiring. Production
 // behaviour is exercised by the CreateSessionModal*.test.tsx suites.
 vi.mock('./components/CreateSessionModal', () => ({
-  CreateSessionModal: (props: { open: boolean }) =>
-    props.open ? <div data-testid="create-session-modal-mock" /> : null,
+  // #5218 — expose an `onCreate` seam so create-flow tests can drive the
+  // confirm path (App.handleCreateSession) without dragging in the real
+  // modal's directory-browser / store wiring. Existing tests only assert the
+  // `open` transition via `create-session-modal-mock`, so the extra confirm
+  // button is inert for them.
+  CreateSessionModal: (props: {
+    open: boolean
+    onCreate?: (data: { name: string; cwd: string }) => void
+  }) =>
+    props.open ? (
+      <div data-testid="create-session-modal-mock">
+        <button
+          type="button"
+          data-testid="create-session-modal-confirm"
+          onClick={() => props.onCreate?.({ name: 'New Session', cwd: '/tmp/new' })}
+        />
+      </div>
+    ) : null,
 }))
 
 vi.mock('./components/StdinDisabledBanner', () => ({
@@ -2350,6 +2366,110 @@ describe('App', () => {
       // also render (mutually exclusive).
       expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
       expect(screen.queryByTestId('disconnected-screen')).not.toBeInTheDocument()
+    })
+  })
+
+  // #5218 / #5214 — a stashed Investigate seed must not leak into a session
+  // created by a *plain* opener. handleInvestigate stashes the repo's note as
+  // the pending seed (openCreateSession({ seed })); every plain opener routes
+  // through openCreateSession() with no seed, which clears the ref (#5215 /
+  // #5217). If a clear regresses, the stale reason would seed an unrelated
+  // session's composer. These tests lock that in: a positive control proves
+  // the seed path is observable, then each plain opener must leave the
+  // composer empty after create. The assertions are timing-agnostic — they
+  // read the active session's composer after the create-confirm effect runs,
+  // regardless of which session the effect targets.
+  describe('#5218 Investigate seed does not leak into plain create-session openers', () => {
+    const REASON = 'Investigate: 172 worktrees — likely a leak/runaway.'
+
+    const oneSessionWithCwd = [{
+      sessionId: 's1', name: 'One', cwd: '/tmp/work', type: 'cli' as const,
+      hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+      createdAt: 1, conversationId: null, provider: 'claude-sdk', worktree: false,
+    }]
+
+    // host_status snapshot whose single repo carries an actionable
+    // `investigate` verdict + a note (the reason that would be seeded).
+    function snapshotWithInvestigate() {
+      return {
+        type: 'host_status_snapshot' as const,
+        generatedAt: '2026-06-06T11:50:00.000Z',
+        root: '/tmp',
+        summary: { live: 0, onboarded: 0, abandoned: 0, investigate: 1, recent: 0 },
+        repos: [{
+          name: 'alpha', path: '/tmp/alpha', branch: 'main',
+          verdict: 'investigate' as const, live: false,
+          tree: { state: 'dirty' as const, untracked: 2, modified: 0, staged: 0 },
+          worktrees: 172, ahead: null, behind: null, openPRs: null, prChecks: null,
+          prsUrl: null, attribution: null, onboarding: 'skipped — dirty tree',
+          lastTouched: '2026-06-01T00:00:00.000Z', note: REASON,
+        }],
+      }
+    }
+
+    function connectedState() {
+      return {
+        connectionPhase: 'connected' as const,
+        sessions: oneSessionWithCwd,
+        activeSessionId: 's1',
+        hostStatus: snapshotWithInvestigate(),
+        createSession: vi.fn(),
+      }
+    }
+
+    // Open the Control Room and click the repo's actionable Investigate verdict
+    // tag — this stashes the repo's note as the pending seed and opens the
+    // create-session modal.
+    function stashSeedViaInvestigate() {
+      fireEvent.click(screen.getByTestId('sidebar-panel-slot-launcher-control-room'))
+      fireEvent.click(screen.getByTestId('cr-verdict-investigate'))
+      // Modal opened (mock renders its node only when open=true).
+      expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
+    }
+
+    // Drive the mocked modal's onCreate seam → App.handleCreateSession, which
+    // flips isCreatingSession and lets the create-confirm effect run.
+    function confirmCreate() {
+      fireEvent.click(screen.getByTestId('create-session-modal-confirm'))
+    }
+
+    // After create, make sure we're viewing the session (not the Control Room)
+    // so the composer renders. When a seed fires the effect deactivates the CR
+    // for us; when it doesn't, we close the CR tab explicitly. Either way we
+    // end up on the session view.
+    function viewSessionComposer(): HTMLTextAreaElement {
+      const crClose = screen.queryByTestId('control-room-tab-close')
+      if (crClose) fireEvent.click(crClose)
+      return screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+    }
+
+    it('positive control: Investigate → create seeds the composer with the reason', () => {
+      stateOverrides = connectedState()
+      render(<App />)
+      stashSeedViaInvestigate()
+      confirmCreate()
+      // Seed landed in the active session's composer — proves the seed path is
+      // observable, so the empty-composer assertions below are meaningful.
+      expect(viewSessionComposer().value).toBe(REASON)
+    })
+
+    it.each([
+      ['header overflow "New Session"', () => {
+        fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+        fireEvent.click(screen.getByTestId('header-overflow-item-new-session'))
+      }],
+      ['command palette "New Session"', () => {
+        // Cmd+Shift+P opens the palette (VSCode alias); click the command.
+        fireEvent.keyDown(window, { key: 'p', metaKey: true, shiftKey: true })
+        fireEvent.click(screen.getByRole('option', { name: /new session/i }))
+      }],
+    ])('does not leak the seed when a plain session is opened via %s', (_label, openPlainSession) => {
+      stateOverrides = connectedState()
+      render(<App />)
+      stashSeedViaInvestigate()   // seed stashed
+      openPlainSession()          // plain opener must CLEAR the seed ref
+      confirmCreate()             // create — must NOT seed
+      expect(viewSessionComposer().value).toBe('')
     })
   })
 })
