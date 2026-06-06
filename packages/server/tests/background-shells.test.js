@@ -273,8 +273,8 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
 
   it('#5247: the sweep is advisory — clears the banner but does NOT flip isRunning', () => {
     mock.timers.enable({ apis: ['setInterval'] })
-    // Deterministic completion check: this shell's output has "quiesced".
-    session._backgroundShellCompletionCheck = () => true
+    // Deterministic quiescence check: this shell's output has "quiesced".
+    session._backgroundShellQuiesceCheck = () => true
 
     const events = []
     session.on('background_work_changed', (d) => events.push(d))
@@ -305,7 +305,7 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
 
   it('#5247: an authoritative clear (BashOutput / destroy) releases liveness after a sweep', () => {
     mock.timers.enable({ apis: ['setInterval'] })
-    session._backgroundShellCompletionCheck = () => true
+    session._backgroundShellQuiesceCheck = () => true
     session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
     mock.timers.tick(1000) // advisory quiesce — banner clears, liveness retained
     assert.equal(session.isRunning, true, 'sweep alone keeps it running')
@@ -318,7 +318,7 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
 
   it('leaves a still-running shell pending across sweep ticks', () => {
     mock.timers.enable({ apis: ['setInterval'] })
-    session._backgroundShellCompletionCheck = () => false
+    session._backgroundShellQuiesceCheck = () => false
 
     session.trackBackgroundShell({ shellId: 'a', command: 'sleep 600', outputPath: '/tmp/a.output' })
     mock.timers.tick(1000)
@@ -331,7 +331,7 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     mock.timers.enable({ apis: ['setInterval'] })
     assert.equal(session._backgroundShellSweepTimer, null, 'no timer when idle')
 
-    session._backgroundShellCompletionCheck = () => false
+    session._backgroundShellQuiesceCheck = () => false
     session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
     assert.ok(session._backgroundShellSweepTimer, 'timer armed once pending')
 
@@ -340,7 +340,7 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     assert.equal(session._backgroundShellSweepTimer, null, 'timer stopped when map drains')
   })
 
-  it('default completion check uses the output file mtime (real fs, no real timers)', () => {
+  it('default quiescence check uses the output file mtime (real fs, no real timers)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-out-'))
     const outputPath = join(dir, 'shell.output')
     writeFileSync(outputPath, 'hi\n')
@@ -349,17 +349,17 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     // Freshly written → not quiesced → not complete.
     session.trackBackgroundShell({ shellId: 'a', outputPath })
     const fresh = session._pendingBackgroundShells.get('a')
-    assert.equal(session._isBackgroundShellComplete(fresh), false, 'fresh write is not complete')
+    assert.equal(session._isBackgroundShellQuiesced(fresh), false, 'fresh write is not quiesced')
 
-    // Backdate the mtime past the quiescence window → complete.
+    // Backdate the mtime past the quiescence window → quiesced.
     const old = Date.now() / 1000 - 60
     utimesSync(outputPath, old, old)
-    assert.equal(session._isBackgroundShellComplete(fresh), true, 'quiesced file is complete')
+    assert.equal(session._isBackgroundShellQuiesced(fresh), true, 'idle file is quiesced')
 
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('default completion check does NOT reap a silent shell whose output file is empty (#5177 review)', () => {
+  it('default quiescence check does NOT reap a silent shell whose output file is empty (#5177 review)', () => {
     // A silent command (e.g. `sleep 600`) leaves an empty, quiesced output
     // file. Reaping on mtime alone would flip isRunning to false while it is
     // still running; the non-empty guard prevents that.
@@ -374,7 +374,7 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     session.trackBackgroundShell({ shellId: 'a', outputPath })
     const entry = session._pendingBackgroundShells.get('a')
     assert.equal(
-      session._isBackgroundShellComplete(entry),
+      session._isBackgroundShellQuiesced(entry),
       false,
       'empty output file is never reaped (silent shell stays pending)',
     )
@@ -382,19 +382,19 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('default completion check treats a shell with no output path as not complete (#4307 fallback)', () => {
+  it('default quiescence check treats a shell with no output path as not quiesced (#4307 fallback)', () => {
     session._backgroundShellQuiesceMs = 5000
     session.trackBackgroundShell({ shellId: 'a', command: 'x' })
     const entry = session._pendingBackgroundShells.get('a')
     assert.equal(entry.outputPath, null, 'no path captured')
-    assert.equal(session._isBackgroundShellComplete(entry), false, 'cannot reap without a path')
+    assert.equal(session._isBackgroundShellQuiesced(entry), false, 'cannot reap without a path')
   })
 
-  it('default completion check treats a stat() error as not complete (defensive)', () => {
+  it('default quiescence check treats a stat() error as not quiesced (defensive)', () => {
     session._backgroundShellQuiesceMs = 5000
     session.trackBackgroundShell({ shellId: 'a', outputPath: '/no/such/file/at/all.output' })
     const entry = session._pendingBackgroundShells.get('a')
-    assert.equal(session._isBackgroundShellComplete(entry), false, 'missing file is not reaped')
+    assert.equal(session._isBackgroundShellQuiesced(entry), false, 'missing file is not reaped')
   })
 
   it('outputPath is NOT leaked onto the wire snapshot', () => {
@@ -407,7 +407,7 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
 
   it('destroy stops the sweep timer (no leak)', () => {
     mock.timers.enable({ apis: ['setInterval'] })
-    session._backgroundShellCompletionCheck = () => false
+    session._backgroundShellQuiesceCheck = () => false
     session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
     assert.ok(session._backgroundShellSweepTimer)
     session._destroyPendingBackgroundShells()

@@ -327,10 +327,10 @@ export class BaseSession extends EventEmitter {
     // pauses output mid-run is not reaped prematurely; the agent's own
     // BashOutput poll still clears faster when it happens.
     this._backgroundShellQuiesceMs = BACKGROUND_SHELL_QUIESCE_MS
-    // Injectable completion check — `(entry) => boolean`. Default reads the
+    // Injectable quiescence check — `(entry) => boolean`. Default reads the
     // output file's mtime; tests override this to drive deterministic
-    // completion without touching the filesystem or real timers.
-    this._backgroundShellCompletionCheck = null
+    // quiescence without touching the filesystem or real timers.
+    this._backgroundShellQuiesceCheck = null
     // #4307: ephemeral map of recent `Bash` tool_uses dispatched with
     // `run_in_background: true`, keyed by toolUseId. Used to recover the
     // command string when the matching tool_result lands carrying the
@@ -879,7 +879,7 @@ export class BaseSession extends EventEmitter {
     if (this._pendingBackgroundShells.size === 0) return
     if (!(this._backgroundShellSweepMs > 0)) return
     this._backgroundShellSweepTimer = setInterval(
-      () => this._sweepCompletedBackgroundShells(),
+      () => this._sweepQuiescedBackgroundShells(),
       this._backgroundShellSweepMs,
     )
     // unref so the sweep never blocks process exit on its own.
@@ -899,25 +899,25 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #5177: one sweep tick — reap every pending shell that has completed.
-   * Completion is decided by `_isBackgroundShellComplete`. Reaping a shell
-   * goes through `clearBackgroundShell`, so it emits the SAME
-   * `background_work_changed` snapshot the BashOutput / destroy paths emit —
-   * the dashboard's "Waiting on background work" indicator consumes that
-   * snapshot and clears with no new wire contract. Iterating over a copied
-   * key list keeps the mutation (clearBackgroundShell deletes from the map)
-   * safe.
+   * #5177: one sweep tick — mark every pending shell whose output has quiesced.
+   * Quiescence is decided by `_isBackgroundShellQuiesced`. #5247: this is
+   * ADVISORY — a quiesced shell is dropped from the banner snapshot (via the
+   * `quiesced` flag, NOT `clearBackgroundShell`) so it stays in the map and
+   * `isRunning` is unaffected. The emitted `background_work_changed` snapshot is
+   * the SAME shape the BashOutput / destroy paths emit, so the dashboard's
+   * "Waiting on background work" indicator clears with no new wire contract.
+   * Iterating over a copied key list keeps the mutation safe.
    *
    * @private
    */
-  _sweepCompletedBackgroundShells() {
+  _sweepQuiescedBackgroundShells() {
     let changed = false
     let anyActive = false
     for (const shellId of Array.from(this._pendingBackgroundShells.keys())) {
       const entry = this._pendingBackgroundShells.get(shellId)
       if (!entry) continue
       if (entry.quiesced) continue // already advisory-cleared from the banner
-      if (this._isBackgroundShellComplete(entry)) {
+      if (this._isBackgroundShellQuiesced(entry)) {
         // #5247: ADVISORY only — mark the shell quiesced so it drops out of the
         // banner snapshot, but DO NOT clearBackgroundShell / remove it from the
         // map. mtime quiescence can't distinguish "finished" from "idle but
@@ -950,12 +950,12 @@ export class BaseSession extends EventEmitter {
    * logs "listening on :3000" then waits, a file watcher, `tail -f`, a build in
    * a long silent link phase). chroxy never holds the shell's PID (the id is
    * opaque, owned by claude), so mtime quiescence is the best the BANNER can do
-   * — and the caller (`_sweepCompletedBackgroundShells`) treats a `true` here as
+   * — and the caller (`_sweepQuiescedBackgroundShells`) treats a `true` here as
    * ADVISORY (clears the banner only). Liveness / `SessionTimeoutManager` is
    * governed solely by BashOutput / destroy (#4307), so a false "quiesced" here
    * can no longer idle-time a live session out.
    *
-   * Tests inject `_backgroundShellCompletionCheck` for deterministic control
+   * Tests inject `_backgroundShellQuiesceCheck` for deterministic control
    * without touching the filesystem or real time. A shell with no known output
    * path, or whose output file is still empty (a silent command like
    * `sleep 600`), is never marked quiesced via this path and stays in the
@@ -968,9 +968,9 @@ export class BaseSession extends EventEmitter {
    * @returns {boolean}
    * @private
    */
-  _isBackgroundShellComplete(entry) {
-    if (typeof this._backgroundShellCompletionCheck === 'function') {
-      return this._backgroundShellCompletionCheck(entry) === true
+  _isBackgroundShellQuiesced(entry) {
+    if (typeof this._backgroundShellQuiesceCheck === 'function') {
+      return this._backgroundShellQuiesceCheck(entry) === true
     }
     if (!entry || typeof entry.outputPath !== 'string' || entry.outputPath.length === 0) {
       return false
