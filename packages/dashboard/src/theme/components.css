@@ -8864,6 +8864,34 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-amber, #d29922);
 }
 
+/* #5216 — CI/review rollup beneath the open-PR count. */
+.cr-prchecks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-end;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.cr-pr-fail {
+  color: var(--accent-red, #cf222e);
+}
+
+.cr-pr-pending {
+  color: var(--text-muted);
+}
+
+.cr-pr-changes {
+  color: var(--accent-amber, #d29922);
+}
+
+.cr-pr-approved {
+  color: var(--accent-green, #2ea043);
+}
+
 /* Verdict tags */
 .cr-tag {
   display: inline-block;

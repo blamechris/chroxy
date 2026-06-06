@@ -2051,6 +2051,7 @@ describe('@chroxy/protocol schemas', () => {
       ahead: 0,
       behind: 0,
       openPRs: 3,
+      prChecks: { failing: 0, pending: 0, approved: 1, changesRequested: 0 },
       attribution: true,
       onboarding: 'fully onboarded',
       lastTouched: '2026-06-05T12:00:00.000Z',
@@ -2067,6 +2068,7 @@ describe('@chroxy/protocol schemas', () => {
       ahead: null,
       behind: null,
       openPRs: null,
+      prChecks: null,
       attribution: null,
       onboarding: 'not onboarded',
       lastTouched: '2026-01-02T09:30:00.000Z',
@@ -2163,6 +2165,25 @@ describe('@chroxy/protocol schemas', () => {
         const { ahead, behind, ...withoutAheadBehind } = cleanRepo
         void ahead; void behind
         assert.ok(!RepoStatusSchema.safeParse(withoutAheadBehind).success)
+      })
+
+      it('#5216: accepts prChecks as a counts object or null', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, prChecks: { failing: 1, pending: 2, approved: 3, changesRequested: 0 } }).success)
+        assert.ok(RepoStatusSchema.safeParse({ ...cleanRepo, prChecks: null }).success)
+      })
+
+      it('#5216: rejects a prChecks missing a count or with a negative count', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, prChecks: { failing: 1, pending: 0, approved: 0 } }).success)
+        assert.ok(!RepoStatusSchema.safeParse({ ...cleanRepo, prChecks: { failing: -1, pending: 0, approved: 0, changesRequested: 0 } }).success)
+      })
+
+      it('#5216: requires prChecks to be present', async () => {
+        const { RepoStatusSchema } = await import('../src/schemas/server.ts')
+        const { prChecks, ...without } = cleanRepo
+        void prChecks
+        assert.ok(!RepoStatusSchema.safeParse(without).success)
       })
 
       it('accepts attribution true / false / null', async () => {

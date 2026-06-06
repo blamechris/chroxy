@@ -723,6 +723,12 @@ export const RepoTreeSchema = z.object({
  *                     `null` semantics as `ahead`. `null` ≠ 0.
  *   - `openPRs`     — number of open PRs, or `null` when unknown (e.g. no GitHub
  *                     remote, or the lookup was skipped/failed). `null` ≠ 0.
+ *   - `prChecks`    — rollup of CI + review state across this repo's open PRs
+ *                     (counts of open PRs that are CI-failing / CI-pending /
+ *                     review-approved / changes-requested), or `null` when the
+ *                     PR lookup was skipped/failed (same condition as a `null`
+ *                     `openPRs`). All-zero counts = PRs exist but none need
+ *                     attention; `null` ≠ all-zero.
  *   - `attribution` — whether commits carry the expected author attribution, or
  *                     `null` when not evaluated. `null` ≠ false.
  *   - `onboarding`  — human-readable onboarding state (free-form so the survey
@@ -743,6 +749,14 @@ export const RepoStatusSchema = z.object({
   ahead: z.number().int().nonnegative().finite().nullable(),
   behind: z.number().int().nonnegative().finite().nullable(),
   openPRs: z.number().int().nonnegative().finite().nullable(),
+  prChecks: z
+    .object({
+      failing: z.number().int().nonnegative().finite(),
+      pending: z.number().int().nonnegative().finite(),
+      approved: z.number().int().nonnegative().finite(),
+      changesRequested: z.number().int().nonnegative().finite(),
+    })
+    .nullable(),
   attribution: z.boolean().nullable(),
   onboarding: z.string(),
   lastTouched: z.string().datetime(),

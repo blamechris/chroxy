@@ -108,6 +108,7 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         ahead: 0,
         behind: 0,
         openPRs: null,
+        prChecks: null,
         attribution: null,
         onboarding: 'deferred (live)',
         lastTouched: '2026-06-04T11:47:00.000Z',
@@ -124,6 +125,7 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         ahead: 2,
         behind: 1,
         openPRs: 16,
+        prChecks: { failing: 1, pending: 0, approved: 2, changesRequested: 1 },
         attribution: null,
         onboarding: 'skipped — dirty tree',
         lastTouched: '2026-05-28T11:00:00.000Z',
@@ -140,6 +142,7 @@ function makeSnapshot(over: Partial<ServerHostStatusSnapshotMessage> = {}): Serv
         ahead: null,
         behind: null,
         openPRs: 1,
+        prChecks: { failing: 0, pending: 0, approved: 0, changesRequested: 0 },
         attribution: true,
         onboarding: '✓ onboarded',
         lastTouched: '2026-06-04T11:12:00.000Z',
@@ -226,6 +229,7 @@ describe('ControlRoomSection (#5175)', () => {
           ahead: 3,
           behind: 0,
           openPRs: null,
+          prChecks: null,
           attribution: null,
           onboarding: '✓ onboarded',
           lastTouched: '2026-06-04T11:12:00.000Z',
@@ -236,6 +240,18 @@ describe('ControlRoomSection (#5175)', () => {
     const badge = screen.getByTestId('cr-aheadbehind-solo')
     expect(badge).toHaveTextContent('↑3')
     expect(badge).not.toHaveTextContent('↓')
+  })
+
+  it('#5216: renders the PR CI/review rollup badge for repos with attention-needing PRs', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    // medlens: { failing:1, approved:2, changesRequested:1 } → badge with ✗/✎/✓.
+    const badge = screen.getByTestId('cr-prchecks-medlens')
+    expect(badge).toHaveTextContent('✗1')
+    expect(badge).toHaveTextContent('✓2')
+    expect(badge).toHaveTextContent('✎1')
+    // no-it-all: all-zero counts → no badge. chroxy: prChecks null → no badge.
+    expect(screen.queryByTestId('cr-prchecks-no-it-all')).toBeNull()
+    expect(screen.queryByTestId('cr-prchecks-chroxy')).toBeNull()
   })
 
   it('shows the live green dot only for live repos', () => {
@@ -743,6 +759,7 @@ describe('ControlRoomSection investigate action (#5202)', () => {
           ahead: null,
           behind: null,
           openPRs: null,
+          prChecks: null,
           attribution: null,
           onboarding: 'skipped',
           lastTouched: '2026-05-28T11:00:00.000Z',
