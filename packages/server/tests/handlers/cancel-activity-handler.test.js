@@ -112,6 +112,20 @@ describe('cancel_activity handler (#5271)', () => {
     assert.equal(reply.attemptedSessionId, 'gone')
   })
 
+  it('emits "No active session" (not SESSION_NOT_FOUND) when there is no id to act on', async () => {
+    const ctx = makeCtx(new Map())
+    const client = makeClient({ activeSessionId: null }) // no sessionId, no activeSessionId
+
+    await inputHandlers.cancel_activity(makeWs(), client, { type: 'cancel_activity', activityId: 'tu-1' }, ctx)
+
+    const reply = last(ctx)
+    assert.equal(reply.type, 'session_error')
+    assert.equal(reply.message, 'No active session')
+    // Must NOT mislabel a no-id case as a stale-id SESSION_NOT_FOUND drop.
+    assert.equal(reply.code, undefined)
+    assert.equal(reply.attemptedSessionId, undefined)
+  })
+
   it('lets a pairing-bound client cancel activity in its OWN session', async () => {
     const sessions = new Map()
     const { entry, cancelActivity } = entryWithCancel({ ok: true })

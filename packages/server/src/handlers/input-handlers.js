@@ -563,6 +563,14 @@ async function handleCancelActivity(ws, client, msg, ctx) {
       return
     }
     const sid = msg.sessionId || client.activeSessionId
+    if (!sid) {
+      // No id at all to act on — emit the canonical "No active session"
+      // envelope (mirrors handleInput) rather than a misleading
+      // "Session not found: undefined" with a null attemptedSessionId.
+      log.info(`cancel_activity dropped: no active session client=${client.id}`)
+      sendSessionError(ws, ctx, 'No active session')
+      return
+    }
     log.info(`cancel_activity dropped: session not found sessionId=${sid} client=${client.id}`)
     ctx.send(ws, {
       type: 'session_error',
