@@ -88,8 +88,8 @@ function ServiceCell({ runner }: { runner: RunnerInfo }) {
   if (service.running) {
     return (
       <td data-testid={`runner-svc-${runner.name}`}>
-        <span className="cr-ok">running</span>{' '}
-        <span className="cr-dim cr-mono">pid {service.pid}</span>
+        <span className="cr-ok">running</span>
+        {service.pid !== null && <span className="cr-dim cr-mono"> pid {service.pid}</span>}
       </td>
     )
   }
