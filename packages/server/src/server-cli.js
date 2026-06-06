@@ -21,6 +21,7 @@ import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
+import { maybeEncryptCredentialsAtRest } from './credential-store.js'
 import { registerDockerProvider, resolveProviderLabel } from './providers.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
@@ -346,6 +347,15 @@ export async function startCliServer(config) {
   if (!NO_AUTH && !API_TOKEN) {
     console.error('[!] No API token configured. Run \'npx chroxy init\' first.') // intentional user-facing output
     process.exit(1)
+  }
+
+  // #5154 — encrypt a legacy plaintext credentials.json at rest once an OS
+  // keychain is available (mirrors the primary-token migration above).
+  // Best-effort: never blocks boot.
+  try {
+    maybeEncryptCredentialsAtRest({ log })
+  } catch (err) {
+    log.warn(`Credentials at-rest encryption check failed: ${err.message}`)
   }
 
   const banner = buildServerBanner({ version: SERVER_VERSION, provider: config.provider })

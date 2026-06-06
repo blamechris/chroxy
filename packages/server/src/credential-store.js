@@ -31,17 +31,62 @@
  * `Bearer` patterns, and SENSITIVE_KEYS in config.js masks the file path; this
  * module additionally never passes a raw value to any logger call.
  *
- * NOTE (scope): the issue's "encrypted at rest with an OS-keychain-derived key"
- * requirement is intentionally NOT implemented here. The established chroxy
- * secret-at-rest baseline is the 0600 owner-only file (refusing anything more
- * permissive), shared with the primary-token fallback and the #4052 BYOK store.
- * Keychain-derived envelope encryption of the multi-key map is tracked as a
- * separable follow-up — see the PR body.
+ * At-rest encryption (#5154): on hosts with an OS keychain (macOS Keychain /
+ * Linux libsecret), the file is encrypted with a random data key stored in the
+ * keychain — see credential-cipher.js. The 0600 owner-only mode is retained as
+ * defense-in-depth even when encrypted. Where no keychain is available
+ * (Windows, headless Linux without `secret-tool`) the store falls back to 0600
+ * plaintext, since a key stored beside the file would be obfuscation, not
+ * security. `maybeEncryptCredentialsAtRest()` migrates a legacy plaintext file
+ * in place at startup once a keychain is present.
  */
 import { readFileSync, statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { maskApiKey } from './byok-credentials.js'
+import * as realKeychain from './keychain.js'
+import {
+  CRED_KEY_SERVICE,
+  isEncryptedEnvelope,
+  decryptEnvelope,
+  encryptJson,
+  getMasterKey,
+  getOrCreateMasterKey,
+} from './credential-cipher.js'
+
+// A keychain stub that reports "no keychain here" — selects the plaintext
+// fallback path.
+const NO_KEYCHAIN = { isKeychainAvailable: () => false }
+
+// Explicit test injection (an in-memory keychain), or null to use the resolved
+// default. Takes precedence over the env escape hatch below.
+let _keychainOverride = null
+
+/**
+ * Resolve the keychain to use for at-rest encryption, evaluated lazily per call
+ * (NOT captured at import) so it never forces `keychain.js` into the module
+ * graph early — that would defeat `mock.module('child_process')` in the keychain
+ * unit tests.
+ *
+ *   1. an explicit test injection wins (the encryption suite's in-memory key);
+ *   2. else `CHROXY_CRED_DISABLE_KEYCHAIN=1` forces the plaintext fallback —
+ *      an operator escape hatch for hosts with an unreliable keychain, and the
+ *      switch the test bootstrap sets so suites never touch the real keychain;
+ *   3. else the real OS keychain.
+ */
+function activeKeychain() {
+  if (_keychainOverride) return _keychainOverride
+  if (process.env.CHROXY_CRED_DISABLE_KEYCHAIN === '1') return NO_KEYCHAIN
+  return realKeychain
+}
+
+/**
+ * Test seam: inject a keychain (e.g. an in-memory one to drive the encrypted
+ * path), or pass null to fall back to the resolved default.
+ */
+export function _setCredentialKeychainForTests(keychain) {
+  _keychainOverride = keychain || null
+}
 
 /**
  * The credential env vars the store manages, with display metadata. The order
@@ -149,7 +194,62 @@ function readStore() {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { data: {}, fileExists: true, error: `${file} is not a JSON object` }
   }
-  return { data: parsed, fileExists: true, error: null }
+
+  // #5154 — an encrypted envelope requires the keychain data key to decrypt.
+  // A plaintext object passes through unchanged (legacy / no-keychain host).
+  if (isEncryptedEnvelope(parsed)) {
+    const key = getMasterKey(activeKeychain())
+    if (!key) {
+      return {
+        data: {},
+        fileExists: true,
+        error: `${file} is encrypted but its decryption key is unavailable (OS keychain service "${CRED_KEY_SERVICE}" missing or unreadable)`,
+        encrypted: true,
+      }
+    }
+    try {
+      return { data: decryptEnvelope(parsed, key), fileExists: true, error: null, encrypted: true }
+    } catch (err) {
+      return { data: {}, fileExists: true, error: `${file} could not be decrypted: ${err.message}`, encrypted: true }
+    }
+  }
+
+  return { data: parsed, fileExists: true, error: null, encrypted: false }
+}
+
+/**
+ * Serialize + atomically write the store to `target`, encrypting the blob when
+ * a keychain-backed data key is available (#5154) and otherwise writing 0600
+ * plaintext. Preserves the temp-file → chmod 0600 → rename crash-safety and the
+ * post-write mode re-check (POSIX). `dir` is assumed to already exist (callers
+ * mkdir it). Shared by the set/delete/migrate paths.
+ */
+function writeStoreAtomically(target, nextObj) {
+  const key = getOrCreateMasterKey(activeKeychain())
+  const payload = key ? encryptJson(nextObj, key) : nextObj
+
+  const tmp = `${target}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`
+  let renamed = false
+  try {
+    writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 })
+    if (process.platform !== 'win32') chmodSync(tmp, 0o600)
+    if (process.platform === 'win32' && existsSync(target)) {
+      try { unlinkSync(target) } catch { /* */ }
+    }
+    renameSync(tmp, target)
+    renamed = true
+    if (process.platform !== 'win32') {
+      const perms = statSync(target).mode & 0o777
+      if (perms !== 0o600) {
+        try { unlinkSync(target) } catch { /* */ }
+        throw new Error(`credentials file ended up with mode ${perms.toString(8)} after write; refused`)
+      }
+    }
+  } finally {
+    if (!renamed && existsSync(tmp)) {
+      try { unlinkSync(tmp) } catch { /* */ }
+    }
+  }
 }
 
 /**
@@ -233,28 +333,7 @@ export function setStoredCredential(key, rawValue) {
   const legacyField = LEGACY_FIELD_BY_KEY[key]
   if (legacyField) next[legacyField] = value
 
-  const tmp = `${target}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`
-  let renamed = false
-  try {
-    writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 })
-    if (process.platform !== 'win32') chmodSync(tmp, 0o600)
-    if (process.platform === 'win32' && existsSync(target)) {
-      try { unlinkSync(target) } catch { /* */ }
-    }
-    renameSync(tmp, target)
-    renamed = true
-    if (process.platform !== 'win32') {
-      const perms = statSync(target).mode & 0o777
-      if (perms !== 0o600) {
-        try { unlinkSync(target) } catch { /* */ }
-        throw new Error(`credentials file ended up with mode ${perms.toString(8)} after write; refused`)
-      }
-    }
-  } finally {
-    if (!renamed && existsSync(tmp)) {
-      try { unlinkSync(tmp) } catch { /* */ }
-    }
-  }
+  writeStoreAtomically(target, next)
 }
 
 /**
@@ -286,20 +365,45 @@ export function deleteStoredCredential(key) {
     return
   }
 
-  const tmp = `${target}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`
-  let renamed = false
+  writeStoreAtomically(target, next)
+}
+
+/**
+ * #5154 — encrypt a legacy plaintext credentials.json in place once an OS
+ * keychain is available. Mirrors the primary-token keychain migration in
+ * server-cli.js; call once at startup. Best-effort: never throws into boot.
+ *
+ * No-op (with a reason) when: the file is missing, no keychain is available
+ * (logs a one-time plaintext warning), the file is already encrypted, the file
+ * can't be safely read (bad mode / corrupt), or the store is empty.
+ *
+ * @param {{ log?: { info: Function, warn: Function } }} [opts]
+ * @returns {{ migrated: boolean, reason: string }}
+ */
+export function maybeEncryptCredentialsAtRest({ log } = {}) {
+  const file = credentialsFilePath()
+  if (!existsSync(file)) return { migrated: false, reason: 'no-file' }
+
+  if (!activeKeychain().isKeychainAvailable()) {
+    if (log) log.warn(`${file} is stored as plaintext — no OS keychain available to encrypt it at rest`)
+    return { migrated: false, reason: 'no-keychain' }
+  }
+
+  const { data, error, encrypted } = readStore()
+  if (error) {
+    if (log) log.warn(`Credentials at-rest encryption skipped: ${error}`)
+    return { migrated: false, reason: 'read-error' }
+  }
+  if (encrypted) return { migrated: false, reason: 'already-encrypted' }
+  if (Object.keys(data).length === 0) return { migrated: false, reason: 'empty' }
+
   try {
-    writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 })
-    if (process.platform !== 'win32') chmodSync(tmp, 0o600)
-    if (process.platform === 'win32' && existsSync(target)) {
-      try { unlinkSync(target) } catch { /* */ }
-    }
-    renameSync(tmp, target)
-    renamed = true
-  } finally {
-    if (!renamed && existsSync(tmp)) {
-      try { unlinkSync(tmp) } catch { /* */ }
-    }
+    writeStoreAtomically(file, data) // getOrCreateMasterKey → writes an envelope
+    if (log) log.info('Encrypted credentials.json at rest using an OS-keychain-backed key')
+    return { migrated: true, reason: 'migrated' }
+  } catch (err) {
+    if (log) log.warn(`Credentials at-rest encryption failed: ${err.message}`)
+    return { migrated: false, reason: 'write-error' }
   }
 }
 
