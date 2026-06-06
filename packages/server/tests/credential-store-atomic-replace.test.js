@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, renameSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, renameSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -71,6 +71,62 @@ describe('credential-store — replaceFileAtomically (#5243)', () => {
 
     assert.ok(existsSync(target), 'live target must still exist after a failed replace')
     assert.equal(readFileSync(target, 'utf8'), 'LIVE-CREDENTIALS', 'live content must be preserved')
+  })
+
+  it('#5258: win32 retries once after a held-handle lock (EEXIST) and succeeds', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'OLD')
+    writeFileSync(tmp, 'NEW')
+    let attempts = 0
+    let unlinkedTarget = false
+    replaceFileAtomically(tmp, target, {
+      platform: 'win32',
+      rename: (from, to) => {
+        attempts++
+        if (attempts === 1) { const e = new Error('EEXIST: handle held'); e.code = 'EEXIST'; throw e }
+        renameSync(from, to)
+      },
+      unlink: (p) => { if (p === target) unlinkedTarget = true; unlinkSync(p) },
+    })
+    assert.equal(attempts, 2, 'exactly one retry')
+    assert.ok(unlinkedTarget, 'target unlinked before the retry (after the atomic attempt, not before)')
+    assert.equal(readFileSync(target, 'utf8'), 'NEW')
+  })
+
+  it('#5258: win32 restores the live file if the retry also fails', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'LIVE')
+    writeFileSync(tmp, 'NEW')
+    // Both the atomic attempt and the post-unlink retry fail (handle never
+    // releases). Default unlink/readFile/writeFile are real fs, so this
+    // exercises the snapshot → unlink → restore path end-to-end.
+    assert.throws(() => {
+      replaceFileAtomically(tmp, target, {
+        platform: 'win32',
+        rename: () => { const e = new Error('EBUSY: locked'); e.code = 'EBUSY'; throw e },
+      })
+    }, /EBUSY/)
+    assert.ok(existsSync(target), 'live file restored after retry failure')
+    assert.equal(readFileSync(target, 'utf8'), 'LIVE', 'prior credentials survive a doubly-failed replace')
+  })
+
+  it('#5258: win32 does NOT retry a non-lock error (e.g. ENOSPC) — surfaces immediately', () => {
+    const target = join(dir, 'c.json')
+    const tmp = join(dir, 'c.json.tmp')
+    writeFileSync(target, 'LIVE')
+    writeFileSync(tmp, 'NEW')
+    let unlinkCalled = false
+    assert.throws(() => {
+      replaceFileAtomically(tmp, target, {
+        platform: 'win32',
+        rename: () => { const e = new Error('ENOSPC: disk full'); e.code = 'ENOSPC'; throw e },
+        unlink: () => { unlinkCalled = true },
+      })
+    }, /ENOSPC/)
+    assert.equal(unlinkCalled, false, 'a non-lock error must not trigger the destructive retry')
+    assert.ok(existsSync(target), 'live file untouched')
   })
 })
 

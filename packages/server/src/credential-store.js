@@ -62,6 +62,12 @@ import {
 // fallback path.
 const NO_KEYCHAIN = { isKeychainAvailable: () => false }
 
+// #5258: Windows rename-failure codes that indicate a held handle (antivirus /
+// Windows Search) on the destination, not a genuine I/O error. Mirrors
+// session-state-persistence.WINDOWS_LOCK_CODES — replaceFileAtomically retries
+// once on these.
+const CRED_WINDOWS_LOCK_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST'])
+
 // #5242: logger for the recoverable encrypted-but-keychain-unavailable warning.
 // Injectable for tests. Credentials are NEVER passed to it — only the key NAME
 // and the fact of the failure (the logger.js redactor scrubs sk-ant/Bearer too).
@@ -280,15 +286,50 @@ function readStore() {
  * sibling `writeFileRestricted` (platform.js), which goes straight from
  * `writeFileSync(tmp)` to `renameSync`.
  *
+ * #5258: on Windows an antivirus / Windows Search held handle on `target` can
+ * make the atomic replace fail with EPERM/EACCES/EBUSY/EEXIST even though
+ * renameSync normally replaces atomically. We mirror
+ * session-state-persistence._rotateToBak's one-shot retry: snapshot the live
+ * target, clear it, then retry the rename once. The unlink happens ONLY after
+ * the atomic attempt already failed (never a pre-delete — that was the #5243
+ * data-loss bug), and the snapshot lets us restore the live credentials if the
+ * retry ALSO fails, so a crash can't leave zero credentials.
+ *
  * fs ops are injectable for testing (defaults are the real fs calls).
  *
  * @param {string} tmp - source temp path.
  * @param {string} target - destination path.
- * @param {{ rename?: Function }} [deps]
+ * @param {{ rename?: Function, unlink?: Function, readFile?: Function, writeFile?: Function, platform?: string }} [deps]
  */
 export function replaceFileAtomically(tmp, target, deps = {}) {
-  const { rename = renameSync } = deps
-  rename(tmp, target)
+  const {
+    rename = renameSync,
+    unlink = unlinkSync,
+    readFile = readFileSync,
+    writeFile = writeFileSync,
+    platform = process.platform,
+  } = deps
+  try {
+    rename(tmp, target)
+    return
+  } catch (err) {
+    // Non-Windows, or an error that isn't a Windows held-handle lock: surface
+    // it unchanged (no unlink — preserves the #5243 no-pre-delete guarantee).
+    if (platform !== 'win32' || !err || !CRED_WINDOWS_LOCK_CODES.has(err.code)) throw err
+    let snapshot = null
+    try { snapshot = readFile(target) } catch { /* target may already be gone */ }
+    try { unlink(target) } catch { /* best-effort — target may be gone */ }
+    try {
+      rename(tmp, target)
+    } catch (retryErr) {
+      // Retry still failed — restore the live bytes (if captured) so the prior
+      // credentials survive, then surface the error to the caller.
+      if (snapshot !== null) {
+        try { writeFile(target, snapshot, { mode: 0o600 }) } catch { /* best-effort restore */ }
+      }
+      throw retryErr
+    }
+  }
 }
 
 /**
