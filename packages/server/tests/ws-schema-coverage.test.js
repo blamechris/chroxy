@@ -98,6 +98,11 @@ describe('WS protocol schema coverage', () => {
       // #5174 (epic #5170): host_status_request now has a real handler
       // (control-room-handlers.js), so it is covered by the forward
       // schema-coverage check and no longer belongs in KNOWN_PRE_REGISTRY.
+      // #5270 (Control Room Phase 2a): cancel_activity schema lands ahead of
+      // its handler. TEMPORARY — remove this entry in #5271 when the
+      // cancel_activity WS handler is registered (it will then be covered by
+      // the forward check above).
+      'cancel_activity',
     ])
 
     const unexplained = schemaOnly.filter((t) => !KNOWN_PRE_REGISTRY.has(t))

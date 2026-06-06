@@ -35,6 +35,30 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject data over 100k chars')
   })
 
+  // #5270 (Control Room Phase 2a): cancel_activity client→server message.
+  it('validates cancel_activity with an activityId (sessionId optional)', async () => {
+    const { CancelActivitySchema } = await import('../src/schemas/client.ts')
+    const minimal = CancelActivitySchema.safeParse({ type: 'cancel_activity', activityId: 'tu-1' })
+    assert.ok(minimal.success, 'Should validate with just activityId')
+    const withSession = CancelActivitySchema.safeParse({ type: 'cancel_activity', activityId: 'tu-1', sessionId: 'sess-1' })
+    assert.ok(withSession.success, 'Should validate with sessionId too')
+  })
+
+  it('rejects cancel_activity missing or with an empty activityId', async () => {
+    const { CancelActivitySchema } = await import('../src/schemas/client.ts')
+    assert.ok(!CancelActivitySchema.safeParse({ type: 'cancel_activity' }).success, 'missing activityId rejected')
+    assert.ok(!CancelActivitySchema.safeParse({ type: 'cancel_activity', activityId: '' }).success, 'empty activityId rejected')
+    assert.ok(!CancelActivitySchema.safeParse({ type: 'cancel_activity', activityId: 'x'.repeat(513) }).success, 'over-long activityId rejected')
+  })
+
+  it('resolves cancel_activity through the ClientMessageSchema union by discriminator', async () => {
+    const { ClientMessageSchema } = await import('../src/schemas/client.ts')
+    const result = ClientMessageSchema.safeParse({ type: 'cancel_activity', activityId: 'tu-1' })
+    assert.ok(result.success, 'union should route cancel_activity to CancelActivitySchema')
+    // The discriminated union must NOT collapse it to a different member.
+    assert.equal(result.data.type, 'cancel_activity')
+  })
+
   it('validates server auth_ok message', async () => {
     const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
     const result = ServerAuthOkSchema.safeParse({

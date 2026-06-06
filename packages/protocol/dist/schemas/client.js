@@ -58,6 +58,16 @@ export const InputSchema = z.object({
 export const InterruptSchema = z.object({
     type: z.literal('interrupt'),
 }).passthrough();
+// #5270 (Control Room Phase 2a): cancel a single in-flight activity node
+// (currently a Task subagent) by its activity-tree entry id. `sessionId` is
+// optional — the server resolves the target session from it or the caller's
+// bound/active session, mirroring `interrupt`. Whole-turn interruption stays on
+// the `interrupt` message; this is the per-node control action.
+export const CancelActivitySchema = z.object({
+    type: z.literal('cancel_activity'),
+    activityId: z.string().min(1).max(512),
+    sessionId: z.string().optional(),
+}).passthrough();
 export const SetModelSchema = z.object({
     type: z.literal('set_model'),
     model: z.string().max(256),
@@ -696,6 +706,7 @@ export const EncryptedEnvelopeSchema = z.object({
 export const ClientMessageSchema = z.discriminatedUnion('type', [
     InputSchema,
     InterruptSchema,
+    CancelActivitySchema,
     SetModelSchema,
     SetPermissionModeSchema,
     SetThinkingLevelSchema,
