@@ -190,8 +190,14 @@ describe('control-room/runners — classifyRunner', () => {
   it('unregistered when no service', () => {
     assert.equal(classifyRunner({ manager: 'none', label: null, running: false }, null), 'unregistered')
   })
-  it('stopped when not running', () => {
-    assert.equal(classifyRunner(svc({ running: false }), { status: 'online', busy: false }), 'stopped')
+  it('stopped when not running and GitHub view unavailable', () => {
+    assert.equal(classifyRunner(svc({ running: false }), null), 'stopped')
+  })
+  it('stopped when not running and GitHub agrees (offline)', () => {
+    assert.equal(classifyRunner(svc({ running: false }), { status: 'offline', busy: false }), 'stopped')
+  })
+  it('offline when not running but GitHub still says online (inverse mismatch)', () => {
+    assert.equal(classifyRunner(svc({ running: false }), { status: 'online', busy: false }), 'offline')
   })
   it('busy when running + online + busy', () => {
     assert.equal(classifyRunner(svc(), { status: 'online', busy: true }), 'busy')

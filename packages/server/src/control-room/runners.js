@@ -22,7 +22,11 @@
  *   - `_execFile(file, args, opts)` — async, resolves `{ stdout, stderr }`
  *     (the promisified `child_process.execFile` shape). Rejections tolerated.
  *   - `_now()` — returns a `Date` (defaults to `new Date()`).
- *   - `_platform()` — returns a `process.platform` string (for service probing).
+ *
+ * Service probing dispatches on the per-install service manager parsed from each
+ * install's `.service` file (`launchd` vs `systemd`), not on `process.platform`,
+ * so no platform seam is needed — the `_execFile` seam already isolates the
+ * exec calls from the host.
  *
  * Pure parse/classify helpers are exported individually so the bulk of the
  * logic is unit-tested without any orchestration.
@@ -257,7 +261,8 @@ export function parseGhRunners(json) {
  * view. See `RunnerVerdictSchema` for the bucket definitions.
  *
  *   - no service registered                       → 'unregistered'
- *   - service not running                         → 'stopped'
+ *   - not running + GitHub online                 → 'offline' (mismatch)
+ *   - not running (no GitHub view / offline)      → 'stopped'
  *   - running + GitHub online + busy              → 'busy'
  *   - running + GitHub online + not busy          → 'idle'
  *   - running + GitHub view unavailable           → 'idle' (locally healthy)
@@ -269,8 +274,12 @@ export function parseGhRunners(json) {
  */
 export function classifyRunner(service, github) {
   if (!service || service.manager === 'none' || !service.label) return 'unregistered'
-  if (!service.running) return 'stopped'
   const status = github ? github.status : null
+  if (!service.running) {
+    // GitHub still reporting the runner online while the local service is down
+    // is the inverse mismatch — surface it as 'offline', not a plain 'stopped'.
+    return status === 'online' ? 'offline' : 'stopped'
+  }
   if (status === 'offline') return 'offline'
   if (status === 'online') return github && github.busy ? 'busy' : 'idle'
   // Running locally with no GitHub view → trust the local healthy state.
@@ -364,7 +373,6 @@ function summarize(repos) {
  * @param {Function} [opts._readFile] - async readFile seam.
  * @param {Function} [opts._execFile] - promisified execFile seam.
  * @param {Function} [opts._now] - returns a `Date`.
- * @param {Function} [opts._platform] - returns a platform string.
  * @returns {Promise<{ generatedAt: string, root: string, summary: object, repos: object[] }>}
  */
 export async function surveyRunners(opts = {}) {
