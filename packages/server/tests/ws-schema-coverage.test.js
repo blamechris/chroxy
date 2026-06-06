@@ -87,8 +87,12 @@ describe('WS protocol schema coverage', () => {
     const handlerTypes = new Set([...registeredMessageTypes, ...SCHEMA_EXEMPT])
     const schemaOnly = [...schemaTypes].filter((t) => !handlerTypes.has(t))
 
-    // These are known schema-only types handled at the connection/auth layer
-    // (ws-server.js) before messages reach the handler registry.
+    // Known schema-only types, in two categories:
+    //   1. Handled at the connection/auth layer (ws-server.js) before messages
+    //      reach the handler registry (auth, pair, key_exchange, ping, encrypted).
+    //   2. Temporary: the schema landed ahead of its handler and the type is
+    //      currently unhandled (cancel_activity, see #5270/#5271). Each such
+    //      entry carries its own removal note below.
     const KNOWN_PRE_REGISTRY = new Set([
       'auth',          // handled in ws-auth.js before registry dispatch
       'pair',          // pairing flow, handled at connection layer
