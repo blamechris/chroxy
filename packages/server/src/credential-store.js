@@ -331,14 +331,15 @@ export function replaceFileAtomically(tmp, target, deps = {}) {
     _log.warn(`credentials atomic replace hit a Windows held-handle lock (${err.code}); attempting one-shot retry`)
     // Snapshot the live target so we can restore it if the retry also fails.
     let snapshot = null
-    try { snapshot = readFile(target) } catch { /* target may already be gone */ }
+    let snapshotErr = null
+    try { snapshot = readFile(target) } catch (readErr) { snapshotErr = readErr /* target may already be gone */ }
     // If the snapshot failed but the target is still on disk (e.g. readFile threw
     // EACCES/EPERM because the same held handle is blocking the read), unlinking
     // it here would destroy the only copy with no way to restore — re-introducing
     // the #5243 data-loss path. Keep the live file intact and surface the ORIGINAL
     // lock error instead; the caller is no worse off than before the retry.
     if (snapshot === null && existsSync(target)) {
-      _log.warn(`credentials atomic replace could not snapshot the live target before retry (${err.code}); leaving it intact and surfacing the lock error`)
+      _log.warn(`credentials atomic replace could not snapshot the live target before retry (lock ${err.code}, read ${snapshotErr?.code || 'unknown'}); leaving it intact and surfacing the lock error`)
       throw err
     }
     try { unlink(target) } catch { /* best-effort — target may be gone */ }
@@ -354,7 +355,7 @@ export function replaceFileAtomically(tmp, target, deps = {}) {
           // Worst case: target deleted, retry failed, restore failed → no
           // credentials on disk. Leave a breadcrumb (codes only) so the thrown
           // error isn't the sole signal that a restore was even attempted.
-          _log.warn(`credentials atomic replace failed to restore the prior file after a failed retry (${restoreErr?.code || restoreErr?.message || 'unknown'})`)
+          _log.warn(`credentials atomic replace failed to restore the prior file after a failed retry (${restoreErr?.code || 'unknown'})`)
         }
       }
       throw retryErr

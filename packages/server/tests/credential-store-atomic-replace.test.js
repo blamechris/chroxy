@@ -246,7 +246,9 @@ describe('credential-store — replaceFileAtomically win32 warn logging (#5264)'
       })
     }, /EPERM/)
     assert.equal(warnings.filter((w) => /could not snapshot/.test(w)).length, 1, 'one refuse-to-unlink warn')
-    assert.match(warnings.find((w) => /could not snapshot/.test(w)), /EPERM/)
+    const snapshotWarn = warnings.find((w) => /could not snapshot/.test(w))
+    assert.match(snapshotWarn, /EPERM/, 'logs the original lock code')
+    assert.match(snapshotWarn, /EACCES/, 'logs the snapshot-read code that actually triggered this branch')
   })
 
   it('warns when the restore also fails after a failed retry (codes only)', () => {
