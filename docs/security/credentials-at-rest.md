@@ -61,6 +61,8 @@ On hosts with no usable keychain — Windows, or headless Linux without `secret-
 
 It does **not** derive a key from machine identifiers and "encrypt" with that. Such a key is reconstructible on the same host that holds the file, so it would add only the *appearance* of protection — worse than honest plaintext, because it invites false confidence. Plaintext-`0600` is the same posture every other `~/.chroxy/` secret file uses.
 
+> **Reconciliation (#5230).** #5154's original scope said the keychain-less case should *refuse to store* rather than fall back to plaintext. The shipped behavior — and the recorded maintainer decision — is the `0600` plaintext fallback above, for the reasons in this section: a key stored beside the file is obfuscation not security, refuse-to-store would lock out every Windows / headless-Linux-without-`secret-tool` operator entirely, and it matches the existing primary-token fallback in `keychain.js`. #5154's "refuse to store" wording is superseded by this document.
+
 ### Operator escape hatch
 
 `CHROXY_CRED_DISABLE_KEYCHAIN=1` forces the plaintext path even when a keychain is present. Use it only when the keychain is unreliable (e.g. flaky `secret-tool` in a container) and you accept plaintext-at-rest. Setting it does **not** decrypt an already-encrypted file; future writes and the startup migration use plaintext.
