@@ -368,6 +368,7 @@ describe('useConnectionStore', () => {
     // Message actions
     expect(typeof state.sendInput).toBe('function');
     expect(typeof state.sendInterrupt).toBe('function');
+    expect(typeof state.sendCancelActivity).toBe('function');
     expect(typeof state.sendPermissionResponse).toBe('function');
     expect(typeof state.sendUserQuestionResponse).toBe('function');
 
@@ -570,6 +571,38 @@ describe('message handler', () => {
     const parsed = JSON.parse(sent[0]!);
     expect(parsed.type).toBe('test');
     expect(parsed.data).toBe('hello');
+  });
+
+  it('sendCancelActivity sends cancel_activity with the explicit sessionId (#5272)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    useConnectionStore.setState({
+      socket: { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket,
+      activeSessionId: 'active-sess',
+    });
+
+    const result = useConnectionStore.getState().sendCancelActivity('tu-1', 'drill-sess');
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    const parsed = JSON.parse(sent[0]!);
+    expect(parsed.type).toBe('cancel_activity');
+    expect(parsed.activityId).toBe('tu-1');
+    // Explicit sessionId wins over the active session.
+    expect(parsed.sessionId).toBe('drill-sess');
+  });
+
+  it('sendCancelActivity falls back to the active session when no sessionId is given (#5272)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    useConnectionStore.setState({
+      socket: { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket,
+      activeSessionId: 'active-sess',
+    });
+
+    useConnectionStore.getState().sendCancelActivity('tu-9');
+    const parsed = JSON.parse(sent[0]!);
+    expect(parsed.activityId).toBe('tu-9');
+    expect(parsed.sessionId).toBe('active-sess');
   });
 
   it('session_error surfaces non-crash errors via addServerError', async () => {

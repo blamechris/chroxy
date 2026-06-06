@@ -632,9 +632,13 @@ interface RepoRowsProps {
   now?: () => number
   /** #5202 — investigate action, forwarded to the verdict tag. */
   onInvestigate?: (req: RepoInvestigateRequest) => void
+  /** #5272 — cancel a subagent in this repo's session (bound to its sessionId). */
+  onCancelActivity?: (activityId: string, sessionId: string) => void
+  /** #5272 — interrupt this repo's session (heading "Interrupt turn"). */
+  onInterruptSession?: (sessionId: string) => void
 }
 
-function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate }: RepoRowsProps) {
+function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate, onCancelActivity, onInterruptSession }: RepoRowsProps) {
   // Map repo → its active chroxy session (by cwd). When a session is found the
   // name cell becomes a disclosure toggle that reveals that session's live
   // activity tree (subagents / shells / tools — the retired v1 panel's view).
@@ -701,9 +705,34 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
           <td colSpan={9}>
             <div className="cr-activity-drill">
               <div className="cr-activity-heading" data-testid={`cr-activity-heading-${repo.name}`}>
-                Live activity · {repo.name}
+                <span>Live activity · {repo.name}</span>
+                {/* #5272: whole-turn interrupt for THIS repo's session. Subagent
+                    cancel lives per-node in the tree below; this is the
+                    coarse "stop the turn" lever (the only lever that reaches
+                    background shells / tool calls, which aren't individually
+                    cancellable). */}
+                {onInterruptSession && sessionId && (
+                  <button
+                    type="button"
+                    className="cr-interrupt-btn"
+                    data-testid={`cr-interrupt-${repo.name}`}
+                    onClick={() => onInterruptSession(sessionId)}
+                    title="Interrupt the current turn in this session"
+                  >
+                    Interrupt turn
+                  </button>
+                )}
               </div>
-              <ActivityTree activity={activity} sessionId={sessionId} now={now} />
+              <ActivityTree
+                activity={activity}
+                sessionId={sessionId}
+                now={now}
+                onCancelActivity={
+                  onCancelActivity && sessionId
+                    ? (activityId) => onCancelActivity(activityId, sessionId)
+                    : undefined
+                }
+              />
             </div>
           </td>
         </tr>
@@ -769,6 +798,17 @@ export interface ControlRoomSectionProps {
    * pre-filled with the repo cwd and seeds the reason into the composer.
    */
   onInvestigate?: (req: RepoInvestigateRequest) => void
+  /**
+   * #5272 — cancel a subagent node in a drill-down's session. Defaults to the
+   * store's `sendCancelActivity`. Injectable for tests.
+   */
+  onCancelActivity?: (activityId: string, sessionId: string) => void
+  /**
+   * #5272 — interrupt the current turn of a drill-down's session (the heading
+   * "Interrupt turn" action). Defaults to the store's `sendInterrupt`.
+   * Injectable for tests.
+   */
+  onInterruptSession?: (sessionId: string) => void
 }
 
 // Stable empty-activity default so the `activity` prop falling back to its
@@ -784,6 +824,8 @@ export function ControlRoomSection({
   sessions: sessionsProp,
   now = Date.now,
   onInvestigate,
+  onCancelActivity: onCancelActivityProp,
+  onInterruptSession: onInterruptSessionProp,
 }: ControlRoomSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.hostStatus)
   const storeLoading = useConnectionStore((s) => s.hostStatusLoading)
@@ -791,6 +833,8 @@ export function ControlRoomSection({
   const requestHostStatus = useConnectionStore((s) => s.requestHostStatus)
   const storeActivity = useConnectionStore((s) => s.activity)
   const storeSessions = useConnectionStore((s) => s.sessions)
+  const storeSendCancelActivity = useConnectionStore((s) => s.sendCancelActivity)
+  const storeSendInterrupt = useConnectionStore((s) => s.sendInterrupt)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
@@ -798,6 +842,10 @@ export function ControlRoomSection({
   const onRefresh = onRefreshProp ?? requestHostStatus
   const activity = activityProp ?? storeActivity ?? EMPTY_ACTIVITY
   const sessions = sessionsProp ?? storeSessions ?? []
+  // #5272: control actions on the per-repo drill-down. Both target a specific
+  // session id (the drill-down's), so they bind sessionId at the call site.
+  const onCancelActivity = onCancelActivityProp ?? ((activityId: string, sessionId: string) => { storeSendCancelActivity(activityId, sessionId) })
+  const onInterruptSession = onInterruptSessionProp ?? ((sessionId: string) => { storeSendInterrupt(sessionId) })
 
   // Per-repo drill-down expansion, keyed by repo.path. A repo's row reveals its
   // active session's live activity tree (subagents / shells / tools) when
@@ -1018,6 +1066,8 @@ export function ControlRoomSection({
                       onToggleExpand={handleToggleRepo}
                       now={now}
                       onInvestigate={onInvestigate}
+                      onCancelActivity={onCancelActivity}
+                      onInterruptSession={onInterruptSession}
                     />
                   ))
                 )}

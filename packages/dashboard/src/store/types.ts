@@ -746,7 +746,20 @@ export interface ConnectionState {
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
-  sendInterrupt: () => 'sent' | 'queued' | false;
+  /**
+   * Interrupt the current turn. Defaults to the active session; pass an explicit
+   * `sessionId` to interrupt a specific session (e.g. the Control Room
+   * per-repo drill-down, which targets the repo's session, not necessarily the
+   * active one). #5272.
+   */
+  sendInterrupt: (sessionId?: string) => 'sent' | 'queued' | false;
+  /**
+   * #5272 (Control Room Phase 2a): cancel a single in-flight activity node (a
+   * subagent) by its activity-tree entry id. Targets `sessionId` if given, else
+   * the active session. The terminal `activity_delta` updates the tree; a
+   * failure surfaces as the existing `session_error` toast.
+   */
+  sendCancelActivity: (activityId: string, sessionId?: string) => 'sent' | 'queued' | false;
   /** #3068 — Run the prompt evaluator on a draft. Resolves with the verdict
    * payload, or rejects on disconnect / 60s timeout. Errors from the server
    * arrive as the `error` field on the resolved value, not as a Promise reject. */

@@ -1661,15 +1661,35 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return result;
   },
 
-  sendInterrupt: () => {
+  sendInterrupt: (sessionId?: string) => {
     const { socket, activeSessionId } = get();
+    // #5272: an explicit sessionId (Control Room drill-down) wins over the
+    // active session, so an operator can interrupt a repo's session without
+    // first making it active.
+    const sid = sessionId ?? activeSessionId;
     const payload: Record<string, unknown> = { type: 'interrupt' };
-    if (activeSessionId) payload.sessionId = activeSessionId;
+    if (sid) payload.sessionId = sid;
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
       return 'sent';
     }
     return enqueueMessage('interrupt', payload);
+  },
+
+  // #5272 (Control Room Phase 2a): cancel one in-flight activity node (a
+  // subagent) by its entry id. Mirrors sendInterrupt's queue-when-offline
+  // behaviour. The server's terminal activity_delta updates the tree; a failure
+  // comes back as a session_error (surfaced by the existing handler).
+  sendCancelActivity: (activityId: string, sessionId?: string) => {
+    const { socket, activeSessionId } = get();
+    const sid = sessionId ?? activeSessionId;
+    const payload: Record<string, unknown> = { type: 'cancel_activity', activityId };
+    if (sid) payload.sessionId = sid;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, payload);
+      return 'sent';
+    }
+    return enqueueMessage('cancel_activity', payload);
   },
 
   // #3068 — manual prompt evaluator. Returns a Promise that resolves with the

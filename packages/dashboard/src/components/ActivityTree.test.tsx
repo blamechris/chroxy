@@ -171,6 +171,48 @@ describe('ActivityTree (#5176)', () => {
   })
 })
 
+describe('ActivityTree control actions (#5272)', () => {
+  it('renders no cancel buttons when onCancelActivity is not provided (read-only)', () => {
+    const activity = buildActivity([entry('a', { kind: 'agent', status: 'running' })])
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} />)
+    expect(screen.queryByTestId('control-room-cancel-a')).toBeNull()
+  })
+
+  it('shows a cancel button only on running SUBAGENT nodes', () => {
+    const activity = buildActivity([
+      entry('agent-run', { kind: 'agent', status: 'running' }),
+      entry('agent-done', { kind: 'agent', status: 'done', endedAt: 2000 }),
+      entry('shell-run', { kind: 'shell', status: 'running' }),
+      entry('tool-run', { kind: 'tool', status: 'running' }),
+    ])
+    render(
+      <ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} onCancelActivity={() => {}} />,
+    )
+    // Only the running agent is cancellable.
+    expect(screen.getByTestId('control-room-cancel-agent-run')).toBeInTheDocument()
+    // Not the finished agent, nor shells/tools (chroxy can't cancel those).
+    expect(screen.queryByTestId('control-room-cancel-agent-done')).toBeNull()
+    expect(screen.queryByTestId('control-room-cancel-shell-run')).toBeNull()
+    expect(screen.queryByTestId('control-room-cancel-tool-run')).toBeNull()
+  })
+
+  it('invokes onCancelActivity with the entry id (and does not toggle expansion)', () => {
+    const onCancel = vi.fn()
+    const activity = buildActivity([
+      entry('a', { kind: 'agent', status: 'running', outputRef: { kind: 'tool_use', id: 't' } }),
+    ])
+    render(
+      <ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} onCancelActivity={onCancel} />,
+    )
+    fireEvent.click(screen.getByTestId('control-room-cancel-a'))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    expect(onCancel).toHaveBeenCalledWith('a')
+    // The cancel button is a sibling of the toggle, so clicking it must NOT
+    // expand the row's output.
+    expect(screen.queryByTestId('control-room-output-a')).toBeNull()
+  })
+})
+
 describe('formatElapsed', () => {
   it('formats seconds, minutes, and hours', () => {
     expect(formatElapsed(0)).toBe('0s')
