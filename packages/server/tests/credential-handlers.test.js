@@ -182,4 +182,63 @@ describe('credential WS handlers (#3855)', () => {
       assert.equal(reply.type, 'error')
     })
   })
+
+  // #5155: credential WRITES require host-level authority. A pairing-bound
+  // session token (client.boundSessionId set) can READ masked status but must
+  // NOT be able to overwrite or clear the operator's provider keys — that's a
+  // billing-redirection / DoS vector. Reads stay open for the bound client.
+  describe('#5155 bound-client write gate', () => {
+    const boundClient = { id: 'c-bound', boundSessionId: 'sess-1' }
+
+    it('rejects set_credential from a pairing-bound client and does not write', () => {
+      const ws = makeWs()
+      const ctx = makeCtx()
+      settingsHandlers.set_credential(ws, boundClient, {
+        type: 'set_credential', key: 'OPENAI_API_KEY', value: 'sk-openai-evil', requestId: 'rb1',
+      }, ctx)
+      const reply = lastReply(ws, ctx)
+      assert.equal(reply.type, 'error')
+      assert.equal(reply.code, 'CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT')
+      assert.equal(reply.requestId, 'rb1')
+      // The write must NOT have happened.
+      assert.equal(getStoredCredential('OPENAI_API_KEY'), null)
+      assert.equal(ctx.broadcast.mock.callCount(), 0)
+    })
+
+    it('rejects delete_credential from a pairing-bound client and leaves the value intact', () => {
+      setStoredCredential('GEMINI_API_KEY', 'gem-keep')
+      const ws = makeWs()
+      const ctx = makeCtx()
+      settingsHandlers.delete_credential(ws, boundClient, {
+        type: 'delete_credential', key: 'GEMINI_API_KEY', requestId: 'rb2',
+      }, ctx)
+      const reply = lastReply(ws, ctx)
+      assert.equal(reply.type, 'error')
+      assert.equal(reply.code, 'CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT')
+      // The live value must survive.
+      assert.equal(getStoredCredential('GEMINI_API_KEY'), 'gem-keep')
+    })
+
+    it('still allows a pairing-bound client to READ masked status', () => {
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-readable')
+      const ws = makeWs()
+      const ctx = makeCtx()
+      settingsHandlers.get_credentials_status(ws, boundClient, { type: 'get_credentials_status', requestId: 'rb3' }, ctx)
+      const reply = lastReply(ws, ctx)
+      assert.equal(reply.type, 'credentials_status')
+      const anth = reply.credentials.find((c) => c.key === 'ANTHROPIC_API_KEY')
+      assert.equal(anth.status, 'set')
+    })
+
+    it('still allows the primary (unbound) client to write', () => {
+      const ws = makeWs()
+      const ctx = makeCtx()
+      settingsHandlers.set_credential(ws, { id: 'c-primary' }, {
+        type: 'set_credential', key: 'OPENAI_API_KEY', value: 'sk-openai-ok', requestId: 'rb4',
+      }, ctx)
+      const reply = lastReply(ws, ctx)
+      assert.equal(reply.type, 'credentials_status')
+      assert.equal(getStoredCredential('OPENAI_API_KEY'), 'sk-openai-ok')
+    })
+  })
 })
