@@ -8,6 +8,7 @@ import {
   DEFAULT_RESULT_TIMEOUT_MS,
   DEFAULT_HARD_TIMEOUT_MS,
   DEFAULT_STREAM_STALL_TIMEOUT_MS,
+  BACKGROUND_SHELL_HARD_QUIESCE_MS,
 } from '../src/base-session.js'
 import { SkillsTrustStore, sha256Hex } from '../src/skills-trust.js'
 
@@ -58,6 +59,23 @@ describe('BaseSession', () => {
 
     it('generates a 6-hex-char _messageIdPrefix per session (#3700)', () => {
       assert.match(session._messageIdPrefix, /^[0-9a-f]{6}$/, 'matches 6-hex format')
+    })
+
+    // #5288 / #5304: the configurable hard-quiesce opt must land in the field,
+    // with the constant as default and an explicit 0 preserved (?? not ||).
+    it('backgroundShellHardQuiesceMs: defaults to the constant when unset (#5288)', () => {
+      const s = new BaseSession()
+      assert.equal(s._backgroundShellHardQuiesceMs, BACKGROUND_SHELL_HARD_QUIESCE_MS)
+    })
+
+    it('backgroundShellHardQuiesceMs: explicit 0 disables (preserved, not defaulted) (#5288)', () => {
+      const s = new BaseSession({ backgroundShellHardQuiesceMs: 0 })
+      assert.equal(s._backgroundShellHardQuiesceMs, 0)
+    })
+
+    it('backgroundShellHardQuiesceMs: a positive value is applied verbatim (#5288)', () => {
+      const s = new BaseSession({ backgroundShellHardQuiesceMs: 6 * 60 * 60 * 1000 })
+      assert.equal(s._backgroundShellHardQuiesceMs, 6 * 60 * 60 * 1000)
     })
 
     it('each new BaseSession draws an independent _messageIdPrefix (#3700)', () => {
