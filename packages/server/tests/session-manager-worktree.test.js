@@ -7,7 +7,7 @@
  */
 import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, renameSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync, renameSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
@@ -54,6 +54,13 @@ before(async () => {
   }
 
   registerProvider('stub-worktree', StubSession)
+
+  // #5310 — a stub whose start() throws synchronously, to exercise the
+  // createSession start-failure rollback during a restore-rebind.
+  class FailStartSession extends StubSession {
+    start() { throw new Error('simulated start failure on restore') }
+  }
+  registerProvider('stub-worktree-failstart', FailStartSession)
 })
 
 // ---------------------------------------------------------------------------
@@ -164,6 +171,114 @@ describe('SessionManager worktree isolation', () => {
 
     assert.ok(!existsSync(path1), 'worktree 1 should be removed after destroyAll')
     assert.ok(!existsSync(path2), 'worktree 2 should be removed after destroyAll')
+  })
+
+  // #5310 (WP-0.4) — the worktree binding must survive a daemon restart.
+  // Pre-fix, serializeState dropped worktreePath/worktreeRepoDir, so a restored
+  // session ran in the worktree dir but carried worktreePath:null — it never
+  // GC'd the worktree on destroy (orphan accrual) and reported isolation:'none'.
+  it('rebinds the worktree on restore (no recreate, GC works, isolation preserved) (#5310)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+    const wtPath = mgr.getSession(id).worktreePath
+    assert.ok(wtPath && existsSync(wtPath), 'worktree created')
+    assert.equal(mgr.getSession(id).worktreeRepoDir, gitRepo, 'repo dir recorded for GC')
+
+    // Persist, then simulate a restart with a fresh manager over the same state
+    // file. Do NOT destroyAll — a real restart leaves the worktree dir on disk.
+    mgr.serializeState()
+
+    const mgr2 = makeManager(gitRepo) // makeManager sets the same _worktreeBase
+    mgr2.restoreState()
+
+    const r = mgr2.getSession(id)
+    assert.ok(r, 'session restored under its preserved id')
+    assert.equal(r.worktreePath, wtPath, 'rebound to the SAME worktree (not a new one)')
+    assert.equal(r.worktreeRepoDir, gitRepo, 'worktreeRepoDir round-tripped (needed for git worktree remove)')
+    assert.equal(r.isolation, 'worktree', 'isolation reported as worktree after restore')
+    assert.equal(r.cwd, wtPath, 'cwd points at the worktree')
+    assert.ok(existsSync(wtPath), 'rebind did not recreate/destroy the existing worktree')
+
+    // The actual payoff: GC now works post-restore (pre-fix it leaked).
+    mgr2.destroySession(id)
+    assert.ok(!existsSync(wtPath), 'restored worktree session GCs its worktree on destroy')
+    mgr2.destroyAll()
+  })
+
+  // #5310 — regression guard: a restore whose provider start() FAILS must NOT
+  // delete the pre-existing worktree (it holds possibly-uncommitted work, and
+  // deleting it would make the #2954-preserved retry unrecoverable). Only a
+  // freshly-created worktree should roll back on start failure.
+  it('does NOT delete the worktree when a restore-rebind start() fails (#5310)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+    const wtPath = mgr.getSession(id).worktreePath
+    assert.ok(existsSync(wtPath), 'worktree created')
+    mgr.serializeState()
+
+    // Simulate a provider that fails to start on restore by rewriting the
+    // persisted provider to the fail-start stub, then restore.
+    const stateFile = join(gitRepo, 'session-state.json')
+    const persisted = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    persisted.sessions[0].provider = 'stub-worktree-failstart'
+    writeFileSync(stateFile, JSON.stringify(persisted))
+
+    const mgr2 = makeManager(gitRepo)
+    mgr2.restoreState() // createSession → start() throws → sync rollback
+
+    assert.ok(!mgr2.getSession(id), 'session not live after failed restore')
+    assert.ok(existsSync(wtPath), 'pre-existing worktree MUST survive a failed restore-rebind')
+    // #2954 — the failed session is preserved so a later retry can re-hydrate.
+    assert.ok(mgr2._failedRestores.has(id), 'failed restore preserved for retry')
+
+    mgr2.destroyAll()
+  })
+
+  // #5310 security review — restoreWorktreePath comes from the on-disk state and
+  // becomes a recursive-deletion target in _removeWorktree. A corrupted/tampered
+  // state file pointing it outside the per-session worktree dir must NOT be
+  // rebound (and so must never be deleted on destroy).
+  it('rejects a restored worktreePath outside the per-session worktree dir; never deletes it (#5310)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+    mgr.serializeState()
+
+    // Tamper: repoint worktreePath (and cwd, so the existence check passes) at a
+    // sensitive directory outside the worktree base.
+    const sensitive = mkdtempSync(join(tmpdir(), 'chroxy-sensitive-'))
+    const sentinel = join(sensitive, 'keep.txt')
+    writeFileSync(sentinel, 'do not delete')
+    const stateFile = join(gitRepo, 'session-state.json')
+    const persisted = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    persisted.sessions[0].worktreePath = sensitive
+    persisted.sessions[0].cwd = sensitive
+    writeFileSync(stateFile, JSON.stringify(persisted))
+
+    const mgr2 = makeManager(gitRepo)
+    mgr2.restoreState()
+    const r = mgr2.getSession(id)
+    assert.ok(r, 'session still restores (safe-degrade, not a hard failure)')
+    assert.equal(r.worktreePath, null, 'tampered path is NOT rebound as a worktree')
+    assert.equal(r.isolation, 'none')
+
+    mgr2.destroySession(id)
+    assert.ok(existsSync(sentinel), 'arbitrary directory MUST NOT be deleted on destroy')
+
+    mgr2.destroyAll()
+    rmSync(sensitive, { recursive: true, force: true })
+  })
+
+  it('a non-worktree session restores with no worktree binding (#5310 back-compat)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo }) // no worktree
+    mgr.serializeState()
+    const mgr2 = makeManager(gitRepo)
+    mgr2.restoreState()
+    const r = mgr2.getSession(id)
+    assert.equal(r.worktreePath, null, 'no worktree binding on a plain session')
+    assert.equal(r.isolation, 'none')
+    mgr.destroyAll()
+    mgr2.destroyAll()
   })
 
   it('rejects worktree:true when cwd is not a git repository', () => {
