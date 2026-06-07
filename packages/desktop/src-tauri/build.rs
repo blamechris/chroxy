@@ -16,6 +16,7 @@ const APP_COMMANDS: &[&str] = &[
     "start_server",
     "stop_server",
     "restart_server",
+    "discover_lan_servers",
     "get_qr_code_svg",
     "pick_directory",
     "check_dependencies",
