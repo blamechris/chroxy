@@ -1395,8 +1395,7 @@ export class ClaudeByokSession extends BaseSession {
     } catch (ctorErr) {
       // Balance the agent_spawned emit + _activeAgents.set above so the
       // dashboard badge clears and the entry doesn't leak forever.
-      this._activeAgents.delete(toolUseId)
-      this.emit('agent_completed', { toolUseId })
+      this._finalizeAgentByToolUseId(toolUseId)
       log.warn(`subagent construction failed: ${ctorErr?.message || ctorErr}`)
       return {
         content: `Subagent construction failed: ${ctorErr?.message || ctorErr}`,
@@ -1549,8 +1548,7 @@ export class ClaudeByokSession extends BaseSession {
       try { await child.destroy() } catch (err) {
         log.warn(`subagent destroy on pre-send abort failed: ${err?.message || err}`)
       }
-      this._activeAgents.delete(toolUseId)
-      this.emit('agent_completed', { toolUseId })
+      this._finalizeAgentByToolUseId(toolUseId)
       return { content: 'Interrupted by user before subagent started', isError: true }
     }
     try {
@@ -1570,8 +1568,7 @@ export class ClaudeByokSession extends BaseSession {
       try { await child.destroy() } catch (err) {
         log.warn(`subagent destroy on Task completion failed: ${err?.message || err}`)
       }
-      this._activeAgents.delete(toolUseId)
-      this.emit('agent_completed', { toolUseId })
+      this._finalizeAgentByToolUseId(toolUseId)
     }
 
     // Fold child usage + cost into the parent's per-turn accumulators
@@ -1854,6 +1851,12 @@ export class ClaudeByokSession extends BaseSession {
       return { ok: false, reason: 'not-found' }
     }
     log.info(`Cancelling byok subagent ${activityId}`)
+    // Best-effort: the child's interrupt() aborts its in-flight stream, but
+    // early-returns if the child isn't busy yet (the narrow window between
+    // _subagentSessions.set and the child's sendMessage flipping _isBusy). In
+    // that window the cancel can't pre-empt the not-yet-started turn — we still
+    // optimistically finalize the node, matching the SDK path's best-effort
+    // stopTask contract.
     try {
       child.interrupt()
     } catch (err) {

@@ -60,6 +60,25 @@ describe('ClaudeByokSession #5274 — cancelActivity', () => {
     await session.destroy()
   })
 
+  it('cancel + natural completion emit agent_completed exactly once (no double-emit)', async () => {
+    // Both the cancel path and _executeTaskTool's completion path now funnel
+    // through the guarded _finalizeAgentByToolUseId, matching SdkSession — so a
+    // cancel followed by the child's natural unwind must not double-emit.
+    const session = createSession()
+    seedAgentNode(session, 'tu-1')
+    session._activeAgents.set('tu-1', { toolUseId: 'tu-1' })
+    session._subagentSessions.set('tu-1', fakeChild())
+    let emits = 0
+    session.on('agent_completed', () => { emits++ })
+
+    await session.cancelActivity('tu-1') // optimistic finalize → emit #1
+    // Simulate the natural completion path (which now routes through the helper).
+    session._finalizeAgentByToolUseId('tu-1') // guarded no-op (already finalized)
+
+    assert.equal(emits, 1)
+    await session.destroy()
+  })
+
   it('returns invalid-id for a non-string / empty id', async () => {
     const session = createSession()
     assert.deepEqual(await session.cancelActivity(''), { ok: false, reason: 'invalid-id' })
