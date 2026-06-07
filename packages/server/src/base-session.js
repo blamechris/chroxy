@@ -1035,6 +1035,16 @@ export class BaseSession extends EventEmitter {
       return this._backgroundShellHardQuiesceCheck(entry) === true
     }
     if (!entry) return false
+    // Cheap pre-stat gate (#5287 review): output can't have been idle longer
+    // than the shell has existed, so a shell younger than the hard window can't
+    // possibly be hard-quiesced — skip the per-tick statSync entirely until
+    // then. This makes the sweep's hard-check ~free (one subtraction) for the
+    // first hard-window of every shell's life, which is the bulk of the time the
+    // sweep runs.
+    if (typeof entry.startedAt === 'number'
+      && Date.now() - entry.startedAt < this._backgroundShellHardQuiesceMs) {
+      return false
+    }
     if (typeof entry.outputPath !== 'string' || entry.outputPath.length === 0) {
       // No output file to stat — fall back to wall-clock age since the shell was
       // tracked. This is the WEAKEST signal in the change: unlike the mtime path

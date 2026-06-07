@@ -524,7 +524,10 @@ describe('BaseSession background-shell HARD-quiesce reap (#5265)', () => {
     assert.equal(session._isBackgroundShellHardQuiesced(fresh), false, 'fresh write is not hard-quiesced')
 
     // Backdate mtime past the hard window → hard-quiesced (note: no non-empty
-    // guard on the hard path, unlike the advisory check).
+    // guard on the hard path, unlike the advisory check). Also age the entry's
+    // startedAt past the window so the cheap pre-stat gate (#5287 review) lets
+    // the mtime check run (a shell can't be idle longer than it has existed).
+    fresh.startedAt = Date.now() - 60_000
     const old = Date.now() / 1000 - 60
     utimesSync(outputPath, old, old)
     assert.equal(session._isBackgroundShellHardQuiesced(fresh), true, 'silent past the hard window → reapable')
