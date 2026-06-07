@@ -110,6 +110,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       }
     })
     req.on('end', () => {
+      // #5313 (WP-1.3): this callback fires on a later tick, after the HTTP
+      // dispatch that registered it has already returned — so a throw here is
+      // NOT caught by the route handler's wrapper and escapes to
+      // uncaughtException → process.exit(1), crashing the daemon. The inner
+      // JSON.parse is already guarded; this wraps the WHOLE body (res.writeHead
+      // on a torn-down socket, downstream session/broadcast calls) so any other
+      // throw is contained and returns a 500 to the client when possible.
+      try {
       if (oversized) {
         res.writeHead(413, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ decision: 'deny' }))
@@ -235,6 +243,22 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         timer,
         data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now() },
       })
+      } catch (err) {
+        // #5313 (WP-1.3): see the try at the top of this end callback.
+        const message = err?.message || String(err)
+        log.error(`POST /permission end handler threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+        // #5313 review — the recovery response can ITSELF throw if the original
+        // failure was a torn-down socket (res.writeHead/res.end raising). Guard
+        // it so the catch can't re-crash the daemon; nothing more we can do.
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Internal server error' }))
+          } else {
+            res.end()
+          }
+        } catch { /* socket already torn down */ }
+      }
     })
   }
 
@@ -271,6 +295,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       }
     })
     req.on('end', () => {
+      // #5313 (WP-1.3): same crash shape as handlePermissionRequest's end
+      // callback — fires on a later tick, escapes the route wrapper, and an
+      // uncaught throw (res.writeHead on a torn-down socket, getSessionManager
+      // / respondToPermission / broadcast downstream) crashes the daemon.
+      // Wrap the whole body; the inner JSON.parse guard is preserved.
+      try {
       if (oversized) return
 
       let parsed
@@ -405,6 +435,21 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       } else {
         res.writeHead(404, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'unknown or expired requestId' }))
+      }
+      } catch (err) {
+        // #5313 (WP-1.3): see the try at the top of this end callback.
+        const message = err?.message || String(err)
+        log.error(`POST /permission-response end handler threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+        // #5313 review — guard the recovery response so a torn-down-socket
+        // throw in writeHead/end can't re-crash the daemon from the catch.
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Internal server error' }))
+          } else {
+            res.end()
+          }
+        } catch { /* socket already torn down */ }
       }
     })
   }

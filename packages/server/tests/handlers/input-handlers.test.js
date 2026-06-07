@@ -1703,4 +1703,70 @@ describe('input-handlers', () => {
       assert.equal(sessionA.sendMessage.callCount, 1, 'session A still forwards after its own evaluator completes')
     })
   })
+
+  // #5313 (WP-1.3): sendMessage is fire-and-forget. A rejecting promise from a
+  // provider's sendMessage must NOT escape to unhandledRejection (→ daemon
+  // crash). The handler attaches a .catch that logs and swallows.
+  describe('sendMessage rejection containment (#5313)', () => {
+    it('does not let a rejecting sendMessage promise escape as an unhandled rejection', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      // Reject ASYNCHRONOUSLY so the rejection lands on a later microtask —
+      // the exact shape that becomes an unhandledRejection if not caught.
+      session.sendMessage = createSpy(() => Promise.reject(new Error('boom: provider send failed')))
+      sessions.set('s1', { session, name: 'S', cwd: '/work' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      const unhandled = []
+      const onUnhandled = (reason) => { unhandled.push(reason) }
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        await inputHandlers.input(makeWs(), client, { data: 'a substantive message that forwards' }, ctx)
+        // Give the rejected microtask a couple of turns to surface had it
+        // escaped the .catch.
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled)
+      }
+
+      assert.equal(session.sendMessage.callCount, 1, 'sendMessage was invoked')
+      assert.equal(unhandled.length, 0, 'rejecting sendMessage must not escape to unhandledRejection')
+    })
+
+    it('still updates primary and echoes user_input when sendMessage rejects', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.sendMessage = createSpy(() => Promise.reject(new Error('boom')))
+      sessions.set('s1', { session, name: 'S', cwd: '/work' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'a substantive message that forwards' }, ctx)
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(ctx.updatePrimary.callCount, 1, 'primary still updated despite send rejection')
+      const echoed = ctx._broadcasts.find((m) => m.type === 'user_input')
+      assert.ok(echoed, 'user_input echo still broadcast despite send rejection')
+    })
+
+    it('tolerates a non-thenable (legacy sync) sendMessage return without breaking post-send bookkeeping', async () => {
+      // The .catch guard only attaches to thenables, so a legacy provider whose
+      // sendMessage returns undefined (no promise) must not break the primary-
+      // update / user_input echo that follow. (A SYNCHRONOUS throw is a separate
+      // path — it propagates out of handleInput and is caught by the awaited
+      // message-handler's server_error wrapper, not by this thenable guard.)
+      const sessions = new Map()
+      const session = createMockSession()
+      session.sendMessage = createSpy(() => undefined) // legacy sync provider
+      sessions.set('s1', { session, name: 'S', cwd: '/work' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, { data: 'a substantive message that forwards' }, ctx)
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(ctx.updatePrimary.callCount, 1)
+    })
+  })
 })

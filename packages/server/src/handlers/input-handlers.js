@@ -499,7 +499,20 @@ async function handleInput(ws, client, msg, ctx) {
   // cap-bypass).
   recordHistoryEntry(textToSend)
 
-  entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice })
+  // #5313 (WP-1.3): sendMessage is fire-and-forget. If a provider's
+  // sendMessage returns a rejecting promise, an unhandled rejection escapes
+  // to process-level unhandledRejection → process.exit(1), crashing EVERY
+  // session in the daemon over a single per-session send fault. Capture the
+  // return and, if thenable, attach a .catch that logs and swallows — real
+  // delivery failures still surface to the client via the provider's 'error'
+  // event. Mirrors the start() guard in session-manager.js createSession.
+  const sendResult = entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice })
+  if (sendResult && typeof sendResult.catch === 'function') {
+    sendResult.catch((err) => {
+      const message = err?.message || String(err)
+      log.error(`sendMessage rejected for session ${targetSessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+    })
+  }
 
   ctx.updatePrimary(targetSessionId, client.id)
 
