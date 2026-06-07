@@ -77,10 +77,15 @@ export class SessionStatePersistence {
     if (fs.existsSync(this._stateFilePath)) {
       this._rotateToBak(this._stateFilePath, bakPath)
     }
-    // writeFileRestricted is atomic on POSIX (internal .tmp + rename) and a
-    // direct writeFileSync on Windows. Cleanup of the orphan .tmp on rename
-    // failure is handled inside the helper.
-    writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2))
+    // writeFileRestricted does an atomic temp+rename on both POSIX and Windows
+    // (#4913); cleanup of the orphan temp on rename failure is handled inside.
+    // #5309 (WP-0.3) — pass a per-pid tmpSuffix so two processes writing the
+    // SAME state file (e.g. an accidental second `chroxy start` against
+    // ~/.chroxy/session-state.json, or a test runner + the daemon) don't race
+    // on a shared intermediate `.tmp` and clobber each other mid-write,
+    // corrupting the file. PIDs are unique among live processes, so the temp
+    // paths can't collide. Mirrors the models-cache precedent (models.js:488).
+    writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
   }
@@ -198,6 +203,19 @@ export class SessionStatePersistence {
 
   /**
    * Schedule a debounced persist. Multiple rapid calls reset the timer.
+   *
+   * #5309 (WP-0.3) — durability boundary, by design: this debounce backs
+   * high-frequency message-history appends only. Session-LIST mutations
+   * (create/destroy/rename) use flushPersist() and are never debounced, and
+   * every CLEAN exit path serializes immediately — SIGINT/SIGTERM (server-cli.js)
+   * and the supervised IPC shutdown + crash handlers (server-cli-child.js, #5308)
+   * all call serializeState() directly, which cancels this timer and writes the
+   * current state. So the only way to lose up to persistDebounceMs (2s) of
+   * message history is an abrupt kill that runs NO handler at all — SIGKILL,
+   * OOM-kill, or power loss. That window is accepted as best-effort: shrinking
+   * it trades constant write amplification on every token for protection against
+   * an unrecoverable kill we can't flush before anyway.
+   *
    * @param {() => void} serializeFn - Function to call when the debounce fires
    */
   schedulePersist(serializeFn) {
