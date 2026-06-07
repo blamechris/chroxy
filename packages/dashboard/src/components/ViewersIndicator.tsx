@@ -49,6 +49,28 @@ function clientLabel(c: ConnectedClient): string {
   return 'Unknown device'
 }
 
+/**
+ * Resolve the "drove last" client id for the footer indicator.
+ *
+ * The server routes `primary_changed` to two distinct slots: a real session's
+ * primary lands on that session's per-session `primaryClientId`, while the
+ * default / no-session context lands on the global one (see
+ * store-core handlers/index.ts + message-handler primary_changed). So when a
+ * real session is active we MUST read only its per-session value (null when
+ * nobody has driven it yet) — falling back to the global there would surface a
+ * stale "drove last" from a different context on a session no one has driven
+ * (#5281 ①.3 review). The global is the right answer only for the
+ * pre-session / 'default' view.
+ */
+export function resolveActivePrimaryClientId(
+  activeSessionId: string | null,
+  sessionStates: Record<string, { primaryClientId: string | null }>,
+  globalPrimaryClientId: string | null,
+): string | null {
+  if (activeSessionId) return sessionStates[activeSessionId]?.primaryClientId ?? null
+  return globalPrimaryClientId
+}
+
 export function ViewersIndicator({ clients, primaryClientId, connected }: ViewersIndicatorProps) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -87,15 +109,13 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
   const countText = `${total} client${total === 1 ? '' : 's'}`
 
   // Solo: keep the plain, non-interactive label the footer always showed.
-  if (total < 2) {
+  if (total === 1) {
     return (
       <span className="sidebar-client-count" data-testid="viewers-indicator-solo">
         {countText}
       </span>
     )
   }
-
-  const activePrimary = primaryClientId
 
   return (
     <div className="viewers-indicator sidebar-client-count" data-testid="viewers-indicator">
@@ -120,6 +140,7 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
           className="viewers-popover"
           data-testid="viewers-popover"
           role="dialog"
+          aria-modal="false"
           aria-label="Connected devices"
         >
           <div className="viewers-popover-header">
@@ -131,7 +152,7 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
           </div>
           <ul className="viewers-list">
             {clients.map(c => {
-              const isPrimary = !!activePrimary && c.clientId === activePrimary
+              const isPrimary = !!primaryClientId && c.clientId === primaryClientId
               return (
                 <li
                   key={c.clientId}

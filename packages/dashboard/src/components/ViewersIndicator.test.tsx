@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { ViewersIndicator } from './ViewersIndicator'
+import { ViewersIndicator, resolveActivePrimaryClientId } from './ViewersIndicator'
 import type { ConnectedClient } from '../store/types'
 
 afterEach(cleanup)
@@ -154,5 +154,60 @@ describe('ViewersIndicator', () => {
     expect(screen.getByTestId('viewers-popover')).toBeInTheDocument()
     fireEvent.mouseDown(document.body)
     expect(screen.queryByTestId('viewers-popover')).not.toBeInTheDocument()
+  })
+
+  it('exposes the device count in the trigger title', () => {
+    render(
+      <ViewersIndicator
+        connected
+        clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1' })]}
+        primaryClientId={null}
+      />,
+    )
+    expect(screen.getByTestId('viewers-indicator-trigger')).toHaveAttribute(
+      'title',
+      '2 clients sharing this session',
+    )
+  })
+
+  it('swaps the solo label for the interactive chip when a second device joins', () => {
+    const { rerender } = render(
+      <ViewersIndicator connected clients={[client({ clientId: 'c0', isSelf: true })]} primaryClientId={null} />,
+    )
+    expect(screen.getByTestId('viewers-indicator-solo')).toBeInTheDocument()
+    expect(screen.queryByTestId('viewers-indicator-trigger')).not.toBeInTheDocument()
+
+    rerender(
+      <ViewersIndicator
+        connected
+        clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1' })]}
+        primaryClientId={null}
+      />,
+    )
+    expect(screen.queryByTestId('viewers-indicator-solo')).not.toBeInTheDocument()
+    expect(screen.getByTestId('viewers-indicator-trigger')).toHaveTextContent('2')
+  })
+})
+
+describe('resolveActivePrimaryClientId', () => {
+  it('returns the active session\'s per-session primary', () => {
+    const states = { s1: { primaryClientId: 'c1' }, s2: { primaryClientId: 'c2' } }
+    expect(resolveActivePrimaryClientId('s1', states, 'cGlobal')).toBe('c1')
+  })
+
+  it('returns null (NOT the global) for a real session nobody has driven yet', () => {
+    // The #5281 ①.3 review fix: a never-driven real session must not inherit a
+    // stale global "drove last" from a different (default) routing context.
+    const states = { s1: { primaryClientId: null } }
+    expect(resolveActivePrimaryClientId('s1', states, 'cGlobal')).toBeNull()
+  })
+
+  it('returns null for an unknown active session id', () => {
+    expect(resolveActivePrimaryClientId('gone', {}, 'cGlobal')).toBeNull()
+  })
+
+  it('falls back to the global primary only when there is no active session', () => {
+    expect(resolveActivePrimaryClientId(null, {}, 'cGlobal')).toBe('cGlobal')
+    expect(resolveActivePrimaryClientId(null, {}, null)).toBeNull()
   })
 })

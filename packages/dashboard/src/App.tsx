@@ -19,6 +19,7 @@ import type { BaseSessionState } from '@chroxy/store-core'
 import type { ChatViewMessage } from './components/ChatView'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
+import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
 import { SessionContextMenu, type ContextMenuItem } from './components/SessionContextMenu'
 import { buildSidebarContextMenuItems } from './sidebarContextMenuItems'
 import { CommandPalette } from './components/CommandPalette'
@@ -2306,9 +2307,7 @@ export function App() {
           serverStatus={isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}
           tunnelUrl={null}
           connectedClients={connectedClients}
-          activePrimaryClientId={
-            (activeSessionId ? sessionStates[activeSessionId]?.primaryClientId : null) ?? globalPrimaryClientId
-          }
+          activePrimaryClientId={resolveActivePrimaryClientId(activeSessionId, sessionStates, globalPrimaryClientId)}
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}

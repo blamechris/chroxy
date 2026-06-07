@@ -1503,6 +1503,9 @@ button.sidebar-token-view-session-row:hover {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Cap a large roster so the popover can't grow unbounded. */
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .viewers-client-row {
