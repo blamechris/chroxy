@@ -2768,9 +2768,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   retryConnection: () => {
     const activeServerId = get().activeServerId;
     if (activeServerId) {
-      // Registry server. connectToServer no-ops on an unknown id (e.g. the
-      // entry was removed mid-session); falling back to local here would
-      // reintroduce the exact wrong-target bug, so we let it no-op.
+      // Registry server. connectToServer no-ops on an id absent from the
+      // registry. removeServer already nulls activeServerId when it drops the
+      // active entry, so this only fires on a stale/desynced id (e.g. the
+      // registry was edited in another tab, or storage is corrupt). Falling
+      // back to local there would reintroduce the exact wrong-target bug, so
+      // we deliberately let it no-op rather than silently jump to local.
       get().connectToServer(activeServerId);
       return;
     }

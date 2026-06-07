@@ -911,6 +911,11 @@ export function App() {
   // Auto-connect on mount — use page token (served by local server),
   // or fall back to the last active server from the registry.
   // Reads registry via getState() to avoid reactive deps (mount-only effect).
+  //
+  // NOTE: precedence here (local-first) is intentionally the inverse of
+  // retryConnection's (active-server-first). A fresh page load returns to the
+  // local "home" daemon; a manual Retry resumes whatever you were connected to.
+  // The two don't collide in practice — connectLocal nulls activeServerId.
   useEffect(() => {
     const token = getAuthToken()
     if (token) {
