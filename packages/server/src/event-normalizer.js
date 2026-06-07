@@ -1,4 +1,7 @@
 import { toShortModelId } from './models.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('event-normalizer')
 
 /**
  * Declarative event-to-WS-message mapping.
@@ -725,7 +728,21 @@ export class EventNormalizer {
           entries.push({ key, sessionId: null, messageId: key, delta })
         }
       }
-      this._onFlush(entries)
+      // #5313 (WP-1.3): _onFlush is a broadcast callback invoked from a
+      // setTimeout. A throw here escapes the timer → uncaughtException →
+      // process.exit(1), crashing the whole daemon over one bad flush.
+      // Contain it: log and swallow. The buffer is cleared in the finally
+      // below regardless, so a throwing flush can't wedge the delta buffer
+      // and stall every subsequent stream.
+      try {
+        this._onFlush(entries)
+      } catch (err) {
+        const message = err?.message || String(err)
+        log.error(`Delta flush onFlush callback threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+      } finally {
+        this._deltaBuffer.clear()
+      }
+      return
     }
     this._deltaBuffer.clear()
   }

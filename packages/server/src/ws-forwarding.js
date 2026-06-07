@@ -49,6 +49,13 @@ function setupSessionForwarding(normalizer, ctx) {
   const { sessionManager, devPreview, broadcast, broadcastToSession } = ctx
 
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
+    // #5313 (WP-1.3): this listener runs synchronously inside the
+    // SessionManager EventEmitter's emit(). A throw here unwinds emit() and
+    // escapes to the emitting code (session-manager), which can crash the
+    // whole daemon — taking down every other session — over one bad event.
+    // Contain it: wrap the body, log with the session id, and swallow so a
+    // single malformed event can't bring down the process.
+    try {
     // models_updated is global — broadcast to ALL clients, not per-session.
     // Look up the session's provider so clients receive the provider-scoped
     // defaultModel rather than the Claude-only global. Falls back to the
@@ -107,6 +114,11 @@ function setupSessionForwarding(normalizer, ctx) {
         broadcastToSession(sessionId, msg)
       }
     }
+    } catch (err) {
+      // #5313 (WP-1.3): see the try at the top of this listener.
+      const message = err?.message || String(err)
+      log.error(`session_event forwarding threw for session ${sessionId} (event=${event}): ${message}${err?.stack ? '\n' + err.stack : ''}`)
+    }
   })
 
   // Session metadata updates (e.g. auto-labeling) — broadcast to ALL clients
@@ -160,30 +172,39 @@ function setupCliForwarding(normalizer, ctx) {
   ]
   for (const event of FORWARDED_EVENTS) {
     cliSession.on(event, (data) => {
-      const normCtx = {
-        sessionId: null,
-        mode: 'legacy-cli',
-        getSessionEntry: () => ({
-          session: cliSession,
-        }),
-      }
-      const result = normalizer.normalize(event, data, normCtx)
-      if (!result) return
-
-      if (result.buffer) {
-        normalizer.bufferDelta(null, data.messageId, data.delta)
-        return
-      }
-
-      executeSideEffects(result.sideEffects, null, ctx)
-      executeRegistrations(result.registrations, null, ctx)
-
-      for (const { msg, filter } of result.messages) {
-        if (filter) {
-          broadcast(msg, filter)
-        } else {
-          broadcast(msg)
+      // #5313 (WP-1.3): same crash shape as the multi-session listener — a
+      // throw here unwinds the CliSession EventEmitter's emit() and escapes
+      // to the emitting code, which can crash the daemon over one bad event.
+      // Contain it: wrap the body, log the event, and swallow.
+      try {
+        const normCtx = {
+          sessionId: null,
+          mode: 'legacy-cli',
+          getSessionEntry: () => ({
+            session: cliSession,
+          }),
         }
+        const result = normalizer.normalize(event, data, normCtx)
+        if (!result) return
+
+        if (result.buffer) {
+          normalizer.bufferDelta(null, data.messageId, data.delta)
+          return
+        }
+
+        executeSideEffects(result.sideEffects, null, ctx)
+        executeRegistrations(result.registrations, null, ctx)
+
+        for (const { msg, filter } of result.messages) {
+          if (filter) {
+            broadcast(msg, filter)
+          } else {
+            broadcast(msg)
+          }
+        }
+      } catch (err) {
+        const message = err?.message || String(err)
+        log.error(`legacy-cli forwarding threw (event=${event}): ${message}${err?.stack ? '\n' + err.stack : ''}`)
       }
     })
   }

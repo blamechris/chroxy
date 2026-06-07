@@ -45,7 +45,10 @@ function makeRes() {
   const res = {
     statusCode: null,
     body: null,
-    writeHead: mock.fn(function(code) { this.statusCode = code }),
+    // #5313 (WP-1.3): track headersSent like a real ServerResponse so the
+    // end-callback containment can decide between writeHead(500) and bare end().
+    headersSent: false,
+    writeHead: mock.fn(function(code) { this.statusCode = code; this.headersSent = true }),
     end: mock.fn(function(b) { this.body = b }),
     on(event, cb) { listeners[event] = cb; return this },
     emit(event, ...args) { if (listeners[event]) listeners[event](...args) },
@@ -345,6 +348,40 @@ describe('createPermissionHandler', () => {
       await new Promise(r => setImmediate(r))
       assert.equal(opts.permissionSessionMap.size, 0)
       assert.equal(ownerSession.notifyPermissionPending.mock.calls.length, 1)
+    })
+
+    // #5313 (WP-1.3): the req.on('end', ...) callback fires on a later tick,
+    // after handlePermissionRequest has returned, so a throw inside it is NOT
+    // caught by the route handler's wrapper and escapes to uncaughtException →
+    // daemon crash. The whole callback body is now wrapped: log + 500 (or bare
+    // end if headers already sent).
+    it('contains a throw inside the end callback and returns 500 (#5313)', async () => {
+      // broadcastFn throws inside the end callback, after JSON.parse succeeds
+      // and before any response is written.
+      const opts = makeHandlerOpts({
+        broadcastFn: mock.fn(() => { throw new Error('boom: broadcast failed') }),
+      })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+
+      const req = makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }))
+      const res = makeRes()
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        // The synchronous dispatch must not throw...
+        assert.doesNotThrow(() => handlePermissionRequest(req, res))
+        // ...and the deferred end-callback throw must be contained, not escape.
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+
+      assert.equal(uncaught.length, 0, 'end-callback throw must not escape to uncaughtException')
+      assert.equal(res.statusCode, 500, 'client receives a 500 when the end callback throws pre-response')
     })
   })
 
@@ -918,6 +955,36 @@ describe('createPermissionHandler', () => {
       assert.equal(res.statusCode, 410, 'expired branch returns 410')
       assert.equal(audit.logDecision.mock.calls.length, 0,
         'expired SDK responses must not be audited — auto-deny already recorded')
+    })
+
+    // #5313 (WP-1.3): like handlePermissionRequest, this end callback fires on
+    // a later tick and a throw inside it escapes the route wrapper → daemon
+    // crash. The body is now wrapped: log + 500 (or bare end if headers sent).
+    it('contains a throw inside the end callback and returns 500 (#5313)', async () => {
+      // getSessionManager throws inside the end callback, after JSON parse and
+      // decision validation succeed but before any response is written.
+      const permissionSessionMap = new Map([['req-x', 'sess-x']])
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => { throw new Error('boom: session manager unavailable') }),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'req-x', decision: 'allow' }))
+      const res = makeRes()
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        assert.doesNotThrow(() => handlePermissionResponseHttp(req, res))
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+
+      assert.equal(uncaught.length, 0, 'end-callback throw must not escape to uncaughtException')
+      assert.equal(res.statusCode, 500, 'client receives a 500 when the end callback throws pre-response')
     })
   })
 })

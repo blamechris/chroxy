@@ -985,3 +985,129 @@ describe('[session-binding-create] diagnostic log (#2832, #2855, #2854)', () => 
     assert.equal(ctx.permissionSessionMap.get('req-silent'), 'sess-silent')
   })
 })
+
+// #5313 (WP-1.3): the forwarding listeners run synchronously inside the
+// SessionManager / CliSession EventEmitter's emit(). An uncaught throw there
+// unwinds emit() and can crash the whole daemon — taking down every session —
+// over one bad event. Both listeners now wrap their body in try/catch + log.
+describe('forwarding listener throw containment (#5313)', () => {
+  let currentListener = null
+  let priorLogLevel = null
+  afterEach(() => {
+    if (currentListener) {
+      removeLogListener(currentListener)
+      currentListener = null
+    }
+    if (priorLogLevel != null) {
+      setLogLevel(priorLogLevel)
+      priorLogLevel = null
+    }
+  })
+
+  it('multi-session session_event listener swallows a throwing broadcast (does not unwind emit)', () => {
+    const ctx = makeCtx({
+      // stream_start broadcasts session_activity synchronously at the top of
+      // the listener — make that broadcast throw.
+      broadcast: mock.fn(() => { throw new Error('boom: broadcast failed') }),
+    })
+    setupForwarding(ctx)
+
+    // emit() must NOT throw — the listener contains the fault.
+    assert.doesNotThrow(() => {
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-throw-1',
+        event: 'stream_start',
+        data: { messageId: 'm1' },
+      })
+    }, 'a throwing broadcast must not unwind the SessionManager emit()')
+  })
+
+  it('multi-session session_event listener logs the contained error with the session id', () => {
+    priorLogLevel = getLogLevel()
+    setLogLevel('debug')
+    const entries = []
+    currentListener = (e) => entries.push(e)
+    addLogListener(currentListener)
+
+    const ctx = makeCtx({
+      broadcast: mock.fn(() => { throw new Error('boom') }),
+    })
+    setupForwarding(ctx)
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-throw-2',
+      event: 'stream_start',
+      data: { messageId: 'm1' },
+    })
+
+    const errLog = entries.find((e) =>
+      e.level === 'error' && e.message.includes('sess-throw-2') && e.message.includes('session_event forwarding threw'))
+    assert.ok(errLog, 'expected an error log naming the session and the containment site')
+  })
+
+  it('multi-session forwarding stays functional after a throwing event — a later good event still routes', () => {
+    let shouldThrow = true
+    const ctx = makeCtx({
+      broadcast: mock.fn(() => { if (shouldThrow) throw new Error('boom') }),
+    })
+    setupForwarding(ctx)
+
+    // First event throws inside the listener (contained).
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-throw-3',
+      event: 'stream_start',
+      data: { messageId: 'm1' },
+    })
+    // A subsequent good event must still route normally.
+    shouldThrow = false
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-throw-3',
+      event: 'result',
+      data: { cost: 0.01 },
+    })
+    const activity = ctx.broadcast.mock.calls
+      .map((c) => c.arguments[0])
+      .find((m) => m.type === 'session_activity' && m.isBusy === false)
+    assert.ok(activity, 'forwarding still delivers after a prior contained throw')
+  })
+
+  it('legacy-cli forwarding listener swallows a throwing broadcast (does not unwind emit)', () => {
+    const ctx = makeCliCtx({
+      broadcast: mock.fn(() => { throw new Error('boom: broadcast failed') }),
+    })
+    setupForwarding(ctx)
+
+    assert.doesNotThrow(() => {
+      ctx.cliSession.emit('message', {
+        type: 'assistant',
+        content: 'Hello',
+        tool: null,
+        options: null,
+        timestamp: 1000,
+      })
+    }, 'a throwing broadcast must not unwind the CliSession emit()')
+  })
+
+  it('legacy-cli forwarding listener logs the contained error with the event name', () => {
+    priorLogLevel = getLogLevel()
+    setLogLevel('debug')
+    const entries = []
+    currentListener = (e) => entries.push(e)
+    addLogListener(currentListener)
+
+    const ctx = makeCliCtx({
+      broadcast: mock.fn(() => { throw new Error('boom') }),
+    })
+    setupForwarding(ctx)
+    ctx.cliSession.emit('message', {
+      type: 'assistant',
+      content: 'Hi',
+      tool: null,
+      options: null,
+      timestamp: 1,
+    })
+
+    const errLog = entries.find((e) =>
+      e.level === 'error' && e.message.includes('legacy-cli forwarding threw') && e.message.includes('event=message'))
+    assert.ok(errLog, 'expected an error log naming the event and the containment site')
+  })
+})

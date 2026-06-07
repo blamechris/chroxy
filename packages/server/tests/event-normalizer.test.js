@@ -750,6 +750,51 @@ describe('EventNormalizer', () => {
       assert.equal(flushed[0].delta, 'hello')
     })
 
+    // #5313 (WP-1.3): the timer-driven flush invokes onFlush (a broadcast). A
+    // throw there used to escape the setTimeout → uncaughtException → daemon
+    // crash. The flush now contains the throw, and clears the buffer in a
+    // finally so a throwing flush can't wedge the buffer for every later stream.
+    it('does not propagate a throwing onFlush out of the flush timer (#5313)', async () => {
+      normalizer.onFlush = () => { throw new Error('boom: broadcast failed') }
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        normalizer.bufferDelta('sess-1', 'msg-1', 'hello')
+        // Wait past the flush interval (10ms) for the timer to fire.
+        await new Promise((resolve) => setTimeout(resolve, 40))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+
+      assert.equal(uncaught.length, 0, 'throwing onFlush must not escape the flush timer')
+    })
+
+    it('clears the delta buffer even when onFlush throws (#5313)', async () => {
+      normalizer.onFlush = () => { throw new Error('boom') }
+      normalizer.bufferDelta('sess-1', 'msg-1', 'hello')
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      assert.equal(normalizer._deltaBuffer.size, 0,
+        'buffer must be cleared so a throwing flush does not wedge subsequent streams')
+    })
+
+    it('stays functional after a throwing flush — a later flush still delivers (#5313)', async () => {
+      let lastFlushed = null
+      // First flush throws, then we swap in a good callback for the next round.
+      normalizer.onFlush = () => { throw new Error('boom') }
+      normalizer.bufferDelta('sess-1', 'msg-1', 'first')
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      normalizer.onFlush = (entries) => { lastFlushed = entries }
+      normalizer.bufferDelta('sess-2', 'msg-2', 'second')
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      assert.ok(lastFlushed, 'a subsequent flush still fires after a prior throwing flush')
+      assert.equal(lastFlushed.length, 1)
+      assert.equal(lastFlushed[0].delta, 'second')
+    })
+
     it('cancels timer when buffer emptied by flushSession', () => {
       normalizer.bufferDelta('sess-1', 'msg-1', 'x')
       normalizer.flushSession('sess-1')
