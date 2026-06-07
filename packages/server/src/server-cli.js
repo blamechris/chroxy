@@ -882,7 +882,7 @@ export async function startCliServer(config) {
 
   // Advertise via mDNS/Bonjour for local network discovery. Suppressed on a
   // loopback bind and when auth is off — see maybeAdvertiseMdns (#5280).
-  let { mdnsService, bonjourInstance } = await maybeAdvertiseMdns({
+  const { mdnsService, bonjourInstance } = await maybeAdvertiseMdns({
     noAuth: NO_AUTH,
     bindHost,
     port: PORT,
