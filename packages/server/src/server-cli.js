@@ -307,6 +307,66 @@ export function initFileLoggingFromConfig(config = {}) {
   }
 }
 
+/**
+ * Decide whether to advertise the server over mDNS/Bonjour and, if so, publish
+ * the `_chroxy._tcp` service. Extracted from startCliServer so the loopback
+ * gating wiring is testable without booting the full CLI (#5280) — the pure
+ * resolver (bind-host.js) was already covered, but the decision to suppress the
+ * advertisement on a loopback bind was not.
+ *
+ * Returns `{ mdnsService, bonjourInstance }` (both null when not advertising) so
+ * the caller can stop/destroy them on shutdown.
+ *
+ * @param {object} opts
+ * @param {boolean} opts.noAuth   — auth disabled; never advertise.
+ * @param {string|undefined} opts.bindHost — the resolved bind host.
+ * @param {number} opts.port
+ * @param {string} opts.version
+ * @param {boolean} opts.hasToken — surfaced in the TXT record's `auth` field.
+ * @param {object} [opts.log]     — logger (defaults to console).
+ * @param {() => (object|Promise<object>)} [opts.bonjourFactory] — injectable
+ *   Bonjour instance factory for tests; defaults to dynamically importing
+ *   `bonjour-service`.
+ */
+export async function maybeAdvertiseMdns({
+  noAuth,
+  bindHost,
+  port,
+  version,
+  hasToken,
+  log = console,
+  bonjourFactory,
+} = {}) {
+  const none = { mdnsService: null, bonjourInstance: null }
+  // Auth-off skips discovery entirely (matches the pre-#5280 guards).
+  if (noAuth) return none
+  // Loopback bind — nothing on the LAN can reach it, so an _chroxy._tcp
+  // advertisement would be misleading.
+  if (isLoopbackHost(bindHost)) {
+    log.info?.('Loopback bind — skipping mDNS advertisement (server not LAN-reachable)')
+    return none
+  }
+  try {
+    const bonjourInstance = bonjourFactory
+      ? await bonjourFactory()
+      : await (async () => {
+          const { Bonjour } = await import('bonjour-service')
+          return new Bonjour()
+        })()
+    const mdnsService = bonjourInstance.publish({
+      name: `Chroxy (${hostname()})`,
+      type: 'chroxy',
+      port,
+      txt: { version, auth: hasToken ? 'token' : 'none' },
+    })
+    log.info?.(`Advertising _chroxy._tcp on port ${port} via mDNS`)
+    return { mdnsService, bonjourInstance }
+  } catch (err) {
+    log.debug?.(`mDNS advertisement unavailable: ${err.message}`)
+    return none
+  }
+}
+
 export async function startCliServer(config) {
   // Enable JSON log format if configured
   if (config.logFormat === 'json') {
@@ -820,29 +880,16 @@ export async function startCliServer(config) {
   sessionManager.setActiveViewersFn((sid) => wsServer.hasActiveViewersForSession(sid))
   sessionManager.startSessionTimeouts()
 
-  // Advertise via mDNS/Bonjour for local network discovery. Skipped on a
-  // loopback bind — nothing on the LAN can reach it, so an _chroxy._tcp
-  // advertisement would be misleading. (Auth-off already skips both branches
-  // below via the pre-existing !NO_AUTH guards.)
-  let mdnsService = null
-  let bonjourInstance = null
-  if (!NO_AUTH && isLoopbackHost(bindHost)) {
-    log.info('Loopback bind — skipping mDNS advertisement (server not LAN-reachable)')
-  } else if (!NO_AUTH) {
-    try {
-      const { Bonjour } = await import('bonjour-service')
-      bonjourInstance = new Bonjour()
-      mdnsService = bonjourInstance.publish({
-        name: `Chroxy (${hostname()})`,
-        type: 'chroxy',
-        port: PORT,
-        txt: { version: SERVER_VERSION, auth: API_TOKEN ? 'token' : 'none' },
-      })
-      log.info(`Advertising _chroxy._tcp on port ${PORT} via mDNS`)
-    } catch (err) {
-      log.debug(`mDNS advertisement unavailable: ${err.message}`)
-    }
-  }
+  // Advertise via mDNS/Bonjour for local network discovery. Suppressed on a
+  // loopback bind and when auth is off — see maybeAdvertiseMdns (#5280).
+  let { mdnsService, bonjourInstance } = await maybeAdvertiseMdns({
+    noAuth: NO_AUTH,
+    bindHost,
+    port: PORT,
+    version: SERVER_VERSION,
+    hasToken: !!API_TOKEN,
+    log,
+  })
 
   // Track current WebSocket URL and mode label across all modes (tunnel, external, LAN)
   let tunnel = null
