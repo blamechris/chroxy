@@ -542,7 +542,7 @@ export class SessionManager extends EventEmitter {
    *   after a daemon restart (#4983).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false, preserveId } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false, preserveId } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -635,7 +635,23 @@ export class SessionManager extends EventEmitter {
     // Worktree isolation — create a detached git worktree for this session
     let resolvedCwd = baseCwd
     let worktreePath = null
-    if (worktree) {
+    let worktreeRepoDir = null
+    if (restoreWorktreePath) {
+      // #5310 (WP-0.4) — restore path: REBIND to the worktree this session
+      // already owns instead of creating a new one. Worktree dirs under
+      // ~/.chroxy/worktrees/<id> survive a daemon restart, so recreating would
+      // fail ("already exists") and — worse — without rebinding, the restored
+      // entry carries worktreePath:null and never GCs the dir on destroy
+      // (orphan accrual) and reports isolation:'none'. The original repo dir
+      // can't be derived from the persisted cwd (which IS the worktree), so it
+      // is persisted + threaded through here for `git worktree remove`. If the
+      // worktree dir was deleted out from under us (e.g. `chroxy worktree gc`),
+      // the generic baseCwd existence check above already fails the restore
+      // cleanly and #2954 preserves it for retry.
+      worktreePath = restoreWorktreePath
+      worktreeRepoDir = restoreWorktreeRepoDir || null
+      resolvedCwd = restoreWorktreePath
+    } else if (worktree) {
       // Verify cwd is inside a git repository
       try {
         execFileSync(GIT, ['-C', baseCwd, 'rev-parse', '--git-dir'], {
@@ -663,6 +679,7 @@ export class SessionManager extends EventEmitter {
 
       resolvedCwd = worktreeDir
       worktreePath = worktreeDir
+      worktreeRepoDir = baseCwd
       log.info(`Created worktree for session ${sessionId} at ${worktreeDir}`)
     }
 
@@ -803,8 +820,11 @@ export class SessionManager extends EventEmitter {
       provider: resolvedProvider,
       createdAt: Date.now(),
       worktreePath,
-      // Original repo dir needed for `git worktree remove` during cleanup
-      worktreeRepoDir: worktreePath ? baseCwd : null,
+      // Original repo dir needed for `git worktree remove` during cleanup.
+      // #5310: set in both the create and restore-rebind branches above so it
+      // survives a restart (was `worktreePath ? baseCwd : null`, which on
+      // restore wrongly resolved to the worktree dir / null).
+      worktreeRepoDir,
       isolation: resolvedIsolation,
       // #4072: cumulative usage accumulator (tokens + cost) populated by
       // _trackUsage on every priced `result` event. Subscription-only
@@ -1236,6 +1256,14 @@ export class SessionManager extends EventEmitter {
         permissionMode: entry.session.permissionMode,
         provider: entry.provider || null,
         name: entry.name,
+        // #5310 (WP-0.4) — persist the worktree binding so a restored session
+        // rebinds to its existing worktree (rather than losing it). worktreePath
+        // is also the session's cwd, but worktreeRepoDir (the ORIGINAL repo,
+        // needed for `git worktree remove`) is NOT derivable from cwd, so both
+        // must round-trip. Null for non-worktree sessions; older state files
+        // (pre-#5310) restore as null → treated as a non-worktree session.
+        worktreePath: entry.worktreePath || null,
+        worktreeRepoDir: entry.worktreeRepoDir || null,
         lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
         // #4664: persist per-session toggle/string settings via the
@@ -1339,6 +1367,15 @@ export class SessionManager extends EventEmitter {
           permissionMode: saved.permissionMode,
           resumeSessionId: saved.sdkSessionId,
           provider: saved.provider || undefined,
+          // #5310 (WP-0.4) — rebind to the existing worktree (don't recreate).
+          // Only string paths flow through; non-worktree sessions and older
+          // state files (no field) pass undefined and take the normal path.
+          restoreWorktreePath: typeof saved.worktreePath === 'string' && saved.worktreePath.length > 0
+            ? saved.worktreePath
+            : undefined,
+          restoreWorktreeRepoDir: typeof saved.worktreeRepoDir === 'string' && saved.worktreeRepoDir.length > 0
+            ? saved.worktreeRepoDir
+            : undefined,
           // #4664: restore per-session toggle/string settings via the
           // shared registry. Each registry entry's `acceptFromConstructor`
           // predicate drops malformed values to `undefined` so

@@ -166,6 +166,51 @@ describe('SessionManager worktree isolation', () => {
     assert.ok(!existsSync(path2), 'worktree 2 should be removed after destroyAll')
   })
 
+  // #5310 (WP-0.4) — the worktree binding must survive a daemon restart.
+  // Pre-fix, serializeState dropped worktreePath/worktreeRepoDir, so a restored
+  // session ran in the worktree dir but carried worktreePath:null — it never
+  // GC'd the worktree on destroy (orphan accrual) and reported isolation:'none'.
+  it('rebinds the worktree on restore (no recreate, GC works, isolation preserved) (#5310)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+    const wtPath = mgr.getSession(id).worktreePath
+    assert.ok(wtPath && existsSync(wtPath), 'worktree created')
+    assert.equal(mgr.getSession(id).worktreeRepoDir, gitRepo, 'repo dir recorded for GC')
+
+    // Persist, then simulate a restart with a fresh manager over the same state
+    // file. Do NOT destroyAll — a real restart leaves the worktree dir on disk.
+    mgr.serializeState()
+
+    const mgr2 = makeManager(gitRepo) // makeManager sets the same _worktreeBase
+    mgr2.restoreState()
+
+    const r = mgr2.getSession(id)
+    assert.ok(r, 'session restored under its preserved id')
+    assert.equal(r.worktreePath, wtPath, 'rebound to the SAME worktree (not a new one)')
+    assert.equal(r.worktreeRepoDir, gitRepo, 'worktreeRepoDir round-tripped (needed for git worktree remove)')
+    assert.equal(r.isolation, 'worktree', 'isolation reported as worktree after restore')
+    assert.equal(r.cwd, wtPath, 'cwd points at the worktree')
+    assert.ok(existsSync(wtPath), 'rebind did not recreate/destroy the existing worktree')
+
+    // The actual payoff: GC now works post-restore (pre-fix it leaked).
+    mgr2.destroySession(id)
+    assert.ok(!existsSync(wtPath), 'restored worktree session GCs its worktree on destroy')
+    mgr2.destroyAll()
+  })
+
+  it('a non-worktree session restores with no worktree binding (#5310 back-compat)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo }) // no worktree
+    mgr.serializeState()
+    const mgr2 = makeManager(gitRepo)
+    mgr2.restoreState()
+    const r = mgr2.getSession(id)
+    assert.equal(r.worktreePath, null, 'no worktree binding on a plain session')
+    assert.equal(r.isolation, 'none')
+    mgr.destroyAll()
+    mgr2.destroyAll()
+  })
+
   it('rejects worktree:true when cwd is not a git repository', () => {
     const nonGitDir = mkdtempSync(join(tmpdir(), 'chroxy-nongit-'))
     try {
