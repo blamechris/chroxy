@@ -715,7 +715,11 @@ export function createHttpHandler(server) {
     try {
       await dispatch(req, res)
     } catch (err) {
-      log.error(`Unhandled error in HTTP handler (${req.method} ${req.url}): ${err?.stack || err}`)
+      // #5312 review — log the PATH only, never the raw req.url: query strings on
+      // dashboard/connect routes carry the API token (?token=...) which must not
+      // leak into server logs.
+      const pathOnly = (req.url || '').split('?')[0]
+      log.error(`Unhandled error in HTTP handler (${req.method} ${pathOnly}): ${err?.stack || err}`)
       if (!res.headersSent) {
         try {
           res.writeHead(500, { 'Content-Type': 'application/json' })
