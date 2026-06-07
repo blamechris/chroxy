@@ -327,6 +327,67 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// #5294 — read the configured summon hotkey accelerator. Returns `None` when
+/// unset or blank (i.e. disabled), matching `effective_summon_hotkey()`.
+#[tauri::command]
+fn get_summon_hotkey(settings_state: tauri::State<'_, Mutex<DesktopSettings>>) -> Option<String> {
+    lock_or_recover(&settings_state).effective_summon_hotkey()
+}
+
+/// #5294 — set (or clear) the global summon hotkey at runtime and re-register
+/// it immediately, so the change takes effect with no restart. Passing `None`
+/// or a blank/whitespace string clears the hotkey. A malformed or
+/// OS-conflicting accelerator is returned as an error (with the previous
+/// binding left intact) instead of being silently swallowed.
+#[tauri::command]
+fn set_summon_hotkey(app: tauri::AppHandle, accelerator: Option<String>) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    // Normalize blank/whitespace to None (disabled), mirroring
+    // effective_summon_hotkey()'s treatment so the two never disagree.
+    let new_accel = accelerator
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let settings_state = app
+        .try_state::<Mutex<DesktopSettings>>()
+        .ok_or("Settings state unavailable")?;
+
+    // The accelerator currently registered (what we must unregister first).
+    let old_accel = lock_or_recover(&settings_state).effective_summon_hotkey();
+
+    // Unregister the previously-registered accelerator, if any. Best-effort:
+    // if it was never actually registered (e.g. it had failed at startup), the
+    // unregister error is irrelevant to the new registration.
+    if let Some(ref old) = old_accel {
+        let _ = app.global_shortcut().unregister(old.as_str());
+    }
+
+    // Register the new accelerator. On failure, restore the old binding so a
+    // typo doesn't leave the user with no hotkey, and surface the error.
+    if let Some(ref acc) = new_accel {
+        if let Err(e) = register_summon_hotkey(&app, acc) {
+            if let Some(ref old) = old_accel {
+                let _ = register_summon_hotkey(&app, old);
+            }
+            return Err(format!("{} — the previous hotkey is unchanged.", e));
+        }
+    }
+
+    // Persist only after a successful (un)register.
+    {
+        let mut settings = lock_or_recover(&settings_state);
+        settings.summon_hotkey = new_accel;
+        settings
+            .save()
+            .map_err(|e| format!("Failed to save settings: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Read `allowAutoPermissionMode` from `~/.chroxy/config.json`.
 /// Returns `false` if the config file doesn't exist, is empty/whitespace-only,
 /// or the key is missing. Surfaces parse errors so the UI can show a meaningful
@@ -749,6 +810,8 @@ pub fn run() {
             save_setup_config,
             get_tunnel_mode,
             set_tunnel_mode,
+            get_summon_hotkey,
+            set_summon_hotkey,
             get_allow_auto_permission_mode,
             set_allow_auto_permission_mode,
             #[cfg(target_os = "macos")]
@@ -1230,7 +1293,10 @@ pub fn run() {
                 let accel = settings_guard.effective_summon_hotkey();
                 drop(settings_guard);
                 if let Some(accel) = accel {
-                    register_summon_hotkey(app.handle(), &accel);
+                    match register_summon_hotkey(app.handle(), &accel) {
+                        Ok(()) => eprintln!("[hotkey] summon shortcut registered: {}", accel),
+                        Err(e) => eprintln!("[hotkey] {}", e),
+                    }
                 }
             }
 
@@ -1314,15 +1380,17 @@ pub fn run() {
         });
 }
 
-/// Register the opt-in global summon shortcut. Best-effort: a malformed
-/// accelerator or an OS-level conflict is logged, never fatal — the tray
-/// "Show Chroxy" item is always available as a fallback. (#5281 ②)
-fn register_summon_hotkey(app: &tauri::AppHandle, accelerator: &str) {
+/// Register the opt-in global summon shortcut, returning any registration
+/// error (malformed accelerator or OS-level conflict) so the caller can decide
+/// how to handle it: surface it to the user for a runtime change
+/// (`set_summon_hotkey`), or just log it for the best-effort startup
+/// registration — the tray "Show Chroxy" item is always available as a
+/// fallback. (#5281 ②, #5294)
+fn register_summon_hotkey(app: &tauri::AppHandle, accelerator: &str) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
-    match app.global_shortcut().register(accelerator) {
-        Ok(()) => eprintln!("[hotkey] summon shortcut registered: {}", accelerator),
-        Err(e) => eprintln!("[hotkey] failed to register summon shortcut '{}': {}", accelerator, e),
-    }
+    app.global_shortcut()
+        .register(accelerator)
+        .map_err(|e| format!("failed to register summon shortcut '{}': {}", accelerator, e))
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
