@@ -1436,6 +1436,112 @@ button.sidebar-token-view-session-row:hover {
   margin-left: auto;
 }
 
+/* #5281 ①.3 — shared-session presence indicator (sidebar footer) */
+.viewers-indicator {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.viewers-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  background: var(--bg-secondary, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.viewers-trigger:hover {
+  background: var(--bg-hover, var(--border-primary));
+  color: var(--text-primary);
+}
+
+.viewers-trigger-glyph {
+  font-size: 11px;
+}
+
+.viewers-trigger-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.viewers-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  width: 240px;
+  padding: 10px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  color: var(--text-primary);
+}
+
+.viewers-popover-header strong {
+  font-size: 12px;
+}
+
+.viewers-popover-sub {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.viewers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.viewers-client-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.viewers-client-glyph {
+  flex-shrink: 0;
+}
+
+.viewers-client-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewers-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.viewers-tag-self {
+  background: var(--border-primary);
+  color: var(--text-secondary);
+}
+
+.viewers-tag-primary {
+  background: var(--accent-muted, var(--border-primary));
+  color: var(--accent, var(--text-primary));
+}
+
 /* ---- Session Bar ---- */
 .session-bar {
   display: flex;

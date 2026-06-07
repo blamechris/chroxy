@@ -303,6 +303,9 @@ export function App() {
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const connectedClients = useConnectionStore(s => s.connectedClients)
+  // #5281 ①.3 — global primary (last-driver) fallback for the pre-session /
+  // 'default' case; per-session primary is read from sessionStates below.
+  const globalPrimaryClientId = useConnectionStore(s => s.primaryClientId)
   const pairingRefreshedCount = useConnectionStore(s => s.pairingRefreshedCount)
   // #4497: server-advertised stream-stall window — threaded into the
   // StreamStallChip render path so the headline humanises to e.g.
@@ -2302,7 +2305,10 @@ export function App() {
           filter={sidebarFilter}
           serverStatus={isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}
           tunnelUrl={null}
-          clientCount={connectedClients.length}
+          connectedClients={connectedClients}
+          activePrimaryClientId={
+            (activeSessionId ? sessionStates[activeSessionId]?.primaryClientId : null) ?? globalPrimaryClientId
+          }
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}

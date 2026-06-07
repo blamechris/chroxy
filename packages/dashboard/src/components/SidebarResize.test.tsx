@@ -27,7 +27,7 @@ const baseProps = {
   filter: '',
   serverStatus: 'connected' as const,
   tunnelUrl: null,
-  clientCount: 1,
+  connectedClients: [], activePrimaryClientId: null,
   onFilterChange: vi.fn(),
   onSessionClick: vi.fn(),
   onResumeSession: vi.fn(),
