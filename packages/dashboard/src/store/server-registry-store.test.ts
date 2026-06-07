@@ -27,15 +27,27 @@ vi.mock('../utils/auth', () => ({
 // Must import after localStorage mock is set up
 const { useConnectionStore } = await import('./connection')
 
+// Capture the real action refs at import time (before any test mocks them). The
+// store is a module singleton, so retryConnection tests that swap actions in via
+// setState would otherwise leak mocked refs into later tests in this file — and,
+// in a shared Vitest worker, other files. Restore them in beforeEach.
+const realActions = {
+  connect: useConnectionStore.getState().connect,
+  connectToServer: useConnectionStore.getState().connectToServer,
+  _resetSessionMemory: useConnectionStore.getState()._resetSessionMemory,
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(store)) delete store[k]
   mockToken = null
-  // Reset store state relevant to server registry
+  // Reset store state relevant to server registry, restoring the real actions
+  // any prior test may have replaced with spies.
   useConnectionStore.setState({
     serverRegistry: [],
     activeServerId: null,
     connectionPhase: 'disconnected',
+    ...realActions,
   })
 })
 
@@ -116,6 +128,87 @@ describe('store server registry actions', () => {
     useConnectionStore.getState().connectLocal()
     // Already local + connected → must not tear down the connection.
     expect(useConnectionStore.getState().connectionPhase).toBe('connected')
+  })
+
+  describe('retryConnection (#5284)', () => {
+    it('reconnects to the active REMOTE server, not local', () => {
+      const entry = useConnectionStore.getState().addServer('Dev', 'wss://dev/ws', 'token1')
+      const connectSpy = vi.fn()
+      const connectToServerSpy = vi.fn()
+      // A dropped remote session: active server set, socket down.
+      useConnectionStore.setState({
+        activeServerId: entry.id,
+        connectionPhase: 'disconnected',
+        connect: connectSpy,
+        connectToServer: connectToServerSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      // Must retry the remote registry entry — never the same-origin connect().
+      expect(connectToServerSpy).toHaveBeenCalledWith(entry.id)
+      expect(connectSpy).not.toHaveBeenCalled()
+    })
+
+    it('reconnects to local same-origin when no active server', () => {
+      mockToken = 'local-token'
+      const connectSpy = vi.fn()
+      const connectToServerSpy = vi.fn()
+      useConnectionStore.setState({
+        activeServerId: null,
+        connectionPhase: 'disconnected',
+        connect: connectSpy,
+        connectToServer: connectToServerSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      expect(connectToServerSpy).not.toHaveBeenCalled()
+      expect(connectSpy).toHaveBeenCalledTimes(1)
+      // Same-origin /ws URL + the page token.
+      expect(connectSpy.mock.calls[0]![0]).toMatch(/\/ws$/)
+      expect(connectSpy.mock.calls[0]![1]).toBe('local-token')
+    })
+
+    it('is a no-op for the local path when no same-origin token is available', () => {
+      mockToken = null
+      const connectSpy = vi.fn()
+      useConnectionStore.setState({
+        activeServerId: null,
+        connectionPhase: 'disconnected',
+        connect: connectSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      expect(connectSpy).not.toHaveBeenCalled()
+    })
+
+    it('no-ops when activeServerId is stale (absent from registry) — never falls back to local', () => {
+      // Stale/desynced id (e.g. cross-tab registry edit): connectToServer must
+      // no-op rather than reconnect to local, which would be the wrong target.
+      const connectSpy = vi.fn()
+      useConnectionStore.setState({
+        serverRegistry: [],
+        activeServerId: 'srv_gone',
+        connectionPhase: 'disconnected',
+        connect: connectSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      // Real connectToServer ran and found no entry — no local fallback connect.
+      expect(connectSpy).not.toHaveBeenCalled()
+      expect(useConnectionStore.getState().activeServerId).toBe('srv_gone')
+    })
+
+    it('preserves session state on retry (does NOT reset session memory)', () => {
+      // The core guarantee of retryConnection vs switchServer/connectLocal: a
+      // retry resumes, it must not wipe session memory. Guard against a future
+      // change to connectToServer that adds a reset.
+      const entry = useConnectionStore.getState().addServer('Dev', 'wss://dev/ws', 'token1')
+      const resetSpy = vi.fn()
+      useConnectionStore.setState({
+        activeServerId: entry.id,
+        connectionPhase: 'disconnected',
+        connect: vi.fn(),
+        _resetSessionMemory: resetSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      expect(resetSpy).not.toHaveBeenCalled()
+    })
   })
 
   it('multiple servers can coexist in registry', () => {

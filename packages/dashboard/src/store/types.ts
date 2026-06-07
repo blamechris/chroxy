@@ -1141,6 +1141,14 @@ export interface ConnectionState {
   connectToServer: (serverId: string) => void;
   /** Connect to the local same-origin daemon ("this machine"); registry-less local target. */
   connectLocal: () => void;
+  /**
+   * Reconnect to whatever server is currently active — the registry server when
+   * `activeServerId` is set, otherwise the local same-origin daemon. Preserves
+   * session state (it's a retry, not a switch). Used by the manual "Retry"
+   * affordance so a dropped remote LAN connection retries the remote, not local
+   * (#5284).
+   */
+  retryConnection: () => void;
 
   // Environment actions
   requestEnvironments: () => void;

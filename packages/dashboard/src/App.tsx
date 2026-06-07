@@ -508,6 +508,7 @@ export function App() {
 
   // Store actions (stable refs)
   const connect = useConnectionStore(s => s.connect)
+  const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
@@ -910,6 +911,11 @@ export function App() {
   // Auto-connect on mount — use page token (served by local server),
   // or fall back to the last active server from the registry.
   // Reads registry via getState() to avoid reactive deps (mount-only effect).
+  //
+  // NOTE: precedence here (local-first) is intentionally the inverse of
+  // retryConnection's (active-server-first). A fresh page load returns to the
+  // local "home" daemon; a manual Retry resumes whatever you were connected to.
+  // The two don't collide in practice — connectLocal nulls activeServerId.
   useEffect(() => {
     const token = getAuthToken()
     if (token) {
@@ -1645,13 +1651,11 @@ export function App() {
     dismissSessionNotification(notificationId)
   }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
 
+  // Retry reconnects to the *active* server (remote registry entry or local),
+  // not unconditionally to local — see retryConnection / #5284.
   const handleRetry = useCallback(() => {
-    const token = getAuthToken()
-    if (!token) return
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const wsUrl = `${proto}://${window.location.host}/ws`
-    connect(wsUrl, token)
-  }, [connect])
+    retryConnection()
+  }, [retryConnection])
 
   const handleStartServer = useCallback(() => {
     startServer()
