@@ -73,4 +73,26 @@ describe('Tauri IPC commands (#1108)', () => {
   test('TypeScript hook exports setTunnelMode', () => {
     expect(hookSrc).toMatch(/export async function setTunnelMode/)
   })
+
+  // #5294 — summon hotkey settings command + live re-registration.
+  test('Rust has get_summon_hotkey command', () => {
+    expect(libSrc).toMatch(/#\[tauri::command\][\s\S]*?fn get_summon_hotkey/)
+  })
+
+  test('Rust has set_summon_hotkey command', () => {
+    expect(libSrc).toMatch(/#\[tauri::command\][\s\S]*?fn set_summon_hotkey/)
+  })
+
+  test('summon hotkey commands registered in generate_handler', () => {
+    expect(libSrc).toMatch(/generate_handler!\[[\s\S]*?get_summon_hotkey/)
+    expect(libSrc).toMatch(/generate_handler!\[[\s\S]*?set_summon_hotkey/)
+  })
+
+  test('TypeScript hook exports getSummonHotkey', () => {
+    expect(hookSrc).toMatch(/export async function getSummonHotkey/)
+  })
+
+  test('TypeScript hook exports setSummonHotkey', () => {
+    expect(hookSrc).toMatch(/export async function setSummonHotkey/)
+  })
 })

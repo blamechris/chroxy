@@ -6498,6 +6498,22 @@ button.sidebar-token-view-session-row:hover {
   font-style: italic;
 }
 
+/* #5294 — summon hotkey: text field + Save/Clear on one row. */
+.summon-hotkey-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.summon-hotkey-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.summon-hotkey-row button {
+  flex: 0 0 auto;
+}
+
 .tunnel-restart-btn {
   margin: 10px 0 0;
   padding: 8px 16px;

@@ -55,6 +55,33 @@ export async function setTunnelMode(mode: string): Promise<void> {
 }
 
 /**
+ * Read the configured global summon hotkey accelerator (#5294).
+ *
+ * Returns `null` outside Tauri, or when no hotkey is set (the Rust side returns
+ * `None` for unset/blank). A non-empty string is the active accelerator.
+ */
+export async function getSummonHotkey(): Promise<string | null> {
+  return tauriInvoke<string | null>('get_summon_hotkey')
+}
+
+/**
+ * Set or clear the global summon hotkey and re-register it immediately (#5294).
+ * Pass `null` or an empty string to clear it. No-ops outside Tauri.
+ *
+ * Throws when invoke is unavailable inside Tauri, or when the Rust side rejects
+ * the accelerator (malformed / OS-conflicting) — so the SettingsPanel can show
+ * the failure instead of silently leaving the old binding in place.
+ */
+export async function setSummonHotkey(accelerator: string | null): Promise<void> {
+  if (!isTauri()) return
+  const invoke = getTauriInvoke()
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
+  await invoke('set_summon_hotkey', { accelerator })
+}
+
+/**
  * Read `allowAutoPermissionMode` from `~/.chroxy/config.json`.
  *
  * Returns:

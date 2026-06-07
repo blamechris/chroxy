@@ -32,6 +32,8 @@
     "allow-save-setup-config",
     "allow-get-tunnel-mode",
     "allow-set-tunnel-mode",
+    "allow-get-summon-hotkey",
+    "allow-set-summon-hotkey",
     "allow-get-allow-auto-permission-mode",
     "allow-set-allow-auto-permission-mode",
     "allow-voice-available",

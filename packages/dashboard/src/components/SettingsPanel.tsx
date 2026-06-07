@@ -32,6 +32,8 @@ import { getTauriInvoke } from '../utils/tauri-bridge'
 import {
   getTunnelMode,
   setTunnelMode,
+  getSummonHotkey,
+  setSummonHotkey,
   restartServer,
   getServerInfo,
   getAllowAutoPermissionMode,
@@ -698,6 +700,12 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
   const [restarting, setRestarting] = useState(false)
+  // #5294 — global summon hotkey. `summonHotkeySaved` tracks the persisted
+  // value so the Save button can disable when unchanged and Clear when empty.
+  const [summonHotkeyInput, setSummonHotkeyInput] = useState<string>('')
+  const [summonHotkeySaved, setSummonHotkeySaved] = useState<string | null>(null)
+  const [summonHotkeyError, setSummonHotkeyError] = useState<string | null>(null)
+  const [summonHotkeySaving, setSummonHotkeySaving] = useState<boolean>(false)
   // #4052: paste-API-key form state. Lives in the component (not the
   // store) so the raw key is never observable beyond this one render.
   const [byokKeyInput, setByokKeyInput] = useState('')
@@ -786,6 +794,13 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     // previous open doesn't linger across reopens.
     setSpeechResetStatus('idle')
     setSpeechResetError(null)
+    // #5294 — reset hotkey edit state, then load the persisted accelerator.
+    setSummonHotkeyError(null)
+    setSummonHotkeySaving(false)
+    getSummonHotkey().then(hk => {
+      setSummonHotkeySaved(hk ?? null)
+      setSummonHotkeyInput(hk ?? '')
+    }).catch(() => {})
     // Read saved setting (what user selected)
     getTunnelMode().then(mode => {
       if (mode) setTunnelModeState(mode)
@@ -960,6 +975,38 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
       setTunnelError(err instanceof Error ? err.message : String(err))
     }
   }, [tunnelMode])
+
+  // #5294 — persist + live-register the summon hotkey. On a bad/conflicting
+  // accelerator the Rust side throws; surface it and leave the field as-typed
+  // so the user can correct it (the previous binding stays active server-side).
+  const handleSaveSummonHotkey = useCallback(async () => {
+    const next = summonHotkeyInput.trim()
+    setSummonHotkeyError(null)
+    setSummonHotkeySaving(true)
+    try {
+      await setSummonHotkey(next || null)
+      setSummonHotkeySaved(next || null)
+      setSummonHotkeyInput(next)
+    } catch (err) {
+      setSummonHotkeyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSummonHotkeySaving(false)
+    }
+  }, [summonHotkeyInput])
+
+  const handleClearSummonHotkey = useCallback(async () => {
+    setSummonHotkeyError(null)
+    setSummonHotkeySaving(true)
+    try {
+      await setSummonHotkey(null)
+      setSummonHotkeySaved(null)
+      setSummonHotkeyInput('')
+    } catch (err) {
+      setSummonHotkeyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSummonHotkeySaving(false)
+    }
+  }, [])
 
   // Normalize: if persisted defaultProvider isn't in server's list, use first available
   const effectiveProvider = useMemo(() => {
@@ -1812,6 +1859,56 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
                 ) : (
                   <p className="tunnel-mode-note">Server restart required after change</p>
                 )}
+              </div>
+            </section>
+          )}
+          {/* #5294 — global summon hotkey: edit/clear with live re-registration. */}
+          {inTauri && (
+            <section className="settings-section">
+              <h3>Desktop</h3>
+              <div className="settings-field">
+                <label htmlFor="summon-hotkey">Summon hotkey</label>
+                <div className="summon-hotkey-row">
+                  <input
+                    id="summon-hotkey"
+                    type="text"
+                    aria-label="Summon hotkey accelerator"
+                    placeholder="e.g. CmdOrCtrl+Shift+K"
+                    value={summonHotkeyInput}
+                    onChange={(e) => setSummonHotkeyInput(e.target.value)}
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    data-testid="summon-hotkey-input"
+                  />
+                  <button
+                    type="button"
+                    className="summon-hotkey-save"
+                    disabled={summonHotkeySaving || summonHotkeyInput.trim() === (summonHotkeySaved ?? '')}
+                    onClick={handleSaveSummonHotkey}
+                    data-testid="summon-hotkey-save"
+                  >
+                    {summonHotkeySaving ? 'Saving…' : 'Save'}
+                  </button>
+                  <button
+                    type="button"
+                    className="summon-hotkey-clear"
+                    disabled={summonHotkeySaving || (!summonHotkeyInput.trim() && !summonHotkeySaved)}
+                    onClick={handleClearSummonHotkey}
+                    data-testid="summon-hotkey-clear"
+                  >
+                    Clear
+                  </button>
+                </div>
+                {summonHotkeyError && (
+                  <p className="tunnel-mode-error" data-testid="summon-hotkey-error">{summonHotkeyError}</p>
+                )}
+                <p className="settings-hint">
+                  A system-wide shortcut to bring Chroxy to the front, in Tauri
+                  accelerator syntax (e.g. <code>CmdOrCtrl+Shift+K</code>). Applies
+                  immediately — no restart. Leave blank to disable; the tray
+                  &ldquo;Show Chroxy&rdquo; item is always available.
+                </p>
               </div>
             </section>
           )}
