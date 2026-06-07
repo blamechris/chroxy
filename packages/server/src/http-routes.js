@@ -165,7 +165,12 @@ function matchAllowedOrigin(origin) {
  * @returns {(req: import('http').IncomingMessage, res: import('http').ServerResponse) => void}
  */
 export function createHttpHandler(server) {
-  return async (req, res) => {
+  // #5312 (WP-1.2) — the actual routing logic, wrapped below in a top-level
+  // try/catch so an unguarded throw from any route (e.g. buildDiagnosticsSnapshot,
+  // readConnectionInfo, or readFileSync(index)) returns 500 instead of rejecting
+  // the handler promise → unhandledRejection → process.exit(1), which would take
+  // down the whole daemon (every session) on a single bad request.
+  const dispatch = async (req, res) => {
     // CORS preflight
     if (req.method === 'OPTIONS') {
       const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect')
@@ -701,5 +706,24 @@ export function createHttpHandler(server) {
     // Fallback 404
     res.writeHead(404)
     res.end()
+  }
+
+  // #5312 (WP-1.2) — top-level guard. Any throw/rejection escaping dispatch()
+  // becomes a 500, never an unhandledRejection that crashes the daemon. Headers
+  // may already be sent (a route threw mid-response); only write 500 if not.
+  return async (req, res) => {
+    try {
+      await dispatch(req, res)
+    } catch (err) {
+      log.error(`Unhandled error in HTTP handler (${req.method} ${req.url}): ${err?.stack || err}`)
+      if (!res.headersSent) {
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Internal server error' }))
+        } catch { /* response already torn down */ }
+      } else {
+        try { res.end() } catch { /* already ended */ }
+      }
+    }
   }
 }

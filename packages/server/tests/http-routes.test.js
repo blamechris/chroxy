@@ -87,6 +87,32 @@ describe('http-routes', () => {
     httpServer = null
   })
 
+  // #5312 (WP-1.2) — an unguarded throw in any route must become a 500, not an
+  // unhandledRejection that crashes the whole daemon (every session) on one bad
+  // request. The audit's throw sites (buildDiagnosticsSnapshot, readConnectionInfo,
+  // readFileSync(index)) are all synchronous, so a sync route throw is the case.
+  describe('top-level error guard (#5312)', () => {
+    it('returns 500 for a throwing route and the server stays alive', async () => {
+      const mock = createMockServer({
+        _permissions: {
+          handlePermissionRequest: () => { throw new Error('boom in route') },
+          handlePermissionResponseHttp: (_req, res) => { res.writeHead(200); res.end('ok') },
+        },
+      })
+      await startWith(mock)
+
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/permission`, { method: 'POST', body: '{}' })
+      assert.equal(res.status, 500, 'throwing route returns 500')
+      const body = await res.json()
+      assert.equal(body.error, 'Internal server error')
+
+      // The daemon survived — a subsequent request still works (the crash this
+      // guards against would have killed the process).
+      const health = await globalThis.fetch(`http://127.0.0.1:${port}/health`)
+      assert.equal(health.status, 200, 'server still serving after a route threw')
+    })
+  })
+
   describe('health endpoint', () => {
     it('GET / returns JSON health status', async () => {
       const mock = createMockServer()
