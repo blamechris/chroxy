@@ -49,6 +49,86 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5307 (WP-0.1) — conversation continuity across restart. The TUI must
+  // persist its upstream conversation uuid (get resumeSessionId, read by
+  // SessionManager.serializeState) and, on restore, respawn claude with
+  // `--resume <id>` instead of minting a fresh uuid + `--session-id`. Without
+  // this, every restart silently started a brand-new claude conversation while
+  // the dashboard replayed stale history (audit TUI-AUDIT-001).
+  describe('resume / conversation continuity (#5307 WP-0.1)', () => {
+    let fakeHome
+    let origSpawnPty
+    let capturedArgs
+    let session
+
+    beforeEach(() => {
+      fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-resume-home-'))
+      writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
+      process.env._ORIG_HOME = process.env.HOME
+      process.env.HOME = fakeHome
+      capturedArgs = null
+      origSpawnPty = ClaudeTuiSession.prototype._spawnPty
+      ClaudeTuiSession.prototype._spawnPty = async function () {
+        const idArgs = this._resumedFromPersisted
+          ? ['--resume', this._sessionId]
+          : ['--session-id', this._sessionId]
+        capturedArgs = [...idArgs, '--settings', this._settingsPath]
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
+      }
+    })
+
+    afterEach(async () => {
+      if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
+      if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+    })
+
+    it('declares capabilities.resume = true', () => {
+      assert.equal(ClaudeTuiSession.capabilities.resume, true,
+        'resume must be advertised so SessionManager round-trips the conversation uuid')
+    })
+
+    it('fresh session: mints a uuid, exposes it via resumeSessionId, spawns with --session-id', async () => {
+      session = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(session._sessionId, null, 'no uuid before start on a fresh session')
+      assert.equal(session.resumeSessionId, null, 'resumeSessionId is null pre-start when fresh')
+      await session.start()
+      assert.ok(session._sessionId, 'a uuid is minted at start')
+      assert.equal(session.resumeSessionId, session._sessionId,
+        'resumeSessionId getter exposes the minted uuid for serializeState')
+      const i = capturedArgs.indexOf('--session-id')
+      assert.ok(i >= 0 && capturedArgs[i + 1] === session._sessionId, 'fresh spawn uses --session-id <uuid>')
+      assert.equal(capturedArgs.includes('--resume'), false, 'fresh spawn must NOT use --resume')
+    })
+
+    it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {
+      const persisted = '11111111-2222-3333-4444-555555555555'
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12345, skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resumeSessionId: persisted,
+      })
+      assert.equal(session._sessionId, persisted, 'constructor seeds _sessionId from the persisted resume id')
+      assert.equal(session.resumeSessionId, persisted, 'getter round-trips the persisted id pre-start')
+      await session.start()
+      assert.equal(session._sessionId, persisted, 'start() must NOT overwrite the seeded uuid with a fresh one')
+      const i = capturedArgs.indexOf('--resume')
+      assert.ok(i >= 0 && capturedArgs[i + 1] === persisted, 'restore spawn uses --resume <persisted-uuid>')
+      assert.equal(capturedArgs.includes('--session-id'), false, 'restore spawn must NOT re-use --session-id (claude rejects a reused id)')
+    })
+
+    it('blank/empty resumeSessionId is treated as fresh (back-compat with older state files)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12345, skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resumeSessionId: '',
+      })
+      assert.equal(session._sessionId, null, 'empty string does not seed a resume')
+      assert.equal(session._resumedFromPersisted, false)
+      await session.start()
+      assert.ok(capturedArgs.includes('--session-id'), 'empty resume id falls back to a fresh --session-id spawn')
+    })
+  })
+
   describe('constructor', () => {
     it('defaults provider id to claude-tui', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
@@ -5641,11 +5721,14 @@ describe('ClaudeTuiSession', () => {
       origSpawnPty = ClaudeTuiSession.prototype._spawnPty
       ClaudeTuiSession.prototype._spawnPty = async function (permissionsEnabled) {
         capturedPermissionsEnabled = permissionsEnabled
-        // Mirror the production arg list (lines 499-523 of
-        // claude-tui-session.js) so the test stays honest about what
-        // node-pty would actually receive.
+        // Mirror the production arg list (claude-tui-session.js _spawnPty) so
+        // the test stays honest about what node-pty would actually receive.
+        // #5307 (WP-0.1): fresh → --session-id, restore → --resume.
+        const idArgs = this._resumedFromPersisted
+          ? ['--resume', this._sessionId]
+          : ['--session-id', this._sessionId]
         const args = [
-          '--session-id', this._sessionId,
+          ...idArgs,
           '--settings', this._settingsPath,
         ]
         if (this.skipPermissions) args.push('--dangerously-skip-permissions')

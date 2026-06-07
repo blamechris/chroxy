@@ -306,7 +306,11 @@ export class ClaudeTuiSession extends BaseSession {
       // CliSession's restart-based setPermissionMode.
       permissionModeSwitch: true,
       planMode: false,
-      resume: false,
+      // #5307 (WP-0.1) — the TUI now persists its upstream conversation uuid
+      // (get resumeSessionId) and, on restore, respawns claude with
+      // `--resume <id>` so the conversation continues across daemon restart /
+      // upgrade / crash-recovery instead of silently starting a fresh chat.
+      resume: true,
       terminal: false,
       thinkingLevel: false,
       streaming: false,
@@ -390,7 +394,7 @@ export class ClaudeTuiSession extends BaseSession {
     return ['multi_question_intervention']
   }
 
-  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, firstOutputTimeoutMs, skipPermissions } = {}) {
+  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, firstOutputTimeoutMs, skipPermissions, resumeSessionId } = {}) {
     super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs })
 
     this._port = port || null
@@ -406,7 +410,18 @@ export class ClaudeTuiSession extends BaseSession {
     // `entry.session._hookSecret` duck-typed). Mirrors the same name CliSession
     // uses so the existing permission HTTP route routes us with no changes.
     this._hookSecret = this._port ? randomBytes(32).toString('hex') : null
-    this._sessionId = null   // upstream claude conversation uuid, assigned at start()
+    // #5307 (WP-0.1) — seed the upstream conversation uuid from the persisted
+    // resume id (SessionManager.restoreState passes it through from the saved
+    // sdkSessionId). When present, start() reuses it and spawns claude with
+    // `--resume <id>` so the conversation continues across restart; when absent
+    // (fresh session, or an older state file) it stays null and start() mints a
+    // new uuid spawned with `--session-id <id>`, exactly as before. Provider-
+    // local — NOT a BaseSession opt, so it is not forwarded via super() (matches
+    // CliSession's seeding pattern, cli-session.js:333).
+    this._sessionId = (typeof resumeSessionId === 'string' && resumeSessionId.length > 0)
+      ? resumeSessionId
+      : null   // upstream claude conversation uuid, assigned at start() when fresh
+    this._resumedFromPersisted = this._sessionId !== null
     // #4792: session-scoped logger. Assigned in start() once _sessionId is
     // generated. Until then, code paths that need to log MUST fall back to
     // the module-level `log` (e.g. trust pre-write failure, sink dir create
@@ -688,6 +703,16 @@ export class ClaudeTuiSession extends BaseSession {
     return this._sessionId
   }
 
+  // #5307 (WP-0.1) — SessionManager.serializeState reads `resumeSessionId` off
+  // the session and persists it as `sdkSessionId`; restoreState passes it back
+  // into the constructor so the conversation resumes. Without this getter the
+  // read was `undefined` → persisted null → every restart started a brand-new
+  // claude conversation while the dashboard replayed stale history (the silent
+  // context-amnesia bug, audit TUI-AUDIT-001). Mirrors cli-session.js:386.
+  get resumeSessionId() {
+    return this._sessionId
+  }
+
   async start() {
     // Pre-flight: ensure cwd is trusted so the dialog doesn't block PTY spawns.
     try {
@@ -704,7 +729,10 @@ export class ClaudeTuiSession extends BaseSession {
 
     // Generate the upstream session uuid here so the JSONL path is
     // predictable + so claude resumes the same conversation across turns.
-    this._sessionId = randomUUID()
+    // #5307 (WP-0.1) — only mint a fresh uuid when this isn't a restore. When
+    // the constructor seeded `_sessionId` from a persisted resume id, keep it
+    // so the spawn below can `--resume <id>` the same conversation.
+    if (!this._sessionId) this._sessionId = randomUUID()
     // #4792: now that the session id exists, bind the per-instance logger
     // so subsequent log lines carry sessionId and route correctly through
     // the WsServer log fan-out (#4787). Anything that logs before this
@@ -800,8 +828,20 @@ export class ClaudeTuiSession extends BaseSession {
       env.CHROXY_SINK_DIR = this._sinkDir
     }
 
+    // #5307 (WP-0.1) — on a fresh session, set the conversation uuid with
+    // `--session-id <id>` (claude requires a brand-new uuid here). On restore,
+    // the same uuid is now claude's existing conversation id, so resume it with
+    // `--resume <id>` instead — reusing `--session-id` with an already-used id
+    // is rejected by claude. Falls back to the fresh path whenever the session
+    // wasn't seeded from a persisted id. Resume-failure handling (claude can't
+    // find the conversation, e.g. cleared ~/.claude history) currently surfaces
+    // via the warmup `_ptyExited` error path; a graceful drop-and-retry-fresh
+    // fallback is tracked with the per-session respawn work (#5315 / WP-2.1).
+    const idArgs = this._resumedFromPersisted
+      ? ['--resume', this._sessionId]
+      : ['--session-id', this._sessionId]
     const args = [
-      '--session-id', this._sessionId,
+      ...idArgs,
       '--settings', this._settingsPath,
     ]
     if (this.skipPermissions) {
