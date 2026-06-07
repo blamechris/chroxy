@@ -23,30 +23,24 @@
  * Analysis: tail the JSONL file to find the keystroke patterns that
  * advance between questions, toggle multiSelect, and reach Submit.
  *
- * 10+ option questions (#4625 + #4848):
- *   The 2026-05-30 empirical recording only covered questions with ≤9
- *   options (single-digit hotkeys '1'..'9'). #4848 added native drive
- *   for single-select 10+ option picks via arrow-key navigation:
- *   '\x1b[B' (down) × matchIdx + '\r' (Enter) to commit. This is the
- *   conservative bet of the two theoretically-possible paths (the
+ * 10+ option questions (#4625 + #4848 + #4880 — RESOLVED 2026-06-07):
+ *   #4848 added native drive for single-select 10+ option picks via
+ *   arrow-key navigation ('\x1b[B' down × matchIdx + '\r' Enter to commit),
+ *   the conservative bet of two theoretically-possible paths (the
  *   multi-digit hotkey path was ruled out — claude TUI's single-digit
  *   commit-on-keystroke behaviour pinned in #4292 means a '1' would
  *   commit option 1 before the '0' arrived).
  *
- *   **Open assumption (#4848):** the arrow-nav sequence is implemented
- *   under the assumption it works against claude TUI's AskUserQuestion
- *   form, but the empirical recorder pass against a 10+ option form
- *   was NOT run before the PR landed. If the sequence misfires in
- *   dogfood, re-run this recorder against a 12-option AskUserQuestion
- *   form, pick option 11 manually with whichever keystroke works, and
- *   replace `_writePtyArrowNavSequence` in claude-tui-session.js with
- *   the empirically-pinned bytes.
- *
- *   Multi-select 10+ toggles STILL bail with ASK_USER_QUESTION_TOO_MANY_OPTIONS
- *   because the multi-select arrow-nav pattern (arrow + Space toggle +
- *   return-to-anchor) is more complex and was deliberately scoped out
- *   of #4848 — record a multi-select form pick to extend driver
- *   coverage there too.
+ *   **Empirical finding (#4880):** the recorder pass against a 10+ option
+ *   AskUserQuestion ran and proved the form is UNREACHABLE — claude TUI
+ *   v2.1.168 hard-caps each AskUserQuestion question at 4 options. A prompt
+ *   asking for 12 options fails server-side with
+ *   `InputValidationError: too_big, maximum: 4, path: questions[0].options`
+ *   before any form renders (recording: docs/empirical/4880-twelve-option-cap.jsonl).
+ *   So `_writePtyArrowNavSequence` and the multi-select TOO_MANY_OPTIONS bail
+ *   are dead code on this TUI version, kept as forward-compat for a future
+ *   claude that raises the cap. Re-run this recorder if/when that happens;
+ *   only then can the arrow-nav bytes be empirically pinned.
  *
  * Exit:
  *   Ctrl+D — clean exit (closes recording file)
@@ -55,15 +49,19 @@
 
 import { resolve } from 'node:path'
 import { writeFileSync, createWriteStream } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { flushAndExit } from './flush-and-exit.mjs'
 
-// npm workspaces hoists node-pty to the root node_modules/.
-const ptyMod = await import('/Users/blamechris/Projects/chroxy/node_modules/node-pty/lib/index.js')
+// npm workspaces hoists node-pty to the root node_modules/. Resolve it relative
+// to this script (scripts/ → ../node_modules) so the recorder is portable across
+// checkouts rather than pinned to one contributor's absolute path.
+const ptyMod = await import(new URL('../node_modules/node-pty/lib/index.js', import.meta.url).href)
 
 const projectDir = resolve(process.argv[2] || process.cwd())
-const claudeBin = '/Users/blamechris/.local/bin/claude'
+// Resolve the claude binary portably: $CLAUDE_BIN override, else the default
+// per-user install location (~/.local/bin/claude).
+const claudeBin = process.env.CLAUDE_BIN || join(homedir(), '.local', 'bin', 'claude')
 
 const recordingPath = join(tmpdir(), `tui-form-recording-${Date.now()}.jsonl`)
 const recording = createWriteStream(recordingPath, { encoding: 'utf8' })

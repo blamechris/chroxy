@@ -1,0 +1,12 @@
+{"kind": "meta", "note": "Curated extract of a tui-form-recorder.mjs run (#4880). claude TUI v2.1.168, prompt requesting a 12-option single-select AskUserQuestion. All `in` (keystroke) events are verbatim; selected `out` events are ANSI-stripped and home paths scrubbed. Shows the AskUserQuestion 4-option hard cap (InputValidationError too_big maximum:4). Raw capture not committed."}
+{"t": 344, "kind": "in", "data": "\u001bP>|iTerm2 3.6.11\u001b\\"}
+{"t": 361, "kind": "in", "data": "\u001b[?64;1;2;4;6;17;18;21;22;52c"}
+{"t": 367, "kind": "in", "data": "\u001b[?2026;2$y"}
+{"t": 376, "kind": "in", "data": "\u001b[?64;1;2;4;6;17;18;21;22;52c"}
+{"t": 4931, "kind": "in", "data": "\u001b[O"}
+{"t": 41729, "kind": "in", "data": "\u001b[I"}
+{"t": 42519, "kind": "in", "data": "\u001b[200~Use your AskUserQuestion tool to ask me ONE single-select question\rwith twelve options to choose from (list 12 web frameworks).\rDon't shorten the list.\u001b[201~"}
+{"t": 43064, "kind": "in", "data": "\r"}
+{"t": 50658, "kind": "out", "text": "Error: InputValidationError: [ { \"origin\": \"array\", \"code\": \"too_big\", \"maximum\": 4, \"inclusive\": true, \"path\": [ \"questions\", 0, \"options\" ], \"message\":\"Toobig:expectedarraytohave<=4items\" } ] ✢Smooshing… (7s·↓408tokens)"}
+{"t": 55018, "kind": "out", "text": "The AskUserQuestiontool can't do this as asked.Ithard-capseachquestionat4 options(thecallfailedwithtoo_big: maximum 4),andyouexplicitlytoldmenottoshortenthelist—soIwon'tquietlytrim12downto4andpretendthat's what you wanted. A few ways forward:"}
+{"t": 60676, "kind": "in", "data": "<<CTRL-D EXIT>>"}

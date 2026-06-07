@@ -1,0 +1,18 @@
+{"kind": "meta", "note": "Curated extract of a tui-form-recorder.mjs run (#4882). claude TUI v2.1.168, 2-question all-single-select AskUserQuestion. All `in` (keystroke) events are verbatim; selected `out` events are ANSI-stripped and home paths scrubbed for readability/PII. Raw capture not committed."}
+{"t": 445, "kind": "in", "data": "\u001bP>|iTerm2 3.6.11\u001b\\"}
+{"t": 456, "kind": "in", "data": "\u001b[?64;1;2;4;6;17;18;21;22;52c"}
+{"t": 481, "kind": "in", "data": "\u001b[?2026;2$y"}
+{"t": 497, "kind": "in", "data": "\u001b[?64;1;2;4;6;17;18;21;22;52c"}
+{"t": 101026, "kind": "in", "data": "\u001b[O"}
+{"t": 108125, "kind": "in", "data": "\u001b[I"}
+{"t": 109195, "kind": "in", "data": "\r"}
+{"t": 110642, "kind": "in", "data": "\u001b[200~Use your AskUserQuestion tool to ask me exactly two single-select\rquestions before doing anything else: (1) pick a framework â React,\rVue, or Svelte; (2) pick a package manager â npm, pnpm, or yarn.\rAsk both in one form, don't assume answers.\u001b[201~"}
+{"t": 120815, "kind": "in", "data": "\r"}
+{"t": 178752, "kind": "in", "data": "\u001b[O"}
+{"t": 233046, "kind": "in", "data": "\u001b[I"}
+{"t": 237651, "kind": "in", "data": "2"}
+{"t": 243469, "kind": "in", "data": "2"}
+{"t": 247818, "kind": "in", "data": "1"}
+{"t": 248403, "kind": "out", "text": "User answered Claude's questions: ⎿ · Which framework would you like to use? → Vue · Which package manager would you like to use? → pnpm · Blanching… (5s · ↑ 377 tokens)"}
+{"t": 251067, "kind": "out", "text": "You picked Vue andpnpm. Readyforthenextstepwheneveryouare—justletmeknowwhatyou'dlikemetobuildorset up. ✶ Blanching… (8s · ↓395 tokens)"}
+{"t": 254089, "kind": "in", "data": "<<CTRL-D EXIT>>"}

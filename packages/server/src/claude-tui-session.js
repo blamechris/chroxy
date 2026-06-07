@@ -137,17 +137,27 @@ const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
 // pre-#4635 timing-free path (Tab's commit signal makes Submit settle
 // naturally and the existing empirical recording pins the Tab + '1' run).
 //
-// #4882 (open) — this constant + the trailing `\r` below are still
-// "best-effort defensive" rather than empirically confirmed. The recorder
-// script `scripts/tui-form-recorder.mjs` (repo root) was originally only run
-// against a MIXED multi-question form (#4604 Chunk B). A fresh recorder pass
-// against a pure all-single-select N-question prompt is needed to:
-//   - confirm 150ms is the right magnitude (or tune down/up)
-//   - confirm the Submit screen accepts `'1'` (vs needing `'\r'`, vs auto-
-//     submitting after the last digit with NO Submit screen)
-// Until that happens, the 30s ASK_USER_QUESTION watchdog is the safety net
-// for any remaining wedge. See issue #4882 for the empirical reconcile
-// tracking and the prior all-single-select wedge analysis (#4635, #4867).
+// #4882 (resolved 2026-06-07) — the fresh all-single-select recorder pass
+// finally ran against a live claude TUI (v2.1.168) and is committed at
+// `docs/empirical/4882-all-single-select-2q.jsonl`. A human driving a pure
+// two-question all-single-select form submitted with the digit sequence
+// `'2','2','1'` and the form committed on the Submit `'1'` ALONE — no
+// trailing `\r` was pressed. So:
+//   - The Submit screen accepts `'1'` (it does NOT require `\r`, and does
+//     NOT auto-submit after the last digit — there IS a Submit screen).
+//   - 150ms is kept (LOCKED): the human's natural gap before Submit was
+//     ~4s, which confirms a settle works but gives no lower bound, so
+//     tuning down isn't justified by this capture. 150ms mirrors the
+//     OTHER_FREEFORM_SETTLE_MS render-settle magnitude (#4651) and the
+//     #4635 wedge has not recurred, so it stays.
+//   - The trailing `\r` below is now CONFIRMED unnecessary (the human
+//     never sent it) but is retained as confirmed-harmless belt-and-braces
+//     — see the comment at its `sequence.push('\r')` site. It is NOT
+//     removed here because this recording covered only the 2-question
+//     all-single-select shape; pulling the `\r` from the mixed and 3+q
+//     paths it also feeds would be an overreach from a single-shape capture.
+// The 30s ASK_USER_QUESTION watchdog remains the safety net for any shape
+// not yet captured. Prior wedge analysis: #4635, #4867.
 const MULTI_QUESTION_SUBMIT_SETTLE_MS = 150
 
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
@@ -2651,10 +2661,21 @@ export class ClaudeTuiSession extends BaseSession {
         // menus that auto-commit on the first digit can't be driven via
         // multi-digit chord like '1','0'; arrow keys are the standard
         // claude TUI navigation primitive used elsewhere in its form
-        // pickers). The recorder script's authoritative note is preserved
-        // as the open assumption — re-run the recorder pass against a
-        // 10+ option AskUserQuestion to confirm arrow nav is the right
-        // path; if not, switch to whichever empirical sequence pins.
+        // pickers).
+        //
+        // #4880 (resolved 2026-06-07): the recorder pass against a 10+ option
+        // AskUserQuestion finally ran (docs/empirical/4880-twelve-option-cap.jsonl)
+        // and found the form is UNREACHABLE: claude TUI v2.1.168's
+        // AskUserQuestion tool hard-caps each question at 4 options. A prompt
+        // asking for 12 options fails server-side with
+        // `InputValidationError: too_big, maximum: 4, path: questions[0].options`
+        // before any form renders — so `matchIdx >= 9` can never be hit via a
+        // real AskUserQuestion on this TUI version. This branch is therefore
+        // currently DEAD CODE, retained as forward-compat: if a future claude
+        // raises the option cap, the arrow-nav drive is ready. The `\x1b[B`
+        // (Down) + `\r` (Enter) bytes remain the best-available unverified
+        // sequence — they could not be empirically pinned because the form
+        // can't be produced. Revisit if/when the cap is raised.
         //
         // Scoped to MATCHED picks at idx >= 9. An unmatched label still
         // falls through to typing the literal text (the v0.9.3 / pre-#4292
@@ -2922,20 +2943,18 @@ export class ClaudeTuiSession extends BaseSession {
       sequence.push({ type: 'mark', label: 'submit', toolUseId: prevToolUseId })
     }
     sequence.push('1')
-    // #4635 — defensive trailing Enter. The empirical mixed-form recording
-    // pinned `'1'` as immediate-submit (no Enter needed); on the mixed
-    // path the trailing `\r` is harmless (same reasoning as the single-q
-    // path's redundant Enter pinned in #4290). On the all-single-select
-    // path it's a belt-and-braces defense in case claude TUI's Submit
-    // screen for that shape requires an explicit commit keystroke — which
-    // is one of the live-debugged hypotheses for the wedge (Option B in
-    // the issue). Costs nothing on the path that already works; potentially
-    // saves the path that doesn't.
-    // #4884: per the issue, mixed-form (single + multi mix) live verification
-    // of the trailing `\r` was deferred — the #4290 single-q precedent
-    // applies, but mixed multi-question is a different TUI state. The
-    // Submit-mark above + PostToolUse delta log give forensic evidence
-    // that the trailing `\r` lands harmlessly on every mixed-form submit.
+    // #4635 — trailing Enter after the Submit `'1'`.
+    // #4882 (resolved 2026-06-07): the all-single-select recorder pass
+    // (docs/empirical/4882-all-single-select-2q.jsonl) confirmed a human
+    // submits the Submit screen with `'1'` ALONE — the trailing `\r` is
+    // NOT required (the Submit screen commits on the digit, same as the
+    // mixed-form recording and the single-q path's redundant Enter pinned
+    // in #4290). The `\r` is RETAINED as confirmed-harmless belt-and-braces:
+    // it lands ~1ms after Submit-'1' (per-char throttle) on a form that has
+    // already committed, and #4884's Submit→PostToolUse forensics show it
+    // arriving without disrupting the round-trip. Kept (not removed) because
+    // the recording covered only the 2-question all-single-select shape and
+    // this push also feeds the mixed and 3+q paths, which were not re-recorded.
     sequence.push('\r')
 
     const keystrokeCount = sequence.filter((x) => typeof x === 'string').length
@@ -3021,14 +3040,17 @@ export class ClaudeTuiSession extends BaseSession {
    * under any reasonable paste threshold). Each arrow is one `_term.write`
    * call (3 bytes); 10 arrows ≈ 30 bytes total form-byte payload.
    *
-   * **Open assumption (#4848):** the empirical recorder pass against a
-   * 10+ option AskUserQuestion was not run before this PR — arrow-key
-   * navigation is the conservative bet (recorder script
-   * scripts/tui-form-recorder.mjs called it out as the most likely
-   * working path; multi-digit chord '1','0' was ruled out because the
-   * digit hotkey auto-commits on the first keystroke). Re-run the
-   * recorder against a 12-option AskUserQuestion and pick option 11 to
-   * confirm; if the working sequence differs, replace this writer.
+   * **Empirically unreachable (#4880, 2026-06-07):** the recorder pass
+   * against a 10+ option AskUserQuestion ran and found the form can't be
+   * produced — claude TUI v2.1.168 hard-caps each AskUserQuestion question
+   * at 4 options (the call fails server-side with
+   * `InputValidationError: too_big, maximum: 4` before any form renders;
+   * see docs/empirical/4880-twelve-option-cap.jsonl). So this writer is
+   * currently DEAD CODE on real AskUserQuestion forms, kept as forward-compat
+   * for a future TUI that raises the cap. The `\x1b[B` + `\r` sequence is the
+   * conservative bet (multi-digit chord '1','0' was ruled out — the digit
+   * hotkey auto-commits on the first keystroke); it could not be confirmed
+   * because the form is unproducible. Revisit if/when the option cap rises.
    *
    * @param {number} targetIdx — 0-indexed option to land on
    * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
