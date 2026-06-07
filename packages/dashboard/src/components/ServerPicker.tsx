@@ -7,6 +7,8 @@
 import { useState, useCallback } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { ServerEntry, ConnectionPhase } from '../store/types'
+import { isTauri } from '../utils/tauri'
+import { discoverLanServers, type DiscoveredServer } from '../utils/discovery'
 
 function statusDot(phase: ConnectionPhase, isActive: boolean): string {
   if (!isActive) return 'server-dot disconnected'
@@ -50,11 +52,14 @@ interface AddServerFormProps {
   onAdd: (name: string, wsUrl: string, token: string) => void
   onCancel: () => void
   error: string | null
+  /** Pre-fill from a LAN-discovered daemon (#5281 ③); token is still entered. */
+  initialName?: string
+  initialUrl?: string
 }
 
-function AddServerForm({ onAdd, onCancel, error }: AddServerFormProps) {
-  const [name, setName] = useState('')
-  const [url, setUrl] = useState('')
+function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = '' }: AddServerFormProps) {
+  const [name, setName] = useState(initialName)
+  const [url, setUrl] = useState(initialUrl)
   const [token, setToken] = useState('')
 
   const handleSubmit = useCallback((e?: React.FormEvent) => {
@@ -193,18 +198,51 @@ export function ServerPicker() {
 
   const [showAddForm, setShowAddForm] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
+  // #5281 ③ — pre-fill the add form from a LAN-discovered daemon.
+  const [prefill, setPrefill] = useState<{ name: string; url: string } | null>(null)
+  // #5281 ③ — LAN discovery (desktop/Tauri only).
+  const [discovered, setDiscovered] = useState<DiscoveredServer[]>([])
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverError, setDiscoverError] = useState<string | null>(null)
+  const canDiscover = isTauri()
 
   const handleAdd = useCallback((name: string, wsUrl: string, token: string) => {
     try {
       const entry = addServer(name, wsUrl, token)
       setAddError(null)
       setShowAddForm(false)
+      setPrefill(null)
       // Auto-connect to newly added server
       switchServer(entry.id)
     } catch (err) {
       setAddError(err instanceof Error ? err.message : 'Failed to add server')
     }
   }, [addServer, switchServer])
+
+  const runDiscovery = useCallback(async () => {
+    setDiscovering(true)
+    setDiscoverError(null)
+    try {
+      setDiscovered(await discoverLanServers())
+    } catch (err) {
+      setDiscoverError(err instanceof Error ? err.message : 'Discovery failed')
+      setDiscovered([])
+    } finally {
+      setDiscovering(false)
+    }
+  }, [])
+
+  // Open the add form pre-filled from a discovered daemon. The form is keyed on
+  // the prefill URL below so a fresh selection re-seeds its inputs.
+  const handlePickDiscovered = useCallback((srv: DiscoveredServer) => {
+    setPrefill({ name: srv.name, url: srv.wsUrl })
+    setAddError(null)
+    setShowAddForm(true)
+  }, [])
+
+  // Hide daemons already in the registry (match on wsUrl).
+  const knownUrls = new Set(serverRegistry.map(s => s.wsUrl))
+  const freshDiscovered = discovered.filter(d => !knownUrls.has(d.wsUrl))
 
   return (
     <div className="server-picker" data-testid="server-picker">
@@ -223,10 +261,53 @@ export function ServerPicker() {
 
       {showAddForm && (
         <AddServerForm
+          key={prefill?.url ?? 'blank'}
           onAdd={handleAdd}
-          onCancel={() => { setShowAddForm(false); setAddError(null) }}
+          onCancel={() => { setShowAddForm(false); setAddError(null); setPrefill(null) }}
           error={addError}
+          initialName={prefill?.name ?? ''}
+          initialUrl={prefill?.url ?? ''}
         />
+      )}
+
+      {canDiscover && (
+        <div className="server-discover" data-testid="server-discover">
+          <button
+            type="button"
+            className="server-btn server-discover-btn"
+            onClick={runDiscovery}
+            disabled={discovering}
+            data-testid="server-discover-btn"
+          >
+            {discovering ? 'Scanning LAN…' : 'Discover on LAN'}
+          </button>
+          {discoverError && (
+            <span className="server-form-error" data-testid="server-discover-error" role="alert">
+              {discoverError}
+            </span>
+          )}
+          {!discovering && !discoverError && discovered.length > 0 && freshDiscovered.length === 0 && (
+            <span className="server-discover-empty" data-testid="server-discover-allknown">
+              All discovered servers are already added.
+            </span>
+          )}
+          {freshDiscovered.map(srv => (
+            <button
+              type="button"
+              key={srv.wsUrl}
+              className="server-item-main server-discover-item"
+              onClick={() => handlePickDiscovered(srv)}
+              data-testid={`server-discover-item-${srv.host}`}
+              title={`Add ${srv.name} (${srv.host}:${srv.port})`}
+            >
+              <span className="server-item-info">
+                <span className="server-item-name">{srv.name}</span>
+                <span className="server-item-url">{srv.host}:{srv.port}{srv.version ? ` • v${srv.version}` : ''}</span>
+              </span>
+              <span className="server-discover-add" aria-hidden="true">+</span>
+            </button>
+          ))}
+        </div>
       )}
 
       {hasLocalServer && (

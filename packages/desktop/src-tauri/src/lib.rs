@@ -4,6 +4,7 @@
 // external consumer depends on this surface, so exposing it for testing
 // carries no API stability cost.
 pub mod config;
+pub mod discovery;
 pub mod node;
 pub mod platform;
 pub mod qrcode;
@@ -96,6 +97,19 @@ fn get_server_info(
 #[tauri::command]
 fn start_server(app: tauri::AppHandle) {
     handle_start(&app);
+}
+
+/// #5281 ③ — browse the LAN for chroxy daemons advertising `_chroxy._tcp` and
+/// return them for the dashboard ServerPicker's "Discover on LAN" list. Runs
+/// the blocking mDNS browse off the UI thread; an mDNS failure surfaces as an
+/// error string (the picker falls back to manual entry).
+#[tauri::command]
+async fn discover_lan_servers() -> Result<Vec<discovery::DiscoveredServer>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        discovery::browse_lan(std::time::Duration::from_millis(2000))
+    })
+    .await
+    .map_err(|e| format!("discovery task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -727,6 +741,7 @@ pub fn run() {
             start_server,
             stop_server,
             restart_server,
+            discover_lan_servers,
             get_qr_code_svg,
             pick_directory,
             check_dependencies,

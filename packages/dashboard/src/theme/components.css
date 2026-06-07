@@ -7383,6 +7383,48 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-dim);
 }
 
+/* #5281 ③ — LAN discovery section */
+.server-discover {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.server-discover-btn {
+  align-self: flex-start;
+}
+
+.server-discover-empty {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.server-discover-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--border-primary);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.server-discover-item:hover {
+  background: var(--bg-hover, var(--border-primary));
+}
+
+.server-discover-add {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
 .server-item {
   display: flex;
   align-items: center;

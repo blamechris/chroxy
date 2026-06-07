@@ -28,6 +28,13 @@ vi.mock('../store/connection', () => ({
   },
 }))
 
+// #5281 ③ — LAN discovery deps. isTauri gates the section; discoverLanServers
+// is stubbed per-test.
+let mockIsTauri = false
+const mockDiscover = vi.fn()
+vi.mock('../utils/tauri', () => ({ isTauri: () => mockIsTauri }))
+vi.mock('../utils/discovery', () => ({ discoverLanServers: () => mockDiscover() }))
+
 const FAKE_NOW = 1_741_348_800_000 // 2025-03-07T12:00:00Z
 
 afterEach(() => cleanup())
@@ -35,6 +42,7 @@ afterEach(() => cleanup())
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
+  mockIsTauri = false
   storeState = {
     serverRegistry: [],
     activeServerId: null,
@@ -285,5 +293,65 @@ describe('ServerPicker', () => {
     fireEvent.click(screen.getByTestId('server-add-submit'))
     const errorEl = screen.getByTestId('server-url-error')
     expect(errorEl.getAttribute('role')).toBe('alert')
+  })
+
+  describe('LAN discovery (#5281 ③)', () => {
+    const DISCOVERED = [
+      { name: 'devbox', host: '192.168.1.9', port: 8765, wsUrl: 'ws://192.168.1.9:8765/ws', version: '0.9.44' },
+    ]
+
+    it('does not render the Discover button outside Tauri', () => {
+      mockIsTauri = false
+      render(<ServerPicker />)
+      expect(screen.queryByTestId('server-discover-btn')).toBeNull()
+    })
+
+    it('renders the Discover button in Tauri and lists results', async () => {
+      mockIsTauri = true
+      mockDiscover.mockResolvedValue(DISCOVERED)
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-discover-btn'))
+      expect(mockDiscover).toHaveBeenCalledTimes(1)
+      const item = await screen.findByTestId('server-discover-item-192.168.1.9')
+      expect(item).toHaveTextContent('devbox')
+      expect(item).toHaveTextContent('192.168.1.9:8765')
+      expect(item).toHaveTextContent('v0.9.44')
+    })
+
+    it('clicking a discovered server opens the add form pre-filled with its URL', async () => {
+      mockIsTauri = true
+      mockDiscover.mockResolvedValue(DISCOVERED)
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-discover-btn'))
+      fireEvent.click(await screen.findByTestId('server-discover-item-192.168.1.9'))
+      const urlInput = screen.getByTestId('server-url-input') as HTMLInputElement
+      const nameInput = screen.getByTestId('server-name-input') as HTMLInputElement
+      expect(urlInput.value).toBe('ws://192.168.1.9:8765/ws')
+      expect(nameInput.value).toBe('devbox')
+      // Token is intentionally NOT pre-filled — the user supplies it.
+      expect((screen.getByTestId('server-token-input') as HTMLInputElement).value).toBe('')
+    })
+
+    it('hides discovered daemons already in the registry', async () => {
+      mockIsTauri = true
+      storeState.serverRegistry = [
+        { id: 'srv_known', name: 'devbox', wsUrl: 'ws://192.168.1.9:8765/ws', token: 't', lastConnectedAt: null },
+      ]
+      mockDiscover.mockResolvedValue(DISCOVERED)
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-discover-btn'))
+      expect(await screen.findByTestId('server-discover-allknown')).toBeTruthy()
+      expect(screen.queryByTestId('server-discover-item-192.168.1.9')).toBeNull()
+    })
+
+    it('surfaces a discovery error', async () => {
+      mockIsTauri = true
+      mockDiscover.mockRejectedValue(new Error('mDNS init failed'))
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-discover-btn'))
+      const err = await screen.findByTestId('server-discover-error')
+      expect(err).toHaveTextContent('mDNS init failed')
+      expect(err.getAttribute('role')).toBe('alert')
+    })
   })
 })
