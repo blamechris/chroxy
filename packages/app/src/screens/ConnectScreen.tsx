@@ -55,8 +55,8 @@ export function parseChroxyUrl(raw: string): ParseResult {
 
       return { ok: false, reason: 'missing_token' };
     }
-    // A directly-entered ws://-/wss:// URL keeps its own scheme — the override
-    // for the rare port-bearing wss (custom proxy) case.
+    // A directly-entered ws:// or wss:// URL keeps its own scheme — the
+    // override for the rare port-bearing wss (custom proxy) case.
     if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {
       return { ok: true, wsUrl: trimmed, token: '' };
     }
