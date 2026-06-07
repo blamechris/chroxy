@@ -112,6 +112,17 @@ export const BACKGROUND_SHELL_SWEEP_MS = 15 * 1000
 // poll or destroy. 60s is still a reasonable banner-clear delay.
 export const BACKGROUND_SHELL_QUIESCE_MS = 60 * 1000
 
+// #5265: HARD-quiesce window (ms). Distinct from (and much longer than) the 60s
+// advisory banner window above. After this much CONTINUOUS output silence the
+// sweep REAPS the shell — removing it from `_pendingBackgroundShells` so
+// `isRunning` flips and SessionTimeoutManager can finally idle-time a session
+// that was pinned "running" only by a long-dead, never-polled background
+// command. 4h is deliberately conservative: a real long-runner that emits any
+// output within any 4h stretch keeps its mtime fresh and is never reaped; only
+// a genuinely silent-for-hours shell (overwhelmingly likely finished) is
+// reclaimed. Set the instance field to 0 to disable (advisory-only #5247).
+export const BACKGROUND_SHELL_HARD_QUIESCE_MS = 4 * 60 * 60 * 1000
+
 // Default per-provider injection mode (#3200). Subprocess providers without
 // a system-prompt flag (Codex, Gemini) prepend skills to the first user
 // message; Claude (SDK or CLI) appends to the system prompt. Maps the
@@ -331,6 +342,19 @@ export class BaseSession extends EventEmitter {
     // output file's mtime; tests override this to drive deterministic
     // quiescence without touching the filesystem or real timers.
     this._backgroundShellQuiesceCheck = null
+    // #5265: HARD-quiesce window. The 60s advisory quiesce above only clears
+    // the banner — a finished-but-never-polled shell stays in the map (isRunning
+    // pinned true) until destroy, so a long-idle session can be pinned "running"
+    // by a long-dead command forever. After this much CONTINUOUS output silence
+    // a shell is overwhelmingly likely finished, so the sweep REAPS it (releases
+    // liveness) — the accepted tradeoff (a multi-hour-silent shell ≈ done). A
+    // noisy long-runner (dev server logging within the window) keeps its mtime
+    // fresh and is never hard-reaped. Set to 0 to disable hard-reaping (revert
+    // to the #5247 advisory-only behaviour). Overridable in tests.
+    this._backgroundShellHardQuiesceMs = BACKGROUND_SHELL_HARD_QUIESCE_MS
+    // Injectable hard-quiesce check — `(entry) => boolean`. Default reads the
+    // output file's mtime against the hard window; tests override it.
+    this._backgroundShellHardQuiesceCheck = null
     // #4307: ephemeral map of recent `Bash` tool_uses dispatched with
     // `run_in_background: true`, keyed by toolUseId. Used to recover the
     // command string when the matching tool_result lands carrying the
@@ -933,9 +957,28 @@ export class BaseSession extends EventEmitter {
   _sweepQuiescedBackgroundShells() {
     let changed = false
     let anyActive = false
+    const hardEnabled = this._backgroundShellHardQuiesceMs > 0
     for (const shellId of Array.from(this._pendingBackgroundShells.keys())) {
       const entry = this._pendingBackgroundShells.get(shellId)
       if (!entry) continue
+      // #5265: HARD-quiesce reap — checked first and for EVERY entry (including
+      // already advisory-quiesced ones). After the long hard window of output
+      // silence the shell is overwhelmingly likely finished, so reap it
+      // (remove from the map → `isRunning` flips) so a session pinned "running"
+      // by a long-dead, never-polled command can finally idle-time out.
+      if (hardEnabled && this._isBackgroundShellHardQuiesced(entry)) {
+        this._pendingBackgroundShells.delete(shellId)
+        changed = true
+        continue
+        // NOTE: reaping an entry that was ALREADY advisory-quiesced changes
+        // `isRunning` (true→false) but NOT the banner snapshot (it was already
+        // filtered out at advisory time), so the `background_work_changed` emit
+        // below carries an unchanged `pending` payload. That is fine TODAY
+        // because liveness is consumed via the pull path (SessionTimeoutManager
+        // calls `isRunningFn()` live, it does not diff this event). A future
+        // consumer that diffs `pending` to infer liveness would need an explicit
+        // liveness field on the event — flagged so this isn't a silent trap.
+      }
       if (entry.quiesced) continue // already advisory-cleared from the banner
       if (this._isBackgroundShellQuiesced(entry)) {
         // #5247: ADVISORY only — mark the shell quiesced so it drops out of the
@@ -944,21 +987,81 @@ export class BaseSession extends EventEmitter {
         // alive" (a dev server that logs once then waits), so flipping liveness
         // here reaped live processes and let SessionTimeoutManager idle-time the
         // session out — re-opening #4307. Real liveness is released only by a
-        // BashOutput poll or destroy.
+        // BashOutput poll, destroy, or the #5265 hard-quiesce reap above.
         entry.quiesced = true
         changed = true
       } else {
         anyActive = true
       }
     }
-    // The banner snapshot changed (a shell dropped out) — emit the same
+    // The banner snapshot / liveness changed — emit the same
     // background_work_changed the BashOutput / destroy paths emit so the
     // dashboard indicator clears with no new wire contract.
     if (changed) this._emitBackgroundWorkChanged()
-    // Nothing left that could still transition → stop the recurring stat()
-    // sweep. A future trackBackgroundShell re-arms it. (clearBackgroundShell
-    // also stops it when the map fully drains via BashOutput / destroy.)
-    if (!anyActive) this._stopBackgroundShellSweep()
+    // Stop the recurring stat() sweep when nothing remains that could still
+    // transition. With hard-quiesce ON (default), advisory-quiesced shells are
+    // still pending a future hard-reap, so keep sweeping while the map is
+    // non-empty; the sweep stops only once it drains. With hard-quiesce OFF
+    // (#5247 advisory-only), stop as soon as nothing can advisory-transition.
+    // A future trackBackgroundShell re-arms it either way.
+    const drained = this._pendingBackgroundShells.size === 0
+    if (drained || (!hardEnabled && !anyActive)) this._stopBackgroundShellSweep()
+  }
+
+  /**
+   * #5265: decide whether a pending background shell has HARD-quiesced — i.e.
+   * its output has been silent long enough (`_backgroundShellHardQuiesceMs`)
+   * that it is overwhelmingly likely finished and can be reaped (liveness
+   * released), unlike the 60s advisory `_isBackgroundShellQuiesced`.
+   *
+   * Tests inject `_backgroundShellHardQuiesceCheck` for deterministic control.
+   * The default reads the output file's mtime: a shell is hard-quiesced when
+   * `now - mtime >= hard window`. Unlike the advisory check there is NO
+   * non-empty guard — after hours even an empty output file (a silent
+   * `sleep`/compute) is reaped, since the file's mtime ≈ its creation time and
+   * a command silent for the whole hard window is almost certainly done. A
+   * shell with no known output path falls back to its `startedAt`. A stat()
+   * error is treated as NOT hard-quiesced (transient FS hiccup must not reap).
+   *
+   * @param {{ shellId: string, outputPath?: string|null, startedAt: number }} entry
+   * @returns {boolean}
+   * @private
+   */
+  _isBackgroundShellHardQuiesced(entry) {
+    // Disabled short-circuit FIRST so the method's "0 disables" contract holds
+    // even if a stale check is injected (the sweep also gates on hardEnabled).
+    if (this._backgroundShellHardQuiesceMs <= 0) return false
+    if (typeof this._backgroundShellHardQuiesceCheck === 'function') {
+      return this._backgroundShellHardQuiesceCheck(entry) === true
+    }
+    if (!entry) return false
+    // Cheap pre-stat gate (#5287 review): output can't have been idle longer
+    // than the shell has existed, so a shell younger than the hard window can't
+    // possibly be hard-quiesced — skip the per-tick statSync entirely until
+    // then. This makes the sweep's hard-check ~free (one subtraction) for the
+    // first hard-window of every shell's life, which is the bulk of the time the
+    // sweep runs.
+    if (typeof entry.startedAt === 'number'
+      && Date.now() - entry.startedAt < this._backgroundShellHardQuiesceMs) {
+      return false
+    }
+    if (typeof entry.outputPath !== 'string' || entry.outputPath.length === 0) {
+      // No output file to stat — fall back to wall-clock age since the shell was
+      // tracked. This is the WEAKEST signal in the change: unlike the mtime path
+      // (which proves the process could write), age-only can't tell a live
+      // silent compute from a finished one — so a >hard-window shell with an
+      // unparsed output path is reaped on time-since-tracking alone (accepted
+      // per #5265's tradeoff; the only consequence is idle-timeout eligibility,
+      // never process death — chroxy doesn't own the PID).
+      return typeof entry.startedAt === 'number'
+        && Date.now() - entry.startedAt >= this._backgroundShellHardQuiesceMs
+    }
+    try {
+      const st = statSync(entry.outputPath)
+      return Date.now() - st.mtimeMs >= this._backgroundShellHardQuiesceMs
+    } catch {
+      return false
+    }
   }
 
   /**

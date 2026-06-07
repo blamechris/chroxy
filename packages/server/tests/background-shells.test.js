@@ -262,6 +262,11 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     session = makeSession()
     // Tighten the sweep interval so fake timers advance predictably.
     session._backgroundShellSweepMs = 1000
+    // #5265: these tests cover the #5247 ADVISORY behaviour in isolation, so
+    // disable the hard-quiesce reap here. The dedicated hard-quiesce describe
+    // block below re-enables it. (With hard-quiesce on, the sweep keeps running
+    // past advisory-quiesce to await the eventual reap.)
+    session._backgroundShellHardQuiesceMs = 0
   })
 
   afterEach(() => {
@@ -413,6 +418,129 @@ describe('BaseSession background-shell completion sweep (#5177)', () => {
     session._destroyPendingBackgroundShells()
     assert.equal(session._backgroundShellSweepTimer, null, 'timer cleared on destroy')
     assert.equal(session._pendingBackgroundShells.size, 0)
+  })
+})
+
+describe('BaseSession background-shell HARD-quiesce reap (#5265)', () => {
+  let session
+
+  beforeEach(() => {
+    emptySkillsDir = mkdtempSync(join(tmpdir(), 'chroxy-bg-skills-'))
+    session = makeSession()
+    session._backgroundShellSweepMs = 1000
+    // Enable hard-quiesce with a window the fake clock can cross.
+    session._backgroundShellHardQuiesceMs = 5000
+  })
+
+  afterEach(() => {
+    mock.timers.reset()
+    session._destroyPendingBackgroundShells()
+    if (emptySkillsDir) rmSync(emptySkillsDir, { recursive: true, force: true })
+    emptySkillsDir = null
+  })
+
+  it('reaps a hard-quiesced shell — releases liveness (isRunning flips false)', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    session._backgroundShellHardQuiesceCheck = () => true // long-dead
+
+    const events = []
+    session.on('background_work_changed', (d) => events.push(d))
+    session.trackBackgroundShell({ shellId: 'a', command: 'npm run build', outputPath: '/tmp/a.output' })
+    assert.equal(session.isRunning, true, 'running while pending')
+
+    mock.timers.tick(1000) // sweep reaps the hard-quiesced shell
+
+    assert.equal(session._pendingBackgroundShells.size, 0, 'shell reaped from the map')
+    assert.equal(session.isRunning, false, 'liveness released after hard-reap')
+    assert.equal(events[events.length - 1].pending.length, 0, 'banner cleared')
+    assert.equal(session._backgroundShellSweepTimer, null, 'sweep stops once the map drains')
+  })
+
+  it('keeps sweeping past advisory-quiesce, then hard-reaps when the hard window passes', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    // Advisory-quiesced (banner clears) but not yet hard-quiesced.
+    session._backgroundShellQuiesceCheck = () => true
+    session._backgroundShellHardQuiesceCheck = () => false
+
+    session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
+    mock.timers.tick(1000) // advisory quiesce
+    assert.equal(session.isRunning, true, 'retained for liveness after advisory quiesce')
+    assert.equal(session.getPendingBackgroundShells().length, 0, 'banner cleared')
+    // With hard-quiesce ON the sweep does NOT stop at advisory-quiesce (it must
+    // stay alive to perform the eventual hard-reap) — contrast the #5247 test.
+    assert.ok(session._backgroundShellSweepTimer, 'sweep persists awaiting hard-reap')
+
+    // Now the hard window passes.
+    session._backgroundShellHardQuiesceCheck = () => true
+    mock.timers.tick(1000)
+    assert.equal(session._pendingBackgroundShells.size, 0, 'hard-reaped')
+    assert.equal(session.isRunning, false, 'liveness released')
+  })
+
+  it('does not hard-reap when disabled (Ms=0) — advisory-only #5247 behaviour', () => {
+    mock.timers.enable({ apis: ['setInterval'] })
+    session._backgroundShellHardQuiesceMs = 0
+    session._backgroundShellQuiesceCheck = () => true
+    session._backgroundShellHardQuiesceCheck = () => true // would reap if consulted
+
+    session.trackBackgroundShell({ shellId: 'a', outputPath: '/tmp/a.output' })
+    mock.timers.tick(1000)
+    assert.equal(session._pendingBackgroundShells.size, 1, 'retained — hard-reap disabled')
+    assert.equal(session.isRunning, true, 'still running (advisory-only)')
+    assert.equal(session._backgroundShellSweepTimer, null, 'sweep stops at advisory when hard disabled')
+  })
+
+  it('SAFETY: a shell still writing within the hard window is NEVER reaped (#4307/#5247 guard)', () => {
+    // The load-bearing safety property: a noisy long-runner (dev server, watcher,
+    // build) keeps its mtime fresh, so it must survive every sweep. This guards
+    // against a refactor re-introducing the #5247/#4307 live-process reap.
+    mock.timers.enable({ apis: ['setInterval'] })
+    session._backgroundShellHardQuiesceMs = 5000
+    // Default checks consult the real fs; a fresh-mtime file is neither advisory-
+    // nor hard-quiesced. Use a real, freshly-written output file.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-live-'))
+    const outputPath = join(dir, 'shell.output')
+    writeFileSync(outputPath, 'listening on :3000\n')
+
+    session.trackBackgroundShell({ shellId: 'live', command: 'npm run dev', outputPath })
+    // Several sweep ticks — but the file mtime stays fresh (just written), so
+    // neither quiesce window is crossed.
+    mock.timers.tick(1000)
+    mock.timers.tick(1000)
+    mock.timers.tick(1000)
+    assert.equal(session._pendingBackgroundShells.size, 1, 'live shell retained across sweeps')
+    assert.equal(session.isRunning, true, 'live shell keeps the session running')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('default hard-quiesce check uses output mtime against the hard window (real fs)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-hard-'))
+    const outputPath = join(dir, 'shell.output')
+    writeFileSync(outputPath, 'building...\n')
+    session._backgroundShellHardQuiesceMs = 5000
+
+    session.trackBackgroundShell({ shellId: 'a', outputPath })
+    const fresh = session._pendingBackgroundShells.get('a')
+    assert.equal(session._isBackgroundShellHardQuiesced(fresh), false, 'fresh write is not hard-quiesced')
+
+    // Backdate mtime past the hard window → hard-quiesced (note: no non-empty
+    // guard on the hard path, unlike the advisory check). Also age the entry's
+    // startedAt past the window so the cheap pre-stat gate (#5287 review) lets
+    // the mtime check run (a shell can't be idle longer than it has existed).
+    fresh.startedAt = Date.now() - 60_000
+    const old = Date.now() / 1000 - 60
+    utimesSync(outputPath, old, old)
+    assert.equal(session._isBackgroundShellHardQuiesced(fresh), true, 'silent past the hard window → reapable')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('hard-quiesces a shell with no output path by its startedAt age', () => {
+    session._backgroundShellHardQuiesceMs = 5000
+    session.trackBackgroundShell({ shellId: 'a', command: 'sleep 1', outputPath: null })
+    const entry = session._pendingBackgroundShells.get('a')
+    assert.equal(session._isBackgroundShellHardQuiesced(entry), false, 'fresh shell not hard-quiesced')
+    entry.startedAt = Date.now() - 6000 // older than the hard window
+    assert.equal(session._isBackgroundShellHardQuiesced(entry), true, 'aged-out no-output shell is reapable')
   })
 })
 
