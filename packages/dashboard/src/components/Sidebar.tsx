@@ -9,9 +9,10 @@ import type { CumulativeUsage, SessionInfo, SessionVisualStatus } from '@chroxy/
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
+import { ViewersIndicator } from './ViewersIndicator'
 import { SidebarPanelSlot, type SidebarPanelView, type SidebarPanelLauncher } from './SidebarPanelSlot'
 import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
-import type { SearchResult } from '../store/types'
+import type { SearchResult, ConnectedClient } from '../store/types'
 import {
   persistSidebarPanelHeight,
   persistSidebarPanelView,
@@ -68,7 +69,11 @@ export interface SidebarProps {
   filter: string
   serverStatus: 'connected' | 'disconnected' | 'reconnecting'
   tunnelUrl: string | null
-  clientCount: number
+  /** #5281 ①.3 — all clients attached to the daemon, for the shared-session
+      presence indicator in the footer. */
+  connectedClients: ConnectedClient[]
+  /** Active session's primary (last-driver) client id, or null. */
+  activePrimaryClientId: string | null
   onFilterChange: (value: string) => void
   onSessionClick: (sessionId: string) => void
   onResumeSession: (conversationId: string, cwd?: string) => void
@@ -118,7 +123,8 @@ export function Sidebar({
   filter,
   serverStatus,
   tunnelUrl,
-  clientCount,
+  connectedClients,
+  activePrimaryClientId,
   onFilterChange,
   onSessionClick,
   onResumeSession,
@@ -973,9 +979,14 @@ export function Sidebar({
                 {abbreviateTunnel(tunnelUrl)}
               </span>
             )}
-            {serverStatus === 'connected' && (
-              <span className="sidebar-client-count">{clientCount} client{clientCount !== 1 ? 's' : ''}</span>
-            )}
+            {/* #5281 ①.3 — shared-session presence. Renders the same plain
+                "N client(s)" text when solo, an interactive popover when the
+                session is genuinely shared (≥2 devices). */}
+            <ViewersIndicator
+              clients={connectedClients}
+              primaryClientId={activePrimaryClientId}
+              connected={serverStatus === 'connected'}
+            />
           </div>
         </>
       )}

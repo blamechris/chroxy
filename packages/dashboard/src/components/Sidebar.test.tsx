@@ -5,6 +5,7 @@ import type React from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { Sidebar, type SidebarProps, type RepoNode } from './Sidebar'
+import type { ConnectedClient } from '../store/types'
 
 // Mock the connection store (used by ServerPicker inside Sidebar)
 vi.mock('../store/connection', () => ({
@@ -24,6 +25,16 @@ vi.mock('../store/connection', () => ({
 afterEach(cleanup)
 
 const noop = vi.fn()
+
+function makeClients(n: number): ConnectedClient[] {
+  return Array.from({ length: n }, (_, i) => ({
+    clientId: `c${i}`,
+    deviceName: `Device ${i}`,
+    deviceType: 'desktop' as const,
+    platform: 'macos',
+    isSelf: i === 0,
+  }))
+}
 
 function makeRepos(overrides?: Partial<RepoNode>[]): RepoNode[] {
   const defaults: RepoNode[] = [
@@ -62,7 +73,8 @@ function renderSidebar(props: Partial<SidebarProps> = {}) {
     filter: '',
     serverStatus: 'connected',
     tunnelUrl: null,
-    clientCount: 1,
+    connectedClients: [],
+    activePrimaryClientId: null,
     onFilterChange: noop,
     onSessionClick: noop,
     onResumeSession: noop,
@@ -177,9 +189,11 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('my-tunnel.trycloudflare.com')
   })
 
-  it('shows client count in footer', () => {
-    renderSidebar({ clientCount: 3 })
+  it('shows the shared-session viewer count in the footer', () => {
+    renderSidebar({ connectedClients: makeClients(3) })
+    // ≥2 devices → interactive chip showing the device count.
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('3')
+    expect(screen.getByTestId('viewers-indicator')).toBeInTheDocument()
   })
 
   // #5183 — the Running indicator is surfaced on the left projects/explorer
@@ -316,7 +330,8 @@ describe('Sidebar', () => {
       filter: 'Backend',
       serverStatus: 'connected',
       tunnelUrl: null,
-      clientCount: 1,
+      connectedClients: [],
+      activePrimaryClientId: null,
       onFilterChange: noop,
       onSessionClick: noop,
       onResumeSession: noop,
@@ -332,14 +347,15 @@ describe('Sidebar', () => {
     expect(screen.queryByText('Backend')).not.toBeInTheDocument()
   })
 
-  it('hides client count when server is disconnected', () => {
-    renderSidebar({ serverStatus: 'disconnected', clientCount: 2 })
-    expect(screen.queryByTestId('sidebar-footer')).not.toHaveTextContent('client')
+  it('hides the viewer indicator when server is disconnected', () => {
+    renderSidebar({ serverStatus: 'disconnected', connectedClients: makeClients(2) })
+    expect(screen.queryByTestId('viewers-indicator')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('viewers-indicator-solo')).not.toBeInTheDocument()
   })
 
-  it('shows client count when server is connected', () => {
-    renderSidebar({ serverStatus: 'connected', clientCount: 2 })
-    expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('2 clients')
+  it('shows the solo client count when only one device is connected', () => {
+    renderSidebar({ serverStatus: 'connected', connectedClients: makeClients(1) })
+    expect(screen.getByTestId('viewers-indicator-solo')).toHaveTextContent('1 client')
   })
 
   it('shows Stopped label when server is disconnected', () => {

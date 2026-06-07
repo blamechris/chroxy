@@ -144,7 +144,7 @@ describe('Sidebar cost badge rendering (#4073)', () => {
       filter: '',
       serverStatus: 'connected' as const,
       tunnelUrl: null,
-      clientCount: 1,
+      connectedClients: [], activePrimaryClientId: null,
       onFilterChange: () => {},
       onSessionClick: () => {},
       onResumeSession: () => {},
