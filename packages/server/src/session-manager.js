@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { statSync, mkdirSync, rmSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { getProvider } from './providers.js'
@@ -648,9 +648,24 @@ export class SessionManager extends EventEmitter {
       // worktree dir was deleted out from under us (e.g. `chroxy worktree gc`),
       // the generic baseCwd existence check above already fails the restore
       // cleanly and #2954 preserves it for retry.
-      worktreePath = restoreWorktreePath
-      worktreeRepoDir = restoreWorktreeRepoDir || null
-      resolvedCwd = restoreWorktreePath
+      //
+      // SECURITY (#5310 review): restoreWorktreePath is read from the on-disk
+      // state file and later becomes a recursive-deletion target in
+      // _removeWorktree (git worktree remove, then an rmSync -rf fallback). A
+      // corrupted or tampered state file could otherwise point it at an
+      // arbitrary directory and have destroySession() delete it. Worktree dirs
+      // are always created deterministically at join(base, sessionId), so a
+      // restored path that doesn't resolve to exactly that is rejected: we
+      // safe-degrade to a non-worktree session (worktreePath stays null ⇒ no
+      // deletion target) and log loudly, rather than rebind an unsafe path.
+      const expectedWorktreeDir = resolve(join(this._worktreeBase || DEFAULT_WORKTREE_BASE, sessionId))
+      if (resolve(restoreWorktreePath) === expectedWorktreeDir) {
+        worktreePath = restoreWorktreePath
+        worktreeRepoDir = restoreWorktreeRepoDir || null
+        resolvedCwd = restoreWorktreePath
+      } else {
+        log.warn(`Restored worktreePath "${restoreWorktreePath}" for session ${sessionId} does not match the expected per-session worktree dir "${expectedWorktreeDir}" — ignoring the rebind (treating as non-worktree) so a corrupted state file can't make destroySession() delete an arbitrary path`)
+      }
     } else if (worktree) {
       // Verify cwd is inside a git repository
       try {

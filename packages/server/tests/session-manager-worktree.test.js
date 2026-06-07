@@ -234,6 +234,40 @@ describe('SessionManager worktree isolation', () => {
     mgr2.destroyAll()
   })
 
+  // #5310 security review — restoreWorktreePath comes from the on-disk state and
+  // becomes a recursive-deletion target in _removeWorktree. A corrupted/tampered
+  // state file pointing it outside the per-session worktree dir must NOT be
+  // rebound (and so must never be deleted on destroy).
+  it('rejects a restored worktreePath outside the per-session worktree dir; never deletes it (#5310)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+    mgr.serializeState()
+
+    // Tamper: repoint worktreePath (and cwd, so the existence check passes) at a
+    // sensitive directory outside the worktree base.
+    const sensitive = mkdtempSync(join(tmpdir(), 'chroxy-sensitive-'))
+    const sentinel = join(sensitive, 'keep.txt')
+    writeFileSync(sentinel, 'do not delete')
+    const stateFile = join(gitRepo, 'session-state.json')
+    const persisted = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    persisted.sessions[0].worktreePath = sensitive
+    persisted.sessions[0].cwd = sensitive
+    writeFileSync(stateFile, JSON.stringify(persisted))
+
+    const mgr2 = makeManager(gitRepo)
+    mgr2.restoreState()
+    const r = mgr2.getSession(id)
+    assert.ok(r, 'session still restores (safe-degrade, not a hard failure)')
+    assert.equal(r.worktreePath, null, 'tampered path is NOT rebound as a worktree')
+    assert.equal(r.isolation, 'none')
+
+    mgr2.destroySession(id)
+    assert.ok(existsSync(sentinel), 'arbitrary directory MUST NOT be deleted on destroy')
+
+    mgr2.destroyAll()
+    rmSync(sensitive, { recursive: true, force: true })
+  })
+
   it('a non-worktree session restores with no worktree binding (#5310 back-compat)', () => {
     const mgr = makeManager(gitRepo)
     const id = mgr.createSession({ cwd: gitRepo }) // no worktree
