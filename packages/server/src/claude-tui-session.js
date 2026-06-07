@@ -781,6 +781,51 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #5311 (WP-1.1) — single idempotent teardown for "the PTY is gone", reached
+   * from onExit (process exit) AND from the 'close'/'error' socket events that
+   * fire on a node-pty fault with no process-exit callback. Resets turn state so
+   * the next sendMessage() sees a clean idle (it still rejects with "no longer
+   * alive", but isn't locked by a stale _isBusy from the interrupted turn,
+   * #3924) and emits ONE session-scoped error. Guards on `_ptyExited` so the
+   * several wired events collapse to a single teardown + error emit.
+   *
+   * @param {object|null} info — node-pty exit info ({exitCode, signal}) when known
+   * @param {string} source — diagnostic label for the log line
+   */
+  _onPtyGone(info, source) {
+    // Always capture the most specific exit info, even on a repeat event.
+    if (info) this._ptyExitInfo = info
+    if (this._ptyExited) return
+    this._ptyExited = true
+    this._processReady = false
+    // Reset turn state so the next sendMessage() sees a clean idle.
+    const hadActiveTurn = this._activeTurn !== null
+    // #4022: clean up the in-flight turn's attachment dir BEFORE nulling
+    // _activeTurn, otherwise sendMessage's poll loop reaches _finishTurnError
+    // with activeTurn=null and the helper no-ops → dir leaks until destroy().
+    // The cleanup is idempotent (rmSync force:true) so a later call is fine.
+    this._cleanupTurnAttachments(this._activeTurn)
+    this._activeTurn = null
+    this._isBusy = false
+    this._currentMessageId = null
+    if (this._destroying) return
+    // #5311 review — the socket 'close'/'error' paths have no exit info, so
+    // render a clear "unknown" instead of a bare "code=undefined". The
+    // "Claude PTY exited" prefix is preserved (clients/log scrapers key on it).
+    const code = this._ptyExitInfo?.exitCode
+    const codeStr = (code === undefined || code === null) ? 'unknown' : code
+    log.warn(`claude PTY gone (${source}) (code=${codeStr} signal=${this._ptyExitInfo?.signal ?? 'unknown'})`)
+    // Suppress the generic error when a turn was in flight — sendMessage's poll
+    // loop emits a more specific "PTY exited mid-turn" error instead, so the
+    // dashboard sees one root cause not two.
+    if (!hadActiveTurn) {
+      const tail = this._outputTailDiagnostic()
+      const base = `Claude PTY exited (code=${codeStr})`
+      this.emit('error', { message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
+    }
+  }
+
+  /**
    * Spawn the persistent PTY under node-pty + wait for the TUI to render.
    * Sets `this._term`, wires onData/onExit handlers, then sleeps for
    * WARMUP_MS so the TUI's input prompt is ready before the first
@@ -913,35 +958,25 @@ export class ClaudeTuiSession extends BaseSession {
         ? merged.subarray(-ClaudeTuiSession.PTY_TAIL_BYTES)
         : merged
     })
-    this._term.onExit((info) => {
-      this._ptyExited = true
-      this._ptyExitInfo = info
-      this._processReady = false
-      // Reset turn state so the next sendMessage() sees a clean idle
-      // (it'll still reject with "no longer alive", but won't be locked
-      // by stale _isBusy from a turn the PTY interrupted) (#3924).
-      const hadActiveTurn = this._activeTurn !== null
-      // #4022: clean up the in-flight turn's attachment dir BEFORE
-      // nulling _activeTurn, otherwise sendMessage's poll loop reaches
-      // _finishTurnError with activeTurn=null and the helper no-ops →
-      // dir leaks until destroy(). The cleanup is idempotent (rmSync
-      // with force:true), so _finishTurnError calling it again is fine.
-      this._cleanupTurnAttachments(this._activeTurn)
-      this._activeTurn = null
-      this._isBusy = false
-      this._currentMessageId = null
-      if (this._destroying) return
-      log.warn(`claude PTY exited unexpectedly (code=${info?.exitCode} signal=${info?.signal})`)
-      // Suppress the generic onExit error when a turn was in flight —
-      // sendMessage's poll loop emits a more specific "PTY exited
-      // mid-turn" error instead, so the dashboard sees one root cause
-      // not two.
-      if (!hadActiveTurn) {
-        const tail = this._outputTailDiagnostic()
-        const base = `Claude PTY exited (code=${info?.exitCode})`
-        this.emit('error', { message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
-      }
-    })
+    this._term.onExit((info) => this._onPtyGone(info, 'exit'))
+
+    // #5311 (WP-1.1) — keep a per-session PTY fault from crashing the WHOLE
+    // daemon (every session on the host) via an uncaught throw. node-pty's
+    // internal socket 'error' handler (unixTerminal.js) returns silently for
+    // EAGAIN/EIO (the normal child-exit path, which surfaces through onExit
+    // above) but for any OTHER error it calls _close() + emits 'close' and then
+    // `throw err` UNLESS the Terminal has >= 2 'error' listeners. It never
+    // emits 'error' to those listeners — they exist solely to clear that
+    // rethrow threshold. So:
+    //   - drive the actual teardown off 'close' (which node-pty DOES emit), and
+    //   - also off 'error' in case a future node-pty starts emitting it, and
+    //   - register a second no-op 'error' listener so the count is >= 2 and the
+    //     otherwise-uncaught throw is suppressed.
+    // _onPtyGone is idempotent (guards on _ptyExited) so onExit + close + error
+    // firing in any order tears down + emits exactly once.
+    this._term.on('error', (err) => this._onPtyGone(null, `error: ${err?.message || 'unknown'}`))
+    this._term.on('error', () => {}) // bumps listener count >= 2 so node-pty does not rethrow
+    this._term.on('close', () => this._onPtyGone(null, 'close'))
 
     // Wait for the TUI to reach status=idle before returning. The prior
     // implementations (hardcoded sleep, then glyph screen-scrape across

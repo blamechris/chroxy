@@ -5699,6 +5699,79 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5311 (WP-1.1) — a PTY socket fault must tear down only THIS session and
+  // emit a session-scoped error, never crash the daemon. _onPtyGone is the
+  // single idempotent teardown reached from onExit + the close/error socket
+  // events; these tests exercise its contract directly.
+  describe('PTY failure teardown _onPtyGone (#5311 WP-1.1)', () => {
+    function makeSession() {
+      return new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+    }
+
+    it('resets state and emits ONE session error when the PTY dies with no active turn', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._isBusy = true
+      s._processReady = true
+      s._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      assert.equal(s._ptyExited, true, 'marks the PTY dead')
+      assert.equal(s._isBusy, false, 'clears busy so the next sendMessage isn\'t wedged')
+      assert.equal(s._processReady, false)
+      assert.equal(errors.length, 1, 'exactly one error')
+      assert.match(errors[0].message, /Claude PTY exited \(code=1\)/)
+    })
+
+    it('renders code=unknown (never "undefined") when failing via close/error with no exit info (#5311)', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._onPtyGone(null, 'close') // socket fault: no exit info
+      assert.equal(errors.length, 1)
+      assert.match(errors[0].message, /Claude PTY exited \(code=unknown\)/)
+      assert.doesNotMatch(errors[0].message, /undefined/)
+    })
+
+    it('is idempotent — onExit + close + error collapse to ONE error emit', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._onPtyGone(null, 'close')
+      s._onPtyGone({ exitCode: 0 }, 'exit')
+      s._onPtyGone(null, 'error: boom')
+      assert.equal(errors.length, 1, 'one error despite three teardown events in any order')
+    })
+
+    it('suppresses the generic error when a turn was in flight (sendMessage emits the specific one)', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._activeTurn = { messageId: 'm1', startedAt: Date.now(), aborted: false }
+      s._onPtyGone({ exitCode: 137 }, 'exit')
+      assert.equal(s._activeTurn, null, 'active turn cleared')
+      assert.equal(s._isBusy, false)
+      assert.equal(errors.length, 0, 'no generic error while a turn was in flight')
+    })
+
+    it('captures the most specific exit info even on a guarded repeat event', () => {
+      const s = makeSession()
+      s.on('error', () => {})
+      s._onPtyGone(null, 'close')            // close fires first, no info
+      s._onPtyGone({ exitCode: 42 }, 'exit') // exit arrives after; guarded, but info updates
+      assert.equal(s._ptyExitInfo?.exitCode, 42)
+    })
+
+    it('marks the PTY dead but emits nothing while destroying', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._destroying = true
+      s._onPtyGone({ exitCode: 1 }, 'exit')
+      assert.equal(s._ptyExited, true, 'still marks exited so sendMessage rejects')
+      assert.equal(errors.length, 0, 'no error emit during teardown')
+    })
+  })
+
   // #4044: per-session option that spawns claude TUI with the literal
   // --dangerously-skip-permissions flag and elides chroxy's permission
   // hook entirely. Distinct from `permissionMode: 'auto'`, which still
