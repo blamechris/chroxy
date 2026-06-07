@@ -89,7 +89,7 @@ Used by the `desktop-windows` job to Authenticode-sign the standalone `.msi` so 
 first-time install no longer trips the Windows SmartScreen "Windows protected your
 PC" dialog (#3808). This is **separate from Tauri updater signing** above: the
 updater secrets minisign the auto-update payload (`.msi.zip.sig`), while these
-secrets Authenticode-sign the installer Windows itself trusts.
+secrets Authenticode-sign the installer that Windows itself trusts.
 
 We use [Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/)
 (~$10/mo, key managed by Azure — no cert files or HSM to handle) via the official
