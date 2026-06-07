@@ -349,6 +349,8 @@ jobs:
         # download is Authenticode-trusted. The updater payload (.msi.zip) was zipped
         # during the build step and keeps its minisign signature only — see the
         # "Windows Authenticode code signing" section of docs/release-signing.md.
+        # Intentionally NOT continue-on-error: if signing was meant to happen
+        # (SIGN_ENABLED) but fails, fail the release rather than ship an unsigned MSI.
         uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
