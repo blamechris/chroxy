@@ -108,6 +108,16 @@ describe('http-routes', () => {
       assert.equal(body.status, 'ok')
     })
 
+    it('GET /health includes hostname for LAN discovery (#5281 ③)', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/health`)
+      const body = await res.json()
+      // Non-empty string so a discovery client can label by machine name.
+      assert.equal(typeof body.hostname, 'string')
+      assert.ok(body.hostname.length > 0)
+    })
+
     it('GET / with Accept: text/html redirects to /dashboard when apiToken set', async () => {
       const mock = createMockServer()
       await startWith(mock)

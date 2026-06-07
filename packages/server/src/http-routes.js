@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'fs'
+import { hostname } from 'os'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
@@ -203,7 +204,11 @@ export function createHttpHandler(server) {
         'Vary': 'Accept',
         'Access-Control-Allow-Origin': '*',
       })
-      res.end(JSON.stringify({ status: 'ok', mode: server.serverMode, version: SERVER_VERSION }))
+      // #5281 ③ — `hostname` lets LAN-discovery clients (the mobile subnet
+      // scanner, and the upcoming desktop mDNS browse) label a found daemon by
+      // machine name instead of a bare IP. The mobile scanner already reads it
+      // (lan-scanner.ts: `data.hostname || ip`); the server just hadn't sent it.
+      res.end(JSON.stringify({ status: 'ok', mode: server.serverMode, version: SERVER_VERSION, hostname: hostname() }))
       return
     }
 
