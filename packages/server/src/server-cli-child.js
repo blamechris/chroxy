@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { pathToFileURL } from 'url'
 import { mergeConfig } from './config.js'
 import { createLogger } from './logger.js'
 
@@ -25,6 +26,47 @@ const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
 // Module-level references for drain handler access
 let _sessionManager = null
 let _wsServer = null
+
+// Guards the flush/exit sequence so a crash arriving during an IPC shutdown
+// (or vice-versa) doesn't double-run it.
+let _shuttingDown = false
+
+/**
+ * Persist + tear down before the child exits. Mirrors the foreground handler in
+ * server-cli.js (#3697): broadcast the shutdown, serialize session state to disk
+ * BEFORE destroying anything (losing the user's restored state on stop/crash is
+ * worse than risking a partial write), then destroyAll() (idempotent — it
+ * serializes again and sets _destroying so late persists no-op) and close the WS.
+ *
+ * Exported (no process.exit) so it can be unit-tested with fakes. #5308 / WP-0.2.
+ *
+ * @param {object|null} sessionManager
+ * @param {object|null} wsServer
+ * @param {string} reason — broadcastShutdown reason ('shutdown' | 'crash')
+ * @param {object} [logger]
+ */
+export function flushAndDestroy(sessionManager, wsServer, reason, logger = log) {
+  try { if (wsServer) wsServer.broadcastShutdown(reason, 0) } catch {}
+  try {
+    if (sessionManager) sessionManager.serializeState()
+  } catch (err) {
+    logger.error(`Failed to serialize session state before ${reason}: ${err?.stack || err}`)
+  }
+  try { if (sessionManager) sessionManager.destroyAll() } catch {}
+  try { if (wsServer) wsServer.close() } catch {}
+}
+
+// Flush state, then exit. Idempotent via _shuttingDown. The 100ms defer lets the
+// broadcastShutdown frame + socket close flush before the process goes away.
+function gracefulExit(code, reason) {
+  if (_shuttingDown) {
+    setTimeout(() => process.exit(code), 100)
+    return
+  }
+  _shuttingDown = true
+  flushAndDestroy(_sessionManager, _wsServer, reason, log)
+  setTimeout(() => process.exit(code), 100)
+}
 
 async function main() {
   // Load config (same as cli.js start command)
@@ -105,38 +147,50 @@ async function handleDrain(timeout) {
   }
 }
 
-// Listen for IPC messages from supervisor
-if (process.send) {
-  process.on('message', async (msg) => {
-    if (msg.type === 'shutdown') {
-      log.info('Shutdown requested by supervisor')
-      process.exit(0)
-    }
+// Only wire process-global handlers + run main() when this file is the forked
+// entry point. When imported (e.g. unit tests of flushAndDestroy) these side
+// effects must NOT fire — registering crash handlers or starting the server on
+// import would corrupt the test runner. #5308 / WP-0.2.
+const isEntryPoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 
-    if (msg.type === 'drain') {
-      const timeout = msg.timeout || 30000
-      await handleDrain(timeout)
-    }
+if (isEntryPoint) {
+  // Listen for IPC messages from supervisor
+  if (process.send) {
+    process.on('message', async (msg) => {
+      if (msg.type === 'shutdown') {
+        // #5308 (WP-0.2) — the supervisor's stop path sends this IPC and only
+        // escalates to an OS SIGTERM at the 5s force-kill fallback, so the
+        // child's OS-signal flush handler never runs first. A bare process.exit(0)
+        // here therefore lost ALL session state on every supervised stop/restart
+        // (the #3697 data-loss class on the supervised hot path). Flush first.
+        log.info('Shutdown requested by supervisor')
+        gracefulExit(0, 'shutdown')
+        return
+      }
+
+      if (msg.type === 'drain') {
+        const timeout = msg.timeout || 30000
+        await handleDrain(timeout)
+      }
+    })
+  }
+
+  // #5308 (WP-0.2) — crash handlers previously called destroyAll() (which does
+  // serialize internally) but omitted the explicit pre-destroy serializeState the
+  // foreground handler runs. gracefulExit() now serializes BEFORE destroyAll for
+  // parity with server-cli.js, isolating a serialize failure from teardown.
+  process.on('uncaughtException', (err) => {
+    log.error(`Uncaught exception: ${err?.stack || err}`)
+    gracefulExit(1, 'crash')
+  })
+
+  process.on('unhandledRejection', (err) => {
+    log.error(`Unhandled rejection: ${err?.stack || err}`)
+    gracefulExit(1, 'crash')
+  })
+
+  main().catch((err) => {
+    log.error(`Fatal error: ${err?.stack || err}`)
+    process.exit(1)
   })
 }
-
-process.on('uncaughtException', (err) => {
-  log.error(`Uncaught exception: ${err?.stack || err}`)
-  try { if (_wsServer) _wsServer.broadcastShutdown('crash', 0) } catch {}
-  try { if (_wsServer) _wsServer.close() } catch {}
-  try { if (_sessionManager) _sessionManager.destroyAll() } catch {}
-  setTimeout(() => process.exit(1), 100)
-})
-
-process.on('unhandledRejection', (err) => {
-  log.error(`Unhandled rejection: ${err?.stack || err}`)
-  try { if (_wsServer) _wsServer.broadcastShutdown('crash', 0) } catch {}
-  try { if (_wsServer) _wsServer.close() } catch {}
-  try { if (_sessionManager) _sessionManager.destroyAll() } catch {}
-  setTimeout(() => process.exit(1), 100)
-})
-
-main().catch((err) => {
-  log.error(`Fatal error: ${err?.stack || err}`)
-  process.exit(1)
-})
