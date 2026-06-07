@@ -175,4 +175,22 @@ describe('#5280 maybeAdvertiseMdns publishes on a LAN-reachable bind', () => {
     assert.equal(res.mdnsService, null)
     assert.equal(res.bonjourInstance, null)
   })
+
+  it('degrades gracefully even when a non-Error value is thrown', async () => {
+    // The catch normalizes err via `err?.message || String(err)`, so a thrown
+    // string / null must not turn the fallback into a TypeError crash.
+    for (const thrown of ['plain string', null, undefined, 42]) {
+      const res = await maybeAdvertiseMdns({
+        noAuth: false,
+        bindHost: '0.0.0.0',
+        port: 8765,
+        version: '9.9.9',
+        hasToken: true,
+        log: silentLog,
+        bonjourFactory: () => { throw thrown },
+      })
+      assert.equal(res.mdnsService, null)
+      assert.equal(res.bonjourInstance, null)
+    }
+  })
 })

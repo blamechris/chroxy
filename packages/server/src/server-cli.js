@@ -362,7 +362,10 @@ export async function maybeAdvertiseMdns({
     log.info?.(`Advertising _chroxy._tcp on port ${port} via mDNS`)
     return { mdnsService, bonjourInstance }
   } catch (err) {
-    log.debug?.(`mDNS advertisement unavailable: ${err.message}`)
+    // Normalize the error the way the rest of this file does — a Bonjour
+    // factory (or the dynamic import) that throws a non-Error / null must not
+    // turn the graceful no-advertisement fallback into a crash.
+    log.debug?.(`mDNS advertisement unavailable: ${err?.message || String(err)}`)
     return none
   }
 }
