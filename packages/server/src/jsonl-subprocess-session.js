@@ -124,6 +124,11 @@ export class JsonlSubprocessSession extends BaseSession {
     // back to BaseSession's 5min default — exactly the trap documented
     // in [[feedback_jsonl_subprocess_middle_layer]] landing again.
     streamStallTimeoutMs,
+    // #5288: hard-quiesce window flows through this middle layer to
+    // BaseSession exactly like streamStallTimeoutMs — drop it here and
+    // Codex / Gemini silently fall back to the 4h default
+    // ([[feedback_jsonl_subprocess_middle_layer]]).
+    backgroundShellHardQuiesceMs,
     resumeSessionId,
   } = {}) {
     super({
@@ -146,6 +151,7 @@ export class JsonlSubprocessSession extends BaseSession {
       resultTimeoutMs,
       hardTimeoutMs,
       streamStallTimeoutMs,
+      backgroundShellHardQuiesceMs,
     })
     // #3865: accept resumeSessionId from constructor so SessionManager's
     // serializeState/restoreState path carries a captured Codex thread_id

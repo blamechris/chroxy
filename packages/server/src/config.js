@@ -187,6 +187,14 @@ const CONFIG_SCHEMA = {
   // and the dashboard can offer a retry. Default 300000 (5 min). Set to
   // 0 to disable (operators with legitimately long event gaps).
   streamStallTimeoutMs: 'number',
+  // #5288: background-shell HARD-quiesce window (ms). A finished-but-never-
+  // polled background shell is reaped after this much continuous output
+  // silence so it stops pinning the session "running". Default 14400000 (4h);
+  // set 0 to disable hard-reaping (advisory-only, #5247). The tradeoff: a
+  // genuinely-silent-for-hours background compute could have its tracking
+  // reaped — operators running such workloads should raise this (6-8h) or
+  // disable it. Range: 60s minimum, 24h maximum (0 to disable).
+  backgroundShellHardQuiesceMs: 'number',
   // #4601: per-provider override map for streamStallTimeoutMs. An object
   // keyed by provider id (e.g. 'codex', 'gemini', 'claude-sdk') whose
   // value is a stall window in ms. Same 5s-24h-or-0 validation as
@@ -485,6 +493,17 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (minimum 5000 / 5s; set 0 to disable)`)
     } else if (config.streamStallTimeoutMs > 24 * 60 * 60 * 1000) {
       warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (maximum 86400000 / 24h)`)
+    }
+  }
+
+  // #5288: background-shell hard-quiesce range. 0 is valid (disable). Otherwise
+  // 60s-24h — below the 60s advisory quiesce window makes no sense, above 24h
+  // is the shared ceiling.
+  if (Number.isFinite(config.backgroundShellHardQuiesceMs) && config.backgroundShellHardQuiesceMs !== 0) {
+    if (config.backgroundShellHardQuiesceMs < 60_000) {
+      warnings.push(`Invalid value for 'backgroundShellHardQuiesceMs': ${config.backgroundShellHardQuiesceMs} (minimum 60000 / 60s; set 0 to disable)`)
+    } else if (config.backgroundShellHardQuiesceMs > 24 * 60 * 60 * 1000) {
+      warnings.push(`Invalid value for 'backgroundShellHardQuiesceMs': ${config.backgroundShellHardQuiesceMs} (maximum 86400000 / 24h)`)
     }
   }
 
@@ -788,6 +807,7 @@ function envKeyForConfig(key) {
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',
     hardTimeoutMs: 'CHROXY_HARD_TIMEOUT_MS',
     streamStallTimeoutMs: 'CHROXY_STREAM_STALL_TIMEOUT_MS',
+    backgroundShellHardQuiesceMs: 'CHROXY_BACKGROUND_SHELL_HARD_QUIESCE_MS',
     // #4601: JSON-encoded provider→ms map (e.g.
     // `CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS='{"codex":900000}'`).
     // parseEnvValue dispatches on CONFIG_SCHEMA's `'object'` type and

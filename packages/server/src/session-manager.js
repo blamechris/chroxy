@@ -219,6 +219,10 @@ export class SessionManager extends EventEmitter {
     // #4467: stream-stall recovery timeout (ms). Forwarded via providerOpts.
     // null = use BaseSession's DEFAULT_STREAM_STALL_TIMEOUT_MS (5min).
     streamStallTimeoutMs,
+    // #5288: background-shell HARD-quiesce window (ms). Forwarded via
+    // providerOpts. null = use BaseSession's BACKGROUND_SHELL_HARD_QUIESCE_MS
+    // (4h); 0 disables hard-reaping (advisory-only, #5247 behaviour).
+    backgroundShellHardQuiesceMs,
     // #4601: per-provider override map for streamStallTimeoutMs. Keys are
     // provider ids (e.g. 'codex', 'gemini'); values are stall windows in
     // ms (or 0 to disable for that provider). When a session is created
@@ -303,6 +307,13 @@ export class SessionManager extends EventEmitter {
     this._streamStallTimeoutMs =
       isOperatorTimeoutInRange(streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
         ? streamStallTimeoutMs
+        : null
+    // #5288: background-shell hard-quiesce window. `allowZero: true` keeps 0 as
+    // "disable hard-reaping"; null falls through to BaseSession's 4h default.
+    // Same ceiling guard as the timeouts (over-24h falls back + warns).
+    this._backgroundShellHardQuiesceMs =
+      isOperatorTimeoutInRange(backgroundShellHardQuiesceMs, { allowZero: true, name: 'backgroundShellHardQuiesceMs', log })
+        ? backgroundShellHardQuiesceMs
         : null
     // #4601: sanitise the per-provider override map at construction time —
     // each entry runs through the same `isOperatorTimeoutInRange` guard as
@@ -675,6 +686,9 @@ export class SessionManager extends EventEmitter {
     if (this._maxToolInput) providerOpts.maxToolInput = this._maxToolInput
     if (this._resultTimeoutMs != null) providerOpts.resultTimeoutMs = this._resultTimeoutMs
     if (this._hardTimeoutMs != null) providerOpts.hardTimeoutMs = this._hardTimeoutMs
+    // #5288: forward the operator-configured hard-quiesce window (incl. 0 =
+    // disable). null = unset → BaseSession applies its 4h default.
+    if (this._backgroundShellHardQuiesceMs != null) providerOpts.backgroundShellHardQuiesceMs = this._backgroundShellHardQuiesceMs
     // #4601: per-provider streamStallTimeoutMs override resolution. Lookup
     // is by RESOLVED provider id (the same key SessionManager used to fetch
     // the ProviderClass from `getProvider()` above) so a session whose
