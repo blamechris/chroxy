@@ -51,10 +51,11 @@ export class SessionStatePersistence {
    *   - `writeFileRestricted` is atomic on POSIX (internal rename replaces the
    *     destination), so a partial write of the new generation cannot leave
    *     half-written bytes at `mainPath`.
-   *   - On Windows, `writeFileRestricted` does a direct `writeFileSync` — that
-   *     matches the prior behavior (the old code's `.tmp` write was also a
-   *     direct `writeFileSync`; the only "atomic" step on Windows was the
-   *     final `renameSync`, which still depends on the OS).
+   *   - On Windows, `writeFileRestricted` also writes to a temp file then
+   *     `renameSync`s it into place (#4913) — the `renameSync` is the atomic
+   *     step (it depends on the OS), and the temp write itself uses
+   *     `writeFileSync` (no POSIX mode bits apply). Same temp+rename shape as
+   *     POSIX since #4913; only the mode handling differs.
    *
    * `_rotateToBak`'s Windows retry-and-restore-`.bak` flow stays intact under
    * the new order: the snapshot-and-restore happens before the main write, so

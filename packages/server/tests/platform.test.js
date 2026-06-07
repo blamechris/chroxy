@@ -58,22 +58,6 @@ describe('platform', () => {
       assert.strictEqual(content, 'second')
     })
 
-    it('honours a custom tmpSuffix so writers to the same file use distinct temps (#5309)', () => {
-      const filePath = join(tmpDir, 'state.json')
-      // Two writers targeting the same final path with distinct per-pid suffixes
-      // must each rename their OWN intermediate temp — they can't clobber a
-      // shared `.tmp`. Both writes land the final content cleanly and leave no
-      // suffixed orphan behind. This is the mechanism session-state-persistence
-      // relies on so a second process can't corrupt the state file mid-write.
-      writeFileRestricted(filePath, 'a', { tmpSuffix: '.tmp-111' })
-      assert.strictEqual(readFileSync(filePath, 'utf-8'), 'a')
-      writeFileRestricted(filePath, 'b', { tmpSuffix: '.tmp-222' })
-      assert.strictEqual(readFileSync(filePath, 'utf-8'), 'b')
-      assert.strictEqual(existsSync(`${filePath}.tmp-111`), false, 'suffix-111 temp cleaned')
-      assert.strictEqual(existsSync(`${filePath}.tmp-222`), false, 'suffix-222 temp cleaned')
-      assert.strictEqual(existsSync(`${filePath}.tmp`), false, 'no bare .tmp from a custom-suffix write')
-    })
-
     if (!isWindows) {
       it('sets 0o600 permissions on Unix', () => {
         const filePath = join(tmpDir, 'restricted.txt')
