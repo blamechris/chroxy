@@ -88,7 +88,13 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
       setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.stopPropagation(); setOpen(false) }
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setOpen(false)
+        // Restore focus to the trigger so a keyboard user isn't dropped to
+        // <body> after dismissing — matches the disclosure pattern elsewhere.
+        triggerRef.current?.focus()
+      }
     }
     const onBlur = () => setOpen(false)
     document.addEventListener('mousedown', onMouseDown, true)
@@ -128,6 +134,10 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={popoverId}
+        // The visible content is a decorative glyph + bare number, which a
+        // screen reader would announce as just "2" — give the control an
+        // explicit name describing what it does.
+        aria-label={`${countText} sharing this session — show devices`}
         title={`${countText} sharing this session`}
       >
         <span className="viewers-trigger-glyph" aria-hidden="true">{'\u{1F465}'}</span>

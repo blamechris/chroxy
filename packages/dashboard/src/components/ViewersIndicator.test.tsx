@@ -128,7 +128,7 @@ describe('ViewersIndicator', () => {
     expect(screen.getByTestId('viewers-client-c1')).toHaveTextContent('Unknown device')
   })
 
-  it('closes the popover on Escape', () => {
+  it('gives the trigger an explicit accessible name (not just the count)', () => {
     render(
       <ViewersIndicator
         connected
@@ -136,10 +136,25 @@ describe('ViewersIndicator', () => {
         primaryClientId={null}
       />,
     )
-    fireEvent.click(screen.getByTestId('viewers-indicator-trigger'))
+    expect(screen.getByTestId('viewers-indicator-trigger')).toHaveAccessibleName(
+      '2 clients sharing this session — show devices',
+    )
+  })
+
+  it('closes the popover on Escape and restores focus to the trigger', () => {
+    render(
+      <ViewersIndicator
+        connected
+        clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1' })]}
+        primaryClientId={null}
+      />,
+    )
+    const trigger = screen.getByTestId('viewers-indicator-trigger')
+    fireEvent.click(trigger)
     expect(screen.getByTestId('viewers-popover')).toBeInTheDocument()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByTestId('viewers-popover')).not.toBeInTheDocument()
+    expect(document.activeElement).toBe(trigger)
   })
 
   it('closes the popover on an outside click', () => {
