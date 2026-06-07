@@ -36,7 +36,14 @@ export function parseChroxyUrl(raw: string): ParseResult {
     const trimmed = raw.trim();
     if (trimmed.startsWith('chroxy://')) {
       const parsed = new URL(trimmed.replace('chroxy://', 'https://'));
-      const wsUrl = `wss://${parsed.host}`;
+      // #5298 — the chroxy:// scheme drops ws/wss, so infer it from the port.
+      // A LAN daemon's pairing/QR URL always has an explicit port and serves
+      // plain ws:// (no TLS); a tunnel URL has no port and is wss:// on 443.
+      // So: port present ⇒ ws (LAN), port absent ⇒ wss (tunnel). `parsed.host`
+      // already carries the port (and brackets, for IPv6). Mirrors the
+      // dashboard's parsePairingUrl scheme inference.
+      const scheme = parsed.port ? 'ws' : 'wss';
+      const wsUrl = `${scheme}://${parsed.host}`;
 
       // New pairing flow: chroxy://host?pair=PAIRING_ID
       const pairingId = parsed.searchParams.get('pair');
@@ -48,7 +55,9 @@ export function parseChroxyUrl(raw: string): ParseResult {
 
       return { ok: false, reason: 'missing_token' };
     }
-    if (trimmed.startsWith('wss://')) {
+    // A directly-entered ws:// or wss:// URL keeps its own scheme — the
+    // override for the rare port-bearing wss (custom proxy) case.
+    if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {
       return { ok: true, wsUrl: trimmed, token: '' };
     }
   } catch {

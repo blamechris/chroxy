@@ -49,4 +49,40 @@ describe('parseChroxyUrl (#1852)', () => {
     const result = parseChroxyUrl('  chroxy://example.com?pair=abc  ');
     expect(result).toEqual({ ok: true, wsUrl: 'wss://example.com', pairingId: 'abc' });
   });
+
+  // #5298 — chroxy:// scheme inference: a LAN daemon's URL has an explicit
+  // port and serves plain ws://; a tunnel URL has no port and is wss:// on 443.
+  describe('LAN vs tunnel scheme inference (#5298)', () => {
+    it('LAN pairing URL (explicit port) connects over ws://', () => {
+      const result = parseChroxyUrl('chroxy://192.168.1.5:8765?pair=abc123');
+      expect(result).toEqual({ ok: true, wsUrl: 'ws://192.168.1.5:8765', pairingId: 'abc123' });
+    });
+
+    it('LAN token URL (explicit port) connects over ws://', () => {
+      const result = parseChroxyUrl('chroxy://192.168.1.5:8765?token=tok');
+      expect(result).toEqual({ ok: true, wsUrl: 'ws://192.168.1.5:8765', token: 'tok' });
+    });
+
+    it('tunnel pairing URL (no port) stays wss://', () => {
+      const result = parseChroxyUrl('chroxy://abc.trycloudflare.com?pair=xyz');
+      expect(result).toEqual({ ok: true, wsUrl: 'wss://abc.trycloudflare.com', pairingId: 'xyz' });
+    });
+
+    it('IPv6 LAN URL (explicit port) keeps brackets and uses ws://', () => {
+      const result = parseChroxyUrl('chroxy://[fd00::1]:8765?pair=abc');
+      expect(result).toEqual({ ok: true, wsUrl: 'ws://[fd00::1]:8765', pairingId: 'abc' });
+    });
+
+    it('directly-entered ws:// keeps its scheme', () => {
+      const result = parseChroxyUrl('ws://192.168.1.5:8765');
+      expect(result).toEqual({ ok: true, wsUrl: 'ws://192.168.1.5:8765', token: '' });
+    });
+
+    it('explicit :443 is the https default port and stays wss:// (no port in host)', () => {
+      // `new URL` strips the default https port, so `parsed.port` is empty —
+      // a tunnel on 443 still infers wss, even written with an explicit :443.
+      const result = parseChroxyUrl('chroxy://abc.trycloudflare.com:443?pair=xyz');
+      expect(result).toEqual({ ok: true, wsUrl: 'wss://abc.trycloudflare.com', pairingId: 'xyz' });
+    });
+  });
 });
