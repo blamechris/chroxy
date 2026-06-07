@@ -271,6 +271,167 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5315 (WP-2.1) — bounded per-session PTY auto-respawn. When the persistent
+  // claude PTY dies unexpectedly mid-session, the session must self-heal
+  // (bounded backoff, max 5 attempts) instead of becoming a permanently
+  // input-rejecting zombie. Mirrors CliSession's respawn. Tests stub _spawnPty
+  // on the prototype and drive mock.timers so no real claude is spawned and no
+  // real backoff delay is waited.
+  describe('PTY auto-respawn (#5315 WP-2.1)', () => {
+    beforeEach(() => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+    })
+    afterEach(() => {
+      mock.timers.reset()
+    })
+
+    // Build a session with _spawnPty stubbed to succeed (live term, not exited).
+    // `onSpawn` lets a test observe / mutate each spawn (e.g. count calls,
+    // capture the idArgs, or make the respawn die again).
+    function makeSession(onSpawn) {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s._spawnPty = async function () {
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+        if (onSpawn) onSpawn(this)
+      }
+      // Pretend start() already ran: sink/settings/secret exist, PTY is live.
+      s._sinkDir = '/tmp/fake-sink'
+      s._settingsPath = '/tmp/fake-sink/settings.json'
+      s._sessionId = 'conv-uuid-1234'
+      s._resumedFromPersisted = false
+      s._processReady = true
+      // EventEmitter throws on an unhandled 'error'; _onPtyGone emits one on
+      // the no-active-turn death path. Swallow by default — tests that assert
+      // on errors add their own listener (additive, both fire).
+      s.on('error', () => {})
+      return s
+    }
+
+    it('an unexpected PTY death schedules a respawn that re-invokes _spawnPty', async () => {
+      let spawnCalls = 0
+      session = makeSession(() => { spawnCalls++ })
+      // Simulate the unexpected death (onExit path).
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      assert.equal(session._respawnScheduled, true, 'a respawn is scheduled after unexpected death')
+      assert.equal(session._respawnCount, 1, 'first attempt counted')
+
+      // Advance the first backoff (1000ms) and let the async _respawnPty settle.
+      mock.timers.tick(1000)
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(spawnCalls, 1, '_spawnPty re-invoked by the respawn')
+      assert.equal(session._processReady, true, 'session is ready again after a successful respawn')
+      assert.equal(session._respawnCount, 0, 'respawn count resets after a successful respawn that stays alive')
+    })
+
+    it('re-emits ready on a successful respawn so the dashboard knows it recovered', async () => {
+      session = makeSession()
+      const readies = []
+      session.on('ready', (d) => readies.push(d))
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      mock.timers.tick(1000)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(readies.length, 1, 'ready re-emitted once on recovery')
+      assert.equal(readies[0].sessionId, 'conv-uuid-1234', 'ready carries the preserved conversation id')
+    })
+
+    it('respawn uses --resume (not --session-id) to continue the conversation', async () => {
+      let capturedArgs = null
+      // Capture the idArgs _spawnPty would build from _resumedFromPersisted.
+      session = makeSession((self) => {
+        capturedArgs = self._resumedFromPersisted
+          ? ['--resume', self._sessionId]
+          : ['--session-id', self._sessionId]
+      })
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      mock.timers.tick(1000)
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(session._resumedFromPersisted, true, 'respawn flips _resumedFromPersisted so idArgs picks --resume')
+      assert.ok(capturedArgs.includes('--resume'), 'respawn spawns with --resume')
+      assert.equal(capturedArgs.includes('--session-id'), false, 'respawn must NOT reuse --session-id (claude rejects a reused id)')
+      const i = capturedArgs.indexOf('--resume')
+      assert.equal(capturedArgs[i + 1], 'conv-uuid-1234', 'respawn resumes the SAME (not a new) conversation uuid')
+    })
+
+    it('resets the _ptyExited guard so a SECOND death after respawn tears down again', async () => {
+      let spawnCalls = 0
+      session = makeSession(() => { spawnCalls++ })
+      // First death → respawn.
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      mock.timers.tick(1000)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(session._ptyExited, false, 'guard reset after a successful respawn')
+      assert.equal(spawnCalls, 1)
+
+      // Second, independent death — must NOT be swallowed by a latched guard.
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      assert.equal(session._ptyExited, true, 'second death tears down again (guard was reset)')
+      assert.equal(session._respawnScheduled, true, 'second death schedules another respawn')
+      mock.timers.tick(1000)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(spawnCalls, 2, 'second death triggers a second respawn')
+    })
+
+    it('after 5 attempts emits a fatal error + respawn_exhausted and stops (no infinite loop)', async () => {
+      let spawnCalls = 0
+      // Every respawn dies again during warmup → drives toward the cap. In
+      // production the wired onExit/close handlers call _onPtyGone when the PTY
+      // dies; the stub mimics that so the same scheduling path runs.
+      session = makeSession((self) => {
+        spawnCalls++
+        self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      })
+      const errors = []
+      const exhausted = []
+      session.on('error', (e) => errors.push(e))
+      session.on('respawn_exhausted', (d) => exhausted.push(d))
+
+      // Initial unexpected death.
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      // Drain all five backoffs (1,2,4,8,15s) — each respawn dies and the dead
+      // _spawnPty calls _onPtyGone which schedules the next attempt.
+      const delays = [1000, 2000, 4000, 8000, 15000]
+      for (const d of delays) {
+        mock.timers.tick(d)
+        await new Promise((r) => setImmediate(r))
+      }
+      // One more tick to be sure nothing else is scheduled.
+      mock.timers.tick(15000)
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(spawnCalls, 5, 'exactly 5 respawn attempts, then it gives up')
+      assert.equal(exhausted.length, 1, 'respawn_exhausted emitted exactly once')
+      assert.ok(errors.some((e) => e.code === 'pty_respawn_exhausted'), 'a categorized fatal error is emitted on exhaustion')
+      assert.equal(session._respawnScheduled, false, 'no further respawn is scheduled after exhaustion')
+    })
+
+    it('suppresses respawn when _destroying (deliberate teardown)', () => {
+      session = makeSession()
+      session._destroying = true
+      session._onPtyGone({ exitCode: 0, signal: null }, 'exit')
+      assert.equal(session._respawnScheduled, false, 'deliberate teardown must not schedule a respawn')
+      assert.equal(session._respawnCount, 0, 'no respawn attempt counted on a destroying teardown')
+    })
+
+    it('clears the respawn timer on destroy so it cannot fire after teardown', async () => {
+      let spawnCalls = 0
+      session = makeSession(() => { spawnCalls++ })
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      assert.ok(session._respawnTimer, 'a respawn timer is armed')
+
+      await session.destroy()
+      assert.equal(session._respawnTimer, null, 'respawn timer cleared on destroy')
+      assert.equal(session._respawnScheduled, false, 'respawn flag cleared on destroy')
+
+      // Even if a stale timer somehow remained, _respawnPty bails on _destroying.
+      mock.timers.tick(60000)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(spawnCalls, 0, 'no respawn after destroy')
+      session = null // already destroyed; skip afterEach double-destroy
+    })
+  })
+
   describe('sendMessage() error paths', () => {
     it('emits error if not started yet', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })

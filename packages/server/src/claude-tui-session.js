@@ -391,7 +391,15 @@ export class ClaudeTuiSession extends BaseSession {
    * the v0.9.24 dogfood feedback captured on #4653.
    */
   static get customEvents() {
-    return ['multi_question_intervention']
+    // #5315 (WP-2.1) — `respawn_exhausted` is emitted by `_scheduleRespawn`
+    // when bounded PTY auto-respawn gives up (max attempts reached). WHY it's a
+    // custom event and not just an `error`: SessionManager keys its
+    // drop-the-session-from-the-list coordination on this distinct signal
+    // (`_wireSessionEvents` calls destroySession on it) so the session leaves
+    // the list with a clear error instead of lingering as an input-rejecting
+    // zombie tab. Listing it here also forwards it to paired clients as a
+    // transient `session_event` so the dashboard can surface the give-up reason.
+    return ['multi_question_intervention', 'respawn_exhausted']
   }
 
   constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, firstOutputTimeoutMs, skipPermissions, resumeSessionId } = {}) {
@@ -441,6 +449,17 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null  // { messageId, startedAt, aborted, synthSeq }
     this._ptyExited = false
     this._ptyExitInfo = null
+    // #5315 (WP-2.1) — bounded per-session PTY auto-respawn state, mirroring
+    // CliSession (cli-session.js:351). WHY: when the persistent claude PTY dies
+    // unexpectedly mid-session, `_onPtyGone` used to tear the session down into
+    // a permanently input-rejecting zombie (every later sendMessage rejected
+    // "no longer alive"). The TUI provider is becoming the PRIMARY backend, so
+    // it must self-heal like CliSession does. Backoff [1s,2s,4s,8s,15s], max 5
+    // attempts, then `respawn_exhausted` (SessionManager drops the session).
+    this._respawnCount = 0
+    this._respawnTimer = null
+    this._respawnScheduled = false
+    this._respawning = false
     // Ring buffer of recent PTY output bytes — surfaces in error
     // messages when the TUI renders a diagnostic (rate-limit, auth
     // failure, "switch back to API mode") that would otherwise be
@@ -823,6 +842,113 @@ export class ClaudeTuiSession extends BaseSession {
       const base = `Claude PTY exited (code=${codeStr})`
       this.emit('error', { message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
     }
+    // #5315 (WP-2.1) — an UNEXPECTED PTY death (we already returned above when
+    // `_destroying`, so this is never a deliberate teardown). Try to bring the
+    // session back instead of leaving a zombie. The error(s) above still fire
+    // so the dashboard sees the death; the respawn is the recovery layer on top.
+    this._scheduleRespawn()
+  }
+
+  /**
+   * #5315 (WP-2.1) — schedule a bounded PTY respawn with exponential backoff,
+   * mirroring CliSession._scheduleRespawn (cli-session.js:556). Backoff is
+   * [1s,2s,4s,8s,15s] and caps at 5 attempts; on exhaustion it emits a
+   * categorized `error` AND a `respawn_exhausted` event so SessionManager drops
+   * the session from its list (no input-rejecting zombie tab — the audit AC).
+   * Guarded on `_destroying` / `_respawning` / `_respawnScheduled` so the
+   * several wired PTY-fault events (onExit/close/error) can't stack timers.
+   */
+  _scheduleRespawn() {
+    if (this._destroying) return
+    if (this._respawning) return
+    if (this._respawnScheduled) return
+
+    this._respawnCount++
+    if (this._respawnCount > 5) {
+      ;(this._log || log).error('Max PTY respawn attempts reached (5), giving up')
+      const tail = this._outputTailDiagnostic()
+      const base = 'Claude PTY failed to stay alive after 5 respawn attempts'
+      // Distinct code so the dashboard can render a terminal "give up" state
+      // rather than a recoverable crash toast.
+      this.emit('error', { code: 'pty_respawn_exhausted', message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
+      // SessionManager listens for this and calls destroySession() so the
+      // session leaves the list cleanly (see _wireSessionEvents).
+      this.emit('respawn_exhausted', { reason: 'pty_respawn_exhausted', attempts: this._respawnCount - 1 })
+      return
+    }
+
+    const delays = [1000, 2000, 4000, 8000, 15000]
+    const delay = delays[Math.min(this._respawnCount - 1, delays.length - 1)]
+    ;(this._log || log).info(`Respawning claude PTY in ${delay}ms (attempt ${this._respawnCount}/5)`)
+
+    this._respawnScheduled = true
+    this._respawnTimer = setTimeout(() => {
+      this._respawnTimer = null
+      this._respawnScheduled = false
+      if (this._destroying) return
+      this._respawnPty()
+    }, delay)
+  }
+
+  /**
+   * #5315 (WP-2.1) — re-spawn the persistent PTY in place after an unexpected
+   * death. Reuses the existing sink dir / settings.json / hook secret (does NOT
+   * re-create them) by re-invoking `_spawnPty()` with the same
+   * `permissionsEnabled` decision start() made.
+   *
+   * Two subtleties that are load-bearing:
+   *   1. Guard reset — `_onPtyGone` latched `_ptyExited=true` (plus
+   *      `_ptyExitInfo` / `_processReady=false`). Without resetting these,
+   *      `_onPtyGone`'s `if (this._ptyExited) return` guard stays latched and
+   *      the NEXT death would no-op instead of tearing down / respawning again
+   *      (the #5315 #1 footgun). Reset them before re-spawning.
+   *   2. Conversation continuity — the upstream claude conversation already
+   *      exists from the prior PTY run and `_sessionId` is preserved, so the
+   *      respawn MUST use `--resume <id>`, NOT `--session-id` (claude rejects a
+   *      reused session-id as "already in use"). Set `_resumedFromPersisted`
+   *      so `_spawnPty`'s idArgs picks `--resume`; do NOT mint a new id.
+   */
+  async _respawnPty() {
+    if (this._destroying) return
+    this._respawning = true
+    // (1) reset the teardown latches so a future death re-triggers _onPtyGone.
+    this._ptyExited = false
+    this._ptyExitInfo = null
+    this._processReady = false
+    // (2) continue the SAME upstream conversation via --resume.
+    this._resumedFromPersisted = true
+    // Recompute permissionsEnabled exactly as start() did — the sink dir, hook
+    // secret and settings.json are all still in place from the original start,
+    // so we re-use them rather than re-deriving (no re-mint, no re-create).
+    const permissionsEnabled = !!(this._port && this._hookSecret) && !this.skipPermissions
+    try {
+      await this._spawnPty(permissionsEnabled)
+    } catch (err) {
+      ;(this._log || log).error(`PTY respawn threw: ${err?.message || err}`)
+      this._respawning = false
+      // Treat a throw like a death: schedule the next attempt (respects the cap).
+      this._scheduleRespawn()
+      return
+    }
+    this._respawning = false
+    if (this._destroying) return
+    if (this._ptyExited) {
+      // Respawn warmup failed: the PTY died again during _spawnPty. _onPtyGone
+      // DID fire (it set _ptyExited), but its _scheduleRespawn was suppressed
+      // by the `_respawning` guard that was true for the whole _spawnPty await.
+      // Now that we've cleared `_respawning`, schedule the next attempt here so
+      // the backoff chain continues toward the cap (it won't loop forever —
+      // _scheduleRespawn enforces the 5-attempt limit).
+      this._scheduleRespawn()
+      return
+    }
+    // Respawn succeeded and stayed alive through warmup. Reset the count so a
+    // FUTURE unrelated death gets the full retry budget again (matches how
+    // CliSession resets _respawnCount on system.init, cli-session.js:888), mark
+    // ready, and re-emit `ready` so the dashboard knows the session recovered.
+    this._respawnCount = 0
+    this._processReady = true
+    this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
   }
 
   /**
@@ -3318,6 +3444,15 @@ export class ClaudeTuiSession extends BaseSession {
     this._processReady = false
     this._isBusy = false
     this._activeTurn = null
+    // #5315 (WP-2.1) — cancel any pending respawn so a scheduled _respawnPty
+    // can't fire after teardown and spawn a fresh claude into a destroyed
+    // session. `_destroying` is already true above, so _scheduleRespawn would
+    // short-circuit anyway, but a timer already armed before destroy() must be
+    // cleared explicitly. _respawning is reset so a re-create of this instance
+    // (defensive) starts from a clean state.
+    if (this._respawnTimer) { clearTimeout(this._respawnTimer); this._respawnTimer = null }
+    this._respawnScheduled = false
+    this._respawning = false
     // #4278 / #4802: drop any pending AskUserQuestion so a late
     // user_question_response can't write into a dead PTY. Explicit
     // `_pendingUserAnswers_clearAll()` (was an implicit
