@@ -111,6 +111,45 @@ describe('http-routes', () => {
       const health = await globalThis.fetch(`http://127.0.0.1:${port}/health`)
       assert.equal(health.status, 200, 'server still serving after a route threw')
     })
+
+    it('a throwing route does NOT produce an unhandledRejection', async () => {
+      const mock = createMockServer({
+        _permissions: {
+          handlePermissionRequest: () => { throw new Error('boom') },
+          handlePermissionResponseHttp: (_req, res) => { res.writeHead(200); res.end('ok') },
+        },
+      })
+      await startWith(mock)
+
+      let leaked = null
+      const onLeak = (err) => { leaked = err }
+      process.once('unhandledRejection', onLeak)
+      try {
+        await globalThis.fetch(`http://127.0.0.1:${port}/permission`, { method: 'POST', body: '{}' })
+        // Let any deferred rejection surface on the next ticks.
+        await new Promise((r) => setTimeout(r, 50))
+      } finally {
+        process.removeListener('unhandledRejection', onLeak)
+      }
+      assert.equal(leaked, null, 'wrapper must catch the throw — no unhandledRejection escapes')
+    })
+
+    it('does not double-write when a route throws AFTER sending headers', async () => {
+      const mock = createMockServer({
+        _permissions: {
+          handlePermissionRequest: (_req, res) => { res.writeHead(202); res.write('partial'); throw new Error('after headers') },
+          handlePermissionResponseHttp: (_req, res) => { res.writeHead(200); res.end('ok') },
+        },
+      })
+      await startWith(mock)
+
+      // Headers already sent → wrapper takes the else-branch (end(), no 2nd writeHead).
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/permission`, { method: 'POST', body: '{}' })
+      assert.equal(res.status, 202, 'keeps the already-sent status (no second writeHead(500))')
+      await res.text()
+      const health = await globalThis.fetch(`http://127.0.0.1:${port}/health`)
+      assert.equal(health.status, 200, 'server survived a post-headers throw')
+    })
   })
 
   describe('health endpoint', () => {
