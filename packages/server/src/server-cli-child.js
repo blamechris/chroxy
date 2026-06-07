@@ -59,12 +59,13 @@ export function flushAndDestroy(sessionManager, wsServer, reason, logger = log) 
 // Flush state, then exit. Idempotent via _shuttingDown. The 100ms defer lets the
 // broadcastShutdown frame + socket close flush before the process goes away.
 function gracefulExit(code, reason) {
-  if (_shuttingDown) {
-    setTimeout(() => process.exit(code), 100)
-    return
-  }
+  // Idempotent: the first call already armed the exit timer below, so a second
+  // path firing during the 100ms window (e.g. a crash mid-shutdown) just returns
+  // — the in-flight timer guarantees the process exits.
+  if (_shuttingDown) return
   _shuttingDown = true
   flushAndDestroy(_sessionManager, _wsServer, reason, log)
+  // 100ms defer lets the broadcastShutdown frame + socket close flush first.
   setTimeout(() => process.exit(code), 100)
 }
 
