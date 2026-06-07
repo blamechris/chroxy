@@ -2523,13 +2523,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const rejectedId = typeof msg.clientMessageId === 'string' && msg.clientMessageId.length > 0
           ? msg.clientMessageId
           : null;
+        // filterThinking drops the spinner immediately (no 5s safety-net wait);
+        // the id filter removes the ghost send when the server echoed which
+        // message it rejected — but ONLY the optimistic user_input at that id,
+        // never a colliding message of another type.
+        const dropGhost = (messages: ChatMessage[]) =>
+          filterThinking(messages).filter(
+            (m) => !(rejectedId && m.id === rejectedId && m.type === 'user_input'),
+          );
         if (conflictSessionId && get().sessionStates[conflictSessionId]) {
           updateSession(conflictSessionId, (ss) => ({
-            // filterThinking drops the spinner immediately (no 5s safety-net
-            // wait); the id filter removes the ghost send when the server
-            // echoed which message it rejected.
-            messages: filterThinking(ss.messages).filter((m) => (rejectedId ? m.id !== rejectedId : true)),
+            messages: dropGhost(ss.messages),
             streamingMessageId: ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
+          }));
+        } else {
+          // Root-level (CLI single-session) store mode: addUserMessage put the
+          // optimistic entry on the top-level messages/streamingMessageId, so
+          // clean those instead of a per-session slot.
+          set((state: ConnectionState) => ({
+            messages: dropGhost(state.messages),
+            streamingMessageId: state.streamingMessageId === 'pending' ? null : state.streamingMessageId,
           }));
         }
         // Prefer the server's specific reason (cross-device vs evaluator lock);

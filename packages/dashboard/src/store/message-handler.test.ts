@@ -531,6 +531,61 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.messages.find((m: any) => m.id === 'older')).toBeDefined()
     })
 
+    it('cleans up root-level (CLI single-session) store mode too', () => {
+      // No active session / no sessionStates entry — addUserMessage put the
+      // optimistic send on the top-level messages/streamingMessageId.
+      store = createMockStore(baseState({
+        activeSessionId: null,
+        sessionStates: {},
+        messages: [
+          { id: 'user-7', type: 'user_input', content: 'hi', timestamp: 1 },
+          { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+        ],
+        streamingMessageId: 'pending',
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', clientMessageId: 'user-7', message: 'busy' },
+        ctx() as any,
+      )
+
+      const state = store.getState() as any
+      expect(state.messages.find((m: any) => m.id === 'user-7')).toBeUndefined()
+      expect(state.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(state.streamingMessageId).toBeNull()
+      expect(state.serverErrors).toEqual([])
+    })
+
+    it('only drops the rejected user_input, never a colliding message of another type', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [
+              // A non-user_input message that happens to share the rejected id.
+              { id: 'dup', type: 'tool_use', content: 'ls', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            streamingMessageId: 'pending',
+          },
+        },
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', sessionId: 's1', clientMessageId: 'dup', message: 'busy' },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      // The tool_use at the colliding id survives; only the spinner cleared.
+      expect(ss.messages.find((m: any) => m.id === 'dup' && m.type === 'tool_use')).toBeDefined()
+      expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(ss.streamingMessageId).toBeNull()
+    })
+
     it('shows the evaluator-lock reason verbatim (not the cross-device copy)', () => {
       store = createMockStore(baseState({
         activeSessionId: 's1',
