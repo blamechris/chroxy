@@ -508,6 +508,7 @@ export function App() {
 
   // Store actions (stable refs)
   const connect = useConnectionStore(s => s.connect)
+  const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
@@ -1645,13 +1646,11 @@ export function App() {
     dismissSessionNotification(notificationId)
   }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
 
+  // Retry reconnects to the *active* server (remote registry entry or local),
+  // not unconditionally to local — see retryConnection / #5284.
   const handleRetry = useCallback(() => {
-    const token = getAuthToken()
-    if (!token) return
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const wsUrl = `${proto}://${window.location.host}/ws`
-    connect(wsUrl, token)
-  }, [connect])
+    retryConnection()
+  }, [retryConnection])
 
   const handleStartServer = useCallback(() => {
     startServer()

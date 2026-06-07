@@ -118,6 +118,55 @@ describe('store server registry actions', () => {
     expect(useConnectionStore.getState().connectionPhase).toBe('connected')
   })
 
+  describe('retryConnection (#5284)', () => {
+    it('reconnects to the active REMOTE server, not local', () => {
+      const entry = useConnectionStore.getState().addServer('Dev', 'wss://dev/ws', 'token1')
+      const connectSpy = vi.fn()
+      const connectToServerSpy = vi.fn()
+      // A dropped remote session: active server set, socket down.
+      useConnectionStore.setState({
+        activeServerId: entry.id,
+        connectionPhase: 'disconnected',
+        connect: connectSpy,
+        connectToServer: connectToServerSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      // Must retry the remote registry entry — never the same-origin connect().
+      expect(connectToServerSpy).toHaveBeenCalledWith(entry.id)
+      expect(connectSpy).not.toHaveBeenCalled()
+    })
+
+    it('reconnects to local same-origin when no active server', () => {
+      mockToken = 'local-token'
+      const connectSpy = vi.fn()
+      const connectToServerSpy = vi.fn()
+      useConnectionStore.setState({
+        activeServerId: null,
+        connectionPhase: 'disconnected',
+        connect: connectSpy,
+        connectToServer: connectToServerSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      expect(connectToServerSpy).not.toHaveBeenCalled()
+      expect(connectSpy).toHaveBeenCalledTimes(1)
+      // Same-origin /ws URL + the page token.
+      expect(connectSpy.mock.calls[0]![0]).toMatch(/\/ws$/)
+      expect(connectSpy.mock.calls[0]![1]).toBe('local-token')
+    })
+
+    it('is a no-op for the local path when no same-origin token is available', () => {
+      mockToken = null
+      const connectSpy = vi.fn()
+      useConnectionStore.setState({
+        activeServerId: null,
+        connectionPhase: 'disconnected',
+        connect: connectSpy,
+      })
+      useConnectionStore.getState().retryConnection()
+      expect(connectSpy).not.toHaveBeenCalled()
+    })
+  })
+
   it('multiple servers can coexist in registry', () => {
     useConnectionStore.getState().addServer('Dev', 'wss://dev/ws', 'token1')
     useConnectionStore.getState().addServer('Staging', 'wss://staging/ws', 'token2')

@@ -2754,6 +2754,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     get().connect(wsUrl, token);
   },
+
+  /**
+   * Reconnect to the *active* server — registry server when `activeServerId` is
+   * set, else the local same-origin daemon. The manual "Retry" affordance must
+   * target whatever we were connected to; building the URL from
+   * `window.location.host` unconditionally (the old App-level handler) silently
+   * reconnected a dropped remote LAN session to the *local* daemon instead
+   * (#5284). Unlike switchServer/connectLocal this preserves session state — a
+   * retry resumes the same connection rather than switching contexts, so it
+   * reuses connectToServer's no-reset reconnect for the registry case.
+   */
+  retryConnection: () => {
+    const activeServerId = get().activeServerId;
+    if (activeServerId) {
+      // Registry server. connectToServer no-ops on an unknown id (e.g. the
+      // entry was removed mid-session); falling back to local here would
+      // reintroduce the exact wrong-target bug, so we let it no-op.
+      get().connectToServer(activeServerId);
+      return;
+    }
+    // Local same-origin daemon — reconnect in place (no scope/memory reset).
+    const token = getAuthToken();
+    if (!token) return;
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${proto}://${window.location.host}/ws`;
+    get().connect(wsUrl, token);
+  },
 }));
 
 // Type for the store API used by message-handler
