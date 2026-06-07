@@ -990,22 +990,31 @@ export async function startCliServer(config) {
     wireTunnelEvents(tunnel, wsServer)
 
     tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
-      log.info(`Tunnel recovered after ${attempt} attempt(s)`)
+      // #5314 (WP-1.4) — async event listener: waitForTunnel THROWS on a routine
+      // DNS-settle failure, and an unhandled rejection here would hit server-cli's
+      // unhandledRejection handler → process.exit(1), crashing the whole server on
+      // a recoverable tunnel hiccup. Contain it: log and wait for the next
+      // tunnel_recovered retry.
+      try {
+        log.info(`Tunnel recovered after ${attempt} attempt(s)`)
 
-      // Re-verify the new tunnel URL
-      await waitForTunnel(newHttpUrl, {
-        initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
-      })
+        // Re-verify the new tunnel URL
+        await waitForTunnel(newHttpUrl, {
+          initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
+        })
 
-      // Only display new QR code if URL actually changed
-      if (newWsUrl !== currentWsUrl) {
-        currentWsUrl = newWsUrl
-        if (pairingManager) pairingManager.refresh()
-        await displayQr(newWsUrl, newHttpUrl, modeLabel)
-        wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
-      } else {
-        log.info(`Tunnel URL unchanged: ${newWsUrl}`)
-        wsServer.broadcastStatus('Tunnel connection recovered')
+        // Only display new QR code if URL actually changed
+        if (newWsUrl !== currentWsUrl) {
+          currentWsUrl = newWsUrl
+          if (pairingManager) pairingManager.refresh()
+          await displayQr(newWsUrl, newHttpUrl, modeLabel)
+          wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
+        } else {
+          log.info(`Tunnel URL unchanged: ${newWsUrl}`)
+          wsServer.broadcastStatus('Tunnel connection recovered')
+        }
+      } catch (err) {
+        log.error(`tunnel_recovered handler failed (will retry on next recovery): ${err?.message || err}`)
       }
     })
 

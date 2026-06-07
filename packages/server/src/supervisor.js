@@ -118,6 +118,17 @@ export class Supervisor extends EventEmitter {
     })
   }
 
+  /**
+   * #5314 (WP-1.4) — last-resort handler for an uncaught error in the supervisor
+   * process. Logs it; stays alive so the child keeps being supervised (killing
+   * the supervisor would take down the whole service). Exits only if a shutdown
+   * is already underway. Extracted so tests can drive it without real signals.
+   */
+  _onProcessError(kind, err) {
+    this._log.error(`Supervisor ${kind} (staying alive): ${err?.stack || err}`)
+    if (this._shuttingDown) this._exit(1)
+  }
+
   /** Override point: exit the process */
   _exit(code) {
     process.exit(code)
@@ -162,6 +173,14 @@ export class Supervisor extends EventEmitter {
 
     process.on('SIGINT', () => this.shutdown('SIGINT'))
     process.on('SIGTERM', () => this.shutdown('SIGTERM'))
+
+    // #5314 (WP-1.4) — the supervisor had no uncaughtException/unhandledRejection
+    // handler, so a stray fault (e.g. the routine tunnel-DNS-settle rejection from
+    // an async tunnel_recovered handler) silently killed the supervisor and
+    // orphaned the child. Its job is uptime: log loudly and KEEP SUPERVISING.
+    // Only let the process exit if we're already in a deliberate shutdown.
+    process.on('uncaughtException', (err) => this._onProcessError('uncaughtException', err))
+    process.on('unhandledRejection', (err) => this._onProcessError('unhandledRejection', err))
   }
 
   async start() {
@@ -190,6 +209,10 @@ export class Supervisor extends EventEmitter {
     this._modeLabel = tunnelArg ? `cloudflare:${tunnelArg.mode}` : this._tunnelMode
 
     this._tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
+      // #5314 (WP-1.4) — this is an ASYNC event listener; an unhandled rejection
+      // here (waitForTunnel throws on a routine DNS-settle failure) would crash
+      // the supervisor. Contain it: log and let the next tunnel_recovered retry.
+      try {
       this._log.info(`Tunnel recovered after ${attempt} attempt(s)`)
       await this._waitForTunnel(newHttpUrl)
 
@@ -213,14 +236,29 @@ export class Supervisor extends EventEmitter {
           pid: process.pid,
         })
       }
+      } catch (err) {
+        this._log.error(`tunnel_recovered handler failed (will retry on next recovery): ${err?.message || err}`)
+      }
     })
 
     this._tunnel.on('tunnel_failed', ({ message }) => {
       this._log.error(message)
     })
 
-    // 2. Wait for tunnel to be routable
-    await this._waitForTunnel(httpUrl)
+    // 2. Wait for tunnel to be routable.
+    // #5314 (WP-1.4) — waitForTunnel THROWS on failure. The cloudflared child is
+    // already running (this._tunnel.start() above), so a boot failure here must
+    // stop it before exiting, otherwise the orphaned cloudflared process leaks.
+    try {
+      await this._waitForTunnel(httpUrl)
+    } catch (err) {
+      this._log.error(`Tunnel failed to become routable on boot: ${err?.message || err}`)
+      try { await this._tunnel.stop() } catch (stopErr) {
+        this._log.error(`Failed to stop cloudflared after boot failure: ${stopErr?.message || stopErr}`)
+      }
+      this._exit(1)
+      return
+    }
 
     // 3. Display connection info
     const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
