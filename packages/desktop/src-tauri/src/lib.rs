@@ -688,12 +688,9 @@ pub fn run() {
     {
         builder = builder.plugin(single_instance_init(
             |app: &tauri::AppHandle, _args, _cwd| {
-                // Second instance launched: focus the existing main window.
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Second instance launched: bring the existing main window
+                // forward. Shares the one summon path so the two can't drift.
+                window::show_window(app);
             },
         ));
     }
