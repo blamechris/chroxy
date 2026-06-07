@@ -117,6 +117,29 @@ function resolveUserInputId(candidate) {
   return candidate
 }
 
+// #5281 ①.3 — a shared-session input_conflict rejection: the session is busy
+// processing another device's request. Echo the session and the rejected
+// clientMessageId (when well-formed) so the dashboard can remove the stranded
+// optimistic user message + clear its thinking spinner, instead of leaving a
+// ghost send in the transcript behind a calm "another device is driving" notice.
+function buildInputConflictError(sessionId, clientMessageId) {
+  const err = {
+    type: 'session_error',
+    category: 'input_conflict',
+    message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
+    sessionId,
+  }
+  if (
+    typeof clientMessageId === 'string' &&
+    clientMessageId.length > 0 &&
+    clientMessageId.length <= MAX_CLIENT_MESSAGE_ID_LEN &&
+    USER_INPUT_ID_RE.test(clientMessageId)
+  ) {
+    err.clientMessageId = clientMessageId
+  }
+  return err
+}
+
 async function handleInput(ws, client, msg, ctx) {
   const text = msg.data
   let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
@@ -260,11 +283,7 @@ async function handleInput(ws, client, msg, ctx) {
   if (entry.session.isRunning) {
     const primaryClientId = ctx.primaryClients.get(targetSessionId)
     if (primaryClientId && primaryClientId !== client.id) {
-      ctx.send(ws, {
-        type: 'session_error',
-        category: 'input_conflict',
-        message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
-      })
+      ctx.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
       return
     }
   }
@@ -401,11 +420,7 @@ async function handleInput(ws, client, msg, ctx) {
       if (entry.session.isRunning) {
         const primaryClientId = ctx.primaryClients.get(targetSessionId)
         if (primaryClientId && primaryClientId !== client.id) {
-          ctx.send(ws, {
-            type: 'session_error',
-            category: 'input_conflict',
-            message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
-          })
+          ctx.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
           return
         }
       }

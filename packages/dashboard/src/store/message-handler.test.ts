@@ -486,6 +486,77 @@ describe('dashboard message-handler dispatch', () => {
       expect(state.serverErrors).toEqual(['session failed'])
     })
 
+    // #5281 ①.3 — input_conflict is an expected shared-session event, not a
+    // failure. It must NOT raise the red serverError / modal alert the generic
+    // branch uses, and must clean up the optimistic send the server refused.
+    it('routes input_conflict to a calm notice and removes the stranded optimistic send', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [
+              { id: 'user-123', type: 'user_input', content: 'hi', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            streamingMessageId: 'pending',
+          },
+        },
+      }))
+      setStore(store)
+
+      handleMessage(
+        {
+          type: 'session_error',
+          category: 'input_conflict',
+          sessionId: 's1',
+          clientMessageId: 'user-123',
+          message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
+        },
+        ctx() as any,
+      )
+
+      const state = store.getState() as any
+      // Calm info notice, not a red error.
+      expect(state.serverErrors).toEqual([])
+      expect(state._infoNotifications).toHaveLength(1)
+      expect(String(state._infoNotifications[0])).toMatch(/another device is driving/i)
+      // The stranded optimistic user message + thinking spinner are gone.
+      const ss = state.sessionStates.s1
+      expect(ss.messages.find((m: any) => m.id === 'user-123')).toBeUndefined()
+      expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(ss.streamingMessageId).toBeNull()
+    })
+
+    it('input_conflict still clears the spinner when the server omits clientMessageId', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [
+              { id: 'user-9', type: 'user_input', content: 'hi', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            streamingMessageId: 'pending',
+          },
+        },
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', sessionId: 's1', message: 'busy' },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      // Without the echoed id the ghost message can't be removed, but the
+      // spinner must still clear (no perpetual "thinking").
+      expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(ss.streamingMessageId).toBeNull()
+      expect((store.getState() as any).serverErrors).toEqual([])
+    })
+
     // Issue #2904: bound-token error should be rewritten to something
     // actionable that names the session instead of the raw "Not authorized".
     it('rewrites SESSION_TOKEN_MISMATCH with bound session name into an actionable hint', () => {

@@ -2505,6 +2505,30 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           _adapters.alert.alert('Session Restarted', parsed.message);
           get().addServerError(parsed.message);
         }
+      } else if (parsed.category === 'input_conflict') {
+        // #5281 ①.3 — a shared-session collaboration event, NOT a failure:
+        // another device's request is mid-flight on this session, so the
+        // server refused this send. The generic branch below would raise a
+        // modal alert + red serverError, which is the wrong register for an
+        // expected "someone else is driving" outcome. Instead: drop the
+        // stranded optimistic user message (its send was rejected) + its
+        // thinking spinner, and surface a calm, transient notice.
+        const conflictSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
+        const rejectedId = typeof msg.clientMessageId === 'string' && msg.clientMessageId.length > 0
+          ? msg.clientMessageId
+          : null;
+        if (conflictSessionId && get().sessionStates[conflictSessionId]) {
+          updateSession(conflictSessionId, (ss) => ({
+            // filterThinking drops the spinner immediately (no 5s safety-net
+            // wait); the id filter removes the ghost send when the server
+            // echoed which message it rejected.
+            messages: filterThinking(ss.messages).filter((m) => (rejectedId ? m.id !== rejectedId : true)),
+            streamingMessageId: ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
+          }));
+        }
+        get().addInfoNotification(
+          'Another device is driving this session right now — your message wasn’t sent. Wait for it to finish, or interrupt the current run.',
+        );
       } else if (parsed.message) {
         _adapters.alert.alert('Session Error', parsed.message);
         get().addServerError(parsed.message);
