@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.44] - 2026-06-07
 
-Big-feature consolidation plus a fleet-management push: the docker-byok / Task-subagent arc lands its final round of follow-ups, two cloud backends arrive (config-driven K8s/Rancher with per-tenant namespace isolation + resource quotas), the dashboard becomes a multi-host LAN client (epic #5281) able to join shared sessions on remote daemons, Control Room graduates to v2 with a navigable host/repo status section + self-hosted-runner page, a `cancel_activity` request/response chain lets the operator stop in-flight agents/subagents from the Control Room tree, and credentials.json is now encrypted at rest behind an OS-keychain data key with a rotation path. Rounded out by worktree-gc safety hardening, background-shell reap fixes, and the dashboard Provider Credentials pane.
+Big-feature consolidation plus a fleet-management push: the docker-byok / Task-subagent arc lands its final round of follow-ups, two cloud backends arrive (config-driven K8s/Rancher with per-tenant namespace isolation + resource quotas), the dashboard becomes a multi-host LAN client (epic #5281) able to join shared sessions on remote daemons, Control Room graduates to v2 with a navigable host/repo status section + self-hosted-runner page, a `cancel_activity` request/response chain lets the operator stop in-flight agents/subagents from the Control Room tree, and credentials.json is now encrypted at rest behind an OS-keychain data key (with a rotation path) on keychain-capable hosts — falling back to the prior 0600 plaintext store where no keychain is available. Rounded out by worktree-gc safety hardening, background-shell reap fixes, and the dashboard Provider Credentials pane.
 
 ### Added
 
@@ -22,7 +22,7 @@ Big-feature consolidation plus a fleet-management push: the docker-byok / Task-s
   - **Summon hotkey + "Show Chroxy" tray item (#5293)** — bring the desktop window forward quickly.
   - **mDNS LAN discovery in the ServerPicker (#5296):** discover chroxy daemons on the LAN instead of typing a URL; integration coverage for `--host` bind + mDNS suppression (#5290).
   - **Pair-by-pairing-URL (#5297):** desktops can't scan a QR, so the parity auth path is pasting the `chroxy://…?pair=<id>` URL a daemon shows.
-- **`cancel_activity` request/response chain (#5269–#5286):** stop in-flight agents, subagents, shells, and tools from the Control Room activity tree.
+- **`cancel_activity` request/response chain (#5269–#5286):** stop in-flight agents and subagents from the Control Room activity tree. (Background shells and individual tool calls have no per-node cancel surface; the UI marks them as not-cancellable.)
   - Capture SDK `task_id` + `cancelActivity()` for subagents (#5269 → #5273); `activity-registry` + `base-session` plumbing.
   - `cancel_activity` client→server protocol message (#5270 → #5275); server WS handler + auth gating (#5271 → #5276).
   - Cancel affordances on the Control Room activity tree (#5272 → #5278).
