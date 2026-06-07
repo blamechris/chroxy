@@ -7,28 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.9.44] - 2026-06-07
 
-- **Sidebar token-usage view: cache-hit ratio + per-session breakdown (#4303):** the bottom sidebar panel's token view now surfaces a cache-hit ratio in the aggregate strip (`cacheRead / (input + cacheRead + cacheCreation)` — the visible signal of prompt-caching effectiveness, hidden when there's no input surface) and a per-session breakdown sorted by total tokens. Per-session rows are click-to-activate (parity with the sidebar tree) and float the active session to the top with `aria-current`. claude-tui sessions remain excluded from the per-session list since they expose no token counts. Pure helper `cacheHitRatio(usage)` is unit-tested independently of React.
-
-## [0.9.44] - 2026-06-05
-
-Control Room v2: a navigable host/repo status section plus a round of top-bar polish.
+Big-feature consolidation plus a fleet-management push: the docker-byok / Task-subagent arc lands its final round of follow-ups, two cloud backends arrive (config-driven K8s/Rancher with per-tenant namespace isolation + resource quotas), the dashboard becomes a multi-host LAN client (epic #5281) able to join shared sessions on remote daemons, Control Room graduates to v2 with a navigable host/repo status section + self-hosted-runner page, a `cancel_activity` request/response chain lets the operator stop in-flight agents/subagents from the Control Room tree, and credentials.json is now encrypted at rest behind an OS-keychain data key with a rotation path. Rounded out by worktree-gc safety hardening, background-shell reap fixes, and the dashboard Provider Credentials pane.
 
 ### Added
 
-- **Control Room section (epic #5159 / #5170):** a new main-content view that surveys every managed repo (config `repos` ∪ auto-discovered git repos under a configurable root, default `~/Projects`) and renders a host/fleet status table — triage verdict (live / investigate / likely-abandoned / recent / onboarded), tree state, worktree count, open PRs, attribution, last-touched, and live-agent detection (a chroxy session bound to the repo, or a dirty-tree + recently-touched heuristic). Launched from a button in the sidebar bottom-panel slot header (#5200); the wide table opens in the main content area. On-demand Refresh snapshot over a new `host_status_request` / `host_status_snapshot` WS contract (#5171–#5175). Per-session activity (running agents/shells/tools) folds in as a per-repo drill-down (#5176), replacing the v1 sidebar panel.
-- **Configurable header cost badge (#5184):** the badge display is chosen in Settings — provider/model (default), cost, tokens, % context used, or session-type — persisted locally.
-- **Running indicator on the projects/explorer header (#5183).**
+- **LAN-client epic — desktop/dashboard as a multi-host client (#5281):** the dashboard can now connect to and join sessions on a remote chroxy daemon over the LAN, not just the local one.
+  - **`--host` bind-address override (#5279):** new `bind-host.js` + config/CLI plumbing lets the daemon bind a chosen interface (e.g. a LAN IP) while preserving the loopback auth posture — auth is required for any non-loopback bind.
+  - **CSP unlock for remote daemon connect (#5282):** `http-routes.js` widens the dashboard Content-Security-Policy so a dashboard served by one daemon can open a WS to a remote LAN daemon; covered by `csp-hardening.test.js`.
+  - **"This machine" local entry pinned in the ServerPicker (#5283):** a stable local server row plus a server-registry store so the picker lists known daemons.
+  - **Shared-session presence indicator in the sidebar footer (#5291)** — shows who else is attached to a shared session.
+  - **`input_conflict` UX (#5292):** legible feedback when two clients contend for input on a shared session.
+  - **Summon hotkey + "Show Chroxy" tray item (#5293)** — bring the desktop window forward quickly.
+  - **mDNS LAN discovery in the ServerPicker (#5296):** discover chroxy daemons on the LAN instead of typing a URL; integration coverage for `--host` bind + mDNS suppression (#5290).
+  - **Pair-by-pairing-URL (#5297):** desktops can't scan a QR, so the parity auth path is pasting the `chroxy://…?pair=<id>` URL a daemon shows.
+- **`cancel_activity` request/response chain (#5269–#5286):** stop in-flight agents, subagents, shells, and tools from the Control Room activity tree.
+  - Capture SDK `task_id` + `cancelActivity()` for subagents (#5269 → #5273); `activity-registry` + `base-session` plumbing.
+  - `cancel_activity` client→server protocol message (#5270 → #5275); server WS handler + auth gating (#5271 → #5276).
+  - Cancel affordances on the Control Room activity tree (#5272 → #5278).
+  - `cancelActivity` parity for `ClaudeByokSession` subagents (#5285).
+  - Request/response correlation + positive ack (#5286): a cancel now round-trips a correlated acknowledgement to the dashboard rather than firing blind.
+- **Control Room section — v2 (epic #5159 / #5170):** a new main-content view that surveys every managed repo (config `repos` ∪ auto-discovered git repos under a configurable root, default `~/Projects`) and renders a host/fleet status table — triage verdict (live / investigate / likely-abandoned / recent / onboarded), tree state, worktree count, open PRs, attribution, last-touched, and live-agent detection (a chroxy session bound to the repo, or a dirty-tree + recently-touched heuristic). On-demand Refresh snapshot over a new `host_status_request` / `host_status_snapshot` WS contract (#5171–#5175). Per-session activity (running agents/shells/tools) folds in as a per-repo drill-down (#5176), replacing the v1 sidebar panel. Subsequent follow-ups landed:
+  - Live read-only activity tree panel + platform-agnostic activity reducer + per-session activity registry (#5161–#5169).
+  - Control Room promoted to a session-independent top-level tab (#5204 → #5209), then refined (#5208 / #5198 / #5215).
+  - Clickable Investigate verdict launches a pre-seeded session (#5202 → #5213); single `openCreateSession` opener (#5217 → #5222); Investigate-seed no-leak lock-in (#5218 → #5238).
+  - Sort + filter the repo table (#5216 → #5225), persisted across reloads (#5226 → #5232).
+  - Branch ahead/behind upstream (#5216 → #5233); per-repo PR CI + review-state rollup (#5216 → #5235); safe per-repo row actions — View PRs + Copy path (#5216 → #5236).
+- **Self-hosted runner status dashboard page (#5253 → #5254):** `runner_status_request` / `runner_status_snapshot` protocol contract + survey core + a Control Room page surfacing self-hosted CI runner status.
+- **Config-driven K8s / Rancher environment backend (#5144 epic):** K8s git-clone workspace strategy (#5139), per-user/project namespace isolation (#5140), CPU/mem resource quotas (#5141), namespace-level ResourceQuota / LimitRange ensure (#5150), a Rancher API adapter on top of the K8s backend (#5143), and config-driven backend selection between k8s/rancher (#5148).
+- **`claude-channel` provider scaffold (#3951 spike):** spike findings (#5145), a standalone `chroxy-channel` MCP server prototype (#5146), provider registration scaffold (#5147), and provider + plugin-packaging plan docs (#5164).
+- **Provider Credentials pane (#5153):** manage BYOK API keys + OAuth tokens directly from the dashboard.
+- **React Native MultiQuestionForm for multi-question AskUserQuestion (#5156):** mobile parity for the multi-question approval form.
+- **Audible intervention ping + all-device alert consistency (#4891 → #5157):** intervention alerts now ring audibly and stay consistent across devices.
+- **Render Task subagent `agent_event` nested sub-bubbles on mobile (#5060 → #5135)** — mobile parity for the dashboard nested-child rendering from #5059.
+- **Render child `permission_request` as a nested sub-bubble (#5137); relay Task subagent `permission_request` to the dashboard (#5056 → #5120)** — child agents that need MCP approval now surface in the parent's nested bubble.
+- **docker-byok pool observability panel (#5128):** stats endpoint + dashboard panel (count, hit rate, recent evictions); `pool.inspect()` per-key bucket snapshots (#5052 → #5117).
+- **docker-byok devcontainer/compose breadth (#5070 tail):** multi-file `dockerComposeFile` overlay merge (#5134); devcontainer `build` / `dockerFile` / `dockerComposeFile` support (#5123); stream `postCreateCommand` output to the session log (#5125); reconcile orphaned snapshots (#5075 → #5119); persist compose project ids for crash cleanup (#5081 → #5118); canonicalize (sort-keys) the devcontainer fingerprint input (#5103 → #5116).
+- **Sidebar token-usage view: cache-hit ratio + per-session breakdown (#4303 → #5138):** the bottom sidebar panel's token view now surfaces a cache-hit ratio in the aggregate strip (`cacheRead / (input + cacheRead + cacheCreation)`, hidden when there's no input surface) and a per-session breakdown sorted by total tokens. Per-session rows are click-to-activate (parity with the sidebar tree) and float the active session to the top with `aria-current`. claude-tui sessions stay excluded since they expose no token counts. Pure helper `cacheHitRatio(usage)` is unit-tested independently of React.
+- **`chroxy worktree gc` CLI (#5158 → #5220):** reclaim orphaned, dead-pid-locked agent worktrees (e.g. `.claude/worktrees/agent-XXX` locked by a since-exited `claude agent`), with config-discovered repo-set coverage (#5221 → #5223). Opt-in startup auto-reaper added on top (#5158 → #5224).
+- **Configurable header cost badge (#5184 → #5188):** badge display chosen in Settings — provider/model (default), cost, tokens, % context used, or session-type — persisted locally.
+- **Running indicator on the projects/explorer header (#5183 → #5192).**
+- **Tab close UX (#5205 / #5206 → #5212):** hover/focus × on session tabs + a close-confirm dialog gated by a Settings toggle.
+- **Credentials encrypted at rest (#5154 → #5227):** `credentials.json` (BYOK provider API keys + the Claude Code OAuth token) is now encrypted with a random 32-byte data key held in the OS keychain — not beside the file — so a stolen disk image / backup / errant `cat` no longer exposes plaintext. On no-keychain platforms (Windows / headless Linux) it falls back to the prior 0600 plaintext store, a deliberate, documented decision (#5228 / #5230 → #5234 / #5268).
+- **`chroxy credentials rekey` (#5229 → #5239):** rotate the at-rest data key — `rotateMasterKey()` mints a fresh 32-byte key and replaces the keychain entry, with `setMasterKey()` for rollback.
 
 ### Changed
 
-- **Top status dot now reflects Connected (tunnel), not Running (#5182).**
-- **Top-bar layout pass (#5179–#5181 + #5197 + #5200):** the header is now two stacked rows — the model/permission selectors on top, the cost/token cluster on its own row below — so the main bar is never crowded and the permission selector is no longer pushed past overflow; the token usage bar sits under the token count; the model dropdown is responsive and the cost badge truncates so the token count never clips. The Control Room moved off the top tab bar to a sidebar launcher (#5200), freeing the tab row.
+- **Top status dot now reflects Connected (tunnel), not Running (#5182 → #5193).**
+- **Top-bar layout pass (#5179–#5181 / #5193 / #5197 / #5200):** the header is now two stacked rows — model/permission selectors on top, the cost/token cluster on its own row below — so the bar is never crowded and the permission selector is no longer pushed past overflow; the token usage bar sits under the token count; the model dropdown is responsive and the cost badge truncates so the token count never clips.
+- **Unify token formatters into store-core (#5058 / #5094 → #5122):** dashboard token-count helpers consolidated into a single `@chroxy/store-core` source of truth.
+- **Extract `sharedStreamDelta` to dedupe the app/dashboard `stream_delta` handlers (#4981 → #5129).**
+- **CLI-mode result fallback surfaces error-subtype text as a response bubble (#5088 → #5109);** pinned by tests for `stream_delta` content composition (#5090 → #5107) and CLI-mode usage emission on streamed turns (#5095 → #5108).
+- **Make permission `requestId`s globally unique (#5133):** prevents cross-session collisions in permission correlation.
+- **`bump-version.sh` scaffolds the new CHANGELOG section below `[Unreleased]` (#5207 → #5219).**
 
 ### Fixed
 
-- **Background-work banner no longer sticks forever (#5177 / #5178):** completed background shells are reaped (output-file quiesce sweep) so the "Waiting on background work" indicator clears instead of hanging after the command exits.
+- **Retry reconnects to the active server, not always local (#5289):** in multi-host mode the reconnect path now targets whichever daemon the dashboard is currently attached to instead of always falling back to localhost.
+- **Background-work banner no longer sticks forever (#5177 / #5178):** completed background shells are reaped (output-file quiesce sweep) so the "Waiting on background work" indicator clears instead of hanging after the command exits (#5187 / #5190).
+- **Background-shell mtime sweep is advisory, not a liveness reap (#5247 → #5263):** the no-poll sweep no longer flips `isRunning` false on a 60s-quiesced shell — a `tail -f` / dev server / file watcher that logs then waits could be misread as finished and idle-timed out.
+- **Hard-quiesce reap for long-dead background shells (#5265 → #5287):** a background command that genuinely finished but is never polled via `BashOutput` no longer pins `isRunning` true forever, so a long-idle session can finally idle-time out.
+- **Worktree gc must not delete worktrees holding gitignored content (#5244 → #5249):** `isClean()` now runs `git status --porcelain --ignored` so a worktree whose only untracked content is gitignored (node_modules, build/) isn't treated as clean-and-reclaimable.
+- **Re-lock a worktree when its removal fails mid-reclaim (#5245 → #5252):** if `git worktree remove` fails after the dead-pid lock was dropped, the lock is restored so the entry isn't left unlocked and exposed.
+- **Verify worktree prune actually reclaimed each entry (#5246 → #5256):** `applyPlan` now checks each entry instead of reporting all items ok whenever a single global `git worktree prune` succeeds — a transient stat failure no longer misclassifies a present worktree as gone.
+- **Build the Control Room activity tree iteratively (#5248 → #5250):** `selectActivityTree` no longer recurses per parent→child level, so a wire-controlled deep `parentId` chain can't blow the stack.
+- **Harden the activity reducer against prototype-pollution wire keys (#5168);** guard the `stream_delta` handler against malformed payloads (#5131).
+- **Control Room survey probes robust to large output + many PRs (#5240 / #5241 → #5251):** `gh pr list` runs with an explicit `--limit` so gh's default 30-cap no longer silently truncates PR counts / CI rollups.
+- **Bound Control Room survey probes with a timeout + make runner gh enrichment configurable (#5259 / #5260 → #5262):** a 20s timeout (+ maxBuffer) on the git/gh/launchctl/systemctl shell-outs so a wedged probe can't hang the survey and pin the per-client in-flight guard.
+- **Control Room from-review follow-ups (#5210 / #5211 / #5214 → #5215);** tab visibility, header cluster overflow, model dropdown width (#5198).
+- **Credential store must not unlink the live file before rename (#5243 → #5255):** the win32 write path no longer deletes `credentials.json` before moving the replacement in, closing a crash-window that could leave no credentials file at all.
+- **Credential atomic-replace retries a Windows held-handle lock (#5258 → #5261):** `replaceFileAtomically` retries the rename on EPERM/EACCES/EBUSY/EEXIST (AV / Windows Search holding the target handle), with credentials-safe warn logging on the retry/refuse/restore branches (#5264 → #5266).
+- **Warn when an encrypted credential resolves null on keychain-unavailable (#5242 → #5257):** `getStoredCredential` no longer silently returns null (and launches a provider unauthenticated) when the keychain data key is momentarily unavailable for a valid encrypted file.
+- **Gate provider-credential writes behind the primary token (#5155 → #5267):** pairing-bound (share-a-session) tokens can no longer *overwrite* the operator's provider credentials, closing a billing-redirection / integrity / DoS vector distinct from merely using resolved credentials.
+- **SIGKILL escalation + bounded buffer in streaming `execInEnvironment` (#5132).**
+- **Ratchet token usage for subscription CLI sessions (#5115 → #5136).**
+- **Preserve space between final Web Speech segments (#4765).**
+- **Untrack accidentally-committed node_modules symlinks (#5231).**
+- **Cache fallback `DockerBackend` for snapshot DELETE (#5101 → #5110);** warn when a snapshot image survives a failed `docker rmi` (#5102 → #5111).
+- **Defense-in-depth: drop soiled containers in pool acquire (#5049 → #5106).**
+- **Commit the autogenerated `reset_speech_permissions` Tauri capability (#5112).**
 
 ## [0.9.43] - 2026-06-03
 
