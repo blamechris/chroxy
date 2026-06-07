@@ -76,6 +76,8 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
   // branch of session_error wires through this setter; we assert on the
   // shape of the call).
   const sessionNotFoundCalls: unknown[] = []
+  const updateServerCalls: Array<{ serverId: string; patch: unknown }> = []
+  const removeServerCalls: string[] = []
   return {
     connectionPhase: 'connected',
     socket: null,
@@ -114,11 +116,19 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
       grantCalls.push({ skillName, author })
     },
     appendTerminalData: (d: string) => { terminalWrites.push(d) },
+    // #5281 ③ PR 2 — server registry surface for the pairing auth_ok/pair_fail
+    // paths. Captured so tests can assert token persistence + dead-entry cleanup.
+    activeServerId: null,
+    serverRegistry: [],
+    updateServer: (serverId: string, patch: unknown) => { updateServerCalls.push({ serverId, patch }) },
+    removeServer: (serverId: string) => { removeServerCalls.push(serverId) },
     _terminalWrites: terminalWrites,
     _serverErrorActions: serverErrorActions,
     _infoNotifications: infoNotifications,
     _grantCalls: grantCalls,
     _sessionNotFoundCalls: sessionNotFoundCalls,
+    _updateServerCalls: updateServerCalls,
+    _removeServerCalls: removeServerCalls,
     serverProtocolVersion: null,
     ...overrides,
   } as unknown as Partial<ConnectionState>
@@ -174,6 +184,65 @@ describe('dashboard message-handler dispatch', () => {
       )
       expect(store.getState().connectionPhase).toBe('connected')
       expect(store.getState().serverVersion).toBe('0.6.0')
+    })
+
+    it('#5281 ③ PR 2 — adopts a paired sessionToken and persists it on the active server', () => {
+      store = createMockStore(baseState({ activeServerId: 'srv_paired' }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'auth_ok',
+          serverMode: 'cli',
+          serverVersion: '0.6.0',
+          protocolVersion: 3,
+          clientId: 'c1',
+          connectedClients: [],
+          sessionToken: 'sess-tok-xyz',
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      // Effective token = the issued session token (ctx.token was 'tok').
+      expect(state.apiToken).toBe('sess-tok-xyz')
+      expect(state.savedConnection.token).toBe('sess-tok-xyz')
+      // …and written back to the registry entry for reconnects.
+      expect(state._updateServerCalls).toEqual([{ serverId: 'srv_paired', patch: { token: 'sess-tok-xyz' } }])
+    })
+
+    it('does not touch the registry on a normal token auth (no sessionToken)', () => {
+      store = createMockStore(baseState({ activeServerId: 'srv_x' }))
+      setStore(store)
+      handleMessage(
+        { type: 'auth_ok', serverMode: 'cli', serverVersion: '0.6.0', protocolVersion: 3, clientId: 'c1', connectedClients: [] },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state._updateServerCalls).toEqual([])
+      expect(state.apiToken).toBe('tok') // ctx.token unchanged
+    })
+  })
+
+  describe('pair_fail dispatch (#5281 ③ PR 2)', () => {
+    it('removes the optimistic tokenless entry and alerts', () => {
+      store = createMockStore(baseState({
+        activeServerId: 'srv_paired',
+        serverRegistry: [{ id: 'srv_paired', name: 'P', wsUrl: 'ws://x/ws', token: '', lastConnectedAt: null }],
+      }))
+      setStore(store)
+      handleMessage({ type: 'pair_fail', reason: 'expired' }, ctx() as any)
+      const state = store.getState() as any
+      expect(state.connectionPhase).toBe('disconnected')
+      expect(state._removeServerCalls).toEqual(['srv_paired'])
+    })
+
+    it('keeps an entry that already has a token (not an optimistic pairing entry)', () => {
+      store = createMockStore(baseState({
+        activeServerId: 'srv_real',
+        serverRegistry: [{ id: 'srv_real', name: 'R', wsUrl: 'ws://x/ws', token: 'keep', lastConnectedAt: null }],
+      }))
+      setStore(store)
+      handleMessage({ type: 'pair_fail', reason: 'rate_limited' }, ctx() as any)
+      expect((store.getState() as any)._removeServerCalls).toEqual([])
     })
   })
 

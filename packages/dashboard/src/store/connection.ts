@@ -291,6 +291,12 @@ export const selectShowSession = (s: ConnectionState): boolean =>
 let searchNonce = 0;
 let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
+// #5281 ③ PR 2 — one-shot pairing id for the next socket open. When set, the
+// auth handshake sends `{type:'pair', pairingId}` instead of `{type:'auth',
+// token}`; it's cleared right after that first send so a later reconnect uses
+// the issued session token (captured from auth_ok), not the spent pairing id.
+let pendingPairingId: string | null = null;
+
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
 let _cachedDeviceId: string | null = null;
@@ -1012,9 +1018,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
   // aggressively after transient drops (tunnel blips, server restarts, etc.).
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => {
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string }) => {
     const _retryCount = options?._retryCount ?? 0;
     const silent = options?.silent ?? false;
+    // #5281 ③ PR 2 — resolve the pairing id for THIS connect into the closure,
+    // consuming the one-shot module global at the top of a fresh connect (NOT on
+    // socket open). Consuming here means a pairing connect that never opens
+    // (host down) or is superseded by another connect can't leak its armed id
+    // into the next, unrelated connect's auth. Retries thread it forward via
+    // `_pairingId` so a flaky-but-reachable daemon still pairs.
+    const pairingId = _retryCount === 0
+      ? (() => { const id = pendingPairingId; pendingPairingId = null; return id; })()
+      : (options?._pairingId ?? null);
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
 
@@ -1081,7 +1096,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               const delay = withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]!);
               setTimeout(() => {
                 if (myAttemptId !== connectionAttemptId) return;
-                get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
+                get().connect(url, token, { silent, _retryCount: _retryCount + 1, ...(pairingId ? { _pairingId: pairingId } : {}) });
               }, delay);
             } else {
               set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
@@ -1110,7 +1125,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           console.log(`[ws] Retrying in ${delay}ms...`);
           setTimeout(() => {
             if (myAttemptId !== connectionAttemptId) return;
-            get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
+            get().connect(url, token, { silent, _retryCount: _retryCount + 1, ...(pairingId ? { _pairingId: pairingId } : {}) });
           }, delay);
         } else {
           set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
@@ -1164,7 +1179,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
       setTimeout(() => {
         if (myAttemptId !== connectionAttemptId) return;
-        get().connect(url, token);
+        // #5281 ③ PR 2 — reconnect with the latest stored token for the active
+        // registry server. A paired connection started with an empty token;
+        // auth_ok wrote the issued session token back to the registry, so the
+        // reconnect must use that, not the stale captured (empty) token.
+        const sid = get().activeServerId;
+        const reconnectToken = sid
+          ? (get().serverRegistry.find((s) => s.id === sid)?.token ?? token)
+          : token;
+        get().connect(url, reconnectToken);
       }, delayMs);
     };
 
@@ -1173,13 +1196,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const info = getDeviceInfo();
       const deviceId = getDeviceId();
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
-          type: 'auth',
-          token,
+        const common = {
           protocolVersion: CLIENT_PROTOCOL_VERSION,
           deviceInfo: { deviceId, ...info },
           capabilities: CLIENT_CAPABILITIES.desktop,
-        }));
+        };
+        // #5281 ③ PR 2 — pairing handshake when this connect carries a pairing
+        // id (resolved into the closure at connect-start). Otherwise normal
+        // token auth. A reconnect carries no pairing id, so it auths with the
+        // session token written back to the registry in auth_ok.
+        if (pairingId) {
+          socket.send(JSON.stringify({ type: 'pair', pairingId, ...common }));
+        } else {
+          socket.send(JSON.stringify({ type: 'auth', token, ...common }));
+        }
       }
     };
 
@@ -2783,6 +2813,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${proto}://${window.location.host}/ws`;
     get().connect(wsUrl, token);
+  },
+
+  /**
+   * Add a server from a pairing URL and connect via the ephemeral pairing
+   * handshake — no permanent token typed (#5281 ③ PR 2). The entry starts with
+   * an empty token; the session token issued in `auth_ok` replaces it (handled
+   * in the auth_ok message handler) so reconnects authenticate normally. A
+   * `pair_fail` clears the armed pairing id and surfaces the reason.
+   */
+  pairServer: (name: string, wsUrl: string, pairingId: string): ServerEntry => {
+    const entry = get().addServer(name, wsUrl, '');
+    pendingPairingId = pairingId;
+    get().switchServer(entry.id);
+    return entry;
   },
 }));
 

@@ -211,6 +211,16 @@ describe('store server registry actions', () => {
     })
   })
 
+  it('pairServer adds a tokenless entry and makes it active (#5281 ③ PR 2)', () => {
+    mockToken = null
+    const entry = useConnectionStore.getState().pairServer('Studio', 'ws://192.168.1.5:8765/ws', 'PAIR123')
+    // Entry persisted with an empty token (the session token arrives via auth_ok).
+    expect(entry.token).toBe('')
+    expect(useConnectionStore.getState().serverRegistry.some(s => s.id === entry.id)).toBe(true)
+    // switchServer made it the active server (connect() does async work).
+    expect(useConnectionStore.getState().activeServerId).toBe(entry.id)
+  })
+
   it('multiple servers can coexist in registry', () => {
     useConnectionStore.getState().addServer('Dev', 'wss://dev/ws', 'token1')
     useConnectionStore.getState().addServer('Staging', 'wss://staging/ws', 'token2')

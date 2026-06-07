@@ -744,7 +744,7 @@ export interface ConnectionState {
   _terminalWriteCallback: ((data: string) => void) | null;
 
   // Actions
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string }) => void;
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
@@ -1141,6 +1141,10 @@ export interface ConnectionState {
   connectToServer: (serverId: string) => void;
   /** Connect to the local same-origin daemon ("this machine"); registry-less local target. */
   connectLocal: () => void;
+  /** Add a server from a pairing URL and connect via the ephemeral pairing
+      handshake (no permanent token); the issued session token replaces the
+      entry's empty token. (#5281 ③ PR 2) */
+  pairServer: (name: string, wsUrl: string, pairingId: string) => ServerEntry;
   /**
    * Reconnect to whatever server is currently active — the registry server when
    * `activeServerId` is set, otherwise the local same-origin daemon. Preserves
