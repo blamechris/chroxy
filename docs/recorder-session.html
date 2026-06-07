@@ -57,11 +57,14 @@
   <p class="lead">A run-it-yourself guide to capture the two empirical keystroke recordings that close
   <a href="https://github.com/blamechris/chroxy/issues/4882">#4882</a> (all-single-select multi-question form)
   and <a href="https://github.com/blamechris/chroxy/issues/4880">#4880</a> (≥10-option arrow-nav).
-  You drive a live <code>claude</code> TUI; the recorder writes a JSONL to <code>/tmp/</code> that Claude reads back
-  directly — you don't copy anything, just say <b>"run 1 done"</b> / <b>"run 2 done"</b> in chat.</p>
+  You drive a live <code>claude</code> TUI; the recorder writes a JSONL to your temp dir
+  (<code>$TMPDIR</code> on macOS, <code>/tmp</code> on Linux). This guide assumes you're running it alongside a
+  chat session with an assistant (e.g. Claude Code) that can read that file from disk when you say
+  <b>"run 1 done"</b> / <b>"run 2 done"</b> — that's a convenience of that workflow, not an automated
+  feature of this repo. Working solo, just open the JSONL yourself (the recorder prints its path on exit).</p>
   <div class="meta">
     <span>Recorder: scripts/tui-form-recorder.mjs</span>
-    <span>Output: /tmp/tui-form-recording-&lt;ts&gt;.jsonl</span>
+    <span>Output: $TMPDIR/tui-form-recording-&lt;ts&gt;.jsonl</span>
     <span>Exit each run: Ctrl+D</span>
   </div>
 
@@ -90,8 +93,8 @@
   <div class="card">
     <b>Open a real Terminal tab</b> (Terminal.app / iTerm) — <em>not</em> inside this chat. The recorder needs raw keyboard
     access to capture arrow keys and Tab.
-    <pre>cd /Users/blamechris/Projects/chroxy</pre>
-    <p class="lead" style="margin-top:10px">The recorder spawns <code>~/.local/bin/claude</code> in a PTY and logs every keystroke (<code>in</code>)
+    <pre>cd /path/to/chroxy   # your chroxy checkout</pre>
+    <p class="lead" style="margin-top:10px">The recorder spawns <code>claude</code> (from <code>$CLAUDE_BIN</code>, else <code>~/.local/bin/claude</code>) in a PTY and logs every keystroke (<code>in</code>)
     and every screen byte (<code>out</code>). You'll run it twice — once per issue. Each run makes a fresh JSONL.</p>
     <table id="tbl0"></table>
   </div>
@@ -112,8 +115,8 @@ Ask both in one form, don't assume answers.</pre>
     <table id="tbl1"></table>
   </div>
   <div class="note good">
-    <b>After Ctrl+D</b> the recorder prints <code>Recording: /tmp/tui-form-recording-&lt;ts&gt;.jsonl</code>.
-    You don't need the path — just tell Claude <b>"run 1 done"</b> and it reads the newest file in <code>/tmp</code>.
+    <b>After Ctrl+D</b> the recorder prints <code>Recording: &lt;tmpdir&gt;/tui-form-recording-&lt;ts&gt;.jsonl</code>.
+    If an assistant is reading along, just say <b>"run 1 done"</b> and it opens the newest recording; solo, open that path yourself.
   </div>
 
   <!-- ============ RUN 2 ============ -->
@@ -142,7 +145,7 @@ Don't shorten the list.</pre>
   <div class="card">
     <p class="lead" style="margin-top:0">Once you've said "run 1 done" (and "run 2 done"), Claude will, with <b>no further input from you</b>:</p>
     <ul style="color:var(--dim); font-size:14px; line-height:1.7">
-      <li>Read both <code>/tmp/tui-form-recording-*.jsonl</code> files and extract the <code>in</code> byte sequences.</li>
+      <li>Read both <code>$TMPDIR/tui-form-recording-*.jsonl</code> files and extract the <code>in</code> byte sequences.</li>
       <li>Reconcile <code>packages/server/src/claude-tui-session.js</code> — lock or tune the 150ms settle + trailing <code>\r</code> (#4882),
           and confirm or replace <code>_writePtyArrowNavSequence</code>'s <code>\x1b[B</code> bytes (#4880).</li>
       <li>Update the empirical tests in <code>packages/server/tests/claude-tui-session.test.js</code>.</li>
@@ -161,17 +164,17 @@ Don't shorten the list.</pre>
 <script>
 // ---- data: [id, what, steps, run] ----
 const S0 = [
-  ["s1","Recorder + claude present","<code>ls scripts/tui-form-recorder.mjs</code> exists and <code>~/.local/bin/claude</code> launches a TUI."],
+  ["s1","Recorder + claude present","<code>ls scripts/tui-form-recorder.mjs</code> exists and <code>claude</code> ($CLAUDE_BIN / ~/.local/bin/claude) launches a TUI."],
   ["s2","In a real Terminal tab","Not inside this chat — raw keyboard mode is needed to capture arrow keys / Tab."],
 ];
 const R1 = [
-  ["r1a","Launch recorder","<code>node scripts/tui-form-recorder.mjs</code> — banner prints the /tmp recording path."],
+  ["r1a","Launch recorder","<code>node scripts/tui-form-recorder.mjs</code> — banner prints the recording path."],
   ["r1b","Paste the 2-question prompt","Wait for the claude prompt to render first, then paste the framework + package-manager prompt above."],
   ["r1c","Form renders with 2 questions","Both single-select (radio-style, not checkboxes). If it asks only one, re-prompt: “ask both in one form”."],
   ["r1d","Q1 → pick option 2 (Vue)","Use whatever key works (digit <kbd>2</kbd> or <kbd>↓</kbd> then <kbd>Enter</kbd>). Note which in the box."],
   ["r1e","Q2 → pick option 2 (pnpm)","Option 2 on purpose — distinct from the Submit screen's <code>1</code>."],
   ["r1f","Form submits","claude proceeds / acknowledges the answers."],
-  ["r1g","Ctrl+D to end","Recorder prints <code>Recording: /tmp/…jsonl</code>. Say <b>“run 1 done”</b> in chat."],
+  ["r1g","Ctrl+D to end","Recorder prints <code>Recording: …/…jsonl</code>. Say <b>“run 1 done”</b> in chat."],
 ];
 const R2 = [
   ["r2a","Launch recorder again","<code>node scripts/tui-form-recorder.mjs</code> — fresh recording file."],

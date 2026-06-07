@@ -49,15 +49,19 @@
 
 import { resolve } from 'node:path'
 import { writeFileSync, createWriteStream } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { flushAndExit } from './flush-and-exit.mjs'
 
-// npm workspaces hoists node-pty to the root node_modules/.
-const ptyMod = await import('/Users/blamechris/Projects/chroxy/node_modules/node-pty/lib/index.js')
+// npm workspaces hoists node-pty to the root node_modules/. Resolve it relative
+// to this script (scripts/ → ../node_modules) so the recorder is portable across
+// checkouts rather than pinned to one contributor's absolute path.
+const ptyMod = await import(new URL('../node_modules/node-pty/lib/index.js', import.meta.url).href)
 
 const projectDir = resolve(process.argv[2] || process.cwd())
-const claudeBin = '/Users/blamechris/.local/bin/claude'
+// Resolve the claude binary portably: $CLAUDE_BIN override, else the default
+// per-user install location (~/.local/bin/claude).
+const claudeBin = process.env.CLAUDE_BIN || join(homedir(), '.local', 'bin', 'claude')
 
 const recordingPath = join(tmpdir(), `tui-form-recording-${Date.now()}.jsonl`)
 const recording = createWriteStream(recordingPath, { encoding: 'utf8' })
