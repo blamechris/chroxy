@@ -4690,13 +4690,17 @@ describe('ClaudeTuiSession', () => {
     // digit would change the pinned byte sequence (currently `'2','2','1'`)
     // instead of being invisible inside `'1','1','1'`.
     //
-    // NOTE: this pins the bytes the DRIVER writes per the #4867 fix; the
-    // upstream empirical recorder pass against a live claude TUI is still
-    // outstanding (tracked under #4882) — until that runs, the trailing
-    // `\r` and the 150ms settle remain "best-effort defensive" not
-    // "empirically confirmed". Driver shape pinned here so any reconciliation
-    // PR after the recorder pass updates this test alongside the empirical
-    // findings recorded under #4882.
+    // EMPIRICAL (#4882, resolved 2026-06-07): the recorder pass against a
+    // live claude TUI (v2.1.168) is committed at
+    // docs/empirical/4882-all-single-select-2q.jsonl. A human driving this
+    // exact 2-question all-single-select shape pressed `'2','2','1'` and the
+    // form committed on the Submit `'1'` ALONE — NO trailing `\r`. So the
+    // settle + Submit-`'1'` are confirmed correct, and the DRIVER's extra
+    // `\r` (asserted below) is confirmed unnecessary-but-harmless (retained
+    // as belt-and-braces — see the src comment at the `sequence.push('\r')`
+    // site). This test therefore pins the DRIVER sequence (with `\r`); the
+    // HUMAN-recorded sequence `'2','2','1'` (without `\r`) is the empirical
+    // reference in the committed JSONL.
     it('drives a pure all-single-select 2-question form with settle + trailing Enter (#4882)', async () => {
       const writeEvents = []
       session._term = {
@@ -4718,9 +4722,9 @@ describe('ClaudeTuiSession', () => {
       await new Promise((resolve) => setTimeout(resolve, 300))
 
       const writes = writeEvents.map((e) => e.data)
-      // Byte sequence (pinned by #4867 driver fix; empirical confirmation
-      // outstanding under #4882): paste-disable, Q1 → '2', Q2 → '2',
-      // [settle 150ms], Submit '1', trailing Enter '\r', paste-enable.
+      // Byte sequence (DRIVER; empirically reconciled #4882, see comment
+      // above): paste-disable, Q1 → '2', Q2 → '2', [settle 150ms], Submit
+      // '1', trailing Enter '\r' (confirmed-harmless redundancy), paste-enable.
       // Q2's '2' is intentionally distinct from Submit's '1' so a reorder
       // regression would mutate the pinned sequence (see test comment above).
       assert.deepEqual(

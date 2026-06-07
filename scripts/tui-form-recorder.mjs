@@ -23,30 +23,24 @@
  * Analysis: tail the JSONL file to find the keystroke patterns that
  * advance between questions, toggle multiSelect, and reach Submit.
  *
- * 10+ option questions (#4625 + #4848):
- *   The 2026-05-30 empirical recording only covered questions with ≤9
- *   options (single-digit hotkeys '1'..'9'). #4848 added native drive
- *   for single-select 10+ option picks via arrow-key navigation:
- *   '\x1b[B' (down) × matchIdx + '\r' (Enter) to commit. This is the
- *   conservative bet of the two theoretically-possible paths (the
+ * 10+ option questions (#4625 + #4848 + #4880 — RESOLVED 2026-06-07):
+ *   #4848 added native drive for single-select 10+ option picks via
+ *   arrow-key navigation ('\x1b[B' down × matchIdx + '\r' Enter to commit),
+ *   the conservative bet of two theoretically-possible paths (the
  *   multi-digit hotkey path was ruled out — claude TUI's single-digit
  *   commit-on-keystroke behaviour pinned in #4292 means a '1' would
  *   commit option 1 before the '0' arrived).
  *
- *   **Open assumption (#4848):** the arrow-nav sequence is implemented
- *   under the assumption it works against claude TUI's AskUserQuestion
- *   form, but the empirical recorder pass against a 10+ option form
- *   was NOT run before the PR landed. If the sequence misfires in
- *   dogfood, re-run this recorder against a 12-option AskUserQuestion
- *   form, pick option 11 manually with whichever keystroke works, and
- *   replace `_writePtyArrowNavSequence` in claude-tui-session.js with
- *   the empirically-pinned bytes.
- *
- *   Multi-select 10+ toggles STILL bail with ASK_USER_QUESTION_TOO_MANY_OPTIONS
- *   because the multi-select arrow-nav pattern (arrow + Space toggle +
- *   return-to-anchor) is more complex and was deliberately scoped out
- *   of #4848 — record a multi-select form pick to extend driver
- *   coverage there too.
+ *   **Empirical finding (#4880):** the recorder pass against a 10+ option
+ *   AskUserQuestion ran and proved the form is UNREACHABLE — claude TUI
+ *   v2.1.168 hard-caps each AskUserQuestion question at 4 options. A prompt
+ *   asking for 12 options fails server-side with
+ *   `InputValidationError: too_big, maximum: 4, path: questions[0].options`
+ *   before any form renders (recording: docs/empirical/4880-twelve-option-cap.jsonl).
+ *   So `_writePtyArrowNavSequence` and the multi-select TOO_MANY_OPTIONS bail
+ *   are dead code on this TUI version, kept as forward-compat for a future
+ *   claude that raises the cap. Re-run this recorder if/when that happens;
+ *   only then can the arrow-nav bytes be empirically pinned.
  *
  * Exit:
  *   Ctrl+D — clean exit (closes recording file)

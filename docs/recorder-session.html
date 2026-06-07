@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chroxy — TUI Recorder Session Guide (#4880 / #4882)</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --txt:#e6e9ef; --dim:#9aa3b2;
+    --accent:#6ea8fe; --pass:#3fb950; --fail:#f85149; --skip:#d29922; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .wrap { max-width:1040px; margin:0 auto; padding:28px 22px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:19px; margin:34px 0 6px; padding-top:14px; border-top:1px solid var(--line); }
+  h2 .tag { font:12px var(--mono); color:var(--dim); margin-left:8px; }
+  p.lead { color:var(--dim); margin:2px 0 14px; }
+  code, kbd { font-family:var(--mono); font-size:.9em; background:#222732; padding:1px 5px; border-radius:4px; }
+  kbd { border:1px solid var(--line); box-shadow:0 1px 0 var(--line); }
+  pre { background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:12px 14px; overflow:auto; font-family:var(--mono); font-size:13px; }
+  a { color:var(--accent); }
+  .meta { display:flex; gap:18px; flex-wrap:wrap; color:var(--dim); font:13px var(--mono); margin:6px 0 18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:12px 0; }
+  .note { border-left:3px solid var(--accent); padding:8px 12px; background:#141925; border-radius:0 8px 8px 0; margin:12px 0; color:#cdd6e6; }
+  .warn { border-left-color:var(--skip); background:#1d1a12; }
+  .good { border-left-color:var(--pass); background:#101a12; }
+  table { width:100%; border-collapse:collapse; margin:10px 0; }
+  th, td { text-align:left; padding:8px 9px; border-bottom:1px solid var(--line); vertical-align:top; font-size:14px; }
+  th { color:var(--dim); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  td .what { font-weight:600; }
+  td .steps { color:var(--dim); font-size:13px; }
+  select.res { background:#0b0d11; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:4px 6px; font:13px var(--mono); }
+  select.res[data-v="DONE"] { color:var(--pass); border-color:var(--pass); }
+  select.res[data-v="STUCK"] { color:var(--fail); border-color:var(--fail); }
+  select.res[data-v="SKIP"] { color:var(--skip); border-color:var(--skip); }
+  input.notes { width:100%; background:#0b0d11; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 7px; font-size:13px; }
+  .pill { display:inline-block; font:11px var(--mono); padding:1px 7px; border-radius:20px; border:1px solid var(--line); color:var(--dim); }
+  .pill.r1 { color:var(--accent); border-color:var(--accent); }
+  .pill.r2 { color:var(--skip); border-color:var(--skip); }
+  .bar { position:sticky; top:0; z-index:5; background:rgba(15,17,21,.92); backdrop-filter:blur(6px); border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin:0 0 8px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .bar b { font:13px var(--mono); }
+  .tally span { font:13px var(--mono); margin-right:12px; }
+  button { background:var(--accent); color:#0b0d11; border:0; border-radius:7px; padding:8px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  .out { display:none; }
+  .out.show { display:block; }
+  textarea { width:100%; height:300px; background:#0b0d11; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:12px; font:12px var(--mono); }
+  footer { color:var(--dim); font-size:12px; margin-top:30px; border-top:1px solid var(--line); padding-top:14px; }
+  @media print { .bar, button, .out { display:none !important; } body { background:#fff; color:#000; } .card,.note { border-color:#bbb; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Chroxy — TUI Recorder Session</h1>
+  <p class="lead">A run-it-yourself guide to capture the two empirical keystroke recordings that close
+  <a href="https://github.com/blamechris/chroxy/issues/4882">#4882</a> (all-single-select multi-question form)
+  and <a href="https://github.com/blamechris/chroxy/issues/4880">#4880</a> (≥10-option arrow-nav).
+  You drive a live <code>claude</code> TUI; the recorder writes a JSONL to <code>/tmp/</code> that Claude reads back
+  directly — you don't copy anything, just say <b>"run 1 done"</b> / <b>"run 2 done"</b> in chat.</p>
+  <div class="meta">
+    <span>Recorder: scripts/tui-form-recorder.mjs</span>
+    <span>Output: /tmp/tui-form-recording-&lt;ts&gt;.jsonl</span>
+    <span>Exit each run: Ctrl+D</span>
+  </div>
+
+  <div class="bar">
+    <b>Progress</b>
+    <span class="tally" id="tally"></span>
+    <button onclick="exportMd()">Export → Markdown</button>
+    <button class="ghost" onclick="resetAll()">Reset</button>
+  </div>
+  <div class="out card" id="outBox">
+    <p class="lead">A summary of what you did — paste into the issue or hand to Claude if anything went sideways.</p>
+    <textarea id="outText" readonly></textarea>
+    <p style="margin:8px 0 0"><button class="ghost" onclick="copyOut()">Copy to clipboard</button></p>
+  </div>
+
+  <div class="note">
+    <b>What this is for.</b> Chroxy drives <code>claude</code>'s interactive AskUserQuestion forms by writing
+    keystrokes into a PTY. Two paths were shipped on a <em>best-effort guess</em> and never confirmed against a live TUI:
+    the <b>all-single-select settle + trailing Enter</b> (#4867 → #4882) and the <b>≥10-option Down-arrow navigation</b>
+    (#4848 → #4880). These two recordings capture the bytes a <em>human</em> actually produces, so Claude can lock the
+    driver to them (or, for #4880, prove the path is unreachable).
+  </div>
+
+  <!-- ============ SETUP ============ -->
+  <h2>0 · One-time setup <span class="tag">do this once, in a normal Terminal tab</span></h2>
+  <div class="card">
+    <b>Open a real Terminal tab</b> (Terminal.app / iTerm) — <em>not</em> inside this chat. The recorder needs raw keyboard
+    access to capture arrow keys and Tab.
+    <pre>cd /Users/blamechris/Projects/chroxy</pre>
+    <p class="lead" style="margin-top:10px">The recorder spawns <code>~/.local/bin/claude</code> in a PTY and logs every keystroke (<code>in</code>)
+    and every screen byte (<code>out</code>). You'll run it twice — once per issue. Each run makes a fresh JSONL.</p>
+    <table id="tbl0"></table>
+  </div>
+
+  <!-- ============ RUN 1 ============ -->
+  <h2>1 · Run 1 — #4882 all-single-select <span class="tag pill r1">RUN 1 · this one definitely works</span></h2>
+  <p class="lead">Goal: capture the bytes for a <b>two-question, all single-select</b> form — the smallest shape that wedged
+  before the #4867 fix. We pick <b>option 2 on both</b> so the last answer digit (<code>2</code>) is distinct from the
+  Submit screen's <code>1</code>.</p>
+  <div class="card">
+    <b>Launch it:</b>
+    <pre>node scripts/tui-form-recorder.mjs</pre>
+    <b>When the claude prompt renders, paste:</b>
+    <pre>Use your AskUserQuestion tool to ask me exactly two single-select
+questions before doing anything else: (1) pick a framework — React,
+Vue, or Svelte; (2) pick a package manager — npm, pnpm, or yarn.
+Ask both in one form, don't assume answers.</pre>
+    <table id="tbl1"></table>
+  </div>
+  <div class="note good">
+    <b>After Ctrl+D</b> the recorder prints <code>Recording: /tmp/tui-form-recording-&lt;ts&gt;.jsonl</code>.
+    You don't need the path — just tell Claude <b>"run 1 done"</b> and it reads the newest file in <code>/tmp</code>.
+  </div>
+
+  <!-- ============ RUN 2 ============ -->
+  <h2>2 · Run 2 — #4880 ≥10-option attempt <span class="tag pill r2">RUN 2 · either outcome is useful</span></h2>
+  <p class="lead">Goal: get claude to render a single question with <b>10+ options</b> and pick <b>option 11</b> with the
+  <b>Down-arrow</b> key. Heads-up: the AskUserQuestion tool schema caps at <b>4 options per question</b> — so claude may
+  refuse to list 12. <b>That refusal is itself the finding</b> (it means the arrow-nav path can't be reached via
+  AskUserQuestion). Record whichever happens.</p>
+  <div class="card">
+    <b>Launch it again (new recording):</b>
+    <pre>node scripts/tui-form-recorder.mjs</pre>
+    <b>When the claude prompt renders, paste:</b>
+    <pre>Use your AskUserQuestion tool to ask me ONE single-select question
+with twelve options to choose from (list 12 web frameworks).
+Don't shorten the list.</pre>
+    <table id="tbl2"></table>
+  </div>
+  <div class="note warn">
+    <b>If it caps at ~4 options:</b> just pick any option, submit, Ctrl+D. Tell Claude <b>"run 2 done — capped at N"</b>.
+    Claude will document the path as defensive/dead and close #4880 on that basis — no goose chase.
+    <b>If it shows 10+:</b> arrow <kbd>↓</kbd> down to option 11, <kbd>Enter</kbd>, let it submit, Ctrl+D, say <b>"run 2 done — got 10+"</b>.
+  </div>
+
+  <!-- ============ HANDOFF ============ -->
+  <h2>3 · Handoff <span class="tag">what Claude does next</span></h2>
+  <div class="card">
+    <p class="lead" style="margin-top:0">Once you've said "run 1 done" (and "run 2 done"), Claude will, with <b>no further input from you</b>:</p>
+    <ul style="color:var(--dim); font-size:14px; line-height:1.7">
+      <li>Read both <code>/tmp/tui-form-recording-*.jsonl</code> files and extract the <code>in</code> byte sequences.</li>
+      <li>Reconcile <code>packages/server/src/claude-tui-session.js</code> — lock or tune the 150ms settle + trailing <code>\r</code> (#4882),
+          and confirm or replace <code>_writePtyArrowNavSequence</code>'s <code>\x1b[B</code> bytes (#4880).</li>
+      <li>Update the empirical tests in <code>packages/server/tests/claude-tui-session.test.js</code>.</li>
+      <li>Update the <code>tui_multi_question_form_keys.md</code> memory (resolve the 2026-05-31 caveat).</li>
+      <li>Commit the recording JSONLs under <code>docs/empirical/</code>, open the PR(s), run the full review, and merge when green.</li>
+    </ul>
+  </div>
+
+  <footer>
+    Generated guide for issues <a href="https://github.com/blamechris/chroxy/issues/4880">#4880</a> /
+    <a href="https://github.com/blamechris/chroxy/issues/4882">#4882</a>.
+    Recorder docstring: <code>scripts/tui-form-recorder.mjs</code>. Results live only in this browser (localStorage).
+  </footer>
+</div>
+
+<script>
+// ---- data: [id, what, steps, run] ----
+const S0 = [
+  ["s1","Recorder + claude present","<code>ls scripts/tui-form-recorder.mjs</code> exists and <code>~/.local/bin/claude</code> launches a TUI."],
+  ["s2","In a real Terminal tab","Not inside this chat — raw keyboard mode is needed to capture arrow keys / Tab."],
+];
+const R1 = [
+  ["r1a","Launch recorder","<code>node scripts/tui-form-recorder.mjs</code> — banner prints the /tmp recording path."],
+  ["r1b","Paste the 2-question prompt","Wait for the claude prompt to render first, then paste the framework + package-manager prompt above."],
+  ["r1c","Form renders with 2 questions","Both single-select (radio-style, not checkboxes). If it asks only one, re-prompt: “ask both in one form”."],
+  ["r1d","Q1 → pick option 2 (Vue)","Use whatever key works (digit <kbd>2</kbd> or <kbd>↓</kbd> then <kbd>Enter</kbd>). Note which in the box."],
+  ["r1e","Q2 → pick option 2 (pnpm)","Option 2 on purpose — distinct from the Submit screen's <code>1</code>."],
+  ["r1f","Form submits","claude proceeds / acknowledges the answers."],
+  ["r1g","Ctrl+D to end","Recorder prints <code>Recording: /tmp/…jsonl</code>. Say <b>“run 1 done”</b> in chat."],
+];
+const R2 = [
+  ["r2a","Launch recorder again","<code>node scripts/tui-form-recorder.mjs</code> — fresh recording file."],
+  ["r2b","Paste the 12-option prompt","The “list 12 web frameworks” prompt above."],
+  ["r2c","Count the rendered options","Write the actual number in the box — this is the key datum. 10+ = jackpot; ~4 = the cap finding."],
+  ["r2d","Pick the option","If 10+: arrow <kbd>↓</kbd> to option 11, <kbd>Enter</kbd>. If capped: pick any, submit."],
+  ["r2e","Ctrl+D to end","Say <b>“run 2 done — got 10+”</b> or <b>“run 2 done — capped at N”</b> in chat."],
+];
+
+// ---- render ----
+const KEY = "chroxy-recorder-v1";
+const store = JSON.parse(localStorage.getItem(KEY) || "{}");
+function save(){ localStorage.setItem(KEY, JSON.stringify(store)); tally(); }
+function resBox(id){
+  const v = store[id]?.r || "";
+  return `<select class="res" data-v="${v}" onchange="store['${id}']=Object.assign(store['${id}']||{},{r:this.value});this.dataset.v=this.value;save()">
+    <option value="">—</option>
+    <option ${v==='DONE'?'selected':''}>DONE</option>
+    <option ${v==='STUCK'?'selected':''}>STUCK</option>
+    <option ${v==='SKIP'?'selected':''}>SKIP</option></select>`;
+}
+function noteBox(id, ph){
+  const n = store[id]?.n || "";
+  return `<input class="notes" placeholder="${ph||'notes'}" value="${n.replace(/"/g,'&quot;')}"
+    oninput="store['${id}']=Object.assign(store['${id}']||{},{n:this.value});save()">`;
+}
+function rowsTable(elId, rows, notePh){
+  document.getElementById(elId).innerHTML =
+    `<tr><th style="width:30%">Step</th><th>What to do</th><th style="width:90px">State</th><th style="width:26%">Notes</th></tr>` +
+    rows.map(([id,w,s])=>`<tr><td class="what">${w}</td><td class="steps">${s}</td><td>${resBox(id)}</td><td>${noteBox(id,notePh)}</td></tr>`).join('');
+}
+rowsTable('tbl0', S0);
+rowsTable('tbl1', R1);
+rowsTable('tbl2', R2, 'e.g. "rendered 4 options" / "down-arrow worked"');
+
+// ---- tally + export ----
+const ALL = [["Setup",S0],["Run 1 — #4882",R1],["Run 2 — #4880",R2]];
+function label(id){ for(const [,set] of ALL) for(const row of set) if(row[0]===id) return row[1]; return id; }
+function tally(){
+  let d=0,k=0,s=0;
+  Object.values(store).forEach(v=>{ if(v.r==='DONE')d++; else if(v.r==='STUCK')k++; else if(v.r==='SKIP')s++; });
+  const total=S0.length+R1.length+R2.length; const n=total-d-k-s;
+  document.getElementById('tally').innerHTML =
+    `<span style="color:var(--pass)">✔ ${d} done</span><span style="color:var(--fail)">✘ ${k} stuck</span>`+
+    `<span style="color:var(--skip)">– ${s} skip</span><span style="color:var(--dim)">○ ${n} to do</span>`;
+}
+function exportMd(){
+  const d=new Date().toISOString().slice(0,10);
+  let md=`# Chroxy TUI recorder session — ${d}\n\n`;
+  ALL.forEach(([sec,set])=>{
+    const rows=set.filter(([id])=>store[id]&&(store[id].r||store[id].n));
+    if(!rows.length) return;
+    md+=`## ${sec}\n\n| Step | State | Notes |\n|---|---|---|\n`;
+    rows.forEach(([id])=>{ md+=`| ${label(id)} | ${store[id].r||'—'} | ${(store[id].n||'').replace(/\|/g,'\\|')} |\n`; });
+    md+=`\n`;
+  });
+  const stuck=Object.entries(store).filter(([,v])=>v.r==='STUCK').map(([id])=>`- ${label(id)} — ${store[id].n||'(add detail)'}`);
+  md+=stuck.length?`## ⚠ Stuck\n\n${stuck.join('\n')}\n`:`_No blockers recorded._\n`;
+  document.getElementById('outText').value=md;
+  document.getElementById('outBox').classList.add('show');
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function copyOut(){ const t=document.getElementById('outText'); t.select(); document.execCommand('copy'); }
+function resetAll(){ if(confirm('Clear all results in this browser?')){ for(const k in store) delete store[k]; localStorage.removeItem(KEY); location.reload(); } }
+tally();
+</script>
+</body>
+</html>
