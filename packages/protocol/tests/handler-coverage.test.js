@@ -73,7 +73,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
 // ---------------------------------------------------------------------------
 const PLATFORM_SPECIFIC = {
   // Mobile app only
-  'pair_fail': 'app',           // QR pairing is mobile-only
+  // (pair_fail is now handled by BOTH platforms — the dashboard gained
+  //  paste-a-pairing-URL support in #5297 — so it's no longer platform-specific.)
   'push_token_error': 'app',    // push notifications are mobile-only
   'write_file_result': 'app',   // app file editing UI
   'git_branches_result': 'app', // app git UI

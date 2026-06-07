@@ -65,20 +65,27 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
   const [url, setUrl] = useState(initialUrl)
   const [token, setToken] = useState('')
 
-  // #5281 ③ PR 2 — when the URL field holds a pairing URL, switch to pairing
-  // mode: the token field is unnecessary (a session token is issued by the
-  // handshake) and the submit pairs instead of adding with a typed token.
-  const parsedPairing = parsePairingUrl(url)
-  const pairingMode = !!parsedPairing?.pairingId
+  // #5281 ③ PR 2 — a pasted connection URL can embed credentials: a pairing id
+  // (?pair=) or a legacy token (?token=). Either way the token field is
+  // unnecessary; we route on the embedded credential. host:port reads nicer as
+  // the default name than the full ws URL.
+  const parsed = parsePairingUrl(url)
+  const pairingMode = !!parsed?.pairingId
+  const tokenUrlMode = !pairingMode && !!parsed?.token
+  const embeddedCreds = pairingMode || tokenUrlMode
 
   const handleSubmit = useCallback((e?: React.FormEvent) => {
     e?.preventDefault()
-    const parsed = parsePairingUrl(url)
-    if (parsed?.pairingId) {
-      // Default the name to the host:port (friendlier than the full ws URL).
-      let defaultName = parsed.wsUrl
-      try { defaultName = new URL(parsed.wsUrl).host } catch { /* keep wsUrl */ }
-      onPair(name.trim() || defaultName, parsed.wsUrl, parsed.pairingId)
+    const p = parsePairingUrl(url)
+    let host = p?.wsUrl ?? ''
+    try { if (p) host = new URL(p.wsUrl).host } catch { /* keep wsUrl */ }
+    if (p?.pairingId) {
+      onPair(name.trim() || host, p.wsUrl, p.pairingId)
+      return
+    }
+    if (p?.token) {
+      // Legacy ?token= URL — use the embedded token, no separate entry needed.
+      onAdd(name.trim() || host, p.wsUrl, p.token)
       return
     }
     if (!url.trim() || !token.trim()) return
@@ -108,9 +115,11 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
           {error}
         </span>
       )}
-      {pairingMode ? (
+      {embeddedCreds ? (
         <span className="server-form-hint" data-testid="server-pairing-hint">
-          Pairing URL detected — no token needed.
+          {pairingMode
+            ? 'Pairing URL detected — no token needed.'
+            : 'Connection URL includes a token — no token needed.'}
         </span>
       ) : (
         <input
@@ -126,7 +135,7 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
         <button
           type="submit"
           className="server-btn server-btn-primary"
-          disabled={pairingMode ? false : (!url.trim() || !token.trim())}
+          disabled={embeddedCreds ? false : (!url.trim() || !token.trim())}
           data-testid="server-add-submit"
         >
           {pairingMode ? 'Pair' : 'Add'}

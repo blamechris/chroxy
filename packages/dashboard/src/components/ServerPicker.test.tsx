@@ -402,5 +402,20 @@ describe('ServerPicker', () => {
       expect(screen.queryByTestId('server-pairing-hint')).toBeNull()
       expect(screen.getByTestId('server-add-submit')).toHaveTextContent('Add')
     })
+
+    it('uses the embedded token from a legacy chroxy://…?token= URL', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-url-input'), {
+        target: { value: 'chroxy://192.168.1.5:8765?token=embedded-tok' },
+      })
+      // Token field hidden (URL carries it); button still "Add" (not pairing).
+      expect(screen.queryByTestId('server-token-input')).toBeNull()
+      expect(screen.getByTestId('server-pairing-hint')).toHaveTextContent('includes a token')
+      expect(screen.getByTestId('server-add-submit')).toHaveTextContent('Add')
+      fireEvent.click(screen.getByTestId('server-add-submit'))
+      expect(mockAddServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'embedded-tok')
+      expect(mockPairServer).not.toHaveBeenCalled()
+    })
   })
 })
