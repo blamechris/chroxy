@@ -636,9 +636,11 @@ interface RepoRowsProps {
   onCancelActivity?: (activityId: string, sessionId: string) => void
   /** #5272 — interrupt this repo's session (heading "Interrupt turn"). */
   onInterruptSession?: (sessionId: string) => void
+  /** #5277 — activity ids with an in-flight cancel (pending "Cancelling…" state). */
+  cancellingActivityIds?: ReadonlySet<string>
 }
 
-function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate, onCancelActivity, onInterruptSession }: RepoRowsProps) {
+function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate, onCancelActivity, onInterruptSession, cancellingActivityIds }: RepoRowsProps) {
   // Map repo → its active chroxy session (by cwd). When a session is found the
   // name cell becomes a disclosure toggle that reveals that session's live
   // activity tree (subagents / shells / tools — the retired v1 panel's view).
@@ -732,6 +734,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
                     ? (activityId) => onCancelActivity(activityId, sessionId)
                     : undefined
                 }
+                cancellingActivityIds={cancellingActivityIds}
               />
             </div>
           </td>
@@ -835,6 +838,8 @@ export function ControlRoomSection({
   const storeSessions = useConnectionStore((s) => s.sessions)
   const storeSendCancelActivity = useConnectionStore((s) => s.sendCancelActivity)
   const storeSendInterrupt = useConnectionStore((s) => s.sendInterrupt)
+  // #5277: in-flight cancels → "Cancelling…" pending state on the tree button.
+  const cancellingActivityIds = useConnectionStore((s) => s.cancellingActivityIds)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
@@ -1068,6 +1073,7 @@ export function ControlRoomSection({
                       onInvestigate={onInvestigate}
                       onCancelActivity={onCancelActivity}
                       onInterruptSession={onInterruptSession}
+                      cancellingActivityIds={cancellingActivityIds}
                     />
                   ))
                 )}

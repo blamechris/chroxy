@@ -541,6 +541,14 @@ export interface ConnectionState {
    * v1 — control actions are a tracked phase-2 follow-up on the epic.
    */
   activity: import('@chroxy/store-core').ActivityState;
+  /**
+   * #5277: activity ids with an in-flight cancel_activity request — set when
+   * sendCancelActivity is called, cleared on the cancel_activity_ack (success)
+   * or the CANCEL_ACTIVITY_FAILED session_error (failure). Lets the
+   * ActivityTree show a "Cancelling…" pending state instead of guessing from
+   * the terminal activity_delta.
+   */
+  cancellingActivityIds: Set<string>;
 
   /**
    * #5175 (epic #5170) — Host/Repo Status Control Room: the latest

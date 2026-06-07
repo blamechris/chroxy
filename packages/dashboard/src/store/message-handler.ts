@@ -115,7 +115,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -1878,6 +1878,30 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
 }
 
 /**
+ * #5277 — Control Room `cancel_activity_ack`: positive confirmation that a
+ * cancel_activity request was actioned. Clears the node's "cancelling" pending
+ * state (the terminal activity_delta separately updates the tree itself).
+ */
+function handleCancelActivityAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerCancelActivityAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  clearCancellingActivity(get, set, parsed.data.activityId);
+}
+
+/**
+ * #5277 — drop an activity id from the in-flight cancel set (shared by the
+ * success ack and the CANCEL_ACTIVITY_FAILED session_error). No-op if absent.
+ */
+function clearCancellingActivity(get: MsgGet, set: MsgSet, activityId: string | undefined): void {
+  if (!activityId) return;
+  const prev = get().cancellingActivityIds;
+  if (!prev.has(activityId)) return;
+  const next = new Set(prev);
+  next.delete(activityId);
+  set({ cancellingActivityIds: next });
+}
+
+/**
  * #5175 (epic #5170) — Host/Repo Status Control Room `host_status_snapshot`:
  * REPLACE the stored survey with the carried snapshot and clear the in-flight
  * loading flag. The survey is a full picture (no delta stream), so each
@@ -1962,6 +1986,8 @@ const HANDLERS: Record<string, Handler> = {
   // #5163 (epic #5159): Control Room live activity tree.
   activity_snapshot: handleActivitySnapshot,
   activity_delta: handleActivityDelta,
+  // #5277: positive ack correlating a cancel_activity request to its outcome.
+  cancel_activity_ack: handleCancelActivityAck,
   // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
   host_status_snapshot: handleHostStatusSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
@@ -2409,6 +2435,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // platform-specific surfaces (notification, alert, server error banner)
       // stay here.
       const parsed = sharedSessionError(msg, get().activeSessionId);
+      // #5277: a CANCEL_ACTIVITY_FAILED echoes the activityId — clear its
+      // pending "cancelling" state so the ActivityTree button recovers.
+      if (parsed.code === 'CANCEL_ACTIVITY_FAILED' && typeof msg.activityId === 'string') {
+        clearCancellingActivity(get, set, msg.activityId);
+      }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;
         if (crashedId && get().sessionStates[crashedId]) {

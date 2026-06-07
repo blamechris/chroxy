@@ -53,8 +53,42 @@ describe('cancel_activity handler (#5271)', () => {
 
     assert.equal(cancelActivity.calls.length, 1)
     assert.equal(cancelActivity.calls[0][0], 'tu-1')
-    // No session_error on success — the activity_delta is the confirmation.
-    assert.equal(ctx._sent.length, 0)
+    // #5277: success now sends a positive cancel_activity_ack (the terminal
+    // activity_delta remains the substantive change; the ack lets the dashboard
+    // correlate this specific cancel click to its outcome).
+    assert.equal(ctx._sent.length, 1)
+    assert.equal(last(ctx).type, 'cancel_activity_ack')
+    assert.equal(last(ctx).activityId, 'tu-1')
+  })
+
+  it('#5277: echoes requestId on the success ack', async () => {
+    const sessions = new Map()
+    const { entry } = entryWithCancel({ ok: true })
+    sessions.set('s1', entry)
+    const ctx = makeCtx(sessions)
+    const client = makeClient({ activeSessionId: 's1' })
+
+    await inputHandlers.cancel_activity(makeWs(), client, { type: 'cancel_activity', activityId: 'tu-1', requestId: 'req-9' }, ctx)
+
+    const reply = last(ctx)
+    assert.equal(reply.type, 'cancel_activity_ack')
+    assert.equal(reply.activityId, 'tu-1')
+    assert.equal(reply.requestId, 'req-9')
+  })
+
+  it('#5277: echoes requestId on the CANCEL_ACTIVITY_FAILED session_error', async () => {
+    const sessions = new Map()
+    const { entry } = entryWithCancel({ ok: false, reason: 'no-task-id' })
+    sessions.set('s1', entry)
+    const ctx = makeCtx(sessions)
+    const client = makeClient({ activeSessionId: 's1' })
+
+    await inputHandlers.cancel_activity(makeWs(), client, { type: 'cancel_activity', activityId: 'tu-1', requestId: 'req-9' }, ctx)
+
+    const reply = last(ctx)
+    assert.equal(reply.type, 'session_error')
+    assert.equal(reply.code, 'CANCEL_ACTIVITY_FAILED')
+    assert.equal(reply.requestId, 'req-9')
   })
 
   it('surfaces a structured failure (no-task-id) as a CANCEL_ACTIVITY_FAILED session_error', async () => {
@@ -136,7 +170,9 @@ describe('cancel_activity handler (#5271)', () => {
     await inputHandlers.cancel_activity(makeWs(), client, { type: 'cancel_activity', activityId: 'tu-1', sessionId: 'bound-1' }, ctx)
 
     assert.equal(cancelActivity.calls.length, 1)
-    assert.equal(ctx._sent.length, 0)
+    // #5277: success ack (no session_error).
+    assert.equal(ctx._sent.length, 1)
+    assert.equal(last(ctx).type, 'cancel_activity_ack')
   })
 
   it('rejects a bound client aiming at ANOTHER session with SESSION_TOKEN_MISMATCH', async () => {

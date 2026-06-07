@@ -130,6 +130,25 @@ describe('Control Room activity dispatch (#5163)', () => {
     resetReplayFlags()
   })
 
+  it('#5277: cancel_activity_ack clears the activity id from cancellingActivityIds', () => {
+    store.setState({ cancellingActivityIds: new Set(['a', 'b']) })
+    handleMessage({ type: 'cancel_activity_ack', activityId: 'a', requestId: 'req-1' }, ctx() as never)
+    const set = store.getState().cancellingActivityIds
+    expect(set.has('a')).toBe(false)
+    expect(set.has('b')).toBe(true)
+  })
+
+  it('#5277: CANCEL_ACTIVITY_FAILED session_error clears the cancelling id', () => {
+    // The generic session_error branch surfaces the message via addServerError;
+    // stub it so the handler runs cleanly in this harness.
+    store.setState({ cancellingActivityIds: new Set(['a']), addServerError: vi.fn() } as never)
+    handleMessage(
+      { type: 'session_error', code: 'CANCEL_ACTIVITY_FAILED', message: 'Could not cancel activity: no-task-id', reason: 'no-task-id', activityId: 'a', requestId: 'req-1' },
+      ctx() as never,
+    )
+    expect(store.getState().cancellingActivityIds.has('a')).toBe(false)
+  })
+
   it('applies activity_snapshot, replacing the session tree', () => {
     handleMessage(snapshot([runningEntry('a'), runningEntry('b')]), ctx() as never)
     const tree = selectActivityTree(store.getState().activity, SESSION_ID)

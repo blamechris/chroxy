@@ -593,6 +593,20 @@ export const ServerActivityDeltaSchema = z.object({
         }
     }
 });
+/**
+ * #5277: positive ack that a `cancel_activity` request was actioned. Success
+ * was previously silent — the terminal `activity_delta` was the only signal,
+ * which the dashboard couldn't correlate to a specific cancel click (and which
+ * could be delayed/dropped). This echoes the request's `activityId` and
+ * (when supplied) `requestId` so the caller gets a definite per-request signal.
+ * Failures continue to surface as a `CANCEL_ACTIVITY_FAILED` session_error,
+ * which also echoes `requestId`.
+ */
+export const ServerCancelActivityAckSchema = z.object({
+    type: z.literal('cancel_activity_ack'),
+    activityId: z.string(),
+    requestId: z.string().max(128).optional(),
+}).passthrough();
 // ───────────────────────────────────────────────────────────────────────────
 // Host/Repo Status Control Room (#5170 epic, #5171 protocol contract)
 // ───────────────────────────────────────────────────────────────────────────

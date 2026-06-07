@@ -379,6 +379,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #5163 (epic #5159): Control Room activity tree, fed by the store-core
   // reducer from activity_snapshot / activity_delta.
   activity: createEmptyActivityState(),
+  cancellingActivityIds: new Set<string>(),
   // #5175 (epic #5170): Host/Repo Status Control Room snapshot, fed by the
   // host_status_snapshot handler. Null until the first survey lands.
   hostStatus: null,
@@ -1443,6 +1444,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
+      cancellingActivityIds: new Set<string>(),
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -1472,6 +1474,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5163: drop the Control Room tree on disconnect/forget — a fresh
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
+      cancellingActivityIds: new Set<string>(),
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -1689,8 +1692,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sendCancelActivity: (activityId: string, sessionId?: string) => {
     const { socket, activeSessionId } = get();
     const sid = sessionId ?? activeSessionId;
-    const payload: Record<string, unknown> = { type: 'cancel_activity', activityId };
+    // #5277: tag the request with an opaque requestId the server echoes on the
+    // cancel_activity_ack / CANCEL_ACTIVITY_FAILED, and optimistically mark the
+    // node "cancelling" so the ActivityTree shows a pending state until the
+    // outcome lands (cleared in handleCancelActivityAck / the session_error).
+    const requestId = `cancel-${nextMessageId()}`;
+    const payload: Record<string, unknown> = { type: 'cancel_activity', activityId, requestId };
     if (sid) payload.sessionId = sid;
+    const cancelling = new Set(get().cancellingActivityIds);
+    cancelling.add(activityId);
+    set({ cancellingActivityIds: cancelling });
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, payload);
       return 'sent';
