@@ -77,5 +77,12 @@ describe('parseChroxyUrl (#1852)', () => {
       const result = parseChroxyUrl('ws://192.168.1.5:8765');
       expect(result).toEqual({ ok: true, wsUrl: 'ws://192.168.1.5:8765', token: '' });
     });
+
+    it('explicit :443 is the https default port and stays wss:// (no port in host)', () => {
+      // `new URL` strips the default https port, so `parsed.port` is empty —
+      // a tunnel on 443 still infers wss, even written with an explicit :443.
+      const result = parseChroxyUrl('chroxy://abc.trycloudflare.com:443?pair=xyz');
+      expect(result).toEqual({ ok: true, wsUrl: 'wss://abc.trycloudflare.com', pairingId: 'xyz' });
+    });
   });
 });
