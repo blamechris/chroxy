@@ -574,6 +574,10 @@ export async function startCliServer(config) {
     resultTimeoutMs: startupTimeouts.resultTimeoutMs,
     hardTimeoutMs: startupTimeouts.hardTimeoutMs,
     streamStallTimeoutMs: startupTimeouts.streamStallTimeoutMs,
+    // #5288: background-shell hard-quiesce window (ms). null = BaseSession
+    // default (4h); 0 disables hard-reaping. SessionManager applies the same
+    // isOperatorTimeoutInRange ceiling guard (allowZero) as the timeouts.
+    backgroundShellHardQuiesceMs: config.backgroundShellHardQuiesceMs ?? null,
     // #4601: per-provider streamStallTimeoutMs override map. SessionManager
     // sanitises each entry against the same range gate as the global value
     // (`allowZero: true`, 5s-24h ceiling) — bogus entries are dropped (with

@@ -233,6 +233,12 @@ export class BaseSession extends EventEmitter {
     hardTimeoutMs,
     // #4467: stream-stall recovery timeout. See DEFAULT_STREAM_STALL_TIMEOUT_MS.
     streamStallTimeoutMs,
+    // #5288: HARD-quiesce window (ms) for background shells. A finished-but-
+    // never-polled shell is reaped after this much continuous output silence
+    // so it stops pinning the session "running". Defaults to
+    // BACKGROUND_SHELL_HARD_QUIESCE_MS (4h); 0 disables hard-reaping (revert
+    // to #5247 advisory-only). Forwarded from config via SessionManager.
+    backgroundShellHardQuiesceMs,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -351,7 +357,9 @@ export class BaseSession extends EventEmitter {
     // noisy long-runner (dev server logging within the window) keeps its mtime
     // fresh and is never hard-reaped. Set to 0 to disable hard-reaping (revert
     // to the #5247 advisory-only behaviour). Overridable in tests.
-    this._backgroundShellHardQuiesceMs = BACKGROUND_SHELL_HARD_QUIESCE_MS
+    // #5288: config-driven via the constructor opt; `?? constant` keeps the
+    // default when unset and honours an explicit 0 (disable).
+    this._backgroundShellHardQuiesceMs = backgroundShellHardQuiesceMs ?? BACKGROUND_SHELL_HARD_QUIESCE_MS
     // Injectable hard-quiesce check — `(entry) => boolean`. Default reads the
     // output file's mtime against the hard window; tests override it.
     this._backgroundShellHardQuiesceCheck = null
