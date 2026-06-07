@@ -356,6 +356,33 @@ describe('useConnectionStore', () => {
     expect(state.viewMode).toBe('chat');
   });
 
+  it('#5277: sendCancelActivity marks the node cancelling and sends when the socket is open', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket, activeSessionId: 's1', cancellingActivityIds: new Set() });
+
+    const result = useConnectionStore.getState().sendCancelActivity('act-1');
+
+    expect(result).toBe('sent');
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse((send.mock.calls[0]![0]) as string);
+    expect(payload.type).toBe('cancel_activity');
+    expect(payload.activityId).toBe('act-1');
+    expect(typeof payload.requestId).toBe('string');
+    expect(useConnectionStore.getState().cancellingActivityIds.has('act-1')).toBe(true);
+  });
+
+  it('#5277: sendCancelActivity does NOT mark cancelling when offline (cancel is not queueable)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, activeSessionId: 's1', cancellingActivityIds: new Set() });
+
+    useConnectionStore.getState().sendCancelActivity('act-1');
+
+    // Offline send is dropped (not in QUEUE_TTLS); the node must NOT be stranded "Cancelling…".
+    expect(useConnectionStore.getState().cancellingActivityIds.has('act-1')).toBe(false);
+  });
+
   it('exposes all required actions', async () => {
     const { useConnectionStore } = await import('./connection');
     const state = useConnectionStore.getState();

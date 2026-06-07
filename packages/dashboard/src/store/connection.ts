@@ -1236,6 +1236,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const wasConnected = get().connectionPhase === 'connected';
       set({ socket: null, sessionStates: cleanedSessionStates });
 
+      // #5277: a dropped socket means any in-flight cancel_activity's ack/failure
+      // will never arrive on this socket — clear the pending set so a node can't
+      // render "Cancelling…" forever across the reconnect (the tree re-seeds from
+      // activity_snapshot on resubscribe).
+      if (get().cancellingActivityIds.size > 0) {
+        set({ cancellingActivityIds: new Set<string>() });
+      }
+
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
       updateActiveSession((ss) => {
@@ -1686,23 +1694,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   // #5272 (Control Room Phase 2a): cancel one in-flight activity node (a
-  // subagent) by its entry id. Mirrors sendInterrupt's queue-when-offline
-  // behaviour. The server's terminal activity_delta updates the tree; a failure
-  // comes back as a session_error (surfaced by the existing handler).
+  // subagent) by its entry id. The server's terminal activity_delta updates the
+  // tree; a failure comes back as a session_error (surfaced by the existing
+  // handler). cancel_activity is intentionally NOT queued offline — a cancel
+  // that drains seconds later races the activity finishing — so we only mark the
+  // node "cancelling" when the request is actually on the wire (#5277).
   sendCancelActivity: (activityId: string, sessionId?: string) => {
     const { socket, activeSessionId } = get();
     const sid = sessionId ?? activeSessionId;
     // #5277: tag the request with an opaque requestId the server echoes on the
-    // cancel_activity_ack / CANCEL_ACTIVITY_FAILED, and optimistically mark the
-    // node "cancelling" so the ActivityTree shows a pending state until the
-    // outcome lands (cleared in handleCancelActivityAck / the session_error).
+    // cancel_activity_ack / CANCEL_ACTIVITY_FAILED so the dashboard can correlate.
     const requestId = `cancel-${nextMessageId()}`;
     const payload: Record<string, unknown> = { type: 'cancel_activity', activityId, requestId };
     if (sid) payload.sessionId = sid;
-    const cancelling = new Set(get().cancellingActivityIds);
-    cancelling.add(activityId);
-    set({ cancellingActivityIds: cancelling });
     if (socket && socket.readyState === WebSocket.OPEN) {
+      // Only mark "cancelling" once the request is genuinely sent — otherwise an
+      // offline send (cancel_activity isn't in QUEUE_TTLS, so enqueue drops it)
+      // would strand the node "Cancelling…" with no ack/failure ever arriving.
+      const cancelling = new Set(get().cancellingActivityIds);
+      cancelling.add(activityId);
+      set({ cancellingActivityIds: cancelling });
       wsSend(socket, payload);
       return 'sent';
     }

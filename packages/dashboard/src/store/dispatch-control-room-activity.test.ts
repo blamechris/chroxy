@@ -149,6 +149,14 @@ describe('Control Room activity dispatch (#5163)', () => {
     expect(store.getState().cancellingActivityIds.has('a')).toBe(false)
   })
 
+  it('#5277: a terminal (ended) activity_delta clears a pending cancelling id', () => {
+    // First seed the node so the reducer has it to mark ended.
+    handleMessage(snapshot([runningEntry('a')]), ctx() as never)
+    store.setState({ cancellingActivityIds: new Set(['a']) })
+    handleMessage(delta('ended', runningEntry('a', { status: 'done', endedAt: 2000 })), ctx() as never)
+    expect(store.getState().cancellingActivityIds.has('a')).toBe(false)
+  })
+
   it('applies activity_snapshot, replacing the session tree', () => {
     handleMessage(snapshot([runningEntry('a'), runningEntry('b')]), ctx() as never)
     const tree = selectActivityTree(store.getState().activity, SESSION_ID)

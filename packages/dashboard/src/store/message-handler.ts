@@ -1867,6 +1867,13 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
   if (next === prev) return;
   set({ activity: next });
 
+  // #5277: if a node we were cancelling just went terminal (whether from the
+  // cancel itself or natural completion racing it), drop its pending state so
+  // the id can't leak in cancellingActivityIds after the row is gone/finished.
+  if (parsed.data.op === 'ended') {
+    clearCancellingActivity(get, set, parsed.data.entry.id);
+  }
+
   const sessionId = parsed.data.sessionId;
   if (get().sessionStates[sessionId] && !_replayingSessions.has(sessionId)) {
     updateSession(sessionId, (ss) => {
@@ -1895,7 +1902,7 @@ function handleCancelActivityAck(msg: Record<string, unknown>, get: MsgGet, set:
 function clearCancellingActivity(get: MsgGet, set: MsgSet, activityId: string | undefined): void {
   if (!activityId) return;
   const prev = get().cancellingActivityIds;
-  if (!prev.has(activityId)) return;
+  if (!prev || !prev.has(activityId)) return;
   const next = new Set(prev);
   next.delete(activityId);
   set({ cancellingActivityIds: next });
