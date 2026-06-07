@@ -19,6 +19,23 @@ describe('SessionStatePersistence.serializeState', () => {
     rmSync(tempDir, { recursive: true, force: true })
   })
 
+  // #5309 (WP-0.3) — serializeState must route its atomic temp through a
+  // per-pid suffix, not writeFileRestricted's shared default `.tmp`, so a second
+  // process writing the same state file can't clobber a shared intermediate.
+  // Proof without forking: occupy the DEFAULT `.tmp` path with a directory — if
+  // serializeState used the default suffix it would EISDIR; succeeding proves it
+  // routes through `.tmp-<pid>` instead. (Binds the caller fix, not just the
+  // platform primitive, which is covered by the #4874 platform test.)
+  it('routes its atomic temp through a per-pid suffix, not the shared .tmp (#5309)', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    mkdirSync(`${stateFile}.tmp`) // booby-trap the shared default temp path
+    const state = { version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'A', cwd: '/tmp' }] }
+    assert.doesNotThrow(() => p.serializeState(state), 'must not write through the shared .tmp')
+    assert.strictEqual(JSON.parse(readFileSync(stateFile, 'utf-8')).sessions[0].id, 's1')
+    // The per-pid temp is renamed into place, leaving no orphan after success.
+    assert.strictEqual(existsSync(`${stateFile}.tmp-${process.pid}`), false, 'per-pid temp cleaned after rename')
+  })
+
   it('writes JSON state to file', () => {
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
     const state = {
