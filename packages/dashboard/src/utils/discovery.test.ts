@@ -42,6 +42,17 @@ describe('discoverLanServers', () => {
     expect(result[0]!.host).toBe('10.0.0.1')
   })
 
+  it('rejects entries with a non-string version or non-finite port', async () => {
+    const invoke = vi.fn().mockResolvedValue([
+      { name: 'bad-version', host: '10.0.0.1', port: 8765, wsUrl: 'ws://10.0.0.1:8765/ws', version: { x: 1 } },
+      { name: 'bad-port', host: '10.0.0.2', port: Number.POSITIVE_INFINITY, wsUrl: 'ws://10.0.0.2/ws', version: null },
+      { name: 'ok-null-version', host: '10.0.0.3', port: 8765, wsUrl: 'ws://10.0.0.3:8765/ws', version: null },
+    ])
+    mockGetInvoke.mockReturnValue(invoke)
+    const result = await discoverLanServers()
+    expect(result.map(r => r.name)).toEqual(['ok-null-version'])
+  })
+
   it('returns [] when the command yields a non-array', async () => {
     const invoke = vi.fn().mockResolvedValue({ unexpected: true })
     mockGetInvoke.mockReturnValue(invoke)

@@ -24,8 +24,12 @@ function isDiscoveredServer(v: unknown): v is DiscoveredServer {
   return (
     typeof o.name === 'string' &&
     typeof o.host === 'string' &&
-    typeof o.port === 'number' &&
-    typeof o.wsUrl === 'string'
+    // Finite integer port — guards against NaN/Infinity sneaking into the URL.
+    typeof o.port === 'number' && Number.isFinite(o.port) &&
+    typeof o.wsUrl === 'string' &&
+    // version is interpolated into UI text; only accept string | null | absent
+    // so a non-string can't render as "v[object Object]".
+    (o.version == null || typeof o.version === 'string')
   )
 }
 

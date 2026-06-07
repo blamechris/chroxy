@@ -141,7 +141,14 @@ pub fn browse_lan(timeout: Duration) -> Result<Vec<DiscoveredServer>, String> {
                 }
             }
             Ok(_) => {}
-            // Timed out waiting for the next event — browse window is over.
+            // recv_timeout errors on Timeout OR Disconnected; both end the
+            // browse and we return what resolved so far. Timeout = the 2s
+            // window elapsed (the normal path). Disconnected can't actually
+            // occur here before shutdown: `mdns` owns the sender and stays in
+            // scope through this whole loop, so the channel can't drop early —
+            // and even if it somehow did, returning the daemons already found
+            // beats discarding them. (mdns-sd re-exports only `Receiver`, not
+            // flume's error type, so we match on `_` rather than the variant.)
             Err(_) => break,
         }
     }
