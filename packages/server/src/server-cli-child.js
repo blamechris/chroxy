@@ -52,8 +52,18 @@ export function flushAndDestroy(sessionManager, wsServer, reason, logger = log) 
   } catch (err) {
     logger.error(`Failed to serialize session state before ${reason}: ${err?.stack || err}`)
   }
-  try { if (sessionManager) sessionManager.destroyAll() } catch {}
-  try { if (wsServer) wsServer.close() } catch {}
+  // Isolate each teardown step so one failure can't abort the rest, but log it —
+  // a throw here during a crash/shutdown is exactly when observability matters.
+  try {
+    if (sessionManager) sessionManager.destroyAll()
+  } catch (err) {
+    logger.error(`Failed to destroy sessions during ${reason}: ${err?.stack || err}`)
+  }
+  try {
+    if (wsServer) wsServer.close()
+  } catch (err) {
+    logger.error(`Failed to close WsServer during ${reason}: ${err?.stack || err}`)
+  }
 }
 
 // Flush state, then exit. Idempotent via _shuttingDown. The 100ms defer lets the
