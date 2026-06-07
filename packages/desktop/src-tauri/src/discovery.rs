@@ -12,7 +12,7 @@
 
 use serde::Serialize;
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 const SERVICE_TYPE: &str = "_chroxy._tcp.local.";
@@ -62,19 +62,33 @@ pub fn ws_url(host: &str, port: u16) -> String {
     }
 }
 
-/// Pick the address a client should connect to — IPv4 first (LAN-friendly,
-/// no scope-id hassle), else the first address of any kind.
+/// IPv6 link-local (`fe80::/10`). The resolved address set carries no scope id,
+/// so a bare `ws://[fe80::1]:port` URL is unconnectable — we skip these.
+fn is_ipv6_link_local(addr: &Ipv6Addr) -> bool {
+    (addr.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Pick the address a client should connect to — IPv4 first (LAN-friendly, no
+/// scope-id hassle), else the first usable (non-link-local) IPv6. A multi-homed
+/// daemon's IPv4 set has no defined order (it's a HashSet), so any reachable
+/// address is acceptable; we just need one that works. Returns None when the
+/// only addresses are link-local IPv6 (unconnectable from a WebSocket).
 pub fn pick_address<'a, I: IntoIterator<Item = &'a IpAddr>>(addrs: I) -> Option<String> {
-    let mut first_any: Option<String> = None;
+    let mut fallback: Option<String> = None;
     for addr in addrs {
-        if addr.is_ipv4() {
-            return Some(addr.to_string());
-        }
-        if first_any.is_none() {
-            first_any = Some(addr.to_string());
+        match addr {
+            IpAddr::V4(_) => return Some(addr.to_string()),
+            IpAddr::V6(v6) => {
+                if is_ipv6_link_local(v6) {
+                    continue;
+                }
+                if fallback.is_none() {
+                    fallback = Some(addr.to_string());
+                }
+            }
         }
     }
-    first_any
+    fallback
 }
 
 /// Assemble a [`DiscoveredServer`] from resolved mDNS fields.
@@ -182,10 +196,25 @@ mod tests {
     }
 
     #[test]
-    fn pick_address_falls_back_to_ipv6_when_no_ipv4() {
-        let v6: IpAddr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).into();
+    fn pick_address_falls_back_to_global_ipv6_when_no_ipv4() {
+        // A routable (non-link-local) IPv6 is usable.
+        let v6: IpAddr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into();
         let addrs = vec![v6];
-        assert_eq!(pick_address(addrs.iter()), Some("fe80::1".to_string()));
+        assert_eq!(pick_address(addrs.iter()), Some("2001:db8::1".to_string()));
+    }
+
+    #[test]
+    fn pick_address_skips_link_local_ipv6() {
+        // fe80::/10 has no scope id here → unconnectable → skipped (None).
+        let ll: IpAddr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).into();
+        assert_eq!(pick_address([ll].iter()), None);
+    }
+
+    #[test]
+    fn pick_address_prefers_ipv4_over_link_local_ipv6() {
+        let ll: IpAddr = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).into();
+        let v4: IpAddr = Ipv4Addr::new(10, 0, 0, 7).into();
+        assert_eq!(pick_address([ll, v4].iter()), Some("10.0.0.7".to_string()));
     }
 
     #[test]
