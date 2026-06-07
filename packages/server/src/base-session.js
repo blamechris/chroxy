@@ -970,6 +970,14 @@ export class BaseSession extends EventEmitter {
         this._pendingBackgroundShells.delete(shellId)
         changed = true
         continue
+        // NOTE: reaping an entry that was ALREADY advisory-quiesced changes
+        // `isRunning` (true→false) but NOT the banner snapshot (it was already
+        // filtered out at advisory time), so the `background_work_changed` emit
+        // below carries an unchanged `pending` payload. That is fine TODAY
+        // because liveness is consumed via the pull path (SessionTimeoutManager
+        // calls `isRunningFn()` live, it does not diff this event). A future
+        // consumer that diffs `pending` to infer liveness would need an explicit
+        // liveness field on the event — flagged so this isn't a silent trap.
       }
       if (entry.quiesced) continue // already advisory-cleared from the banner
       if (this._isBackgroundShellQuiesced(entry)) {
@@ -1020,15 +1028,21 @@ export class BaseSession extends EventEmitter {
    * @private
    */
   _isBackgroundShellHardQuiesced(entry) {
+    // Disabled short-circuit FIRST so the method's "0 disables" contract holds
+    // even if a stale check is injected (the sweep also gates on hardEnabled).
+    if (this._backgroundShellHardQuiesceMs <= 0) return false
     if (typeof this._backgroundShellHardQuiesceCheck === 'function') {
       return this._backgroundShellHardQuiesceCheck(entry) === true
     }
-    if (this._backgroundShellHardQuiesceMs <= 0) return false
     if (!entry) return false
     if (typeof entry.outputPath !== 'string' || entry.outputPath.length === 0) {
-      // No output file to stat — fall back to wall-clock age since the shell
-      // was tracked. (A shell that never produced an output path and has been
-      // around for the whole hard window is treated the same as silent output.)
+      // No output file to stat — fall back to wall-clock age since the shell was
+      // tracked. This is the WEAKEST signal in the change: unlike the mtime path
+      // (which proves the process could write), age-only can't tell a live
+      // silent compute from a finished one — so a >hard-window shell with an
+      // unparsed output path is reaped on time-since-tracking alone (accepted
+      // per #5265's tradeoff; the only consequence is idle-timeout eligibility,
+      // never process death — chroxy doesn't own the PID).
       return typeof entry.startedAt === 'number'
         && Date.now() - entry.startedAt >= this._backgroundShellHardQuiesceMs
     }

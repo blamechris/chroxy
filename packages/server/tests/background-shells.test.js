@@ -490,6 +490,29 @@ describe('BaseSession background-shell HARD-quiesce reap (#5265)', () => {
     assert.equal(session._backgroundShellSweepTimer, null, 'sweep stops at advisory when hard disabled')
   })
 
+  it('SAFETY: a shell still writing within the hard window is NEVER reaped (#4307/#5247 guard)', () => {
+    // The load-bearing safety property: a noisy long-runner (dev server, watcher,
+    // build) keeps its mtime fresh, so it must survive every sweep. This guards
+    // against a refactor re-introducing the #5247/#4307 live-process reap.
+    mock.timers.enable({ apis: ['setInterval'] })
+    session._backgroundShellHardQuiesceMs = 5000
+    // Default checks consult the real fs; a fresh-mtime file is neither advisory-
+    // nor hard-quiesced. Use a real, freshly-written output file.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-live-'))
+    const outputPath = join(dir, 'shell.output')
+    writeFileSync(outputPath, 'listening on :3000\n')
+
+    session.trackBackgroundShell({ shellId: 'live', command: 'npm run dev', outputPath })
+    // Several sweep ticks — but the file mtime stays fresh (just written), so
+    // neither quiesce window is crossed.
+    mock.timers.tick(1000)
+    mock.timers.tick(1000)
+    mock.timers.tick(1000)
+    assert.equal(session._pendingBackgroundShells.size, 1, 'live shell retained across sweeps')
+    assert.equal(session.isRunning, true, 'live shell keeps the session running')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('default hard-quiesce check uses output mtime against the hard window (real fs)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-bg-hard-'))
     const outputPath = join(dir, 'shell.output')
