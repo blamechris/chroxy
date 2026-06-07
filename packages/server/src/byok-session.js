@@ -1395,8 +1395,7 @@ export class ClaudeByokSession extends BaseSession {
     } catch (ctorErr) {
       // Balance the agent_spawned emit + _activeAgents.set above so the
       // dashboard badge clears and the entry doesn't leak forever.
-      this._activeAgents.delete(toolUseId)
-      this.emit('agent_completed', { toolUseId })
+      this._finalizeAgentByToolUseId(toolUseId)
       log.warn(`subagent construction failed: ${ctorErr?.message || ctorErr}`)
       return {
         content: `Subagent construction failed: ${ctorErr?.message || ctorErr}`,
@@ -1549,8 +1548,7 @@ export class ClaudeByokSession extends BaseSession {
       try { await child.destroy() } catch (err) {
         log.warn(`subagent destroy on pre-send abort failed: ${err?.message || err}`)
       }
-      this._activeAgents.delete(toolUseId)
-      this.emit('agent_completed', { toolUseId })
+      this._finalizeAgentByToolUseId(toolUseId)
       return { content: 'Interrupted by user before subagent started', isError: true }
     }
     try {
@@ -1570,8 +1568,7 @@ export class ClaudeByokSession extends BaseSession {
       try { await child.destroy() } catch (err) {
         log.warn(`subagent destroy on Task completion failed: ${err?.message || err}`)
       }
-      this._activeAgents.delete(toolUseId)
-      this.emit('agent_completed', { toolUseId })
+      this._finalizeAgentByToolUseId(toolUseId)
     }
 
     // Fold child usage + cost into the parent's per-turn accumulators
@@ -1822,6 +1819,70 @@ export class ClaudeByokSession extends BaseSession {
         log.warn(`subagent interrupt failed: ${err?.message || err}`)
       }
     }
+  }
+
+  /**
+   * #5274 (Control Room Phase 2a parity): cancel a single in-flight subagent
+   * node by its `activityId` (the Task `toolUseId`). Mirrors
+   * `SdkSession.cancelActivity` and returns the same structured-result
+   * vocabulary, but the *mechanism* differs: SdkSession maps the node to the
+   * SDK's `query.stopTask(task_id)`, whereas ClaudeByokSession owns each
+   * subagent as a child session in `_subagentSessions` — so cancel aborts the
+   * child's in-flight stream (via its `interrupt()` → `AbortController`) and
+   * finalizes the parent's agent node.
+   *
+   * @param {string} activityId
+   * @returns {Promise<{ ok: boolean, reason?: string, error?: string }>}
+   */
+  async cancelActivity(activityId) {
+    if (typeof activityId !== 'string' || !activityId) return { ok: false, reason: 'invalid-id' }
+    const entry = this._activity.getEntry(activityId)
+    if (!entry) return { ok: false, reason: 'not-found' }
+    if (entry.kind !== 'agent') {
+      // Shells and tool calls have no per-node cancel surface (same as
+      // SdkSession) — distinguish the shell case so the UI can point at
+      // "Interrupt turn" instead of implying a transient error.
+      return { ok: false, reason: entry.kind === 'shell' ? 'shell-not-cancellable' : 'not-cancellable' }
+    }
+    const child = this._subagentSessions.get(activityId)
+    if (!child) {
+      // The agent node is in the registry but we hold no live child handle —
+      // the subagent already returned and was cleaned up; nothing to abort.
+      return { ok: false, reason: 'not-found' }
+    }
+    log.info(`Cancelling byok subagent ${activityId}`)
+    // Best-effort: the child's interrupt() aborts its in-flight stream, but
+    // early-returns if the child isn't busy yet (the narrow window between
+    // _subagentSessions.set and the child's sendMessage flipping _isBusy). In
+    // that window the cancel can't pre-empt the not-yet-started turn — we still
+    // optimistically finalize the node, matching the SDK path's best-effort
+    // stopTask contract.
+    try {
+      child.interrupt()
+    } catch (err) {
+      log.warn(`subagent cancel failed for ${activityId}: ${err?.message || err}`)
+      return { ok: false, reason: 'stop-failed', error: err?.message || String(err) }
+    }
+    // Optimistic finalize — idempotent with the natural agent_completed that
+    // fires when the child's aborted stream unwinds.
+    this._finalizeAgentByToolUseId(activityId)
+    return { ok: true }
+  }
+
+  /**
+   * #5274: drop a subagent's `_activeAgents` entry and emit `agent_completed`
+   * so its activity node terminates promptly on cancel. Idempotent (guards on
+   * `_activeAgents.has`) so the optimistic cancel-finalize and the natural
+   * completion don't double-emit. Mirrors SdkSession's helper of the same name
+   * (minus the task-id map, which byok doesn't have).
+   *
+   * @param {string} toolUseId
+   */
+  _finalizeAgentByToolUseId(toolUseId) {
+    if (typeof toolUseId !== 'string' || !toolUseId) return
+    if (!this._activeAgents.has(toolUseId)) return
+    this._activeAgents.delete(toolUseId)
+    this.emit('agent_completed', { toolUseId })
   }
 
   setModel(model) {
