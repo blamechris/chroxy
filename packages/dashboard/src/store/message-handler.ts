@@ -1871,7 +1871,7 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
   // cancel itself or natural completion racing it), drop its pending state so
   // the id can't leak in cancellingActivityIds after the row is gone/finished.
   if (parsed.data.op === 'ended') {
-    clearCancellingActivity(get, set, parsed.data.entry.id);
+    clearCancellingActivity(get, set, parsed.data.sessionId, parsed.data.entry.id);
   }
 
   const sessionId = parsed.data.sessionId;
@@ -1892,20 +1892,47 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
 function handleCancelActivityAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerCancelActivityAckSchema.safeParse(msg);
   if (!parsed.success) return;
-  clearCancellingActivity(get, set, parsed.data.activityId);
+  clearCancellingActivity(get, set, parsed.data.sessionId, parsed.data.activityId);
+}
+
+/** #5277 — composite key: activity ids are only unique within a session. */
+function cancelKey(sessionId: string | undefined, activityId: string | undefined): string | null {
+  if (!sessionId || !activityId) return null;
+  return `${sessionId}:${activityId}`;
 }
 
 /**
- * #5277 — drop an activity id from the in-flight cancel set (shared by the
- * success ack and the CANCEL_ACTIVITY_FAILED session_error). No-op if absent.
+ * #5277 — drop one `${sessionId}:${activityId}` from the in-flight cancel set
+ * (shared by the success ack, the CANCEL_ACTIVITY_FAILED session_error, and a
+ * terminal activity_delta). No-op if absent.
  */
-function clearCancellingActivity(get: MsgGet, set: MsgSet, activityId: string | undefined): void {
-  if (!activityId) return;
+function clearCancellingActivity(get: MsgGet, set: MsgSet, sessionId: string | undefined, activityId: string | undefined): void {
+  const key = cancelKey(sessionId, activityId);
+  if (!key) return;
   const prev = get().cancellingActivityIds;
-  if (!prev || !prev.has(activityId)) return;
+  if (!prev || !prev.has(key)) return;
   const next = new Set(prev);
-  next.delete(activityId);
+  next.delete(key);
   set({ cancellingActivityIds: next });
+}
+
+/**
+ * #5277 — drop ALL pending cancels for a session. Used when a session-level
+ * error (SESSION_NOT_FOUND) means no cancel for that session can ever resolve,
+ * so its nodes must not stay stuck "Cancelling…".
+ */
+function clearCancellingForSession(get: MsgGet, set: MsgSet, sessionId: string | undefined): void {
+  if (!sessionId) return;
+  const prev = get().cancellingActivityIds;
+  if (!prev || prev.size === 0) return;
+  const prefix = `${sessionId}:`;
+  let changed = false;
+  const next = new Set<string>();
+  for (const key of prev) {
+    if (key.startsWith(prefix)) { changed = true; continue; }
+    next.add(key);
+  }
+  if (changed) set({ cancellingActivityIds: next });
 }
 
 /**
@@ -2442,10 +2469,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // platform-specific surfaces (notification, alert, server error banner)
       // stay here.
       const parsed = sharedSessionError(msg, get().activeSessionId);
-      // #5277: a CANCEL_ACTIVITY_FAILED echoes the activityId — clear its
-      // pending "cancelling" state so the ActivityTree button recovers.
-      if (parsed.code === 'CANCEL_ACTIVITY_FAILED' && typeof msg.activityId === 'string') {
-        clearCancellingActivity(get, set, msg.activityId);
+      // #5277: clear pending "cancelling" state so the ActivityTree button
+      // recovers. CANCEL_ACTIVITY_FAILED echoes the exact sessionId+activityId;
+      // SESSION_NOT_FOUND means the whole session is gone, so no cancel for it
+      // can resolve — drop all of its pending cancels.
+      if (parsed.code === 'CANCEL_ACTIVITY_FAILED' && typeof msg.sessionId === 'string' && typeof msg.activityId === 'string') {
+        clearCancellingActivity(get, set, msg.sessionId, msg.activityId);
+      } else if (parsed.code === 'SESSION_NOT_FOUND') {
+        clearCancellingForSession(get, set, parsed.attemptedSessionId ?? undefined);
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;

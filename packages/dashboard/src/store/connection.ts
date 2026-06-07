@@ -1707,12 +1707,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const requestId = `cancel-${nextMessageId()}`;
     const payload: Record<string, unknown> = { type: 'cancel_activity', activityId, requestId };
     if (sid) payload.sessionId = sid;
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (sid && socket && socket.readyState === WebSocket.OPEN) {
       // Only mark "cancelling" once the request is genuinely sent — otherwise an
       // offline send (cancel_activity isn't in QUEUE_TTLS, so enqueue drops it)
       // would strand the node "Cancelling…" with no ack/failure ever arriving.
+      // Key by `${sessionId}:${activityId}` — activity ids (toolUseIds) are only
+      // unique within a session, so a global activityId-only set would let one
+      // session's cancel disable/clear another's identically-ided node (#5277).
       const cancelling = new Set(get().cancellingActivityIds);
-      cancelling.add(activityId);
+      cancelling.add(`${sid}:${activityId}`);
       set({ cancellingActivityIds: cancelling });
       wsSend(socket, payload);
       return 'sent';

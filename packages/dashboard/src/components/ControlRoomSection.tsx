@@ -646,6 +646,16 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
   // activity tree (subagents / shells / tools — the retired v1 panel's view).
   const sessionId = sessionIdForRepoPath(repo.path, sessions)
   const drillable = sessionId !== null
+  // #5277: the store keys pending cancels by `${sessionId}:${activityId}`. Scope
+  // to this drill-down's session and strip the prefix so the ActivityTree can
+  // match by plain entry id (and one session's cancel never affects another's).
+  const scopedCancelling = sessionId && cancellingActivityIds
+    ? new Set(
+        [...cancellingActivityIds]
+          .filter((k) => k.startsWith(`${sessionId}:`))
+          .map((k) => k.slice(sessionId.length + 1)),
+      )
+    : undefined
 
   return (
     <>
@@ -734,7 +744,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
                     ? (activityId) => onCancelActivity(activityId, sessionId)
                     : undefined
                 }
-                cancellingActivityIds={cancellingActivityIds}
+                cancellingActivityIds={scopedCancelling}
               />
             </div>
           </td>

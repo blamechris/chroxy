@@ -370,7 +370,9 @@ describe('useConnectionStore', () => {
     expect(payload.type).toBe('cancel_activity');
     expect(payload.activityId).toBe('act-1');
     expect(typeof payload.requestId).toBe('string');
-    expect(useConnectionStore.getState().cancellingActivityIds.has('act-1')).toBe(true);
+    // Keyed by `${sessionId}:${activityId}` so one session's cancel can't affect
+    // another's identically-ided node.
+    expect(useConnectionStore.getState().cancellingActivityIds.has('s1:act-1')).toBe(true);
   });
 
   it('#5277: sendCancelActivity does NOT mark cancelling when offline (cancel is not queueable)', async () => {
@@ -380,7 +382,7 @@ describe('useConnectionStore', () => {
     useConnectionStore.getState().sendCancelActivity('act-1');
 
     // Offline send is dropped (not in QUEUE_TTLS); the node must NOT be stranded "Cancelling…".
-    expect(useConnectionStore.getState().cancellingActivityIds.has('act-1')).toBe(false);
+    expect(useConnectionStore.getState().cancellingActivityIds.has('s1:act-1')).toBe(false);
   });
 
   it('exposes all required actions', async () => {

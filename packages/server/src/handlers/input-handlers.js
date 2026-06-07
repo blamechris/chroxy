@@ -591,6 +591,7 @@ async function handleCancelActivity(ws, client, msg, ctx) {
       message: 'This session does not support cancelling activity',
       reason: 'not-supported',
       activityId: msg.activityId,
+      sessionId: msg.sessionId,
       requestId: msg.requestId,
     })
     return
@@ -606,6 +607,7 @@ async function handleCancelActivity(ws, client, msg, ctx) {
       message: `Could not cancel activity: ${reason}`,
       reason,
       activityId: msg.activityId,
+      sessionId: msg.sessionId,
       requestId: msg.requestId,
     })
     return
@@ -619,6 +621,7 @@ async function handleCancelActivity(ws, client, msg, ctx) {
   ctx.send(ws, {
     type: 'cancel_activity_ack',
     activityId: msg.activityId,
+    sessionId: msg.sessionId,
     requestId: msg.requestId,
   })
 }

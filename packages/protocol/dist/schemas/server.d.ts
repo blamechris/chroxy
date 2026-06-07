@@ -523,6 +523,7 @@ export declare const ServerActivityDeltaSchema: z.ZodObject<{
 export declare const ServerCancelActivityAckSchema: z.ZodObject<{
     type: z.ZodLiteral<"cancel_activity_ack">;
     activityId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 /**

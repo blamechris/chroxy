@@ -605,6 +605,10 @@ export const ServerActivityDeltaSchema = z.object({
 export const ServerCancelActivityAckSchema = z.object({
     type: z.literal('cancel_activity_ack'),
     activityId: z.string(),
+    // #5277: the session the cancelled node belongs to. Activity ids (toolUseIds)
+    // are only unique WITHIN a session, so the dashboard scopes its pending-cancel
+    // state by sessionId+activityId — the ack echoes the session for that.
+    sessionId: z.string().optional(),
     requestId: z.string().max(128).optional(),
 }).passthrough();
 // ───────────────────────────────────────────────────────────────────────────
