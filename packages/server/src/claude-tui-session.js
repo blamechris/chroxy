@@ -809,14 +809,18 @@ export class ClaudeTuiSession extends BaseSession {
     this._isBusy = false
     this._currentMessageId = null
     if (this._destroying) return
+    // #5311 review — the socket 'close'/'error' paths have no exit info, so
+    // render a clear "unknown" instead of a bare "code=undefined". The
+    // "Claude PTY exited" prefix is preserved (clients/log scrapers key on it).
     const code = this._ptyExitInfo?.exitCode
-    log.warn(`claude PTY gone (${source}) (code=${code} signal=${this._ptyExitInfo?.signal})`)
+    const codeStr = (code === undefined || code === null) ? 'unknown' : code
+    log.warn(`claude PTY gone (${source}) (code=${codeStr} signal=${this._ptyExitInfo?.signal ?? 'unknown'})`)
     // Suppress the generic error when a turn was in flight — sendMessage's poll
     // loop emits a more specific "PTY exited mid-turn" error instead, so the
     // dashboard sees one root cause not two.
     if (!hadActiveTurn) {
       const tail = this._outputTailDiagnostic()
-      const base = `Claude PTY exited (code=${code})`
+      const base = `Claude PTY exited (code=${codeStr})`
       this.emit('error', { message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
     }
   }

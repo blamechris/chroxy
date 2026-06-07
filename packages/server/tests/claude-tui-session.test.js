@@ -5722,6 +5722,16 @@ describe('ClaudeTuiSession', () => {
       assert.match(errors[0].message, /Claude PTY exited \(code=1\)/)
     })
 
+    it('renders code=unknown (never "undefined") when failing via close/error with no exit info (#5311)', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._onPtyGone(null, 'close') // socket fault: no exit info
+      assert.equal(errors.length, 1)
+      assert.match(errors[0].message, /Claude PTY exited \(code=unknown\)/)
+      assert.doesNotMatch(errors[0].message, /undefined/)
+    })
+
     it('is idempotent — onExit + close + error collapse to ONE error emit', () => {
       const s = makeSession()
       const errors = []
