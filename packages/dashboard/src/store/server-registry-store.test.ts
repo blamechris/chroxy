@@ -27,15 +27,27 @@ vi.mock('../utils/auth', () => ({
 // Must import after localStorage mock is set up
 const { useConnectionStore } = await import('./connection')
 
+// Capture the real action refs at import time (before any test mocks them). The
+// store is a module singleton, so retryConnection tests that swap actions in via
+// setState would otherwise leak mocked refs into later tests in this file — and,
+// in a shared Vitest worker, other files. Restore them in beforeEach.
+const realActions = {
+  connect: useConnectionStore.getState().connect,
+  connectToServer: useConnectionStore.getState().connectToServer,
+  _resetSessionMemory: useConnectionStore.getState()._resetSessionMemory,
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(store)) delete store[k]
   mockToken = null
-  // Reset store state relevant to server registry
+  // Reset store state relevant to server registry, restoring the real actions
+  // any prior test may have replaced with spies.
   useConnectionStore.setState({
     serverRegistry: [],
     activeServerId: null,
     connectionPhase: 'disconnected',
+    ...realActions,
   })
 })
 
