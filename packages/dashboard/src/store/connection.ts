@@ -1018,9 +1018,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
   // aggressively after transient drops (tunnel blips, server restarts, etc.).
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => {
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string }) => {
     const _retryCount = options?._retryCount ?? 0;
     const silent = options?.silent ?? false;
+    // #5281 ③ PR 2 — resolve the pairing id for THIS connect into the closure,
+    // consuming the one-shot module global at the top of a fresh connect (NOT on
+    // socket open). Consuming here means a pairing connect that never opens
+    // (host down) or is superseded by another connect can't leak its armed id
+    // into the next, unrelated connect's auth. Retries thread it forward via
+    // `_pairingId` so a flaky-but-reachable daemon still pairs.
+    const pairingId = _retryCount === 0
+      ? (() => { const id = pendingPairingId; pendingPairingId = null; return id; })()
+      : (options?._pairingId ?? null);
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
 
@@ -1087,7 +1096,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               const delay = withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]!);
               setTimeout(() => {
                 if (myAttemptId !== connectionAttemptId) return;
-                get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
+                get().connect(url, token, { silent, _retryCount: _retryCount + 1, ...(pairingId ? { _pairingId: pairingId } : {}) });
               }, delay);
             } else {
               set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
@@ -1116,7 +1125,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           console.log(`[ws] Retrying in ${delay}ms...`);
           setTimeout(() => {
             if (myAttemptId !== connectionAttemptId) return;
-            get().connect(url, token, { silent, _retryCount: _retryCount + 1 });
+            get().connect(url, token, { silent, _retryCount: _retryCount + 1, ...(pairingId ? { _pairingId: pairingId } : {}) });
           }, delay);
         } else {
           set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
@@ -1192,12 +1201,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           deviceInfo: { deviceId, ...info },
           capabilities: CLIENT_CAPABILITIES.desktop,
         };
-        // #5281 ③ PR 2 — pairing handshake when a one-shot pairing id is armed
-        // (consume it immediately so a reconnect falls back to the session
-        // token issued in auth_ok). Otherwise the normal token auth.
-        if (pendingPairingId) {
-          const pairingId = pendingPairingId;
-          pendingPairingId = null;
+        // #5281 ③ PR 2 — pairing handshake when this connect carries a pairing
+        // id (resolved into the closure at connect-start). Otherwise normal
+        // token auth. A reconnect carries no pairing id, so it auths with the
+        // session token written back to the registry in auth_ok.
+        if (pairingId) {
           socket.send(JSON.stringify({ type: 'pair', pairingId, ...common }));
         } else {
           socket.send(JSON.stringify({ type: 'auth', token, ...common }));

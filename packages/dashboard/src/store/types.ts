@@ -744,7 +744,7 @@ export interface ConnectionState {
   _terminalWriteCallback: ((data: string) => void) | null;
 
   // Actions
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string }) => void;
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;
