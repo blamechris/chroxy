@@ -125,7 +125,10 @@ export class Supervisor extends EventEmitter {
    * is already underway. Extracted so tests can drive it without real signals.
    */
   _onProcessError(kind, err) {
-    this._log.error(`Supervisor ${kind} (staying alive): ${err?.stack || err}`)
+    // Reflect the actual action: during a deliberate shutdown we exit(1); the
+    // rest of the time we stay alive and keep supervising.
+    const action = this._shuttingDown ? 'exiting — shutdown in progress' : 'staying alive'
+    this._log.error(`Supervisor ${kind} (${action}): ${err?.stack || err}`)
     if (this._shuttingDown) this._exit(1)
   }
 

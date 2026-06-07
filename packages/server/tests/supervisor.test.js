@@ -866,20 +866,20 @@ describe('Supervisor', () => {
   // #5314 (WP-1.4) — supervisor crash safety + cloudflared boot leak.
   describe('crash safety (#5314)', () => {
     it('_onProcessError logs and stays alive (does not exit) when not shutting down', () => {
-      const { supervisor } = createTestSupervisor()
+      const { supervisor } = setup()
       supervisor._onProcessError('uncaughtException', new Error('stray fault'))
       assert.equal(supervisor._exitCalled, null, 'supervisor must keep supervising after an uncaught error')
     })
 
     it('_onProcessError exits(1) when a shutdown is already underway', () => {
-      const { supervisor } = createTestSupervisor()
+      const { supervisor } = setup()
       supervisor._shuttingDown = true
       supervisor._onProcessError('unhandledRejection', new Error('during shutdown'))
       assert.equal(supervisor._exitCalled, 1)
     })
 
     it('stops cloudflared and exits(1) when the tunnel is not routable on boot (no leak)', async () => {
-      const { supervisor } = createTestSupervisor()
+      const { supervisor } = setup()
       // waitForTunnel throws on failure; the cloudflared child is already running.
       supervisor._waitForTunnel = () => Promise.reject(new Error('tunnel not routable'))
       await supervisor.start()
@@ -892,7 +892,7 @@ describe('Supervisor', () => {
       // #5314 review — the boot guard covers not just waitForTunnel but every
       // pre-fork step (displayQr/writeConnectionInfo), since each runs while
       // cloudflared is up but before the child fork.
-      const { supervisor } = createTestSupervisor()
+      const { supervisor } = setup()
       supervisor._displayQr = () => Promise.reject(new Error('QR encode failed'))
       await supervisor.start()
       assert.equal(supervisor._mockTunnel.stop.mock.callCount(), 1, 'cloudflared stopped on a pre-fork boot throw')
@@ -901,7 +901,7 @@ describe('Supervisor', () => {
     })
 
     it('tunnel_recovered handler contains a waitForTunnel rejection (no unhandledRejection)', async () => {
-      const { supervisor } = createTestSupervisor()
+      const { supervisor } = setup()
       await supervisor.start() // default _waitForTunnel resolves → handler wired
       // A routine DNS-settle failure on recovery: waitForTunnel rejects.
       supervisor._waitForTunnel = () => Promise.reject(new Error('DNS not settled'))
