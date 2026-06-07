@@ -85,6 +85,11 @@ export class SessionStatePersistence {
     // on a shared intermediate `.tmp` and clobber each other mid-write,
     // corrupting the file. PIDs are unique among live processes, so the temp
     // paths can't collide. Mirrors the models-cache precedent (models.js:488).
+    // Trade-off vs. the bare `.tmp`: the shared `.tmp` was self-healing (the
+    // next write O_TRUNC-reused it), whereas a per-pid temp orphaned by a
+    // hard-kill mid-write (between writeFileSync and renameSync) is never
+    // reused by a later process and no sweeper reclaims it. Accepted: such
+    // mid-write hard-kills are rare and the sidecar is tiny (matches models.js).
     writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
@@ -209,8 +214,9 @@ export class SessionStatePersistence {
    * (create/destroy/rename) use flushPersist() and are never debounced, and
    * every CLEAN exit path serializes immediately — SIGINT/SIGTERM (server-cli.js)
    * and the supervised IPC shutdown + crash handlers (server-cli-child.js, #5308)
-   * all call serializeState() directly, which cancels this timer and writes the
-   * current state. So the only way to lose up to persistDebounceMs (2s) of
+   * all call serializeState() directly (followed by destroyAll(), which cancels
+   * this timer and no-ops any stray fire). So the only way to lose up to
+   * persistDebounceMs (2s) of
    * message history is an abrupt kill that runs NO handler at all — SIGKILL,
    * OOM-kill, or power loss. That window is accepted as best-effort: shrinking
    * it trades constant write amplification on every token for protection against

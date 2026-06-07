@@ -58,7 +58,7 @@ describe('platform', () => {
       assert.strictEqual(content, 'second')
     })
 
-    it('honours a custom tmpSuffix so concurrent writers to the same file use distinct temps (#5309)', () => {
+    it('honours a custom tmpSuffix so writers to the same file use distinct temps (#5309)', () => {
       const filePath = join(tmpDir, 'state.json')
       // Two writers targeting the same final path with distinct per-pid suffixes
       // must each rename their OWN intermediate temp — they can't clobber a
