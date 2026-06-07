@@ -56,6 +56,7 @@ export type {
   ActivityEntry,
   ServerActivitySnapshotMessage,
   ServerActivityDeltaMessage,
+  ServerCancelActivityAckMessage,
 } from './schemas/server.ts'
 
 // #5171: pin the Host/Repo Status Control Room contract (#5170 epic) at the

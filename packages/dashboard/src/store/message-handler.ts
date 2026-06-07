@@ -115,7 +115,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -1867,6 +1867,13 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
   if (next === prev) return;
   set({ activity: next });
 
+  // #5277: if a node we were cancelling just went terminal (whether from the
+  // cancel itself or natural completion racing it), drop its pending state so
+  // the id can't leak in cancellingActivityIds after the row is gone/finished.
+  if (parsed.data.op === 'ended') {
+    clearCancellingActivity(get, set, parsed.data.sessionId, parsed.data.entry.id);
+  }
+
   const sessionId = parsed.data.sessionId;
   if (get().sessionStates[sessionId] && !_replayingSessions.has(sessionId)) {
     updateSession(sessionId, (ss) => {
@@ -1875,6 +1882,57 @@ function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: Msg
       return patch;
     });
   }
+}
+
+/**
+ * #5277 — Control Room `cancel_activity_ack`: positive confirmation that a
+ * cancel_activity request was actioned. Clears the node's "cancelling" pending
+ * state (the terminal activity_delta separately updates the tree itself).
+ */
+function handleCancelActivityAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerCancelActivityAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  clearCancellingActivity(get, set, parsed.data.sessionId, parsed.data.activityId);
+}
+
+/** #5277 — composite key: activity ids are only unique within a session. */
+function cancelKey(sessionId: string | undefined, activityId: string | undefined): string | null {
+  if (!sessionId || !activityId) return null;
+  return `${sessionId}:${activityId}`;
+}
+
+/**
+ * #5277 — drop one `${sessionId}:${activityId}` from the in-flight cancel set
+ * (shared by the success ack, the CANCEL_ACTIVITY_FAILED session_error, and a
+ * terminal activity_delta). No-op if absent.
+ */
+function clearCancellingActivity(get: MsgGet, set: MsgSet, sessionId: string | undefined, activityId: string | undefined): void {
+  const key = cancelKey(sessionId, activityId);
+  if (!key) return;
+  const prev = get().cancellingActivityIds;
+  if (!prev || !prev.has(key)) return;
+  const next = new Set(prev);
+  next.delete(key);
+  set({ cancellingActivityIds: next });
+}
+
+/**
+ * #5277 — drop ALL pending cancels for a session. Used when a session-level
+ * error (SESSION_NOT_FOUND) means no cancel for that session can ever resolve,
+ * so its nodes must not stay stuck "Cancelling…".
+ */
+function clearCancellingForSession(get: MsgGet, set: MsgSet, sessionId: string | undefined): void {
+  if (!sessionId) return;
+  const prev = get().cancellingActivityIds;
+  if (!prev || prev.size === 0) return;
+  const prefix = `${sessionId}:`;
+  let changed = false;
+  const next = new Set<string>();
+  for (const key of prev) {
+    if (key.startsWith(prefix)) { changed = true; continue; }
+    next.add(key);
+  }
+  if (changed) set({ cancellingActivityIds: next });
 }
 
 /**
@@ -1962,6 +2020,8 @@ const HANDLERS: Record<string, Handler> = {
   // #5163 (epic #5159): Control Room live activity tree.
   activity_snapshot: handleActivitySnapshot,
   activity_delta: handleActivityDelta,
+  // #5277: positive ack correlating a cancel_activity request to its outcome.
+  cancel_activity_ack: handleCancelActivityAck,
   // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
   host_status_snapshot: handleHostStatusSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
@@ -2409,6 +2469,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // platform-specific surfaces (notification, alert, server error banner)
       // stay here.
       const parsed = sharedSessionError(msg, get().activeSessionId);
+      // #5277: clear pending "cancelling" state so the ActivityTree button
+      // recovers. CANCEL_ACTIVITY_FAILED echoes the exact sessionId+activityId;
+      // SESSION_NOT_FOUND means the whole session is gone, so no cancel for it
+      // can resolve — drop all of its pending cancels.
+      if (parsed.code === 'CANCEL_ACTIVITY_FAILED' && typeof msg.sessionId === 'string' && typeof msg.activityId === 'string') {
+        clearCancellingActivity(get, set, msg.sessionId, msg.activityId);
+      } else if (parsed.code === 'SESSION_NOT_FOUND') {
+        clearCancellingForSession(get, set, parsed.attemptedSessionId ?? undefined);
+      }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;
         if (crashedId && get().sessionStates[crashedId]) {

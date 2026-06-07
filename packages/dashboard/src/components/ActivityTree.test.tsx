@@ -202,6 +202,30 @@ describe('ActivityTree control actions (#5272)', () => {
     expect(screen.queryByTestId('control-room-cancel-tool-run')).toBeNull()
   })
 
+  it('#5277: shows a disabled "Cancelling…" state for ids in cancellingActivityIds', () => {
+    const onCancel = vi.fn()
+    const activity = buildActivity([
+      entry('a', { kind: 'agent', status: 'running' }),
+      entry('b', { kind: 'agent', status: 'running' }),
+    ])
+    render(
+      <ActivityTree
+        activity={activity}
+        sessionId={SESSION_ID}
+        now={() => 1000}
+        onCancelActivity={onCancel}
+        cancellingActivityIds={new Set(['a'])}
+      />,
+    )
+    const pending = screen.getByTestId('control-room-cancel-a') as HTMLButtonElement
+    expect(pending.textContent).toBe('Cancelling…')
+    expect(pending.disabled).toBe(true)
+    // The other live agent is unaffected.
+    const other = screen.getByTestId('control-room-cancel-b') as HTMLButtonElement
+    expect(other.textContent).toBe('Cancel')
+    expect(other.disabled).toBe(false)
+  })
+
   it('invokes onCancelActivity with the entry id (and does not toggle expansion)', () => {
     const onCancel = vi.fn()
     const activity = buildActivity([

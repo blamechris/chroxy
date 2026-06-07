@@ -591,6 +591,8 @@ async function handleCancelActivity(ws, client, msg, ctx) {
       message: 'This session does not support cancelling activity',
       reason: 'not-supported',
       activityId: msg.activityId,
+      sessionId: msg.sessionId,
+      requestId: msg.requestId,
     })
     return
   }
@@ -605,13 +607,23 @@ async function handleCancelActivity(ws, client, msg, ctx) {
       message: `Could not cancel activity: ${reason}`,
       reason,
       activityId: msg.activityId,
+      sessionId: msg.sessionId,
+      requestId: msg.requestId,
     })
     return
   }
-  // Success: the node's terminal activity_delta is broadcast via the session's
-  // agent_completed → registry path; no extra reply needed (mirrors interrupt,
-  // which also acks via the resulting stream change, not a dedicated message).
+  // Success: the node's terminal activity_delta (via agent_completed → registry)
+  // is still the substantive change, but #5277 also sends an explicit positive
+  // ack echoing the activityId + requestId so the dashboard can correlate this
+  // specific cancel click to its outcome — the delta alone is uncorrelated and
+  // may lag or drop.
   log.info(`cancel_activity ${msg.activityId} actioned by ${client.id}`)
+  ctx.send(ws, {
+    type: 'cancel_activity_ack',
+    activityId: msg.activityId,
+    sessionId: msg.sessionId,
+    requestId: msg.requestId,
+  })
 }
 
 function handleResumeBudget(ws, client, msg, ctx) {

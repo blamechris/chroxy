@@ -31,7 +31,7 @@ export declare const CLIENT_CAPABILITIES: {
 export declare const MIN_PROTOCOL_VERSION = 1;
 export * from './schemas/index.ts';
 export type { ServerErrorEnvelopeMessage } from './schemas/server.ts';
-export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, } from './schemas/server.ts';
+export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, ServerCancelActivityAckMessage, } from './schemas/server.ts';
 export type { RepoVerdict, RepoTree, RepoStatus, HostStatusSummary, ServerHostStatusSnapshotMessage, } from './schemas/server.ts';
 export type { RunnerVerdict, RunnerServiceState, RunnerInfo, RepoRunners, RunnerStatusSummary, ServerRunnerStatusSnapshotMessage, } from './schemas/server.ts';
 export type { HostStatusRequestMessage } from './schemas/client.ts';

@@ -44,6 +44,12 @@ export interface ActivityTreeProps {
    * failed) and non-agent nodes (shells / tools) never get a cancel affordance.
    */
   onCancelActivity?: (activityId: string) => void
+  /**
+   * #5277: activity ids with an in-flight cancel request. Their cancel button
+   * shows a disabled "Cancelling…" pending state until the server's
+   * cancel_activity_ack (success) or CANCEL_ACTIVITY_FAILED (failure) lands.
+   */
+  cancellingActivityIds?: ReadonlySet<string>
 }
 
 // Stable empty tree for the null-session case so we don't allocate a new array
@@ -133,9 +139,10 @@ interface EntryRowProps {
   expanded: boolean
   onToggleExpand: (id: string) => void
   onCancelActivity?: (activityId: string) => void
+  cancellingActivityIds?: ReadonlySet<string>
 }
 
-function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivity }: EntryRowProps) {
+function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivity, cancellingActivityIds }: EntryRowProps) {
   const terminal = isTerminal(entry.status)
   const blocked = entry.status === 'blocked'
   // Terminal entries freeze elapsed at endedAt; live entries tick from `now`.
@@ -152,6 +159,9 @@ function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivit
   // SIBLING of the toggle button (not nested — that would be invalid HTML and
   // swallow its own click).
   const canCancel = onCancelActivity !== undefined && entry.kind === 'agent' && !terminal
+  // #5277: a cancel request is in flight for this node — show a disabled
+  // "Cancelling…" pending state until the ack/failure clears it.
+  const isCancelling = canCancel && (cancellingActivityIds?.has(entry.id) ?? false)
 
   return (
     <li
@@ -202,10 +212,12 @@ function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivit
             className="control-room-cancel-btn"
             data-testid={`control-room-cancel-${entry.id}`}
             onClick={() => onCancelActivity!(entry.id)}
-            title={`Cancel ${entry.label || KIND_LABEL[entry.kind]}`}
-            aria-label={`Cancel subagent ${entry.label || ''}`.trim()}
+            disabled={isCancelling}
+            aria-busy={isCancelling}
+            title={isCancelling ? 'Cancelling…' : `Cancel ${entry.label || KIND_LABEL[entry.kind]}`}
+            aria-label={isCancelling ? 'Cancelling subagent' : `Cancel subagent ${entry.label || ''}`.trim()}
           >
-            Cancel
+            {isCancelling ? 'Cancelling…' : 'Cancel'}
           </button>
         )}
       </div>
@@ -250,9 +262,10 @@ interface EntryTreeProps {
   expandedIds: ReadonlySet<string>
   onToggleExpand: (id: string) => void
   onCancelActivity?: (activityId: string) => void
+  cancellingActivityIds?: ReadonlySet<string>
 }
 
-function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelActivity }: EntryTreeProps) {
+function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelActivity, cancellingActivityIds }: EntryTreeProps) {
   return (
     <ul className="control-room-entry-list" data-testid={depth === 0 ? 'control-room-tree' : undefined}>
       {nodes.map((node) => (
@@ -265,6 +278,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelAct
               expanded={expandedIds.has(node.entry.id)}
               onToggleExpand={onToggleExpand}
               onCancelActivity={onCancelActivity}
+              cancellingActivityIds={cancellingActivityIds}
             />
           </ul>
           {node.children.length > 0 && (
@@ -275,6 +289,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelAct
               expandedIds={expandedIds}
               onToggleExpand={onToggleExpand}
               onCancelActivity={onCancelActivity}
+              cancellingActivityIds={cancellingActivityIds}
             />
           )}
         </li>
@@ -283,7 +298,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelAct
   )
 }
 
-export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActivity }: ActivityTreeProps) {
+export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActivity, cancellingActivityIds }: ActivityTreeProps) {
   // Only query the reducer for a real session — a null id has no tree, and
   // selecting with an empty-string id would do pointless work (and could match
   // a degenerate "" session key). The empty-state branch below renders for null.
@@ -337,6 +352,7 @@ export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActi
         expandedIds={expandedIds}
         onToggleExpand={handleToggleExpand}
         onCancelActivity={onCancelActivity}
+        cancellingActivityIds={cancellingActivityIds}
       />
     </div>
   )

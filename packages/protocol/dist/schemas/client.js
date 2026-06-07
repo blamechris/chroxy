@@ -67,6 +67,11 @@ export const CancelActivitySchema = z.object({
     type: z.literal('cancel_activity'),
     activityId: z.string().min(1).max(512),
     sessionId: z.string().max(256).optional(),
+    // #5277: opaque client-generated correlation id echoed back on the
+    // `cancel_activity_ack` (success) and the `CANCEL_ACTIVITY_FAILED`
+    // session_error (failure), so the dashboard can tie a specific cancel click
+    // to its outcome without inferring it from the terminal activity_delta.
+    requestId: z.string().max(128).optional(),
 }).passthrough();
 export const SetModelSchema = z.object({
     type: z.literal('set_model'),

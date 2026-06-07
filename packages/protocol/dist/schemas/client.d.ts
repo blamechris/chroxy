@@ -73,6 +73,7 @@ export declare const CancelActivitySchema: z.ZodObject<{
     type: z.ZodLiteral<"cancel_activity">;
     activityId: z.ZodString;
     sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const SetModelSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_model">;
@@ -602,6 +603,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"cancel_activity">;
     activityId: z.ZodString;
     sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"set_model">;
     model: z.ZodString;

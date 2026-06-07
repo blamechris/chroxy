@@ -512,6 +512,21 @@ export declare const ServerActivityDeltaSchema: z.ZodObject<{
     }, z.core.$strip>;
 }, z.core.$strip>;
 /**
+ * #5277: positive ack that a `cancel_activity` request was actioned. Success
+ * was previously silent — the terminal `activity_delta` was the only signal,
+ * which the dashboard couldn't correlate to a specific cancel click (and which
+ * could be delayed/dropped). This echoes the request's `activityId` and
+ * (when supplied) `requestId` so the caller gets a definite per-request signal.
+ * Failures continue to surface as a `CANCEL_ACTIVITY_FAILED` session_error,
+ * which also echoes `requestId`.
+ */
+export declare const ServerCancelActivityAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"cancel_activity_ack">;
+    activityId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
  * Verdict for a repo — the survey's classification of "what is this repo's
  * current state". Drives the colour-coded tag in the Control Room table:
  *   - `'live'`        — actively worked (a chroxy session is/was recently running).
@@ -1541,6 +1556,7 @@ export type ActivityOutputRef = z.infer<typeof ActivityOutputRefSchema>;
 export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;
 export type ServerActivitySnapshotMessage = z.infer<typeof ServerActivitySnapshotSchema>;
 export type ServerActivityDeltaMessage = z.infer<typeof ServerActivityDeltaSchema>;
+export type ServerCancelActivityAckMessage = z.infer<typeof ServerCancelActivityAckSchema>;
 export type RepoVerdict = z.infer<typeof RepoVerdictSchema>;
 export type RepoTree = z.infer<typeof RepoTreeSchema>;
 export type RepoStatus = z.infer<typeof RepoStatusSchema>;
