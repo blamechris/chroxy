@@ -846,6 +846,15 @@ export class SessionManager extends EventEmitter {
         result.catch((err) => {
           const message = err?.message || String(err)
           log.error(`Async start() rejected for session ${sessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+          // NOTE (#5310/#5316): destroySession() here fully tears the session
+          // down — including _removeWorktree() and history cleanup. For a
+          // restore-rebind whose provider start() rejects ASYNCHRONOUSLY, that
+          // destroys the pre-existing worktree + restored history. This path
+          // already erased restored history pre-#5310; making restore +
+          // start-failure non-destructive (keep the entry, mark retryable) is
+          // the explicit scope of WP-2.2 (#5316), which will replace this
+          // destroySession() call. The SYNCHRONOUS rollback below is guarded
+          // against worktree deletion on rebind as of #5310.
           this.destroySession(sessionId)
         })
       }
@@ -860,9 +869,16 @@ export class SessionManager extends EventEmitter {
         log.error(`Failed to destroy session ${sessionId} during start() failure cleanup: ${destroyErr?.stack || destroyErr}`)
       }
       this._cleanupSessionMaps(sessionId)
-      // Clean up worktree if one was created but session start failed
-      if (worktreePath) {
-        this._removeWorktree(worktreePath, baseCwd, sessionId)
+      // Clean up the worktree ONLY if we freshly created it this call. #5310:
+      // on a restore-rebind, worktreePath points at a PRE-EXISTING worktree
+      // (with possibly uncommitted work) that we must NOT delete just because
+      // the provider's start() failed — destroying it would lose the user's
+      // work AND make the #2954-preserved retry unrecoverable (the next attempt
+      // would hit the missing-worktree statSync failure). Only the fresh-create
+      // branch should roll back its own creation. Use worktreeRepoDir (the
+      // original repo) for the remove, consistent with the destroy paths.
+      if (worktreePath && !restoreWorktreePath) {
+        this._removeWorktree(worktreePath, worktreeRepoDir, sessionId)
       }
       throw err
     }

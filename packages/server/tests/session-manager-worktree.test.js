@@ -7,7 +7,7 @@
  */
 import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, renameSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync, renameSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
@@ -54,6 +54,13 @@ before(async () => {
   }
 
   registerProvider('stub-worktree', StubSession)
+
+  // #5310 — a stub whose start() throws synchronously, to exercise the
+  // createSession start-failure rollback during a restore-rebind.
+  class FailStartSession extends StubSession {
+    start() { throw new Error('simulated start failure on restore') }
+  }
+  registerProvider('stub-worktree-failstart', FailStartSession)
 })
 
 // ---------------------------------------------------------------------------
@@ -195,6 +202,35 @@ describe('SessionManager worktree isolation', () => {
     // The actual payoff: GC now works post-restore (pre-fix it leaked).
     mgr2.destroySession(id)
     assert.ok(!existsSync(wtPath), 'restored worktree session GCs its worktree on destroy')
+    mgr2.destroyAll()
+  })
+
+  // #5310 — regression guard: a restore whose provider start() FAILS must NOT
+  // delete the pre-existing worktree (it holds possibly-uncommitted work, and
+  // deleting it would make the #2954-preserved retry unrecoverable). Only a
+  // freshly-created worktree should roll back on start failure.
+  it('does NOT delete the worktree when a restore-rebind start() fails (#5310)', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+    const wtPath = mgr.getSession(id).worktreePath
+    assert.ok(existsSync(wtPath), 'worktree created')
+    mgr.serializeState()
+
+    // Simulate a provider that fails to start on restore by rewriting the
+    // persisted provider to the fail-start stub, then restore.
+    const stateFile = join(gitRepo, 'session-state.json')
+    const persisted = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    persisted.sessions[0].provider = 'stub-worktree-failstart'
+    writeFileSync(stateFile, JSON.stringify(persisted))
+
+    const mgr2 = makeManager(gitRepo)
+    mgr2.restoreState() // createSession → start() throws → sync rollback
+
+    assert.ok(!mgr2.getSession(id), 'session not live after failed restore')
+    assert.ok(existsSync(wtPath), 'pre-existing worktree MUST survive a failed restore-rebind')
+    // #2954 — the failed session is preserved so a later retry can re-hydrate.
+    assert.ok(mgr2._failedRestores.has(id), 'failed restore preserved for retry')
+
     mgr2.destroyAll()
   })
 
