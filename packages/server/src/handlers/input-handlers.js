@@ -117,6 +117,38 @@ function resolveUserInputId(candidate) {
   return candidate
 }
 
+// #5281 ①.3 — an input_conflict rejection: the session can't accept this send
+// right now (busy with another device's request, or still evaluating a previous
+// draft on the same session). Echo the session and the rejected clientMessageId
+// (when well-formed) so the dashboard can remove the stranded optimistic user
+// message + clear its thinking spinner instead of leaving a ghost send behind a
+// calm notice. `message` carries the specific reason so the dashboard can show
+// it verbatim (cross-device vs same-session evaluator lock differ).
+const INPUT_CONFLICT_CROSS_DEVICE_MESSAGE =
+  'Session is already processing input from another device. Wait for it to finish or interrupt first.'
+function buildInputConflictError(sessionId, clientMessageId, message = INPUT_CONFLICT_CROSS_DEVICE_MESSAGE) {
+  const err = {
+    type: 'session_error',
+    category: 'input_conflict',
+    message,
+    sessionId,
+  }
+  // Echo only a well-formed id. Mirror resolveUserInputId's guards (incl. the
+  // reserved-id exclusion) so we never reflect a value the history path itself
+  // would have regenerated — keeps the echoed id consistent with the recorded
+  // one and avoids reflecting a reserved placeholder like 'thinking'.
+  if (
+    typeof clientMessageId === 'string' &&
+    clientMessageId.length > 0 &&
+    clientMessageId.length <= MAX_CLIENT_MESSAGE_ID_LEN &&
+    USER_INPUT_ID_RE.test(clientMessageId) &&
+    !RESERVED_USER_INPUT_IDS.has(clientMessageId)
+  ) {
+    err.clientMessageId = clientMessageId
+  }
+  return err
+}
+
 async function handleInput(ws, client, msg, ctx) {
   const text = msg.data
   let attachments = Array.isArray(msg.attachments) ? msg.attachments : undefined
@@ -260,11 +292,7 @@ async function handleInput(ws, client, msg, ctx) {
   if (entry.session.isRunning) {
     const primaryClientId = ctx.primaryClients.get(targetSessionId)
     if (primaryClientId && primaryClientId !== client.id) {
-      ctx.send(ws, {
-        type: 'session_error',
-        category: 'input_conflict',
-        message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
-      })
+      ctx.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
       return
     }
   }
@@ -280,11 +308,11 @@ async function handleInput(ws, client, msg, ctx) {
   // matches the #3636 design.
   const _pendingAwaits = _getEvaluatorAwaits(ctx)
   if (_pendingAwaits.has(targetSessionId)) {
-    ctx.send(ws, {
-      type: 'session_error',
-      category: 'input_conflict',
-      message: 'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
-    })
+    ctx.send(ws, buildInputConflictError(
+      targetSessionId,
+      msg.clientMessageId,
+      'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
+    ))
     return
   }
 
@@ -401,11 +429,7 @@ async function handleInput(ws, client, msg, ctx) {
       if (entry.session.isRunning) {
         const primaryClientId = ctx.primaryClients.get(targetSessionId)
         if (primaryClientId && primaryClientId !== client.id) {
-          ctx.send(ws, {
-            type: 'session_error',
-            category: 'input_conflict',
-            message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
-          })
+          ctx.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
           return
         }
       }

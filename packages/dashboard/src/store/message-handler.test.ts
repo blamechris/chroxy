@@ -486,6 +486,152 @@ describe('dashboard message-handler dispatch', () => {
       expect(state.serverErrors).toEqual(['session failed'])
     })
 
+    // #5281 ①.3 — input_conflict is an expected shared-session event, not a
+    // failure. It must NOT raise the red serverError / modal alert the generic
+    // branch uses, and must clean up the optimistic send the server refused.
+    it('routes input_conflict to a calm notice and removes the stranded optimistic send', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [
+              { id: 'older', type: 'user_input', content: 'earlier', timestamp: 0 },
+              { id: 'user-123', type: 'user_input', content: 'hi', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            streamingMessageId: 'pending',
+          },
+        },
+      }))
+      setStore(store)
+
+      const reason = 'Session is already processing input from another device. Wait for it to finish or interrupt first.';
+      handleMessage(
+        {
+          type: 'session_error',
+          category: 'input_conflict',
+          sessionId: 's1',
+          clientMessageId: 'user-123',
+          message: reason,
+        },
+        ctx() as any,
+      )
+
+      const state = store.getState() as any
+      // Calm info notice (the server's specific reason), not a red error.
+      expect(state.serverErrors).toEqual([])
+      expect(state._infoNotifications).toEqual([reason])
+      // The stranded optimistic user message + thinking spinner are gone…
+      const ss = state.sessionStates.s1
+      expect(ss.messages.find((m: any) => m.id === 'user-123')).toBeUndefined()
+      expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(ss.streamingMessageId).toBeNull()
+      // …but only the rejected send — prior real messages are untouched.
+      expect(ss.messages.find((m: any) => m.id === 'older')).toBeDefined()
+    })
+
+    it('cleans up root-level (CLI single-session) store mode too', () => {
+      // No active session / no sessionStates entry — addUserMessage put the
+      // optimistic send on the top-level messages/streamingMessageId.
+      store = createMockStore(baseState({
+        activeSessionId: null,
+        sessionStates: {},
+        messages: [
+          { id: 'user-7', type: 'user_input', content: 'hi', timestamp: 1 },
+          { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+        ],
+        streamingMessageId: 'pending',
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', clientMessageId: 'user-7', message: 'busy' },
+        ctx() as any,
+      )
+
+      const state = store.getState() as any
+      expect(state.messages.find((m: any) => m.id === 'user-7')).toBeUndefined()
+      expect(state.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(state.streamingMessageId).toBeNull()
+      expect(state.serverErrors).toEqual([])
+    })
+
+    it('only drops the rejected user_input, never a colliding message of another type', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [
+              // A non-user_input message that happens to share the rejected id.
+              { id: 'dup', type: 'tool_use', content: 'ls', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            streamingMessageId: 'pending',
+          },
+        },
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', sessionId: 's1', clientMessageId: 'dup', message: 'busy' },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      // The tool_use at the colliding id survives; only the spinner cleared.
+      expect(ss.messages.find((m: any) => m.id === 'dup' && m.type === 'tool_use')).toBeDefined()
+      expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(ss.streamingMessageId).toBeNull()
+    })
+
+    it('shows the evaluator-lock reason verbatim (not the cross-device copy)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      }))
+      setStore(store)
+
+      const evalReason = 'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.';
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', sessionId: 's1', message: evalReason },
+        ctx() as any,
+      )
+
+      expect((store.getState() as any)._infoNotifications).toEqual([evalReason])
+      expect((store.getState() as any).serverErrors).toEqual([])
+    })
+
+    it('input_conflict still clears the spinner when the server omits clientMessageId', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            messages: [
+              { id: 'user-9', type: 'user_input', content: 'hi', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            streamingMessageId: 'pending',
+          },
+        },
+      }))
+      setStore(store)
+
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', sessionId: 's1', message: 'busy' },
+        ctx() as any,
+      )
+
+      const ss = (store.getState() as any).sessionStates.s1
+      // Without the echoed id the ghost message can't be removed, but the
+      // spinner must still clear (no perpetual "thinking").
+      expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
+      expect(ss.streamingMessageId).toBeNull()
+      expect((store.getState() as any).serverErrors).toEqual([])
+    })
+
     // Issue #2904: bound-token error should be rewritten to something
     // actionable that names the session instead of the raw "Not authorized".
     it('rewrites SESSION_TOKEN_MISMATCH with bound session name into an actionable hint', () => {

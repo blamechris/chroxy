@@ -98,6 +98,33 @@ describe('cross-device input echo (#1119)', () => {
       assert.equal(ctx._spies.broadcast.callCount, 0)
     })
 
+    it('#5281: echoes the session id and rejected clientMessageId so the dashboard can clean up', async () => {
+      ws = {}
+      const clientB = { id: 'client-B', activeSessionId: 'sess-1' }
+      const msg = { type: 'input', data: 'conflicting input', sessionId: 'sess-1', clientMessageId: 'user-123' }
+      await handleSessionMessage(ws, clientB, msg, ctx)
+
+      const errorMsg = ctx._spies.send.calls.find(c => c[1]?.type === 'session_error')
+      assert.ok(errorMsg)
+      assert.equal(errorMsg[1].category, 'input_conflict')
+      assert.equal(errorMsg[1].sessionId, 'sess-1')
+      assert.equal(errorMsg[1].clientMessageId, 'user-123')
+    })
+
+    it('#5281: does not echo a malformed clientMessageId', async () => {
+      ws = {}
+      const clientB = { id: 'client-B', activeSessionId: 'sess-1' }
+      const msg = { type: 'input', data: 'conflicting input', sessionId: 'sess-1', clientMessageId: 'bad id with spaces!' }
+      await handleSessionMessage(ws, clientB, msg, ctx)
+
+      const errorMsg = ctx._spies.send.calls.find(c => c[1]?.type === 'session_error')
+      assert.ok(errorMsg)
+      assert.equal(errorMsg[1].category, 'input_conflict')
+      // Session id still echoed; the malformed id is dropped rather than reflected.
+      assert.equal(errorMsg[1].sessionId, 'sess-1')
+      assert.equal(errorMsg[1].clientMessageId, undefined)
+    })
+
     it('allows input from the same client even when busy', async () => {
       ws = {}
       const clientA = { id: 'client-A', activeSessionId: 'sess-1' }
