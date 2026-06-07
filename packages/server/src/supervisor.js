@@ -129,6 +129,22 @@ export class Supervisor extends EventEmitter {
     if (this._shuttingDown) this._exit(1)
   }
 
+  /**
+   * #5314 (WP-1.4) — single cleanup path for a boot failure that occurs after
+   * cloudflared has started but before the child is forked. Stops cloudflared so
+   * it doesn't leak as an orphan, then exits(1). Best-effort stop — we're exiting
+   * regardless.
+   */
+  async _failBoot(err) {
+    this._log.error(`Supervisor boot failed before the child started: ${err?.message || err}`)
+    try {
+      await this._tunnel.stop()
+    } catch (stopErr) {
+      this._log.error(`Failed to stop cloudflared after boot failure: ${stopErr?.message || stopErr}`)
+    }
+    this._exit(1)
+  }
+
   /** Override point: exit the process */
   _exit(code) {
     process.exit(code)
@@ -245,44 +261,44 @@ export class Supervisor extends EventEmitter {
       this._log.error(message)
     })
 
-    // 2. Wait for tunnel to be routable.
-    // #5314 (WP-1.4) — waitForTunnel THROWS on failure. The cloudflared child is
-    // already running (this._tunnel.start() above), so a boot failure here must
-    // stop it before exiting, otherwise the orphaned cloudflared process leaks.
+    // 2-3. Wait for the tunnel to be routable, then display + persist connection
+    // info. #5314 (WP-1.4) — every step here runs while cloudflared is already
+    // up (this._tunnel.start() above) but BEFORE the child is forked, so ANY
+    // throw must stop cloudflared first or it leaks as an orphan. waitForTunnel
+    // THROWS on a routine DNS-settle failure; _displayQr (QR encode) and
+    // writeConnectionInfo (disk) can also throw. _failBoot() is the single
+    // cleanup path. (The PID write below has its own non-fatal guard, and the
+    // child fork is past the no-leak boundary.)
     try {
       await this._waitForTunnel(httpUrl)
+
+      // 3. Display connection info
+      const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
+
+      this._log.info(`${this._modeLabel} ready`)
+      process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
+      await this._displayQr(connectionUrl)
+      process.stdout.write('\nOr connect manually:\n')
+      process.stdout.write(`   URL:   ${wsUrl}\n`)
+      process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
+      const dashboardBase = httpUrl || `http://localhost:${this._port}`
+      process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
+      process.stdout.write('\n')
+
+      // 3b. Write connection info file for programmatic access
+      writeConnectionInfo({
+        wsUrl,
+        httpUrl,
+        apiToken: this._apiToken,
+        connectionUrl,
+        tunnelMode: this._modeLabel,
+        startedAt: new Date().toISOString(),
+        pid: process.pid,
+      })
     } catch (err) {
-      this._log.error(`Tunnel failed to become routable on boot: ${err?.message || err}`)
-      try { await this._tunnel.stop() } catch (stopErr) {
-        this._log.error(`Failed to stop cloudflared after boot failure: ${stopErr?.message || stopErr}`)
-      }
-      this._exit(1)
+      await this._failBoot(err)
       return
     }
-
-    // 3. Display connection info
-    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
-
-    this._log.info(`${this._modeLabel} ready`)
-    process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
-    await this._displayQr(connectionUrl)
-    process.stdout.write('\nOr connect manually:\n')
-    process.stdout.write(`   URL:   ${wsUrl}\n`)
-    process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
-    const dashboardBase = httpUrl || `http://localhost:${this._port}`
-    process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
-    process.stdout.write('\n')
-
-    // 3b. Write connection info file for programmatic access
-    writeConnectionInfo({
-      wsUrl,
-      httpUrl,
-      apiToken: this._apiToken,
-      connectionUrl,
-      tunnelMode: this._modeLabel,
-      startedAt: new Date().toISOString(),
-      pid: process.pid,
-    })
 
     // 4. Write PID file
     try {

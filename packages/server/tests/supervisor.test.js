@@ -888,6 +888,18 @@ describe('Supervisor', () => {
       assert.equal(supervisor._mockChildren.length, 0, 'never forked the child (failed before fork)')
     })
 
+    it('stops cloudflared and exits(1) when a pre-fork boot step (_displayQr) throws (no leak)', async () => {
+      // #5314 review — the boot guard covers not just waitForTunnel but every
+      // pre-fork step (displayQr/writeConnectionInfo), since each runs while
+      // cloudflared is up but before the child fork.
+      const { supervisor } = createTestSupervisor()
+      supervisor._displayQr = () => Promise.reject(new Error('QR encode failed'))
+      await supervisor.start()
+      assert.equal(supervisor._mockTunnel.stop.mock.callCount(), 1, 'cloudflared stopped on a pre-fork boot throw')
+      assert.equal(supervisor._exitCalled, 1)
+      assert.equal(supervisor._mockChildren.length, 0, 'never forked the child')
+    })
+
     it('tunnel_recovered handler contains a waitForTunnel rejection (no unhandledRejection)', async () => {
       const { supervisor } = createTestSupervisor()
       await supervisor.start() // default _waitForTunnel resolves → handler wired
