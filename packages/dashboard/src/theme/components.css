@@ -7553,6 +7553,13 @@ button.sidebar-token-view-session-row:hover {
   margin-top: -4px;
 }
 
+/* #5281 ③ PR 2 — pairing-mode hint replacing the token field */
+.server-form-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 2px 0;
+}
+
 .server-add-actions {
   display: flex;
   gap: 6px;

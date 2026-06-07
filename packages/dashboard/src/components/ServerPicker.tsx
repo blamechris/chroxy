@@ -9,6 +9,7 @@ import { useConnectionStore } from '../store/connection'
 import type { ServerEntry, ConnectionPhase } from '../store/types'
 import { isTauri } from '../utils/tauri'
 import { discoverLanServers, type DiscoveredServer } from '../utils/discovery'
+import { parsePairingUrl } from '../utils/pairing'
 
 function statusDot(phase: ConnectionPhase, isActive: boolean): string {
   if (!isActive) return 'server-dot disconnected'
@@ -55,18 +56,34 @@ interface AddServerFormProps {
   /** Pre-fill from a LAN-discovered daemon (#5281 ③); token is still entered. */
   initialName?: string
   initialUrl?: string
+  /** Pair via a pasted chroxy://…?pair= URL — no token typed (#5281 ③ PR 2). */
+  onPair: (name: string, wsUrl: string, pairingId: string) => void
 }
 
-function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = '' }: AddServerFormProps) {
+function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = '', onPair }: AddServerFormProps) {
   const [name, setName] = useState(initialName)
   const [url, setUrl] = useState(initialUrl)
   const [token, setToken] = useState('')
 
+  // #5281 ③ PR 2 — when the URL field holds a pairing URL, switch to pairing
+  // mode: the token field is unnecessary (a session token is issued by the
+  // handshake) and the submit pairs instead of adding with a typed token.
+  const parsedPairing = parsePairingUrl(url)
+  const pairingMode = !!parsedPairing?.pairingId
+
   const handleSubmit = useCallback((e?: React.FormEvent) => {
     e?.preventDefault()
+    const parsed = parsePairingUrl(url)
+    if (parsed?.pairingId) {
+      // Default the name to the host:port (friendlier than the full ws URL).
+      let defaultName = parsed.wsUrl
+      try { defaultName = new URL(parsed.wsUrl).host } catch { /* keep wsUrl */ }
+      onPair(name.trim() || defaultName, parsed.wsUrl, parsed.pairingId)
+      return
+    }
     if (!url.trim() || !token.trim()) return
     onAdd(name.trim() || url.trim(), url.trim(), token.trim())
-  }, [name, url, token, onAdd])
+  }, [name, url, token, onAdd, onPair])
 
   return (
     <form className="server-add-form" data-testid="server-add-form" onSubmit={handleSubmit}>
@@ -80,7 +97,7 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
       />
       <input
         type="text"
-        placeholder="wss://your-server.example.com/ws"
+        placeholder="wss://your-server/ws or chroxy://…?pair=…"
         value={url}
         onChange={e => setUrl(e.target.value)}
         className={`server-input${error ? ' server-input-error' : ''}`}
@@ -91,22 +108,28 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
           {error}
         </span>
       )}
-      <input
-        type="password"
-        placeholder="Auth token"
-        value={token}
-        onChange={e => setToken(e.target.value)}
-        className="server-input"
-        data-testid="server-token-input"
-      />
+      {pairingMode ? (
+        <span className="server-form-hint" data-testid="server-pairing-hint">
+          Pairing URL detected — no token needed.
+        </span>
+      ) : (
+        <input
+          type="password"
+          placeholder="Auth token"
+          value={token}
+          onChange={e => setToken(e.target.value)}
+          className="server-input"
+          data-testid="server-token-input"
+        />
+      )}
       <div className="server-add-actions">
         <button
           type="submit"
           className="server-btn server-btn-primary"
-          disabled={!url.trim() || !token.trim()}
+          disabled={pairingMode ? false : (!url.trim() || !token.trim())}
           data-testid="server-add-submit"
         >
-          Add
+          {pairingMode ? 'Pair' : 'Add'}
         </button>
         <button
           type="button"
@@ -195,6 +218,7 @@ export function ServerPicker() {
   const removeServer = useConnectionStore(s => s.removeServer)
   const switchServer = useConnectionStore(s => s.switchServer)
   const connectLocal = useConnectionStore(s => s.connectLocal)
+  const pairServer = useConnectionStore(s => s.pairServer)
 
   const [showAddForm, setShowAddForm] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
@@ -218,6 +242,19 @@ export function ServerPicker() {
       setAddError(err instanceof Error ? err.message : 'Failed to add server')
     }
   }, [addServer, switchServer])
+
+  const handlePair = useCallback((name: string, wsUrl: string, pairingId: string) => {
+    try {
+      pairServer(name, wsUrl, pairingId)
+      setAddError(null)
+      setShowAddForm(false)
+      setPrefill(null)
+      // A bad/expired pairing id surfaces later as a pair_fail alert; the
+      // optimistic entry is cleaned up there.
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : 'Failed to pair')
+    }
+  }, [pairServer])
 
   const runDiscovery = useCallback(async () => {
     setDiscovering(true)
@@ -263,6 +300,7 @@ export function ServerPicker() {
         <AddServerForm
           key={prefill?.url ?? 'blank'}
           onAdd={handleAdd}
+          onPair={handlePair}
           onCancel={() => { setShowAddForm(false); setAddError(null); setPrefill(null) }}
           error={addError}
           initialName={prefill?.name ?? ''}

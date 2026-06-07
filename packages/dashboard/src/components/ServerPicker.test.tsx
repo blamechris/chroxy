@@ -11,6 +11,7 @@ const mockAddServer = vi.fn(() => ({ id: 'srv_new', name: 'New', wsUrl: 'wss://n
 const mockRemoveServer = vi.fn()
 const mockSwitchServer = vi.fn()
 const mockConnectLocal = vi.fn()
+const mockPairServer = vi.fn(() => ({ id: 'srv_paired', name: 'Paired', wsUrl: 'ws://192.168.1.5:8765/ws', token: '', lastConnectedAt: null }))
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
@@ -23,6 +24,7 @@ vi.mock('../store/connection', () => ({
       removeServer: mockRemoveServer,
       switchServer: mockSwitchServer,
       connectLocal: mockConnectLocal,
+      pairServer: mockPairServer,
     }
     return selector(store)
   },
@@ -352,6 +354,53 @@ describe('ServerPicker', () => {
       const err = await screen.findByTestId('server-discover-error')
       expect(err).toHaveTextContent('mDNS init failed')
       expect(err.getAttribute('role')).toBe('alert')
+    })
+  })
+
+  describe('pairing URL (#5281 ③ PR 2)', () => {
+    it('switches to pairing mode when a chroxy://…?pair= URL is entered', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-url-input'), {
+        target: { value: 'chroxy://192.168.1.5:8765?pair=ABC123' },
+      })
+      // Token field is replaced by a "no token needed" hint; submit says "Pair".
+      expect(screen.getByTestId('server-pairing-hint')).toBeTruthy()
+      expect(screen.queryByTestId('server-token-input')).toBeNull()
+      expect(screen.getByTestId('server-add-submit')).toHaveTextContent('Pair')
+      expect((screen.getByTestId('server-add-submit') as HTMLButtonElement).disabled).toBe(false)
+    })
+
+    it('submitting a pairing URL calls pairServer with the inferred ws URL', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-url-input'), {
+        target: { value: 'chroxy://192.168.1.5:8765?pair=ABC123' },
+      })
+      fireEvent.click(screen.getByTestId('server-add-submit'))
+      expect(mockPairServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'ABC123')
+      // Not the manual add path.
+      expect(mockAddServer).not.toHaveBeenCalled()
+    })
+
+    it('uses the typed name when pairing', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-name-input'), { target: { value: 'Studio Mac' } })
+      fireEvent.change(screen.getByTestId('server-url-input'), {
+        target: { value: 'chroxy://my-tunnel.trycloudflare.com?pair=XYZ' },
+      })
+      fireEvent.click(screen.getByTestId('server-add-submit'))
+      expect(mockPairServer).toHaveBeenCalledWith('Studio Mac', 'wss://my-tunnel.trycloudflare.com/ws', 'XYZ')
+    })
+
+    it('stays in manual mode (token required) for a plain ws URL', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'wss://host/ws' } })
+      expect(screen.getByTestId('server-token-input')).toBeTruthy()
+      expect(screen.queryByTestId('server-pairing-hint')).toBeNull()
+      expect(screen.getByTestId('server-add-submit')).toHaveTextContent('Add')
     })
   })
 })

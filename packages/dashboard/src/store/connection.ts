@@ -291,6 +291,12 @@ export const selectShowSession = (s: ConnectionState): boolean =>
 let searchNonce = 0;
 let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
+// #5281 ③ PR 2 — one-shot pairing id for the next socket open. When set, the
+// auth handshake sends `{type:'pair', pairingId}` instead of `{type:'auth',
+// token}`; it's cleared right after that first send so a later reconnect uses
+// the issued session token (captured from auth_ok), not the spent pairing id.
+let pendingPairingId: string | null = null;
+
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
 let _cachedDeviceId: string | null = null;
@@ -1164,7 +1170,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
       setTimeout(() => {
         if (myAttemptId !== connectionAttemptId) return;
-        get().connect(url, token);
+        // #5281 ③ PR 2 — reconnect with the latest stored token for the active
+        // registry server. A paired connection started with an empty token;
+        // auth_ok wrote the issued session token back to the registry, so the
+        // reconnect must use that, not the stale captured (empty) token.
+        const sid = get().activeServerId;
+        const reconnectToken = sid
+          ? (get().serverRegistry.find((s) => s.id === sid)?.token ?? token)
+          : token;
+        get().connect(url, reconnectToken);
       }, delayMs);
     };
 
@@ -1173,13 +1187,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const info = getDeviceInfo();
       const deviceId = getDeviceId();
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
-          type: 'auth',
-          token,
+        const common = {
           protocolVersion: CLIENT_PROTOCOL_VERSION,
           deviceInfo: { deviceId, ...info },
           capabilities: CLIENT_CAPABILITIES.desktop,
-        }));
+        };
+        // #5281 ③ PR 2 — pairing handshake when a one-shot pairing id is armed
+        // (consume it immediately so a reconnect falls back to the session
+        // token issued in auth_ok). Otherwise the normal token auth.
+        if (pendingPairingId) {
+          const pairingId = pendingPairingId;
+          pendingPairingId = null;
+          socket.send(JSON.stringify({ type: 'pair', pairingId, ...common }));
+        } else {
+          socket.send(JSON.stringify({ type: 'auth', token, ...common }));
+        }
       }
     };
 
@@ -2783,6 +2805,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${proto}://${window.location.host}/ws`;
     get().connect(wsUrl, token);
+  },
+
+  /**
+   * Add a server from a pairing URL and connect via the ephemeral pairing
+   * handshake — no permanent token typed (#5281 ③ PR 2). The entry starts with
+   * an empty token; the session token issued in `auth_ok` replaces it (handled
+   * in the auth_ok message handler) so reconnects authenticate normally. A
+   * `pair_fail` clears the armed pairing id and surfaces the reason.
+   */
+  pairServer: (name: string, wsUrl: string, pairingId: string): ServerEntry => {
+    const entry = get().addServer(name, wsUrl, '');
+    pendingPairingId = pairingId;
+    get().switchServer(entry.id);
+    return entry;
   },
 }));
 

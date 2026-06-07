@@ -2109,12 +2109,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const auth = sharedAuthOk(msg);
       const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
+      // #5281 ③ PR 2 — a pairing handshake issues a session token in auth_ok;
+      // adopt it as the effective token so reconnects authenticate normally.
+      // For the normal token-auth path `auth.sessionToken` is null and this is
+      // just `ctx.token`.
+      const effectiveToken = auth.sessionToken ?? ctx.token;
+      // Persist the issued session token onto the active registry entry (which
+      // was added with an empty token by pairServer) so connectToServer/
+      // switchServer reuse it later.
+      const pairedServerId = get().activeServerId;
+      if (auth.sessionToken && pairedServerId) {
+        get().updateServer(pairedServerId, { token: auth.sessionToken });
+      }
+
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
         viewingCachedSession: false,
         wsUrl: ctx.url,
-        apiToken: ctx.token,
+        apiToken: effectiveToken,
         socket: ctx.socket,
         claudeReady: false,
         serverMode: auth.serverMode,
@@ -2176,9 +2189,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           sendClientVisible(ctx.socket, document.visibilityState === 'visible');
         }
       }
-      // Save for quick reconnect
-      saveConnection(ctx.url, ctx.token);
-      set({ savedConnection: { url: ctx.url, token: ctx.token } });
+      // Save for quick reconnect (the issued session token, when paired).
+      saveConnection(ctx.url, effectiveToken);
+      set({ savedConnection: { url: ctx.url, token: effectiveToken } });
       break;
     }
 
@@ -2221,6 +2234,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (!ctx.silent) {
         const { reason } = sharedAuthFail(msg);
         _adapters.alert.alert('Auth Failed', reason);
+      }
+      break;
+    }
+
+    case 'pair_fail': {
+      // #5281 ③ PR 2 — pairing rejected (invalid/expired/already-used id, rate
+      // limited, pairing disabled). The pendingPairingId was already consumed on
+      // send. pairServer optimistically added a still-tokenless registry entry;
+      // pairing failed before a session token was issued, so drop the dead entry.
+      ctx.socket.close();
+      set({ connectionPhase: 'disconnected', socket: null });
+      const failedServerId = get().activeServerId;
+      if (failedServerId) {
+        const entry = get().serverRegistry.find((s) => s.id === failedServerId);
+        if (entry && !entry.token) get().removeServer(failedServerId);
+      }
+      if (!ctx.silent) {
+        const reason = typeof msg.reason === 'string' ? msg.reason : 'unknown';
+        _adapters.alert.alert('Pairing Failed', `Pairing failed: ${reason}`);
       }
       break;
     }
