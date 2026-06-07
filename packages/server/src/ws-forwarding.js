@@ -3,6 +3,22 @@ import { getDefaultModelId, getRegistryForProvider } from './models.js'
 
 const log = createLogger('ws-forwarding')
 
+// #5313 (WP-1.3) — wrap a forwarding listener so a throw in its body (almost
+// always a broadcast to a torn-down client, or a downstream devPreview call)
+// can't unwind the EventEmitter's emit() in the emitting code (session-manager /
+// CliSession / devPreview) and crash the whole daemon over one bad event. Logs
+// with a label for triage, then swallows. Used for the small one-liner
+// forwarders; the two large normalizer-driven listeners use inline try/catch.
+function safeForward(label, fn) {
+  return (...args) => {
+    try {
+      fn(...args)
+    } catch (err) {
+      log.error(`forwarding listener "${label}" threw: ${err?.message || err}${err?.stack ? '\n' + err.stack : ''}`)
+    }
+  }
+}
+
 /**
  * Set up event forwarding from backends to clients via EventNormalizer.
  *
@@ -122,29 +138,30 @@ function setupSessionForwarding(normalizer, ctx) {
   })
 
   // Session metadata updates (e.g. auto-labeling) — broadcast to ALL clients
-  sessionManager.on('session_updated', ({ sessionId, name }) => {
+  // #5313 (WP-1.3): safeForward — a broadcast throw must not unwind emit().
+  sessionManager.on('session_updated', safeForward('session_updated', ({ sessionId, name }) => {
     broadcast({ type: 'session_updated', sessionId, name })
-  })
+  }))
 
   // Restore failures — surface to clients so the UI can show a "needs
   // attention" card for sessions whose env vars / provider setup is broken
   // (#2954). History stays on disk; client shows a retry affordance.
-  sessionManager.on('session_restore_failed', (payload) => {
+  sessionManager.on('session_restore_failed', safeForward('session_restore_failed', (payload) => {
     broadcast({ type: 'session_restore_failed', ...payload })
-  })
+  }))
 
   // Dev server preview: broadcast tunnel start/stop to clients
-  devPreview.on('dev_preview_started', ({ sessionId, port, url }) => {
+  devPreview.on('dev_preview_started', safeForward('dev_preview_started', ({ sessionId, port, url }) => {
     broadcastToSession(sessionId, { type: 'dev_preview', port, url })
-  })
-  devPreview.on('dev_preview_stopped', ({ sessionId, port }) => {
+  }))
+  devPreview.on('dev_preview_stopped', safeForward('dev_preview_stopped', ({ sessionId, port }) => {
     broadcastToSession(sessionId, { type: 'dev_preview_stopped', port })
-  })
+  }))
 
   // Dev server preview: cleanup on session destroy
-  sessionManager.on('session_destroyed', ({ sessionId }) => {
+  sessionManager.on('session_destroyed', safeForward('session_destroyed', ({ sessionId }) => {
     devPreview.closeSession(sessionId)
-  })
+  }))
 
 }
 
@@ -210,30 +227,31 @@ function setupCliForwarding(normalizer, ctx) {
   }
 
   // Dev server preview: scan tool_result events for localhost server patterns (legacy CLI)
-  cliSession.on('tool_result', (data) => {
+  // #5313 (WP-1.3): safeForward — a throw here must not unwind CliSession's emit().
+  cliSession.on('tool_result', safeForward('cli:tool_result', (data) => {
     if (data?.result) {
       devPreview.handleToolResult('__legacy__', data.result)
     }
-  })
-  devPreview.on('dev_preview_started', ({ sessionId, port, url }) => {
+  }))
+  devPreview.on('dev_preview_started', safeForward('cli:dev_preview_started', ({ sessionId, port, url }) => {
     if (sessionId === '__legacy__') {
       broadcast({ type: 'dev_preview', port, url })
     }
-  })
-  devPreview.on('dev_preview_stopped', ({ sessionId, port }) => {
+  }))
+  devPreview.on('dev_preview_stopped', safeForward('cli:dev_preview_stopped', ({ sessionId, port }) => {
     if (sessionId === '__legacy__') {
       broadcast({ type: 'dev_preview_stopped', port })
     }
-  })
+  }))
 
   // models_updated bypasses normalizer — global broadcast.
   // CLI mode is always a Claude session; include provider so clients can
   // route the model list consistently with the multi-session path. (#2993)
-  cliSession.on('models_updated', (data) => {
+  cliSession.on('models_updated', safeForward('cli:models_updated', (data) => {
     if (data?.models) {
       broadcast({ type: 'available_models', models: data.models, defaultModel: getDefaultModelId(), provider: 'claude-cli' })
     }
-  })
+  }))
 }
 
 /** Execute side effect descriptors returned by the normalizer */

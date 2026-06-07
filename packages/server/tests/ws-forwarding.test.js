@@ -1044,6 +1044,28 @@ describe('forwarding listener throw containment (#5313)', () => {
     assert.ok(errLog, 'expected an error log naming the session and the containment site')
   })
 
+  it('a sibling one-liner forwarder (session_updated) is contained via safeForward (#5313 review)', () => {
+    // The small sibling listeners (session_updated/restore_failed/dev_preview*/
+    // session_destroyed + the legacy-cli siblings) share the same crash shape as
+    // the two big listeners and are wrapped via the safeForward() helper.
+    priorLogLevel = getLogLevel()
+    setLogLevel('debug')
+    const entries = []
+    currentListener = (e) => entries.push(e)
+    addLogListener(currentListener)
+
+    const ctx = makeCtx({ broadcast: mock.fn(() => { throw new Error('boom: session_updated broadcast') }) })
+    setupForwarding(ctx)
+
+    assert.doesNotThrow(() => {
+      ctx.sessionManager.emit('session_updated', { sessionId: 's-upd', name: 'Renamed' })
+    }, 'a throwing session_updated broadcast must not unwind the SessionManager emit()')
+
+    const errLog = entries.find((e) =>
+      e.level === 'error' && e.message.includes('session_updated') && e.message.includes('forwarding listener'))
+    assert.ok(errLog, 'safeForward logs the contained sibling-listener error with its label')
+  })
+
   it('multi-session forwarding stays functional after a throwing event — a later good event still routes', () => {
     let shouldThrow = true
     const ctx = makeCtx({
