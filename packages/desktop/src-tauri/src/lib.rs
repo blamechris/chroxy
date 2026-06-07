@@ -688,12 +688,9 @@ pub fn run() {
     {
         builder = builder.plugin(single_instance_init(
             |app: &tauri::AppHandle, _args, _cwd| {
-                // Second instance launched: focus the existing main window.
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Second instance launched: bring the existing main window
+                // forward. Shares the one summon path so the two can't drift.
+                window::show_window(app);
             },
         ));
     }
@@ -710,6 +707,19 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // #5281 ② — global "summon" shortcut. Any registered shortcut (we only
+        // ever register the one summon accelerator) brings the main window
+        // forward. Registration is opt-in via DesktopSettings.summon_hotkey,
+        // done in setup() below.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        window::show_window(app);
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             get_server_info,
             get_server_logs,
@@ -1198,6 +1208,17 @@ pub fn run() {
 
             setup_tray(app)?;
 
+            // #5281 ② — register the opt-in global summon hotkey, if configured.
+            {
+                let settings = app.state::<Mutex<DesktopSettings>>();
+                let settings_guard = lock_or_recover(&settings);
+                let accel = settings_guard.effective_summon_hotkey();
+                drop(settings_guard);
+                if let Some(accel) = accel {
+                    register_summon_hotkey(app.handle(), &accel);
+                }
+            }
+
             // Auto-start server on launch if configured (skip on first run — wizard handles it)
             if !is_first_run {
                 let settings = app.state::<Mutex<DesktopSettings>>();
@@ -1278,7 +1299,22 @@ pub fn run() {
         });
 }
 
+/// Register the opt-in global summon shortcut. Best-effort: a malformed
+/// accelerator or an OS-level conflict is logged, never fatal — the tray
+/// "Show Chroxy" item is always available as a fallback. (#5281 ②)
+fn register_summon_hotkey(app: &tauri::AppHandle, accelerator: &str) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    match app.global_shortcut().register(accelerator) {
+        Ok(()) => eprintln!("[hotkey] summon shortcut registered: {}", accelerator),
+        Err(e) => eprintln!("[hotkey] failed to register summon shortcut '{}': {}", accelerator, e),
+    }
+}
+
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // #5281 ② — always-available "summon" affordance: bring the main window
+    // forward from the tray, regardless of server state or any global hotkey.
+    let show_window_item =
+        MenuItemBuilder::with_id("show_window", "Show Chroxy").build(app)?;
     let start = MenuItemBuilder::with_id("start", "Start Server").build(app)?;
     let stop = MenuItemBuilder::with_id("stop", "Stop Server")
         .enabled(false)
@@ -1335,6 +1371,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let quit = MenuItemBuilder::with_id("quit", "Quit Chroxy").build(app)?;
 
     let menu = MenuBuilder::new(app)
+        .items(&[&show_window_item])
+        .separator()
         .items(&[&start, &stop, &restart])
         .separator()
         .items(&[&dashboard, &console, &show_qr])
@@ -1380,6 +1418,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             match id {
+                "show_window" => window::show_window(app),
                 "start" => handle_start(app),
                 "stop" => handle_stop(app),
                 "restart" => handle_restart(app),
