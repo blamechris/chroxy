@@ -5,7 +5,7 @@
  * and Escape key dismissal.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { SettingsPanel } from './SettingsPanel'
 
 // Mock theme-engine
@@ -2424,6 +2424,83 @@ describe('SettingsPanel', () => {
       fireEvent.click(screen.getByTestId('speech-reset-button'))
       const errEl = await screen.findByTestId('speech-reset-error')
       expect(errEl.textContent).toContain('tccutil reset Microphone exited with status 1')
+    })
+  })
+
+  // #5294 — summon hotkey control: load-on-open, Save (trimmed), Clear (null),
+  // and inline error on registration rejection. Tauri-only (inTauri gate), so
+  // we fake __TAURI_INTERNALS__.invoke and let the real useTauriIPC run.
+  describe('summon hotkey (#5294)', () => {
+    const tauriInvoke = vi.fn()
+    const setTauriEnv = (tauri: boolean) => {
+      if (tauri) {
+        ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke: tauriInvoke }
+      } else {
+        delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+      }
+    }
+    // Default routing so the panel's open-time getters resolve quietly; tests
+    // override the summon-hotkey commands as needed.
+    const baseImpl = (cmd: string): Promise<unknown> => {
+      switch (cmd) {
+        case 'get_summon_hotkey': return Promise.resolve(null)
+        case 'get_tunnel_mode': return Promise.resolve('none')
+        case 'get_server_info': return Promise.resolve({ tunnelMode: 'none' })
+        case 'get_allow_auto_permission_mode': return Promise.resolve(false)
+        default: return Promise.resolve(undefined)
+      }
+    }
+
+    beforeEach(() => {
+      tauriInvoke.mockReset()
+      tauriInvoke.mockImplementation(baseImpl)
+      setTauriEnv(true)
+    })
+
+    afterEach(() => {
+      tauriInvoke.mockReset()
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    })
+
+    it('loads the saved hotkey into the field on open', async () => {
+      tauriInvoke.mockImplementation((cmd: string) =>
+        cmd === 'get_summon_hotkey' ? Promise.resolve('CmdOrCtrl+Shift+K') : baseImpl(cmd))
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = await screen.findByTestId('summon-hotkey-input') as HTMLInputElement
+      await waitFor(() => expect(input.value).toBe('CmdOrCtrl+Shift+K'))
+    })
+
+    it('Save invokes set_summon_hotkey with the trimmed accelerator', async () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = await screen.findByTestId('summon-hotkey-input')
+      fireEvent.change(input, { target: { value: '  CmdOrCtrl+Shift+J  ' } })
+      fireEvent.click(screen.getByTestId('summon-hotkey-save'))
+      await waitFor(() =>
+        expect(tauriInvoke).toHaveBeenCalledWith('set_summon_hotkey', { accelerator: 'CmdOrCtrl+Shift+J' }))
+    })
+
+    it('Clear invokes set_summon_hotkey with null', async () => {
+      tauriInvoke.mockImplementation((cmd: string) =>
+        cmd === 'get_summon_hotkey' ? Promise.resolve('CmdOrCtrl+Shift+K') : baseImpl(cmd))
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = await screen.findByTestId('summon-hotkey-input') as HTMLInputElement
+      await waitFor(() => expect(input.value).toBe('CmdOrCtrl+Shift+K'))
+      fireEvent.click(screen.getByTestId('summon-hotkey-clear'))
+      await waitFor(() =>
+        expect(tauriInvoke).toHaveBeenCalledWith('set_summon_hotkey', { accelerator: null }))
+    })
+
+    it('shows an inline error when registration is rejected', async () => {
+      tauriInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'set_summon_hotkey') return Promise.reject(new Error("Could not register 'BadKey'"))
+        return baseImpl(cmd)
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const input = await screen.findByTestId('summon-hotkey-input')
+      fireEvent.change(input, { target: { value: 'BadKey' } })
+      fireEvent.click(screen.getByTestId('summon-hotkey-save'))
+      const err = await screen.findByTestId('summon-hotkey-error')
+      expect(err.textContent).toContain('Could not register')
     })
   })
 })

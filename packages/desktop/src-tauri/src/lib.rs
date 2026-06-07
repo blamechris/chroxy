@@ -376,13 +376,28 @@ fn set_summon_hotkey(app: tauri::AppHandle, accelerator: Option<String>) -> Resu
         }
     }
 
-    // Persist only after a successful (un)register.
+    // Persist only after a successful (un)register. If the write fails, roll
+    // back BOTH the in-memory setting and the registration so disk, memory, and
+    // the live shortcut stay consistent — otherwise the new hotkey would work
+    // this session but the next restart would load the old, persisted value
+    // (and register that), a silent drift Copilot flagged on #5294.
     {
         let mut settings = lock_or_recover(&settings_state);
-        settings.summon_hotkey = new_accel;
-        settings
-            .save()
-            .map_err(|e| format!("Failed to save settings: {}", e))?;
+        settings.summon_hotkey = new_accel.clone();
+        if let Err(e) = settings.save() {
+            settings.summon_hotkey = old_accel.clone();
+            drop(settings);
+            if let Some(ref acc) = new_accel {
+                let _ = app.global_shortcut().unregister(acc.as_str());
+            }
+            if let Some(ref old) = old_accel {
+                let _ = register_summon_hotkey(&app, old);
+            }
+            return Err(format!(
+                "Failed to save settings: {} — the previous hotkey is unchanged.",
+                e
+            ));
+        }
     }
 
     Ok(())
