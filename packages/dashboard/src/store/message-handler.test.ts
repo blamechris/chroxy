@@ -496,6 +496,7 @@ describe('dashboard message-handler dispatch', () => {
           s1: {
             ...createEmptySessionState(),
             messages: [
+              { id: 'older', type: 'user_input', content: 'earlier', timestamp: 0 },
               { id: 'user-123', type: 'user_input', content: 'hi', timestamp: 1 },
               { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
             ],
@@ -505,27 +506,46 @@ describe('dashboard message-handler dispatch', () => {
       }))
       setStore(store)
 
+      const reason = 'Session is already processing input from another device. Wait for it to finish or interrupt first.';
       handleMessage(
         {
           type: 'session_error',
           category: 'input_conflict',
           sessionId: 's1',
           clientMessageId: 'user-123',
-          message: 'Session is already processing input from another device. Wait for it to finish or interrupt first.',
+          message: reason,
         },
         ctx() as any,
       )
 
       const state = store.getState() as any
-      // Calm info notice, not a red error.
+      // Calm info notice (the server's specific reason), not a red error.
       expect(state.serverErrors).toEqual([])
-      expect(state._infoNotifications).toHaveLength(1)
-      expect(String(state._infoNotifications[0])).toMatch(/another device is driving/i)
-      // The stranded optimistic user message + thinking spinner are gone.
+      expect(state._infoNotifications).toEqual([reason])
+      // The stranded optimistic user message + thinking spinner are gone…
       const ss = state.sessionStates.s1
       expect(ss.messages.find((m: any) => m.id === 'user-123')).toBeUndefined()
       expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined()
       expect(ss.streamingMessageId).toBeNull()
+      // …but only the rejected send — prior real messages are untouched.
+      expect(ss.messages.find((m: any) => m.id === 'older')).toBeDefined()
+    })
+
+    it('shows the evaluator-lock reason verbatim (not the cross-device copy)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      }))
+      setStore(store)
+
+      const evalReason = 'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.';
+      handleMessage(
+        { type: 'session_error', category: 'input_conflict', sessionId: 's1', message: evalReason },
+        ctx() as any,
+      )
+
+      expect((store.getState() as any)._infoNotifications).toEqual([evalReason])
+      expect((store.getState() as any).serverErrors).toEqual([])
     })
 
     it('input_conflict still clears the spinner when the server omits clientMessageId', () => {

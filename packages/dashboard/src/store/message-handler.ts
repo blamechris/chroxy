@@ -2506,13 +2506,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           get().addServerError(parsed.message);
         }
       } else if (parsed.category === 'input_conflict') {
-        // #5281 ①.3 — a shared-session collaboration event, NOT a failure:
-        // another device's request is mid-flight on this session, so the
-        // server refused this send. The generic branch below would raise a
-        // modal alert + red serverError, which is the wrong register for an
-        // expected "someone else is driving" outcome. Instead: drop the
-        // stranded optimistic user message (its send was rejected) + its
-        // thinking spinner, and surface a calm, transient notice.
+        // #5281 ①.3 — an expected "can't send right now" event, NOT a failure:
+        // either another device's request is mid-flight, or this session is
+        // still evaluating a previous draft. The generic branch below would
+        // raise a modal alert + red serverError, which is the wrong register.
+        // Instead: drop the stranded optimistic user message (its send was
+        // rejected) + its thinking spinner, and surface a calm, transient
+        // notice using the server's specific reason.
+        //
+        // sessionId resolution leans on the invariant that the dashboard only
+        // ever sends to (and optimistically records on) its active session —
+        // sendInput sets payload.sessionId = activeSessionId — so the echoed
+        // sessionId is where the ghost lives. Revisit if a multi-session send
+        // path is ever added.
         const conflictSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
         const rejectedId = typeof msg.clientMessageId === 'string' && msg.clientMessageId.length > 0
           ? msg.clientMessageId
@@ -2526,8 +2532,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             streamingMessageId: ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
           }));
         }
+        // Prefer the server's specific reason (cross-device vs evaluator lock);
+        // fall back to a variant-neutral notice for an older server.
         get().addInfoNotification(
-          'Another device is driving this session right now — your message wasn’t sent. Wait for it to finish, or interrupt the current run.',
+          parsed.message || 'Your message wasn’t sent — the session is busy. Wait for it to finish, or interrupt the current run.',
         );
       } else if (parsed.message) {
         _adapters.alert.alert('Session Error', parsed.message);
