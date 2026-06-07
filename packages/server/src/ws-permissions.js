@@ -247,12 +247,17 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #5313 (WP-1.3): see the try at the top of this end callback.
         const message = err?.message || String(err)
         log.error(`POST /permission end handler threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Internal server error' }))
-        } else {
-          res.end()
-        }
+        // #5313 review — the recovery response can ITSELF throw if the original
+        // failure was a torn-down socket (res.writeHead/res.end raising). Guard
+        // it so the catch can't re-crash the daemon; nothing more we can do.
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Internal server error' }))
+          } else {
+            res.end()
+          }
+        } catch { /* socket already torn down */ }
       }
     })
   }
@@ -435,12 +440,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #5313 (WP-1.3): see the try at the top of this end callback.
         const message = err?.message || String(err)
         log.error(`POST /permission-response end handler threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Internal server error' }))
-        } else {
-          res.end()
-        }
+        // #5313 review — guard the recovery response so a torn-down-socket
+        // throw in writeHead/end can't re-crash the daemon from the catch.
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Internal server error' }))
+          } else {
+            res.end()
+          }
+        } catch { /* socket already torn down */ }
       }
     })
   }

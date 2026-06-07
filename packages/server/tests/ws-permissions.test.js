@@ -383,6 +383,32 @@ describe('createPermissionHandler', () => {
       assert.equal(uncaught.length, 0, 'end-callback throw must not escape to uncaughtException')
       assert.equal(res.statusCode, 500, 'client receives a 500 when the end callback throws pre-response')
     })
+
+    it('does not re-crash when the recovery response itself throws (torn-down socket) (#5313 review)', async () => {
+      // Original fault AND the catch's recovery writeHead both throw (socket torn
+      // down). The catch's response attempt is guarded, so nothing escapes.
+      const opts = makeHandlerOpts({
+        broadcastFn: mock.fn(() => { throw new Error('boom: broadcast failed') }),
+      })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+
+      const req = makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }))
+      const res = makeRes()
+      res.writeHead = mock.fn(() => { throw new Error('EPIPE: socket torn down') })
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        assert.doesNotThrow(() => handlePermissionRequest(req, res))
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+      assert.equal(uncaught.length, 0, 'a throwing recovery response must not escape to uncaughtException')
+    })
   })
 
   describe('handlePermissionResponseHttp', () => {

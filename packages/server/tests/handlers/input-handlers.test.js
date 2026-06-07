@@ -1751,10 +1751,12 @@ describe('input-handlers', () => {
       assert.ok(echoed, 'user_input echo still broadcast despite send rejection')
     })
 
-    it('tolerates a synchronously-throwing sendMessage without crashing the handler', async () => {
-      // A non-thenable return (or sync throw) must not break the post-send
-      // bookkeeping. We only guard thenables, so a sync throw would propagate
-      // out of handleInput — assert the common non-rejecting case stays clean.
+    it('tolerates a non-thenable (legacy sync) sendMessage return without breaking post-send bookkeeping', async () => {
+      // The .catch guard only attaches to thenables, so a legacy provider whose
+      // sendMessage returns undefined (no promise) must not break the primary-
+      // update / user_input echo that follow. (A SYNCHRONOUS throw is a separate
+      // path — it propagates out of handleInput and is caught by the awaited
+      // message-handler's server_error wrapper, not by this thenable guard.)
       const sessions = new Map()
       const session = createMockSession()
       session.sendMessage = createSpy(() => undefined) // legacy sync provider
