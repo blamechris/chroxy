@@ -5040,6 +5040,76 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5320 (WP-3.3) — recovery on every respondToQuestion path + crash-isolation
+  // for the intervention emit. Before this, the validation-failure early-returns
+  // in the Other/freeform path cleared the pending answer but armed no watchdog
+  // and emitted no error (the turn wedged until the 2h hard cap), the freeform
+  // IIFE ignored interrupt()'s abort, and a throwing multi_question_intervention
+  // listener orphaned the pending by skipping the user_question emit.
+  describe('respondToQuestion recovery on every path (#5320 WP-3.3)', () => {
+    function makeAnsweringSession() {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s._activeTurn = { synthSeq: 0, aborted: false, startedAt: Date.now() }
+      s._isBusy = true
+      s._currentMessageId = 'msg-5320'
+      s.on('error', () => {})
+      return s
+    }
+
+    it('a freeform answer with no selectable options still arms a stall watchdog', async () => {
+      const s = makeAnsweringSession()
+      s._term = { write: () => {}, kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_no_opts', questions: [{ options: [] }], options: [] }
+      s.respondToQuestion('whatever', undefined, 'toolu_no_opts', { freeformText: 'hi' })
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_no_opts'), 'watchdog armed despite the drop')
+      assert.equal(s._pendingUserAnswers.size, 0, 'pending cleared')
+      await s.destroy()
+    })
+
+    it('a freeform answer whose option is not found still arms a stall watchdog', async () => {
+      const s = makeAnsweringSession()
+      s._term = { write: () => {}, kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_nomatch', questions: [{ options: [{ label: 'a' }] }], options: [{ label: 'a' }] }
+      s.respondToQuestion('NotAnOption', undefined, 'toolu_nomatch', { freeformText: 'hi' })
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_nomatch'), 'watchdog armed despite the drop')
+      await s.destroy()
+    })
+
+    it('an aborted turn cancels the Other-freeform IIFE before the stage-2 write', async () => {
+      const s = makeAnsweringSession()
+      const writes = []
+      s._term = { write: (b) => writes.push(String(b)), kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_abort', questions: [{ options: [{ label: 'Other' }] }], options: [{ label: 'Other' }] }
+
+      s.respondToQuestion('Other', undefined, 'toolu_abort', { freeformText: 'SECRET_FREEFORM' })
+      // Abort during the 150ms settle window (stage-1 digit write finishes fast).
+      await new Promise((r) => setTimeout(r, 40))
+      s._activeTurn.aborted = true
+      // Wait past the settle + would-be stage-2 write.
+      await new Promise((r) => setTimeout(r, 250))
+
+      assert.ok(!writes.join('').includes('SECRET_FREEFORM'), 'stage-2 freeform write skipped after abort')
+      await s.destroy()
+    })
+
+    it('a throwing multi_question_intervention listener does not orphan the pending', () => {
+      const s = makeAnsweringSession()
+      s.on('multi_question_intervention', () => { throw new Error('listener boom') })
+      let userQ = null
+      s.on('user_question', (e) => { userQ = e })
+      // Multi-question PreToolUse triggers the intervention emit before user_question.
+      s._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_mq', tool_name: 'AskUserQuestion',
+        tool_input: { questions: [
+          { question: 'Q1?', options: [{ label: 'a' }] },
+          { question: 'Q2?', options: [{ label: 'b' }] },
+        ] },
+      }, 'msg-5320')
+      assert.ok(userQ, 'user_question still emitted despite the intervention listener throwing')
+      assert.equal(s._pendingUserAnswers.size, 1, 'pending recorded — not orphaned')
+    })
+  })
+
   // #4604 Chunk B — multi-question form driver. Empirical byte sequence
   // pinned via scripts/tui-form-recorder.mjs against claude CLI v2.1.158
   // (see tui_multi_question_form_keys memory). Single-select digit
