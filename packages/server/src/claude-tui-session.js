@@ -2413,15 +2413,18 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _outputTailDiagnostic() {
     if (!this._outputTail) return ''
-    const trimmed = this._outputTail
+    // #5322 (WP-4.2, security) — this tail rides into `error` events that fan
+    // out to clients and the System tab, so redact any token-shaped run (pasted
+    // or echoed OAuth token / API key) before it leaves the process.
+    // #5357 review — redact BEFORE slicing: a token straddling the
+    // PTY_TAIL_DIAGNOSTIC_BYTES boundary must be matched in full (and collapse
+    // to [REDACTED]) rather than leaving a trailing fragment the regex can't
+    // catch. The slice then bounds the already-scrubbed string.
+    return redactSensitive(this._outputTail)
       .slice(-ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
       .replace(/[\r\n]+/g, '\n')
       .replace(/[ \t]{2,}/g, ' ')
       .trim()
-    // #5322 (WP-4.2, security) — this tail rides into `error` events that fan
-    // out to clients and the System tab, so redact any token-shaped run (pasted
-    // or echoed OAuth token / API key) before it leaves the process.
-    return redactSensitive(trimmed)
   }
 
   /**

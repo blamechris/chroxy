@@ -498,10 +498,13 @@ describe('ClaudeTuiSession', () => {
 
       assert.ok(!dump.includes(token), 'raw token absent from the ASCII column')
       // The token's leading bytes ("sk-ant" → 73 6b 2d 61 6e 74) must be gone too.
+      // (Fixture is sized so "sk-ant" lands within one 16-byte hex row.)
       const prefixHex = Buffer.from('sk-ant', 'latin1').toString('hex').match(/../g).join(' ')
       assert.ok(!dump.replace(/\s+/g, ' ').includes(prefixHex), 'token hex bytes absent from the hex column')
       assert.ok(dump.includes('REDACTED'), 'redaction marker present')
-      assert.ok(dump.includes('1b'), 'escape byte (0x1b) preserved — diagnostic value intact')
+      // The full escape RUN `\x1b[0m` (1b 5b 30 6d) survives — proves redaction
+      // scrubbed only the token, not the control bytes the dump exists to show.
+      assert.ok(dump.replace(/\s+/g, ' ').includes('1b 5b 30 6d'), 'escape sequence preserved — diagnostic value intact')
     })
 
     it('_outputTailDiagnostic redacts a token-shaped run (client-facing error path)', () => {
@@ -511,6 +514,20 @@ describe('ClaudeTuiSession', () => {
       const diag = s._outputTailDiagnostic()
       assert.ok(!diag.includes(token), 'token redacted from the readable diagnostic')
       assert.ok(diag.includes('[REDACTED]'), 'redaction marker present')
+    })
+
+    it('_outputTailDiagnostic redacts a token straddling the slice boundary (#5357 review)', () => {
+      const s = makeSession()
+      const token = 'sk-ant-api03-' + 'C'.repeat(50)
+      // Put the token near the END so its PREFIX falls before the last
+      // PTY_TAIL_DIAGNOSTIC_BYTES and only its tail would survive a slice-first
+      // approach. Redact-before-slice must still scrub it entirely.
+      const pad = 'x '.repeat(ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
+      s._outputTail = `${pad} ${token} tail`
+      const diag = s._outputTailDiagnostic()
+      assert.ok(!diag.includes(token), 'full token redacted despite straddling the slice boundary')
+      // No partial token fragment leaks either (no run of the C-filler survives).
+      assert.ok(!/C{20,}/.test(diag), 'no partial-token fragment leaked')
     })
   })
 
