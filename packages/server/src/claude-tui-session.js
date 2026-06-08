@@ -790,9 +790,34 @@ export class ClaudeTuiSession extends BaseSession {
     // the prototype method instead of mocking node-pty at the module level.
     await this._spawnPty(permissionsEnabled)
 
-    if (this._ptyExited) {
-      this.emit('error', { message: `claude PTY exited during warmup (code=${this._ptyExitInfo?.exitCode})` })
+    // #5316 (WP-2.2) — never resolve start() (and never emit `ready` / set
+    // `_processReady`) when the PTY failed to come up. Before this, start()
+    // emitted an `error` and *returned*, so SessionManager's
+    // `session.start().catch(...)` guard never fired and the dead session sat in
+    // the list as an input-rejecting zombie. Worse, the two `_spawnPty`
+    // early-return failure paths (node-pty import fail, spawn throw) emit `error`
+    // and return WITHOUT setting `_ptyExited` and WITHOUT a live `_term`, so the
+    // old `if (this._ptyExited)` guard missed them entirely and fell straight
+    // through to `emit('ready')` — marking a session with no process alive
+    // (the audit's "never mark a dead PTY ready"). Cover every no-live-PTY shape
+    // by rejecting, so SessionManager surfaces the failure (fresh → cleanup;
+    // restore → preserve history, mark retryable).
+    if (this._destroying) {
+      // destroy() raced the spawn; `_spawnPty`'s post-spawn guard already killed
+      // the fresh PTY and nulled `_term`. This is a benign abort, not a start
+      // failure to surface — resolve quietly without emitting `ready`.
       return
+    }
+    if (this._ptyExited) {
+      const message = `claude PTY exited during warmup (code=${this._ptyExitInfo?.exitCode ?? 'unknown'})`
+      this.emit('error', { message })
+      throw new Error(message)
+    }
+    if (!this._term) {
+      // `_spawnPty` hit an early-return failure path (node-pty unavailable /
+      // spawn throw). It already emitted a descriptive `error`; reject so the
+      // failure isn't swallowed.
+      throw new Error('claude PTY failed to spawn (no live process after _spawnPty)')
     }
 
     this._processReady = true
