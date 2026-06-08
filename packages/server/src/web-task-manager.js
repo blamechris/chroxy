@@ -36,6 +36,7 @@ export class WebTaskManager extends EventEmitter {
     this._detected = false
     this._pollTimer = null
     this._pollCount = 0
+    this._inPoll = false
   }
 
   /** Whether the CLI supports --remote (web task launch) */
@@ -56,10 +57,13 @@ export class WebTaskManager extends EventEmitter {
   /**
    * Detect available CLI features by parsing `claude --help`.
    * Safe to call multiple times (e.g. after CLI upgrade).
+   *
+   * @param {object} [deps] - test seam: { exec } promisified execFile stand-in
    */
-  async detectFeatures() {
+  async detectFeatures(deps = {}) {
+    const exec = deps.exec || execFileAsync
     try {
-      const stdout = await execFileAsync('claude', ['--help'])
+      const stdout = await exec('claude', ['--help'])
       this._remoteAvailable = stdout.includes('--remote')
       this._teleportAvailable = stdout.includes('--teleport')
     } catch {
@@ -224,8 +228,15 @@ export class WebTaskManager extends EventEmitter {
 
     this._pollCount = 0
     this._pollTimer = setInterval(() => {
-      this._pollTaskStatus()
+      // _pollTaskStatus is async; swallow rejections so a status-check fault
+      // can't surface as an unhandledRejection and crash the daemon (#5327).
+      Promise.resolve(this._pollTaskStatus()).catch(() => {})
     }, POLL_INTERVAL_MS)
+    // Don't keep the event loop (and the whole daemon) alive solely to poll a
+    // handful of cloud tasks (#5327). Guarded for non-Node timer stand-ins.
+    if (this._pollTimer && typeof this._pollTimer.unref === 'function') {
+      this._pollTimer.unref()
+    }
   }
 
   /**
@@ -244,29 +255,92 @@ export class WebTaskManager extends EventEmitter {
    * @private
    */
   async _pollTaskStatus() {
-    this._pollCount++
+    // Re-entrancy guard (#5327 review): if the previous poll is still awaiting a
+    // status check (a real CLI call can exceed POLL_INTERVAL_MS), skip this tick
+    // rather than overlapping. Overlap would advance _pollCount faster than
+    // wall-clock (premature timeout) and race task-state transitions. The flag
+    // is cleared in finally so a rejection can't wedge polling permanently.
+    if (this._inPoll) return
+    this._inPoll = true
+    try {
+      this._pollCount++
 
-    const running = [...this._tasks.values()].filter(t => t.status === 'running')
-    if (running.length === 0) {
-      this._stopPolling()
-      return
-    }
-
-    // Fail running tasks after max polls to prevent indefinite timers
-    if (this._pollCount >= MAX_POLL_COUNT) {
-      for (const task of running) {
-        task.status = 'failed'
-        task.error = 'Task timed out waiting for status update'
-        task.updatedAt = Date.now()
-        this.emit('task_updated', { ...task })
-        this.emit('task_error', { taskId: task.taskId, message: task.error })
+      const running = [...this._tasks.values()].filter(t => t.status === 'running')
+      if (running.length === 0) {
+        this._stopPolling()
+        return
       }
-      this._stopPolling()
-      return
-    }
 
-    // When CLI support arrives, this will call `claude /tasks` or similar
-    // For now, this is a placeholder that will be implemented when the CLI ships
+      // Genuine timeout backstop: a task STILL running after MAX_POLL_COUNT polls
+      // (10 min) is force-failed so a stuck cloud task can't poll forever. This
+      // used to be the ONLY exit — every healthy task was force-failed here
+      // because nothing implemented the running→completed transition (#5327).
+      // Checked before any await so the synchronous timeout path stays sync.
+      if (this._pollCount >= MAX_POLL_COUNT) {
+        for (const task of running) {
+          task.status = 'failed'
+          task.error = 'Task timed out waiting for status update'
+          task.updatedAt = Date.now()
+          this.emit('task_updated', { ...task })
+          this.emit('task_error', { taskId: task.taskId, message: task.error })
+        }
+        this._stopPolling()
+        return
+      }
+
+      // Check each running task's remote status and transition it to a terminal
+      // state when the cloud reports done/failed (#5327). _checkRemoteStatus is a
+      // seam — a real CLI status command (or a test) drives the transition; the
+      // default reports 'running' (unknown) until that command ships.
+      for (const task of running) {
+        let result
+        try {
+          result = await this._checkRemoteStatus(task)
+        } catch {
+          // A transient status-check failure must not fail the task — let the
+          // timeout backstop catch a genuinely stuck one. Skip this pass.
+          continue
+        }
+        const next = result && result.status
+        if (next === 'completed') {
+          task.status = 'completed'
+          task.result = result.result ?? null
+          task.error = null
+          task.updatedAt = Date.now()
+          this.emit('task_updated', { ...task })
+        } else if (next === 'failed') {
+          task.status = 'failed'
+          task.error = result.error || 'Task failed'
+          task.updatedAt = Date.now()
+          this.emit('task_updated', { ...task })
+          this.emit('task_error', { taskId: task.taskId, message: task.error })
+        }
+        // Any other value (incl. 'running'/undefined) leaves the task running.
+      }
+
+      // Once nothing is left running, stop the timer rather than spinning until
+      // the timeout cap.
+      if (![...this._tasks.values()].some(t => t.status === 'running')) {
+        this._stopPolling()
+      }
+    } finally {
+      this._inPoll = false
+    }
+  }
+
+  /**
+   * Check the remote status of a single running task. Seam for the
+   * (not-yet-shipped) CLI status command — override or inject in tests to
+   * drive the running→completed/failed transition.
+   *
+   * @param {Object} _task - the running task
+   * @returns {Promise<{ status: 'running'|'completed'|'failed', result?: any, error?: string }>}
+   *
+   * Default: no CLI status command exists yet, so report 'running' (unknown)
+   * and let the poll keep waiting until one ships or the timeout backstop fires.
+   */
+  async _checkRemoteStatus(_task) {
+    return { status: 'running' }
   }
 
   /**

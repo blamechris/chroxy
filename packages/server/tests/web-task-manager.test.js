@@ -21,9 +21,26 @@ describe('WebTaskManager', () => {
     })
 
     it('detects features as unavailable when claude CLI lacks --remote', async () => {
+      // Hermetic: inject a --help output without the flags rather than shelling
+      // out to the real `claude` binary (whose flags vary by version/host).
       manager = new WebTaskManager()
-      await manager.detectFeatures()
-      // Current CLI v2.1.51 does not have --remote
+      await manager.detectFeatures({ exec: async () => 'Usage: claude [options]\n  --help\n  --print' })
+      assert.equal(manager.isAvailable, false)
+      assert.equal(manager.teleportAvailable, false)
+      assert.equal(manager.detected, true)
+    })
+
+    it('detects --remote and --teleport when present in --help', async () => {
+      manager = new WebTaskManager()
+      const features = await manager.detectFeatures({ exec: async () => 'Usage:\n  --remote\n  --teleport\n' })
+      assert.equal(manager.isAvailable, true)
+      assert.equal(manager.teleportAvailable, true)
+      assert.deepEqual(features, { remote: true, teleport: true })
+    })
+
+    it('treats a failed --help invocation as unavailable', async () => {
+      manager = new WebTaskManager()
+      await manager.detectFeatures({ exec: async () => { throw new Error('claude: command not found') } })
       assert.equal(manager.isAvailable, false)
       assert.equal(manager.teleportAvailable, false)
       assert.equal(manager.detected, true)
@@ -31,7 +48,7 @@ describe('WebTaskManager', () => {
 
     it('returns feature status object', async () => {
       manager = new WebTaskManager()
-      await manager.detectFeatures()
+      await manager.detectFeatures({ exec: async () => 'Usage: claude [options]\n' })
       const status = manager.getFeatureStatus()
       assert.equal(typeof status.available, 'boolean')
       assert.equal(typeof status.remote, 'boolean')
@@ -218,8 +235,8 @@ describe('WebTaskManager', () => {
     })
   })
 
-  describe('poll timeout', () => {
-    it('fails running tasks after max poll count', () => {
+  describe('polling', () => {
+    it('fails running tasks after max poll count (timeout backstop)', () => {
       manager = new WebTaskManager()
       manager._remoteAvailable = true
       manager._spawnRemoteTask = () => {}
@@ -238,6 +255,143 @@ describe('WebTaskManager', () => {
       assert.equal(task.status, 'failed')
       assert.ok(task.error.includes('timed out'))
       assert.equal(errors.length, 1)
+    })
+
+    it('transitions a healthy task running→completed instead of force-failing (#5327)', async () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('build a site')
+      const task = manager._tasks.get(taskId)
+      task.status = 'running'
+
+      // Inject a status check that reports completion with a result.
+      manager._checkRemoteStatus = async () => ({ status: 'completed', result: 'https://preview.example' })
+
+      const updates = []
+      manager.on('task_updated', (t) => updates.push(t))
+
+      await manager._pollTaskStatus()
+
+      assert.equal(task.status, 'completed', 'a healthy task must complete, not be force-failed')
+      assert.equal(task.result, 'https://preview.example')
+      assert.equal(task.error, null)
+      assert.ok(updates.some((u) => u.taskId === taskId && u.status === 'completed'))
+    })
+
+    it('transitions a task running→failed when the remote reports failure (#5327)', async () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('bad task')
+      const task = manager._tasks.get(taskId)
+      task.status = 'running'
+      manager._checkRemoteStatus = async () => ({ status: 'failed', error: 'sandbox crashed' })
+
+      const errors = []
+      manager.on('task_error', (e) => errors.push(e))
+
+      await manager._pollTaskStatus()
+
+      assert.equal(task.status, 'failed')
+      assert.equal(task.error, 'sandbox crashed')
+      assert.equal(errors.length, 1)
+    })
+
+    it('leaves a task running when the status check is still pending or throws', async () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('slow task')
+      const task = manager._tasks.get(taskId)
+      task.status = 'running'
+
+      // Still running.
+      manager._checkRemoteStatus = async () => ({ status: 'running' })
+      await manager._pollTaskStatus()
+      assert.equal(task.status, 'running')
+
+      // Transient check failure — must not fail the task.
+      manager._checkRemoteStatus = async () => { throw new Error('network blip') }
+      await manager._pollTaskStatus()
+      assert.equal(task.status, 'running')
+    })
+
+    it('stops the timer once no tasks remain running', async () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('one task')
+      const task = manager._tasks.get(taskId)
+      task.status = 'running'
+      manager._startPolling()
+      assert.ok(manager._pollTimer, 'timer armed')
+
+      manager._checkRemoteStatus = async () => ({ status: 'completed', result: 'done' })
+      await manager._pollTaskStatus()
+
+      assert.equal(task.status, 'completed')
+      assert.equal(manager._pollTimer, null, 'timer cleared after last task completes')
+    })
+
+    it('skips an overlapping poll while the prior status check is still in flight (#5327 review)', async () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('slow check')
+      const task = manager._tasks.get(taskId)
+      task.status = 'running'
+
+      let checkStarts = 0
+      let releaseCheck
+      manager._checkRemoteStatus = () => {
+        checkStarts++
+        return new Promise((resolve) => { releaseCheck = resolve })
+      }
+
+      // First poll starts the (stuck) status check and increments _pollCount.
+      const firstPoll = manager._pollTaskStatus()
+      assert.equal(checkStarts, 1)
+      assert.equal(manager._pollCount, 1)
+
+      // A second tick while the first is in flight must be skipped entirely —
+      // no new status check, no _pollCount advance (which would time out early).
+      await manager._pollTaskStatus()
+      assert.equal(checkStarts, 1, 'overlapping poll must not start a second check')
+      assert.equal(manager._pollCount, 1, 'overlapping poll must not advance the count')
+
+      // Release the in-flight check; the first poll settles and clears the flag.
+      releaseCheck({ status: 'running' })
+      await firstPoll
+      assert.equal(manager._inPoll, false, 'in-flight flag cleared after the poll settles')
+
+      // A subsequent poll now runs normally — swap to an immediately-resolving
+      // check so this poll doesn't hang on the stuck-promise mock.
+      manager._checkRemoteStatus = async () => { checkStarts++; return { status: 'running' } }
+      await manager._pollTaskStatus()
+      assert.equal(checkStarts, 2)
+    })
+
+    it('unref\'s the poll timer so it never holds the event loop open (#5327)', () => {
+      manager = new WebTaskManager()
+      let unrefed = false
+      const realSetInterval = globalThis.setInterval
+      // Capture-and-unref seam via a fake timer object.
+      manager._pollTimer = null
+      globalThis.setInterval = () => ({ unref: () => { unrefed = true }, _fake: true })
+      try {
+        manager._startPolling()
+      } finally {
+        globalThis.setInterval = realSetInterval
+      }
+      assert.equal(unrefed, true, 'poll interval must be unref\'d')
+      // Avoid clearInterval on the fake handle in destroy/afterEach.
+      manager._pollTimer = null
     })
   })
 
