@@ -649,16 +649,27 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
-  // #5158: worktree GC block. Only the shape (object, not array) and the
-  // `autoReap` boolean are checked; an unset block means "auto-reaper off".
+  // #5158: worktree GC block. Only the shape (object, not array), the
+  // `autoReap` boolean, and the `reapIntervalMs` positive number (#5326) are
+  // checked; an unset block means "auto-reaper off".
   if (config.worktreeGc !== undefined) {
     if (typeof config.worktreeGc !== 'object' || config.worktreeGc === null || Array.isArray(config.worktreeGc)) {
       warnings.push(`Invalid type for 'worktreeGc': expected object, got ${Array.isArray(config.worktreeGc) ? 'array' : typeof config.worktreeGc}`)
-    } else if (
-      Object.prototype.hasOwnProperty.call(config.worktreeGc, 'autoReap') &&
-      typeof config.worktreeGc.autoReap !== 'boolean'
-    ) {
-      warnings.push(`Invalid type for 'worktreeGc.autoReap': expected boolean, got ${typeof config.worktreeGc.autoReap}`)
+    } else {
+      if (
+        Object.prototype.hasOwnProperty.call(config.worktreeGc, 'autoReap') &&
+        typeof config.worktreeGc.autoReap !== 'boolean'
+      ) {
+        warnings.push(`Invalid type for 'worktreeGc.autoReap': expected boolean, got ${typeof config.worktreeGc.autoReap}`)
+      }
+      // #5326 (WP-5.4): periodic-reaper interval. Optional; when omitted the
+      // reaper uses its built-in default. Must be a positive finite number.
+      if (Object.prototype.hasOwnProperty.call(config.worktreeGc, 'reapIntervalMs')) {
+        const v = config.worktreeGc.reapIntervalMs
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+          warnings.push(`Invalid value for 'worktreeGc.reapIntervalMs': expected a positive number, got ${typeof v === 'number' ? v : typeof v}`)
+        }
+      }
     }
   }
 
