@@ -2292,8 +2292,8 @@ export class ClaudeTuiSession extends BaseSession {
    * pre-first-output timers. When a question is pending the HUMAN is the
    * bottleneck, not claude, so these would only fire a misleading
    * force-cancel / stall error / check-in chip mid-answer. The dedicated
-   * the dedicated per-toolUseId `_askUserQuestionWatchdogs` (armed in respondToQuestion) still recover a
-   * genuinely wedged form after the answer is written.
+   * per-toolUseId `_askUserQuestionWatchdogs` (armed in respondToQuestion) still
+   * recover a genuinely wedged form after the answer is written.
    *
    * Deliberately does NOT touch the HARD cap (`_hardTimeout`): that 2h
    * last-resort backstop stays armed even across a pending question, so a human
