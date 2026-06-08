@@ -10,6 +10,7 @@ import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
+import { hasClaudeOAuthCreds } from './auth-probes.js'
 import {
   parseBackgroundShellId,
   parseBackgroundShellOutputPath,
@@ -122,19 +123,23 @@ const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
 // #5321 (WP-4.1) — subscription-auth failure detection. claude-tui routes via
 // the OAuth subscription (ANTHROPIC_API_KEY is deleted from the spawn env), so a
 // logged-out / expired login can't be caught by an env-var check. Instead we
-// classify claude's own logged-out output. These patterns are intentionally
-// HIGH-CONFIDENCE (strings that only appear in an auth-failure context) to avoid
-// false-positives on normal model output — they are matched only during warmup
-// (before the session is ready) and when a turn has already stalled, never on
-// arbitrary mid-turn response text. Tune against a real logged-out capture
-// (scripts/tui-form-recorder.mjs) if dogfood surfaces a miss.
+// classify claude's own logged-out banner.
+//
+// CRITICAL: these are NOT generic-English auth phrases. This user base writes a
+// lot of auth code, so "authentication failed" / "not logged in" / "session
+// token expired" appear constantly in normal model RESPONSE text — and the
+// stall/exit scan paths see that rendered response. So every pattern requires
+// claude's own remediation COMMAND token — the `/login` slash command or the
+// `claude login` CLI command in a "run …" instruction — which essentially only
+// appears in claude's logged-out banner ("Invalid API key · Please run /login"),
+// not in a model discussing auth. Matched on the whitespace-normalized tail so a
+// line-wrapped banner still matches. Best-effort pending a real logged-out
+// capture (scripts/tui-form-recorder.mjs) — tune the tokens, not loosen them.
 const AUTH_FAILURE_PATTERNS = [
-  /invalid api key/i,
-  /please run\s*\/login/i,
-  /not (?:logged ?in|authenticated)/i,
-  /authentication (?:failed|required|error)/i,
-  /(?:oauth|login|session|credential)s?(?: token)? (?:expired|invalid|revoked)/i,
-  /please (?:run|sign in|log ?in).{0,40}\/login/i,
+  /please run `?\/login`?/i,            // claude's exact logged-out instruction
+  /invalid api key.{0,60}\/login/i,     // full banner: "Invalid API key · Please run /login"
+  /\brun `?\/login`?/i,                 // "run /login" / "run `/login`"
+  /\brun `?claude login`?/i,            // CLI-command guidance: "run claude login"
 ]
 // Structured error surfaced when an auth failure is classified.
 const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
@@ -367,10 +372,13 @@ export class ClaudeTuiSession extends BaseSession {
    *
    * claude-tui explicitly deletes ANTHROPIC_API_KEY from the spawn env and
    * routes via the OAuth subscription. #5321 (WP-4.1): best-effort on-disk
-   * probe instead of the old hardcoded `ready:true`. claude stores its OAuth
-   * token in `~/.claude/.credentials.json` on file-based platforms, but in the
-   * macOS Keychain on darwin (which this process cannot read). So:
-   *   - credentials file present       → ready (authenticated)
+   * probe instead of the old hardcoded `ready:true`, via the shared
+   * `hasClaudeOAuthCreds()` (#3674), which covers all known on-disk stores
+   * (`~/.claude/auth.json`, `~/.claude/.credentials.json`, the `claudeAiOauth`
+   * block in `~/.claude.json`) and honours `CHROXY_CLAUDE_HOME` /
+   * `CHROXY_CLAUDE_CONFIG`. macOS stores the token in the Keychain (no file),
+   * so a miss there is inconclusive. Hence:
+   *   - creds found on disk            → ready (authenticated)
    *   - absent on darwin               → can't rule out Keychain → ready, flagged
    *   - absent on non-darwin           → logged out → ready:false + `claude login`
    * This is a pre-spawn hint only; the AUTHORITATIVE check is the runtime warmup
@@ -381,7 +389,7 @@ export class ClaudeTuiSession extends BaseSession {
    */
   static resolveAuth() {
     const envVars = this.preflight.credentials.envVars
-    const hasFileCreds = existsSync(join(homedir(), '.claude', '.credentials.json'))
+    const hasFileCreds = hasClaudeOAuthCreds()
     if (hasFileCreds) {
       return {
         ready: true,
@@ -1108,6 +1116,18 @@ export class ClaudeTuiSession extends BaseSession {
       this._scheduleRespawn()
       return
     }
+    // #5321 (WP-4.1) — the respawn's warmup classified a logged-out / expired
+    // login (live PTY sitting at the login banner, never reaching ready). Do NOT
+    // emit `ready` on an unauthenticated session — surface AUTH_REQUIRED and stop
+    // respawning: every further attempt re-resumes into the same logged-out state
+    // until the operator runs `claude login`, so retrying is futile. (start() is
+    // not on the respawn path, so this is the only place to catch it here.)
+    if (this._authFailureDetected) {
+      ;(this._log || log).warn(`claude TUI respawn warmup classified ${AUTH_REQUIRED_CODE} — surfacing instead of marking ready`)
+      this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
+      this.emit('respawn_exhausted', { reason: AUTH_REQUIRED_CODE, attempts: this._respawnCount })
+      return
+    }
     // Respawn succeeded and stayed alive through warmup. Reset the count so a
     // FUTURE unrelated death gets the full retry budget again (matches how
     // CliSession resets _respawnCount on system.init, cli-session.js:888), mark
@@ -1239,6 +1259,13 @@ export class ClaudeTuiSession extends BaseSession {
       this._term = null
       return
     }
+
+    // #5321 (WP-4.1) — reset the output tails for THIS spawn so the warmup auth
+    // scan (and a later _onPtyGone / stall scan) can't match a banner left over
+    // from a prior process on a respawn. Constructor already empties these for
+    // the first spawn; this covers every subsequent _respawnPty.
+    this._outputTail = ''
+    this._outputTailRaw = Buffer.alloc(0)
 
     this._term.onData((data) => {
       // Keep a tail of recent output so we can surface diagnostics when
@@ -1427,15 +1454,19 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * #5321 (WP-4.1) — classify the ANSI-stripped PTY tail as a subscription-auth
    * failure (logged out / expired login). Returns true when claude's output
-   * matches a high-confidence AUTH_FAILURE_PATTERNS entry. Used only where a
-   * match is meaningful — during warmup (before ready) and once a turn has
-   * stalled / the PTY exited — never on arbitrary mid-turn response text, so a
-   * model that merely *discusses* authentication can't trip a false positive.
+   * matches an AUTH_FAILURE_PATTERNS entry. Called during warmup (before ready)
+   * and once a turn has stalled / the PTY exited — those tails CAN contain
+   * rendered response text, so the false-positive defence lives in the patterns
+   * themselves: each requires claude's `/login` / `claude login` remediation
+   * command token, which a model merely *discussing* authentication won't emit.
    */
   _scanOutputForAuthFailure() {
     const tail = this._outputTail || ''
     if (!tail) return false
-    return AUTH_FAILURE_PATTERNS.some((re) => re.test(tail))
+    // Collapse whitespace (the TUI wraps/box-pads the banner with newlines +
+    // spaces) so a line-wrapped "Please run\n  /login" still matches.
+    const normalized = tail.replace(/\s+/g, ' ')
+    return AUTH_FAILURE_PATTERNS.some((re) => re.test(normalized))
   }
 
   async sendMessage(prompt, attachments, _options = {}) {
@@ -2609,9 +2640,10 @@ export class ClaudeTuiSession extends BaseSession {
     // #5321 (WP-4.1) — a turn that stalled WITH a logged-out / expired-login
     // banner in its tail is an auth failure, not a generic stall. Upgrade the
     // error so mid-session expiry gives actionable `claude login` guidance
-    // instead of "try sending again" (which would just stall again). Safe from
-    // false positives: only runs once a turn has ALREADY stalled, never on live
-    // response text.
+    // instead of "try sending again" (which would just stall again). The tail
+    // still holds rendered RESPONSE text here, so false-positive safety rests on
+    // the patterns requiring claude's `/login` / `claude login` command token
+    // (see AUTH_FAILURE_PATTERNS) — a model merely DISCUSSING auth won't match.
     const authFail = this._scanOutputForAuthFailure()
     // #4641: shared teardown helper. See companion call in _handleHardTimeout
     // for the meaning of the asymmetric flags — preserved here as-is so this
@@ -2670,8 +2702,9 @@ export class ClaudeTuiSession extends BaseSession {
       : this._firstOutputTimeoutMs
     // #5321 (WP-4.1) — upgrade to AUTH_REQUIRED when the pre-first-output
     // silence came WITH a logged-out / expired-login banner (e.g. an expired
-    // login on the very first turn after restore). Only runs on an
-    // already-stalled turn, so no false positives on live output.
+    // login on the very first turn after restore). False-positive safety rests
+    // on the command-token patterns (see AUTH_FAILURE_PATTERNS), not on the turn
+    // having stalled.
     const authFail = this._scanOutputForAuthFailure()
     // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
     // before error, gate stream_end on messageId) so the dashboard sees
