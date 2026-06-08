@@ -2011,12 +2011,21 @@ export class ClaudeTuiSession extends BaseSession {
           // intervened. Per-toolUseId so the dashboard can dedup repeats
           // when claude TUI re-emits the same multi-q payload (a known
           // failure mode pre-#4668).
-          this.emit('multi_question_intervention', {
-            toolUseId,
-            questionCount,
-            reason: 'multi_question',
-            timestamp: Date.now(),
-          })
+          // #5320 (WP-3.3) — isolate this emit. A synchronous throw from a
+          // listener here would skip the `user_question` emit + backstop suspend
+          // below, leaving `_pendingUserAnswer` set with no dashboard prompt and
+          // no recovery — an orphaned pending. Swallow + log so the question
+          // still surfaces.
+          try {
+            this.emit('multi_question_intervention', {
+              toolUseId,
+              questionCount,
+              reason: 'multi_question',
+              timestamp: Date.now(),
+            })
+          } catch (err) {
+            ;(this._log || log).warn(`multi_question_intervention listener threw (continuing): ${err?.message || err}`)
+          }
         }
         this.emit('user_question', { toolUseId, questions })
         // #5318 (WP-3.1) — we're now blocked on a human answer. Suspend the
@@ -2841,6 +2850,18 @@ export class ClaudeTuiSession extends BaseSession {
     // #4828: session-scoped.
     ;(this._log || log).info(`respondToQuestion: tool=${prevToolUseId || '?'} dashboardToolUseId=${toolUseId || 'none'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${entry?.options?.length || 0} pendingMapSize=${this._pendingUserAnswers.size}`)
     if (!entry) return
+    // #5320 (WP-3.3) — arm the stall watchdog the MOMENT we have a live pending
+    // entry the dashboard tried to answer, BEFORE any early-return below. The
+    // dashboard clears its QuestionPrompt UI when it sends an answer, so ANY
+    // respondToQuestion that finds an entry but then bails — the unactionable
+    // cases here (non-string / empty text + no answersMap), the validation drops
+    // in the freeform path (no options, option-not-found), or `!this._term` —
+    // would otherwise leave the turn wedged until the 2h hard cap with no
+    // dashboard prompt. Arming here (it does NOT clear the pending) gives every
+    // such path recovery; a real follow-up answer re-arms idempotently (same
+    // key), and the success paths re-arm with a fresh post-write window (the
+    // Other-freeform IIFE with its longer second-stage window).
+    this._armAskUserQuestionWatchdog(prevToolUseId)
     // Single-question / free-text path requires a non-empty `text`. The
     // multi-question path is driven from answersMap (text is ignored when
     // a map is present) so an empty string is permitted there.
@@ -2959,10 +2980,14 @@ export class ClaudeTuiSession extends BaseSession {
             ;(this._log || log).warn(`respondToQuestion Other-digit PTY write failed: ${err.message} (tool=${tag})`)
             return false
           })
-          if (this._destroying) return
+          // #5320 (WP-3.3) — also bail if the turn was ABORTED (interrupt() sets
+          // _activeTurn.aborted but does not flip _destroying). Without this the
+          // IIFE would keep driving keystrokes into a turn the user already
+          // interrupted, and re-arm a watchdog interrupt() just cleared.
+          if (this._destroying || this._activeTurn?.aborted) return
           if (!stage1ok) return
           await new Promise((resolve) => setTimeout(resolve, OTHER_FREEFORM_SETTLE_MS))
-          if (this._destroying) return
+          if (this._destroying || this._activeTurn?.aborted) return
           // Belt-and-braces: destroy() sets _destroying before nulling
           // _term in the same synchronous frame, so the guard above
           // already covers the destroy() race. This null-check is

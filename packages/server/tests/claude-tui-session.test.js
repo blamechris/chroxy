@@ -5040,6 +5040,101 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5320 (WP-3.3) — recovery on every respondToQuestion path + crash-isolation
+  // for the intervention emit. Before this, the validation-failure early-returns
+  // in the Other/freeform path cleared the pending answer but armed no watchdog
+  // and emitted no error (the turn wedged until the 2h hard cap), the freeform
+  // IIFE ignored interrupt()'s abort, and a throwing multi_question_intervention
+  // listener orphaned the pending by skipping the user_question emit.
+  describe('respondToQuestion recovery on every path (#5320 WP-3.3)', () => {
+    function makeAnsweringSession() {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s._activeTurn = { synthSeq: 0, aborted: false, startedAt: Date.now() }
+      s._isBusy = true
+      s._currentMessageId = 'msg-5320'
+      s.on('error', () => {})
+      return s
+    }
+
+    it('a freeform answer with no selectable options still arms a stall watchdog', async () => {
+      const s = makeAnsweringSession()
+      s._term = { write: () => {}, kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_no_opts', questions: [{ options: [] }], options: [] }
+      s.respondToQuestion('whatever', undefined, 'toolu_no_opts', { freeformText: 'hi' })
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_no_opts'), 'watchdog armed despite the drop')
+      assert.equal(s._pendingUserAnswers.size, 0, 'pending cleared')
+      await s.destroy()
+    })
+
+    it('an empty answer arms a recovery watchdog WITHOUT consuming the pending', async () => {
+      // The dashboard clears its QuestionPrompt UI when it submits, even for an
+      // empty answer. respondToQuestion returns early on empty text + no
+      // answersMap (it can't drive the form with nothing), so without recovery
+      // the turn would wedge. #5320: arm a watchdog before that early-return —
+      // but DON'T consume the pending, so a real follow-up answer still works.
+      const s = makeAnsweringSession()
+      s._term = { write: () => {}, kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_empty', questions: [{ options: [{ label: 'a' }] }], options: [{ label: 'a' }] }
+      s.respondToQuestion('', undefined, 'toolu_empty')
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_empty'), 'recovery watchdog armed for the empty answer')
+      assert.equal(s._pendingUserAnswers.size, 1, 'empty answer does NOT consume the pending entry')
+      await s.destroy()
+    })
+
+    it('a freeform answer whose option is not found still arms a stall watchdog', async () => {
+      const s = makeAnsweringSession()
+      s._term = { write: () => {}, kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_nomatch', questions: [{ options: [{ label: 'a' }] }], options: [{ label: 'a' }] }
+      s.respondToQuestion('NotAnOption', undefined, 'toolu_nomatch', { freeformText: 'hi' })
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_nomatch'), 'watchdog armed despite the drop')
+      await s.destroy()
+    })
+
+    it('interrupt() during the Other-freeform settle stops the IIFE re-arming the watchdog', async () => {
+      const s = makeAnsweringSession()
+      const writes = []
+      s._term = { write: (b) => writes.push(String(b)), kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_abort', questions: [{ options: [{ label: 'Other' }] }], options: [{ label: 'Other' }] }
+
+      s.respondToQuestion('Other', undefined, 'toolu_abort', { freeformText: 'SECRET_FREEFORM' })
+      // The arm-after-clear watchdog (#5320) is live during the settle.
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_abort'), 'watchdog armed during the answer write')
+
+      // Interrupt DURING the 150ms settle window. interrupt() sets
+      // _activeTurn.aborted and clears all watchdogs synchronously; the IIFE's
+      // post-settle abort guard must then bail BEFORE re-arming at stage 2.
+      await new Promise((r) => setTimeout(r, 40))
+      s.interrupt()
+
+      // Wait past the settle + would-be stage-2 re-arm/write.
+      await new Promise((r) => setTimeout(r, 250))
+
+      // Distinct contribution of the abort guard: no watchdog re-armed after
+      // interrupt() cleared them. Without the guard the IIFE would re-arm
+      // 'toolu_abort' at stage 2 (this assertion fails on main / without the fix).
+      assert.ok(!s._askUserQuestionWatchdogs.has('toolu_abort'), 'IIFE did NOT re-arm the watchdog after interrupt()')
+      assert.ok(!writes.join('').includes('SECRET_FREEFORM'), 'stage-2 freeform write skipped after interrupt')
+      await s.destroy()
+    })
+
+    it('a throwing multi_question_intervention listener does not orphan the pending', () => {
+      const s = makeAnsweringSession()
+      s.on('multi_question_intervention', () => { throw new Error('listener boom') })
+      let userQ = null
+      s.on('user_question', (e) => { userQ = e })
+      // Multi-question PreToolUse triggers the intervention emit before user_question.
+      s._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_mq', tool_name: 'AskUserQuestion',
+        tool_input: { questions: [
+          { question: 'Q1?', options: [{ label: 'a' }] },
+          { question: 'Q2?', options: [{ label: 'b' }] },
+        ] },
+      }, 'msg-5320')
+      assert.ok(userQ, 'user_question still emitted despite the intervention listener throwing')
+      assert.equal(s._pendingUserAnswers.size, 1, 'pending recorded — not orphaned')
+    })
+  })
+
   // #4604 Chunk B — multi-question form driver. Empirical byte sequence
   // pinned via scripts/tui-form-recorder.mjs against claude CLI v2.1.158
   // (see tui_multi_question_form_keys memory). Single-select digit
