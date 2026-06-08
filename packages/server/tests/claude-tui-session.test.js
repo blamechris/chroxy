@@ -315,6 +315,105 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5321 (WP-4.1) — detect & surface a logged-out / expired subscription login
+  // as a clear AUTH_REQUIRED error instead of a 90s silent warmup hang or a
+  // generic stall/exit. The classifier matches claude's own logged-out output.
+  describe('subscription auth failure detection (#5321 WP-4.1)', () => {
+    function makeSession() {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s.on('error', () => {})
+      return s
+    }
+
+    it('_scanOutputForAuthFailure matches logged-out output but not normal text', () => {
+      const s = makeSession()
+      for (const sample of [
+        'Invalid API key · Please run /login',
+        'You are not logged in. Run claude login.',
+        'Authentication failed',
+        'OAuth token expired',
+      ]) {
+        s._outputTail = sample
+        assert.ok(s._scanOutputForAuthFailure(), `should match: ${sample}`)
+      }
+      // Normal model output must NOT match (no false positive).
+      s._outputTail = 'Here is how to fix your code. The function returns a Promise.'
+      assert.ok(!s._scanOutputForAuthFailure(), 'normal output does not match')
+      s._outputTail = ''
+      assert.ok(!s._scanOutputForAuthFailure(), 'empty tail does not match')
+    })
+
+    it('start() rejects with AUTH_REQUIRED when warmup classifies a logged-out session', async () => {
+      const s = makeSession()
+      // Stub _spawnPty to mimic a logged-out warmup: live PTY, never ready,
+      // auth failure latched by the warmup scan.
+      s._spawnPty = async function () {
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+        this._authFailureDetected = true
+      }
+      const errors = []
+      const readys = []
+      s.on('error', (e) => errors.push(e))
+      s.on('ready', (e) => readys.push(e))
+
+      await assert.rejects(s.start(), (err) => err.code === 'AUTH_REQUIRED')
+      assert.equal(readys.length, 0, 'no ready emitted for a logged-out session')
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'AUTH_REQUIRED', 'AUTH_REQUIRED error surfaced')
+      assert.match(errors[0].message, /claude login/, 'guidance included')
+      assert.equal(s._processReady, false)
+    })
+
+    it('start() rejects with AUTH_REQUIRED when the warmup output (not the latch) shows logged-out', async () => {
+      const s = makeSession()
+      // _spawnPty leaves a live PTY + the login banner in the tail, but does not
+      // set the latch (mimics the timeout-fallback path).
+      s._spawnPty = async function () {
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+        this._outputTail = 'Invalid API key · Please run /login'
+      }
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      await assert.rejects(s.start(), (err) => err.code === 'AUTH_REQUIRED')
+      assert.equal(errors[0].code, 'AUTH_REQUIRED')
+    })
+
+    it('_onPtyGone emits AUTH_REQUIRED when the PTY died with a logged-out banner', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._outputTail = 'Invalid API key · Please run /login'
+      s._onPtyGone({ exitCode: 1, signal: null }, 'exit') // no active turn
+
+      const authErr = errors.find((e) => e.code === 'AUTH_REQUIRED')
+      assert.ok(authErr, 'AUTH_REQUIRED surfaced on auth-related PTY death')
+    })
+
+    it('_handleStreamStall upgrades a stall to AUTH_REQUIRED when the tail shows logged-out', () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-auth'
+      s._activeTurn = { startedAt: Date.now() - 100, synthSeq: 0 }
+      s._term = { write: () => {}, kill: () => {} }
+      s._outputTail = 'Authentication failed'
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      s._handleStreamStall()
+      const authErr = errors.find((e) => e.code === 'AUTH_REQUIRED')
+      assert.ok(authErr, 'stall upgraded to AUTH_REQUIRED')
+      assert.equal(s._isBusy, false, 'turn torn down')
+    })
+
+    it('resolveAuth returns a well-formed auth descriptor (best-effort on-disk probe)', () => {
+      const auth = ClaudeTuiSession.resolveAuth()
+      assert.equal(auth.source, 'oauth')
+      assert.equal(typeof auth.ready, 'boolean')
+      assert.ok(typeof auth.hint === 'string' && auth.hint.length > 0)
+      assert.ok(typeof auth.detail === 'string' && auth.detail.length > 0)
+    })
+  })
+
   // #5315 (WP-2.1) — bounded per-session PTY auto-respawn. When the persistent
   // claude PTY dies unexpectedly mid-session, the session must self-heal
   // (bounded backoff, max 5 attempts) instead of becoming a permanently
