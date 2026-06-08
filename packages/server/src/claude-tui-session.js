@@ -497,11 +497,15 @@ export class ClaudeTuiSession extends BaseSession {
     // tests + callers that read the single field keep working.
     this._pendingUserAnswers = new Map()
     this._lastPendingAnswerToolUseId = null
-    // #4604: watchdog timer armed in respondToQuestion(). If PostToolUse
-    // never arrives after we write the answer (multi-question form wedge),
-    // _onAskUserQuestionStall clears busy state + emits an error so the
-    // session is recoverable. Cleared on PostToolUse + destroy().
-    this._askUserQuestionWatchdog = null
+    // #4604 / #5319 (WP-3.2): per-toolUseId stall watchdogs armed in
+    // respondToQuestion(). If PostToolUse never arrives after we write an answer
+    // (multi-question form wedge), the matching watchdog fires
+    // _onAskUserQuestionStall to clear busy state + emit an error so the session
+    // is recoverable. Keyed by toolUseId (mirrors the #4668 _pendingUserAnswers
+    // Map) so PARALLEL AskUserQuestion calls each get an independent watchdog —
+    // answering / stalling one no longer disarms the others. Cleared per-id on
+    // PostToolUse and cleared wholesale on the turn-ending paths + destroy().
+    this._askUserQuestionWatchdogs = new Map()
     // #4884: forensic timing for the defensive trailing '\r' added in
     // #4867 / #4886 — record the wall-clock at which Submit-'1' is written
     // to the PTY for each multi-question form, keyed by toolUseId. On the
@@ -610,6 +614,40 @@ export class ClaudeTuiSession extends BaseSession {
       const keys = [...this._pendingUserAnswers.keys()]
       this._lastPendingAnswerToolUseId = keys.length > 0 ? keys[keys.length - 1] : null
     }
+  }
+
+  /**
+   * #5319 (WP-3.2): arm (or re-arm) the per-toolUseId AskUserQuestion stall
+   * watchdog. Each toolUseId gets its own timer so a parallel sibling's arm
+   * can't clobber this one. On fire it deletes its own Map entry, then calls
+   * _onAskUserQuestionStall. A null/undefined toolUseId is keyed verbatim
+   * (one anonymous slot) so the defensive no-toolUseId path keeps a watchdog.
+   * `ms` defaults to the standard window but the Other-freeform two-stage flow
+   * passes OTHER_FREEFORM_WATCHDOG_MS for its longer second stage.
+   */
+  _armAskUserQuestionWatchdog(toolUseId, ms = ASK_USER_QUESTION_WATCHDOG_MS) {
+    const existing = this._askUserQuestionWatchdogs.get(toolUseId)
+    if (existing) clearTimeout(existing)
+    const t = setTimeout(() => {
+      this._askUserQuestionWatchdogs.delete(toolUseId)
+      this._onAskUserQuestionStall(toolUseId)
+    }, ms)
+    this._askUserQuestionWatchdogs.set(toolUseId, t)
+  }
+
+  /** #5319 (WP-3.2): cancel + drop ONE toolUseId's stall watchdog (PostToolUse / per-question teardown). Idempotent. */
+  _clearAskUserQuestionWatchdog(toolUseId) {
+    const t = this._askUserQuestionWatchdogs.get(toolUseId)
+    if (t) {
+      clearTimeout(t)
+      this._askUserQuestionWatchdogs.delete(toolUseId)
+    }
+  }
+
+  /** #5319 (WP-3.2): cancel + drop ALL stall watchdogs (turn-ending paths + destroy()). Idempotent. */
+  _clearAllAskUserQuestionWatchdogs() {
+    for (const t of this._askUserQuestionWatchdogs.values()) clearTimeout(t)
+    this._askUserQuestionWatchdogs.clear()
   }
 
   /**
@@ -2040,11 +2078,11 @@ export class ClaudeTuiSession extends BaseSession {
       this._clearAskUserQuestionLock()
     }
     // #4604: PostToolUse means claude accepted the answer (single-question
-    // happy path). Cancel the stall watchdog so it doesn't fire a spurious
-    // ASK_USER_QUESTION_STALL error 30s later.
-    if (toolName === 'AskUserQuestion' && this._askUserQuestionWatchdog) {
-      clearTimeout(this._askUserQuestionWatchdog)
-      this._askUserQuestionWatchdog = null
+    // happy path). Cancel THIS tool's stall watchdog so it doesn't fire a
+    // spurious ASK_USER_QUESTION_STALL error 30s later. #5319 (WP-3.2): clear
+    // only this toolUseId's watchdog — a parallel sibling's watchdog stays armed.
+    if (toolName === 'AskUserQuestion' && toolUseId) {
+      this._clearAskUserQuestionWatchdog(toolUseId)
     }
 
     // PostToolUse — extract a string-ish result for the dashboard.
@@ -2205,11 +2243,10 @@ export class ClaudeTuiSession extends BaseSession {
     // #4604: same symmetry for the stall watchdog. The guard in
     // _onAskUserQuestionStall (`!_pendingUserAnswer && !_isBusy`) would
     // currently no-op the late fire (both are falsy here), but leaving
-    // the setTimeout handle live wastes a callback invocation 30s later.
-    if (this._askUserQuestionWatchdog) {
-      clearTimeout(this._askUserQuestionWatchdog)
-      this._askUserQuestionWatchdog = null
-    }
+    // the setTimeout handles live wastes a callback invocation 30s later.
+    // #5319 (WP-3.2): the turn errored — every per-toolUseId watchdog is moot
+    // (their fires would no-op on !_isBusy), so clear them all.
+    this._clearAllAskUserQuestionWatchdogs()
   }
 
   /**
@@ -2255,7 +2292,7 @@ export class ClaudeTuiSession extends BaseSession {
    * pre-first-output timers. When a question is pending the HUMAN is the
    * bottleneck, not claude, so these would only fire a misleading
    * force-cancel / stall error / check-in chip mid-answer. The dedicated
-   * `_askUserQuestionWatchdog` (armed in respondToQuestion) still recovers a
+   * the dedicated per-toolUseId `_askUserQuestionWatchdogs` (armed in respondToQuestion) still recover a
    * genuinely wedged form after the answer is written.
    *
    * Deliberately does NOT touch the HARD cap (`_hardTimeout`): that 2h
@@ -2593,10 +2630,9 @@ export class ClaudeTuiSession extends BaseSession {
     //    stale keystrokes into whatever form the next turn brings up.
     this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
-    if (this._askUserQuestionWatchdog) {
-      clearTimeout(this._askUserQuestionWatchdog)
-      this._askUserQuestionWatchdog = null
-    }
+    // #5319 (WP-3.2): Ctrl-C above dropped the TUI's current form, so every
+    // per-toolUseId watchdog is now stale — clear them all.
+    this._clearAllAskUserQuestionWatchdogs()
     // #4732: clear the pre-first-output watchdog so a teardown via
     // `_handleHardTimeout` / `_handleStreamStall` / `_handleFirstOutputTimeout`
     // can never leak a live handle that would re-fire on a torn-down turn.
@@ -2686,14 +2722,12 @@ export class ClaudeTuiSession extends BaseSession {
     // every sibling pending entry is now equally stale.
     this._pendingUserAnswers_clearAll()
     this._clearAskUserQuestionLock()
-    // #4604: cancel the stall watchdog too. interrupt() does NOT clear
+    // #4604: cancel the stall watchdogs too. interrupt() does NOT clear
     // _isBusy directly (Ctrl-C surfaces async via _finishTurn*), so without
-    // this the watchdog could fire ~30s later and emit a spurious
+    // this a watchdog could fire ~30s later and emit a spurious
     // ASK_USER_QUESTION_STALL for a session the user already interrupted.
-    if (this._askUserQuestionWatchdog) {
-      clearTimeout(this._askUserQuestionWatchdog)
-      this._askUserQuestionWatchdog = null
-    }
+    // #5319 (WP-3.2): clear every per-toolUseId watchdog.
+    this._clearAllAskUserQuestionWatchdogs()
     // #4732: same reasoning for the pre-first-output watchdog. interrupt()
     // doesn't synchronously flip _isBusy=false, so without this clear the
     // watchdog could fire in the 150ms poll-loop window before
@@ -2862,11 +2896,9 @@ export class ClaudeTuiSession extends BaseSession {
       // the watchdog clears _isBusy + _pendingUserAnswer and emits
       // ASK_USER_QUESTION_STALL so the dashboard prompts the user to
       // retry. Cancelled on PostToolUse (happy path) and on destroy().
-      if (this._askUserQuestionWatchdog) clearTimeout(this._askUserQuestionWatchdog)
-      this._askUserQuestionWatchdog = setTimeout(() => {
-        this._askUserQuestionWatchdog = null
-        this._onAskUserQuestionStall(prevToolUseId)
-      }, ASK_USER_QUESTION_WATCHDOG_MS)
+      // #5319 (WP-3.2): keyed by this tool's id so a parallel sibling's arm
+      // doesn't clobber it.
+      this._armAskUserQuestionWatchdog(prevToolUseId)
     }
 
     // Single-question / no-questions-array path (back-compat with the
@@ -2914,7 +2946,7 @@ export class ClaudeTuiSession extends BaseSession {
           // #4808: destroy() can run during ANY of the awaits below
           // (stage-1 write, settle pause, stage-2 write). Without a
           // guard after each await the IIFE keeps running and:
-          //   - re-arms `_askUserQuestionWatchdog` past destroy(),
+          //   - re-arms a `_askUserQuestionWatchdogs` entry past destroy(),
           //     leaking a 30s timer that pins `this` in its closure
           //     even though `_onAskUserQuestionStall`'s _destroying
           //     guard silences the eventual emit
@@ -2943,11 +2975,8 @@ export class ClaudeTuiSession extends BaseSession {
           // Re-arm the watchdog so the freeform write phase has a fresh
           // OTHER_FREEFORM_WATCHDOG_MS window — the stage-1 arm already
           // counted the settle delay against the original 30s budget.
-          if (this._askUserQuestionWatchdog) clearTimeout(this._askUserQuestionWatchdog)
-          this._askUserQuestionWatchdog = setTimeout(() => {
-            this._askUserQuestionWatchdog = null
-            this._onAskUserQuestionStall(prevToolUseId)
-          }, OTHER_FREEFORM_WATCHDOG_MS)
+          // #5319 (WP-3.2): keyed by this tool's id, longer second-stage window.
+          this._armAskUserQuestionWatchdog(prevToolUseId, OTHER_FREEFORM_WATCHDOG_MS)
           await this._writePtyTextThrottled(freeformText).catch((err) => {
             // #4828: session-scoped.
             ;(this._log || log).warn(`respondToQuestion Other-freeform PTY write failed: ${err.message} (tool=${tag})`)
@@ -3499,6 +3528,11 @@ export class ClaudeTuiSession extends BaseSession {
     // would hit the "no matching pending entry — dropping" path and
     // wedge the next form silently).
     this._clearPendingAnswerByToolUseId(toolUseId)
+    // #5319 (WP-3.2): cancel THIS tool's stall watchdog. The 30s-stall path
+    // arrives here after its own watchdog already self-deleted, but the
+    // too-many-options (#4625) path tears down WITHOUT a prior fire, so clear
+    // it explicitly. Idempotent; leaves any sibling watchdog intact.
+    this._clearAskUserQuestionWatchdog(toolUseId)
     this._clearAskUserQuestionLock()
     // #4616: emit a synthetic tool_result FIRST so the dashboard's
     // activeTools entry for this AskUserQuestion is cleared. Without it
@@ -3593,12 +3627,10 @@ export class ClaudeTuiSession extends BaseSession {
     // fire post-destroy must not emit a stream_stall error into a torn-
     // down listener set or write Ctrl-C into a killed PTY.
     this._clearFirstOutputWatchdog()
-    // #4604: cancel the AskUserQuestion stall watchdog so it can't fire
-    // a stale ASK_USER_QUESTION_STALL event into a torn-down listener.
-    if (this._askUserQuestionWatchdog) {
-      clearTimeout(this._askUserQuestionWatchdog)
-      this._askUserQuestionWatchdog = null
-    }
+    // #4604 / #5319 (WP-3.2): cancel every AskUserQuestion stall watchdog so
+    // none can fire a stale ASK_USER_QUESTION_STALL event into a torn-down
+    // listener.
+    this._clearAllAskUserQuestionWatchdogs()
     if (this._term) {
       // #5317 (WP-2.3) — capture the handle + pid BEFORE nulling so the
       // escalation timer (and _onPtyGone's cancel) still have something to act
