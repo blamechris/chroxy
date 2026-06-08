@@ -129,10 +129,22 @@ export function startPeriodicAutoReap(config, log, deps = {}) {
   if (!config || !config.worktreeGc || config.worktreeGc.autoReap !== true) return null
 
   const run = deps.run || maybeAutoReapWorktrees
+  // Reentrancy guard: if a sweep runs longer than the interval (e.g. a tiny
+  // reapIntervalMs over a huge repo set), skip the tick rather than letting two
+  // sweeps run concurrently. Each sweep already builds its own summary and the
+  // GC core re-plans live, so an overlap wouldn't corrupt state — but skipping
+  // is cheaper and clearer than racing two scans (#5363 review).
+  let sweeping = false
   const sweep = () => {
+    if (sweeping) {
+      log.info('worktree auto-reaper: previous sweep still running, skipping this tick')
+      return
+    }
+    sweeping = true
     Promise.resolve()
       .then(() => run(config, log, deps))
       .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
+      .finally(() => { sweeping = false })
   }
 
   // Boot sweep — same behavior as before this WP.

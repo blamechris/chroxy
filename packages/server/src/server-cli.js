@@ -1131,6 +1131,9 @@ export async function startCliServer(config) {
   //
   // #5326 (WP-5.4): sweep once at boot AND on a recurring unref'd interval, so
   // a long-running daemon reclaims worktrees created mid-run without a restart.
+  // The timer handle is assigned inside the async import .then(); if shutdown
+  // races ahead of the import resolving, the clearInterval below is skipped —
+  // tolerated because the interval is unref'd and process.exit reaps it anyway.
   let worktreeReapTimer = null
   if (config.worktreeGc?.autoReap === true) {
     import('./worktree-reaper.js')

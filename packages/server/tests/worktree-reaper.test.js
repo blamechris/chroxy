@@ -174,10 +174,35 @@ describe('worktree-reaper', () => {
       await flush()
       assert.equal(runCount, 1) // boot sweep
       // Fire the captured interval callback twice — simulates mid-run ticks.
+      // Flush between ticks so each sweep settles (the reentrancy guard would
+      // otherwise skip a tick fired before the prior sweep resolves).
       calls[0].fn()
+      await flush()
       calls[0].fn()
       await flush()
       assert.equal(runCount, 3, 'each interval tick re-runs the reaper')
+    })
+
+    it('skips a tick when the previous sweep is still running (reentrancy guard)', async () => {
+      const log = makeLogger()
+      const { calls, setIntervalFn } = makeIntervalSeam()
+      let resolveRun
+      let runStarts = 0
+      const run = () => { runStarts++; return new Promise((r) => { resolveRun = r }) }
+      startPeriodicAutoReap({ worktreeGc: { autoReap: true } }, log, { run, setIntervalFn })
+      await flush()
+      assert.equal(runStarts, 1, 'boot sweep started and is still in flight')
+      // Tick while the boot sweep is unresolved — must be skipped, not started.
+      calls[0].fn()
+      await flush()
+      assert.equal(runStarts, 1, 'overlapping tick was skipped')
+      assert.ok(log._info.some((m) => /skipping this tick/.test(m)), `info logs: ${JSON.stringify(log._info)}`)
+      // Resolve the in-flight sweep; the next tick may now run.
+      resolveRun()
+      await flush()
+      calls[0].fn()
+      await flush()
+      assert.equal(runStarts, 2, 'a tick after the sweep settles runs normally')
     })
 
     it('uses the configured reapIntervalMs when valid', () => {
