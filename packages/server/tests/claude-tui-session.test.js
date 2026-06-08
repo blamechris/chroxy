@@ -2765,12 +2765,11 @@ describe('ClaudeTuiSession', () => {
 
     it('suspending backstops does NOT cancel the AskUserQuestion watchdog (wedge recovery survives)', async () => {
       const s = makeSession()
-      s._askUserQuestionWatchdog = setTimeout(() => {}, 60_000)
-      const wd = s._askUserQuestionWatchdog
+      s._armAskUserQuestionWatchdog('toolu_wd')
+      const wd = s._askUserQuestionWatchdogs.get('toolu_wd')
+      assert.ok(wd, 'watchdog armed')
       s._suspendBackstopsForPendingQuestion()
-      assert.equal(s._askUserQuestionWatchdog, wd, 'the dedicated watchdog is left intact')
-      clearTimeout(wd)
-      s._askUserQuestionWatchdog = null
+      assert.equal(s._askUserQuestionWatchdogs.get('toolu_wd'), wd, 'the dedicated watchdog is left intact')
       await s.destroy()
     })
   })
@@ -3078,7 +3077,7 @@ describe('ClaudeTuiSession', () => {
       session._currentMessageId = 'msg-helper'
       session._activeTurn = { startedAt: Date.now() - 50, aborted: false }
       session._pendingUserAnswer = { toolUseId: 'toolu_helper' }
-      session._askUserQuestionWatchdog = setTimeout(() => {}, 60_000)
+      session._armAskUserQuestionWatchdog('toolu_helper')
       const ptyWrites = []
       session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
 
@@ -3089,7 +3088,7 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._isBusy, false, '_isBusy cleared')
       assert.equal(session._currentMessageId, null, '_currentMessageId nulled')
       assert.equal(session._pendingUserAnswer, null, '_pendingUserAnswer cleared')
-      assert.equal(session._askUserQuestionWatchdog, null, 'AskUserQuestion watchdog cleared')
+      assert.equal(session._askUserQuestionWatchdogs.size, 0, 'all AskUserQuestion watchdogs cleared')
     })
 
     it('emits stream_end + result; skips error when no errorPayload given', () => {
@@ -3975,21 +3974,20 @@ describe('ClaudeTuiSession', () => {
           const torn = session
           session = null
 
-          // The watchdog was cleared by destroy(). If the IIFE re-arms
-          // it after `await new Promise(setTimeout(SETTLE_MS))` resolves,
-          // a fresh timer appears on `_askUserQuestionWatchdog` —
-          // detectable by sampling the field repeatedly until well past
-          // the settle delay.
+          // The watchdogs were cleared by destroy(). If the IIFE re-arms
+          // after `await new Promise(setTimeout(SETTLE_MS))` resolves, a fresh
+          // entry appears in `_askUserQuestionWatchdogs` (#5319) — detectable by
+          // sampling the Map size repeatedly until well past the settle delay.
           const samples = []
           for (let i = 0; i < 4; i++) {
             await new Promise((resolve) => setTimeout(resolve, 60))
-            samples.push(torn._askUserQuestionWatchdog)
+            samples.push(torn._askUserQuestionWatchdogs.size)
           }
 
-          // Pre-#4808: at least one sample is a Timeout (re-armed).
-          // Post-fix: every sample stays null.
+          // Pre-#4808: at least one sample is non-zero (re-armed).
+          // Post-fix: every sample stays 0.
           for (const s of samples) {
-            assert.equal(s, null, `_askUserQuestionWatchdog must stay null past destroy(); saw ${s}. samples=${samples.map((x) => x ? 'TIMER' : 'null').join(',')}`)
+            assert.equal(s, 0, `_askUserQuestionWatchdogs must stay empty past destroy(); saw size=${s}. samples=${samples.join(',')}`)
           }
         })
 
@@ -4704,6 +4702,55 @@ describe('ClaudeTuiSession', () => {
 
         // Busy state cleared so the session is recoverable.
         assert.equal(session._isBusy, false, 'busy cleared')
+      } finally {
+        mock.timers.reset()
+      }
+    })
+
+    // #5319 (WP-3.2) — two parallel ANSWERED questions each get an independent
+    // watchdog. Pre-#5319 the single `_askUserQuestionWatchdog` field meant the
+    // second respondToQuestion clobbered the first's watchdog, and a PostToolUse
+    // for either tool cancelled whichever watchdog happened to be live — so
+    // answering one question silently disarmed the other's stall protection.
+    it('two answered questions get independent watchdogs; PostToolUse for one leaves the other armed + firing (#5319)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._activeTurn = { uuid: 'test-5319', synthSeq: 0 }
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+        session._term = { write: () => {}, kill: () => {} }
+        session._isBusy = true
+        session._currentMessageId = 'msg-5319'
+
+        // Two parallel AskUserQuestions pending.
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_A', tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QA?', options: [{ label: 'a1' }] }] },
+        }, 'msg-5319')
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_B', tool_name: 'AskUserQuestion',
+          tool_input: { questions: [{ question: 'QB?', options: [{ label: 'b1' }] }] },
+        }, 'msg-5319')
+
+        // Answer BOTH → each arms its OWN watchdog (keyed by toolUseId).
+        session.respondToQuestion('a1', undefined, 'toolu_A')
+        session.respondToQuestion('b1', undefined, 'toolu_B')
+        assert.equal(session._askUserQuestionWatchdogs.size, 2, 'two independent watchdogs armed')
+
+        // PostToolUse for A cancels ONLY A's watchdog; B's stays armed.
+        session._emitToolHookEvent('PostToolUse', {
+          tool_use_id: 'toolu_A', tool_name: 'AskUserQuestion', tool_response: 'ok',
+        }, 'msg-5319')
+        assert.equal(session._askUserQuestionWatchdogs.has('toolu_A'), false, "A's watchdog cancelled by its own PostToolUse")
+        assert.ok(session._askUserQuestionWatchdogs.has('toolu_B'), "B's watchdog NOT disarmed by answering A")
+
+        // B never gets a PostToolUse → its independent watchdog still fires.
+        mock.timers.tick(31_000)
+        assert.ok(
+          errors.some((e) => e.code === 'ASK_USER_QUESTION_STALL' && e.toolUseId === 'toolu_B'),
+          "B's independent watchdog still recovers the session",
+        )
       } finally {
         mock.timers.reset()
       }
