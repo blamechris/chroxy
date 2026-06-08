@@ -1872,9 +1872,11 @@ export class SessionManager extends EventEmitter {
     // ALSO drop the session from the list so the audit AC holds: the session
     // leaves the list with a clear error instead of lingering as an
     // input-rejecting zombie tab. Mirrors the session_timeout → destroySession
-    // coordination (this file, ~457). destroySession is idempotent on a missing
-    // id, so a duplicate signal is harmless.
+    // coordination (this file, ~457). Guard on _sessions.has so a duplicate
+    // signal doesn't log a spurious "session not found" error — destroySession
+    // logs + returns false on a missing id rather than no-opping silently.
     session.on('respawn_exhausted', (data) => {
+      if (!this._sessions.has(sessionId)) return
       sessionLog.error(`[respawn_exhausted] ${data?.reason || 'pty respawn gave up'} — destroying session`)
       this.destroySession(sessionId)
     })
