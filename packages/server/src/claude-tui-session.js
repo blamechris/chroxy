@@ -2850,6 +2850,18 @@ export class ClaudeTuiSession extends BaseSession {
     // #4828: session-scoped.
     ;(this._log || log).info(`respondToQuestion: tool=${prevToolUseId || '?'} dashboardToolUseId=${toolUseId || 'none'} text.length=${(text || '').length} answersMap.keys=${answersMapKeyCount} questions=${pendingQuestions.length} options=${entry?.options?.length || 0} pendingMapSize=${this._pendingUserAnswers.size}`)
     if (!entry) return
+    // #5320 (WP-3.3) — arm the stall watchdog the MOMENT we have a live pending
+    // entry the dashboard tried to answer, BEFORE any early-return below. The
+    // dashboard clears its QuestionPrompt UI when it sends an answer, so ANY
+    // respondToQuestion that finds an entry but then bails — the unactionable
+    // cases here (non-string / empty text + no answersMap), the validation drops
+    // in the freeform path (no options, option-not-found), or `!this._term` —
+    // would otherwise leave the turn wedged until the 2h hard cap with no
+    // dashboard prompt. Arming here (it does NOT clear the pending) gives every
+    // such path recovery; a real follow-up answer re-arms idempotently (same
+    // key), and the success paths re-arm with a fresh post-write window (the
+    // Other-freeform IIFE with its longer second-stage window).
+    this._armAskUserQuestionWatchdog(prevToolUseId)
     // Single-question / free-text path requires a non-empty `text`. The
     // multi-question path is driven from answersMap (text is ignored when
     // a map is present) so an empty string is permitted there.
@@ -2860,15 +2872,6 @@ export class ClaudeTuiSession extends BaseSession {
     // #4668: clear only this specific entry; sibling pending answers
     // (from parallel AskUserQuestion calls in the same turn) survive.
     this._clearPendingAnswerByToolUseId(entry.toolUseId)
-    // #5320 (WP-3.3) — arm the stall watchdog the MOMENT we clear the pending
-    // entry, so EVERY path below — including the validation-failure early-returns
-    // that write nothing (freeform-with-no-options, option-not-found, empty
-    // text) — has recovery. The dashboard already cleared its QuestionPrompt UI
-    // when it sent this answer, so a drop without recovery would wedge the turn
-    // until the 2h hard cap. The success paths re-arm idempotently (same key →
-    // a fresh full window measured from write-completion); the Other-freeform
-    // IIFE re-arms with its longer second-stage window.
-    this._armAskUserQuestionWatchdog(prevToolUseId)
     if (!this._term) return
     // #4668 diagnostic: capture the PTY output tail just before we write
     // the answer keystroke. The wedge symptom observed 2026-06-01 was

@@ -5066,6 +5066,21 @@ describe('ClaudeTuiSession', () => {
       await s.destroy()
     })
 
+    it('an empty answer arms a recovery watchdog WITHOUT consuming the pending', async () => {
+      // The dashboard clears its QuestionPrompt UI when it submits, even for an
+      // empty answer. respondToQuestion returns early on empty text + no
+      // answersMap (it can't drive the form with nothing), so without recovery
+      // the turn would wedge. #5320: arm a watchdog before that early-return —
+      // but DON'T consume the pending, so a real follow-up answer still works.
+      const s = makeAnsweringSession()
+      s._term = { write: () => {}, kill: () => {} }
+      s._pendingUserAnswer = { toolUseId: 'toolu_empty', questions: [{ options: [{ label: 'a' }] }], options: [{ label: 'a' }] }
+      s.respondToQuestion('', undefined, 'toolu_empty')
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_empty'), 'recovery watchdog armed for the empty answer')
+      assert.equal(s._pendingUserAnswers.size, 1, 'empty answer does NOT consume the pending entry')
+      await s.destroy()
+    })
+
     it('a freeform answer whose option is not found still arms a stall watchdog', async () => {
       const s = makeAnsweringSession()
       s._term = { write: () => {}, kill: () => {} }
@@ -5075,20 +5090,30 @@ describe('ClaudeTuiSession', () => {
       await s.destroy()
     })
 
-    it('an aborted turn cancels the Other-freeform IIFE before the stage-2 write', async () => {
+    it('interrupt() during the Other-freeform settle stops the IIFE re-arming the watchdog', async () => {
       const s = makeAnsweringSession()
       const writes = []
       s._term = { write: (b) => writes.push(String(b)), kill: () => {} }
       s._pendingUserAnswer = { toolUseId: 'toolu_abort', questions: [{ options: [{ label: 'Other' }] }], options: [{ label: 'Other' }] }
 
       s.respondToQuestion('Other', undefined, 'toolu_abort', { freeformText: 'SECRET_FREEFORM' })
-      // Abort during the 150ms settle window (stage-1 digit write finishes fast).
+      // The arm-after-clear watchdog (#5320) is live during the settle.
+      assert.ok(s._askUserQuestionWatchdogs.has('toolu_abort'), 'watchdog armed during the answer write')
+
+      // Interrupt DURING the 150ms settle window. interrupt() sets
+      // _activeTurn.aborted and clears all watchdogs synchronously; the IIFE's
+      // post-settle abort guard must then bail BEFORE re-arming at stage 2.
       await new Promise((r) => setTimeout(r, 40))
-      s._activeTurn.aborted = true
-      // Wait past the settle + would-be stage-2 write.
+      s.interrupt()
+
+      // Wait past the settle + would-be stage-2 re-arm/write.
       await new Promise((r) => setTimeout(r, 250))
 
-      assert.ok(!writes.join('').includes('SECRET_FREEFORM'), 'stage-2 freeform write skipped after abort')
+      // Distinct contribution of the abort guard: no watchdog re-armed after
+      // interrupt() cleared them. Without the guard the IIFE would re-arm
+      // 'toolu_abort' at stage 2 (this assertion fails on main / without the fix).
+      assert.ok(!s._askUserQuestionWatchdogs.has('toolu_abort'), 'IIFE did NOT re-arm the watchdog after interrupt()')
+      assert.ok(!writes.join('').includes('SECRET_FREEFORM'), 'stage-2 freeform write skipped after interrupt')
       await s.destroy()
     })
 
