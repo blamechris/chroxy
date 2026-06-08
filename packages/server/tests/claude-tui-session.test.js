@@ -253,7 +253,7 @@ describe('ClaudeTuiSession', () => {
       assert.match(stopCmd, /stop-\$\(uuidgen\)\.json/, 'Stop uses uuidgen for unique-per-turn names (mktemp + .json suffix breaks on BSD macOS)')
     })
 
-    it('emits error if PTY exits during warmup', async () => {
+    it('rejects + emits error if PTY exits during warmup (#5316)', async () => {
       // Override the stub for THIS test to simulate PTY death during warmup.
       ClaudeTuiSession.prototype._spawnPty = async function () {
         this._ptyExited = true
@@ -262,12 +262,56 @@ describe('ClaudeTuiSession', () => {
 
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       const errors = []
+      const readys = []
       session.on('error', (e) => errors.push(e))
-      await session.start()
+      session.on('ready', (e) => readys.push(e))
+      // #5316 (WP-2.2) — start() must REJECT so SessionManager surfaces the
+      // failure (previously it resolved + the dead session lingered as a zombie).
+      await assert.rejects(session.start(), /exited during warmup/)
 
       assert.equal(session._processReady, false, 'not ready after PTY death')
+      assert.equal(readys.length, 0, 'no ready emitted for a dead PTY')
       assert.equal(errors.length, 1)
       assert.match(errors[0].message, /exited during warmup/)
+    })
+
+    it('rejects + never emits ready when _spawnPty leaves no live PTY (#5316)', async () => {
+      // Mimic _spawnPty's early-return failure paths (node-pty import fail /
+      // spawn throw): emit an error and return WITHOUT setting _ptyExited and
+      // WITHOUT assigning a live _term. The old start() fell through these and
+      // falsely emitted `ready` on a session with no process.
+      ClaudeTuiSession.prototype._spawnPty = async function () {
+        this.emit('error', { message: 'node-pty unavailable: boom' })
+        this._term = null
+      }
+
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const readys = []
+      session.on('error', () => {})
+      session.on('ready', (e) => readys.push(e))
+      await assert.rejects(session.start(), /failed to spawn/)
+
+      assert.equal(session._processReady, false, 'not ready when no live PTY')
+      assert.equal(readys.length, 0, 'no ready emitted for a session with no PTY')
+    })
+
+    it('resolves quietly (no ready) when destroy() races the spawn (#5316)', async () => {
+      // destroy() sets _destroying mid-spawn; _spawnPty's post-spawn guard kills
+      // the fresh PTY and nulls _term. This is a benign abort, NOT a start
+      // failure to surface — start() must resolve without rejecting or emitting.
+      ClaudeTuiSession.prototype._spawnPty = async function () {
+        this._destroying = true
+        this._term = null
+      }
+
+      session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const readys = []
+      session.on('error', () => {})
+      session.on('ready', (e) => readys.push(e))
+      await session.start() // must not reject
+
+      assert.equal(session._processReady, false, 'not ready after destroy race')
+      assert.equal(readys.length, 0, 'no ready emitted on a destroy-race abort')
     })
   })
 

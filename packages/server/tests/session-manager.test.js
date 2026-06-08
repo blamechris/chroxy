@@ -2037,6 +2037,88 @@ describe('createSession failure cleanup (FM-03)', () => {
   })
 })
 
+describe('#5316 (WP-2.2) — async start() rejection handling', () => {
+  // A provider whose start() is async and REJECTS (mirrors claude-tui's PTY
+  // warmup death). The #1141 `.catch()` guard routes the rejection to
+  // _handleAsyncStartFailure, which destroys a fresh session but PRESERVES a
+  // restored one (history + worktree).
+  class AsyncFailProvider extends EventEmitter {
+    constructor(opts) {
+      super()
+      this.cwd = opts.cwd
+      this.model = opts.model || null
+      this.permissionMode = opts.permissionMode || 'approve'
+      this.isRunning = false
+      this.resumeSessionId = opts.resumeSessionId || null
+      this._messageCounter = 0
+      this.bootedModel = null
+      this.destroyed = false
+    }
+    static get capabilities() { return {} }
+    async start() { throw new Error('claude PTY exited during warmup (code=1)') }
+    destroy() { this.destroyed = true }
+    interrupt() {}
+    sendMessage() {}
+    setModel() {}
+    setPermissionMode() {}
+  }
+
+  // Let the rejected start() promise's microtask `.catch()` run.
+  const tick = () => new Promise((r) => setImmediate(r))
+
+  it('destroys a FRESH session and registers no failed-restore', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const { registerProvider } = await import('../src/providers.js')
+    registerProvider('test-async-fail-fresh', AsyncFailProvider)
+
+    const id = mgr.createSession({ cwd: '/tmp', provider: 'test-async-fail-fresh' })
+    assert.equal(mgr._sessions.has(id), true, 'session live until the async rejection lands')
+    await tick()
+
+    assert.equal(mgr._sessions.has(id), false, 'fresh session destroyed on async start failure')
+    assert.equal(mgr.getFailedRestores().length, 0, 'no failed-restore for a fresh session')
+  })
+
+  it('PRESERVES restored history + surfaces session_restore_failed for a RESTORED session', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const { registerProvider } = await import('../src/providers.js')
+    registerProvider('test-async-fail-restore', AsyncFailProvider)
+    const failedEvents = []
+    mgr.on('session_restore_failed', (e) => failedEvents.push(e))
+
+    const preserveId = 'a'.repeat(32)
+    const id = mgr.createSession({
+      cwd: '/tmp',
+      provider: 'test-async-fail-restore',
+      preserveId,
+      skipPersist: true,
+      isRestore: true,
+    })
+    // restoreState() seeds history AFTER createSession returns, synchronously,
+    // before the async rejection lands — replicate that ordering here.
+    mgr._recordHistory(id, 'message', { role: 'user', text: 'hello from before the crash' })
+    assert.ok(mgr._history.getHistory(id).length >= 1, 'history seeded pre-rejection')
+
+    await tick()
+
+    assert.equal(mgr._sessions.has(id), false, 'dead provider removed from the live session map')
+    const failed = mgr.getFailedRestores()
+    assert.equal(failed.length, 1, 'registered as a failed restore (history preserved on disk)')
+    assert.equal(failed[0].sessionId, preserveId, 'failed-restore keyed by the preserved id')
+    assert.ok(failed[0].historyLength >= 1, 'restored history preserved in the failed-restore payload')
+    assert.equal(failedEvents.length, 1, 'session_restore_failed emitted once')
+    assert.equal(failedEvents[0].originalHistoryPreserved, true)
+    assert.equal(failedEvents[0].errorCode, 'START_FAILED')
+
+    // serializeState must write the preserved session back to disk so a future
+    // restart can retry it — proving the history is not lost.
+    const serialized = mgr.serializeState()
+    const persisted = serialized.sessions.find((s) => s.id === preserveId)
+    assert.ok(persisted, 'failed-restore session is written back to disk')
+    assert.ok(Array.isArray(persisted.history) && persisted.history.length >= 1, 'persisted payload carries the history')
+  })
+})
+
 describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
   it('sync start() failure cleans all session-scoped maps', async () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })

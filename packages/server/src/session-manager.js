@@ -540,9 +540,14 @@ export class SessionManager extends EventEmitter {
    *   so callers can safely pass any value. Primary use: `restoreState` reusing the
    *   persisted id so dashboard's localStorage-cached `activeSessionId` still resolves
    *   after a daemon restart (#4983).
+   * @param {boolean} [options.isRestore] - Internal (#5316): marks a session created by
+   *   `restoreState()`. When a provider's start() rejects ASYNCHRONOUSLY, the rejection
+   *   handler preserves the restored history + worktree (registers a failed-restore)
+   *   instead of fully destroying the session. Fresh sessions omit it and take the
+   *   full-destroy path on start failure.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false, preserveId } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false, preserveId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -841,6 +846,12 @@ export class SessionManager extends EventEmitter {
       // restore wrongly resolved to the worktree dir / null).
       worktreeRepoDir,
       isolation: resolvedIsolation,
+      // #5316 (WP-2.2) — marks a session created by restoreState(). When a
+      // provider's start() rejects ASYNCHRONOUSLY (claude-tui spawns its PTY in
+      // an async start()), the .catch() below must preserve the restored history
+      // + worktree binding instead of destroying them. Fresh sessions (false)
+      // have nothing to preserve and take the full-destroy path.
+      _isRestore: isRestore === true,
       // #4072: cumulative usage accumulator (tokens + cost) populated by
       // _trackUsage on every priced `result` event. Subscription-only
       // providers (e.g. claude-tui) emit `result` without `cost`, so the
@@ -856,22 +867,12 @@ export class SessionManager extends EventEmitter {
 
     try {
       const result = session.start()
-      // Guard: if start() returns a thenable, catch async rejections (#1141)
+      // Guard: if start() returns a thenable, catch async rejections (#1141).
+      // claude-tui's start() spawns its PTY asynchronously and (as of #5316)
+      // REJECTS when the PTY fails to come up, so this is the primary failure
+      // signal for that provider.
       if (result && typeof result.catch === 'function') {
-        result.catch((err) => {
-          const message = err?.message || String(err)
-          log.error(`Async start() rejected for session ${sessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
-          // NOTE (#5310/#5316): destroySession() here fully tears the session
-          // down — including _removeWorktree() and history cleanup. For a
-          // restore-rebind whose provider start() rejects ASYNCHRONOUSLY, that
-          // destroys the pre-existing worktree + restored history. This path
-          // already erased restored history pre-#5310; making restore +
-          // start-failure non-destructive (keep the entry, mark retryable) is
-          // the explicit scope of WP-2.2 (#5316), which will replace this
-          // destroySession() call. The SYNCHRONOUS rollback below is guarded
-          // against worktree deletion on rebind as of #5310.
-          this.destroySession(sessionId)
-        })
+        result.catch((err) => this._handleAsyncStartFailure(sessionId, err))
       }
     } catch (err) {
       // Clean up phantom session on start() failure (Guardian FM-03)
@@ -907,6 +908,72 @@ export class SessionManager extends EventEmitter {
     // and permanently discard the data being restored.
     if (!skipPersist) this._flushPersist()
     return sessionId
+  }
+
+  /**
+   * Handle a provider start() that rejects ASYNCHRONOUSLY (#1141 guard path).
+   * claude-tui spawns its PTY in an async start() that, as of #5316 (WP-2.2),
+   * rejects when the PTY fails to come up.
+   *
+   * For a FRESH session there is no history worth keeping, so fully destroy it
+   * (removes the worktree it created this call) — the pre-#5316 behaviour.
+   *
+   * For a RESTORED session, destroySession() would erase the restored history
+   * AND remove the pre-existing worktree it rebound to (losing uncommitted work
+   * and making the #2954 retry unrecoverable). So instead snapshot the entry
+   * into a failed-restore payload — which serializeState() writes back to disk,
+   * preserving history + worktree binding for a future retry — tear down only
+   * the live (dead) provider, and surface session_restore_failed so the client
+   * shows the "needs attention" / retry affordance.
+   * @param {string} sessionId
+   * @param {Error} err - The rejection from start()
+   * @private
+   */
+  _handleAsyncStartFailure(sessionId, err) {
+    const entry = this._sessions.get(sessionId)
+    // Already gone — destroyed elsewhere (e.g. a concurrent destroySession or a
+    // respawn_exhausted teardown) before this rejection landed. Nothing to do.
+    if (!entry) return
+    const message = err?.message || String(err)
+    log.error(`Async start() rejected for session ${sessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+
+    if (!entry._isRestore) {
+      // Fresh session — full teardown (removes the freshly-created worktree).
+      this.destroySession(sessionId)
+      return
+    }
+
+    // Restore-rebind: preserve history + worktree, mark the session as a failed
+    // restore so it round-trips to disk and surfaces in the needs-attention UI.
+    const saved = this._serializeSessionEntry(sessionId, entry)
+    // Detach + destroy ONLY the live provider (frees the dead PTY). This does
+    // NOT remove the worktree — that's a SessionManager concern (_removeWorktree),
+    // and we deliberately keep the rebound worktree intact for the retry.
+    entry.session.removeAllListeners()
+    entry.session.on('error', () => {}) // swallow stray error during destroy
+    try {
+      entry.session.destroy()
+    } catch (destroyErr) {
+      log.error(`Failed to destroy provider for failed restore ${sessionId}: ${destroyErr?.stack || destroyErr}`)
+    }
+    // Snapshot is captured above, so dropping the live history map is safe.
+    this._cleanupSessionMaps(sessionId)
+    this._failedRestores.set(sessionId, { saved, error: err })
+    this.emit('session_restore_failed', {
+      sessionId,
+      name: saved.name,
+      provider: saved.provider || this._providerType,
+      cwd: saved.cwd,
+      model: saved.model || null,
+      permissionMode: saved.permissionMode || null,
+      errorCode: err?.code || 'START_FAILED',
+      errorMessage: message,
+      originalHistoryPreserved: true,
+      historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
+    })
+    // Persist now so the preserved history survives an abrupt shutdown before
+    // the next debounced write.
+    this._flushPersist()
   }
 
   /**
@@ -1261,8 +1328,42 @@ export class SessionManager extends EventEmitter {
     if (this._destroying) return null
     const state = { version: 1, timestamp: Date.now(), sessions: [] }
     for (const [id, entry] of this._sessions) {
-      const history = this._history.getHistory(id).map(e => this._history.truncateEntry(e))
-      state.sessions.push({
+      state.sessions.push(this._serializeSessionEntry(id, entry))
+    }
+
+    // Preserve sessions that failed to restore (#2954 — Guardian FM-01).
+    // Without this, the next successful write drops them from disk and the
+    // user's history is permanently lost. We write them back exactly as
+    // they were loaded so a retry (after the user sets the missing env var
+    // and restarts) can fully re-hydrate history.
+    for (const [, { saved }] of this._failedRestores) {
+      state.sessions.push(saved)
+    }
+
+    // Persist cost tracking so budget survives restarts
+    const budgetState = this._costBudget.serialize()
+    state.costs = budgetState.costs
+    state.budgetWarned = budgetState.budgetWarned
+    state.budgetExceeded = budgetState.budgetExceeded
+    state.budgetPaused = budgetState.budgetPaused
+
+    return this._persistence.serializeState(state)
+  }
+
+  /**
+   * Serialize a single live session entry to the on-disk persisted shape.
+   * Extracted from serializeState() so the async start-failure path (#5316,
+   * WP-2.2) can snapshot a restored session into a failed-restore payload that
+   * round-trips through restoreState() identically. Keep this in lockstep with
+   * the restore-side reader in restoreState().
+   * @param {string} id - The session id
+   * @param {object} entry - The in-memory session entry
+   * @returns {object} The persisted session payload
+   * @private
+   */
+  _serializeSessionEntry(id, entry) {
+    const history = this._history.getHistory(id).map(e => this._history.truncateEntry(e))
+    return {
         id,
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
         conversationId: entry.session.resumeSessionId || null,
@@ -1339,26 +1440,7 @@ export class SessionManager extends EventEmitter {
         // round-trip as `true` — only an explicit `true` latches.
         // Mirrors the restore side which gates on `=== true`.
         costThresholdNotified: entry.costThresholdNotified === true,
-      })
     }
-
-    // Preserve sessions that failed to restore (#2954 — Guardian FM-01).
-    // Without this, the next successful write drops them from disk and the
-    // user's history is permanently lost. We write them back exactly as
-    // they were loaded so a retry (after the user sets the missing env var
-    // and restarts) can fully re-hydrate history.
-    for (const [, { saved }] of this._failedRestores) {
-      state.sessions.push(saved)
-    }
-
-    // Persist cost tracking so budget survives restarts
-    const budgetState = this._costBudget.serialize()
-    state.costs = budgetState.costs
-    state.budgetWarned = budgetState.budgetWarned
-    state.budgetExceeded = budgetState.budgetExceeded
-    state.budgetPaused = budgetState.budgetPaused
-
-    return this._persistence.serializeState(state)
   }
 
   /**
@@ -1443,6 +1525,10 @@ export class SessionManager extends EventEmitter {
             ? saved.messageCounter
             : undefined,
           skipPersist: true,
+          // #5316 (WP-2.2) — mark this as a restore so an ASYNC provider
+          // start() rejection (claude-tui PTY warmup death) preserves the
+          // restored history + worktree instead of destroying them.
+          isRestore: true,
         })
         if (saved.id) oldToNew.set(saved.id, sessionId)
         // #4089 / #4124: restore the per-session running totals + the
