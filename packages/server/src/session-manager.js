@@ -1865,6 +1865,21 @@ export class SessionManager extends EventEmitter {
     session.on('models_updated', (data) => {
       this.emit('session_event', { sessionId, event: 'models_updated', data })
     })
+
+    // #5315 (WP-2.1) — a provider that exhausts its bounded PTY auto-respawn
+    // budget emits `respawn_exhausted`. The transient-events loop above already
+    // forwarded it to clients (it's in ClaudeTuiSession.customEvents); here we
+    // ALSO drop the session from the list so the audit AC holds: the session
+    // leaves the list with a clear error instead of lingering as an
+    // input-rejecting zombie tab. Mirrors the session_timeout → destroySession
+    // coordination (this file, ~457). Guard on _sessions.has so a duplicate
+    // signal doesn't log a spurious "session not found" error — destroySession
+    // logs + returns false on a missing id rather than no-opping silently.
+    session.on('respawn_exhausted', (data) => {
+      if (!this._sessions.has(sessionId)) return
+      sessionLog.error(`[respawn_exhausted] ${data?.reason || 'pty respawn gave up'} — destroying session`)
+      this.destroySession(sessionId)
+    })
   }
 
   // ---------------------------------------------------------------------------

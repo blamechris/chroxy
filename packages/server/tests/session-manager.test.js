@@ -3909,3 +3909,35 @@ describe('_wireSessionEvents — stopped event proxy (#4756)', () => {
     assert.equal(after, beforeTs, 'stopped must not reset lastActivity')
   })
 })
+
+// #5315 (WP-2.1) — exhaustion coordination. When a provider's bounded PTY
+// auto-respawn gives up it emits `respawn_exhausted`; SessionManager must drop
+// the session from its list so it doesn't linger as an input-rejecting zombie
+// tab (the audit AC). _wireSessionEvents installs the listener.
+describe('#5315 — respawn_exhausted destroys the session', () => {
+  it('drops the session from the list on respawn_exhausted', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    // Fake session whose constructor declares respawn_exhausted as a custom
+    // event (mirrors ClaudeTuiSession.customEvents) so the transient forward +
+    // the destroy listener both wire up.
+    class RespawnProvider extends EventEmitter {
+      static get customEvents() { return ['respawn_exhausted'] }
+      static get capabilities() { return {} }
+    }
+    const session = new RespawnProvider()
+    session.isRunning = true
+    let destroyed = false
+    session.destroy = () => { destroyed = true }
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-tui' })
+    mgr._wireSessionEvents('s1', session)
+
+    const destroyedEvents = []
+    mgr.on('session_destroyed', (e) => destroyedEvents.push(e))
+
+    session.emit('respawn_exhausted', { reason: 'pty_respawn_exhausted', attempts: 5 })
+
+    assert.equal(mgr._sessions.has('s1'), false, 'session removed from the list (no zombie tab)')
+    assert.equal(destroyed, true, 'session.destroy() called')
+    assert.ok(destroyedEvents.some((e) => e.sessionId === 's1'), 'session_destroyed emitted for the dropped session')
+  })
+})
