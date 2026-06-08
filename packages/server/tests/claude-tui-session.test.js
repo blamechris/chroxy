@@ -479,6 +479,58 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5322 (WP-4.2, security) — the PTY diagnostic dumps (hex + readable tail)
+  // ride into log lines AND client-facing `error` events. A pasted/echoed OAuth
+  // token or API key in claude's output must not leak through them.
+  describe('credential redaction in PTY diagnostics (#5322 WP-4.2)', () => {
+    function makeSession() {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s.on('error', () => {})
+      return s
+    }
+
+    it('_outputTailHexDump redacts a token-shaped run in BOTH the hex and ASCII columns', () => {
+      const s = makeSession()
+      const token = 'sk-ant-api03-' + 'A'.repeat(50)
+      // Include an escape byte to prove control bytes survive the latin1 round-trip.
+      s._outputTailRaw = Buffer.from(`Invalid API key ${token}\x1b[0m done`, 'latin1')
+      const dump = s._outputTailHexDump()
+
+      assert.ok(!dump.includes(token), 'raw token absent from the ASCII column')
+      // The token's leading bytes ("sk-ant" → 73 6b 2d 61 6e 74) must be gone too.
+      // (Fixture is sized so "sk-ant" lands within one 16-byte hex row.)
+      const prefixHex = Buffer.from('sk-ant', 'latin1').toString('hex').match(/../g).join(' ')
+      assert.ok(!dump.replace(/\s+/g, ' ').includes(prefixHex), 'token hex bytes absent from the hex column')
+      assert.ok(dump.includes('REDACTED'), 'redaction marker present')
+      // The full escape RUN `\x1b[0m` (1b 5b 30 6d) survives — proves redaction
+      // scrubbed only the token, not the control bytes the dump exists to show.
+      assert.ok(dump.replace(/\s+/g, ' ').includes('1b 5b 30 6d'), 'escape sequence preserved — diagnostic value intact')
+    })
+
+    it('_outputTailDiagnostic redacts a token-shaped run (client-facing error path)', () => {
+      const s = makeSession()
+      const token = 'sk-ant-api03-' + 'B'.repeat(50)
+      s._outputTail = `something went wrong: ${token} — retrying`
+      const diag = s._outputTailDiagnostic()
+      assert.ok(!diag.includes(token), 'token redacted from the readable diagnostic')
+      assert.ok(diag.includes('[REDACTED]'), 'redaction marker present')
+    })
+
+    it('_outputTailDiagnostic redacts a token straddling the slice boundary (#5357 review)', () => {
+      const s = makeSession()
+      const token = 'sk-ant-api03-' + 'C'.repeat(50)
+      // Put the token near the END so its PREFIX falls before the last
+      // PTY_TAIL_DIAGNOSTIC_BYTES and only its tail would survive a slice-first
+      // approach. Redact-before-slice must still scrub it entirely.
+      const pad = 'x '.repeat(ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
+      s._outputTail = `${pad} ${token} tail`
+      const diag = s._outputTailDiagnostic()
+      assert.ok(!diag.includes(token), 'full token redacted despite straddling the slice boundary')
+      // No partial token fragment leaks either (no run of the C-filler survives).
+      assert.ok(!/C{20,}/.test(diag), 'no partial-token fragment leaked')
+    })
+  })
+
   // #5315 (WP-2.1) — bounded per-session PTY auto-respawn. When the persistent
   // claude PTY dies unexpectedly mid-session, the session must self-heal
   // (bounded backoff, max 5 attempts) instead of becoming a permanently

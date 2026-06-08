@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url'
 import { BaseSession } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
-import { createLogger, loggerForSession } from './logger.js'
+import { createLogger, loggerForSession, redactSensitive } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
@@ -1448,7 +1448,14 @@ export class ClaudeTuiSession extends BaseSession {
     // The raw (un-stripped) buffer is used so escape/control bytes
     // survive into the diagnostic — sourcing from the stripped tail
     // would hide the very bytes we want to see (#4031 review).
-    return formatHexDump(this._outputTailRaw, ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
+    //
+    // #5322 (WP-4.2, security) — redact token-shaped runs BEFORE hex-encoding so
+    // a pasted/echoed OAuth token can't leak via the dump's hex AND ASCII
+    // columns. The redact runs on a latin1 (binary) round-trip, which preserves
+    // every byte 0–255 losslessly (so 0x1b / OSC / SS3 escape bytes still land
+    // in the dump); redactSensitive only rewrites the ASCII token runs.
+    const redacted = Buffer.from(redactSensitive(this._outputTailRaw.toString('latin1')), 'latin1')
+    return formatHexDump(redacted, ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
   }
 
   /**
@@ -2406,12 +2413,18 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _outputTailDiagnostic() {
     if (!this._outputTail) return ''
-    const trimmed = this._outputTail
+    // #5322 (WP-4.2, security) — this tail rides into `error` events that fan
+    // out to clients and the System tab, so redact any token-shaped run (pasted
+    // or echoed OAuth token / API key) before it leaves the process.
+    // #5357 review — redact BEFORE slicing: a token straddling the
+    // PTY_TAIL_DIAGNOSTIC_BYTES boundary must be matched in full (and collapse
+    // to [REDACTED]) rather than leaving a trailing fragment the regex can't
+    // catch. The slice then bounds the already-scrubbed string.
+    return redactSensitive(this._outputTail)
       .slice(-ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
       .replace(/[\r\n]+/g, '\n')
       .replace(/[ \t]{2,}/g, ' ')
       .trim()
-    return trimmed
   }
 
   /**
