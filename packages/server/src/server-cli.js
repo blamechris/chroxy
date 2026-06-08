@@ -1134,6 +1134,15 @@ export async function startCliServer(config) {
       .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
   }
 
+  // #5323 (WP-5.1) — sweep claude-tui hook-sink dirs left in /tmp by prior
+  // crashed processes (a leak on every crash). Safe + unconditional: only dirs
+  // whose owner pid is dead are removed, so a live daemon's dirs — including
+  // ours — are kept. Fire-and-forget + lazily imported so a non-tui boot pays
+  // nothing and a failure never affects startup.
+  import('./claude-tui-session.js')
+    .then(({ ClaudeTuiSession }) => ClaudeTuiSession.sweepStaleSinkDirs(log))
+    .catch((err) => log.warn(`claude-tui sink-dir sweep failed: ${(err && err.message) || err}`))
+
   console.log('\nPress Ctrl+C to stop.\n')
 
   // Graceful shutdown.
