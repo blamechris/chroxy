@@ -1259,6 +1259,57 @@ describe('ClaudeTuiSession', () => {
       })
     })
 
+    describe('output tail ANSI stripping (#5325, WP-5.3)', () => {
+      // _appendToOutputTail is the body of the PTY onData handler. It must
+      // strip ANSI from the CONCATENATED tail, not per-chunk, so an escape
+      // sequence split across two onData chunks is still removed.
+
+      it('strips an ANSI escape split across two onData chunks', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        // CSI "\x1b[31m" arrives split: "\x1b[3" then "1mred". A per-chunk
+        // strip would leave the orphaned "\x1b[3" fragment in the tail.
+        session._appendToOutputTail('hello \x1b[3')
+        session._appendToOutputTail('1mred\x1b[0m done')
+        assert.equal(
+          session._outputTail,
+          'hello red done',
+          `split escape must be stripped once whole, got: ${JSON.stringify(session._outputTail)}`,
+        )
+      })
+
+      it('strips an OSC sequence split across chunk boundaries', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        // OSC "\x1b]0;claude\x07" split mid-payload and again before the BEL.
+        session._appendToOutputTail('\x1b]0;cla')
+        session._appendToOutputTail('ude')
+        session._appendToOutputTail('\x07❯ ')
+        assert.equal(
+          session._outputTail,
+          '❯ ',
+          `split OSC must be stripped once whole, got: ${JSON.stringify(session._outputTail)}`,
+        )
+      })
+
+      it('retains the UNSTRIPPED bytes in _outputTailRaw for the hex dump', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._appendToOutputTail('a\x1b[3')
+        session._appendToOutputTail('1mb')
+        // Readable tail is clean...
+        assert.equal(session._outputTail, 'ab')
+        // ...but the raw buffer still carries the escape bytes for diagnostics.
+        assert.ok(
+          session._outputTailRaw.includes(0x1b),
+          'raw tail must retain the ESC byte',
+        )
+      })
+
+      it('strips a single-chunk escape (no regression)', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._appendToOutputTail('x\x1b[0my')
+        assert.equal(session._outputTail, 'xy')
+      })
+    })
+
     it('sendMessage waits for status=idle before writing to the PTY', async () => {
       // The whole point of the probe — bytes must not hit the PTY until
       // claude reports itself ready. We delay the idle transition and

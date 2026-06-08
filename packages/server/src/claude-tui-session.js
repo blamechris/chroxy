@@ -1338,31 +1338,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._outputTail = ''
     this._outputTailRaw = Buffer.alloc(0)
 
-    this._term.onData((data) => {
-      // Keep a tail of recent output so we can surface diagnostics when
-      // the TUI renders an error inline (#3919). Strip ANSI escape
-      // sequences before storing so the saved tail is readable; we
-      // don't visual-render the PTY, so the colors aren't useful. Strip
-      // pattern covers CSI / OSC / SS3 / single-char terminal-mode codes
-      // (#4031 — broadened to keep the readable tail clean for error
-      // diagnostics and the hex dump).
-      const rawStr = String(data)
-      const stripped = rawStr.replace(ANSI_STRIP, '')
-      this._outputTail = (this._outputTail + stripped).slice(-ClaudeTuiSession.PTY_TAIL_BYTES)
-      // #4031 (review): also retain a parallel UNSTRIPPED tail sized
-      // in real bytes via Buffer, exclusively for the timeout hex
-      // dump. _outputTail can never surface the escape/control bytes
-      // we want to diagnose because the strip happens before storage;
-      // _outputTailRaw closes that gap without polluting the readable
-      // tail used by other diagnostics.
-      const chunk = Buffer.from(rawStr, 'utf8')
-      const merged = this._outputTailRaw.length === 0
-        ? chunk
-        : Buffer.concat([this._outputTailRaw, chunk])
-      this._outputTailRaw = merged.length > ClaudeTuiSession.PTY_TAIL_BYTES
-        ? merged.subarray(-ClaudeTuiSession.PTY_TAIL_BYTES)
-        : merged
-    })
+    this._term.onData((data) => this._appendToOutputTail(data))
     this._term.onExit((info) => this._onPtyGone(info, 'exit'))
 
     // #5311 (WP-1.1) — keep a per-session PTY fault from crashing the WHOLE
@@ -1499,6 +1475,39 @@ export class ClaudeTuiSession extends BaseSession {
     const ready = checkReady()
     this._lastProbeSawStatus = sawStatus
     return finish(ready)
+  }
+
+  /**
+   * Append a PTY onData chunk to the recent-output tails (#3919).
+   *
+   * Maintains two tails:
+   *   - `_outputTailRaw` — an UNSTRIPPED byte Buffer for the timeout hex
+   *     dump (#4031), and the canonical source the readable tail is
+   *     derived from.
+   *   - `_outputTail` — an ANSI-stripped, human-readable string for inline
+   *     error diagnostics and the auth-failure scan.
+   *
+   * #5325 (WP-5.3): the readable tail is derived by stripping ANSI from
+   * the CONCATENATED raw buffer, NOT per-chunk. An escape sequence split
+   * across two onData chunks (e.g. "\x1b[" arriving in one chunk, "0m" in
+   * the next) survives a per-chunk strip and corrupts the tail; deriving
+   * from the merged buffer strips the sequence once it's whole. We don't
+   * visual-render the PTY, so the colors aren't useful. Strip pattern
+   * covers CSI / OSC / SS3 / single-char terminal-mode codes (#4031).
+   */
+  _appendToOutputTail(data) {
+    const rawStr = String(data)
+    const chunk = Buffer.from(rawStr, 'utf8')
+    const merged = this._outputTailRaw.length === 0
+      ? chunk
+      : Buffer.concat([this._outputTailRaw, chunk])
+    this._outputTailRaw = merged.length > ClaudeTuiSession.PTY_TAIL_BYTES
+      ? merged.subarray(-ClaudeTuiSession.PTY_TAIL_BYTES)
+      : merged
+    this._outputTail = this._outputTailRaw
+      .toString('utf8')
+      .replace(ANSI_STRIP, '')
+      .slice(-ClaudeTuiSession.PTY_TAIL_BYTES)
   }
 
   /**
