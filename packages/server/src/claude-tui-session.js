@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -831,7 +831,7 @@ export class ClaudeTuiSession extends BaseSession {
       try {
         const n = parseInt(readFileSync(join(dir, 'owner.pid'), 'utf8').trim(), 10)
         if (Number.isInteger(n) && n > 0) ownerPid = n
-      } catch { /* no/garbage pidfile → treat as orphaned */ }
+      } catch { /* no/garbage pidfile → orphaned, subject to the grace below */ }
       if (ownerPid !== null) {
         let alive
         try {
@@ -842,6 +842,18 @@ export class ClaudeTuiSession extends BaseSession {
           alive = err && err.code === 'EPERM'
         }
         if (alive) { kept++; continue }
+      } else {
+        // #5359 review — a pidfile-less dir might be another process's sink dir
+        // caught BETWEEN its mkdir and its owner.pid write (a cross-process race;
+        // within one process those are synchronous). Give brand-new pidfile-less
+        // dirs a grace window before reaping so we can't delete one mid-creation;
+        // a genuinely orphaned dir is older than the grace and still gets swept.
+        try {
+          if (Date.now() - statSync(dir).mtimeMs < ClaudeTuiSession.SINK_SWEEP_GRACE_MS) {
+            kept++
+            continue
+          }
+        } catch { /* stat failed (dir vanished) → fall through to rmSync (no-op) */ }
       }
       try {
         rmSync(dir, { recursive: true, force: true })
@@ -866,6 +878,11 @@ export class ClaudeTuiSession extends BaseSession {
   // tool children on a clean SIGTERM, short enough that a hung claude (or a
   // child holding the PTY open) can't orphan past it.
   static get DESTROY_GRACE_MS() { return 3_000 }
+  // #5359 review — grace window before the boot sweep reaps a PIDFILE-LESS sink
+  // dir, so a dir caught between another process's mkdir and its owner.pid write
+  // (a cross-process race) isn't deleted mid-creation. Dirs with a (dead) pid
+  // are reaped immediately; only the pidfile-less ambiguous case waits this out.
+  static get SINK_SWEEP_GRACE_MS() { return 60_000 }
   // Wedge instrumentation (#4678 follow-up): hook-poll loop emits a
   // heartbeat log line every HOOK_HEARTBEAT_MS of silent waiting (no
   // stop-hook yet). Sized so healthy short turns (<5s end-to-end) emit
@@ -1699,12 +1716,19 @@ export class ClaudeTuiSession extends BaseSession {
     // or whether the loop itself has stopped iterating.
     let pollIters = 0
     let lastHeartbeatMs = pollStart
-    const consumedAtStart = this._consumedFiles.size
+    // #5323 (WP-5.1) — track consumed-file count explicitly. We can no longer
+    // infer progress from `_consumedFiles.size` because consumed files are now
+    // unlinked + dropped from the Set in the same drain, so the Set size doesn't
+    // grow. This cumulative counter drives the heartbeat/exit diagnostics.
+    let totalConsumed = 0
 
     const drainHookFiles = () => {
       let entries
       try { entries = readdirSync(this._sinkDir) } catch { return }
-      const sizeBefore = this._consumedFiles.size
+      // Per-drain progress counter — replaces the old `_consumedFiles.size`
+      // delta, which no longer changes now that consumed files are unlinked +
+      // pruned (#5323). Drives the first-output disarm + timer re-arm below.
+      let drainedThisPass = 0
       // Process prefixes in causal order: pre- (tool_start) MUST fire
       // before post- (tool_result) so the dashboard can pair them via
       // toolUseId. Naive lex sort puts "post-…" before "pre-…" because
@@ -1727,6 +1751,8 @@ export class ClaudeTuiSession extends BaseSession {
           parsed = JSON.parse(raw)
         } catch { continue }
         this._consumedFiles.add(name)
+        drainedThisPass++
+        totalConsumed++
 
         if (name.startsWith('stop-')) {
           stopPayload = parsed
@@ -1752,8 +1778,10 @@ export class ClaudeTuiSession extends BaseSession {
       }
       // Any new hook file = progress evidence. Re-arm timers so a turn
       // that's actively producing tool events doesn't trip the soft
-      // inactivity warning (#3920).
-      if (this._consumedFiles.size > sizeBefore && this._isBusy) {
+      // inactivity warning (#3920). #5323: gate on the per-drain counter, NOT
+      // `_consumedFiles.size` (which no longer grows — files are unlinked +
+      // pruned), otherwise the disarm/re-arm would stop firing on progress.
+      if (drainedThisPass > 0 && this._isBusy) {
         // #4732: a consumed hook file = first output observed for this
         // turn. Disarm the pre-first-output watchdog BEFORE the
         // re-arm below — `_armResultTimeout` would otherwise re-arm
@@ -1782,7 +1810,7 @@ export class ClaudeTuiSession extends BaseSession {
         lastHeartbeatMs = now
         let sinkFileCount = 0
         try { sinkFileCount = readdirSync(this._sinkDir).length } catch {}
-        log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${this._consumedFiles.size - consumedAtStart} stopFound=${stopPayload ? 'yes' : 'no'})`)
+        log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'})`)
       }
       if (stopPayload) break
       await new Promise((r) => setTimeout(r, 150))
@@ -1791,7 +1819,7 @@ export class ClaudeTuiSession extends BaseSession {
     // exit shape — whether it broke on stopPayload, abort, ptyExited,
     // !isBusy, or timeout. Pair with sendMessage's final summary to
     // reconstruct the wedge stage post-hoc.
-    log.info(`hookPoll exit (msg=${messageId} iters=${pollIters} elapsedMs=${Date.now() - pollStart} consumed=${this._consumedFiles.size - consumedAtStart} stopFound=${stopPayload ? 'yes' : 'no'} aborted=${this._activeTurn?.aborted ? 'yes' : 'no'} ptyExited=${this._ptyExited ? 'yes' : 'no'} stillBusy=${this._isBusy ? 'yes' : 'no'})`)
+    log.info(`hookPoll exit (msg=${messageId} iters=${pollIters} elapsedMs=${Date.now() - pollStart} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'} aborted=${this._activeTurn?.aborted ? 'yes' : 'no'} ptyExited=${this._ptyExited ? 'yes' : 'no'} stillBusy=${this._isBusy ? 'yes' : 'no'})`)
 
     if (!stopPayload) {
       let reason

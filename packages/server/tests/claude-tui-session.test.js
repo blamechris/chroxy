@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
@@ -564,39 +564,60 @@ describe('ClaudeTuiSession', () => {
     })
 
     describe('sweepStaleSinkDirs', () => {
+      const DEAD_PID = 4242424 // deterministically reported dead via the stub below
       let created
-      beforeEach(() => { created = [] })
-      afterEach(() => { for (const d of created) rmSync(d, { recursive: true, force: true }) })
+      let realKill
+      beforeEach(() => {
+        created = []
+        // #5359 review — deterministic dead-pid (don't rely on 999999 being
+        // unused; Linux pid_max can be in the millions). Stub process.kill to
+        // ESRCH for DEAD_PID and delegate everything else to the real probe.
+        realKill = process.kill.bind(process)
+        mock.method(process, 'kill', (pid, sig) => {
+          if (pid === DEAD_PID) { const e = new Error('ESRCH'); e.code = 'ESRCH'; throw e }
+          return realKill(pid, sig)
+        })
+      })
+      afterEach(() => {
+        mock.restoreAll()
+        for (const d of created) rmSync(d, { recursive: true, force: true })
+      })
 
-      function makeSinkDir(suffix, pidContent) {
+      function makeSinkDir(suffix, pidContent, { ageMs = 0 } = {}) {
         const base = join(tmpdir(), 'chroxy-claude-tui')
         mkdirSync(base, { recursive: true })
         const dir = join(base, `s-${suffix}-${process.pid}-${Math.random().toString(36).slice(2)}`)
         mkdirSync(dir, { recursive: true })
         if (pidContent !== undefined) writeFileSync(join(dir, 'owner.pid'), pidContent)
+        if (ageMs > 0) {
+          const t = new Date(Date.now() - ageMs)
+          utimesSync(dir, t, t)
+        }
         created.push(dir)
         return dir
       }
 
-      it('sweeps dead-pid + pidfile-less dirs, keeps live-pid dirs', () => {
-        const liveDir = makeSinkDir('live', String(process.pid)) // our pid — alive
-        const deadDir = makeSinkDir('dead', '999999')            // above typical max_pid → ESRCH
-        const orphanDir = makeSinkDir('orphan')                  // no owner.pid
+      it('keeps live-pid dirs, sweeps dead-pid dirs, and sweeps only AGED pidfile-less dirs', () => {
+        const liveDir = makeSinkDir('live', String(process.pid))             // our pid — alive
+        const deadDir = makeSinkDir('dead', String(DEAD_PID))                // stubbed ESRCH → swept
+        const freshOrphan = makeSinkDir('fresh-orphan')                       // no pidfile, new → kept (grace)
+        const oldOrphan = makeSinkDir('old-orphan', undefined, { ageMs: ClaudeTuiSession.SINK_SWEEP_GRACE_MS + 60_000 })
 
         const result = ClaudeTuiSession.sweepStaleSinkDirs({ info() {}, warn() {} })
 
         assert.ok(existsSync(liveDir), 'live-pid dir kept')
         assert.ok(!existsSync(deadDir), 'dead-pid dir swept')
-        assert.ok(!existsSync(orphanDir), 'pidfile-less dir swept')
-        assert.ok(result.swept >= 2, 'reported at least the two swept dirs')
-        assert.ok(result.kept >= 1, 'reported the kept live dir')
+        assert.ok(existsSync(freshOrphan), 'fresh pidfile-less dir kept (mid-creation grace)')
+        assert.ok(!existsSync(oldOrphan), 'aged pidfile-less dir swept')
+        assert.ok(result.swept >= 2, 'reported the swept dirs')
+        assert.ok(result.kept >= 2, 'reported the kept dirs (live + fresh orphan)')
       })
 
-      it('returns zero counts when the base dir does not exist', () => {
-        // Non-throwing on a missing base — just nothing to do.
+      it('returns zero counts (no throw) when the base dir does not exist', () => {
+        // Genuinely exercise the missing-base catch: remove the base dir first.
+        rmSync(join(tmpdir(), 'chroxy-claude-tui'), { recursive: true, force: true })
         const result = ClaudeTuiSession.sweepStaleSinkDirs({ info() {}, warn() {} })
-        assert.equal(typeof result.swept, 'number')
-        assert.equal(typeof result.kept, 'number')
+        assert.deepEqual(result, { swept: 0, kept: 0 })
       })
     })
   })
