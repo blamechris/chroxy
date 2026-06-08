@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -805,6 +805,55 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * #5323 (WP-5.1) — boot-time sweep of orphaned hook-sink dirs under
+   * `/tmp/chroxy-claude-tui/s-*`. destroy() rmSyncs a session's own sink dir,
+   * but a CRASH leaks it forever, so a long-lived host accumulates one dir per
+   * crashed session. Mirrors the worktree reaper's dead-pid-lock logic: each
+   * dir carries an `owner.pid` (written at start()); a dir is removed only when
+   * its owner is DEAD (or the pidfile is missing/garbage). A live owner — this
+   * just-booted daemon, or another chroxy on the host — keeps its dirs, so the
+   * sweep is safe to run unconditionally at boot (our own pid is alive, so we
+   * never delete a dir we are about to use).
+   * @param {object} [logger] - logger with info/warn (defaults to module log)
+   * @returns {{swept:number, kept:number}}
+   */
+  static sweepStaleSinkDirs(logger = log) {
+    const base = join(tmpdir(), 'chroxy-claude-tui')
+    let entries
+    try { entries = readdirSync(base) } catch { return { swept: 0, kept: 0 } }
+    let swept = 0
+    let kept = 0
+    for (const name of entries) {
+      if (!name.startsWith('s-')) continue
+      const dir = join(base, name)
+      let ownerPid = null
+      try {
+        const n = parseInt(readFileSync(join(dir, 'owner.pid'), 'utf8').trim(), 10)
+        if (Number.isInteger(n) && n > 0) ownerPid = n
+      } catch { /* no/garbage pidfile → treat as orphaned */ }
+      if (ownerPid !== null) {
+        let alive
+        try {
+          process.kill(ownerPid, 0) // signal 0 = existence probe
+          alive = true
+        } catch (err) {
+          // ESRCH → dead; EPERM → exists but not ours → still alive, keep it.
+          alive = err && err.code === 'EPERM'
+        }
+        if (alive) { kept++; continue }
+      }
+      try {
+        rmSync(dir, { recursive: true, force: true })
+        swept++
+      } catch (err) {
+        logger?.warn?.(`sink-dir sweep: failed to remove ${dir}: ${err.message}`)
+      }
+    }
+    if (swept > 0) logger?.info?.(`Swept ${swept} stale claude-tui sink dir(s) from ${base} (kept ${kept} live)`)
+    return { swept, kept }
+  }
+
   // Upper bounds on how long we'll wait for status=idle before falling
   // through (and writing anyway, with a warn). Spawn warmup is generous
   // because cold claude can take a few seconds on a fresh keychain
@@ -850,6 +899,11 @@ export class ClaudeTuiSession extends BaseSession {
     mkdirSync(base, { recursive: true })
     this._sinkDir = join(base, `s-${randomUUID()}`)
     mkdirSync(this._sinkDir, { recursive: true })
+    // #5323 (WP-5.1) — stamp the owning pid so the boot-time sweep
+    // (sweepStaleSinkDirs) can tell a live daemon's sink dir from one orphaned
+    // by a prior crash. Best-effort: a missing pidfile just makes the dir
+    // sweep-eligible, which is the safe default for an orphan.
+    try { writeFileSync(join(this._sinkDir, 'owner.pid'), String(process.pid)) } catch { /* best effort */ }
 
     // Generate the upstream session uuid here so the JSONL path is
     // predictable + so claude resumes the same conversation across turns.
@@ -1676,13 +1730,25 @@ export class ClaudeTuiSession extends BaseSession {
 
         if (name.startsWith('stop-')) {
           stopPayload = parsed
-          continue
+        } else {
+          try {
+            this._emitToolHookEvent(name.startsWith('pre-') ? 'PreToolUse' : 'PostToolUse', parsed, messageId)
+          } catch (err) {
+            log.warn(`tool hook emit failed: ${err.message}`)
+          }
         }
+        // #5323 (WP-5.1) — unlink the consumed hook file so the per-session sink
+        // dir stays bounded over a long-lived persistent PTY (one file per turn
+        // + 2 per tool call accumulate fast). On a successful unlink drop the
+        // name from _consumedFiles too — the on-disk file is gone, so it can't be
+        // re-read, which keeps the Set bounded as well (filenames are UUID-unique
+        // so there's no cross-turn collision to guard against). If unlink fails
+        // (rare), KEEP the name in _consumedFiles as the dedup guard so a later
+        // readdir can't re-process it.
         try {
-          this._emitToolHookEvent(name.startsWith('pre-') ? 'PreToolUse' : 'PostToolUse', parsed, messageId)
-        } catch (err) {
-          log.warn(`tool hook emit failed: ${err.message}`)
-        }
+          unlinkSync(full)
+          this._consumedFiles.delete(name)
+        } catch { /* leave the dedup guard in place */ }
       }
       // Any new hook file = progress evidence. Re-arm timers so a turn
       // that's actively producing tool events doesn't trip the soft

@@ -531,6 +531,76 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5323 (WP-5.1) — bound the per-session sink dir + _consumedFiles over a
+  // long-lived PTY (unlink consumed hook files), and sweep sink dirs orphaned
+  // by prior crashes at boot.
+  describe('hook-sink bounding + stale-dir sweep (#5323 WP-5.1)', () => {
+    it('unlinks consumed hook files and prunes _consumedFiles', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-unlink'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-unlink-'))
+      session._waitForPrompt = async () => true
+      session._term = {
+        write: () => {
+          // Drop a pre- tool hook AND a stop hook so the poll loop processes the
+          // pre then completes the turn.
+          writeFileSync(join(session._sinkDir, 'pre-aaa.json'), JSON.stringify({
+            tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' },
+          }))
+          writeFileSync(join(session._sinkDir, 'stop-bbb.json'), JSON.stringify({ last_assistant_message: 'done' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+      await session.sendMessage('hi')
+
+      assert.ok(!existsSync(join(session._sinkDir, 'pre-aaa.json')), 'consumed pre- hook unlinked')
+      assert.ok(!existsSync(join(session._sinkDir, 'stop-bbb.json')), 'consumed stop- hook unlinked')
+      assert.equal(session._consumedFiles.size, 0, '_consumedFiles pruned after successful unlink')
+    })
+
+    describe('sweepStaleSinkDirs', () => {
+      let created
+      beforeEach(() => { created = [] })
+      afterEach(() => { for (const d of created) rmSync(d, { recursive: true, force: true }) })
+
+      function makeSinkDir(suffix, pidContent) {
+        const base = join(tmpdir(), 'chroxy-claude-tui')
+        mkdirSync(base, { recursive: true })
+        const dir = join(base, `s-${suffix}-${process.pid}-${Math.random().toString(36).slice(2)}`)
+        mkdirSync(dir, { recursive: true })
+        if (pidContent !== undefined) writeFileSync(join(dir, 'owner.pid'), pidContent)
+        created.push(dir)
+        return dir
+      }
+
+      it('sweeps dead-pid + pidfile-less dirs, keeps live-pid dirs', () => {
+        const liveDir = makeSinkDir('live', String(process.pid)) // our pid — alive
+        const deadDir = makeSinkDir('dead', '999999')            // above typical max_pid → ESRCH
+        const orphanDir = makeSinkDir('orphan')                  // no owner.pid
+
+        const result = ClaudeTuiSession.sweepStaleSinkDirs({ info() {}, warn() {} })
+
+        assert.ok(existsSync(liveDir), 'live-pid dir kept')
+        assert.ok(!existsSync(deadDir), 'dead-pid dir swept')
+        assert.ok(!existsSync(orphanDir), 'pidfile-less dir swept')
+        assert.ok(result.swept >= 2, 'reported at least the two swept dirs')
+        assert.ok(result.kept >= 1, 'reported the kept live dir')
+      })
+
+      it('returns zero counts when the base dir does not exist', () => {
+        // Non-throwing on a missing base — just nothing to do.
+        const result = ClaudeTuiSession.sweepStaleSinkDirs({ info() {}, warn() {} })
+        assert.equal(typeof result.swept, 'number')
+        assert.equal(typeof result.kept, 'number')
+      })
+    })
+  })
+
   // #5315 (WP-2.1) — bounded per-session PTY auto-respawn. When the persistent
   // claude PTY dies unexpectedly mid-session, the session must self-heal
   // (bounded backoff, max 5 attempts) instead of becoming a permanently
