@@ -4,6 +4,7 @@ import { writeFileSync, unlinkSync, existsSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { JsonlSubprocessSession } from '../src/jsonl-subprocess-session.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import { waitFor } from './test-helpers.js'
 
 // ---------------------------------------------------------------------------
@@ -397,6 +398,61 @@ describe('JsonlSubprocessSession (base)', () => {
       await waitFor(() => starts.length >= 1, { label: 'stream_start' })
 
       assert.match(starts[0].messageId, /^quux-msg-/)
+    })
+
+    it('attaches a user error listener to stdout AND stderr (so a stream error is handled, not uncaught) (#5324)', async () => {
+      // A shim that stays alive long enough for us to inspect its stdio streams.
+      writeFileSync(shimPath, '#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 3000)\n')
+      chmodSync(shimPath, 0o755)
+
+      const P = makeTestProviderClass({ providerName: 'fake' })
+      const s = new P({ cwd: '/tmp' })
+      s._processReady = true
+      s.on('error', () => {})
+      s.sendMessage('hi') // not awaited — spawns then polls for the (sleeping) child
+      await waitFor(() => s._process != null, { label: '_process spawned' })
+
+      // A user 'error' listener on each pipe is what keeps a real stream error
+      // (EPIPE on a dying child, a read fault) from reaching the process as an
+      // unhandled 'error' and crashing the whole daemon. (We assert the listener
+      // is wired rather than synthetically emitting: node attaches its own
+      // internal stream-error handler that re-throws a *manually* emitted error
+      // regardless, so a manual emit can't faithfully model a real I/O error.)
+      assert.ok(s._process.stdout.listenerCount('error') >= 1, 'stdout has a user error listener')
+      assert.ok(s._process.stderr.listenerCount('error') >= 1, 'stderr has a user error listener')
+
+      await s.destroy()
+    })
+
+    it('logs (does not crash on) a stderr stream error via the wired listener (#5324)', async () => {
+      // Verify the listener BODY: invoke it directly with a fake error and
+      // assert it logs rather than throwing. This exercises the handler without
+      // fighting node's internal manual-emit re-throw on a real pipe.
+      const warns = []
+      const logSpy = (e) => {
+        if (e.component === 'jsonl-subprocess-session' && e.level === 'warn') warns.push(e.message)
+      }
+      addLogListener(logSpy)
+      try {
+        writeFileSync(shimPath, '#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 3000)\n')
+        chmodSync(shimPath, 0o755)
+        const P = makeTestProviderClass({ providerName: 'fake' })
+        const s = new P({ cwd: '/tmp' })
+        s._processReady = true
+        s.on('error', () => {})
+        s.sendMessage('hi')
+        await waitFor(() => s._process != null, { label: '_process spawned' })
+
+        // Pull the user listener (the last one registered — ours) and call it.
+        const listeners = s._process.stderr.listeners('error')
+        const mine = listeners[listeners.length - 1]
+        assert.doesNotThrow(() => mine(new Error('boom-err')), 'listener swallows the error')
+        assert.ok(warns.some((m) => /stderr stream error.*boom-err/.test(m)), 'stderr error logged')
+
+        await s.destroy()
+      } finally {
+        removeLogListener(logSpy)
+      }
     })
 
     it('non-zero exit emits an error that includes displayLabel and exit code', async () => {
