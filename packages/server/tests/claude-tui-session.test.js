@@ -2643,10 +2643,11 @@ describe('ClaudeTuiSession', () => {
   })
 
   // #5318 (WP-3.1) — while a human is answering an AskUserQuestion, the human is
-  // the bottleneck, not claude, so the "claude went silent" backstops
-  // (soft-inactivity, hard, stream-stall, first-output) must be suspended.
-  // A slow human must not trip a misleading force-cancel; a genuinely wedged
-  // form still recovers via the dedicated AskUserQuestion watchdog.
+  // the bottleneck, not claude, so the silence-detecting backstops
+  // (soft-inactivity, stream-stall, first-output) are suspended. The HARD cap
+  // deliberately stays armed (last-resort backstop). A slow human must not trip
+  // a misleading force-cancel; a genuinely wedged form still recovers via the
+  // dedicated AskUserQuestion watchdog.
   describe('backstop suspension during pending AskUserQuestion (#5318 WP-3.1)', () => {
     function makeSession() {
       return new ClaudeTuiSession({
@@ -2670,7 +2671,7 @@ describe('ClaudeTuiSession', () => {
       await s.destroy()
     })
 
-    it('_armResultTimeout suspends every backstop while a question is pending', async () => {
+    it('_armResultTimeout suspends the silence backstops (hard cap stays armed) while a question is pending', async () => {
       const s = makeSession()
       s._isBusy = true
       s._currentMessageId = 'msg-1'
@@ -2746,6 +2747,19 @@ describe('ClaudeTuiSession', () => {
       assert.equal(s._streamStallTimeout, null, 'stream-stall suspended on user_question')
       assert.equal(s._resultTimeout, null, 'soft suspended')
       assert.ok(s._hardTimeout, 'hard cap stays armed')
+
+      // #5352 review — drive the matching PostToolUse and re-arm exactly as the
+      // hook-drain loop does (clear pending inside _emitToolHookEvent, then
+      // _armResultTimeout) to prove resume happens via the production path.
+      s._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_aq',
+        tool_name: 'AskUserQuestion',
+        tool_response: 'done',
+      }, 'msg-aq')
+      assert.equal(s._pendingUserAnswers.size, 0, 'PostToolUse cleared the pending answer')
+      s._armResultTimeout() // the drain loop's re-arm after a consumed hook
+      assert.ok(s._streamStallTimeout, 'stream-stall re-armed once the answer cleared')
+      assert.ok(s._resultTimeout, 'soft re-armed')
       await s.destroy()
     })
 
