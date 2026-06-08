@@ -338,6 +338,45 @@ describe('WebTaskManager', () => {
       assert.equal(manager._pollTimer, null, 'timer cleared after last task completes')
     })
 
+    it('skips an overlapping poll while the prior status check is still in flight (#5327 review)', async () => {
+      manager = new WebTaskManager()
+      manager._remoteAvailable = true
+      manager._spawnRemoteTask = () => {}
+
+      const { taskId } = manager.launchTask('slow check')
+      const task = manager._tasks.get(taskId)
+      task.status = 'running'
+
+      let checkStarts = 0
+      let releaseCheck
+      manager._checkRemoteStatus = () => {
+        checkStarts++
+        return new Promise((resolve) => { releaseCheck = resolve })
+      }
+
+      // First poll starts the (stuck) status check and increments _pollCount.
+      const firstPoll = manager._pollTaskStatus()
+      assert.equal(checkStarts, 1)
+      assert.equal(manager._pollCount, 1)
+
+      // A second tick while the first is in flight must be skipped entirely —
+      // no new status check, no _pollCount advance (which would time out early).
+      await manager._pollTaskStatus()
+      assert.equal(checkStarts, 1, 'overlapping poll must not start a second check')
+      assert.equal(manager._pollCount, 1, 'overlapping poll must not advance the count')
+
+      // Release the in-flight check; the first poll settles and clears the flag.
+      releaseCheck({ status: 'running' })
+      await firstPoll
+      assert.equal(manager._inPoll, false, 'in-flight flag cleared after the poll settles')
+
+      // A subsequent poll now runs normally — swap to an immediately-resolving
+      // check so this poll doesn't hang on the stuck-promise mock.
+      manager._checkRemoteStatus = async () => { checkStarts++; return { status: 'running' } }
+      await manager._pollTaskStatus()
+      assert.equal(checkStarts, 2)
+    })
+
     it('unref\'s the poll timer so it never holds the event loop open (#5327)', () => {
       manager = new WebTaskManager()
       let unrefed = false

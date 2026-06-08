@@ -36,6 +36,7 @@ export class WebTaskManager extends EventEmitter {
     this._detected = false
     this._pollTimer = null
     this._pollCount = 0
+    this._inPoll = false
   }
 
   /** Whether the CLI supports --remote (web task launch) */
@@ -254,65 +255,76 @@ export class WebTaskManager extends EventEmitter {
    * @private
    */
   async _pollTaskStatus() {
-    this._pollCount++
+    // Re-entrancy guard (#5327 review): if the previous poll is still awaiting a
+    // status check (a real CLI call can exceed POLL_INTERVAL_MS), skip this tick
+    // rather than overlapping. Overlap would advance _pollCount faster than
+    // wall-clock (premature timeout) and race task-state transitions. The flag
+    // is cleared in finally so a rejection can't wedge polling permanently.
+    if (this._inPoll) return
+    this._inPoll = true
+    try {
+      this._pollCount++
 
-    const running = [...this._tasks.values()].filter(t => t.status === 'running')
-    if (running.length === 0) {
-      this._stopPolling()
-      return
-    }
+      const running = [...this._tasks.values()].filter(t => t.status === 'running')
+      if (running.length === 0) {
+        this._stopPolling()
+        return
+      }
 
-    // Genuine timeout backstop: a task STILL running after MAX_POLL_COUNT polls
-    // (10 min) is force-failed so a stuck cloud task can't poll forever. This
-    // used to be the ONLY exit — every healthy task was force-failed here
-    // because nothing implemented the running→completed transition (#5327).
-    // Checked before any await so the synchronous timeout path stays sync.
-    if (this._pollCount >= MAX_POLL_COUNT) {
+      // Genuine timeout backstop: a task STILL running after MAX_POLL_COUNT polls
+      // (10 min) is force-failed so a stuck cloud task can't poll forever. This
+      // used to be the ONLY exit — every healthy task was force-failed here
+      // because nothing implemented the running→completed transition (#5327).
+      // Checked before any await so the synchronous timeout path stays sync.
+      if (this._pollCount >= MAX_POLL_COUNT) {
+        for (const task of running) {
+          task.status = 'failed'
+          task.error = 'Task timed out waiting for status update'
+          task.updatedAt = Date.now()
+          this.emit('task_updated', { ...task })
+          this.emit('task_error', { taskId: task.taskId, message: task.error })
+        }
+        this._stopPolling()
+        return
+      }
+
+      // Check each running task's remote status and transition it to a terminal
+      // state when the cloud reports done/failed (#5327). _checkRemoteStatus is a
+      // seam — a real CLI status command (or a test) drives the transition; the
+      // default reports 'running' (unknown) until that command ships.
       for (const task of running) {
-        task.status = 'failed'
-        task.error = 'Task timed out waiting for status update'
-        task.updatedAt = Date.now()
-        this.emit('task_updated', { ...task })
-        this.emit('task_error', { taskId: task.taskId, message: task.error })
+        let result
+        try {
+          result = await this._checkRemoteStatus(task)
+        } catch {
+          // A transient status-check failure must not fail the task — let the
+          // timeout backstop catch a genuinely stuck one. Skip this pass.
+          continue
+        }
+        const next = result && result.status
+        if (next === 'completed') {
+          task.status = 'completed'
+          task.result = result.result ?? null
+          task.error = null
+          task.updatedAt = Date.now()
+          this.emit('task_updated', { ...task })
+        } else if (next === 'failed') {
+          task.status = 'failed'
+          task.error = result.error || 'Task failed'
+          task.updatedAt = Date.now()
+          this.emit('task_updated', { ...task })
+          this.emit('task_error', { taskId: task.taskId, message: task.error })
+        }
+        // Any other value (incl. 'running'/undefined) leaves the task running.
       }
-      this._stopPolling()
-      return
-    }
 
-    // Check each running task's remote status and transition it to a terminal
-    // state when the cloud reports done/failed (#5327). _checkRemoteStatus is a
-    // seam — a real CLI status command (or a test) drives the transition; the
-    // default reports 'running' (unknown) until that command ships.
-    for (const task of running) {
-      let result
-      try {
-        result = await this._checkRemoteStatus(task)
-      } catch {
-        // A transient status-check failure must not fail the task — let the
-        // timeout backstop catch a genuinely stuck one. Skip this pass.
-        continue
+      // Once nothing is left running, stop the timer rather than spinning until
+      // the timeout cap.
+      if (![...this._tasks.values()].some(t => t.status === 'running')) {
+        this._stopPolling()
       }
-      const next = result && result.status
-      if (next === 'completed') {
-        task.status = 'completed'
-        task.result = result.result ?? null
-        task.error = null
-        task.updatedAt = Date.now()
-        this.emit('task_updated', { ...task })
-      } else if (next === 'failed') {
-        task.status = 'failed'
-        task.error = result.error || 'Task failed'
-        task.updatedAt = Date.now()
-        this.emit('task_updated', { ...task })
-        this.emit('task_error', { taskId: task.taskId, message: task.error })
-      }
-      // Any other value (incl. 'running'/undefined) leaves the task running.
-    }
-
-    // Once nothing is left running, stop the timer rather than spinning until
-    // the timeout cap.
-    if (![...this._tasks.values()].some(t => t.status === 'running')) {
-      this._stopPolling()
+    } finally {
+      this._inPoll = false
     }
   }
 
