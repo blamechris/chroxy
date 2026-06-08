@@ -315,6 +315,170 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5321 (WP-4.1) — detect & surface a logged-out / expired subscription login
+  // as a clear AUTH_REQUIRED error instead of a 90s silent warmup hang or a
+  // generic stall/exit. The classifier matches claude's own logged-out output.
+  describe('subscription auth failure detection (#5321 WP-4.1)', () => {
+    function makeSession() {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s.on('error', () => {})
+      return s
+    }
+
+    it('_scanOutputForAuthFailure matches claude\'s logged-out banner (command-token anchored)', () => {
+      const s = makeSession()
+      for (const sample of [
+        'Invalid API key · Please run /login',
+        'Please run /login to continue',
+        'Please run `/login`',
+        'You are signed out. Run claude login to authenticate.',
+        // line-wrapped / box-padded banner still matches (whitespace-normalized)
+        'Invalid API key ·\n   Please run\n   /login',
+      ]) {
+        s._outputTail = sample
+        assert.ok(s._scanOutputForAuthFailure(), `should match: ${JSON.stringify(sample)}`)
+      }
+    })
+
+    it('_scanOutputForAuthFailure does NOT match a model merely discussing auth (#5355 M1)', () => {
+      const s = makeSession()
+      // These are normal RESPONSE texts this user base produces constantly. The
+      // command-token-anchored patterns must NOT mislabel them as AUTH_REQUIRED.
+      for (const sample of [
+        'If the user is not authenticated, return a 401.',
+        'When authentication failed, redirect to the sign-in page.',
+        'Your session token expired after 24h, so refresh it.',
+        'An invalid API key triggers the retry path in the client.',
+        'Add a not-logged-in guard before the dashboard route.',
+        'Here is how to fix your code. The function returns a Promise.',
+        '',
+      ]) {
+        s._outputTail = sample
+        assert.ok(!s._scanOutputForAuthFailure(), `must NOT match: ${JSON.stringify(sample)}`)
+      }
+    })
+
+    it('start() rejects with AUTH_REQUIRED when warmup classifies a logged-out session', async () => {
+      const s = makeSession()
+      // Stub _spawnPty to mimic a logged-out warmup: live PTY, never ready,
+      // auth failure latched by the warmup scan.
+      s._spawnPty = async function () {
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+        this._authFailureDetected = true
+      }
+      const errors = []
+      const readys = []
+      s.on('error', (e) => errors.push(e))
+      s.on('ready', (e) => readys.push(e))
+
+      await assert.rejects(s.start(), (err) => err.code === 'AUTH_REQUIRED')
+      assert.equal(readys.length, 0, 'no ready emitted for a logged-out session')
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'AUTH_REQUIRED', 'AUTH_REQUIRED error surfaced')
+      assert.match(errors[0].message, /claude login/, 'guidance included')
+      assert.equal(s._processReady, false)
+      await s.destroy() // start() created a sink dir under /tmp — clean it up
+    })
+
+    it('start() rejects with AUTH_REQUIRED when the warmup output (not the latch) shows logged-out', async () => {
+      const s = makeSession()
+      // _spawnPty leaves a live PTY + the login banner in the tail, but does not
+      // set the latch (mimics the timeout-fallback path).
+      s._spawnPty = async function () {
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+        this._outputTail = 'Invalid API key · Please run /login'
+      }
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      await assert.rejects(s.start(), (err) => err.code === 'AUTH_REQUIRED')
+      assert.equal(errors[0].code, 'AUTH_REQUIRED')
+      await s.destroy() // start() created a sink dir under /tmp — clean it up
+    })
+
+    it('_onPtyGone emits AUTH_REQUIRED when the PTY died with a logged-out banner', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._outputTail = 'Invalid API key · Please run /login'
+      s._onPtyGone({ exitCode: 1, signal: null }, 'exit') // no active turn
+
+      const authErr = errors.find((e) => e.code === 'AUTH_REQUIRED')
+      assert.ok(authErr, 'AUTH_REQUIRED surfaced on auth-related PTY death')
+    })
+
+    it('_handleStreamStall upgrades a stall to AUTH_REQUIRED when the tail shows logged-out', () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-auth'
+      s._activeTurn = { startedAt: Date.now() - 100, synthSeq: 0 }
+      s._term = { write: () => {}, kill: () => {} }
+      s._outputTail = 'Invalid API key · Please run /login'
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      s._handleStreamStall()
+      const authErr = errors.find((e) => e.code === 'AUTH_REQUIRED')
+      assert.ok(authErr, 'stall upgraded to AUTH_REQUIRED')
+      assert.equal(s._isBusy, false, 'turn torn down')
+    })
+
+    it('_waitForPrompt short-circuits the warmup wait on a logged-out banner (#5355 m3 — no 90s hang)', async () => {
+      const s = makeSession()
+      // Real _waitForPrompt: a live pid + a never-ready session file, but the
+      // login banner already in the tail. With detectAuthFailure it must bail on
+      // the FIRST poll instead of burning the full timeout.
+      s._term = { pid: 4242 }
+      s._outputTail = 'Invalid API key · Please run /login'
+      const origRead = ClaudeTuiSession.readSessionStatus
+      ClaudeTuiSession.readSessionStatus = () => null // never reaches idle
+      try {
+        const startedAt = Date.now()
+        const ready = await s._waitForPrompt(60_000, { detectAuthFailure: true })
+        const elapsed = Date.now() - startedAt
+        assert.equal(ready, false, 'not ready')
+        assert.equal(s._authFailureDetected, true, 'auth failure latched')
+        assert.ok(elapsed < 2_000, `short-circuited fast (elapsed=${elapsed}ms, not the 60s timeout)`)
+      } finally {
+        ClaudeTuiSession.readSessionStatus = origRead
+      }
+    })
+
+    it('a logged-out respawn surfaces AUTH_REQUIRED instead of marking ready (#5355 M2)', async () => {
+      const s = makeSession()
+      // Pretend a prior start() ran; drive a respawn whose warmup classifies
+      // a logged-out session (live PTY, latch set, not exited).
+      s._sinkDir = '/tmp/fake-sink'
+      s._settingsPath = '/tmp/fake-sink/settings.json'
+      s._sessionId = 'conv-uuid-auth'
+      s._spawnPty = async function () {
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+        this._authFailureDetected = true
+      }
+      const errors = []
+      const readys = []
+      const exhausted = []
+      s.on('error', (e) => errors.push(e))
+      s.on('ready', (e) => readys.push(e))
+      s.on('respawn_exhausted', (e) => exhausted.push(e))
+
+      await s._respawnPty()
+
+      assert.equal(readys.length, 0, 'no ready emitted on a logged-out respawn')
+      assert.ok(errors.some((e) => e.code === 'AUTH_REQUIRED'), 'AUTH_REQUIRED surfaced')
+      assert.ok(exhausted.some((e) => e.reason === 'AUTH_REQUIRED'), 'respawn stops (no futile retry loop)')
+      assert.equal(s._processReady, false, 'not marked ready while logged out')
+      await s.destroy()
+    })
+
+    it('resolveAuth returns a well-formed auth descriptor (best-effort on-disk probe)', () => {
+      const auth = ClaudeTuiSession.resolveAuth()
+      assert.equal(auth.source, 'oauth')
+      assert.equal(typeof auth.ready, 'boolean')
+      assert.ok(typeof auth.hint === 'string' && auth.hint.length > 0)
+      assert.ok(typeof auth.detail === 'string' && auth.detail.length > 0)
+    })
+  })
+
   // #5315 (WP-2.1) — bounded per-session PTY auto-respawn. When the persistent
   // claude PTY dies unexpectedly mid-session, the session must self-heal
   // (bounded backoff, max 5 attempts) instead of becoming a permanently
