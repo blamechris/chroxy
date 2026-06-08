@@ -479,6 +479,41 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5322 (WP-4.2, security) — the PTY diagnostic dumps (hex + readable tail)
+  // ride into log lines AND client-facing `error` events. A pasted/echoed OAuth
+  // token or API key in claude's output must not leak through them.
+  describe('credential redaction in PTY diagnostics (#5322 WP-4.2)', () => {
+    function makeSession() {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s.on('error', () => {})
+      return s
+    }
+
+    it('_outputTailHexDump redacts a token-shaped run in BOTH the hex and ASCII columns', () => {
+      const s = makeSession()
+      const token = 'sk-ant-api03-' + 'A'.repeat(50)
+      // Include an escape byte to prove control bytes survive the latin1 round-trip.
+      s._outputTailRaw = Buffer.from(`Invalid API key ${token}\x1b[0m done`, 'latin1')
+      const dump = s._outputTailHexDump()
+
+      assert.ok(!dump.includes(token), 'raw token absent from the ASCII column')
+      // The token's leading bytes ("sk-ant" → 73 6b 2d 61 6e 74) must be gone too.
+      const prefixHex = Buffer.from('sk-ant', 'latin1').toString('hex').match(/../g).join(' ')
+      assert.ok(!dump.replace(/\s+/g, ' ').includes(prefixHex), 'token hex bytes absent from the hex column')
+      assert.ok(dump.includes('REDACTED'), 'redaction marker present')
+      assert.ok(dump.includes('1b'), 'escape byte (0x1b) preserved — diagnostic value intact')
+    })
+
+    it('_outputTailDiagnostic redacts a token-shaped run (client-facing error path)', () => {
+      const s = makeSession()
+      const token = 'sk-ant-api03-' + 'B'.repeat(50)
+      s._outputTail = `something went wrong: ${token} — retrying`
+      const diag = s._outputTailDiagnostic()
+      assert.ok(!diag.includes(token), 'token redacted from the readable diagnostic')
+      assert.ok(diag.includes('[REDACTED]'), 'redaction marker present')
+    })
+  })
+
   // #5315 (WP-2.1) — bounded per-session PTY auto-respawn. When the persistent
   // claude PTY dies unexpectedly mid-session, the session must self-heal
   // (bounded backoff, max 5 attempts) instead of becoming a permanently
