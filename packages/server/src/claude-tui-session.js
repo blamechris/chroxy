@@ -931,8 +931,21 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
     this._respawning = false
-    if (this._destroying) return
-    if (this._ptyExited) {
+    if (this._destroying) {
+      // #5315 review (MAJOR-1) — destroy() raced our respawn. _spawnPty's own
+      // post-spawn guard kills a PTY it managed to assign, but cover it here too
+      // (and so a stubbed _spawnPty in tests can't leave a live _term): kill any
+      // PTY that exists and bail without emitting `ready`.
+      try { this._term?.kill?.('SIGTERM') } catch {}
+      this._term = null
+      return
+    }
+    // #5315 review (MINOR-1) — _spawnPty has early-return paths (node-pty import
+    // fail, spawn throw) that emit('error') and return WITHOUT setting
+    // _ptyExited and without assigning a live _term. Treat "no live PTY" the
+    // same as a death so we don't falsely emit `ready` + mark _processReady on a
+    // dead session; reschedule (respects the cap).
+    if (!this._term || this._ptyExited) {
       // Respawn warmup failed: the PTY died again during _spawnPty. _onPtyGone
       // DID fire (it set _ptyExited), but its _scheduleRespawn was suppressed
       // by the `_respawning` guard that was true for the whole _spawnPty await.
@@ -1006,8 +1019,13 @@ export class ClaudeTuiSession extends BaseSession {
     // is rejected by claude. Falls back to the fresh path whenever the session
     // wasn't seeded from a persisted id. Resume-failure handling (claude can't
     // find the conversation, e.g. cleared ~/.claude history) currently surfaces
-    // via the warmup `_ptyExited` error path; a graceful drop-and-retry-fresh
-    // fallback is tracked with the per-session respawn work (#5315 / WP-2.1).
+    // via the warmup `_ptyExited` error path → bounded respawn (#5315) → if every
+    // resume-respawn dies, exhaustion destroys the session. NOTE: #5315 does NOT
+    // add a graceful drop-and-retry-FRESH fallback — a fresh session that dies
+    // before claude persists its conversation will burn all 5 respawns on a
+    // doomed `--resume` then get destroyed (bounded + safe, but recovery is
+    // futile in that narrow window). The retry-fresh fallback is tracked in its
+    // own follow-up (see #5315 review).
     const idArgs = this._resumedFromPersisted
       ? ['--resume', this._sessionId]
       : ['--session-id', this._sessionId]
@@ -1056,6 +1074,16 @@ export class ClaudeTuiSession extends BaseSession {
       })
     } catch (err) {
       this.emit('error', { message: `Failed to spawn claude under PTY: ${err.message}` })
+      return
+    }
+
+    // #5315 (WP-2.1) review — destroy() can race an in-flight (re)spawn: it kills
+    // the OLD _term and sets _destroying while we're awaiting the spawn above, so
+    // the PTY we just created would be orphaned (nothing left to kill it). If a
+    // teardown landed during the await, kill the fresh PTY now and bail.
+    if (this._destroying) {
+      try { this._term.kill('SIGTERM') } catch {}
+      this._term = null
       return
     }
 

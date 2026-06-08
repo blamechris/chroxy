@@ -430,6 +430,37 @@ describe('ClaudeTuiSession', () => {
       assert.equal(spawnCalls, 0, 'no respawn after destroy')
       session = null // already destroyed; skip afterEach double-destroy
     })
+
+    it('kills the fresh PTY when destroy() races an in-flight respawn (no orphan) (#5315 review)', async () => {
+      let killed = 0
+      session = makeSession((self) => {
+        // destroy() lands during the spawn await: _destroying flips and the
+        // fresh PTY has just been assigned by the (stubbed) _spawnPty.
+        self._destroying = true
+        self._term = { kill: () => { killed++ }, onData: () => {}, onExit: () => {}, on: () => {}, write: () => {} }
+      })
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      mock.timers.tick(1000)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(killed, 1, 'the freshly-spawned PTY is killed when destroy raced the respawn')
+      assert.equal(session._term, null, 'no live _term left referenced (no orphan)')
+      assert.equal(session._processReady, false, 'not marked ready on a raced destroy')
+      session = null // _destroying already set; skip afterEach double-destroy
+    })
+
+    it('reschedules (does not falsely go ready) when a respawn leaves no live PTY (#5315 review)', async () => {
+      session = makeSession((self) => {
+        // Mimic _spawnPty's early-return error paths (node-pty import fail /
+        // spawn throw): no live _term, _ptyExited not set.
+        self._term = null
+      })
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      mock.timers.tick(1000)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(session._processReady, false, 'must NOT mark ready when no live PTY came up')
+      assert.equal(session._respawnScheduled, true, 'rescheduled another attempt instead of declaring success')
+      assert.ok(session._respawnCount >= 2, 'attempt count advanced')
+    })
   })
 
   describe('sendMessage() error paths', () => {
