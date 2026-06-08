@@ -1981,6 +1981,12 @@ export class ClaudeTuiSession extends BaseSession {
           })
         }
         this.emit('user_question', { toolUseId, questions })
+        // #5318 (WP-3.1) — we're now blocked on a human answer. Suspend the
+        // turn backstops immediately rather than waiting for the next drain-loop
+        // _armResultTimeout(); the _armResultTimeout() guard keeps them suspended
+        // across any subsequent re-arm until the answer's PostToolUse clears the
+        // pending entry.
+        this._suspendBackstopsForPendingQuestion()
       }
       return
     }
@@ -2243,6 +2249,29 @@ export class ClaudeTuiSession extends BaseSession {
    * (new hook file processed) resets every window. Mirrors
    * `CliSession._armResultTimeout()`.
    */
+  /**
+   * #5318 (WP-3.1) — suspend the "claude went silent" backstops while a human is
+   * answering an AskUserQuestion: the soft-inactivity, stream-stall, and
+   * pre-first-output timers. When a question is pending the HUMAN is the
+   * bottleneck, not claude, so these would only fire a misleading
+   * force-cancel / stall error / check-in chip mid-answer. The dedicated
+   * `_askUserQuestionWatchdog` (armed in respondToQuestion) still recovers a
+   * genuinely wedged form after the answer is written.
+   *
+   * Deliberately does NOT touch the HARD cap (`_hardTimeout`): that 2h
+   * last-resort backstop stays armed even across a pending question, so a human
+   * who walks away and never answers still gets force-cleared eventually (and
+   * `_handleHardTimeout` keeps its existing pending-answer cleanup). Idempotent.
+   */
+  _suspendBackstopsForPendingQuestion() {
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    // Disarms + latches the per-turn first-output watchdog. By the time a
+    // question is pending the first output (the tool_use) has already arrived,
+    // so the watchdog is moot for the rest of this turn anyway.
+    this._clearFirstOutputWatchdog()
+  }
+
   _armResultTimeout() {
     if (this._resultTimeout) clearTimeout(this._resultTimeout)
     if (this._hardTimeout) clearTimeout(this._hardTimeout)
@@ -2250,14 +2279,26 @@ export class ClaudeTuiSession extends BaseSession {
     this._resultTimeout = null
     this._hardTimeout = null
     this._streamStallTimeout = null
-    this._resultTimeout = setTimeout(() => {
-      this._resultTimeout = null
-      this._handleInactivityWarning()
-    }, this._resultTimeoutMs)
+    // Hard cap ALWAYS arms — it's the last-resort backstop and stays live even
+    // while an AskUserQuestion answer is pending (a human who never answers for
+    // hours still gets force-cleared). #5318 suspends only the silence-detecting
+    // backstops below.
     this._hardTimeout = setTimeout(() => {
       this._hardTimeout = null
       this._handleHardTimeout()
     }, this._hardTimeoutMs)
+    // #5318 (WP-3.1) — while an AskUserQuestion answer is pending, keep the
+    // silence backstops suspended even though hook drains (or a defensive
+    // re-arm) call through here. Resuming is automatic: PostToolUse clears the
+    // pending entry, and the next drain-loop _armResultTimeout() falls through.
+    if (this._pendingUserAnswers.size > 0) {
+      this._suspendBackstopsForPendingQuestion()
+      return
+    }
+    this._resultTimeout = setTimeout(() => {
+      this._resultTimeout = null
+      this._handleInactivityWarning()
+    }, this._resultTimeoutMs)
     // #4638: only arm if configured > 0 (operators can disable via 0).
     if (this._streamStallTimeoutMs > 0) {
       this._streamStallTimeout = setTimeout(() => {
@@ -2339,6 +2380,9 @@ export class ClaudeTuiSession extends BaseSession {
 
   _handleInactivityWarning() {
     if (!this._isBusy) return
+    // #5318 (WP-3.1) — defence in depth: never warn while blocked on a human
+    // answer (the suspend should already have cleared this timer).
+    if (this._pendingUserAnswers.size > 0) return
     const idleMs = this._resultTimeoutMs
     const friendly = formatIdleDuration(idleMs)
     log.info(`Inactivity warning (${friendly}) — session alive, prompting check-in`)
@@ -2351,6 +2395,9 @@ export class ClaudeTuiSession extends BaseSession {
 
   _handleHardTimeout() {
     if (!this._isBusy) return
+    // #5318 (WP-3.1) — NOTE: intentionally NOT guarded on a pending question.
+    // The hard cap is the last-resort backstop and must still fire (and run its
+    // pending-answer cleanup, #4691) even if a human never answers.
     this._assertBusyHasMessageId('_handleHardTimeout')
     const friendly = formatIdleDuration(this._hardTimeoutMs)
     log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
@@ -2393,6 +2440,9 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _handleStreamStall() {
     if (!this._isBusy) return
+    // #5318 (WP-3.1) — defence in depth: a pending human answer is not a stall
+    // (the suspend should already have cleared this timer).
+    if (this._pendingUserAnswers.size > 0) return
     this._assertBusyHasMessageId('_handleStreamStall')
     const friendly = formatIdleDuration(this._streamStallTimeoutMs)
     const messageId = this._currentMessageId
@@ -2435,6 +2485,10 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _handleFirstOutputTimeout() {
     if (!this._isBusy) return
+    // #5318 (WP-3.1) — defence in depth: don't fire while blocked on a human
+    // answer. (Normally moot — first output already arrived before any question
+    // — but kept symmetric with the other backstop handlers.)
+    if (this._pendingUserAnswers.size > 0) return
     // #4642: mirror the invariant check the other teardown sites
     // (`_finishTurnError`, `_handleHardTimeout`, `_handleStreamStall`,
     // `_onAskUserQuestionStall`) emit so a future regression that
