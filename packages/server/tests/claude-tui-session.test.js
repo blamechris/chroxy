@@ -2642,6 +2642,139 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #5318 (WP-3.1) — while a human is answering an AskUserQuestion, the human is
+  // the bottleneck, not claude, so the silence-detecting backstops
+  // (soft-inactivity, stream-stall, first-output) are suspended. The HARD cap
+  // deliberately stays armed (last-resort backstop). A slow human must not trip
+  // a misleading force-cancel; a genuinely wedged form still recovers via the
+  // dedicated AskUserQuestion watchdog.
+  describe('backstop suspension during pending AskUserQuestion (#5318 WP-3.1)', () => {
+    function makeSession() {
+      return new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 10_000, hardTimeoutMs: 20_000,
+        streamStallTimeoutMs: 5_000, firstOutputTimeoutMs: 5_000,
+      })
+    }
+    function setPending(s, tid = 'tid-1') {
+      s._pendingUserAnswer = { toolUseId: tid, questions: [{ options: [] }], options: [] }
+    }
+
+    it('_armResultTimeout arms all backstops when no question is pending', async () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      s._armResultTimeout()
+      assert.ok(s._resultTimeout, 'soft inactivity armed')
+      assert.ok(s._hardTimeout, 'hard armed')
+      assert.ok(s._streamStallTimeout, 'stream-stall armed')
+      await s.destroy()
+    })
+
+    it('_armResultTimeout suspends the silence backstops (hard cap stays armed) while a question is pending', async () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      s._armResultTimeout() // arm normally first
+      setPending(s)
+      s._armResultTimeout() // a hook-drain re-arm while pending must NOT resurrect them
+      assert.equal(s._resultTimeout, null, 'soft suspended')
+      assert.equal(s._streamStallTimeout, null, 'stream-stall suspended')
+      assert.equal(s._firstOutputTimeout, null, 'first-output suspended')
+      assert.ok(s._hardTimeout, 'hard cap stays armed (last-resort backstop)')
+      await s.destroy()
+    })
+
+    it('resumes the backstops once the pending answer clears', async () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      setPending(s)
+      s._armResultTimeout()
+      assert.equal(s._streamStallTimeout, null, 'suspended while pending')
+
+      s._clearPendingAnswerByToolUseId('tid-1')
+      s._armResultTimeout() // mirrors the drain-loop re-arm after PostToolUse
+      assert.ok(s._streamStallTimeout, 'stream-stall re-armed after the answer clears')
+      assert.ok(s._hardTimeout, 'hard re-armed')
+      assert.ok(s._resultTimeout, 'soft re-armed')
+      await s.destroy()
+    })
+
+    it('_handleStreamStall does NOT tear down while a question is pending', async () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      setPending(s)
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._handleStreamStall()
+      assert.equal(s._isBusy, true, 'still busy — no force-cancel mid-answer')
+      assert.equal(errors.length, 0, 'no stream_stall error emitted')
+      await s.destroy()
+    })
+
+    it('_handleHardTimeout STILL force-clears + clears pending (last-resort backstop is not suspended)', async () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      setPending(s)
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._handleHardTimeout()
+      assert.equal(s._isBusy, false, 'hard cap force-clears even across a pending question')
+      assert.equal(s._pendingUserAnswers.size, 0, 'hard timeout also clears the pending answer (#4691)')
+      assert.equal(errors.length, 1, 'hard-timeout error emitted')
+      await s.destroy()
+    })
+
+    it('driving an AskUserQuestion PreToolUse suspends the backstops end-to-end', async () => {
+      const s = makeSession()
+      s._activeTurn = { uuid: 'test', synthSeq: 0 }
+      s._isBusy = true
+      s._currentMessageId = 'msg-aq'
+      s.on('user_question', () => {})
+      s._armResultTimeout()
+      assert.ok(s._streamStallTimeout, 'armed before the question')
+
+      s._emitToolHookEvent('PreToolUse', {
+        tool_use_id: 'toolu_aq',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Q?', options: [{ label: 'a' }] }] },
+      }, 'msg-aq')
+
+      assert.equal(s._pendingUserAnswers.size, 1, 'question pending')
+      assert.equal(s._streamStallTimeout, null, 'stream-stall suspended on user_question')
+      assert.equal(s._resultTimeout, null, 'soft suspended')
+      assert.ok(s._hardTimeout, 'hard cap stays armed')
+
+      // #5352 review — drive the matching PostToolUse and re-arm exactly as the
+      // hook-drain loop does (clear pending inside _emitToolHookEvent, then
+      // _armResultTimeout) to prove resume happens via the production path.
+      s._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_aq',
+        tool_name: 'AskUserQuestion',
+        tool_response: 'done',
+      }, 'msg-aq')
+      assert.equal(s._pendingUserAnswers.size, 0, 'PostToolUse cleared the pending answer')
+      s._armResultTimeout() // the drain loop's re-arm after a consumed hook
+      assert.ok(s._streamStallTimeout, 'stream-stall re-armed once the answer cleared')
+      assert.ok(s._resultTimeout, 'soft re-armed')
+      await s.destroy()
+    })
+
+    it('suspending backstops does NOT cancel the AskUserQuestion watchdog (wedge recovery survives)', async () => {
+      const s = makeSession()
+      s._askUserQuestionWatchdog = setTimeout(() => {}, 60_000)
+      const wd = s._askUserQuestionWatchdog
+      s._suspendBackstopsForPendingQuestion()
+      assert.equal(s._askUserQuestionWatchdog, wd, 'the dedicated watchdog is left intact')
+      clearTimeout(wd)
+      s._askUserQuestionWatchdog = null
+      await s.destroy()
+    })
+  })
+
   // #4638 — stream-stall active-recovery watchdog. CLI + SDK got this in
   // #4467; TUI was the outlier and surfaced the wedge as a "Working…"
   // banner that ticked forever when claude TUI accepted the prompt and
