@@ -17,6 +17,12 @@
 import { resolveRepoSet } from './control-room/repo-set.js'
 import { planRepoGc, applyPlan } from './worktree-gc.js'
 
+// #5326 (WP-5.4): how often the periodic auto-reaper re-sweeps after the
+// boot sweep. 30 min is a balance — short enough that a long-running daemon
+// reclaims mid-run agent worktrees without a restart, long enough that the
+// (synchronous-per-repo) git scans don't add meaningful steady-state load.
+const DEFAULT_REAP_INTERVAL_MS = 30 * 60 * 1000
+
 /**
  * Reap one repo into the running summary. Sync (the GC core uses execFileSync).
  */
@@ -100,4 +106,44 @@ export async function maybeAutoReapWorktrees(config, log, deps = {}) {
     log.info('worktree auto-reap: nothing to reclaim')
   }
   return summary
+}
+
+/**
+ * #5326 (WP-5.4): start the worktree auto-reaper for the lifetime of the
+ * daemon. Runs once immediately (the original boot sweep) and then on a
+ * recurring interval so a long-running server reclaims agent worktrees
+ * created MID-RUN — previously the sweep ran once at boot only, so a worktree
+ * orphaned an hour into a session was never reclaimed without a restart.
+ *
+ * No-op (returns null) unless `config.worktreeGc.autoReap === true`. Each sweep
+ * is fire-and-forget: a failure is logged and never propagates (so a transient
+ * git error can't tear down the interval or the daemon). The interval is
+ * `unref()`'d so it never keeps the process alive on its own.
+ *
+ * @param {object} config - merged server config
+ * @param {{ info: Function, warn: Function }} log - server logger
+ * @param {object} [deps] - test seams: run, setIntervalFn, plus maybeAutoReapWorktrees deps
+ * @returns {ReturnType<typeof setInterval>|null} the interval handle (for clearInterval on shutdown), or null when disabled
+ */
+export function startPeriodicAutoReap(config, log, deps = {}) {
+  if (!config || !config.worktreeGc || config.worktreeGc.autoReap !== true) return null
+
+  const run = deps.run || maybeAutoReapWorktrees
+  const sweep = () => {
+    Promise.resolve()
+      .then(() => run(config, log, deps))
+      .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
+  }
+
+  // Boot sweep — same behavior as before this WP.
+  sweep()
+
+  const configured = config.worktreeGc.reapIntervalMs
+  const intervalMs = Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_REAP_INTERVAL_MS
+  const setIntervalFn = deps.setIntervalFn || setInterval
+  const timer = setIntervalFn(sweep, intervalMs)
+  if (timer && typeof timer.unref === 'function') timer.unref()
+  return timer
 }

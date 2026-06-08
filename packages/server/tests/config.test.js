@@ -76,6 +76,27 @@ describe('validateConfig', () => {
     assert.ok(result.warnings.some(w => w.includes('provider') && w.includes('string')))
   })
 
+  it('accepts worktreeGc with autoReap + valid reapIntervalMs (#5326)', () => {
+    const result = validateConfig({ worktreeGc: { autoReap: true, reapIntervalMs: 60000 } })
+    assert.equal(result.valid, true)
+    assert.equal(result.warnings.length, 0)
+  })
+
+  it('accepts worktreeGc.autoReap with no reapIntervalMs (#5326)', () => {
+    const result = validateConfig({ worktreeGc: { autoReap: true } })
+    assert.equal(result.warnings.length, 0)
+  })
+
+  it('warns when worktreeGc.reapIntervalMs is not a positive number (#5326)', () => {
+    for (const bad of [0, -1, 'fast', null]) {
+      const result = validateConfig({ worktreeGc: { autoReap: true, reapIntervalMs: bad } })
+      assert.ok(
+        result.warnings.some(w => w.includes('reapIntervalMs') && w.includes('positive')),
+        `expected a reapIntervalMs warning for ${JSON.stringify(bad)}, got: ${JSON.stringify(result.warnings)}`,
+      )
+    }
+  })
+
   it('accepts valid provider names', () => {
     const config = { provider: 'claude-sdk' }
     const result = validateConfig(config)

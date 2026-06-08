@@ -1124,13 +1124,17 @@ export async function startCliServer(config) {
   }
 
   // #5158: opt-in worktree auto-reaper. When enabled, reclaim orphaned
-  // dead-pid-locked agent worktrees (clean trees only, never --force) once
-  // now that the server is up. Fire-and-forget + lazily imported so a default
-  // (disabled) boot pays nothing and a failure here never affects startup; the
-  // reaper itself yields between repos so the sweep doesn't starve the loop.
+  // dead-pid-locked agent worktrees (clean trees only, never --force). Lazily
+  // imported so a default (disabled) boot pays nothing and a failure here never
+  // affects startup; the reaper itself yields between repos so the sweep
+  // doesn't starve the loop.
+  //
+  // #5326 (WP-5.4): sweep once at boot AND on a recurring unref'd interval, so
+  // a long-running daemon reclaims worktrees created mid-run without a restart.
+  let worktreeReapTimer = null
   if (config.worktreeGc?.autoReap === true) {
     import('./worktree-reaper.js')
-      .then(({ maybeAutoReapWorktrees }) => maybeAutoReapWorktrees(config, log))
+      .then(({ startPeriodicAutoReap }) => { worktreeReapTimer = startPeriodicAutoReap(config, log) })
       .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
   }
 
@@ -1168,6 +1172,9 @@ export async function startCliServer(config) {
     }
     if (tokenManager) tokenManager.destroy()
     if (pairingManager) pairingManager.destroy()
+    // #5326 (WP-5.4): stop the periodic worktree reaper. It's unref'd so it
+    // wouldn't block exit, but clearing it avoids a sweep racing shutdown.
+    if (worktreeReapTimer) clearInterval(worktreeReapTimer)
     // Persist sessions before destroying (enables restore on restart)
     try { sessionManager.serializeState() } catch (err) {
       log.error(`Failed to serialize session state: ${err?.message || err}`)
