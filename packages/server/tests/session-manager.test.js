@@ -2109,6 +2109,10 @@ describe('#5316 (WP-2.2) — async start() rejection handling', () => {
     assert.equal(failedEvents.length, 1, 'session_restore_failed emitted once')
     assert.equal(failedEvents[0].originalHistoryPreserved, true)
     assert.equal(failedEvents[0].errorCode, 'START_FAILED')
+    // The live event and a LATER reconnect (getFailedRestores) must agree on the
+    // errorCode for the same failure — claude-tui rejects with a code-less Error,
+    // so the handler stamps START_FAILED before storing (#5350 review).
+    assert.equal(failed[0].errorCode, 'START_FAILED', 'late-reconnect errorCode matches the live event')
 
     // serializeState must write the preserved session back to disk so a future
     // restart can retry it — proving the history is not lost.

@@ -958,6 +958,13 @@ export class SessionManager extends EventEmitter {
     }
     // Snapshot is captured above, so dropping the live history map is safe.
     this._cleanupSessionMaps(sessionId)
+    // Stamp the code so the live `session_restore_failed` emit below and a
+    // LATER reconnect via getFailedRestores() (which defaults a code-less error
+    // to 'RESTORE_FAILED') report the SAME errorCode for this failure. claude-tui
+    // rejects start() with a bare Error (no .code), so without this the same
+    // failure would surface as START_FAILED to clients present at failure time
+    // and RESTORE_FAILED to clients that reconnect afterwards.
+    if (err && !err.code) err.code = 'START_FAILED'
     this._failedRestores.set(sessionId, { saved, error: err })
     this.emit('session_restore_failed', {
       sessionId,
