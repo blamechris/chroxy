@@ -2456,6 +2456,148 @@ describe('ClaudeTuiSession', () => {
       assert.equal(existsSync(sinkDir), false, 'sink dir removed on destroy')
       assert.equal(session._sinkDir, null, 'reference cleared')
     })
+
+    // #5317 (WP-2.3) — SIGTERM alone leaves a hung claude (and its tool
+    // children) orphaned. destroy() must escalate to SIGKILL after a grace
+    // window, and reap the whole process group, but NOT fire when the process
+    // exits cleanly in response to SIGTERM.
+    describe('SIGKILL escalation (#5317 WP-2.3)', () => {
+      beforeEach(() => { mock.timers.enable({ apis: ['setTimeout'] }) })
+      afterEach(() => { mock.timers.reset(); mock.restoreAll() })
+
+      function makeLiveSession(onKill) {
+        const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        s._processReady = true
+        s._sessionId = 'conv-uuid-1234'
+        s._term = { write: () => {}, kill: (sig) => onKill(sig), onData: () => {}, onExit: () => {}, on: () => {}, pid: 4242 }
+        s.on('error', () => {})
+        return s
+      }
+
+      it('SIGTERMs immediately and arms the escalation timer', async () => {
+        const signals = []
+        const s = makeLiveSession((sig) => signals.push(sig))
+        await s.destroy()
+        assert.deepEqual(signals, ['SIGTERM'], 'SIGTERM sent on destroy')
+        assert.ok(s._killTimer, 'SIGKILL escalation timer armed')
+        assert.equal(s._term, null, 'term reference cleared')
+      })
+
+      it('escalates to SIGKILL when the PTY ignores SIGTERM past the grace window', async () => {
+        const termSignals = []
+        const procSignals = []
+        // Mock process.kill so no real signal leaves the test. Signal 0 is the
+        // liveness probe — return success (still alive). Throw on the
+        // process-group SIGKILL to deterministically exercise the term.kill fallback.
+        mock.method(process, 'kill', (pid, sig) => {
+          procSignals.push([pid, sig])
+          if (sig === 0) return // liveness probe: process is alive
+          throw new Error('ESRCH')
+        })
+        const s = makeLiveSession((sig) => termSignals.push(sig))
+        await s.destroy()
+        assert.deepEqual(termSignals, ['SIGTERM'])
+
+        mock.timers.tick(ClaudeTuiSession.DESTROY_GRACE_MS)
+
+        assert.deepEqual(procSignals[0], [4242, 0], 'probes liveness with signal 0 first')
+        assert.deepEqual(procSignals[1], [-4242, 'SIGKILL'], 'then attempts process-group SIGKILL')
+        assert.deepEqual(termSignals, ['SIGTERM', 'SIGKILL'], 'falls back to term SIGKILL when the group signal fails')
+        assert.equal(s._killTimer, null, 'escalation timer cleared after firing')
+      })
+
+      it('reaps the whole process group when the group signal is deliverable', async () => {
+        const termSignals = []
+        const procSignals = []
+        mock.method(process, 'kill', (pid, sig) => { procSignals.push([pid, sig]) })
+        const s = makeLiveSession((sig) => termSignals.push(sig))
+        await s.destroy()
+        mock.timers.tick(ClaudeTuiSession.DESTROY_GRACE_MS)
+
+        assert.deepEqual(procSignals, [[4242, 0], [-4242, 'SIGKILL']], 'liveness probe then group SIGKILL')
+        assert.deepEqual(termSignals, ['SIGTERM'], 'no per-pid fallback when the group kill succeeds')
+      })
+
+      it('does NOT escalate when the PTY exits within the grace window', async () => {
+        const termSignals = []
+        const s = makeLiveSession((sig) => termSignals.push(sig))
+        await s.destroy()
+        // Process exits in response to SIGTERM (onExit → _onPtyGone), which must
+        // cancel the escalation timer.
+        s._onPtyGone({ exitCode: 0, signal: 'SIGTERM' }, 'exit')
+        assert.equal(s._killTimer, null, 'escalation timer cancelled on clean exit')
+
+        mock.timers.tick(ClaudeTuiSession.DESTROY_GRACE_MS)
+        assert.deepEqual(termSignals, ['SIGTERM'], 'no SIGKILL after a clean exit')
+      })
+
+      it('does NOT escalate when the _ptyExited latch is set before the timer fires (#5351 review)', async () => {
+        // node-pty reaps the pid before firing the JS onExit, so the timer can
+        // fire while onExit is still queued. The latch check inside the timer is
+        // the primary guard against killing a (possibly recycled) pid.
+        const termSignals = []
+        const procSignals = []
+        mock.method(process, 'kill', (pid, sig) => { procSignals.push([pid, sig]) })
+        const s = makeLiveSession((sig) => termSignals.push(sig))
+        await s.destroy()
+        // Simulate "onExit latched but did NOT clear the timer" (defensive — the
+        // timer must self-guard even if the clear was somehow missed). The timer
+        // is still armed from destroy() above.
+        assert.ok(s._killTimer, 'timer armed')
+        s._ptyExited = true
+
+        mock.timers.tick(ClaudeTuiSession.DESTROY_GRACE_MS)
+        assert.deepEqual(procSignals, [], 'no kill signal sent once the process is known gone')
+        assert.deepEqual(termSignals, ['SIGTERM'], 'no SIGKILL when _ptyExited is set')
+      })
+
+      it('does NOT escalate when the liveness probe shows the pid already gone (#5351 review)', async () => {
+        const termSignals = []
+        const procSignals = []
+        // Liveness probe (signal 0) throws ESRCH → pid already exited (reaped,
+        // not recycled). Must bail before any SIGKILL.
+        mock.method(process, 'kill', (pid, sig) => {
+          procSignals.push([pid, sig])
+          if (sig === 0) throw new Error('ESRCH')
+        })
+        const s = makeLiveSession((sig) => termSignals.push(sig))
+        await s.destroy()
+        // Latch NOT set (onExit callback hasn't run), but the OS already reaped it.
+        mock.timers.tick(ClaudeTuiSession.DESTROY_GRACE_MS)
+
+        assert.deepEqual(procSignals, [[4242, 0]], 'only the liveness probe ran; no kill followed')
+        assert.deepEqual(termSignals, ['SIGTERM'], 'no SIGKILL when the liveness probe says the pid is gone')
+      })
+
+      it('arms no escalation timer when the PTY has no usable pid', async () => {
+        const signals = []
+        const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        s._processReady = true
+        s._term = { write: () => {}, kill: (sig) => signals.push(sig) } // no pid
+        s.on('error', () => {})
+        await s.destroy()
+        assert.deepEqual(signals, ['SIGTERM'], 'SIGTERM still sent')
+        assert.equal(s._killTimer, null, 'no escalation timer without a pid')
+      })
+
+      it('sends NO signal when the PTY already exited before destroy() (#5351 review)', async () => {
+        // Crash / respawn-exhaustion teardown: _onPtyGone already ran (_ptyExited
+        // true) but did NOT null _term, so destroy() sees a non-null _term for an
+        // already-reaped (possibly recycled) pid. It must signal nothing.
+        const termSignals = []
+        const procSignals = []
+        mock.method(process, 'kill', (pid, sig) => { procSignals.push([pid, sig]) })
+        const s = makeLiveSession((sig) => termSignals.push(sig))
+        s._ptyExited = true // process already gone, _term still set
+
+        await s.destroy()
+        assert.deepEqual(termSignals, [], 'no SIGTERM to an already-reaped pid')
+        assert.equal(s._killTimer, null, 'no escalation timer armed')
+
+        mock.timers.tick(ClaudeTuiSession.DESTROY_GRACE_MS)
+        assert.deepEqual(procSignals, [], 'no signals sent at all')
+      })
+    })
   })
 
   describe('inactivity timer (#3920)', () => {

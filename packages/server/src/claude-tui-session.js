@@ -460,6 +460,10 @@ export class ClaudeTuiSession extends BaseSession {
     this._respawnTimer = null
     this._respawnScheduled = false
     this._respawning = false
+    // #5317 (WP-2.3) — SIGKILL escalation timer armed by destroy() after SIGTERM.
+    // Cleared by _onPtyGone the moment the process is confirmed gone (which also
+    // closes the pid-reuse window — we only force-kill when onExit never fired).
+    this._killTimer = null
     // Ring buffer of recent PTY output bytes — surfaces in error
     // messages when the TUI renders a diagnostic (rate-limit, auth
     // failure, "switch back to API mode") that would otherwise be
@@ -712,6 +716,11 @@ export class ClaudeTuiSession extends BaseSession {
   // transitions are sub-second once the session is up.
   static get SPAWN_WARMUP_MAX_MS() { return 15_000 }
   static get TURN_PROMPT_WAIT_MAX_MS() { return 5_000 }
+  // #5317 (WP-2.3) — grace window between destroy()'s SIGTERM and the SIGKILL
+  // escalation. Long enough for claude to flush its Stop hook + reap its own
+  // tool children on a clean SIGTERM, short enough that a hung claude (or a
+  // child holding the PTY open) can't orphan past it.
+  static get DESTROY_GRACE_MS() { return 3_000 }
   // Wedge instrumentation (#4678 follow-up): hook-poll loop emits a
   // heartbeat log line every HOOK_HEARTBEAT_MS of silent waiting (no
   // stop-hook yet). Sized so healthy short turns (<5s end-to-end) emit
@@ -842,6 +851,12 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._ptyExited) return
     this._ptyExited = true
     this._processReady = false
+    // #5317 (WP-2.3) — the process is confirmed gone (onExit/close/error fired),
+    // so cancel any pending SIGKILL escalation destroy() armed. Doing this here
+    // (rather than via a timer-only check) is what closes the pid-reuse window:
+    // the escalation only fires when onExit NEVER arrives, i.e. the process is
+    // genuinely still alive, so the captured pid can't have been recycled.
+    if (this._killTimer) { clearTimeout(this._killTimer); this._killTimer = null }
     // Reset turn state so the next sendMessage() sees a clean idle.
     const hadActiveTurn = this._activeTurn !== null
     // #4022: clean up the in-flight turn's attachment dir BEFORE nulling
@@ -3531,8 +3546,63 @@ export class ClaudeTuiSession extends BaseSession {
       this._askUserQuestionWatchdog = null
     }
     if (this._term) {
-      try { this._term.kill('SIGTERM') } catch { /* already dead */ }
+      // #5317 (WP-2.3) — capture the handle + pid BEFORE nulling so the
+      // escalation timer (and _onPtyGone's cancel) still have something to act
+      // on. SIGTERM first so claude can flush its Stop hook and reap its own
+      // tool children; escalate to SIGKILL only if it ignores us.
+      const term = this._term
+      const pid = term.pid
       this._term = null
+      // #5351 review — only signal a PTY we believe is still alive. _onPtyGone
+      // does NOT null _term, so after an unexpected exit (crash / respawn
+      // exhaustion) destroy() sees `_term` non-null AND `_ptyExited` true. The
+      // process has already been reaped by then, so sending ANY signal — even
+      // SIGTERM — risks hitting a recycled pid. Skip the whole kill path; the
+      // PTY is already gone and there's nothing to reap.
+      if (!this._ptyExited) {
+        try { term.kill('SIGTERM') } catch { /* already dead */ }
+      }
+      // Arm the SIGKILL escalation. _onPtyGone clears this timer when the JS
+      // onExit/close/error callback runs, which handles the common case. But that
+      // is NOT sufficient on its own to rule out pid reuse: node-pty reaps the
+      // child with waitpid() on its internal thread BEFORE it schedules the JS
+      // onExit callback, so the OS can recycle the pid in the gap between the
+      // reap and our latch being set — and the grace timer + the onExit callback
+      // are unordered event-loop tasks. So the timer callback re-checks the
+      // _ptyExited latch AND probes liveness with signal 0 before escalating, so
+      // a blind `process.kill(-pid)` can't land on a recycled process group.
+      if (!this._ptyExited && Number.isInteger(pid) && pid > 0) {
+        const graceMs = ClaudeTuiSession.DESTROY_GRACE_MS
+        this._killTimer = setTimeout(() => {
+          this._killTimer = null
+          // The onExit callback has run since we armed the timer → process is
+          // already gone (and possibly its pid recycled). Never escalate.
+          if (this._ptyExited) return
+          // Liveness probe: signal 0 throws ESRCH if the pid is gone. This won't
+          // catch a pid that was reaped-then-recycled into a live process, but
+          // combined with the _ptyExited latch above it narrows escalation to
+          // "the latch never fired AND the pid is still alive" — i.e. a genuinely
+          // hung claude, not a recycled stranger.
+          try { process.kill(pid, 0) } catch { return /* already exited */ }
+          log.warn(`claude PTY (pid=${pid}) did not exit ${graceMs}ms after SIGTERM — escalating to SIGKILL`)
+          // Reap the whole process group so claude's tool children die too, not
+          // just the session leader. node-pty spawns claude with setsid, so it's
+          // its own process-group leader (pgid == pid) and `-pid` targets the
+          // group. Fall back to the single pid (and node-pty's own kill) when the
+          // group signal isn't deliverable (non-POSIX, or the leader already reaped).
+          let killed = false
+          if (process.platform !== 'win32') {
+            try { process.kill(-pid, 'SIGKILL'); killed = true } catch { /* group gone / not a leader */ }
+          }
+          if (!killed) {
+            try { term.kill('SIGKILL') } catch {
+              try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+            }
+          }
+        }, graceMs)
+        // Don't keep the event loop alive solely for the grace timer.
+        if (typeof this._killTimer.unref === 'function') this._killTimer.unref()
+      }
     }
     // Clean up the per-session sink dir so we don't leak hook payload
     // files under /tmp (#3918). One file per turn (stop) plus 2 per
