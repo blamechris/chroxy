@@ -37,12 +37,18 @@ describe('sleep(ms, signal)', () => {
     await assert.rejects(sleep(1000, ac.signal), (err) => err.name === 'AbortError')
   })
 
-  it('clears the timer on abort so it cannot fire later', async () => {
+  it('clears the timer on abort so the timeout callback never runs', async () => {
+    // The promise settles (rejects) on abort regardless of clearTimeout, so a
+    // resolve-vs-reject assertion can't see a missing clearTimeout. Instead pin
+    // it via removeEventListener, which is ONLY called from the timeout's
+    // resolve callback: if the timer fired after abort it would be called once.
     const ac = new AbortController()
+    const removed = mock.method(ac.signal, 'removeEventListener')
     const p = sleep(1000, ac.signal).then(() => 'resolved', () => 'aborted')
     ac.abort()
-    mock.timers.tick(1000) // would resolve if the timer were still armed
+    mock.timers.tick(1000) // would fire the timeout callback if it weren't cleared
     assert.equal(await p, 'aborted')
+    assert.equal(removed.mock.callCount(), 0, 'timeout callback must not run after abort (timer was cleared)')
   })
 
   it('removes the abort listener once the delay elapses (no leaked listener)', async () => {
