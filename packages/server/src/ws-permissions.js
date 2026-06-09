@@ -38,6 +38,24 @@ function sanitizeToolInput(input) {
 }
 
 /**
+ * #5372 — single JSON response helper for the permission HTTP handlers. The
+ * `writeHead(status, {'Content-Type':'application/json'})` + `end(JSON.stringify(...))`
+ * pattern was hand-written 12+ times across the two handlers, which let the
+ * content-type and error-body shape drift between sites. Centralizing it gives
+ * one place to set the header; `extraHeaders` covers the one site (rate-limit)
+ * that also emits `Retry-After`.
+ *
+ * @param {import('http').ServerResponse} res
+ * @param {number} status - HTTP status code.
+ * @param {object} body - JSON-serializable response body.
+ * @param {object} [extraHeaders] - additional response headers to merge.
+ */
+function sendJson(res, status, body, extraHeaders) {
+  res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders })
+  res.end(JSON.stringify(body))
+}
+
+/**
  * Create a permission handler for the WsServer.
  * Manages HTTP permission lifecycle (hook requests, responses, resend, resolve).
  *
@@ -86,11 +104,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     const { allowed, retryAfterMs } = _httpPermissionLimiter.check(clientIp)
     if (!allowed) {
       log.warn(`Rate limited POST /permission from ${clientIp}`)
-      res.writeHead(429, {
-        'Content-Type': 'application/json',
-        'Retry-After': Math.ceil(retryAfterMs / 1000),
-      })
-      res.end(JSON.stringify({ error: 'rate limited', retryAfterMs }))
+      sendJson(res, 429, { error: 'rate limited', retryAfterMs }, { 'Retry-After': Math.ceil(retryAfterMs / 1000) })
       return
     }
 
@@ -119,8 +133,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // throw is contained and returns a 500 to the client when possible.
       try {
       if (oversized) {
-        res.writeHead(413, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ decision: 'deny' }))
+        sendJson(res, 413, { decision: 'deny' })
         return
       }
 
@@ -128,8 +141,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       try {
         hookData = JSON.parse(body)
       } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ decision: 'deny' }))
+        sendJson(res, 400, { decision: 'deny' })
         return
       }
 
@@ -227,8 +239,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         closed = true
         log.info(`Permission ${requestId} timed out, auto-denying`)
         cleanup()
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ decision: 'deny' }))
+        sendJson(res, 200, { decision: 'deny' })
       }, 300_000)
 
       pendingPermissions.set(requestId, {
@@ -237,8 +248,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           closed = true
           cleanup()
           log.info(`Permission ${requestId} resolved: ${decision}`)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ decision }))
+          sendJson(res, 200, { decision })
         },
         timer,
         data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now() },
@@ -252,8 +262,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // it so the catch can't re-crash the daemon; nothing more we can do.
         try {
           if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Internal server error' }))
+            sendJson(res, 500, { error: 'Internal server error' })
           } else {
             res.end()
           }
@@ -290,8 +299,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       body += chunk
       if (body.length > MAX_BODY) {
         oversized = true
-        res.writeHead(413, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'body too large' }))
+        sendJson(res, 413, { error: 'body too large' })
       }
     })
     req.on('end', () => {
@@ -307,22 +315,19 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       try {
         parsed = JSON.parse(body)
       } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'invalid JSON' }))
+        sendJson(res, 400, { error: 'invalid JSON' })
         return
       }
 
       const { requestId, decision } = parsed
       if (!requestId || typeof requestId !== 'string') {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'missing requestId' }))
+        sendJson(res, 400, { error: 'missing requestId' })
         return
       }
 
       const validDecisions = ['allow', 'deny', 'allowAlways']
       if (!validDecisions.includes(decision)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: `invalid decision, must be one of: ${validDecisions.join(', ')}` }))
+        sendJson(res, 400, { error: `invalid decision, must be one of: ${validDecisions.join(', ')}` })
         return
       }
 
@@ -348,13 +353,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           // unified `message` field for old-client compatibility.
           // (#2911 enriched WS paths; #2914/#2936 added inline enrichment here;
           // #2912 extracts the shared helper so the shape is guaranteed identical.)
-          res.writeHead(403, { 'Content-Type': 'application/json' })
           const unified = buildSessionTokenMismatchPayload({
             sessionManager: getSessionManager(),
             boundSessionId: callerBoundSessionId,
             message: 'not authorized for this permission request',
           })
-          res.end(JSON.stringify({ error: unified.message, ...unified }))
+          sendJson(res, 403, { error: unified.message, ...unified })
           return
         }
       }
@@ -386,16 +390,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
                 reason: 'user',
               })
             }
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ ok: true }))
+            sendJson(res, 200, { ok: true })
           } else {
             // UX landmine #5: the permission auto-denied (timed out)
             // before the user tapped the lockscreen notification. Tell
             // the app so it can surface "This permission request
             // expired" instead of silently showing "approved".
             log.info(`Permission ${requestId} already expired when HTTP response arrived (SDK)`)
-            res.writeHead(410, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'expired', message: 'This permission request has already expired or been resolved' }))
+            sendJson(res, 410, { error: 'expired', message: 'This permission request has already expired or been resolved' })
           }
           return
         }
@@ -430,11 +432,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
             reason: 'user',
           })
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true }))
+        sendJson(res, 200, { ok: true })
       } else {
-        res.writeHead(404, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'unknown or expired requestId' }))
+        sendJson(res, 404, { error: 'unknown or expired requestId' })
       }
       } catch (err) {
         // #5313 (WP-1.3): see the try at the top of this end callback.
@@ -444,8 +444,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // throw in writeHead/end can't re-crash the daemon from the catch.
         try {
           if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Internal server error' }))
+            sendJson(res, 500, { error: 'Internal server error' })
           } else {
             res.end()
           }
