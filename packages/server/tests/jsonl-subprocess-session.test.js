@@ -455,6 +455,46 @@ describe('JsonlSubprocessSession (base)', () => {
       }
     })
 
+    it('reverts _skillsPrepended on a post-spawn proc error so the next send re-injects (#5382)', async () => {
+      // #3225 deferral covers the SYNCHRONOUS spawn throw and the success flip.
+      // This covers the third path: a `proc.on('error')` that arrives AFTER the
+      // argv was committed (the flag already flipped true). The shared base
+      // handler must revert _skillsPrepended to false so a retry re-injects the
+      // skills bucket — a dropped revert would silently skip skills injection on
+      // the next turn. The revert lives in JsonlSubprocessSession (the base), so
+      // exercising it here covers every subclass (Codex/Gemini) that inherits it
+      // unchanged.
+      writeFileSync(shimPath, '#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 3000)\n')
+      chmodSync(shimPath, 0o755)
+      const P = makeTestProviderClass({ providerName: 'fake' })
+      const s = new P({ cwd: '/tmp' })
+      s._processReady = true
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s.sendMessage('hi') // not awaited — spawns then polls the sleeping child
+      // Wait until the argv is committed and the flag has flipped true.
+      await waitFor(() => s._process != null && s._skillsPrepended === true, {
+        label: 'spawned + skills prepended', timeoutMs: 3000,
+      })
+
+      // Capture the real child BEFORE emitting: the base 'error' handler nulls
+      // s._process, so destroy() could no longer SIGTERM the still-sleeping shim
+      // and would leak a live child (and keep the runner open) for up to 3s
+      // (#5391 review). We kill our captured reference explicitly below.
+      const child = s._process
+      // The ChildProcess already has the base handler as an 'error' listener, so
+      // the emit is delivered (no re-throw) and the revert runs.
+      child.emit('error', new Error('post-spawn boom'))
+
+      assert.equal(s._skillsPrepended, false, 'flag reverts so the next send re-injects skills')
+      assert.equal(s._isBusy, false, 'busy cleared so a retry is allowed')
+      assert.ok(errors.some((e) => /post-spawn boom/.test(e.message)), 'surfaces the error to the session')
+
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+      await s.destroy()
+    })
+
     it('non-zero exit emits an error that includes displayLabel and exit code', async () => {
       writeShim([], { exitCode: 7 })
       const P = makeTestProviderClass({ displayLabel: 'Quasar' })
