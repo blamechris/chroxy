@@ -191,15 +191,17 @@ describe('#5373 invariant G — the WS unbound-subscription guard is WS-ONLY', (
   let ownerSession, sessionManager
   beforeEach(() => { ownerSession = makeSdkSession(); sessionManager = makeSessionManager(ownerSession) })
 
-  it('a primary/unbound caller SUBSCRIBED to the session is accepted on both transports', async () => {
+  it('a primary/unbound caller subscribed to the session (via subscribedSessionIds, NOT active) is accepted on both transports', async () => {
     ownerSession._addPending('perm-3')
     const http = await runHttp({ requestId: 'perm-3', decision: 'allow', presentedToken: 'tok-primary', tokenBoundSessionId: null, mapEntry: OWNER, ownerSession, sessionManager })
     ownerSession._addPending('perm-3')
-    const ws = runWs({ requestId: 'perm-3', decision: 'allow', boundSessionId: null, activeSessionId: OWNER, mapEntry: OWNER, ownerSession, sessionManager })
+    // active session is OTHER; OWNER is reached only through subscribedSessionIds
+    // — this exercises the subscription arm of the guard, not the active-match arm.
+    const ws = runWs({ requestId: 'perm-3', decision: 'allow', boundSessionId: null, activeSessionId: OTHER, subscribed: OWNER, mapEntry: OWNER, ownerSession, sessionManager })
 
     assert.equal(http.status, 200)
     assert.equal(ws.mismatch, undefined)
-    assert.equal(ws.expired, undefined, 'WS resolves for a subscribed unbound caller')
+    assert.equal(ws.expired, undefined, 'WS resolves for a subscribed (non-active) unbound caller')
   })
 
   it('a primary/unbound caller NOT subscribed: HTTP ACCEPTS (full authority), WS DROPS (guard) — intentional diff', async () => {

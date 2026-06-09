@@ -35,23 +35,14 @@ import assert from 'node:assert/strict'
  *      a bound caller for an UNMAPPED request gets binding_mismatch, never a
  *      fallthrough to the legacy resolver (the #2806 residual).
  *   F) SDK dispatch is attempted BEFORE the legacy store.
- *   C) the map entry is consumed ONLY on `resolved` (preserved on
- *      binding_mismatch / expired / not_found).
+ *   C) the map entry is consumed on `resolved` AND on a (mapped) SDK `expired`
+ *      (matching the HTTP delete-in-the-SDK-branch); it is PRESERVED on
+ *      `binding_mismatch` (the legitimate client must still be able to respond).
  *   D) on `resolved`, audit.logDecision is called with the caller-supplied
  *      clientId, the origin sessionId, the requestId, decision, reason:'user'.
- *
- * This suite SKIPS until permission-resolver.js exists, so it can be reviewed
- * test-first without breaking the build; it activates on implementation.
  */
 
-let createPermissionResolver = null
-try {
-  ({ createPermissionResolver } = await import('../src/permission-resolver.js'))
-} catch {
-  // Not implemented yet — #5373 is test-first; these tests are the spec under review.
-}
-
-const skip = createPermissionResolver ? false : 'permission-resolver.js not implemented yet (#5373 test-first — spec under review)'
+import { createPermissionResolver } from '../src/permission-resolver.js'
 
 const OWNER = 'sess-OWNER'
 const OTHER = 'sess-OTHER'
@@ -83,7 +74,7 @@ function build({ map = [], legacy = [], ownerSession } = {}) {
   return { resolver, permissionSessionMap, pendingPermissions, audited, legacyResolved, sessions }
 }
 
-describe('permission-resolver — binding (invariants A/B/C)', { skip }, () => {
+describe('permission-resolver — binding (invariants A/B/C)', () => {
   it('A: bound caller matching the mapped session resolves (via sdk)', () => {
     const owner = makeSdkSession({ pending: ['perm-1'] })
     const { resolver, permissionSessionMap } = build({ map: [['perm-1', OWNER]], ownerSession: owner })
@@ -118,7 +109,7 @@ describe('permission-resolver — binding (invariants A/B/C)', { skip }, () => {
   })
 })
 
-describe('permission-resolver — SDK-before-legacy (F) + dispatch states', { skip }, () => {
+describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () => {
   it('F: a mapped SDK session is dispatched via sdk even when a legacy entry also exists', () => {
     const owner = makeSdkSession({ pending: ['perm-4'] })
     const { resolver, legacyResolved } = build({ map: [['perm-4', OWNER]], legacy: ['perm-4'], ownerSession: owner })
@@ -152,7 +143,7 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', { sk
   })
 })
 
-describe('permission-resolver — audit (D)', { skip }, () => {
+describe('permission-resolver — audit (D)', () => {
   it('D: a resolved decision is audited with the caller-supplied clientId', () => {
     const owner = makeSdkSession({ pending: ['perm-7'] })
     const { resolver, audited } = build({ map: [['perm-7', OWNER]], ownerSession: owner })
