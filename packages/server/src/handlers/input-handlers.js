@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
-import { createLogger, loggerForSession } from '../logger.js'
+import { createLogger, sessionLogger } from '../logger.js'
 
 const log = createLogger('ws')
 
@@ -855,7 +855,7 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // so fall back to the unscoped `log` instead of throwing — multi-session
     // deployments always have a real sessionId from the toolUseId map or
     // client.activeSessionId.
-    const qlog = questionSessionId ? loggerForSession('ws', questionSessionId) : log
+    const qlog = sessionLogger(questionSessionId)
     qlog.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0} freeform=${hasFreeform ? msg.freeformText.length : 0}`)
     // #4668: forward msg.toolUseId so claude-tui-session can route the
     // answer to the right pending entry in its Map. Sessions that don't

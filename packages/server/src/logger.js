@@ -321,3 +321,23 @@ export function loggerForSession(component, sessionId) {
   }
   return createLogger(component, { sessionId })
 }
+
+/**
+ * #5378 — pick a session-scoped logger when `sessionId` is present, else the
+ * unscoped component logger. Centralizes the
+ * `sessionId ? loggerForSession('ws', sessionId) : log` ternary that was
+ * hand-written across the WS handlers (#4828), where inlining it everywhere
+ * invited picking the wrong sessionId variable or inverting the condition — and
+ * emitting an operator log to the wrong scope is silent. Unlike
+ * `loggerForSession`, this tolerates a missing/empty `sessionId` and falls back
+ * to the unscoped logger instead of throwing.
+ *
+ * @param {string|null|undefined} sessionId
+ * @param {string} [component='ws']
+ * @returns {ReturnType<typeof createLogger>}
+ */
+export function sessionLogger(sessionId, component = 'ws') {
+  return typeof sessionId === 'string' && sessionId.length > 0
+    ? loggerForSession(component, sessionId)
+    : createLogger(component)
+}
