@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { createLogger } from '../logger.js'
 import { metrics } from '../metrics.js'
+import { sleep } from '../utils/sleep.js'
 
 const log = createLogger('tunnel')
 
@@ -106,13 +107,7 @@ export class BaseTunnelAdapter extends EventEmitter {
           // loop pattern in _handleUnexpectedExit().
           this._startAbort = new AbortController()
           try {
-            await new Promise((resolve, reject) => {
-              const timer = setTimeout(resolve, backoffMs)
-              this._startAbort.signal.addEventListener('abort', () => {
-                clearTimeout(timer)
-                reject(new Error('start aborted'))
-              }, { once: true })
-            })
+            await sleep(backoffMs, this._startAbort.signal)
           } catch {
             // Aborted by stop() — bail with the last real error so the
             // caller still sees the underlying provider failure.
@@ -231,13 +226,7 @@ export class BaseTunnelAdapter extends EventEmitter {
       // event loop alive for up to 60s during shutdown.
       this._recoveryAbort = new AbortController()
       try {
-        await new Promise((resolve, reject) => {
-          const timer = setTimeout(resolve, backoff)
-          this._recoveryAbort.signal.addEventListener('abort', () => {
-            clearTimeout(timer)
-            reject(new Error('recovery aborted'))
-          }, { once: true })
-        })
+        await sleep(backoff, this._recoveryAbort.signal)
       } catch {
         // Aborted by stop() — exit the loop
         return

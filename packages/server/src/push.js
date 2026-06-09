@@ -17,6 +17,7 @@ import { dirname } from 'node:path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
+import { sleep, backoffDelay } from './utils/sleep.js'
 import {
   loadPrefs as loadNotificationPrefs,
   savePrefs as saveNotificationPrefs,
@@ -55,9 +56,9 @@ async function fetchWithRetry(url, options) {
 
       // 5xx — retry if attempts remain
       if (attempt < MAX_RETRIES) {
-        const delay = BACKOFF_BASE_MS * Math.pow(2, attempt - 1)
+        const delay = backoffDelay(attempt, BACKOFF_BASE_MS)
         log.warn(`Expo API returned ${res.status}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
-        await new Promise(r => setTimeout(r, delay))
+        await sleep(delay)
         continue
       }
 
@@ -66,9 +67,9 @@ async function fetchWithRetry(url, options) {
       clearTimeout(timer)
 
       if (attempt < MAX_RETRIES) {
-        const delay = BACKOFF_BASE_MS * Math.pow(2, attempt - 1)
+        const delay = backoffDelay(attempt, BACKOFF_BASE_MS)
         log.warn(`Fetch failed (${err.name}: ${err.message}), retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
-        await new Promise(r => setTimeout(r, delay))
+        await sleep(delay)
         continue
       }
 
