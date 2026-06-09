@@ -8,15 +8,17 @@ import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
 import { PushManager } from './push.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
+import { StartupDisplay } from './server-cli/startup-display.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
-import QRCode from 'qrcode'
 import { createLogger, setJsonMode, initFileLogging } from './logger.js'
 
 const log = createLogger('cli')
-import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+// #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
+// displayQr; only removeConnectionInfo (shutdown) is still used here.
+import { removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
@@ -158,11 +160,8 @@ function checkNoAuthWarnings({ authRequired, tunnel }) {
   }
 }
 
-function maskToken(token) {
-  if (!token) return ''
-  if (token.length <= 8) return token
-  return `${token.slice(0, 4)}...${token.slice(-4)}`
-}
+// #5368 slice (b): maskToken moved to server-cli/startup-display.js (its only
+// caller was displayQr). Still also inlined in supervisor.js + mask-token.test.js.
 
 function wireTunnelEvents(tunnel, wsServer) {
   tunnel.on('tunnel_lost', ({ code, signal }) => {
@@ -810,59 +809,33 @@ export async function startCliServer(config) {
     log,
   })
 
-  // Track current WebSocket URL and mode label across all modes (tunnel, external, LAN)
+  // Track the live tunnel handle across modes (consumed by shutdown below).
   let tunnel = null
-  let currentWsUrl = null
-  let currentTunnelMode = 'none'
 
-  // Helper: build QR connection URL using ephemeral pairing ID (never the permanent token)
-  const buildPairingUrl = (wsUrlStr) => {
-    if (!pairingManager) return null
-    pairingManager.setWsUrl(wsUrlStr)
-    return pairingManager.currentPairingUrl
-  }
-
-  // Helper: display QR code and connection info
-  const SHOW_TOKEN = !!config.showToken || process.env.CHROXY_SHOW_TOKEN === '1'
-  const displayQr = async (wsUrlStr, httpUrlStr, modeLabel) => {
-    const pairingUrl = buildPairingUrl(wsUrlStr)
-    if (pairingUrl) {
-      console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
-      console.log('📱 Scan this QR code with the Chroxy app:\n')
-      const qrText = await QRCode.toString(pairingUrl, { type: 'terminal', small: true })
-      process.stdout.write(qrText)
-      const displayToken = SHOW_TOKEN ? API_TOKEN : maskToken(API_TOKEN)
-      console.log(`\nOr connect manually:`)
-      console.log(`   URL:   ${wsUrlStr}`)
-      console.log(`   Token: ${displayToken}`)
-      if (httpUrlStr) {
-        if (SHOW_TOKEN) {
-          console.log(`   Dashboard: ${httpUrlStr}/dashboard?token=${API_TOKEN}`)
-        } else {
-          console.log(`   Dashboard: ${httpUrlStr}/dashboard (use --show-token to see full URL)`)
-        }
-      }
-    }
-
-    writeConnectionInfo({
-      wsUrl: wsUrlStr,
-      httpUrl: httpUrlStr,
-      apiToken: API_TOKEN,
-      connectionUrl: pairingUrl || `chroxy://${wsUrlStr.replace(/^wss?:\/\//, '')}?token=${API_TOKEN}`,
-      tunnelMode: modeLabel,
-      startedAt: new Date().toISOString(),
-      pid: process.pid,
-    })
-  }
+  // #5368 slice (b): the connection display — QR render + manual-connect block +
+  // the connection-info side-car (displayQr), the ephemeral pairing-URL builder
+  // (buildPairingUrl), the current-URL/mode display state shared across modes,
+  // and the QR re-render listeners — lives in StartupDisplay. The mode branches
+  // below set `startupDisplay.currentWsUrl` / `currentTunnelMode` and call
+  // `startupDisplay.displayQr(...)`. The tunnel path sets currentWsUrl EARLY
+  // (before the first displayQr) so a mid-startup tunnel_recovered has a value to
+  // diff against — so displayQr deliberately does not mutate that state.
+  const startupDisplay = new StartupDisplay({
+    pairingManager,
+    tokenManager,
+    apiToken: API_TOKEN,
+    showToken: !!config.showToken || process.env.CHROXY_SHOW_TOKEN === '1',
+    logger: log,
+  })
 
   // External URL mode: reverse proxy / custom domain (skip tunnel entirely)
   const externalUrl = config.externalUrl || null
   if (externalUrl) {
     const wsUrl = externalUrl.replace(/^https?:\/\//, 'wss://')
-    currentWsUrl = wsUrl
-    currentTunnelMode = 'external'
+    startupDisplay.currentWsUrl = wsUrl
+    startupDisplay.currentTunnelMode = 'external'
     const httpUrl = externalUrl.replace(/^wss?:\/\//, 'https://')
-    await displayQr(wsUrl, httpUrl, 'external')
+    await startupDisplay.displayQr(wsUrl, httpUrl, 'external')
   }
 
   // Determine tunnel mode
@@ -890,7 +863,7 @@ export async function startCliServer(config) {
       process.exitCode = 1
       return
     }
-    currentWsUrl = wsUrl
+    startupDisplay.currentWsUrl = wsUrl
 
     // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
     wireTunnelEvents(tunnel, wsServer)
@@ -910,10 +883,10 @@ export async function startCliServer(config) {
         })
 
         // Only display new QR code if URL actually changed
-        if (newWsUrl !== currentWsUrl) {
-          currentWsUrl = newWsUrl
+        if (newWsUrl !== startupDisplay.currentWsUrl) {
+          startupDisplay.currentWsUrl = newWsUrl
           if (pairingManager) pairingManager.refresh()
-          await displayQr(newWsUrl, newHttpUrl, modeLabel)
+          await startupDisplay.displayQr(newWsUrl, newHttpUrl, modeLabel)
           wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
         } else {
           log.info(`Tunnel URL unchanged: ${newWsUrl}`)
@@ -965,8 +938,8 @@ export async function startCliServer(config) {
 
     // 7. Generate connection info
     const modeLabel = `cloudflare:${tunnelArg.mode}`
-    currentTunnelMode = modeLabel
-    await displayQr(wsUrl, httpUrl, modeLabel)
+    startupDisplay.currentTunnelMode = modeLabel
+    await startupDisplay.displayQr(wsUrl, httpUrl, modeLabel)
 
     // Extend the pairing ID validity after first QR display to give the user
     // time to scan. Without this, slow tunnel setup (60-80s) can consume most
@@ -985,8 +958,8 @@ export async function startCliServer(config) {
       : (bindHost && bindHost !== '0.0.0.0' ? bindHost : (getLanIp() || 'localhost'))
     // Bracket IPv6 literals so the URL authority is well-formed.
     const authority = `${formatHostForUrl(host)}:${PORT}`
-    currentWsUrl = `ws://${authority}`
-    await displayQr(`ws://${authority}`, `http://${authority}`, 'none')
+    startupDisplay.currentWsUrl = `ws://${authority}`
+    await startupDisplay.displayQr(`ws://${authority}`, `http://${authority}`, 'none')
   } else if (!NO_AUTH) {
     // tunnelArg is set but SKIP_TUNNEL is true due to externalUrl — already handled above
   } else {
@@ -995,33 +968,10 @@ export async function startCliServer(config) {
     console.log(`   Dashboard: http://localhost:${PORT}/dashboard`)
   }
 
-  // Re-render QR code when pairing auto-refreshes (keeps terminal QR scannable)
-  if (pairingManager) {
-    pairingManager.on('pairing_refreshed', async () => {
-      if (!currentWsUrl) return
-      const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-      await displayQr(currentWsUrl, httpBase, currentTunnelMode)
-      log.info('QR code refreshed with new pairing ID.')
-    })
-  }
-
-  // Regenerate QR code and update connection info when token rotates
-  if (tokenManager) {
-    tokenManager.on('token_rotated', async () => {
-      if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
-
-      // Refresh pairing ID when token rotates (old session tokens remain valid).
-      // The pairing_refreshed listener handles QR re-render; only call displayQr
-      // directly when pairingManager is absent (no pairing_refreshed will fire).
-      if (pairingManager) {
-        pairingManager.refresh()
-      } else {
-        const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-        await displayQr(currentWsUrl, httpBase, currentTunnelMode)
-      }
-      log.info('API token rotated. QR code updated.')
-    })
-  }
+  // #5368 slice (b): QR re-render on pairing auto-refresh + token rotation now
+  // lives in StartupDisplay (it owns displayQr + the current-URL state the
+  // listeners read). Wired here, after the mode branches set the initial URL.
+  startupDisplay.wireReRenderListeners()
 
   // #5158: opt-in worktree auto-reaper. When enabled, reclaim orphaned
   // dead-pid-locked agent worktrees (clean trees only, never --force). Lazily

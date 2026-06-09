@@ -8,16 +8,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const srcDir = join(__dirname, '../src')
 
 describe('QR re-render on pairing refresh (#1894)', () => {
-  it('server-cli.js listens for pairing_refreshed events', () => {
-    const source = readFileSync(join(srcDir, 'server-cli.js'), 'utf-8')
+  // #5368 slice (b): the pairing_refreshed → QR re-render moved from
+  // server-cli.js into StartupDisplay (server-cli now wires it via
+  // wireReRenderListeners). Follow the code to its new home + assert the wiring.
+  it('StartupDisplay re-renders the QR on pairing_refreshed, wired by server-cli.js', () => {
+    const startupDisplay = readFileSync(join(srcDir, 'server-cli/startup-display.js'), 'utf-8')
     assert.ok(
-      source.includes('pairing_refreshed'),
-      'server-cli.js should listen for pairing_refreshed event'
+      startupDisplay.includes('pairing_refreshed'),
+      'startup-display.js should listen for pairing_refreshed event'
     )
     const handlerPattern = /\.on\(\s*['"]pairing_refreshed['"]\s*,[\s\S]*?displayQr/
     assert.ok(
-      handlerPattern.test(source),
+      handlerPattern.test(startupDisplay),
       'pairing_refreshed handler should re-render QR (displayQr called in handler)'
+    )
+    const serverCli = readFileSync(join(srcDir, 'server-cli.js'), 'utf-8')
+    assert.ok(
+      serverCli.includes('wireReRenderListeners'),
+      'server-cli.js should wire the re-render listeners via StartupDisplay'
     )
   })
 
