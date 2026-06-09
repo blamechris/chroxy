@@ -145,9 +145,14 @@ describe('ServerOrchestrator — crash handlers (onFatal)', () => {
 })
 
 describe('ServerOrchestrator — install', () => {
-  it('registers the four process handlers', () => {
+  // SIGHUP included (#5336): Node's default SIGHUP action is to terminate the
+  // process, which bypasses the shutdown() state flush — so a daemon whose
+  // controlling terminal closes would lose unsaved session state. install()
+  // must register a SIGHUP handler routed through the same graceful path.
+  const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException', 'unhandledRejection']
+
+  it('registers the five process handlers', () => {
     const { orchestrator } = build()
-    const signals = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection']
     // Snapshot the EXACT listeners present before install() so cleanup can
     // remove only the ones this test adds — never the test runner's own SIGINT/
     // SIGTERM handlers (removeAllListeners would clobber those, flaking the run).
@@ -157,6 +162,30 @@ describe('ServerOrchestrator — install', () => {
       for (const s of signals) {
         assert.equal(process.listenerCount(s), before[s].length + 1, `${s} handler added`)
       }
+    } finally {
+      for (const s of signals) {
+        for (const l of process.listeners(s)) {
+          if (!before[s].includes(l)) process.removeListener(s, l)
+        }
+      }
+    }
+  })
+
+  it('routes SIGHUP through the graceful shutdown flush (#5336)', async () => {
+    const { orchestrator, seq } = build()
+    // install() adds ALL FIVE handlers — snapshot every signal so the finally
+    // removes only this test's additions across the board (a leaked
+    // uncaughtException/SIGINT handler would interfere with the rest of the run).
+    const before = Object.fromEntries(signals.map((s) => [s, process.listeners(s)]))
+    orchestrator.install()
+    const addedHup = process.listeners('SIGHUP').filter((l) => !before.SIGHUP.includes(l))
+    try {
+      assert.equal(addedHup.length, 1, 'exactly one SIGHUP handler added')
+      addedHup[0]() // simulate the signal
+      await tick()
+      // The graceful path ran: state was serialized before exit (not a hard kill).
+      assert.ok(seq.some((e) => e[0] === 'serializeState'), 'serializeState ran on SIGHUP')
+      assert.deepEqual(seq.at(-1), ['exit', 0], 'exited cleanly after the flush')
     } finally {
       for (const s of signals) {
         for (const l of process.listeners(s)) {
