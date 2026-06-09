@@ -43,7 +43,11 @@ function captureConsole(fn) {
   const origWrite = process.stdout.write
   console.log = (...a) => out.push(a.join(' '))
   process.stdout.write = (s) => { out.push(String(s)); return true }
-  return Promise.resolve(fn()).finally(() => {
+  // Defer fn() into the promise chain (Promise.resolve().then(fn)) so a
+  // SYNCHRONOUS throw in fn still runs the finally cleanup — restoring
+  // console.log/stdout.write. Promise.resolve(fn()) would evaluate fn() before
+  // the promise exists, leaking the patches on a sync throw.
+  return Promise.resolve().then(fn).finally(() => {
     console.log = origLog
     process.stdout.write = origWrite
   }).then(() => out)
