@@ -381,9 +381,10 @@ export class CheckpointManager extends EventEmitter {
       const resolvedSha = snapshotSha.trim()
       if (resolvedSha === headCommit.trim()) {
         // Tag points to HEAD — working tree is already at the correct state.
-        // Restore the stash we took so the user's pending changes survive a
-        // no-op rewind.
-        if (stashed) await execFileAsync(GIT, ['stash', 'pop'], { cwd })
+        // Leave the auto-stash parked, exactly like the checkout success path
+        // below: "restore to checkpoint" sets the user's pending changes aside
+        // (recoverable via the stash) rather than re-applying them over the
+        // restored state.
         return
       }
 

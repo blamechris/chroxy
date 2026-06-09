@@ -323,6 +323,24 @@ describe('CheckpointManager', () => {
       const stashList = execFileSync(GIT, ['stash', 'list'], { cwd: gitDir, encoding: 'utf8' })
       assert.equal(stashList.trim(), '', 'no stash should be left behind')
     })
+
+    it('a successful no-op restore (tag == HEAD) parks pending changes in a stash, leaving the checkpoint state', async () => {
+      // Checkpoint taken on a clean tree → tag points at HEAD → restore is a
+      // no-op. The contract matches the checkout success path: pending changes
+      // are SET ASIDE (recoverable via stash), not re-applied over the restore.
+      const cp = await manager.createCheckpoint({
+        sessionId: 'sess-1', resumeSessionId: 'sdk-1', cwd: gitDir, name: 'cp',
+      })
+      writeFileSync(join(gitDir, 'file.txt'), 'dirty work')
+
+      await manager.restoreCheckpoint('sess-1', cp.id) // resolves, no throw
+
+      assert.equal(readFileSync(join(gitDir, 'file.txt'), 'utf8'), 'initial content',
+        'working tree is left at the checkpoint (HEAD) state, not the dirty content')
+      const stashList = execFileSync(GIT, ['stash', 'list'], { cwd: gitDir, encoding: 'utf8' })
+      assert.match(stashList, /chroxy: auto-stash before rewind/,
+        'the pending changes are parked in a recoverable stash')
+    })
   })
 
   // #5335 (IP-7) — orphaned `chroxy-checkpoint/*` tags accrue when `git tag -d`
