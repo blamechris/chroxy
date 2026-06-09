@@ -296,4 +296,87 @@ describe('CheckpointManager', () => {
     const content = readFileSync(join(gitDir, 'file.txt'), 'utf8')
     assert.equal(content, 'checkpoint content', 'file must be restored to checkpoint state')
   })
+
+  // #5335 (IP-7) — restore-failure must not orphan the user's auto-stashed
+  // pending changes.
+  describe('restore failure preserves pending changes (#5335)', () => {
+    it('a corrupt/missing ref throws but pops the auto-stash back', async () => {
+      const cp = await manager.createCheckpoint({
+        sessionId: 'sess-1', resumeSessionId: 'sdk-1', cwd: gitDir, name: 'cp',
+      })
+      assert.ok(cp.gitRef, 'checkpoint captured a git ref')
+      // Simulate the corrupt-ref case: drop the tag so rev-parse fails.
+      execFileSync(GIT, ['tag', '-d', cp.gitRef], { cwd: gitDir })
+      // The user has uncommitted work in flight at restore time.
+      writeFileSync(join(gitDir, 'file.txt'), 'WORK IN PROGRESS')
+
+      await assert.rejects(
+        () => manager.restoreCheckpoint('sess-1', cp.id),
+        (err) => /Git restore failed/.test(err.message) && /pending changes were preserved/.test(err.message),
+        'restore must fail loudly AND report the changes were preserved'
+      )
+
+      // The crux: the pending work is still in the working tree, not stranded
+      // in a stash.
+      assert.equal(readFileSync(join(gitDir, 'file.txt'), 'utf8'), 'WORK IN PROGRESS',
+        'auto-stashed changes must be popped back when restore fails')
+      const stashList = execFileSync(GIT, ['stash', 'list'], { cwd: gitDir, encoding: 'utf8' })
+      assert.equal(stashList.trim(), '', 'no stash should be left behind')
+    })
+  })
+
+  // #5335 (IP-7) — orphaned `chroxy-checkpoint/*` tags accrue when `git tag -d`
+  // fails; pruneOrphanedRefs sweeps them without deleting live refs.
+  describe('pruneOrphanedRefs (#5335)', () => {
+    it('deletes stray refs and keeps refs a live checkpoint still references', async () => {
+      const a = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'a' })
+      const b = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'b' })
+      // A stray tag with no backing checkpoint (simulates a failed `git tag -d`).
+      execFileSync(GIT, ['tag', 'chroxy-checkpoint/orphan-xyz', 'HEAD'], { cwd: gitDir })
+
+      const pruned = await manager.pruneOrphanedRefs(gitDir)
+      assert.equal(pruned, 1, 'exactly the one orphan is pruned')
+
+      const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+        .split('\n').map((s) => s.trim()).filter(Boolean)
+      assert.ok(tags.includes(a.gitRef) && tags.includes(b.gitRef), 'live refs must survive')
+      assert.ok(!tags.includes('chroxy-checkpoint/orphan-xyz'), 'orphan ref must be gone')
+    })
+
+    it('does NOT delete a ref owned by a persisted-but-unloaded session', async () => {
+      // sess-A's checkpoint is persisted to disk.
+      const cp = await manager.createCheckpoint({ sessionId: 'sess-A', resumeSessionId: 's', cwd: gitDir, name: 'a' })
+      // A fresh manager has NOTHING in memory but shares the checkpoints dir.
+      const fresh = new CheckpointManager({ checkpointsDir: tmpCheckpointsDir })
+
+      const pruned = await fresh.pruneOrphanedRefs(gitDir)
+      assert.equal(pruned, 0, 'must read persisted files and treat the unloaded ref as live')
+      const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+      assert.ok(tags.includes(cp.gitRef), 'unloaded session ref must survive')
+    })
+
+    it('returns 0 on a non-git directory', async () => {
+      const nonGit = mkdtempSync(join(tmpdir(), 'chroxy-cp-nogit-prune-'))
+      try {
+        assert.equal(await manager.pruneOrphanedRefs(nonGit), 0)
+      } finally {
+        rmSync(nonGit, { recursive: true, force: true })
+      }
+    })
+
+    it('createCheckpoint sweeps orphans after an eviction', async () => {
+      // Seed the session at the eviction threshold with cheap fakes so we don't
+      // create 50 real snapshots. The oldest fake (with a gitRef) is evicted.
+      const fakes = Array.from({ length: 50 }, (_, i) => ({
+        id: `fake-${i}`, sessionId: 'sess-1', cwd: gitDir,
+        gitRef: `chroxy-checkpoint/fake-${i}`, createdAt: i,
+      }))
+      manager._checkpoints.set('sess-1', fakes)
+      let prunedCwd = null
+      manager.pruneOrphanedRefs = async (cwd) => { prunedCwd = cwd; return 0 }
+
+      await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'new' })
+      assert.equal(prunedCwd, gitDir, 'eviction must trigger a prune sweep for the evicted cwd')
+    })
+  })
 })

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { execFile as execFileCb } from 'child_process'
@@ -103,9 +103,11 @@ export class CheckpointManager extends EventEmitter {
     const checkpoints = this._getCheckpoints(sessionId)
 
     // Enforce max checkpoints — remove oldest if at limit
+    let evictedCwd = null
     if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
       const evicted = checkpoints.shift()
       if (evicted?.gitRef) {
+        evictedCwd = evicted.cwd
         this._deleteGitRef(evicted.cwd, evicted.gitRef).catch((err) => {
           log.warn(`Failed to delete evicted git ref ${evicted.gitRef}: ${err.message} (non-critical, orphaned ref)`)
         })
@@ -139,6 +141,16 @@ export class CheckpointManager extends EventEmitter {
     this._counters.set(sessionId, (this._counters.get(sessionId) || 0) + 1)
     this._checkpoints.set(sessionId, checkpoints)
     this._persist(sessionId)
+
+    // #5335: after an eviction (the moment an orphan can be born if the
+    // best-effort `git tag -d` above failed), sweep any stray refs. Runs after
+    // the new checkpoint is in-memory + persisted, so its ref counts as live.
+    // Fire-and-forget: never blocks or fails checkpoint creation.
+    if (evictedCwd) {
+      this.pruneOrphanedRefs(evictedCwd).catch((err) => {
+        log.warn(`pruneOrphanedRefs failed for ${evictedCwd}: ${err.message}`)
+      })
+    }
 
     this.emit('checkpoint_created', checkpoint)
     return checkpoint
@@ -339,6 +351,11 @@ export class CheckpointManager extends EventEmitter {
    *      to overwrite all files in the working tree with the snapshot state.
    */
   async _restoreGitSnapshot(cwd, gitRef) {
+    // #5335: we auto-stash the user's pending changes BEFORE resolving the tag.
+    // If anything after the stash fails (e.g. a corrupt/missing ref), the work
+    // would be silently orphaned in a stash. Track whether we stashed so the
+    // catch can put it back instead of leaving the user wedged.
+    let stashed = false
     try {
       // Stash any pending changes before restoring
       const { stdout: status } = await execFileAsync(
@@ -348,6 +365,7 @@ export class CheckpointManager extends EventEmitter {
 
       if (status.trim()) {
         await execFileAsync(GIT, ['stash', 'push', '-u', '-m', 'chroxy: auto-stash before rewind'], { cwd })
+        stashed = true
       }
 
       // Resolve the tag to the snapshot commit SHA
@@ -362,7 +380,10 @@ export class CheckpointManager extends EventEmitter {
 
       const resolvedSha = snapshotSha.trim()
       if (resolvedSha === headCommit.trim()) {
-        // Tag points to HEAD — working tree is already at the correct state
+        // Tag points to HEAD — working tree is already at the correct state.
+        // Restore the stash we took so the user's pending changes survive a
+        // no-op rewind.
+        if (stashed) await execFileAsync(GIT, ['stash', 'pop'], { cwd })
         return
       }
 
@@ -372,6 +393,22 @@ export class CheckpointManager extends EventEmitter {
       await execFileAsync(GIT, ['checkout', resolvedSha, '--', '.'], { cwd })
     } catch (err) {
       log.warn(`Failed to restore git snapshot: ${err.message}`)
+      // #5335: don't strand the auto-stashed changes. The common failure mode
+      // is a corrupt/missing ref, which throws at rev-parse BEFORE any checkout
+      // ran — so the tree is clean and the stash pops back cleanly.
+      if (stashed) {
+        try {
+          await execFileAsync(GIT, ['stash', 'pop'], { cwd })
+        } catch (popErr) {
+          // Pop failed (rare: a conflicting checkout ran before the failure).
+          // Point the user at the stash so the work isn't lost.
+          throw new Error(
+            `Git restore failed: ${err.message}. Your pending changes were auto-stashed but could not be re-applied (${popErr.message}) — recover them with \`git stash list\` / \`git stash pop\` (message: "chroxy: auto-stash before rewind")`
+          )
+        }
+        // Pop succeeded — the user's working state is intact.
+        throw new Error(`Git restore failed: ${err.message} (your pending changes were preserved)`)
+      }
       throw new Error(`Git restore failed: ${err.message}`)
     }
   }
@@ -380,6 +417,65 @@ export class CheckpointManager extends EventEmitter {
     try {
       await execFileAsync(GIT, ['tag', '-d', gitRef], { cwd })
     } catch { /* tag may already be gone */ }
+  }
+
+  // #5335: the eviction / delete / clear paths only log a warning when
+  // `git tag -d` fails, so a transient failure leaks a `chroxy-checkpoint/*`
+  // tag forever. Build the set of refs still referenced by a live checkpoint
+  // for `cwd`, from BOTH the on-disk checkpoint files AND the in-memory map
+  // (a just-created checkpoint is pushed in-memory before it is persisted).
+  // Reading every persisted file is what makes this safe across sessions this
+  // manager hasn't loaded — without it, pruning could delete an unloaded
+  // session's live ref. (Single-daemon model: one process owns the repo.)
+  _liveRefsForCwd(cwd) {
+    const live = new Set()
+    // In-memory (covers the create-before-persist window).
+    for (const list of this._checkpoints.values()) {
+      for (const cp of list) {
+        if (cp?.gitRef && cp.cwd === cwd) live.add(cp.gitRef)
+      }
+    }
+    // On-disk (covers sessions not loaded into this._checkpoints).
+    let files = []
+    try { files = readdirSync(this._checkpointsDir).filter((f) => f.endsWith('.json')) } catch { return live }
+    for (const file of files) {
+      try {
+        const data = JSON.parse(readFileSync(join(this._checkpointsDir, file), 'utf8'))
+        for (const cp of data?.checkpoints || []) {
+          if (cp?.gitRef && cp.cwd === cwd) live.add(cp.gitRef)
+        }
+      } catch { /* skip unreadable / corrupt file */ }
+    }
+    return live
+  }
+
+  /**
+   * Prune `chroxy-checkpoint/*` tags in `cwd` that no live checkpoint
+   * references. Best-effort: never throws, never deletes a ref still in use.
+   * @param {string} cwd
+   * @returns {Promise<number>} number of orphaned refs pruned
+   */
+  async pruneOrphanedRefs(cwd) {
+    if (!(await this._isGitRepo(cwd))) return 0
+    let tags = []
+    try {
+      const { stdout } = await execFileAsync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd })
+      tags = stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+    } catch (err) {
+      log.warn(`pruneOrphanedRefs: failed to list tags in ${cwd}: ${err.message}`)
+      return 0
+    }
+    if (tags.length === 0) return 0
+    const live = this._liveRefsForCwd(cwd)
+    let pruned = 0
+    for (const tag of tags) {
+      if (!live.has(tag)) {
+        await this._deleteGitRef(cwd, tag)
+        pruned++
+      }
+    }
+    if (pruned > 0) log.info(`Pruned ${pruned} orphaned checkpoint ref(s) in ${cwd}`)
+    return pruned
   }
 
   // -- Persistence --
