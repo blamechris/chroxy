@@ -1,36 +1,59 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: Ensure ConnectScreen
 ---
 
-# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17), portrait orientation
-# iPad is untested — tap coordinates may differ in landscape / larger screens
+# Tested devices: iPhone 16 Pro (iOS 18), portrait orientation. iPad / Android
+# untested — tap coordinates may differ in landscape / larger screens.
 #
-# Shared setup: ensure we're on ConnectScreen regardless of initial state
+# Shared setup: ensure we're on ConnectScreen regardless of initial state.
 # Usage: - runFlow: setup/ensure-connect-screen.yaml
+#
+# The app now requires a dev build (expo-speech-recognition + expo-secure-store
+# native modules), so this drives the chroxy dev client (com.blamechris.chroxy)
+# rather than Expo Go. The dev client auto-connects to the Metro bundler it was
+# last launched against; launchApp brings it up.
 
-# Open the Expo project via deep link
-- openLink: exp://localhost:8081
+- launchApp
 
-# Wait for the app to load — could show any of:
+# Wait for the app (or the Expo dev-client menu) to appear. Could show any of:
+# - "Welcome to Chroxy" (first-run onboarding carousel)
+# - "Connect to Chroxy" (ConnectScreen, possibly behind the dev menu)
 # - "Session" (auto-connected from saved state)
-# - "Chroxy" (ConnectScreen title or dev menu)
 # - "Connecting" (auto-connect spinner)
+# - "Reload" (the Expo dev-client menu card)
 - extendedWaitUntil:
     visible:
-      text: ".*(Session|Chroxy|Connect).*"
-    timeout: 15000
+      text: ".*(Welcome to Chroxy|Session|Connect to Chroxy|Connecting|Reload).*"
+    timeout: 20000
 
-# Dismiss Expo dev menu if it appeared (X button on modal card)
-- tapOn:
-    point: "93%,43%"
-    optional: true
+# Dismiss the Expo dev-client menu ONLY if it actually appeared (its card shows
+# "Reload"). A blind point-tap when no menu is present lands on the app
+# underneath and can navigate into the QR scanner — so gate it on "Reload".
+- runFlow:
+    when:
+      visible:
+        text: "^Reload$"
+    commands:
+      - tapOn:
+          point: "93%,43%"
+      - waitForAnimationToEnd
+
+# Skip the first-run onboarding carousel if present (Welcome to Chroxy → Skip).
+- runFlow:
+    when:
+      visible:
+        text: "^Skip$"
+    commands:
+      - tapOn:
+          text: "^Skip$"
+      - waitForAnimationToEnd
 
 # If on SessionScreen (auto-connected), tap the red X to disconnect
 - runFlow:
     when:
       visible: "Session"
     commands:
-      - tapOn: "\u2715"
+      - tapOn: "✕"
       - waitForAnimationToEnd
 
 # If on auto-connect spinner, tap Cancel
@@ -43,7 +66,7 @@ name: Ensure ConnectScreen
           text: "^Cancel$"
       - waitForAnimationToEnd
 
-# Verify we're now on ConnectScreen
+# Verify we're now on ConnectScreen (exact title — NOT the dev-menu "Chroxy").
 - extendedWaitUntil:
     visible: "Connect to Chroxy"
-    timeout: 5000
+    timeout: 8000
