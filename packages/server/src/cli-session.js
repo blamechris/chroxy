@@ -513,6 +513,23 @@ export class CliSession extends BaseSession {
       }
     })
 
+    // #5361 (follow-up to #5324) — guard the child's stdout/stderr streams
+    // against an unhandled 'error' event. A stream-level error (EPIPE on a
+    // dying child, a read fault) emitted on child.stdout/child.stderr with NO
+    // listener throws and crashes the WHOLE daemon. readline does not attach an
+    // error handler to its input, so each stream needs its own. Log + swallow —
+    // the matching process death surfaces via 'close' (exit code) or 'error'
+    // (spawn failure), which already drive teardown/respawn; the stream error
+    // itself carries no extra recoverable signal beyond "the pipe broke".
+    child.stdout.on('error', (err) => {
+      if (this._destroying) return
+      ;(this._log || log).warn(`stdout stream error (ignored): ${err?.message || err}`)
+    })
+    child.stderr.on('error', (err) => {
+      if (this._destroying) return
+      ;(this._log || log).warn(`stderr stream error (ignored): ${err?.message || err}`)
+    })
+
     // Absorb EPIPE and other low-level stdin errors so they don't become
     // unhandled exceptions. Writes are already wrapped in try/catch below.
     child.stdin.on('error', (err) => {

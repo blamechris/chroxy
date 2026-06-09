@@ -212,3 +212,49 @@ describe('stdin error listener', () => {
     )
   })
 })
+
+describe('stdout/stderr stream error listeners (#5361)', () => {
+  // Follow-up to #5324 (which covered the jsonl-subprocess path): a stream-level
+  // 'error' on child.stdout/child.stderr with NO user listener throws as an
+  // unhandled error and crashes the whole daemon. cli-session only wired stdin.
+
+  // CLAUDE is resolved at module load (resolveBinary) and these tests inject
+  // mock children rather than spawn the real binary, so the wiring is guarded
+  // by source-introspection — the same approach the stdin-listener test above
+  // uses. A behavioural emit on a mock stream would only re-prove EventEmitter
+  // semantics (the listener it attaches is the test's own, not the source's),
+  // so it is deliberately omitted as false coverage.
+  it('source wires child.stdout/child.stderr error listeners, _destroying-guarded, in the spawn path', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const dir = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(join(dir, '../src/cli-session.js'), 'utf-8')
+
+    // Both listeners must exist — without them a stream 'error' is unhandled
+    // and crashes the whole daemon (the regression this PR closes).
+    assert.ok(source.includes("child.stdout.on('error'"),
+      'cli-session.js must register child.stdout.on(\'error\')')
+    assert.ok(source.includes("child.stderr.on('error'"),
+      'cli-session.js must register child.stderr.on(\'error\')')
+
+    // Each listener must short-circuit while tearing down (mirrors #5324) —
+    // assert the `this._destroying` guard appears within the listener body.
+    for (const stream of ['stdout', 'stderr']) {
+      const m = source.match(new RegExp(`child\\.${stream}\\.on\\('error',[\\s\\S]{0,200}?\\}\\)`))
+      assert.ok(m, `child.${stream}.on('error', ...) block should be parseable`)
+      assert.ok(m[0].includes('this._destroying'),
+        `child.${stream} error listener must be guarded by this._destroying`)
+    }
+
+    // The listeners must be attached to the spawned child (so EVERY (re)spawn
+    // gets them) — assert they appear after the `const child = spawn(...)` call.
+    // There is a single spawn site, so "after spawn" == "in the spawn path".
+    const spawnIdx = source.indexOf('const child = spawn(')
+    assert.ok(spawnIdx >= 0, 'cli-session.js should spawn the child via spawn()')
+    assert.ok(source.indexOf("child.stdout.on('error'") > spawnIdx,
+      'stdout error listener must be attached to the spawned child')
+    assert.ok(source.indexOf("child.stderr.on('error'") > spawnIdx,
+      'stderr error listener must be attached to the spawned child')
+  })
+})
