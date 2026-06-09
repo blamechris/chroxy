@@ -55,16 +55,38 @@ const runnerInFlight = new WeakSet()
  * @param {{ code: string, message: string }} error
  * @returns {object} a `host_status_snapshot` message.
  */
-function errorSnapshot(root, requestId, error) {
+/**
+ * #5377 — shared builder for the survey error-snapshots. `errorSnapshot` and
+ * `runnerErrorSnapshot` are identical apart from their `type` and the keys of
+ * the zeroed `summary`; this is the single place the snapshot envelope (echoed
+ * requestId, fresh timestamp, real root, empty repos, additive `error`) is
+ * shaped, so a schema change touches one function and a future survey reuses it.
+ *
+ * @param {string} type - the snapshot message type.
+ * @param {object} emptySummary - the zeroed, type-specific summary object.
+ * @param {string} root - effective discovery/install root to report.
+ * @param {string|null} requestId - correlation id to echo, or null.
+ * @param {{ code: string, message: string }} error
+ * @returns {object} a schema-conformant status snapshot carrying the error.
+ */
+function buildSurveyErrorSnapshot(type, emptySummary, root, requestId, error) {
   return {
-    type: 'host_status_snapshot',
+    type,
     requestId,
     generatedAt: new Date().toISOString(),
     root,
-    summary: { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 },
+    summary: emptySummary,
     repos: [],
     error,
   }
+}
+
+function errorSnapshot(root, requestId, error) {
+  return buildSurveyErrorSnapshot(
+    'host_status_snapshot',
+    { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 },
+    root, requestId, error,
+  )
 }
 
 /**
@@ -166,15 +188,11 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
  * @returns {object} a `runner_status_snapshot` message.
  */
 function runnerErrorSnapshot(root, requestId, error) {
-  return {
-    type: 'runner_status_snapshot',
-    requestId,
-    generatedAt: new Date().toISOString(),
-    root,
-    summary: { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 },
-    repos: [],
-    error,
-  }
+  return buildSurveyErrorSnapshot(
+    'runner_status_snapshot',
+    { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 },
+    root, requestId, error,
+  )
 }
 
 /**
