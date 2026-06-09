@@ -7201,8 +7201,11 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
     assert.deepEqual(leftovers, [], 'no temp file should survive replacing an existing value')
   })
 
-  it('helper throws and cleans up the tmp file when the rename target dir is gone', () => {
+  it('helper rethrows and orphans no tmp file when the write fails (target dir missing)', () => {
     session = makeSession()
+    // tmp + target both live under the missing subdir, so writeFileSync throws
+    // ENOENT before renameSync is reached — the catch must still rethrow and
+    // leave nothing behind in the (existing) parent dir.
     const target = join(dir, 'missing-subdir', 'permission-mode')
     assert.throws(() => session._writePermissionModeSidecarAtomic(target, 'plan'))
     const leftovers = readdirSync(dir).filter((f) => f.includes('.tmp-'))
