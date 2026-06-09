@@ -34,7 +34,7 @@ import {
 } from '../auth-probes.js'
 import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
 import { realpathSync, readdirSync, statSync } from 'fs'
-import { createLogger, loggerForSession } from '../logger.js'
+import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
 import {
   PER_SESSION_SETTINGS,
   buildPerSessionSettingHandler,
@@ -116,7 +116,7 @@ function handleSetModel(ws, client, msg, ctx) {
         // sessionId, so fall back to the module-level `log` rather than
         // throwing inside loggerForSession (matches the input-handlers
         // pattern from #4823).
-        ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        ;sessionLogger(modelSessionId).warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
         sendError(
           ws,
           msg?.requestId,
@@ -126,7 +126,7 @@ function handleSetModel(ws, client, msg, ctx) {
         return
       }
       // #4828: session-scoped (single-session fallback as above).
-      ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
       // broadcast them verbatim. toShortModelId() is a Claude-specific
@@ -142,7 +142,7 @@ function handleSetModel(ws, client, msg, ctx) {
   if (ALLOWED_MODEL_IDS.has(msg.model)) {
     if (entry) {
       // #4828: session-scoped (single-session fallback).
-      ;(modelSessionId ? loggerForSession('ws', modelSessionId) : log).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
       ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
@@ -174,7 +174,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         }
         if (ProviderClass && ProviderClass.capabilities?.permissionModeSwitch === false) {
           // #4828: session-scoped (single-session fallback).
-          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
+          ;sessionLogger(permModeSessionId).warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
           sendError(
             ws,
             msg?.requestId,
@@ -226,7 +226,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         }
         if (ctx.config?.allowAutoPermissionMode !== true) {
           // #4828: session-scoped (single-session fallback).
-          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
+          ;sessionLogger(permModeSessionId).warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_DISABLED_BY_CONFIG',
             'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.')
           return
@@ -234,7 +234,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       }
       if (msg.mode === 'auto' && !msg.confirmed) {
         // #4828: session-scoped (single-session fallback).
-        ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).info(`Auto mode requested by ${client.id}, awaiting confirmation`)
+        ;sessionLogger(permModeSessionId).info(`Auto mode requested by ${client.id}, awaiting confirmation`)
         ctx.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',
@@ -243,7 +243,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       } else {
         const previousMode = entry.session.permissionMode || 'unknown'
         // #4828: session-scoped (single-session fallback).
-        const _pmLog = permModeSessionId ? loggerForSession('ws', permModeSessionId) : log
+        const _pmLog = sessionLogger(permModeSessionId)
         if (msg.mode === 'auto') {
           _pmLog.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
         } else {
@@ -265,7 +265,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         const actualMode = entry.session.permissionMode
         if (actualMode !== msg.mode) {
           // #4828: session-scoped (single-session fallback).
-          ;(permModeSessionId ? loggerForSession('ws', permModeSessionId) : log).warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
+          ;sessionLogger(permModeSessionId).warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
           sendError(ws, msg?.requestId, 'PERMISSION_MODE_NOT_APPLIED',
             `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`)
           return
@@ -388,7 +388,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
       // #4828: session-scoped — the permission belongs to `originSessionId`
       // when known. Fall back to module-level `log` when the request had
       // no mapping AND the client isn't bound (legacy / unknown route).
-      ;(originSessionId ? loggerForSession('ws', originSessionId) : log).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
+      sessionLogger(originSessionId).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
       return
     }
   }
