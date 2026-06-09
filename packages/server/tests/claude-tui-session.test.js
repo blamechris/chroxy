@@ -7148,3 +7148,85 @@ describe('ClaudeTuiSession', () => {
     })
   })
 })
+
+// #5334 (IP-6): the permission-mode sidecar is the IPC channel the
+// PreToolUse hook `cat`s on every tool call. A plain writeFileSync
+// truncates-then-writes, so a concurrent read can see an empty/partial value
+// and fall through to the stale env var. Both writers (initial start + mid-
+// session change) must go through the atomic tmp+rename helper.
+describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', () => {
+  let dir, skillsDir, fakeHome, origSpawnPty, session
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-sidecar-atomic-'))
+    skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-sidecar-skills-'))
+    fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-sidecar-home-'))
+    writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
+    process.env._ORIG_HOME = process.env.HOME
+    process.env.HOME = fakeHome
+    // Stub the PTY spawn so start() doesn't launch real node-pty/claude.
+    origSpawnPty = ClaudeTuiSession.prototype._spawnPty
+    ClaudeTuiSession.prototype._spawnPty = async function () {
+      this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
+    }
+  })
+  afterEach(async () => {
+    if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
+    ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+    if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(skillsDir, { recursive: true, force: true })
+    rmSync(fakeHome, { recursive: true, force: true })
+  })
+
+  function makeSession() {
+    return new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir, repoSkillsDir: null })
+  }
+
+  it('helper writes the value and leaves no .tmp file behind', () => {
+    session = makeSession()
+    const target = join(dir, 'permission-mode')
+    session._writePermissionModeSidecarAtomic(target, 'plan')
+    assert.equal(readFileSync(target, 'utf8'), 'plan')
+    const leftovers = readdirSync(dir).filter((f) => f.includes('.tmp-'))
+    assert.deepEqual(leftovers, [], 'no temp file should survive a successful write')
+  })
+
+  it('helper replaces an existing value cleanly (no torn intermediate left on disk)', () => {
+    session = makeSession()
+    const target = join(dir, 'permission-mode')
+    writeFileSync(target, 'approve')
+    session._writePermissionModeSidecarAtomic(target, 'acceptEdits')
+    assert.equal(readFileSync(target, 'utf8'), 'acceptEdits')
+    const leftovers = readdirSync(dir).filter((f) => f.includes('.tmp-'))
+    assert.deepEqual(leftovers, [], 'no temp file should survive replacing an existing value')
+  })
+
+  it('helper rethrows and orphans no tmp file when the write fails (target dir missing)', () => {
+    session = makeSession()
+    // tmp + target both live under the missing subdir, so writeFileSync throws
+    // ENOENT before renameSync is reached — the catch must still rethrow and
+    // leave nothing behind in the (existing) parent dir.
+    const target = join(dir, 'missing-subdir', 'permission-mode')
+    assert.throws(() => session._writePermissionModeSidecarAtomic(target, 'plan'))
+    const leftovers = readdirSync(dir).filter((f) => f.includes('.tmp-'))
+    assert.deepEqual(leftovers, [], 'failed write must not orphan a tmp file')
+  })
+
+  it('_onPermissionModeChanged routes through the atomic helper', () => {
+    session = makeSession()
+    session._permissionModeFile = join(dir, 'permission-mode')
+    const spy = mock.method(session, '_writePermissionModeSidecarAtomic')
+    session._onPermissionModeChanged('plan')
+    assert.equal(spy.mock.callCount(), 1, 'update path must use the atomic helper')
+    assert.deepEqual(spy.mock.calls[0].arguments, [session._permissionModeFile, 'plan'])
+  })
+
+  it('the initial sidecar write at start() uses the atomic helper', async () => {
+    session = makeSession()
+    const spy = mock.method(session, '_writePermissionModeSidecarAtomic')
+    await session.start()
+    assert.ok(spy.mock.callCount() >= 1, 'initial sidecar write must use the atomic helper')
+    assert.equal(spy.mock.calls[0].arguments[1], session.permissionMode || 'approve')
+    assert.equal(session._permissionModeFile, join(session._sinkDir, 'permission-mode'))
+  })
+})

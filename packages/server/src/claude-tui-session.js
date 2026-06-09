@@ -956,7 +956,9 @@ export class ClaudeTuiSession extends BaseSession {
     if (permissionsEnabled) {
       const sidecarPath = join(this._sinkDir, 'permission-mode')
       try {
-        writeFileSync(sidecarPath, this.permissionMode || 'approve')
+        // Atomic from the first write too (#5334): a respawn / hot-restart can
+        // rewrite this sidecar while a hook from a still-draining turn reads it.
+        this._writePermissionModeSidecarAtomic(sidecarPath, this.permissionMode || 'approve')
         this._permissionModeFile = sidecarPath
       } catch (err) {
         log.warn(`initial permission-mode sidecar write failed (${err.message}) — falling back to env-var-only mode; mid-session permission switch will not take effect`)
@@ -2973,6 +2975,24 @@ export class ClaudeTuiSession extends BaseSession {
    */
   // #5374: BaseSession.setPermissionMode owns the validation + guard and fires
   // this hook after `this.permissionMode` is set, only when the mode changed.
+  // #5334 (IP-6): atomically write the permission-mode sidecar — write a tmp
+  // file then rename(2) over the target. Direct writeFileSync truncates-then-
+  // writes, so a concurrent PreToolUse hook `cat` could observe an empty/partial
+  // value mid-write and fall through to the stale env var. rename(2) is atomic
+  // within the same filesystem, so readers see either the OLD complete value or
+  // the NEW complete value — never an empty/partial one. Throws on failure
+  // (after best-effort tmp cleanup) so each caller applies its own fallback.
+  _writePermissionModeSidecarAtomic(path, value) {
+    const tmpPath = `${path}.tmp-${randomUUID()}`
+    try {
+      writeFileSync(tmpPath, value)
+      renameSync(tmpPath, path)
+    } catch (err) {
+      try { rmSync(tmpPath, { force: true }) } catch { /* ignore */ }
+      throw err
+    }
+  }
+
   _onPermissionModeChanged(mode) {
     if (!this._permissionModeFile) {
       // Permissions weren't enabled at start (no port). Mode was already
@@ -2980,20 +3000,10 @@ export class ClaudeTuiSession extends BaseSession {
       log.info(`Permission mode changed to ${mode} (no sidecar — hook script not active)`)
       return
     }
-    // Atomic update: write a tmp file then rename. Direct writeFileSync
-    // truncates-then-writes, so a concurrent hook read could observe an
-    // empty/partial value mid-write and fall through to the stale env
-    // var. rename(2) is atomic within the same filesystem, so readers
-    // either see the OLD complete value or the NEW complete value —
-    // never an empty/partial value.
-    const tmpPath = `${this._permissionModeFile}.tmp-${randomUUID()}`
     try {
-      writeFileSync(tmpPath, mode)
-      renameSync(tmpPath, this._permissionModeFile)
+      this._writePermissionModeSidecarAtomic(this._permissionModeFile, mode)
       log.info(`Permission mode changed to ${mode} (sidecar updated, no PTY restart)`)
     } catch (err) {
-      // Best-effort cleanup of the tmp file if rename never landed.
-      try { rmSync(tmpPath, { force: true }) } catch { /* ignore */ }
       // Hook precedence is file → env var. If the rename failed the
       // sidecar still holds the previous mode, so the next tool call
       // reads the stale FILE value (not the env var). Be explicit so
