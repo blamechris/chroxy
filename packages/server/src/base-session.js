@@ -1215,9 +1215,10 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #5374: protected hook fired by setModel() AFTER validation + the field is
-   * set, only when the model actually changed. Default no-op; subclasses
-   * override with their provider-specific action (and their own logging).
+   * #5374: protected hook fired by setModel() AFTER the busy/no-op guard +
+   * alias resolution (resolveModelId) and the field update, only when the model
+   * actually changed. Default no-op; subclasses override with their
+   * provider-specific action (and their own logging).
    */
   _onModelChanged(_model) {}
 
