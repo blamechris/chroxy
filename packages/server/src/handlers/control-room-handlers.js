@@ -43,28 +43,41 @@ const inFlight = new WeakSet()
 const runnerInFlight = new WeakSet()
 
 /**
- * Build a schema-conformant `host_status_snapshot` carrying an error. The
- * survey fields are present and valid (empty repos, zeroed summary, the real
- * discovery root + a fresh timestamp) so the payload satisfies
- * `ServerHostStatusSnapshotSchema`; the extra `error` (and echoed `requestId`)
- * are additive annotations the dashboard branches on. Keeping the error shape a
- * valid snapshot means the consumer never has to special-case a malformed reply.
+ * #5377 — shared builder for the survey error-snapshots. The error reply is a
+ * schema-conformant but empty snapshot (empty repos, zeroed summary, the real
+ * root + a fresh timestamp) plus an additive `error` (and echoed `requestId`)
+ * the dashboard branches on — so the consumer never special-cases a malformed
+ * reply. `errorSnapshot` and `runnerErrorSnapshot` are identical apart from
+ * their `type` and the keys of the zeroed `summary`; this is the single place
+ * the envelope is shaped, so a schema change touches one function and a future
+ * survey reuses it.
  *
- * @param {string} root - effective discovery root to report.
+ * @param {string} type - the snapshot message type.
+ * @param {object} emptySummary - the zeroed, type-specific summary object.
+ * @param {string} root - effective discovery/install root to report.
  * @param {string|null} requestId - correlation id to echo, or null.
  * @param {{ code: string, message: string }} error
- * @returns {object} a `host_status_snapshot` message.
+ * @returns {object} a schema-conformant status snapshot carrying the error.
  */
-function errorSnapshot(root, requestId, error) {
+function buildSurveyErrorSnapshot(type, emptySummary, root, requestId, error) {
   return {
-    type: 'host_status_snapshot',
+    type,
     requestId,
     generatedAt: new Date().toISOString(),
     root,
-    summary: { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 },
+    summary: emptySummary,
     repos: [],
     error,
   }
+}
+
+/** `host_status_snapshot` error reply — see {@link buildSurveyErrorSnapshot}. */
+function errorSnapshot(root, requestId, error) {
+  return buildSurveyErrorSnapshot(
+    'host_status_snapshot',
+    { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 },
+    root, requestId, error,
+  )
 }
 
 /**
@@ -155,26 +168,13 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
   }
 }
 
-/**
- * #5253 — build a schema-conformant `runner_status_snapshot` carrying an error.
- * Same posture as `errorSnapshot`: a valid (empty) snapshot plus an additive
- * `error` annotation, so the dashboard never special-cases a malformed reply.
- *
- * @param {string} root - effective runner-install root to report.
- * @param {string|null} requestId
- * @param {{ code: string, message: string }} error
- * @returns {object} a `runner_status_snapshot` message.
- */
+/** #5253 — `runner_status_snapshot` error reply — see {@link buildSurveyErrorSnapshot}. */
 function runnerErrorSnapshot(root, requestId, error) {
-  return {
-    type: 'runner_status_snapshot',
-    requestId,
-    generatedAt: new Date().toISOString(),
-    root,
-    summary: { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 },
-    repos: [],
-    error,
-  }
+  return buildSurveyErrorSnapshot(
+    'runner_status_snapshot',
+    { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 },
+    root, requestId, error,
+  )
 }
 
 /**
