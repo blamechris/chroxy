@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { buildSessionTokenMismatchPayload } from './handler-utils.js'
+import { createPermissionResolver } from './permission-resolver.js'
 
 const log = createLogger('ws')
 
@@ -89,6 +90,20 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
 
   // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
   const _validateHookAuth = validateHookAuth || validateBearerAuth
+
+  // #5373: the session-binding check + SDK-vs-legacy dispatch + audit live in
+  // the shared permission-resolver (also used by the WS handler in
+  // settings-handlers.js), so the binding rule lives in ONE place. The HTTP
+  // handler below maps the resolver's transport-agnostic ResolveResult to HTTP
+  // status codes; the body buffering / oversize / crash-guard stay here.
+  // `resolvePermission` is a hoisted function declaration below.
+  const permissionResolver = createPermissionResolver({
+    permissionSessionMap,
+    pendingPermissions,
+    getSessionManager,
+    resolveLegacyPermission: resolvePermission,
+    getPermissionAudit,
+  })
 
   /** Handle POST /permission from the hook script */
   function handlePermissionRequest(req, res) {
@@ -338,110 +353,56 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         return
       }
 
-      // Try SDK-mode first (in-process permission via sessionManager)
-      const originSessionId = permissionSessionMap.get(requestId)
-
-      // Session-binding enforcement: if the presenting token is bound to a
-      // specific session via pairing, reject cross-session permission
-      // responses. This applies to BOTH the SDK-mode and legacy branches
-      // below, so we check once here before either dispatches.
-      //
-      // For a bound caller, the requestId MUST have an explicit mapping in
-      // permissionSessionMap AND that mapping must match the token's bound
-      // session. If the mapping is missing, the caller could otherwise slip
-      // through to the legacy `pendingPermissions` resolver below — which
-      // has no session check. Found by agent-review on PR #2806.
-      if (callerBoundSessionId) {
-        if (!originSessionId || originSessionId !== callerBoundSessionId) {
-          log.warn(`HTTP /permission-response rejected: token bound to ${callerBoundSessionId} tried to respond to ${requestId} with mapped session ${originSessionId ?? 'unmapped'}`)
-          // Issue #2912: enrich HTTP body with the same fields as the WebSocket
+      // #5373: delegate the binding check + SDK-vs-legacy dispatch + audit to
+      // the shared resolver. clientId 'http' distinguishes these from auto-deny
+      // entries (clientId=null) in forensic queries. HTTP passes NO dispatch
+      // fallback — it has no per-connection activeSessionId, so the dispatch
+      // session is the raw mapping only (unchanged from the prior inline code).
+      const result = permissionResolver.resolve(requestId, decision, callerBoundSessionId, { clientId: 'http' })
+      switch (result.kind) {
+        case 'binding_mismatch': {
+          // For a bound caller the requestId MUST be explicitly mapped to that
+          // session (no fallback bypass — the #2806 residual, enforced in the
+          // resolver). Reject cross-session responses with the unified payload.
+          log.warn(`HTTP /permission-response rejected: token bound to ${result.boundSessionId} tried to respond to ${requestId}`)
+          // Issue #2912: enrich the HTTP body with the same fields as the WS
           // SESSION_TOKEN_MISMATCH payload so clients handle both surfaces
-          // identically. The legacy `error` key is preserved alongside the new
-          // unified `message` field for old-client compatibility.
-          // (#2911 enriched WS paths; #2914/#2936 added inline enrichment here;
-          // #2912 extracts the shared helper so the shape is guaranteed identical.)
+          // identically (legacy `error` key preserved for old clients).
           const unified = buildSessionTokenMismatchPayload({
             sessionManager: getSessionManager(),
-            boundSessionId: callerBoundSessionId,
+            boundSessionId: result.boundSessionId,
             message: 'not authorized for this permission request',
           })
           sendJson(res, 403, { error: unified.message, ...unified })
           return
         }
-      }
-
-      const sm = getSessionManager()
-      if (originSessionId && sm) {
-        const entry = sm.getSession(originSessionId)
-        if (entry && typeof entry.session.respondToPermission === 'function') {
-          const resolved = entry.session.respondToPermission(requestId, decision)
-          permissionSessionMap.delete(requestId)
-          if (resolved) {
-            log.info(`Permission ${requestId} resolved via HTTP: ${decision} (SDK)`)
-            // #3048: broadcast is now handled by the unified pipeline
-            // (PermissionManager.emit → SdkSession.emit → SessionManager
-            // session_event → EventNormalizer → broadcast). The previous
-            // inline broadcast here was the #2905 fix and is now redundant.
-            // #3059: audit HTTP user-initiated resolutions. The pipeline-layer
-            // audit listener filters reason==='user' to avoid double-auditing
-            // the WS path (which logs inline with client.id), so HTTP needs
-            // its own inline call. clientId='http' distinguishes from auto-
-            // deny entries (clientId=null) in forensic queries.
-            const audit = getPermissionAudit?.()
-            if (audit) {
-              audit.logDecision({
-                clientId: 'http',
-                sessionId: originSessionId,
-                requestId,
-                decision,
-                reason: 'user',
-              })
-            }
-            sendJson(res, 200, { ok: true })
-          } else {
-            // UX landmine #5: the permission auto-denied (timed out)
-            // before the user tapped the lockscreen notification. Tell
-            // the app so it can surface "This permission request
-            // expired" instead of silently showing "approved".
-            log.info(`Permission ${requestId} already expired when HTTP response arrived (SDK)`)
-            sendJson(res, 410, { error: 'expired', message: 'This permission request has already expired or been resolved' })
+        case 'resolved': {
+          // #3048: the SDK branch's broadcast is handled by the unified pipeline
+          // (PermissionManager → SdkSession → SessionManager → broadcast). The
+          // legacy branch has no PermissionManager, so it keeps the inline
+          // broadcast (#2905) — sessionId included only when the request was mapped.
+          if (result.via === 'legacy') {
+            broadcastFn({
+              type: 'permission_resolved',
+              requestId,
+              decision,
+              ...(result.sessionId ? { sessionId: result.sessionId } : {}),
+            })
           }
+          log.info(`Permission ${requestId} resolved via HTTP: ${decision} (${result.via})`)
+          sendJson(res, 200, { ok: true })
           return
         }
-      }
-
-      // Fall back to legacy HTTP-held permission
-      const pending = pendingPermissions.get(requestId)
-      if (pending) {
-        permissionSessionMap.delete(requestId)
-        resolvePermission(requestId, decision)
-        log.info(`Permission ${requestId} resolved via HTTP: ${decision} (legacy)`)
-        // #2905: same broadcast for the legacy HTTP path. Include sessionId
-        // when the request was mapped (keeps the wire contract consistent
-        // with the SDK branch and settings-handlers.js for clients that route
-        // by session); omit it for genuinely unmapped legacy requests.
-        broadcastFn({
-          type: 'permission_resolved',
-          requestId,
-          decision,
-          ...(originSessionId ? { sessionId: originSessionId } : {}),
-        })
-        // #3059: audit the legacy HTTP path too. There's no PermissionManager
-        // wiring here (legacy non-SDK sessions don't have one), so this is
-        // the only audit hook for these resolutions.
-        const audit = getPermissionAudit?.()
-        if (audit) {
-          audit.logDecision({
-            clientId: 'http',
-            sessionId: originSessionId ?? null,
-            requestId,
-            decision,
-            reason: 'user',
-          })
-        }
-        sendJson(res, 200, { ok: true })
-      } else {
-        sendJson(res, 404, { error: 'unknown or expired requestId' })
+        case 'expired':
+          // UX landmine #5: auto-denied (timed out) before the user tapped the
+          // notification — tell the app so it shows "expired", not "approved".
+          log.info(`Permission ${requestId} already expired when HTTP response arrived (SDK)`)
+          sendJson(res, 410, { error: 'expired', message: 'This permission request has already expired or been resolved' })
+          return
+        case 'not_found':
+        default:
+          sendJson(res, 404, { error: 'unknown or expired requestId' })
+          return
       }
       } catch (err) {
         // #5313 (WP-1.3): see the try at the top of this end callback.
