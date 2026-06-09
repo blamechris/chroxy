@@ -1409,9 +1409,11 @@ describe('validateProviderClass — inProcessPermissions guard (#5379)', () => {
   it('throws when inProcessPermissions=true but respondToPermission is missing', async () => {
     const { validateProviderClass } = await import('../src/providers.js')
     const Stub = makeProviderClass({ inProcessPermissions: true, respondToPermission: false, respondToQuestion: true })
+    // Order-independent: assert each key fragment is present without coupling
+    // to the message's word order (#5384 review).
     assert.throws(
       () => validateProviderClass(Stub, 'stub-no-perm'),
-      /stub-no-perm.*inProcessPermissions=true.*respondToPermission/,
+      /(?=[\s\S]*stub-no-perm)(?=[\s\S]*inProcessPermissions=true)(?=[\s\S]*respondToPermission)/,
     )
   })
 
@@ -1420,7 +1422,7 @@ describe('validateProviderClass — inProcessPermissions guard (#5379)', () => {
     const Stub = makeProviderClass({ inProcessPermissions: true, respondToPermission: true, respondToQuestion: false })
     assert.throws(
       () => validateProviderClass(Stub, 'stub-no-question'),
-      /stub-no-question.*inProcessPermissions=true.*respondToQuestion/,
+      /(?=[\s\S]*stub-no-question)(?=[\s\S]*inProcessPermissions=true)(?=[\s\S]*respondToQuestion)/,
     )
   })
 
