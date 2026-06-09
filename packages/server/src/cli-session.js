@@ -370,7 +370,7 @@ export class CliSession extends BaseSession {
     // from "child crashed" so _handleChildClose skips the misleading
     // "exited unexpectedly" toast + auto-respawn on the stop path.
     // Single-use: set by interrupt(), cleared by _handleChildClose / destroy.
-    this._intentionalStop = false
+    // The flag itself is declared+initialized on BaseSession (#5375).
 
     // Hook manager (shared module)
     this._hookManager = (this._port) ? createPermissionHookManager(this, { settingsPath }) : null
@@ -1469,8 +1469,7 @@ export class CliSession extends BaseSession {
     // (e.g. user clicks Stop → flag set → model switch fires
     // _killAndRespawn → _respawning short-circuit hits, but the flag must
     // not persist to silently swallow a real crash on a future close).
-    const wasIntentionalStop = this._intentionalStop
-    this._intentionalStop = false
+    const wasIntentionalStop = this._consumeIntentionalStop()
 
     // #4929: capture the resume-attempt state for this child BEFORE the
     // destroy/respawn short-circuits return. A `--resume <id>` that the CLI
@@ -1608,7 +1607,7 @@ export class CliSession extends BaseSession {
     // auto-respawn. If the child survives SIGINT (claude only aborts the
     // current turn), the next natural exit will be a real crash — the flag
     // is cleared in _handleChildClose on whichever exit fires first.
-    this._intentionalStop = true
+    this.markIntentionalStop()
 
     // #4828: session-scoped if init has fired.
     ;(this._log || log).info('Sending SIGINT to claude process')
@@ -1626,7 +1625,7 @@ export class CliSession extends BaseSession {
       // #4602: if the child survived SIGINT (claude only aborted the turn),
       // clear the flag so a later natural crash still triggers respawn —
       // otherwise the flag stays armed indefinitely and swallows real crashes.
-      this._intentionalStop = false
+      this._clearIntentionalStop()
       if (this._isBusy) {
         // #4828: session-scoped.
         ;(this._log || log).warn('Interrupt safety timeout — force-clearing busy state')
@@ -1639,7 +1638,7 @@ export class CliSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._respawning = false
-    this._intentionalStop = false
+    this._clearIntentionalStop()
 
     // Clean up permission hook — destroy() now chains unregister() after any
     // in-flight register() promise, preventing a register-after-unregister race

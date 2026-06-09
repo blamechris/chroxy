@@ -216,7 +216,7 @@ describe('SdkSession _callQuery finally — source contains safety-net clear for
    * branch logic while still failing loudly the moment someone removes the
    * safety-net clear from the finally block.
    */
-  it('source has `this._intentionalStop = false` inside _callQuery finally', async () => {
+  it('source has `this._clearIntentionalStop()` inside _callQuery finally', async () => {
     const { readFileSync } = await import('node:fs')
     const { fileURLToPath } = await import('node:url')
     const src = readFileSync(fileURLToPath(new URL('../src/sdk-session.js', import.meta.url)), 'utf8')
@@ -226,11 +226,14 @@ describe('SdkSession _callQuery finally — source contains safety-net clear for
     // where `result` lands before interrupt() throws would leak the flag.
     assert.match(src, /#4881: safety-net clear of _intentionalStop/,
       'finally must carry the documented race-safety comment')
-    // Locate the comment then assert the clear line is within 10 lines after.
+    // Locate the comment then assert the clear is within 10 lines after.
+    // #5375 hoisted the flag to BaseSession, so the safety-net clear is now
+    // the `_clearIntentionalStop()` helper (kept SEPARATE from the catch-block
+    // `_consumeIntentionalStop()` so this race fix stays a two-step sequence).
     const commentIdx = src.indexOf('#4881: safety-net clear of _intentionalStop')
     assert.ok(commentIdx >= 0, 'comment present')
     const tailSlice = src.slice(commentIdx, commentIdx + 800)
-    assert.match(tailSlice, /this\._intentionalStop\s*=\s*false/,
+    assert.match(tailSlice, /this\._clearIntentionalStop\(\)/,
       'finally must clear the flag so a non-throw exit (result landed before interrupt threw) does not leak it to the next turn')
   })
 })

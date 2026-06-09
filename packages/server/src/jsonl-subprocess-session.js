@@ -176,7 +176,7 @@ export class JsonlSubprocessSession extends BaseSession {
     // Single-use: cleared on every close path (close, destroy) so the flag
     // never leaks past one sendMessage cycle. Matches CliSession's
     // capture-and-clear discipline in `_handleChildClose`.
-    this._intentionalStop = false
+    // The flag itself is declared+initialized on BaseSession (#5375).
   }
 
   start() {
@@ -196,7 +196,7 @@ export class JsonlSubprocessSession extends BaseSession {
     this._isBusy = false
     // #4881: clear so a teardown after interrupt() never leaks the flag past
     // this session instance. Mirrors CliSession.destroy() (#4602).
-    this._intentionalStop = false
+    this._clearIntentionalStop()
     if (this._process) {
       try {
         this._process.kill('SIGTERM')
@@ -212,7 +212,7 @@ export class JsonlSubprocessSession extends BaseSession {
     // proc.on('close') handler suppresses the "exited with code N" error and
     // instead emits a quiet `stopped` event with the exit code. Cleared in
     // the close handler (single-use, mirrors CliSession #4602).
-    this._intentionalStop = true
+    this.markIntentionalStop()
     try {
       this._process.kill('SIGINT')
     } catch { /* already dead */ }
@@ -427,8 +427,7 @@ export class JsonlSubprocessSession extends BaseSession {
       // #4881: capture-and-clear BEFORE the _destroying short-circuit so the
       // flag never leaks past a close even when destroy() fires first.
       // Mirrors CliSession._handleChildClose (#4602).
-      const wasIntentionalStop = this._intentionalStop
-      this._intentionalStop = false
+      const wasIntentionalStop = this._consumeIntentionalStop()
       if (this._destroying) return
       if (ctx.didStreamStart) {
         this.emit('stream_end', { messageId: ctx.messageId })

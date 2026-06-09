@@ -285,6 +285,15 @@ export class BaseSession extends EventEmitter {
 
     this._isBusy = false
     this._processReady = false
+    // #5375: user-initiated stop vs crash. Set by interrupt() (markIntentionalStop),
+    // captured-and-cleared by the provider's close/error handler
+    // (_consumeIntentionalStop) so a clean stop is not reported as an error.
+    // Hoisted here from the three providers (#4602/#4881) — see _consumeIntentionalStop
+    // and _clearIntentionalStop below. The capture and the safety-net clear are kept
+    // as SEPARATE helpers on purpose: SDK relies on a catch-block consume plus a
+    // `finally` safety-net clear (the interrupt-races-result case), and collapsing
+    // them would reopen that race.
+    this._intentionalStop = false
     // #4307: per-session map of backgrounded Bash shells the agent is
     // still waiting on. Keyed by the shellId Claude prints in the
     // `Command running in background with ID: <id>` tool_result. Lives
@@ -1153,6 +1162,37 @@ export class BaseSession extends EventEmitter {
 
   get isReady() {
     return this._processReady && !this._isBusy
+  }
+
+  /**
+   * #5375: arm the user-initiated-stop flag. Called by each provider's
+   * interrupt() so the subsequent process close/error is treated as a clean
+   * stop rather than a crash.
+   */
+  markIntentionalStop() {
+    this._intentionalStop = true
+  }
+
+  /**
+   * #5375: capture-and-clear the user-initiated-stop flag in one step. The
+   * provider's close/error handler calls this at the top to decide the
+   * stopped-vs-error branch, disarming the flag so the next natural exit is
+   * not misread. Returns whether the flag was armed.
+   */
+  _consumeIntentionalStop() {
+    const was = this._intentionalStop
+    this._intentionalStop = false
+    return was
+  }
+
+  /**
+   * #5375: plain disarm, for destroy()/finally safety-nets where we only need
+   * to clear the flag without reading it. Kept separate from
+   * _consumeIntentionalStop so SDK's catch-then-finally clear (the
+   * interrupt-races-result race, #4881) stays a two-step sequence.
+   */
+  _clearIntentionalStop() {
+    this._intentionalStop = false
   }
 
   /**

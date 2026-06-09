@@ -411,7 +411,7 @@ export class SdkSession extends BaseSession {
     // Cleared on every consume path (close, error, destroy) so the flag never
     // leaks past one turn — matches the single-use semantic CliSession pins
     // in `_handleChildClose` (capture-and-clear up front).
-    this._intentionalStop = false
+    // The flag itself is declared+initialized on BaseSession (#5375).
   }
 
   get sessionId() {
@@ -931,8 +931,7 @@ export class SdkSession extends BaseSession {
       // #4881: capture-and-clear before any branch so the flag never leaks
       // past this turn even when _destroying short-circuits the emits below.
       // Mirrors CliSession._handleChildClose (#4602).
-      const wasIntentionalStop = this._intentionalStop
-      this._intentionalStop = false
+      const wasIntentionalStop = this._consumeIntentionalStop()
       if (!this._destroying) {
         if (wasIntentionalStop) {
           // #4881: user clicked Stop — interrupt() set the flag, the SDK
@@ -959,7 +958,7 @@ export class SdkSession extends BaseSession {
       // clear, the flag would stay armed until the next turn's catch and
       // mis-trigger a spurious `stopped` emit there. Idempotent — the
       // catch path already cleared it on the throw path.
-      this._intentionalStop = false
+      this._clearIntentionalStop()
       // Dequeue any follow-up messages that arrived while busy
       if (this._pendingInput?.length && !this._destroying) {
         // #3562: if the SidecarProcess latched stdin_disabled mid-turn (e.g.
@@ -1498,7 +1497,7 @@ export class SdkSession extends BaseSession {
     // _callQuery catch block suppresses the AbortError-flavored "Query error"
     // emit and instead surfaces a quiet `stopped` event. Cleared in the
     // catch/finally (single-use, mirrors CliSession#4602).
-    this._intentionalStop = true
+    this.markIntentionalStop()
 
     // #4828: session-scoped (interrupt() only meaningful with an active query).
     ;(this._log || log).info('Interrupting query')
@@ -1707,7 +1706,7 @@ export class SdkSession extends BaseSession {
     this._pendingInput = []
     // #4881: clear so a teardown after interrupt() never leaks the flag past
     // this session instance. Mirrors CliSession.destroy() (#4602).
-    this._intentionalStop = false
+    this._clearIntentionalStop()
     // #5269: drop subagent task-id mappings on teardown.
     this._taskIdByToolUseId.clear()
 

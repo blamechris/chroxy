@@ -115,6 +115,39 @@ describe('BaseSession', () => {
     })
   })
 
+  describe('intentional-stop flag (#5375 — hoisted from the 3 providers)', () => {
+    it('initializes disarmed', () => {
+      assert.equal(new BaseSession()._intentionalStop, false)
+    })
+
+    it('markIntentionalStop arms it', () => {
+      const s = new BaseSession()
+      s.markIntentionalStop()
+      assert.equal(s._intentionalStop, true)
+    })
+
+    it('_consumeIntentionalStop captures-and-clears in one step', () => {
+      const s = new BaseSession()
+      s.markIntentionalStop()
+      // First consume returns the armed state AND disarms.
+      assert.equal(s._consumeIntentionalStop(), true)
+      assert.equal(s._intentionalStop, false)
+      // Second consume sees the cleared state — the next natural exit is not
+      // misread as a user stop.
+      assert.equal(s._consumeIntentionalStop(), false)
+    })
+
+    it('_clearIntentionalStop disarms without reading (kept separate from consume so SDK catch-then-finally stays two-step)', () => {
+      const s = new BaseSession()
+      s.markIntentionalStop()
+      s._clearIntentionalStop()
+      assert.equal(s._intentionalStop, false)
+      // Idempotent — a finally safety-net after the catch already consumed it.
+      s._clearIntentionalStop()
+      assert.equal(s._intentionalStop, false)
+    })
+  })
+
   describe('setModel', () => {
     it('returns false when busy', () => {
       session._isBusy = true
