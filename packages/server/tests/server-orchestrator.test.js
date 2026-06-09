@@ -173,18 +173,25 @@ describe('ServerOrchestrator — install', () => {
 
   it('routes SIGHUP through the graceful shutdown flush (#5336)', async () => {
     const { orchestrator, seq } = build()
-    const before = process.listeners('SIGHUP')
+    // install() adds ALL FIVE handlers — snapshot every signal so the finally
+    // removes only this test's additions across the board (a leaked
+    // uncaughtException/SIGINT handler would interfere with the rest of the run).
+    const before = Object.fromEntries(signals.map((s) => [s, process.listeners(s)]))
     orchestrator.install()
-    const added = process.listeners('SIGHUP').filter((l) => !before.includes(l))
+    const addedHup = process.listeners('SIGHUP').filter((l) => !before.SIGHUP.includes(l))
     try {
-      assert.equal(added.length, 1, 'exactly one SIGHUP handler added')
-      added[0]() // simulate the signal
+      assert.equal(addedHup.length, 1, 'exactly one SIGHUP handler added')
+      addedHup[0]() // simulate the signal
       await tick()
       // The graceful path ran: state was serialized before exit (not a hard kill).
       assert.ok(seq.some((e) => e[0] === 'serializeState'), 'serializeState ran on SIGHUP')
       assert.deepEqual(seq.at(-1), ['exit', 0], 'exited cleanly after the flush')
     } finally {
-      for (const l of added) process.removeListener('SIGHUP', l)
+      for (const s of signals) {
+        for (const l of process.listeners(s)) {
+          if (!before[s].includes(l)) process.removeListener(s, l)
+        }
+      }
     }
   })
 })
