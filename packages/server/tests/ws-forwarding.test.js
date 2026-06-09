@@ -570,6 +570,14 @@ describe('executeSideEffects (via setupCliForwarding)', () => {
     const logSpy = (entry) => {
       if (entry.level === 'warn' && entry.component === 'ws-forwarding') warnings.push(entry.message)
     }
+    // Pin the log level so the non-critical warn isn't suppressed if another
+    // test left the level at 'error' (#5386 review).
+    const priorLevel = getLogLevel()
+    setLogLevel('warn')
+    // Explicitly prove the rejection never escapes as an unhandledRejection.
+    const rejections = []
+    const onUnhandled = (reason) => rejections.push(reason)
+    process.on('unhandledRejection', onUnhandled)
     addLogListener(logSpy)
     try {
       // A `result` event in multi-session mode emits a refresh_context side
@@ -585,8 +593,11 @@ describe('executeSideEffects (via setupCliForwarding)', () => {
       await new Promise((r) => setImmediate(r))
     } finally {
       removeLogListener(logSpy)
+      process.removeListener('unhandledRejection', onUnhandled)
+      setLogLevel(priorLevel)
     }
 
+    assert.deepEqual(rejections, [], 'the rejection must be swallowed — no unhandledRejection')
     assert.equal(sm.getSessionContext.mock.calls.length, 1, 'getSessionContext was attempted')
     assert.ok(
       warnings.some((m) => /Failed to refresh session context for sess-1/.test(m)),
