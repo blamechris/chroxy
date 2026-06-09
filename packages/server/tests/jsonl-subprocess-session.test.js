@@ -478,15 +478,20 @@ describe('JsonlSubprocessSession (base)', () => {
         label: 'spawned + skills prepended', timeoutMs: 3000,
       })
 
-      // Fire a post-spawn 'error' on the ChildProcess. It already has the base
-      // handler as a listener, so the emit is delivered (no re-throw) and the
-      // revert runs.
-      s._process.emit('error', new Error('post-spawn boom'))
+      // Capture the real child BEFORE emitting: the base 'error' handler nulls
+      // s._process, so destroy() could no longer SIGTERM the still-sleeping shim
+      // and would leak a live child (and keep the runner open) for up to 3s
+      // (#5391 review). We kill our captured reference explicitly below.
+      const child = s._process
+      // The ChildProcess already has the base handler as an 'error' listener, so
+      // the emit is delivered (no re-throw) and the revert runs.
+      child.emit('error', new Error('post-spawn boom'))
 
       assert.equal(s._skillsPrepended, false, 'flag reverts so the next send re-injects skills')
       assert.equal(s._isBusy, false, 'busy cleared so a retry is allowed')
       assert.ok(errors.some((e) => /post-spawn boom/.test(e.message)), 'surfaces the error to the session')
 
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
       await s.destroy()
     })
 
