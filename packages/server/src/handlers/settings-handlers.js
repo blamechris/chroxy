@@ -39,6 +39,7 @@ import {
   PER_SESSION_SETTINGS,
   buildPerSessionSettingHandler,
 } from '../per-session-settings.js'
+import { createPermissionResolver } from '../permission-resolver.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
 // These are safe file-operation tools that don't execute code or make network requests.
@@ -291,155 +292,106 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   const { requestId, decision } = msg
   if (!requestId || !decision) return
 
-  // Resolve the origin session of this permission request. The
-  // authoritative source is permissionSessionMap (populated at request
-  // creation). The fallback to client.activeSessionId exists only for
-  // legacy code paths where the map wasn't populated; it must NOT be
-  // used to bypass the binding check for a bound client, because for a
-  // bound client `activeSessionId === boundSessionId`, which would
-  // short-circuit the check below.
+  // #5373: the binding check + SDK-vs-legacy dispatch + audit are delegated to
+  // the shared permission-resolver (also used by the HTTP handler in
+  // ws-permissions.js), so the binding rule lives in ONE place. Two things stay
+  // HERE because they have no HTTP analog / are transport-specific:
+  //   - the WS-ONLY unbound-subscription guard (#4798, invariant G), which runs
+  //     BEFORE the resolver, and
+  //   - the elaborate binding-mismatch forensic log (#2832) + the per-transport
+  //     error / permission_expired / permission_resolved messages.
+  //
+  // `mappedSessionId` is the raw mapping; `originSessionId` adds the WS-only
+  // legacy `client.activeSessionId` fallback. That fallback is passed to the
+  // resolver as `dispatchFallbackSessionId` (used ONLY to pick the dispatch
+  // session, NEVER for the binding check — invariant B / the #2806 residual).
   const mappedSessionId = ctx.permissionSessionMap.get(requestId)
   const originSessionId = mappedSessionId || client.activeSessionId
 
-  // Enforce session binding: if this client authenticated with a
-  // pairing-issued session token that was bound to a specific session,
-  // prevent them from approving/denying a permission request belonging
-  // to any OTHER session — including legacy pendingPermissions entries
-  // that have no mapping.
-  //
-  // For a BOUND client, the request MUST have an explicit mapping in
-  // permissionSessionMap AND that mapping must equal boundSessionId.
-  // Without this, agent-review on PR #2806 found a residual bypass:
-  // when the requestId was not in the map, originSessionId would fall
-  // back to client.activeSessionId, which equals boundSessionId, the
-  // check would pass, and execution would fall through to the legacy
-  // pendingPermissions resolver — which has no session check at all.
-  //
-  // Discovered in the 2026-04-11 production readiness audit (blocker 5).
-  // The 616aeaf62 / 2c0ac7d2d commits claimed to enforce binding across
-  // all session-scoped handlers but missed this one + the HTTP fallback.
-  if (client.boundSessionId) {
-    if (!mappedSessionId || mappedSessionId !== client.boundSessionId) {
-      // Correlate with the [session-binding-create] log at the same
-      // requestId to recover the original creating client's bound session
-      // and createdAt. Reproduction steps: see issue #2832.
-      const permData = (mappedSessionId && ctx.sessionManager)
-        ? ctx.sessionManager.getSession(mappedSessionId)?.session?._lastPermissionData?.get(requestId)
-        : ctx.pendingPermissions?.get(requestId)?.data
-      const createdAt = permData?.createdAt ?? null
-      const ageMs = createdAt ? Date.now() - createdAt : null
-      const clientConnectedAt = client.authTime ?? null
-      const likelyPostReconnect = Boolean(
-        (ageMs !== null && ageMs > 30_000) ||
-        (createdAt && clientConnectedAt && clientConnectedAt > createdAt)
-      )
-      // #4828: session-scoped to the bound session — the reject belongs
-      // to the OWNER of `boundSessionId`, not the mismatched `originSessionId`.
-      loggerForSession('ws', client.boundSessionId).warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
-        requestId,
-        decision,
-        clientId: client.id,
-        activeSessionId: client.activeSessionId ?? null,
-        boundSessionId: client.boundSessionId ?? null,
-        mappedSessionId: mappedSessionId ?? null,
-        requestCreatedAt: createdAt,
-        clientConnectedAt,
-        requestAgeMs: ageMs,
-        likelyPostReconnect,
-      })}`)
-      // Don't consume the permissionSessionMap entry — let the legitimate
-      // client still respond to it.
-      // Issue #2912: payload shape matches every other SESSION_TOKEN_MISMATCH
-      // emit site so the client can branch on `code` alone without worrying
-      // about which transport surface (type: 'error' vs 'session_error' vs
-      // 'web_task_error') produced it.
-      ctx.send(ws, {
-        type: 'error',
-        requestId: requestId ?? null,
-        ...buildSessionTokenMismatchPayload({
-          sessionManager: ctx.sessionManager,
-          boundSessionId: client.boundSessionId,
-          message: 'Not authorized to respond to this permission request',
-        }),
-      })
-      return
-    }
-  }
-
   // #4798 (audit P0 symmetry with #4788): for UNBOUND clients, require the
-  // originSessionId to match the client's active or subscribed sessions
-  // before routing the decision. Without this, an unbound dashboard tab
-  // could approve/deny a permission for any session by replaying a known
-  // requestId — arguably MORE dangerous than the question hijack vector
-  // (#4788) because permission decisions gate file writes / shell exec.
-  // Mirrors the default filter used by _broadcastToSession (ws-broadcaster.js:106)
-  // so the set of clients permitted to RESPOND to a permission is the same
-  // set that could legitimately have RECEIVED it. Leaves the mapping
-  // intact so the legitimate subscribed client can still respond.
-  //
-  // Paired with the WsServer-side `_registerPermissionRoute` helper which
-  // auto-subscribes eligible clients at dispatch time — that keeps the
-  // legitimate "view A → get permission for A → switch to B → respond"
-  // flow working after this guard lands.
+  // originSessionId to match the client's active or subscribed sessions before
+  // routing the decision. Without this, an unbound dashboard tab could
+  // approve/deny a permission for any session by replaying a known requestId —
+  // arguably MORE dangerous than the question hijack vector (#4788) because
+  // permission decisions gate file writes / shell exec. Mirrors the default
+  // filter used by _broadcastToSession (ws-broadcaster.js:106). Leaves the
+  // mapping intact so the legitimate subscribed client can still respond. WS-ONLY
+  // by design: a primary HTTP caller has full session authority (§3), so the HTTP
+  // path has no analog and must not inherit this restriction.
   if (!client.boundSessionId && originSessionId) {
     const subscribed = originSessionId === client.activeSessionId
       || (client.subscribedSessionIds && client.subscribedSessionIds.has(originSessionId))
     if (!subscribed) {
-      // #4828: session-scoped — the permission belongs to `originSessionId`
-      // when known. Fall back to module-level `log` when the request had
-      // no mapping AND the client isn't bound (legacy / unknown route).
       sessionLogger(originSessionId).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
       return
     }
   }
 
-  ctx.permissionSessionMap.delete(requestId)
+  const resolver = createPermissionResolver({
+    permissionSessionMap: ctx.permissionSessionMap,
+    pendingPermissions: ctx.pendingPermissions,
+    getSessionManager: () => ctx.sessionManager,
+    resolveLegacyPermission: (rid, dec) => ctx.permissions.resolvePermission(rid, dec),
+    getPermissionAudit: () => ctx.permissionAudit,
+  })
+  const result = resolver.resolve(requestId, decision, client.boundSessionId, {
+    clientId: client.id,
+    dispatchFallbackSessionId: client.activeSessionId,
+  })
 
-  let resolved = false
-
-  if (originSessionId && ctx.sessionManager) {
-    const entry = ctx.sessionManager.getSession(originSessionId)
-    if (entry && typeof entry.session.respondToPermission === 'function') {
-      const hasPending = entry.session._pendingPermissions?.has(requestId)
-      if (hasPending !== false) {
-        entry.session.respondToPermission(requestId, decision)
-        resolved = true
-      } else {
-        ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
-      }
-      if (!resolved) return
-    }
-  }
-
-  if (!resolved && ctx.pendingPermissions.has(requestId)) {
-    ctx.permissions.resolvePermission(requestId, decision)
-    resolved = true
-  }
-
-  if (!resolved) {
-    ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
-  }
-
-  // Audit trail for permission decisions. Auto-deny paths
-  // (timeout/aborted/cleared) are audited from the unified pipeline in
-  // ws-server.js (#3057) — this branch only fires for user-initiated WS
-  // responses, hence reason: 'user'.
-  if (resolved && ctx.permissionAudit) {
-    ctx.permissionAudit.logDecision({
-      clientId: client.id,
-      sessionId: originSessionId,
+  if (result.kind === 'binding_mismatch') {
+    // Correlate with the [session-binding-create] log at the same requestId to
+    // recover the original creating client's bound session + createdAt (#2832).
+    const permData = (mappedSessionId && ctx.sessionManager)
+      ? ctx.sessionManager.getSession(mappedSessionId)?.session?._lastPermissionData?.get(requestId)
+      : ctx.pendingPermissions?.get(requestId)?.data
+    const createdAt = permData?.createdAt ?? null
+    const ageMs = createdAt ? Date.now() - createdAt : null
+    const clientConnectedAt = client.authTime ?? null
+    const likelyPostReconnect = Boolean(
+      (ageMs !== null && ageMs > 30_000) ||
+      (createdAt && clientConnectedAt && clientConnectedAt > createdAt)
+    )
+    // #4828: session-scoped to the bound session — the reject belongs to the
+    // OWNER of `boundSessionId`, not the mismatched mapped session.
+    loggerForSession('ws', result.boundSessionId).warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
       requestId,
       decision,
-      reason: 'user',
+      clientId: client.id,
+      activeSessionId: client.activeSessionId ?? null,
+      boundSessionId: client.boundSessionId ?? null,
+      mappedSessionId: mappedSessionId ?? null,
+      requestCreatedAt: createdAt,
+      clientConnectedAt,
+      requestAgeMs: ageMs,
+      likelyPostReconnect,
+    })}`)
+    // The resolver does NOT consume the map entry on a mismatch — the
+    // legitimate client can still respond. Issue #2912: payload shape matches
+    // every other SESSION_TOKEN_MISMATCH emit site.
+    ctx.send(ws, {
+      type: 'error',
+      requestId: requestId ?? null,
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessionManager,
+        boundSessionId: result.boundSessionId,
+        message: 'Not authorized to respond to this permission request',
+      }),
     })
+    return
   }
 
-  // #3048: SDK-session broadcasts now go through the unified pipeline
-  // (PermissionManager.emit → SdkSession.emit → SessionManager session_event
-  // → EventNormalizer → broadcast). Legacy non-SDK sessions resolved via
-  // ctx.permissions.resolvePermission have no PermissionManager to wire
-  // through, so keep an inline broadcast for that branch only.
-  if (resolved && !originSessionId) {
+  if (result.kind === 'expired' || result.kind === 'not_found') {
+    ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
+    return
+  }
+
+  // result.kind === 'resolved' — the resolver dispatched (sdk|legacy) + audited.
+  // #3048: SDK-session broadcasts go through the unified pipeline
+  // (PermissionManager → SdkSession → SessionManager → EventNormalizer →
+  // broadcast). Legacy non-SDK sessions (no PermissionManager) keep an inline
+  // broadcast for the unmapped case only — mirrors the prior `!originSessionId`.
+  if (!result.sessionId) {
     ctx.broadcast(
       { type: 'permission_resolved', requestId, decision },
       (c) => c.id !== client.id
