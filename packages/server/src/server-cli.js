@@ -3,12 +3,16 @@ import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STAL
 import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
-import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
+import { WsServer } from './ws-server.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
-import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
+// #5368 slice (c): QUICK_TUNNEL_DNS_SETTLE_MS + TUNNEL_STATUS_MIN_PROTOCOL_VERSION
+// moved to tunnel-lifecycle-handler.js with the tunnel block; createTunnel +
+// waitForTunnel are still passed into the handler.
+import { waitForTunnel } from './tunnel-check.js'
 import { PushManager } from './push.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { StartupDisplay } from './server-cli/startup-display.js'
+import { TunnelLifecycleHandler } from './server-cli/tunnel-lifecycle-handler.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -843,108 +847,41 @@ export async function startCliServer(config) {
   const SKIP_TUNNEL = NO_AUTH || !tunnelArg || !!externalUrl
 
   if (!SKIP_TUNNEL) {
-    // 4. Start the tunnel
-    tunnel = createTunnel({
-      port: PORT,
-      mode: tunnelArg.mode,
-      tunnelConfig: config.tunnelConfig,
-      tunnelName: config.tunnelName || null,
-      tunnelHostname: config.tunnelHostname || null,
+    // #5368 slice (c): the tunnel lifecycle (create + start + emergency-cleanup
+    // on a start throw, wireTunnelEvents, tunnel_recovered re-verify + QR
+    // re-render, waitForTunnel with warming/ready broadcasts + emergency-cleanup
+    // on failure, success QR + pairing-id extension) lives in
+    // TunnelLifecycleHandler. The function deps are passed in (createTunnel /
+    // waitForTunnel as test seams; emergencyCleanup / wireTunnelEvents /
+    // buildTunnel*Status are server-cli-defined, so injecting avoids a circular
+    // import). On startup failure it returns ok:false after the full cleanup —
+    // preserving startCliServer's original `process.exitCode = 1; return`.
+    const tunnelHandler = new TunnelLifecycleHandler({
+      createTunnel,
+      emergencyCleanup,
+      wireTunnelEvents,
+      waitForTunnel,
+      buildTunnelWarmingStatus,
+      buildTunnelReadyStatus,
+      config: {
+        port: PORT,
+        tunnelArg,
+        tunnelConfig: config.tunnelConfig,
+        tunnelName: config.tunnelName || null,
+        tunnelHostname: config.tunnelHostname || null,
+      },
+      wsServer,
+      startupDisplay,
+      pairingManager,
+      cleanupRefs: { mdnsService, bonjourInstance, tokenManager, sessionManager },
+      logger: log,
     })
-    let wsUrl, httpUrl
-    try {
-      ({ wsUrl, httpUrl } = await tunnel.start())
-    } catch (startErr) {
-      const message = `Tunnel start failed: ${startErr.message}`
-      log.error(message)
-      try { wsServer.broadcastError('tunnel', message, false) } catch {}
-      console.error(`\n  ✗ ${message}\n`)
-      await emergencyCleanup({ tunnel, wsServer, mdnsService, bonjourInstance, tokenManager, pairingManager, sessionManager })
+    const result = await tunnelHandler.createAndStart()
+    tunnel = result.tunnel || tunnel
+    if (!result.ok) {
       process.exitCode = 1
       return
     }
-    startupDisplay.currentWsUrl = wsUrl
-
-    // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
-    wireTunnelEvents(tunnel, wsServer)
-
-    tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
-      // #5314 (WP-1.4) — async event listener: waitForTunnel THROWS on a routine
-      // DNS-settle failure, and an unhandled rejection here would hit server-cli's
-      // unhandledRejection handler → process.exit(1), crashing the whole server on
-      // a recoverable tunnel hiccup. Contain it: log and wait for the next
-      // tunnel_recovered retry.
-      try {
-        log.info(`Tunnel recovered after ${attempt} attempt(s)`)
-
-        // Re-verify the new tunnel URL
-        await waitForTunnel(newHttpUrl, {
-          initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
-        })
-
-        // Only display new QR code if URL actually changed
-        if (newWsUrl !== startupDisplay.currentWsUrl) {
-          startupDisplay.currentWsUrl = newWsUrl
-          if (pairingManager) pairingManager.refresh()
-          await startupDisplay.displayQr(newWsUrl, newHttpUrl, modeLabel)
-          wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
-        } else {
-          log.info(`Tunnel URL unchanged: ${newWsUrl}`)
-          wsServer.broadcastStatus('Tunnel connection recovered')
-        }
-      } catch (err) {
-        log.error(`tunnel_recovered handler failed (will retry on next recovery): ${err?.message || err}`)
-      }
-    })
-
-    // 6. Wait for tunnel to be fully routable (DNS propagation)
-    // UX landmine #4: waitForTunnel now throws TUNNEL_NOT_ROUTABLE
-    // instead of silently proceeding with a broken QR.
-    // #2836: phase 'tunnel_warming' is the current wire name. The
-    // previous name 'tunnel_verifying' is still accepted by the dashboard
-    // handler for backward compatibility with in-flight clients.
-    //
-    // #2849: gate on protocolVersion >= 2. v1 dashboards render unknown
-    // `server_status` payloads as chat messages because they only read
-    // `msg.message` (falls through to the legacy plain-status branch).
-    // The structured phase field is a v2 addition.
-    wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, buildTunnelWarmingStatus({ tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl }))
-    try {
-      await waitForTunnel(httpUrl, {
-        initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
-        onAttempt: (attempt, maxAttempts) => {
-          wsServer.broadcastMinProtocolVersion(
-            TUNNEL_STATUS_MIN_PROTOCOL_VERSION,
-            buildTunnelWarmingStatus({
-              tunnelMode: tunnelArg.mode,
-              tunnelUrl: httpUrl,
-              attempt,
-              maxAttempts,
-            }),
-          )
-        },
-      })
-    } catch (tunnelErr) {
-      log.error(tunnelErr.message)
-      try { wsServer.broadcastError('tunnel', tunnelErr.message, false) } catch {}
-      console.error(`\n  ✗ ${tunnelErr.message}\n`)
-      // Clean up everything that's been started so we don't leave
-      // orphan processes or armed timers holding the event loop alive.
-      await emergencyCleanup({ tunnel, wsServer, mdnsService, bonjourInstance, tokenManager, pairingManager, sessionManager })
-      process.exitCode = 1
-      return
-    }
-    wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, buildTunnelReadyStatus({ tunnelUrl: httpUrl }))
-
-    // 7. Generate connection info
-    const modeLabel = `cloudflare:${tunnelArg.mode}`
-    startupDisplay.currentTunnelMode = modeLabel
-    await startupDisplay.displayQr(wsUrl, httpUrl, modeLabel)
-
-    // Extend the pairing ID validity after first QR display to give the user
-    // time to scan. Without this, slow tunnel setup (60-80s) can consume most
-    // of the default 60s TTL, causing rotation before the user can scan (#2599).
-    if (pairingManager) pairingManager.extendCurrentId()
 
   } else if (externalUrl) {
     // Ready message already printed above
