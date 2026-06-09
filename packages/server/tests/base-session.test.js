@@ -167,6 +167,38 @@ describe('BaseSession', () => {
     })
   })
 
+  describe('setter hooks (#5374)', () => {
+    it('setModel fires _onModelChanged once with the resolved model, only when it changes', () => {
+      const s = new BaseSession()
+      const calls = []
+      s._onModelChanged = (m) => calls.push(m)
+      s.model = null
+      assert.equal(s.setModel('claude-sonnet-4-5-20250514'), true)
+      assert.deepEqual(calls, [s.model], 'hook fired once with the resolved model')
+      // No-op set (same model) must NOT fire the hook.
+      assert.equal(s.setModel('claude-sonnet-4-5-20250514'), false)
+      assert.equal(calls.length, 1, 'hook not fired on a no-op set')
+      // Busy guard rejects → hook not fired.
+      s._isBusy = true
+      assert.equal(s.setModel('claude-opus-4-1-20250805'), false)
+      assert.equal(calls.length, 1, 'hook not fired when busy guard rejects')
+    })
+
+    it('setPermissionMode fires _onPermissionModeChanged once with the mode, only when it changes', () => {
+      const s = new BaseSession()
+      const calls = []
+      s._onPermissionModeChanged = (m) => calls.push(m)
+      s.permissionMode = 'approve'
+      assert.equal(s.setPermissionMode('plan'), true)
+      assert.deepEqual(calls, ['plan'], 'hook fired once with the new mode')
+      // Invalid mode rejected → hook not fired.
+      assert.equal(s.setPermissionMode('bogus'), false)
+      // No-op (same mode) → hook not fired.
+      assert.equal(s.setPermissionMode('plan'), false)
+      assert.equal(calls.length, 1, 'hook only fired on the real change')
+    })
+  })
+
   // #3185: per-session promptEvaluator toggle. Default is `false` so the
   // auto-evaluator chain (sub-tasks of #3068) is opt-in per session — the
   // manual `evaluate_draft` flow (PR #3089) is the existing behaviour and

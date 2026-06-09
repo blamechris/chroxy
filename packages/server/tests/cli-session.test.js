@@ -921,32 +921,35 @@ describe('#988 — _killAndRespawn extraction', () => {
       '_killAndRespawn should be extracted as a shared method')
   })
 
-  it('setModel uses _killAndRespawn instead of inline kill logic', async () => {
+  // #5374 hoisted the busy/no-op guard into BaseSession.setModel/setPermissionMode,
+  // which fire the _onModelChanged / _onPermissionModeChanged hooks; CliSession's
+  // respawn logic moved into those hooks (it no longer overrides the setters).
+  it('_onModelChanged uses _killAndRespawn instead of inline kill logic', async () => {
     const { readFileSync } = await import('node:fs')
     const { dirname, join } = await import('node:path')
     const { fileURLToPath } = await import('node:url')
     const dir = dirname(fileURLToPath(import.meta.url))
     const source = readFileSync(join(dir, '../src/cli-session.js'), 'utf-8')
-    const setModelBlock = source.match(/setModel\(model\)\s*\{[\s\S]*?^  \}/m)
-    assert.ok(setModelBlock, 'setModel method should exist')
+    const setModelBlock = source.match(/_onModelChanged\(\)\s*\{[\s\S]*?^  \}/m)
+    assert.ok(setModelBlock, '_onModelChanged hook should exist')
     assert.ok(setModelBlock[0].includes('_killAndRespawn'),
-      'setModel should delegate to _killAndRespawn')
+      '_onModelChanged should delegate to _killAndRespawn')
     assert.ok(!setModelBlock[0].includes('forceKillTimer'),
-      'setModel should not contain inline kill logic (forceKillTimer)')
+      '_onModelChanged should not contain inline kill logic (forceKillTimer)')
   })
 
-  it('setPermissionMode uses _killAndRespawn instead of inline kill logic', async () => {
+  it('_onPermissionModeChanged uses _killAndRespawn instead of inline kill logic', async () => {
     const { readFileSync } = await import('node:fs')
     const { dirname, join } = await import('node:path')
     const { fileURLToPath } = await import('node:url')
     const dir = dirname(fileURLToPath(import.meta.url))
     const source = readFileSync(join(dir, '../src/cli-session.js'), 'utf-8')
-    const setPermBlock = source.match(/setPermissionMode\(mode\)\s*\{[\s\S]*?^  \}/m)
-    assert.ok(setPermBlock, 'setPermissionMode method should exist')
+    const setPermBlock = source.match(/_onPermissionModeChanged\(mode\)\s*\{[\s\S]*?^  \}/m)
+    assert.ok(setPermBlock, '_onPermissionModeChanged hook should exist')
     assert.ok(setPermBlock[0].includes('_killAndRespawn'),
-      'setPermissionMode should delegate to _killAndRespawn')
+      '_onPermissionModeChanged should delegate to _killAndRespawn')
     assert.ok(!setPermBlock[0].includes('forceKillTimer'),
-      'setPermissionMode should not contain inline kill logic (forceKillTimer)')
+      '_onPermissionModeChanged should not contain inline kill logic (forceKillTimer)')
   })
 })
 

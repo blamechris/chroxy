@@ -1400,16 +1400,15 @@ export class CliSession extends BaseSession {
   /**
    * Change the model used for subsequent messages.
    * Kills the current process and respawns with the new model (new session).
+   * #5374: BaseSession.setModel owns the guard + resolve and fires this hook.
    */
-  setModel(model) {
-    if (!super.setModel(model)) return
+  _onModelChanged() {
     // #4828: session-scoped if init has fired before the model change.
     ;(this._log || log).info(`Model changed to ${this.model || 'default'}, restarting process`)
     this._killAndRespawn()
   }
 
-  setPermissionMode(mode) {
-    if (!super.setPermissionMode(mode)) return
+  _onPermissionModeChanged(mode) {
     // #3729 panic-button semantics: BaseSession.setPermissionMode lets `'auto'`
     // bypass the `_isBusy` guard, so flipping to auto mid-turn IS destructive —
     // the in-flight `claude -p` process is killed and respawned, dropping the

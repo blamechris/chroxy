@@ -2969,11 +2969,12 @@ export class ClaudeTuiSession extends BaseSession {
    * on the next tool-call boundary; an in-flight tool that already
    * routed to /permission is unaffected.
    */
-  setPermissionMode(mode) {
-    if (!super.setPermissionMode(mode)) return
+  // #5374: BaseSession.setPermissionMode owns the validation + guard and fires
+  // this hook after `this.permissionMode` is set, only when the mode changed.
+  _onPermissionModeChanged(mode) {
     if (!this._permissionModeFile) {
-      // Permissions weren't enabled at start (no port). Mode was
-      // updated on `this.permissionMode` by super; nothing else to do.
+      // Permissions weren't enabled at start (no port). Mode was already
+      // updated on `this.permissionMode` by BaseSession; nothing else to do.
       log.info(`Permission mode changed to ${mode} (no sidecar — hook script not active)`)
       return
     }
