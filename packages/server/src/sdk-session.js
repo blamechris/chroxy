@@ -1296,15 +1296,14 @@ export class SdkSession extends BaseSession {
 
   /**
    * Change the model. In SDK mode this doesn't require process restart.
+   * #5374: BaseSession.setModel owns the guard + resolve and fires this hook.
    */
-  setModel(model) {
-    if (!super.setModel(model)) return
+  _onModelChanged() {
     // #4828: session-scoped when init has fired.
     ;(this._log || log).info(`Model changed to ${this.model || 'default'}`)
   }
 
-  setPermissionMode(mode) {
-    if (!super.setPermissionMode(mode)) return
+  _onPermissionModeChanged(mode) {
     this._permissions.clearRules()
     // #3729: switching TO auto is a "panic button" — drain any pending
     // permission prompts so the user isn't left staring at modals after

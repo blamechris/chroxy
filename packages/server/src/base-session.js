@@ -1196,9 +1196,10 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * Change the model. Subclasses that need to restart (CliSession) should
-   * override and call super.setModel() for the guard + resolve, then act.
-   * Returns true if the model actually changed (subclass should act).
+   * Change the model. Centralizes the busy/no-op guard + resolve; subclasses
+   * that need a provider-specific reaction (CliSession respawn, SdkSession log)
+   * override the `_onModelChanged` hook instead of the whole setter (#5374).
+   * Returns true if the model actually changed.
    */
   setModel(model) {
     if (this._isBusy) {
@@ -1209,12 +1210,22 @@ export class BaseSession extends EventEmitter {
       return false
     }
     this.model = newModel
+    this._onModelChanged(this.model)
     return true
   }
 
   /**
-   * Change the permission mode. Subclasses that need to restart (CliSession)
-   * should override and call super.setPermissionMode() for validation.
+   * #5374: protected hook fired by setModel() AFTER validation + the field is
+   * set, only when the model actually changed. Default no-op; subclasses
+   * override with their provider-specific action (and their own logging).
+   */
+  _onModelChanged(_model) {}
+
+  /**
+   * Change the permission mode. Centralizes validation + the busy/no-op guard;
+   * subclasses override the `_onPermissionModeChanged` hook for their
+   * provider-specific action (CliSession respawn, SdkSession drain, TUI sidecar
+   * write) instead of the whole setter (#5374).
    * Returns true if the mode actually changed.
    */
   setPermissionMode(mode) {
@@ -1233,8 +1244,18 @@ export class BaseSession extends EventEmitter {
       return false
     }
     this.permissionMode = mode
+    this._onPermissionModeChanged(mode)
     return true
   }
+
+  /**
+   * #5374: protected hook fired by setPermissionMode() AFTER validation + the
+   * field is set, only when the mode actually changed. Default no-op;
+   * subclasses override with their provider-specific action (and their own
+   * logging). JsonlSubprocessSession deliberately overrides the whole setter
+   * to a no-op (it suppresses the field update too), so it does not use this.
+   */
+  _onPermissionModeChanged(_mode) {}
 
   /**
    * Toggle the per-session promptEvaluator flag (#3185). Returns `true`

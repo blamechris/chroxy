@@ -1885,18 +1885,15 @@ export class ClaudeByokSession extends BaseSession {
     this.emit('agent_completed', { toolUseId })
   }
 
-  setModel(model) {
-    super.setModel(model)
-    // Next sendMessage will use the new model. No restart needed — the
-    // SDK is just a stateless HTTP client; each turn opens a fresh stream.
-  }
+  // #5374: no setModel override needed — BaseSession.setModel updates the
+  // field and the next sendMessage uses it. No restart: the SDK is a stateless
+  // HTTP client; each turn opens a fresh stream.
 
-  setPermissionMode(mode) {
-    if (!super.setPermissionMode(mode)) return
+  _onPermissionModeChanged(mode) {
     // #3729 / #4462: flipping to auto/bypass mid-turn must drain any
     // open permission prompts so the user isn't left staring at modals
     // after declaring "approve everything". Mirrors sdk-session.js's
-    // setPermissionMode behaviour.
+    // behaviour.
     //
     // MCP trust prompts are exempt — autoAllowPending denies them so
     // the bypass doesn't silently persist a binary to the trust store

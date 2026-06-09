@@ -293,9 +293,9 @@ export class GeminiSession extends JsonlSubprocessSession {
     super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'gemini', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, resumeSessionId })
   }
 
-  setModel(model) {
-    return super.setModel(model)
-  }
+  // #5374: removed the no-op `setModel` override — it only forwarded to
+  // BaseSession.setModel, which now owns the guard + the (default no-op)
+  // _onModelChanged hook.
 
   // ------------------------------------------------------------------
   // JsonlSubprocessSession overrides
