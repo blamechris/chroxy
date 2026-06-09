@@ -8,17 +8,13 @@
  */
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
-import { statSync } from 'fs'
 import { resolveModelId } from './models.js'
 import {
-  loadActiveSkillsLayered,
   formatSkillsForPrompt,
-  groupSkillsByInjectionMode,
-  findRepoSkillsDir,
-  DEFAULT_SKILLS_DIR,
   SKILLS_PROMPT_HEADER,
 } from './skills-loader.js'
-import { SkillsTrustStore } from './skills-trust.js'
+import { SkillsManager } from './skills-manager.js'
+import { BackgroundShellTracker } from './background-shell-tracker.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { createLogger } from './logger.js'
 import { ActivityRegistry } from './activity-registry.js'
@@ -93,35 +89,15 @@ export const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000
 // to 0 to disable.
 export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 5 * 60 * 1000
 
-// #5177: how often the background-shell sweep runs (ms). A completed
-// background shell that the agent never polls via `BashOutput` is reaped on
-// the next tick after its output file quiesces. 15s is a tradeoff: snappy
-// enough that the dashboard banner clears within a sensible window of the
-// command actually finishing, slow enough that the per-tick stat() of each
-// pending output file is negligible. Only armed while shells are pending.
-export const BACKGROUND_SHELL_SWEEP_MS = 15 * 1000
-
-// #5177: quiescence window (ms). A pending shell whose NON-EMPTY output file
-// has not been modified for at least this long is treated as QUIESCED.
-// #5247: quiescence is ADVISORY — it clears the dashboard "Waiting on
-// background work" banner but does NOT reap the shell or flip `isRunning`,
-// because a non-empty-then-idle output file is indistinguishable from a live
-// dev server / file-watcher / `tail -f` that logged once and now waits. The
-// old behaviour (reap + flip isRunning on quiescence) idle-timed those live
-// sessions out — re-opening #4307. Liveness is released only by a BashOutput
-// poll or destroy. 60s is still a reasonable banner-clear delay.
-export const BACKGROUND_SHELL_QUIESCE_MS = 60 * 1000
-
-// #5265: HARD-quiesce window (ms). Distinct from (and much longer than) the 60s
-// advisory banner window above. After this much CONTINUOUS output silence the
-// sweep REAPS the shell — removing it from `_pendingBackgroundShells` so
-// `isRunning` flips and SessionTimeoutManager can finally idle-time a session
-// that was pinned "running" only by a long-dead, never-polled background
-// command. 4h is deliberately conservative: a real long-runner that emits any
-// output within any 4h stretch keeps its mtime fresh and is never reaped; only
-// a genuinely silent-for-hours shell (overwhelmingly likely finished) is
-// reclaimed. Set the instance field to 0 to disable (advisory-only #5247).
-export const BACKGROUND_SHELL_HARD_QUIESCE_MS = 4 * 60 * 60 * 1000
+// #5376: the background-shell sweep/quiesce machinery moved to
+// background-shell-tracker.js. Re-exported here so existing importers
+// (session-timeout-manager, tests) keep their import path. See that module for
+// the #5177 / #5247 / #5265 rationale on each window.
+export {
+  BACKGROUND_SHELL_SWEEP_MS,
+  BACKGROUND_SHELL_QUIESCE_MS,
+  BACKGROUND_SHELL_HARD_QUIESCE_MS,
+} from './background-shell-tracker.js'
 
 // #5367: canonical list of the opts BaseSession's constructor accepts, in the
 // exact order they appear in the destructure below. Single source of truth for
@@ -166,23 +142,6 @@ export function buildBaseSessionOpts(fullOpts = {}, overrides = {}) {
   }
   return { ...out, ...overrides }
 }
-
-// Default per-provider injection mode (#3200). Subprocess providers without
-// a system-prompt flag (Codex, Gemini) prepend skills to the first user
-// message; Claude (SDK or CLI) appends to the system prompt. Maps the
-// session's provider id to the channel that the existing skills text
-// pipeline already uses, so a skill without `injection:` keeps its
-// behaviour from v1.
-const DEFAULT_INJECTION_BY_PROVIDER = {
-  'claude-sdk': 'append',
-  'claude-cli': 'append',
-  'docker-sdk': 'append',
-  'docker-cli': 'append',
-  'docker': 'append',
-  'codex': 'prepend',
-  'gemini': 'prepend',
-}
-const FALLBACK_INJECTION_MODE = 'append'
 
 // #3639: validate a constructor-supplied promptEvaluatorSkipPattern. Only
 // real regex sources survive — anything else (non-string, malformed
@@ -338,84 +297,20 @@ export class BaseSession extends EventEmitter {
     // `finally` safety-net clear (the interrupt-races-result case), and collapsing
     // them would reopen that race.
     this._intentionalStop = false
-    // #4307: per-session map of backgrounded Bash shells the agent is
-    // still waiting on. Keyed by the shellId Claude prints in the
-    // `Command running in background with ID: <id>` tool_result. Lives
-    // beyond `_clearMessageState` (turn-end) on purpose — the whole
-    // point of #4307 is that a session waiting on background work is
-    // distinct from an idle session and must NOT be reaped by
-    // `SessionTimeoutManager`. Entries clear in two paths:
-    //   1. Matching `BashOutput` tool call (the agent acknowledged the
-    //      shell — either it polled and saw output, or it asked to be
-    //      killed; either way our model of pending work is stale).
-    //   2. `destroy()` (no leak — see `_destroyPendingBackgroundShells`).
-    // SDK provider: if the agent never calls `BashOutput`, the entry
-    // persists until destroy. Documented behaviour — we deliberately do
-    // not try to tail the output file ourselves (that's a separate
-    // sidecar lifecycle problem, out of scope).
-    // TUI provider: same parity — the agent's next turn surfaces the
-    // BashOutput call and clears the entry naturally.
-    //
-    // #4417: TRANSIENT BY DESIGN — this map is in-memory only and is
-    // NOT serialized to `~/.chroxy/session-state.json`. A server
-    // restart drops every entry. This is the correct behaviour, not an
-    // oversight:
-    //   - The actual OS-level background shells are owned by the
-    //     claude TUI / SDK runtime, not by chroxy. On server restart
-    //     those processes have either died with the parent or have
-    //     been orphaned beyond chroxy's ability to correlate (we never
-    //     held the PID, only the opaque shellId Claude printed).
-    //   - Persisting the list would therefore re-surface a "waiting
-    //     on <command>" indicator that is at best stale and at worst a
-    //     UX lie — chroxy can't deliver a clear signal because the
-    //     shellId is meaningless to the new claude process.
-    //   - The agent re-discovers reality on its next turn via its own
-    //     context (a fresh `BashOutput` poll, or a `Bash` re-dispatch).
-    //     The user-facing consequence of dropping the map is that the
-    //     activity chip briefly shows idle until the next agent turn —
-    //     a minor, recoverable UX nit, not data loss.
-    // If a future change ever needs to persist this state, it MUST
-    // also reconcile with the (unknown) post-restart claude side —
-    // blindly restoring a stale Map will lock the indicator on forever.
-    this._pendingBackgroundShells = new Map()
-    // #5177: periodic sweep that reaps COMPLETED background shells without
-    // waiting for the agent to call `BashOutput`. Before #5177 a shell that
-    // finished (e.g. `for i in $(seq 1 30); …`, exit 0) stayed pending
-    // forever — `isRunning` never returned to false and the dashboard's
-    // "Waiting on background work" banner stuck, because the only clear
-    // signal was an explicit BashOutput poll that never comes after the
-    // turn ends. The sweep observes completion via the output file claude
-    // names in the tool_result (`Output is being written to: <path>`): a
-    // finished command stops appending, so a quiesced mtime reaps it. The
-    // timer is armed only while the pending map is non-empty (lazy) and
-    // stopped when it drains or the session is destroyed (no leak / no idle
-    // wakeups). Interval + completion check are injectable for tests.
-    this._backgroundShellSweepTimer = null
-    this._backgroundShellSweepMs = BACKGROUND_SHELL_SWEEP_MS
-    // Quiescence window: a shell whose output file has not been written to
-    // for this long is treated as complete. Conservative so a command that
-    // pauses output mid-run is not reaped prematurely; the agent's own
-    // BashOutput poll still clears faster when it happens.
-    this._backgroundShellQuiesceMs = BACKGROUND_SHELL_QUIESCE_MS
-    // Injectable quiescence check — `(entry) => boolean`. Default reads the
-    // output file's mtime; tests override this to drive deterministic
-    // quiescence without touching the filesystem or real timers.
-    this._backgroundShellQuiesceCheck = null
-    // #5265: HARD-quiesce window. The 60s advisory quiesce above only clears
-    // the banner — a finished-but-never-polled shell stays in the map (isRunning
-    // pinned true) until destroy, so a long-idle session can be pinned "running"
-    // by a long-dead command forever. After this much CONTINUOUS output silence
-    // a shell is overwhelmingly likely finished, so the sweep REAPS it (releases
-    // liveness) — the accepted tradeoff (a multi-hour-silent shell ≈ done). A
-    // noisy long-runner (dev server logging within the window) keeps its mtime
-    // fresh and is never hard-reaped. Set to 0 to disable hard-reaping (revert
-    // to the #5247 advisory-only behaviour). Overridable in tests.
-    // #5288: config-driven via the constructor opt; `?? constant` keeps the
-    // default when unset and honours an explicit 0 (disable).
-    this._backgroundShellHardQuiesceMs = backgroundShellHardQuiesceMs ?? BACKGROUND_SHELL_HARD_QUIESCE_MS
-    // Injectable hard-quiesce check — `(entry) => boolean`. Default reads the
-    // output file's mtime against the hard window; tests override it.
-    this._backgroundShellHardQuiesceCheck = null
+    // #4307/#5177/#5247/#5265: pending background-shell tracking + the reaping
+    // sweep live in BackgroundShellTracker (#5376). BaseSession composes one and
+    // delegates the public surface (trackBackgroundShell / clearBackgroundShell /
+    // getPendingBackgroundShells / _destroyPendingBackgroundShells) plus the
+    // test-facing tunables (`_backgroundShell*` get/set shims below) to it;
+    // `isRunning` consults its pending count. Events flow from the session via the
+    // injected emit. #5288: `backgroundShellHardQuiesceMs` is config-driven; the
+    // tracker honours an explicit 0 (disable). See background-shell-tracker.js for
+    // the transient-by-design (#4417) and quiescence-window (#4417/#5247/#5265)
+    // rationale.
+    this._backgroundShellTracker = new BackgroundShellTracker({
+      emit: (event, payload) => this.emit(event, payload),
+      hardQuiesceMs: backgroundShellHardQuiesceMs,
+    })
     // #4307: ephemeral map of recent `Bash` tool_uses dispatched with
     // `run_in_background: true`, keyed by toolUseId. Used to recover the
     // command string when the matching tool_result lands carrying the
@@ -514,61 +409,35 @@ export class BaseSession extends EventEmitter {
     // list are filtered OUT, skills without one still apply).
     this._provider = provider || null
 
-    // Per-session manually-activated skill names (#3199). Skills declared
-    // `activation: manual` are off by default and only load when their
-    // name is in this Set. #3209 adds the WS toggle path
-    // (activateSkill/deactivateSkill) that mutates this Set + reloads.
-    this._activeManualSkills = activeManualSkills instanceof Set
-      ? new Set(activeManualSkills)
-      : (Array.isArray(activeManualSkills) ? new Set(activeManualSkills) : new Set())
+    // #2957/#3199/#3204/#3248: the shared-skills system — the manual-activation
+    // set, the immutable load-time inputs (dirs, byte caps, provider allowlist),
+    // the trust store, the parse cache, and the loader-built caches — lives in
+    // SkillsManager (#5376). BaseSession composes one and exposes compat getters
+    // (`_skills`, `_skillsDir`, `_activeManualSkills`, `_trustStore`,
+    // `_providerSkillAllowlist`, …) so existing consumers, the prompt builders,
+    // and the #5367 opt sentinel keep their surface; activateSkill /
+    // deactivateSkill / _loadSkills delegate to it. `_provider` (above) is kept
+    // on the session for non-skills use and also passed through here.
+    this._skillsManager = new SkillsManager({
+      cwd: this.cwd,
+      provider,
+      activeManualSkills,
+      skillsDir,
+      repoSkillsDir,
+      maxSkillBytes,
+      maxTotalSkillBytes,
+      providerSkillAllowlist,
+      trustStore,
+      trustMismatchMode,
+      emit: (...args) => this.emit(...args),
+    })
 
-    // Cache the immutable load-time inputs so the runtime toggle path
-    // (#3209) can rebuild layerOpts without re-parsing constructor args.
-    // These are set once at construction and never mutate.
-    this._skillsDir = skillsDir || DEFAULT_SKILLS_DIR
-    this._repoSkillsDir = repoSkillsDir !== undefined
-      ? repoSkillsDir
-      : findRepoSkillsDir(this.cwd)
-    this._maxSkillBytes = Number.isFinite(maxSkillBytes) ? maxSkillBytes : null
-    this._maxTotalSkillBytes = Number.isFinite(maxTotalSkillBytes) ? maxTotalSkillBytes : null
-    this._providerSkillAllowlist = providerSkillAllowlist != null
-      && typeof providerSkillAllowlist === 'object'
-      && !Array.isArray(providerSkillAllowlist)
-      ? providerSkillAllowlist
-      : null
-
-    // Trust store (#3204). Two activation paths:
-    //   - `trustStore: <SkillsTrustStore-like>` — caller-supplied store
-    //     (tests pin a temp file path here so the real
-    //     ~/.chroxy/skills-trust.json is never touched).
-    //   - `trustMismatchMode: 'warn' | 'block'` — opt into the default
-    //     store at ~/.chroxy/skills-trust.json with the chosen mode.
-    //     SessionManager always passes one of these strings through;
-    //     direct BaseSession construction without it (existing tests,
-    //     ad-hoc instantiation) keeps the legacy no-op behaviour.
-    let resolvedTrustStore = null
-    if (trustStore) {
-      resolvedTrustStore = trustStore
-    } else if (trustMismatchMode === 'warn' || trustMismatchMode === 'block') {
-      resolvedTrustStore = new SkillsTrustStore({ mode: trustMismatchMode })
-    }
-    this._trustStore = resolvedTrustStore
-
-    // #3248: per-session parse cache. Map keyed by realpath; values
-    // hold `{ mtimeMs, size, body, frontmatter, finalBody, description }`
-    // so subsequent _loadSkills() calls (every activate/deactivate
-    // toggle) skip readFileSync / parseFrontmatter for files whose
-    // mtimeMs is unchanged. The loader writes through to this Map —
-    // invalidation is automatic when the on-disk mtimeMs moves.
-    this._skillsParseCache = new Map()
-
-    // Skills are scanned at construction. #3209 adds a runtime reload
-    // path for manual activation toggles. Mismatch events are
-    // collected during the synchronous loader call and re-emitted on
-    // `process.nextTick` because SessionManager wires event listeners
-    // AFTER the constructor returns — a synchronous emit here would
-    // land on an empty listener set.
-    const { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents } = this._loadSkills({ collectTrustEvents: true })
+    // Skills are scanned at construction. #3209 adds a runtime reload path for
+    // manual activation toggles. The construction load deliberately RETURNS its
+    // mismatch / community-trust events so they re-emit on `process.nextTick`:
+    // SessionManager wires event listeners AFTER the constructor returns, so a
+    // synchronous emit here would land on an empty listener set.
+    const { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents } = this._skillsManager.loadSkills({ collectTrustEvents: true })
     if (pendingTrustEvents.length > 0 || pendingCommunityTrustEvents.length > 0) {
       process.nextTick(() => {
         for (const ev of pendingTrustEvents) {
@@ -582,95 +451,17 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * Build the layered-loader options + run the loader, populating the
-   * skill caches (`_skills`, `_skillsByMode`, `_skillsText`,
-   * `_prependSkillsText`). Used by both the constructor and the
-   * runtime activate/deactivate toggle (#3209) so the loader-side
-   * state stays the single source of truth.
+   * #5376: delegate to SkillsManager. Kept as a session method because
+   * settings-handlers.js calls `session._loadSkills()` to rebuild after a
+   * trust grant. Returns the pending trust / community-trust events for the
+   * caller to emit (the construction path emits them on `process.nextTick`).
    *
    * @param {{ collectTrustEvents?: boolean }} [opts]
    * @returns {{ trustEvents: Array<object>, communityTrustEvents: Array<object> }}
-   *   `trustEvents` — pending skill_changed events (mismatch) when collectTrustEvents=true.
-   *   `communityTrustEvents` — pending skill_trust_request events for untrusted community skills.
    * @private
    */
-  _loadSkills({ collectTrustEvents = false } = {}) {
-    const layerOpts = {
-      globalDir: this._skillsDir,
-      repoDir: this._repoSkillsDir,
-      provider: this._provider,
-      activeManualSkills: this._activeManualSkills,
-      defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
-      // #3253: include inactive manual skills in the unified scan so
-      // `activateSkill` can validate names against `_manualSkillNames`
-      // without paying for a second validation-only scan. The active
-      // subset is partitioned out below before populating the
-      // prompt-context caches — inactive entries never reach the
-      // model. Cost: a few metadata-only entries; bodies are not
-      // loaded for inactive manual skills (skills-loader.js:646).
-      includeInactive: true,
-    }
-    if (this._maxSkillBytes !== null) layerOpts.maxSkillBytes = this._maxSkillBytes
-    if (this._maxTotalSkillBytes !== null) layerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
-    if (this._providerSkillAllowlist) layerOpts.providerSkillAllowlist = this._providerSkillAllowlist
-    // #3248: hand the per-session parse cache to the loader. Cache
-    // hits skip readFileSync + parseFrontmatter; misses populate.
-    if (this._skillsParseCache instanceof Map) layerOpts.parseCache = this._skillsParseCache
-
-    const pendingTrustEvents = []
-    const pendingCommunityTrustEvents = []
-    if (this._trustStore) {
-      layerOpts.trustStore = this._trustStore
-      if (collectTrustEvents) {
-        layerOpts.onTrustMismatch = (info) => { pendingTrustEvents.push(info) }
-      }
-      // Hash recording happens via `trustStore.inspect()` inside the
-      // loader regardless of whether `onTrustMismatch` is wired — the
-      // callback is just the mismatch-event delivery channel. On
-      // runtime reload (collectTrustEvents=false) we deliberately
-      // omit the callback so a user-initiated toggle does NOT
-      // re-emit `skill_changed` events that already fired at session
-      // construction.
-
-      // #3297: community trust checker — allows the loader to gate
-      // community skills pending a first-activation grant.
-      if (typeof this._trustStore.isCommunityTrusted === 'function') {
-        layerOpts.communityTrustChecker = this._trustStore.isCommunityTrusted.bind(this._trustStore)
-      }
-      // Always collect community trust pending events (fired on both
-      // construction and runtime reload so re-entry from other sessions
-      // sees the prompt after a grant clears an earlier block).
-      layerOpts.onCommunityTrustPending = (info) => { pendingCommunityTrustEvents.push(info) }
-    }
-
-    const all = loadActiveSkillsLayered(layerOpts)
-    if (this._trustStore && typeof this._trustStore.flush === 'function') {
-      try { this._trustStore.flush() } catch { /* ignore */ }
-    }
-
-    // #3253: partition the unified scan into the active subset (used
-    // for prompt injection) and a Set of all manual-skill names (used
-    // by activateSkill to validate without re-scanning). Inactive
-    // entries carry `active: false` from the loader; auto skills
-    // don't carry the field at all and are always active.
-    const manualNames = new Set()
-    const active = []
-    for (const s of all) {
-      const activation = typeof s.metadata?.activation === 'string'
-        ? s.metadata.activation.trim().toLowerCase()
-        : null
-      if (activation === 'manual') manualNames.add(s.name)
-      if (s.active !== false) active.push(s)
-    }
-    this._skills = active
-    this._manualSkillNames = manualNames
-
-    const grouped = groupSkillsByInjectionMode(this._skills)
-    this._skillsByMode = grouped
-    this._skillsText = formatSkillsForPrompt(grouped.append)
-    this._prependSkillsText = formatSkillsForPrompt(grouped.prepend)
-
-    return { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents }
+  _loadSkills(opts = {}) {
+    return this._skillsManager.loadSkills(opts)
   }
 
   /**
@@ -711,49 +502,18 @@ export class BaseSession extends EventEmitter {
    * @returns {boolean}
    */
   activateSkill(skillName) {
-    if (typeof skillName !== 'string' || skillName === '') return false
-    if (this._activeManualSkills.has(skillName)) return false
-
-    // #3253: speculatively add and reload — the unified `_loadSkills`
-    // scan populates both the prompt-context caches AND the
-    // `_manualSkillNames` validation set, so we can reuse one scan
-    // for validation + reload rather than running a separate
-    // validation-only scan first. On the rare failure path (typo /
-    // auto-skill name) we run a rollback scan to restore the active
-    // set; the common success path stays at one layered scan.
-    this._activeManualSkills.add(skillName)
-    const { communityTrustEvents } = this._loadSkills()
-    if (!this._manualSkillNames.has(skillName)) {
-      this._activeManualSkills.delete(skillName)
-      this._loadSkills()
-      return false
-    }
-    for (const ev of communityTrustEvents) {
-      this.emit('skill_trust_request', ev)
-    }
-    return true
+    return this._skillsManager.activateSkill(skillName)
   }
 
   /**
-   * Deactivate a manual skill at runtime (#3209). Returns true when
-   * the active set actually changed; false otherwise. The
-   * `_listManualSkillNames` validation isn't strictly needed here
-   * (deactivating a name that isn't currently active is already a
-   * no-op via the `has()` check), but mirroring `activateSkill`
-   * keeps the contract symmetric.
+   * Deactivate a manual skill at runtime (#3209). Returns true when the active
+   * set actually changed; false otherwise. #5376: delegates to SkillsManager.
    *
    * @param {string} skillName
    * @returns {boolean}
    */
   deactivateSkill(skillName) {
-    if (typeof skillName !== 'string' || skillName === '') return false
-    if (!this._activeManualSkills.has(skillName)) return false
-    this._activeManualSkills.delete(skillName)
-    const { communityTrustEvents } = this._loadSkills()
-    for (const ev of communityTrustEvents) {
-      this.emit('skill_trust_request', ev)
-    }
-    return true
+    return this._skillsManager.deactivateSkill(skillName)
   }
 
   /**
@@ -781,82 +541,38 @@ export class BaseSession extends EventEmitter {
    */
   get isRunning() {
     if (this._isBusy) return true
-    return this._pendingBackgroundShells.size > 0
+    return this._backgroundShellTracker.size > 0
   }
 
   /**
-   * #4307: read-only snapshot of pending background shells, ordered by
-   * insertion (so the dashboard surfaces the most-recently-started shell
-   * last). Returns a plain array of `{ shellId, startedAt, command }`
-   * objects so the caller can stringify directly onto a wire payload.
+   * #4307: read-only snapshot of pending background shells.
+   * #5376: delegates to BackgroundShellTracker.
    */
   getPendingBackgroundShells() {
-    // #5177: project to the stable wire shape — `outputPath` is an internal
-    // sweep detail and must not leak onto the snapshot the dashboard caches.
-    // #5247: a shell the mtime sweep marked `quiesced` (output went idle) is
-    // dropped from this banner snapshot — the dashboard "Waiting on background
-    // work" indicator clears — but it stays in `_pendingBackgroundShells` so
-    // `isRunning` is unaffected (the sweep is advisory; see isRunning).
-    return Array.from(this._pendingBackgroundShells.values())
-      .filter((e) => !e.quiesced)
-      .map(({ shellId, startedAt, command }) => ({ shellId, startedAt, command }))
+    return this._backgroundShellTracker.getPendingBackgroundShells()
   }
 
   /**
-   * #4307: record a new pending background shell. Idempotent on
-   * shellId — re-registering an existing id is a no-op (preserves the
-   * original startedAt + command so a duplicate tool_result, which
-   * does happen on certain claude paths, can't bump the timestamp or
-   * overwrite the original command text).
-   *
-   * Emits `background_work_changed` with the full pending snapshot
-   * after a change. `SessionManager` proxies this transient event onto
-   * the WS wire (see `customEvents`-style integration).
-   *
-   * #5177: `outputPath` (when known — parsed from the canonical
-   * tool_result) is stashed so the completion sweep can observe the shell
-   * finishing via the output file's mtime. It is internal-only and is NOT
-   * surfaced on the wire snapshot (see getPendingBackgroundShells).
+   * #4307: record a new pending background shell. Idempotent on shellId.
+   * #5376: delegates to BackgroundShellTracker. Called by SdkSession /
+   * ClaudeTuiSession as a session method.
    *
    * @param {{ shellId: string, command?: string, outputPath?: string }} opts
    * @returns {boolean} true if a new entry was added
    */
-  trackBackgroundShell({ shellId, command, outputPath } = {}) {
-    if (typeof shellId !== 'string' || shellId.length === 0) return false
-    if (this._pendingBackgroundShells.has(shellId)) return false
-    this._pendingBackgroundShells.set(shellId, {
-      shellId,
-      startedAt: Date.now(),
-      command: typeof command === 'string' ? command : '',
-      outputPath: typeof outputPath === 'string' && outputPath.length > 0 ? outputPath : null,
-    })
-    // #5177: start the reaping sweep now that there is work to watch.
-    this._ensureBackgroundShellSweep()
-    this._emitBackgroundWorkChanged()
-    return true
+  trackBackgroundShell(opts = {}) {
+    return this._backgroundShellTracker.trackBackgroundShell(opts)
   }
 
   /**
-   * #4307: clear a pending background shell by id. Returns true when
-   * an entry actually existed, false when the id was not tracked —
-   * matches the idempotent contract of other BaseSession setters so
-   * the caller can decide whether to log / emit.
-   *
-   * Emits `background_work_changed` with the post-clear snapshot when
-   * the change is observable (entry actually existed).
+   * #4307: clear a pending background shell by id. Returns true when an entry
+   * actually existed. #5376: delegates to BackgroundShellTracker.
    *
    * @param {string} shellId
    * @returns {boolean}
    */
   clearBackgroundShell(shellId) {
-    if (typeof shellId !== 'string' || shellId.length === 0) return false
-    if (!this._pendingBackgroundShells.delete(shellId)) return false
-    // #5177: stop the sweep once the last shell drains so an idle session
-    // has no recurring timer (no wakeups, no leak). Re-armed by the next
-    // trackBackgroundShell.
-    if (this._pendingBackgroundShells.size === 0) this._stopBackgroundShellSweep()
-    this._emitBackgroundWorkChanged()
-    return true
+    return this._backgroundShellTracker.clearBackgroundShell(shellId)
   }
 
   /**
@@ -954,230 +670,41 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #4307: emit the current pending-shells snapshot on the
-   * `background_work_changed` event. Pulled into a helper so both
-   * `trackBackgroundShell` and `clearBackgroundShell` use one shape.
-   * The full snapshot is sent on each change (not just the delta) so a
-   * late-joining client subscribed to the event sees the canonical
-   * state without needing to replay a delta stream.
-   *
+   * #5376: the following are thin delegators to BackgroundShellTracker. They
+   * stay on BaseSession because `background-shells.test.js` drives them as
+   * session methods (and `removeAllListeners` stops the sweep via
+   * `_stopBackgroundShellSweep`). The sweep / quiescence logic and the
+   * test-injected tunables (`_backgroundShell*` get/set shims below) live on the
+   * tracker — see background-shell-tracker.js for the #5177/#5247/#5265 rationale.
    * @private
    */
   _emitBackgroundWorkChanged() {
-    this.emit('background_work_changed', {
-      pending: this.getPendingBackgroundShells(),
-    })
+    return this._backgroundShellTracker._emitBackgroundWorkChanged()
   }
 
-  /**
-   * #5177: arm the periodic reaping sweep if it is not already running and
-   * there is pending work to watch. Idempotent — a second call while the
-   * timer is live is a no-op, so every `trackBackgroundShell` can call it
-   * unconditionally. The interval is `unref()`'d so a lone pending shell
-   * can never keep the process alive on its own (mirrors how chroxy treats
-   * its other background timers — the shell is owned by claude, not us).
-   *
-   * @private
-   */
+  /** @private #5376: delegates to BackgroundShellTracker. */
   _ensureBackgroundShellSweep() {
-    if (this._backgroundShellSweepTimer) return
-    if (this._pendingBackgroundShells.size === 0) return
-    if (!(this._backgroundShellSweepMs > 0)) return
-    this._backgroundShellSweepTimer = setInterval(
-      () => this._sweepQuiescedBackgroundShells(),
-      this._backgroundShellSweepMs,
-    )
-    // unref so the sweep never blocks process exit on its own.
-    if (typeof this._backgroundShellSweepTimer.unref === 'function') {
-      this._backgroundShellSweepTimer.unref()
-    }
+    return this._backgroundShellTracker._ensureBackgroundShellSweep()
   }
 
-  /**
-   * #5177: stop the reaping sweep. Idempotent.
-   * @private
-   */
+  /** @private #5376: delegates to BackgroundShellTracker. */
   _stopBackgroundShellSweep() {
-    if (!this._backgroundShellSweepTimer) return
-    clearInterval(this._backgroundShellSweepTimer)
-    this._backgroundShellSweepTimer = null
+    return this._backgroundShellTracker._stopBackgroundShellSweep()
   }
 
-  /**
-   * #5177: one sweep tick — mark every pending shell whose output has quiesced.
-   * Quiescence is decided by `_isBackgroundShellQuiesced`. #5247: this is
-   * ADVISORY — a quiesced shell is dropped from the banner snapshot (via the
-   * `quiesced` flag, NOT `clearBackgroundShell`) so it stays in the map and
-   * `isRunning` is unaffected. The emitted `background_work_changed` snapshot is
-   * the SAME shape the BashOutput / destroy paths emit, so the dashboard's
-   * "Waiting on background work" indicator clears with no new wire contract.
-   * Iterating over a copied key list keeps the mutation safe.
-   *
-   * @private
-   */
+  /** @private #5376: delegates to BackgroundShellTracker. */
   _sweepQuiescedBackgroundShells() {
-    let changed = false
-    let anyActive = false
-    const hardEnabled = this._backgroundShellHardQuiesceMs > 0
-    for (const shellId of Array.from(this._pendingBackgroundShells.keys())) {
-      const entry = this._pendingBackgroundShells.get(shellId)
-      if (!entry) continue
-      // #5265: HARD-quiesce reap — checked first and for EVERY entry (including
-      // already advisory-quiesced ones). After the long hard window of output
-      // silence the shell is overwhelmingly likely finished, so reap it
-      // (remove from the map → `isRunning` flips) so a session pinned "running"
-      // by a long-dead, never-polled command can finally idle-time out.
-      if (hardEnabled && this._isBackgroundShellHardQuiesced(entry)) {
-        this._pendingBackgroundShells.delete(shellId)
-        changed = true
-        continue
-        // NOTE: reaping an entry that was ALREADY advisory-quiesced changes
-        // `isRunning` (true→false) but NOT the banner snapshot (it was already
-        // filtered out at advisory time), so the `background_work_changed` emit
-        // below carries an unchanged `pending` payload. That is fine TODAY
-        // because liveness is consumed via the pull path (SessionTimeoutManager
-        // calls `isRunningFn()` live, it does not diff this event). A future
-        // consumer that diffs `pending` to infer liveness would need an explicit
-        // liveness field on the event — flagged so this isn't a silent trap.
-      }
-      if (entry.quiesced) continue // already advisory-cleared from the banner
-      if (this._isBackgroundShellQuiesced(entry)) {
-        // #5247: ADVISORY only — mark the shell quiesced so it drops out of the
-        // banner snapshot, but DO NOT clearBackgroundShell / remove it from the
-        // map. mtime quiescence can't distinguish "finished" from "idle but
-        // alive" (a dev server that logs once then waits), so flipping liveness
-        // here reaped live processes and let SessionTimeoutManager idle-time the
-        // session out — re-opening #4307. Real liveness is released only by a
-        // BashOutput poll, destroy, or the #5265 hard-quiesce reap above.
-        entry.quiesced = true
-        changed = true
-      } else {
-        anyActive = true
-      }
-    }
-    // The banner snapshot / liveness changed — emit the same
-    // background_work_changed the BashOutput / destroy paths emit so the
-    // dashboard indicator clears with no new wire contract.
-    if (changed) this._emitBackgroundWorkChanged()
-    // Stop the recurring stat() sweep when nothing remains that could still
-    // transition. With hard-quiesce ON (default), advisory-quiesced shells are
-    // still pending a future hard-reap, so keep sweeping while the map is
-    // non-empty; the sweep stops only once it drains. With hard-quiesce OFF
-    // (#5247 advisory-only), stop as soon as nothing can advisory-transition.
-    // A future trackBackgroundShell re-arms it either way.
-    const drained = this._pendingBackgroundShells.size === 0
-    if (drained || (!hardEnabled && !anyActive)) this._stopBackgroundShellSweep()
+    return this._backgroundShellTracker._sweepQuiescedBackgroundShells()
   }
 
-  /**
-   * #5265: decide whether a pending background shell has HARD-quiesced — i.e.
-   * its output has been silent long enough (`_backgroundShellHardQuiesceMs`)
-   * that it is overwhelmingly likely finished and can be reaped (liveness
-   * released), unlike the 60s advisory `_isBackgroundShellQuiesced`.
-   *
-   * Tests inject `_backgroundShellHardQuiesceCheck` for deterministic control.
-   * The default reads the output file's mtime: a shell is hard-quiesced when
-   * `now - mtime >= hard window`. Unlike the advisory check there is NO
-   * non-empty guard — after hours even an empty output file (a silent
-   * `sleep`/compute) is reaped, since the file's mtime ≈ its creation time and
-   * a command silent for the whole hard window is almost certainly done. A
-   * shell with no known output path falls back to its `startedAt`. A stat()
-   * error is treated as NOT hard-quiesced (transient FS hiccup must not reap).
-   *
-   * @param {{ shellId: string, outputPath?: string|null, startedAt: number }} entry
-   * @returns {boolean}
-   * @private
-   */
+  /** @private #5376: delegates to BackgroundShellTracker. */
   _isBackgroundShellHardQuiesced(entry) {
-    // Disabled short-circuit FIRST so the method's "0 disables" contract holds
-    // even if a stale check is injected (the sweep also gates on hardEnabled).
-    if (this._backgroundShellHardQuiesceMs <= 0) return false
-    if (typeof this._backgroundShellHardQuiesceCheck === 'function') {
-      return this._backgroundShellHardQuiesceCheck(entry) === true
-    }
-    if (!entry) return false
-    // Cheap pre-stat gate (#5287 review): output can't have been idle longer
-    // than the shell has existed, so a shell younger than the hard window can't
-    // possibly be hard-quiesced — skip the per-tick statSync entirely until
-    // then. This makes the sweep's hard-check ~free (one subtraction) for the
-    // first hard-window of every shell's life, which is the bulk of the time the
-    // sweep runs.
-    if (typeof entry.startedAt === 'number'
-      && Date.now() - entry.startedAt < this._backgroundShellHardQuiesceMs) {
-      return false
-    }
-    if (typeof entry.outputPath !== 'string' || entry.outputPath.length === 0) {
-      // No output file to stat — fall back to wall-clock age since the shell was
-      // tracked. This is the WEAKEST signal in the change: unlike the mtime path
-      // (which proves the process could write), age-only can't tell a live
-      // silent compute from a finished one — so a >hard-window shell with an
-      // unparsed output path is reaped on time-since-tracking alone (accepted
-      // per #5265's tradeoff; the only consequence is idle-timeout eligibility,
-      // never process death — chroxy doesn't own the PID).
-      return typeof entry.startedAt === 'number'
-        && Date.now() - entry.startedAt >= this._backgroundShellHardQuiesceMs
-    }
-    try {
-      const st = statSync(entry.outputPath)
-      return Date.now() - st.mtimeMs >= this._backgroundShellHardQuiesceMs
-    } catch {
-      return false
-    }
+    return this._backgroundShellTracker._isBackgroundShellHardQuiesced(entry)
   }
 
-  /**
-   * #5177: decide whether a pending background shell's output has QUIESCED —
-   * i.e. it can be dropped from the dashboard banner.
-   *
-   * #5247: this is NOT "the command finished". Its NON-EMPTY-then-idle output
-   * file is indistinguishable from a live-but-quiet process (a dev server that
-   * logs "listening on :3000" then waits, a file watcher, `tail -f`, a build in
-   * a long silent link phase). chroxy never holds the shell's PID (the id is
-   * opaque, owned by claude), so mtime quiescence is the best the BANNER can do
-   * — and the caller (`_sweepQuiescedBackgroundShells`) treats a `true` here as
-   * ADVISORY (clears the banner only). Liveness / `SessionTimeoutManager` is
-   * governed solely by BashOutput / destroy (#4307), so a false "quiesced" here
-   * can no longer idle-time a live session out.
-   *
-   * Tests inject `_backgroundShellQuiesceCheck` for deterministic control
-   * without touching the filesystem or real time. A shell with no known output
-   * path, or whose output file is still empty (a silent command like
-   * `sleep 600`), is never marked quiesced via this path and stays in the
-   * banner until BashOutput / destroy.
-   *
-   * Defensive: a stat() error (file removed, races) is treated as NOT quiesced
-   * so a transient FS hiccup can't drop a shell from the banner early.
-   *
-   * @param {{ shellId: string, outputPath?: string|null, startedAt: number }} entry
-   * @returns {boolean}
-   * @private
-   */
+  /** @private #5376: delegates to BackgroundShellTracker. */
   _isBackgroundShellQuiesced(entry) {
-    if (typeof this._backgroundShellQuiesceCheck === 'function') {
-      return this._backgroundShellQuiesceCheck(entry) === true
-    }
-    if (!entry || typeof entry.outputPath !== 'string' || entry.outputPath.length === 0) {
-      return false
-    }
-    try {
-      const st = statSync(entry.outputPath)
-      // #5177 (review): a SILENT command — one that produces no output and
-      // only exits much later (`sleep 600`, a long compute that prints only
-      // at the end) — leaves the output file empty and untouched after
-      // creation. Reaping on mtime alone would clear it ~quiesceMs after
-      // start while it is still running, flipping isRunning to false and
-      // letting SessionTimeoutManager treat the session as idle. Guard with
-      // a non-empty check: an empty output file is NEVER reaped via this
-      // path, so silent shells fall back to the existing BashOutput /
-      // destroy clear (the conservative #4307 behaviour). The sweep only
-      // reaps shells that demonstrably produced output and then went quiet —
-      // the strong signal that the command ran and finished.
-      if (st.size <= 0) return false
-      const lastWrite = st.mtimeMs
-      return Date.now() - lastWrite >= this._backgroundShellQuiesceMs
-    } catch {
-      return false
-    }
+    return this._backgroundShellTracker._isBackgroundShellQuiesced(entry)
   }
 
   /**
@@ -1189,10 +716,10 @@ export class BaseSession extends EventEmitter {
    * @private
    */
   _destroyPendingBackgroundShells() {
-    // #5177: stop the reaping sweep before clearing the map so no tick can
-    // fire against a half-torn-down session.
-    this._stopBackgroundShellSweep()
-    this._pendingBackgroundShells.clear()
+    // #5376: the tracker stops its sweep and clears the pending map (#5177 — so
+    // no tick fires against a half-torn-down session). The session-level
+    // companions are torn down here:
+    this._backgroundShellTracker.destroy()
     this._pendingBackgroundCommands.clear()
     // #5160: tear down the activity registry alongside the other transient
     // per-session work maps. Ends every remaining node (the session is gone,
@@ -1200,6 +727,52 @@ export class BaseSession extends EventEmitter {
     // a late session-list snapshot can't surface a destroyed session's tree.
     this._activity.clear()
   }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5376: compat accessors. The skills + background-shell state moved into
+  // SkillsManager / BackgroundShellTracker, but existing consumers (the prompt
+  // builders, settings-handlers, the #5367 opt sentinel) and the unchanged
+  // background-shells.test.js / base-session.test.js suites read (and a couple
+  // write) these as session fields. Each reads through to the collaborator's
+  // identically-named field so there is a single source of truth — the
+  // collaborator. Setters exist only where a test assigns: `_skillsText`
+  // (base-session.test.js prompt-builder cases) and `_providerSkillAllowlist`
+  // (settings-handlers.test.js allowlist override). Mutating-collection reads
+  // (`_pendingBackgroundShells`, `_activeManualSkills`) return the live
+  // reference, so `.set`/`.add`/`.delete` operate on the collaborator's state.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Background-shell tracker
+  get _pendingBackgroundShells() { return this._backgroundShellTracker._pendingBackgroundShells }
+  get _backgroundShellSweepTimer() { return this._backgroundShellTracker._backgroundShellSweepTimer }
+  set _backgroundShellSweepTimer(v) { this._backgroundShellTracker._backgroundShellSweepTimer = v }
+  get _backgroundShellSweepMs() { return this._backgroundShellTracker._backgroundShellSweepMs }
+  set _backgroundShellSweepMs(v) { this._backgroundShellTracker._backgroundShellSweepMs = v }
+  get _backgroundShellQuiesceMs() { return this._backgroundShellTracker._backgroundShellQuiesceMs }
+  set _backgroundShellQuiesceMs(v) { this._backgroundShellTracker._backgroundShellQuiesceMs = v }
+  get _backgroundShellQuiesceCheck() { return this._backgroundShellTracker._backgroundShellQuiesceCheck }
+  set _backgroundShellQuiesceCheck(v) { this._backgroundShellTracker._backgroundShellQuiesceCheck = v }
+  get _backgroundShellHardQuiesceMs() { return this._backgroundShellTracker._backgroundShellHardQuiesceMs }
+  set _backgroundShellHardQuiesceMs(v) { this._backgroundShellTracker._backgroundShellHardQuiesceMs = v }
+  get _backgroundShellHardQuiesceCheck() { return this._backgroundShellTracker._backgroundShellHardQuiesceCheck }
+  set _backgroundShellHardQuiesceCheck(v) { this._backgroundShellTracker._backgroundShellHardQuiesceCheck = v }
+
+  // Skills manager
+  get _skills() { return this._skillsManager._skills }
+  get _skillsByMode() { return this._skillsManager._skillsByMode }
+  get _skillsText() { return this._skillsManager._skillsText }
+  set _skillsText(v) { this._skillsManager._skillsText = v }
+  get _prependSkillsText() { return this._skillsManager._prependSkillsText }
+  get _activeManualSkills() { return this._skillsManager._activeManualSkills }
+  get _manualSkillNames() { return this._skillsManager._manualSkillNames }
+  get _skillsDir() { return this._skillsManager._skillsDir }
+  get _repoSkillsDir() { return this._skillsManager._repoSkillsDir }
+  get _trustStore() { return this._skillsManager._trustStore }
+  get _skillsParseCache() { return this._skillsManager._skillsParseCache }
+  get _maxSkillBytes() { return this._skillsManager._maxSkillBytes }
+  get _maxTotalSkillBytes() { return this._skillsManager._maxTotalSkillBytes }
+  get _providerSkillAllowlist() { return this._skillsManager._providerSkillAllowlist }
+  set _providerSkillAllowlist(v) { this._skillsManager._providerSkillAllowlist = v }
 
   /** Current thinking level. Override in subclasses that support it. */
   get thinkingLevel() { return undefined }
