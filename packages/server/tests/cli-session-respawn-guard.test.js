@@ -134,7 +134,11 @@ describe('CliSession _scheduleRespawn guard', () => {
       session._scheduleRespawn()
       assert.strictEqual(session._respawnTimer, null, `still no timer scheduled (round ${i})`)
     }
-    assert.strictEqual(session._respawnCount, 9, 'count keeps rising but never reschedules')
-    assert.strictEqual(errors.length, 3, 'each post-exhaustion call re-emits the terminal error')
+    // The invariant is "no respawn is ever scheduled past the cap" (asserted
+    // each round above) plus "a terminal error is signalled". We deliberately
+    // don't assert the exact final count or how many times the error fires, so
+    // a future change (clamping _respawnCount, de-duping the error) can't break
+    // this test while keeping the guarantee (#5385 review).
+    assert.ok(errors.length >= 1, 'a terminal error is signalled after exhaustion')
   })
 })
