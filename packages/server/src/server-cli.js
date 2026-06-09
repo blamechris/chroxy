@@ -7,6 +7,7 @@ import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
 import { PushManager } from './push.js'
+import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -675,174 +676,21 @@ export async function startCliServer(config) {
 
   let wsServer
 
-  // #3866 — explicit per-session dedupe for the idle push. Each entry pins
-  // "we already sent an idle push for the current active→idle cycle of this
-  // session" so a duplicate `result` event (or a race where the gate flips
-  // mid-turn) can't produce two OS-level notifications. Cleared when the
-  // session next emits `stream_start` (next busy cycle) or is destroyed.
-  // Resurrects the 'idle' push category removed in the 2026-04-11 audit
-  // without recreating the duplicate-fire bug that prompted its removal.
-  const _idleNotifiedSessions = new Set()
+  // #5368 slice (a): the `session_event` → push-notification path (incl. the
+  // #3866 idle-push dedupe and the #3870/#3871/#3872 races) lives in
+  // PushNotificationHandler, constructed + started after pushManager exists and
+  // before wsServer (so the #3871 wsServer-undefined branch still covers an
+  // early restoreState event). See below, right after `new PushManager(...)`.
 
-  // Log events for debugging and forward critical errors
-  sessionManager.on('session_event', ({ sessionId, event, data }) => {
-    if (event === 'ready') {
-      log.info(`Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
-    } else if (event === 'error') {
-      log.error(`Session ${sessionId} error: ${data.message}`)
-      // Error is already broadcast as { type: 'message', messageType: 'error' } through
-      // the forwarding path (ws-forwarding.js → EventNormalizer). Don't also broadcastError()
-      // here — that produces a duplicate server_error message on every client.
-      // Activity update: error (immediate)
-      if (pushManager.hasTokens) {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_error', 'Session error', data.message, {
-          sessionId,
-          sessionName,
-          state: 'error',
-          detail: data.message,
-        })
-      }
-    } else if (event === 'result' && data.cost != null) {
-      log.info(`Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
-      // Note: this arm used to ALSO fire an 'idle' push here ("Claude is waiting")
-      // for the same unattended-completion case that the activity_update push below
-      // already covers. Because the two pushes used different rate-limit buckets
-      // (idle=60s, activity_update=10s) they never deduped each other, so every
-      // unattended completion produced two OS-level notifications on the phone.
-      // Removed in favor of the single activity_update fire below.
-    } else if (event === 'result') {
-      // result without cost (e.g. Gemini providers) — log duration if available
-      if (data.duration != null) {
-        log.info(`Session ${sessionId} query completed in ${data.duration}ms`)
-      }
-    } else if (event === 'budget_warning') {
-      log.warn(`Budget warning: ${data.message}`)
-    } else if (event === 'budget_exceeded') {
-      log.warn(`Budget exceeded: ${data.message}`)
-    }
-
-    // Reset the idle-push dedupe at the start of each busy cycle (#3866).
-    // Different providers emit different "session became busy" signals:
-    //   - SDK / Claude CLI turns typically fire stream_start first
-    //   - Codex tool-only turns can fire tool_start without any stream_start
-    //     (see codex-session.js _processJsonlLine — `item.type === 'tool_call'`
-    //     emits tool_start unconditionally)
-    // Without clearing on tool_start, a Codex turn that runs a tool and
-    // returns no streamed text would leave the dedupe latched, and the
-    // *next* turn's result would be wrongly suppressed as "already
-    // notified" (#3872, Copilot review).
-    if (event === 'stream_start' || event === 'tool_start') {
-      _idleNotifiedSessions.delete(sessionId)
-    }
-
-    // Push notifications for actionable events only (#2612)
-    // Intermediate events (stream_start, tool_start) no longer trigger pushes.
-    if (!pushManager.hasTokens && (event === 'result' || event === 'permission_request' || event === 'user_question')) {
-      // #3866 diagnostic — silently dropping a push because no client ever
-      // registered a push token is the most common "I'm getting nothing on
-      // Android" failure mode. Surface it at debug so operators can confirm
-      // registration happened on their last connect.
-      log.debug(`Push suppressed for ${event} on ${sessionId}: no registered tokens`)
-    }
-    if (pushManager.hasTokens) {
-      if (event === 'result') {
-        // Session idle push (#3866). Gate on noActiveViewers so the user
-        // isn't pinged while actively chatting with this session. The
-        // per-session dedupe Set prevents a duplicate `result` from
-        // firing twice for the same active→idle transition.
-        if (wsServer) {
-          const noClients = wsServer.authenticatedClientCount === 0
-          const noActiveViewers = !noClients && !wsServer.hasActiveViewersForSession(sessionId)
-          const allowed = noClients || noActiveViewers
-          const alreadyNotified = _idleNotifiedSessions.has(sessionId)
-          if (allowed && !alreadyNotified) {
-            const sessionName = sessionManager.getSession(sessionId)?.name
-            // #3870: latch SYNCHRONOUSLY before send() returns its promise
-            // so a second `result` arriving in the same tick can't double-
-            // fire (passes the !alreadyNotified gate twice). `send()` now
-            // returns a Promise<boolean> — `false` means Expo hard-failed
-            // (non-2xx or network throw, both caught inside _sendToTokenSet
-            // and surfaced via this return value, NOT via rejection since
-            // _sendToTokenSet swallows the throw). On hard failure, log at
-            // warn and RELEASE the latch so the next active→idle cycle gets
-            // a fresh chance — without this the user was silently dropped
-            // *and* permanently latched until the session went busy again.
-            _idleNotifiedSessions.add(sessionId)
-            Promise.resolve(
-              pushManager.send('activity_update', 'Session idle', 'Ready for next message', {
-                sessionId,
-                sessionName,
-                state: 'idle',
-                ...(data.duration != null && { elapsed: data.duration }),
-              })
-            ).then(ok => {
-              if (ok === false) {
-                log.warn(`Idle push send failed for ${sessionId} (Expo hard failure)`)
-                _idleNotifiedSessions.delete(sessionId)
-              }
-            }).catch(err => {
-              // Defensive — _sendToTokenSet should never throw, but if a
-              // future refactor lets one escape, treat it as hard failure.
-              log.warn(`Idle push send failed for ${sessionId}: ${err?.message || err}`)
-              _idleNotifiedSessions.delete(sessionId)
-            })
-          } else if (!allowed) {
-            // Diagnostic for #3866: surface why a push was suppressed so we
-            // can tell registration failures apart from "user is viewing".
-            log.debug(`Idle push suppressed for ${sessionId}: active viewers present`)
-          } else if (alreadyNotified) {
-            log.debug(`Idle push suppressed for ${sessionId}: already notified this turn`)
-          }
-        } else {
-          // #3871: session_event listener is registered BEFORE wsServer is
-          // constructed, so a result event from a restoreState-resurrected
-          // session can fire while wsServer is still undefined. Surface that
-          // here at debug so it's not silently dropped — same diagnostic
-          // discipline as the no-tokens / active-viewers / already-notified
-          // branches above (#3866).
-          log.debug(`Idle push suppressed for ${sessionId}: wsServer not yet initialized`)
-        }
-      } else if (event === 'permission_request') {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_waiting', 'Waiting for approval', `Permission needed: ${data.tool}`, {
-          sessionId,
-          sessionName,
-          state: 'waiting',
-          detail: data.tool,
-        })
-      } else if (event === 'user_question') {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_waiting', 'Input needed', 'Claude has a question', {
-          sessionId,
-          sessionName,
-          state: 'waiting',
-        })
-      } else if (event === 'inactivity_warning') {
-        // #3899: soft inactivity warning replaces the pre-#3899 kill-on-
-        // timeout behaviour. Push regardless of active-viewer state — a
-        // viewer with the dashboard open but AFK still benefits from the
-        // device-level nudge. (The transient UI chip in the dashboard
-        // covers the actively-watching case.)
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('inactivity_warning', 'Agent quiet for a while', 'Tap to check in', {
-          sessionId,
-          sessionName,
-          state: 'idle_warning',
-          prefab: data.prefab,
-          idleMs: data.idleMs,
-        })
-      }
-    }
-  })
-
+  // Log events for debugging
   sessionManager.on('session_created', ({ sessionId, name, cwd }) => {
     log.info(`Session created: ${sessionId} (${name}) in ${cwd}`)
   })
 
   sessionManager.on('session_destroyed', ({ sessionId }) => {
     log.info(`Session destroyed: ${sessionId}`)
-    _idleNotifiedSessions.delete(sessionId)
+    // #5368: the idle-push dedupe clear-on-destroy now lives in
+    // PushNotificationHandler (its own session_destroyed listener).
   })
 
   sessionManager.on('session_warning', ({ sessionId, name, reason, message, remainingMs }) => {
@@ -866,6 +714,18 @@ export async function startCliServer(config) {
     // ~/.chroxy alongside push-tokens.json so cleanup is one step.
     prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
   })
+
+  // #5368 slice (a): wire the session_event → push path now that pushManager
+  // exists. `getWsServer` is lazy because the handler is started before wsServer
+  // is constructed (below) — an early restoreState `result` event must still
+  // route here and hit the wsServer-undefined branch (#3871).
+  const pushNotificationHandler = new PushNotificationHandler({
+    sessionManager,
+    pushManager,
+    getWsServer: () => wsServer,
+    logger: log,
+  })
+  pushNotificationHandler.start()
 
   const configFile = join(homedir(), '.chroxy', 'config.json')
   const tokenManager = NO_AUTH ? null : new TokenManager({
