@@ -328,16 +328,20 @@ export function loggerForSession(component, sessionId) {
  * `sessionId ? loggerForSession('ws', sessionId) : log` ternary that was
  * hand-written across the WS handlers (#4828), where inlining it everywhere
  * invited picking the wrong sessionId variable or inverting the condition — and
- * emitting an operator log to the wrong scope is silent. Unlike
- * `loggerForSession`, this tolerates a missing/empty `sessionId` and falls back
- * to the unscoped logger instead of throwing.
+ * emitting an operator log to the wrong scope is silent.
+ *
+ * Semantics match that ternary EXACTLY: a falsy `sessionId` (null / undefined /
+ * empty string — the legitimate single-session fallback) uses the unscoped
+ * logger, while a truthy value is passed to `loggerForSession`, which THROWS on
+ * a non-string. That deliberate throw is preserved (not swallowed) so a
+ * programming error — e.g. passing an object/number — fails loudly instead of
+ * silently reintroducing the wrong-scope logging this helper exists to prevent
+ * (#5390 review).
  *
  * @param {string|null|undefined} sessionId
  * @param {string} [component='ws']
  * @returns {ReturnType<typeof createLogger>}
  */
 export function sessionLogger(sessionId, component = 'ws') {
-  return typeof sessionId === 'string' && sessionId.length > 0
-    ? loggerForSession(component, sessionId)
-    : createLogger(component)
+  return sessionId ? loggerForSession(component, sessionId) : createLogger(component)
 }

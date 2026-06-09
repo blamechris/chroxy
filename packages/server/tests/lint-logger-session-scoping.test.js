@@ -122,6 +122,30 @@ export function withLogger(sid) {
     assert.match(res.stdout, /OK: 1 module\(s\) import loggerForSession/)
   })
 
+  test('REQUIRES_FACTORY_IMPORT: passes when sessionLogger is imported (#5378)', () => {
+    // sessionLogger wraps loggerForSession (and falls back to the unscoped
+    // logger only when sessionId is absent), so importing it keeps log entries
+    // session-scoped and satisfies the factory-import requirement.
+    const root = buildFixtureTree({
+      requiresFactoryImport: ['session-good-helper.js'],
+      forbidsBareCreateLogger: [],
+      srcFiles: {
+        'session-good-helper.js': `
+import { createLogger, sessionLogger } from './logger.js'
+
+const log = createLogger('test')
+export function withLogger(sid) {
+  return sessionLogger(sid, 'test')
+}
+`,
+      },
+    })
+    cleanups.push(root)
+
+    const res = runLint(root)
+    assert.equal(res.status, 0, `expected exit 0, got ${res.status}; stderr:\n${res.stderr}`)
+  })
+
   test('REQUIRES_FACTORY_IMPORT: fails when only createLogger is imported', () => {
     const root = buildFixtureTree({
       requiresFactoryImport: ['session-missing-import.js'],
@@ -138,7 +162,7 @@ const log = createLogger('test')
 
     const res = runLint(root)
     assert.equal(res.status, 1, `expected exit 1, got ${res.status}; stdout:\n${res.stdout}`)
-    assert.match(res.stderr, /session-aware module must `import \{ loggerForSession \} from/)
+    assert.match(res.stderr, /session-aware module must `import \{ loggerForSession \}` \(or `sessionLogger`\) from/)
   })
 
   test('FORBIDS_BARE_CREATELOGGER: passes when every createLogger is chained with .withSession', () => {

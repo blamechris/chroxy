@@ -181,12 +181,15 @@ for (const file of walk(SRC_DIR)) {
   const src = readFileSync(file, 'utf8')
 
   if (REQUIRES_FACTORY_IMPORT.has(rel)) {
-    // Find the logger.js import block and check loggerForSession appears.
+    // Find the logger.js import block and check a session-scoping factory
+    // appears: `loggerForSession` directly, or `sessionLogger` (#5378) — the
+    // helper that wraps loggerForSession and falls back to the unscoped logger
+    // only when sessionId is genuinely absent. Either keeps log entries scoped.
     const importRe = /import\s*\{([^}]*)\}\s*from\s*['"](?:\.{1,2}\/)+logger\.js['"]/g
     let mm
     let found = false
     while ((mm = importRe.exec(src)) !== null) {
-      if (/\bloggerForSession\b/.test(mm[1])) { found = true; break }
+      if (/\bloggerForSession\b/.test(mm[1]) || /\bsessionLogger\b/.test(mm[1])) { found = true; break }
     }
     if (!found) {
       // The import path depends on directory depth: src/foo.js uses
@@ -198,7 +201,7 @@ for (const file of walk(SRC_DIR)) {
       errors.push({
         file,
         line: 1,
-        msg: `session-aware module must \`import { loggerForSession } from '${importPath}'\` — see issue #4792`,
+        msg: `session-aware module must \`import { loggerForSession }\` (or \`sessionLogger\`) from '${importPath}' — see issue #4792`,
       })
     }
   }
