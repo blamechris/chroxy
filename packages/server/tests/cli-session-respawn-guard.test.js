@@ -103,4 +103,42 @@ describe('CliSession _scheduleRespawn guard', () => {
     session._scheduleRespawn()
     assert.strictEqual(session._respawnCount, 1, 'count still 1 — second call blocked')
   })
+
+  // #5381 — the exhaustion branch (count > 5) is the loop-stopping safety valve:
+  // it emits a terminal error and must NOT schedule any further respawn. An
+  // off-by-one here would either hang (never give up) or loop forever.
+  it('emits a terminal error and schedules NO timer once the cap (5) is exceeded', () => {
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    // Five respawns already consumed; the scheduled flag is clear (the prior
+    // timer fired), so this call is the 6th attempt.
+    session._respawnCount = 5
+    session._respawnScheduled = false
+
+    session._scheduleRespawn()
+
+    assert.strictEqual(session._respawnCount, 6, 'count increments to 6 then bails')
+    assert.strictEqual(session._respawnTimer, null, 'no respawn timer is scheduled after exhaustion')
+    assert.strictEqual(session._respawnScheduled, false, 'no respawn is marked scheduled after exhaustion')
+    assert.strictEqual(errors.length, 1, 'exactly one terminal error is emitted')
+    assert.match(errors[0].message, /failed to stay alive after 5 attempts/)
+  })
+
+  it('never resumes scheduling on repeated calls after exhaustion', () => {
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session._respawnCount = 6 // already past the cap
+
+    for (let i = 0; i < 3; i++) {
+      session._respawnScheduled = false // simulate the guard being clear each round
+      session._scheduleRespawn()
+      assert.strictEqual(session._respawnTimer, null, `still no timer scheduled (round ${i})`)
+    }
+    // The invariant is "no respawn is ever scheduled past the cap" (asserted
+    // each round above) plus "a terminal error is signalled". We deliberately
+    // don't assert the exact final count or how many times the error fires, so
+    // a future change (clamping _respawnCount, de-duping the error) can't break
+    // this test while keeping the guarantee (#5385 review).
+    assert.ok(errors.length >= 1, 'a terminal error is signalled after exhaustion')
+  })
 })
