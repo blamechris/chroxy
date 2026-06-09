@@ -147,17 +147,22 @@ describe('ServerOrchestrator — crash handlers (onFatal)', () => {
 describe('ServerOrchestrator — install', () => {
   it('registers the four process handlers', () => {
     const { orchestrator } = build()
-    const before = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'].map((s) => process.listenerCount(s))
+    const signals = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection']
+    // Snapshot the EXACT listeners present before install() so cleanup can
+    // remove only the ones this test adds — never the test runner's own SIGINT/
+    // SIGTERM handlers (removeAllListeners would clobber those, flaking the run).
+    const before = Object.fromEntries(signals.map((s) => [s, process.listeners(s)]))
     orchestrator.install()
-    const after = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'].map((s) => process.listenerCount(s))
-    for (let i = 0; i < before.length; i++) assert.equal(after[i], before[i] + 1)
-    // Clean up the handlers this test added so it doesn't leak into the runner.
-    process.removeAllListeners('SIGINT')
-    process.removeAllListeners('SIGTERM')
-    // uncaughtException/unhandledRejection: remove only ours by keeping the count.
-    const uel = process.listeners('uncaughtException')
-    process.removeListener('uncaughtException', uel[uel.length - 1])
-    const url = process.listeners('unhandledRejection')
-    process.removeListener('unhandledRejection', url[url.length - 1])
+    try {
+      for (const s of signals) {
+        assert.equal(process.listenerCount(s), before[s].length + 1, `${s} handler added`)
+      }
+    } finally {
+      for (const s of signals) {
+        for (const l of process.listeners(s)) {
+          if (!before[s].includes(l)) process.removeListener(s, l)
+        }
+      }
+    }
   })
 })
