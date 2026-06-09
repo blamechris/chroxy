@@ -1,8 +1,12 @@
 import { spawn, execFileSync } from 'child_process'
 import { BaseTunnelAdapter } from './base.js'
-import { createLogger } from '../logger.js'
+import { createLogger, redactSensitive } from '../logger.js'
 
 const log = createLogger('tunnel')
+
+// #5328 (WP-5.6): how much of cloudflared's recent output to retain so a
+// startup failure can quote the REAL reason in its error, not just an exit code.
+const CLOUDFLARED_OUTPUT_TAIL_CAP = 2000
 
 /**
  * Cloudflare tunnel adapter.
@@ -95,9 +99,22 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       const httpUrl = `https://${this.tunnelHostname}`
       const wsUrl = `wss://${this.tunnelHostname}`
 
+      // #5328 (WP-5.6): retain a capped tail of cloudflared's startup output.
+      // handleOutput otherwise inspects each chunk only for the success pattern
+      // and discards it — so a startup failure surfaced only "exited with code
+      // N" with no hint of WHY (credentials missing, tunnel not found, DNS
+      // route absent). The tail is redacted at EMIT time (in the reject sites),
+      // not per-chunk: a token split across two `data` events would survive a
+      // per-chunk redact (neither half matches the pattern) and leak a fragment
+      // into the error — so we accumulate raw and redact the whole tail once
+      // (#5366 review). We stop accumulating after `resolved` so a long-lived,
+      // chatty named tunnel doesn't run redaction for its whole lifetime.
+      let outputTailRaw = ''
       const handleOutput = (data) => {
+        if (resolved) return
         const text = data.toString()
-        if (!resolved && /[Rr]egistered.*connection|[Cc]onnection.*registered|Serving tunnel/i.test(text)) {
+        outputTailRaw = (outputTailRaw + text).slice(-CLOUDFLARED_OUTPUT_TAIL_CAP)
+        if (/[Rr]egistered.*connection|[Cc]onnection.*registered|Serving tunnel/i.test(text)) {
           resolved = true
           this.url = httpUrl
 
@@ -118,7 +135,8 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
       proc.on('close', (code, signal) => {
         if (!resolved) {
-          reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
+          const tail = redactSensitive(outputTailRaw).trim()
+          reject(new Error(`cloudflared exited with code ${code} before establishing tunnel${tail ? `. Last output: ${tail}` : ''}`))
         } else {
           void this._handleUnexpectedExit(code, signal).catch((err) => {
             log.error(`Error while handling unexpected cloudflared exit: ${err.stack || err.message || err}`)
@@ -136,7 +154,8 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           resolved = true
           this.intentionalShutdown = true
           proc.kill()
-          reject(new Error('Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)'))
+          const tail = redactSensitive(outputTailRaw).trim()
+          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)${tail ? ` Last output: ${tail}` : ''}`))
         }
       }, 30_000)
 

@@ -1380,14 +1380,35 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
     if (!ready && !this._ptyExited) {
-      const degraded = this._lastProbeSawStatus === false
-        ? ' — session file never appeared with a `status` field; if claude was spawned via a non-cli entrypoint or upstream changed the file format, the probe has degraded and will never see ready'
-        : ''
-      log.warn(
-        `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${degraded} — proceeding (first sendMessage may stall)\n` +
+      ;(this._log || log).warn(
+        `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${this._degradedProbeSuffix()} — proceeding (first sendMessage may stall)\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
     }
+  }
+
+  /**
+   * #5328 (WP-5.6): build the diagnostic suffix for a readiness-probe timeout.
+   * When the probe degraded (never saw a `status` field — `_lastProbeSawStatus`
+   * is false), distinguish the two root causes by checking whether the per-pid
+   * session file exists on disk, so the swallowed degradation names its likely
+   * cause instead of just "not ready":
+   *   - file MISSING → claude is likely running under a DIFFERENT pid than the
+   *     PTY child (a wrapper shim that forks node without `exec`); the probe
+   *     reads ~/.claude/sessions/<pty-pid>.json, which the real claude never
+   *     writes, so readiness gating is effectively disabled for this session.
+   *   - file PRESENT but statusless → a non-cli entrypoint or an upstream
+   *     file-format change; the file exists but carries no `status` field.
+   * Returns '' when the probe was healthy (saw status but never idle = real busy).
+   */
+  _degradedProbeSuffix() {
+    if (this._lastProbeSawStatus !== false) return ''
+    const pid = this._term && this._term.pid
+    const sessFile = Number.isInteger(pid) && pid > 0 ? ClaudeTuiSession.sessionFilePath(pid) : null
+    if (sessFile && !existsSync(sessFile)) {
+      return ` — no session file at ${sessFile} (pty pid ${pid}); claude may be running under a different pid (a wrapper shim that forks node without exec), so the readiness probe can never see its status and readiness gating is effectively disabled for this session`
+    }
+    return ' — session file never appeared with a `status` field; if claude was spawned via a non-cli entrypoint or upstream changed the file format, the probe has degraded and will never see ready'
   }
 
   /**
@@ -1652,11 +1673,8 @@ export class ClaudeTuiSession extends BaseSession {
     // refuse to deliver the prompt.
     const ready = await this._waitForPrompt(ClaudeTuiSession.TURN_PROMPT_WAIT_MAX_MS)
     if (!ready && !this._ptyExited) {
-      const degraded = this._lastProbeSawStatus === false
-        ? ' — and the probe has never seen a `status` field this session, suggesting a degraded probe (see sessionFilePath docs)'
-        : ''
-      log.warn(
-        `TUI session file not at status=idle before turn (msg=${messageId})${degraded} — writing anyway\n` +
+      ;(this._log || log).warn(
+        `TUI session file not at status=idle before turn (msg=${messageId})${this._degradedProbeSuffix()} — writing anyway\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
     }

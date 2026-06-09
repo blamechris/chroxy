@@ -1259,6 +1259,63 @@ describe('ClaudeTuiSession', () => {
       })
     })
 
+    describe('_degradedProbeSuffix (#5328, WP-5.6)', () => {
+      // Surfaces WHY the readiness probe degraded: a missing session file for
+      // the pty pid points at claude running under a different pid (wrapper
+      // shim); a statusless-but-present file points at a wrong entrypoint.
+      //
+      // #5366 review: stub the static sessionFilePath onto a temp dir so the
+      // file-existence branches are HERMETIC (no reliance on the real ~/.claude)
+      // and BOTH branches (missing vs present) are exercised deterministically.
+      let probeTmp
+      let origSessionFilePath
+      beforeEach(() => {
+        probeTmp = mkdtempSync(join(tmpdir(), 'chroxy-tui-probe-'))
+        origSessionFilePath = ClaudeTuiSession.sessionFilePath
+        ClaudeTuiSession.sessionFilePath = (pid) => join(probeTmp, `${pid}.json`)
+      })
+      afterEach(() => {
+        ClaudeTuiSession.sessionFilePath = origSessionFilePath
+        if (probeTmp) rmSync(probeTmp, { recursive: true, force: true })
+        probeTmp = null
+      })
+
+      it('returns empty when the probe saw a status (healthy / real busy)', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._lastProbeSawStatus = true
+        assert.equal(session._degradedProbeSuffix(), '')
+      })
+
+      it('names the wrong-pid cause when the per-pid session file is MISSING', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._lastProbeSawStatus = false
+        session._term = { pid: 4242 } // no file written for it → missing
+        const suffix = session._degradedProbeSuffix()
+        assert.match(suffix, /no session file at .*4242\.json/, `got: ${suffix}`)
+        assert.match(suffix, /different pid/)
+        assert.match(suffix, /readiness gating is effectively disabled/)
+      })
+
+      it('names the statusless-file cause when the session file is PRESENT (#5366 review)', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._lastProbeSawStatus = false
+        session._term = { pid: 4242 }
+        // File exists but carries no `status` field → wrong-entrypoint cause.
+        writeFileSync(join(probeTmp, '4242.json'), '{}')
+        const suffix = session._degradedProbeSuffix()
+        assert.match(suffix, /session file never appeared with a `status` field/, `got: ${suffix}`)
+        assert.doesNotMatch(suffix, /different pid/)
+      })
+
+      it('falls back to the statusless-file message when there is no usable pid', () => {
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session._lastProbeSawStatus = false
+        session._term = null
+        const suffix = session._degradedProbeSuffix()
+        assert.match(suffix, /session file never appeared with a `status` field/, `got: ${suffix}`)
+      })
+    })
+
     describe('output tail ANSI stripping (#5325, WP-5.3)', () => {
       // _appendToOutputTail is the body of the PTY onData handler. It must
       // strip ANSI from the CONCATENATED tail, not per-chunk, so an escape

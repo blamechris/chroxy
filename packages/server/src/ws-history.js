@@ -30,13 +30,20 @@ const log = createLogger('ws')
 //
 // Both helpers abort the poll once ws.readyState leaves OPEN (client
 // disconnected while paused), so the poll chain terminates on socket close
-// without sending to a closed socket. Note that this is a narrower guarantee
-// than "we never leak a setTimeout" — a dead TCP connection that never moves
-// out of OPEN and never drains would keep polling indefinitely. That is the
-// same liveness window as the existing ws keep-alive ping; if we ever want a
-// hard cap, add a max-wait/backoff here.
+// without sending to a closed socket.
+//
+// #5328 (WP-5.6): the readyState check alone is NOT enough to bound the poll —
+// a half-open TCP connection that stays stuck in OPEN, never drains, and never
+// errors would keep re-scheduling setTimeout(poll) forever, leaking one timer
+// chain per stuck replay/flush. BACKPRESSURE_MAX_WAIT_MS is a hard cap: once a
+// drain has been blocked that long we stop polling and close the socket (1013
+// "Try Again Later") so the client reconnects cleanly and re-runs the replay
+// from scratch, rather than silently leaking a timer against a dead peer. The
+// cap is comfortably longer than a healthy slow-link drain but far short of
+// "forever".
 const BACKPRESSURE_PAUSE_THRESHOLD = 256 * 1024
 const BACKPRESSURE_POLL_INTERVAL_MS = 20
+const BACKPRESSURE_MAX_WAIT_MS = 30_000
 
 /**
  * Schedule `fn` once ws.bufferedAmount falls below BACKPRESSURE_PAUSE_THRESHOLD,
@@ -44,18 +51,30 @@ const BACKPRESSURE_POLL_INTERVAL_MS = 20
  * with setTimeout(BACKPRESSURE_POLL_INTERVAL_MS) while paused. Bails out
  * silently if ws.readyState transitions away from OPEN — the caller's first
  * action in `fn` already re-checks readyState so the bailout is safe.
+ *
+ * If the drain stays blocked for BACKPRESSURE_MAX_WAIT_MS (a half-open socket
+ * that never drains), stop polling and close the socket so the client
+ * reconnects cleanly — `fn` is then never called (#5328).
+ *
+ * Exported for direct unit testing of the max-wait cap.
  */
-function scheduleAfterDrain(ws, fn) {
+export function scheduleAfterDrain(ws, fn) {
   if (ws.readyState !== 1) return
   const buffered = ws.bufferedAmount || 0
   if (buffered <= BACKPRESSURE_PAUSE_THRESHOLD) {
     setImmediate(fn)
     return
   }
+  const start = Date.now()
   const poll = () => {
     if (ws.readyState !== 1) return
     if ((ws.bufferedAmount || 0) <= BACKPRESSURE_PAUSE_THRESHOLD) {
       setImmediate(fn)
+      return
+    }
+    if (Date.now() - start >= BACKPRESSURE_MAX_WAIT_MS) {
+      log.warn(`replay/flush drain stalled >${BACKPRESSURE_MAX_WAIT_MS}ms (bufferedAmount=${ws.bufferedAmount}) — closing socket so the client reconnects`)
+      try { ws.close(1013, 'Replay backpressure timeout') } catch (_) { /* already closing */ }
       return
     }
     setTimeout(poll, BACKPRESSURE_POLL_INTERVAL_MS)
