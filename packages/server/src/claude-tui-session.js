@@ -1380,7 +1380,7 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
     if (!ready && !this._ptyExited) {
-      log.warn(
+      ;(this._log || log).warn(
         `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${this._degradedProbeSuffix()} — proceeding (first sendMessage may stall)\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
@@ -1673,7 +1673,7 @@ export class ClaudeTuiSession extends BaseSession {
     // refuse to deliver the prompt.
     const ready = await this._waitForPrompt(ClaudeTuiSession.TURN_PROMPT_WAIT_MAX_MS)
     if (!ready && !this._ptyExited) {
-      log.warn(
+      ;(this._log || log).warn(
         `TUI session file not at status=idle before turn (msg=${messageId})${this._degradedProbeSuffix()} — writing anyway\n` +
         `_outputTail dump:\n${this._outputTailHexDump()}`,
       )
