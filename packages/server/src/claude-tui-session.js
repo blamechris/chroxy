@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameS
 import { homedir, tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { BaseSession } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { createLogger, loggerForSession, redactSensitive } from './logger.js'
@@ -457,8 +457,10 @@ export class ClaudeTuiSession extends BaseSession {
     return ['multi_question_intervention', 'respawn_exhausted']
   }
 
-  constructor({ cwd, model, permissionMode, port, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, firstOutputTimeoutMs, skipPermissions, resumeSessionId } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-tui', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs })
+  constructor(opts = {}) {
+    super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-tui' }))
+    // ClaudeTuiSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
+    const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId } = opts
 
     this._port = port || null
     // #4044: when true, spawn `claude` with --dangerously-skip-permissions

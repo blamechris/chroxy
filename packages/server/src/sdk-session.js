@@ -2,7 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { join } from 'path'
 import { homedir } from 'os'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
-import { BaseSession } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
@@ -300,8 +300,10 @@ export class SdkSession extends BaseSession {
 
   get thinkingLevel() { return this._thinkingLevel }
 
-  constructor({ cwd, model, permissionMode, resumeSessionId, transforms, maxToolInput, sandbox, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-sdk', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs })
+  constructor(opts = {}) {
+    super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-sdk' }))
+    // SdkSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
+    const { resumeSessionId, transforms, maxToolInput, sandbox, stdinForwardingDisabled } = opts
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null

@@ -123,6 +123,50 @@ export const BACKGROUND_SHELL_QUIESCE_MS = 60 * 1000
 // reclaimed. Set the instance field to 0 to disable (advisory-only #5247).
 export const BACKGROUND_SHELL_HARD_QUIESCE_MS = 4 * 60 * 60 * 1000
 
+// #5367: canonical list of the opts BaseSession's constructor accepts, in the
+// exact order they appear in the destructure below. Single source of truth for
+// `buildBaseSessionOpts()` — the picker each subclass uses to forward opts down
+// without hand-maintaining a parallel destructure (the "middle-layer trap" that
+// re-shipped three times: #3224 / #3231 / #4790). The CI lint
+// (lint-session-opt-forwarding.mjs) ASSERTS this array equals the set parsed
+// from the constructor destructure, so the two can never drift apart.
+export const BASE_SESSION_OPT_KEYS = [
+  'cwd',
+  'model',
+  'permissionMode',
+  'skillsDir',
+  'repoSkillsDir',
+  'maxSkillBytes',
+  'maxTotalSkillBytes',
+  'provider',
+  'activeManualSkills',
+  'providerSkillAllowlist',
+  'trustStore',
+  'trustMismatchMode',
+  'promptEvaluator',
+  'promptEvaluatorSkipPattern',
+  'chroxyContextHint',
+  'sessionPreamble',
+  'resultTimeoutMs',
+  'hardTimeoutMs',
+  'streamStallTimeoutMs',
+  'backgroundShellHardQuiesceMs',
+]
+
+// #5367: pick the BaseSession opts out of a subclass's full opts bag and merge
+// per-subclass `overrides` on top (overrides win — e.g. provider/model
+// defaults). Uses `if (k in fullOpts)` rather than `??` so an explicitly-passed
+// falsy value (notably `backgroundShellHardQuiesceMs: 0`, which disables
+// hard-reaping) is preserved, and absent keys are omitted entirely (so
+// BaseSession's own `|| default` fallbacks still apply).
+export function buildBaseSessionOpts(fullOpts = {}, overrides = {}) {
+  const out = {}
+  for (const k of BASE_SESSION_OPT_KEYS) {
+    if (k in fullOpts) out[k] = fullOpts[k]
+  }
+  return { ...out, ...overrides }
+}
+
 // Default per-provider injection mode (#3200). Subprocess providers without
 // a system-prompt flag (Codex, Gemini) prepend skills to the first user
 // message; Claude (SDK or CLI) appends to the system prompt. Maps the

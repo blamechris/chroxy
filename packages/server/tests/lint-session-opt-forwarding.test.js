@@ -26,22 +26,35 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const LINT_SCRIPT = resolve(__dirname, '..', 'scripts', 'lint-session-opt-forwarding.mjs')
 
 // Minimal BaseSession fixture that mimics the real signature shape — the
-// lint extracts the opt-name set from the destructure inside the constructor.
-const BASE_SESSION_SRC = `
+// lint extracts the opt-name set from the destructure inside the constructor
+// AND asserts it equals the exported BASE_SESSION_OPT_KEYS array (#5367).
+// `mkBaseSession` lets a test deliberately desync the array from the ctor to
+// exercise the drift guard.
+function mkBaseSession({ ctorKeys, arrayKeys } = {}) {
+  const ctor = ctorKeys || [
+    'cwd', 'model', 'permissionMode', 'skillsDir', 'repoSkillsDir',
+    'maxSkillBytes', 'chroxyContextHint', 'streamStallTimeoutMs',
+    'resultTimeoutMs', 'hardTimeoutMs',
+  ]
+  const arr = arrayKeys || ctor
+  return `
 import { EventEmitter } from 'events'
+
+export const BASE_SESSION_OPT_KEYS = [
+${arr.map(k => `  '${k}',`).join('\n')}
+]
+
+export function buildBaseSessionOpts(fullOpts = {}, overrides = {}) {
+  const out = {}
+  for (const k of BASE_SESSION_OPT_KEYS) {
+    if (k in fullOpts) out[k] = fullOpts[k]
+  }
+  return { ...out, ...overrides }
+}
 
 export class BaseSession extends EventEmitter {
   constructor({
-    cwd,
-    model,
-    permissionMode,
-    skillsDir,
-    repoSkillsDir,
-    maxSkillBytes,
-    chroxyContextHint,
-    streamStallTimeoutMs,
-    resultTimeoutMs,
-    hardTimeoutMs,
+${ctor.map(k => `    ${k},`).join('\n')}
   } = {}) {
     super()
     this.cwd = cwd
@@ -49,6 +62,9 @@ export class BaseSession extends EventEmitter {
   }
 }
 `
+}
+
+const BASE_SESSION_SRC = mkBaseSession()
 
 // A "good" middle layer — every BaseSession opt is destructured and
 // forwarded through super(). The real JsonlSubprocessSession looks like
@@ -169,11 +185,55 @@ export class ClaudeByokSession extends BaseSession {
 }
 `
 
-function setupFixtureTree(extraFiles = {}) {
+// #5367: the sanctioned picker shape. A single-arg ctor forwarding via
+// `super(buildBaseSessionOpts(opts, { ...overrides }))`. The lint treats this
+// as compliant-by-construction (coverage proven by the array-vs-ctor assertion
+// + the picker copying every key) — it must NOT be skipped vacuously.
+const PICKER_SRC = `
+import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+
+export class SdkSession extends BaseSession {
+  constructor(opts = {}) {
+    super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-sdk' }))
+    const { resumeSessionId } = opts
+    this.resumeSessionId = resumeSessionId
+  }
+}
+`
+
+// #5367: a single-arg ctor that hand-rolls `super({ cwd })` and silently drops
+// every other BaseSession opt. Pre-#5367 the lint skipped single-arg ctors
+// blanket-style, so this regression slipped through. The inverted lint must
+// flag it.
+const SINGLE_ARG_HANDROLLED_DROP_SRC = `
+import { BaseSession } from './base-session.js'
+
+export class CliSession extends BaseSession {
+  constructor(opts = {}) {
+    super({ cwd: opts.cwd })
+  }
+}
+`
+
+// #5367: an unrecognized super() forwarder — wraps opts in some other function
+// that the lint cannot prove preserves every key. Must be flagged.
+const UNRECOGNIZED_SUPER_SRC = `
+import { BaseSession } from './base-session.js'
+
+function mungeOpts(o) { return o }
+
+export class CliSession extends BaseSession {
+  constructor(opts = {}) {
+    super(mungeOpts(opts))
+  }
+}
+`
+
+function setupFixtureTree(extraFiles = {}, baseSessionSrc = BASE_SESSION_SRC) {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-lint-opt-fwd-'))
   const srcDir = join(dir, 'src')
   mkdirSync(srcDir, { recursive: true })
-  writeFileSync(join(srcDir, 'base-session.js'), BASE_SESSION_SRC, 'utf8')
+  writeFileSync(join(srcDir, 'base-session.js'), baseSessionSrc, 'utf8')
   for (const [name, src] of Object.entries(extraFiles)) {
     writeFileSync(join(srcDir, name), src, 'utf8')
   }
@@ -239,6 +299,70 @@ describe('lint-session-opt-forwarding', () => {
     cleanups.push(dir)
     const { code, stdout, stderr } = runLint(srcDir)
     assert.equal(code, 0, `rest-spread is naturally immune\nstdout:\n${stdout}\nstderr:\n${stderr}`)
+  })
+
+  test('accepts the buildBaseSessionOpts() picker (single-arg ctor) — #5367', () => {
+    // The sanctioned migration target. Must be analyzed-and-ok (compliant by
+    // construction), NOT skipped vacuously — the latter would re-arm the trap.
+    const { dir, srcDir } = setupFixtureTree({
+      'sdk-session.js': PICKER_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stdout, stderr } = runLint(srcDir)
+    assert.equal(code, 0, `picker should pass\nstdout:\n${stdout}\nstderr:\n${stderr}`)
+    // Prove it was actually counted (not silently skipped to "0 subclasses").
+    assert.match(stdout, /1 session subclass/, 'picker class must be counted as analyzed')
+  })
+
+  test('fails (exit 2) when BASE_SESSION_OPT_KEYS drifts from the ctor — #5367', () => {
+    // The new primary drift guard: the array the picker iterates must equal the
+    // ctor destructure. Drop a key from the array only → the picker would
+    // silently stop forwarding it. Lint must hard-error (exit 2).
+    const driftedBase = mkBaseSession({
+      ctorKeys: [
+        'cwd', 'model', 'permissionMode', 'skillsDir', 'repoSkillsDir',
+        'maxSkillBytes', 'chroxyContextHint', 'streamStallTimeoutMs',
+        'resultTimeoutMs', 'hardTimeoutMs',
+      ],
+      // streamStallTimeoutMs intentionally MISSING from the array.
+      arrayKeys: [
+        'cwd', 'model', 'permissionMode', 'skillsDir', 'repoSkillsDir',
+        'maxSkillBytes', 'chroxyContextHint',
+        'resultTimeoutMs', 'hardTimeoutMs',
+      ],
+    })
+    const { dir, srcDir } = setupFixtureTree({ 'sdk-session.js': PICKER_SRC }, driftedBase)
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 2, 'drift between array and ctor must hard-error (exit 2)')
+    assert.match(stderr, /drifted/i, 'error should explain the drift')
+    assert.match(stderr, /streamStallTimeoutMs/, 'error should name the drifted key')
+  })
+
+  test('fails when a single-arg ctor hand-rolls super({ cwd }) and drops keys — #5367', () => {
+    // Pre-#5367 single-arg ctors were blanket-skipped; this is the hole the
+    // picker would have slipped through. The inverted lint must flag it.
+    const { dir, srcDir } = setupFixtureTree({
+      'cli-session.js': SINGLE_ARG_HANDROLLED_DROP_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'hand-rolled super({ cwd }) in a single-arg ctor must fail')
+    assert.match(stderr, /cli-session\.js/, 'error should name the offending file')
+    assert.match(stderr, /model|permissionMode|streamStallTimeoutMs/, 'error should name dropped opts')
+  })
+
+  test('flags an unrecognized super() forwarder shape — #5367', () => {
+    // super(someOtherFn(opts)) cannot be proven safe → offense (pre-#5367 this
+    // was silently skipped, which is exactly the hole that re-armed the trap).
+    const { dir, srcDir } = setupFixtureTree({
+      'cli-session.js': UNRECOGNIZED_SUPER_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'unrecognized super() shape must fail')
+    assert.match(stderr, /cli-session\.js/, 'error should name the offending file')
+    assert.match(stderr, /[Uu]nrecognized super/, 'error should explain the unrecognized shape')
   })
 
   test('passes against the real packages/server/src tree (acceptance criterion)', () => {

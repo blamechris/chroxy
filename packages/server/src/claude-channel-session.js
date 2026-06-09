@@ -1,6 +1,6 @@
 import { homedir } from 'os'
 import { join } from 'path'
-import { BaseSession } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 
 // Minimum `claude` CLI version that ships the `--channels` MCP transport.
@@ -136,8 +136,8 @@ export class ClaudeChannelSession extends BaseSession {
     return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs } = {}) {
-    super({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'claude-channel', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs })
+  constructor(opts = {}) {
+    super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-channel' }))
   }
 
   /**
