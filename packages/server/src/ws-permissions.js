@@ -43,7 +43,8 @@ function sanitizeToolInput(input) {
  * pattern was hand-written 12+ times across the two handlers, which let the
  * content-type and error-body shape drift between sites. Centralizing it gives
  * one place to set the header; `extraHeaders` covers the one site (rate-limit)
- * that also emits `Retry-After`.
+ * that also emits `Retry-After`. The `Content-Type` is merged AFTER
+ * `extraHeaders` so a caller can never accidentally override it (#5389 review).
  *
  * @param {import('http').ServerResponse} res
  * @param {number} status - HTTP status code.
@@ -51,7 +52,7 @@ function sanitizeToolInput(input) {
  * @param {object} [extraHeaders] - additional response headers to merge.
  */
 function sendJson(res, status, body, extraHeaders) {
-  res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders })
+  res.writeHead(status, { ...extraHeaders, 'Content-Type': 'application/json' })
   res.end(JSON.stringify(body))
 }
 
@@ -299,7 +300,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       body += chunk
       if (body.length > MAX_BODY) {
         oversized = true
-        sendJson(res, 413, { error: 'body too large' })
+        // #5389 review: this 'data' callback runs on a later tick outside the
+        // route wrapper, so a throw here (e.g. writing to a torn-down socket)
+        // would escape to uncaughtException and crash the daemon — same shape
+        // as the #5313 guard on the 'end' handler. Contain it.
+        try {
+          sendJson(res, 413, { error: 'body too large' })
+        } catch { /* socket already torn down — nothing more we can do */ }
       }
     })
     req.on('end', () => {
