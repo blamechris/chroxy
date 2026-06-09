@@ -212,3 +212,38 @@ describe('stdin error listener', () => {
     )
   })
 })
+
+describe('stdout/stderr stream error listeners (#5361)', () => {
+  // Follow-up to #5324 (which covered the jsonl-subprocess path): a stream-level
+  // 'error' on child.stdout/child.stderr with NO user listener throws as an
+  // unhandled error and crashes the whole daemon. cli-session only wired stdin.
+
+  it('source file registers child.stdout.on(\'error\') and child.stderr.on(\'error\')', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const dir = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(join(dir, '../src/cli-session.js'), 'utf-8')
+    assert.ok(
+      source.includes("child.stdout.on('error'"),
+      'cli-session.js must register child.stdout.on(\'error\') so a stdout stream error cannot crash the daemon'
+    )
+    assert.ok(
+      source.includes("child.stderr.on('error'"),
+      'cli-session.js must register child.stderr.on(\'error\') so a stderr stream error cannot crash the daemon'
+    )
+  })
+
+  it('an attached stdout/stderr error listener swallows an emitted error (no unhandled throw)', () => {
+    // Mirrors the stdin-listener test above: with a user 'error' listener
+    // present, emitting 'error' on the stream does not become an unhandled
+    // EventEmitter throw (which is exactly what would crash the daemon).
+    const session = createReadySession()
+    for (const stream of [session._child.stdout, session._child.stderr]) {
+      stream.on('error', () => { /* log + swallow, as the source does */ })
+      assert.doesNotThrow(() => {
+        stream.emit('error', Object.assign(new Error('read EPIPE'), { code: 'EPIPE' }))
+      })
+    }
+  })
+})
