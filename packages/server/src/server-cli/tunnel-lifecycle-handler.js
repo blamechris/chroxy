@@ -79,6 +79,15 @@ export class TunnelLifecycleHandler {
     const pairingManager = this._pairingManager
     const log = this._log
 
+    // #5368c (Copilot review on #5402): modeLabel is deterministic from the
+    // tunnel mode, so compute it up-front instead of after waitForTunnel (as
+    // the original did). The tunnel_recovered handler references it and can fire
+    // DURING the initial waitForTunnel after an early flap — with the late
+    // declaration that hit a TDZ ReferenceError and silently skipped the QR
+    // re-render (caught by the handler's try/catch). Same value either way; this
+    // just closes the window so a recovery-during-startup actually re-renders.
+    const modeLabel = `cloudflare:${tunnelArg.mode}`
+
     // 4. Start the tunnel
     const tunnel = this._createTunnel({
       port,
@@ -170,8 +179,7 @@ export class TunnelLifecycleHandler {
     }
     wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, this._buildTunnelReadyStatus({ tunnelUrl: httpUrl }))
 
-    // 7. Generate connection info
-    const modeLabel = `cloudflare:${tunnelArg.mode}`
+    // 7. Generate connection info (modeLabel computed up-front; see above)
     startupDisplay.currentTunnelMode = modeLabel
     await startupDisplay.displayQr(wsUrl, httpUrl, modeLabel)
 

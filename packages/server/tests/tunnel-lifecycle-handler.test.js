@@ -145,6 +145,28 @@ describe('TunnelLifecycleHandler — tunnel_recovered', () => {
     assert.ok(wsServer.statuses.some((s) => s.includes('recovered')), 'recovery status broadcast')
   })
 
+  it('a recovery DURING the initial waitForTunnel re-renders (modeLabel available — #5402 TDZ fix)', async () => {
+    let firstWait = true
+    const { handler, tunnel, startupDisplay } = build({
+      waitForTunnel: async () => {
+        if (firstWait) {
+          firstWait = false
+          // Simulate a flap+recovery while the initial routability wait is in
+          // flight. Before the fix, modeLabel was declared AFTER this wait, so
+          // the recovered handler hit a TDZ ReferenceError and silently skipped
+          // the QR re-render (swallowed by its try/catch).
+          tunnel.emit('tunnel_recovered', { httpUrl: 'https://recovered.example', wsUrl: 'wss://recovered.example', attempt: 1 })
+          await new Promise((r) => setImmediate(r))
+        }
+      },
+    })
+    await handler.createAndStart()
+    assert.ok(
+      startupDisplay.calls.some((c) => c[0] === 'wss://recovered.example' && c[2] === 'cloudflare:quick'),
+      'recovery-during-startup re-rendered the QR with modeLabel (would TDZ-throw and skip before the fix)'
+    )
+  })
+
   it('contains a waitForTunnel throw in the recovered handler (no crash)', async () => {
     let calls = 0
     const { handler, tunnel } = build({
