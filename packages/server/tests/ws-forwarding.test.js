@@ -544,6 +544,59 @@ describe('executeSideEffects (via setupCliForwarding)', () => {
     assert.equal(listMsg, undefined, 'session_list must not broadcast without sessionManager')
   })
 
+  it('refresh_context side-effect: logs a warning and never rejects when getSessionContext rejects (#5383)', async () => {
+    const sm = new EventEmitter()
+    sm.getSession = mock.fn(() => null)
+    sm.listSessions = mock.fn(() => [])
+    sm.getSessionContext = mock.fn(() => Promise.reject(new Error('ctx boom')))
+    const normalizer = new EventNormalizer()
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = mock.fn()
+    devPreview.closeSession = mock.fn()
+    const ctx = {
+      normalizer,
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      pushManager: null,
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+    }
+    setupForwarding(ctx)
+
+    const warnings = []
+    const logSpy = (entry) => {
+      if (entry.level === 'warn' && entry.component === 'ws-forwarding') warnings.push(entry.message)
+    }
+    addLogListener(logSpy)
+    try {
+      // A `result` event in multi-session mode emits a refresh_context side
+      // effect, which calls getSessionContext — here it rejects. The rejection
+      // must be swallowed (logged) and never propagate to crash the daemon.
+      sm.emit('session_event', {
+        sessionId: 'sess-1',
+        event: 'result',
+        data: { cost: 0, duration: 1, usage: {}, sessionId: 'sess-1' },
+      })
+      // Let the rejected getSessionContext().catch() settle.
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+    } finally {
+      removeLogListener(logSpy)
+    }
+
+    assert.equal(sm.getSessionContext.mock.calls.length, 1, 'getSessionContext was attempted')
+    assert.ok(
+      warnings.some((m) => /Failed to refresh session context for sess-1/.test(m)),
+      `expected the refresh-context warning, got: ${JSON.stringify(warnings)}`,
+    )
+    // The rejection must not produce a session_context broadcast.
+    const broadcasts = ctx.broadcastToSession.mock.calls.map((c) => c.arguments[1]).filter(Boolean)
+    assert.ok(!broadcasts.some((m) => m && m.type === 'session_context'), 'no session_context broadcast on rejection')
+  })
+
   it('push side-effect: calls pushManager.send with correct args', () => {
     const sm = new EventEmitter()
     sm.getSession = mock.fn(() => null)
