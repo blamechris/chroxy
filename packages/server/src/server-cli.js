@@ -370,6 +370,54 @@ export async function maybeAdvertiseMdns({
   }
 }
 
+/**
+ * #5369: best-effort teardown for STARTUP-ERROR paths (tunnel.start failure,
+ * waitForTunnel failure). Async — awaits tunnel.stop() because at startup there
+ * is no exit-deadline risk and we want a clean stop. Each step is try/catch-
+ * isolated so one failure can't strand the rest. Exported (no process.exit) so
+ * it can be unit-tested with fakes — mirrors flushAndDestroy in
+ * server-cli-child.js. Order is tunnel → ws → mdns → bonjour → token → pairing
+ * → sessionManager (the deliberate startup-error order; pool is NOT torn down
+ * at these sites today and must not be added).
+ */
+export async function emergencyCleanup({
+  tunnel, wsServer, mdnsService, bonjourInstance,
+  tokenManager, pairingManager, sessionManager, logger = log,
+}) {
+  try { if (tunnel) await tunnel.stop() } catch (err) { logger.warn?.(`emergencyCleanup: tunnel.stop failed: ${err?.message || err}`) }
+  try { wsServer?.close() } catch (err) { logger.warn?.(`emergencyCleanup: wsServer.close failed: ${err?.message || err}`) }
+  try { mdnsService?.stop?.() } catch {}
+  try { bonjourInstance?.destroy?.() } catch {}
+  try { tokenManager?.destroy() } catch {}
+  try { pairingManager?.destroy() } catch {}
+  try { sessionManager?.destroyAll() } catch (err) { logger.warn?.(`emergencyCleanup: destroyAll failed: ${err?.message || err}`) }
+}
+
+/**
+ * #5369: unified SYNCHRONOUS crash teardown for uncaughtException /
+ * unhandledRejection. `kind` is the log label. Deliberately NOT async and does
+ * NOT await tunnel.stop() — the sigterm-not-sigkill invariant: a hung stop must
+ * never block the setTimeout-driven process.exit in the caller (otherwise an
+ * installed crash handler suppresses Node's default crash-exit and could leave
+ * the process alive forever). Order: broadcast → serialize → destroyAll → ws
+ * close → tunnel.stop (fire-and-forget) → removeConnectionInfo. destroyAll runs
+ * before wsServer.close so SDK sessions auto-deny pending permissions first.
+ */
+export function emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager, logger = log }) {
+  try { wsServer?.broadcastShutdown('crash', 0) } catch {}
+  // Persist sessions before destroying — losing the user's restored state on
+  // crash is worse UX than the small risk of writing partial state. The
+  // try/catch isolates serialization failures so destroyAll() still runs.
+  try { sessionManager?.serializeState() } catch (serializeErr) {
+    logger.warn(`Failed to serialize state during ${kind}: ${serializeErr?.stack || serializeErr}`)
+  }
+  try { sessionManager?.destroyAll() } catch {}
+  try { wsServer?.close() } catch {}
+  // NO await — see the invariant above.
+  try { if (tunnel) tunnel.stop() } catch {}
+  try { removeConnectionInfo() } catch {}
+}
+
 export async function startCliServer(config) {
   // Enable JSON log format if configured
   if (config.logFormat === 'json') {
@@ -974,13 +1022,7 @@ export async function startCliServer(config) {
       log.error(message)
       try { wsServer.broadcastError('tunnel', message, false) } catch {}
       console.error(`\n  ✗ ${message}\n`)
-      try { await tunnel.stop() } catch {}
-      try { wsServer.close() } catch {}
-      try { mdnsService?.stop?.() } catch {}
-      try { bonjourInstance?.destroy?.() } catch {}
-      try { tokenManager?.destroy() } catch {}
-      try { pairingManager?.destroy() } catch {}
-      try { sessionManager.destroyAll() } catch {}
+      await emergencyCleanup({ tunnel, wsServer, mdnsService, bonjourInstance, tokenManager, pairingManager, sessionManager })
       process.exitCode = 1
       return
     }
@@ -1051,13 +1093,7 @@ export async function startCliServer(config) {
       console.error(`\n  ✗ ${tunnelErr.message}\n`)
       // Clean up everything that's been started so we don't leave
       // orphan processes or armed timers holding the event loop alive.
-      try { await tunnel.stop() } catch {}
-      try { wsServer.close() } catch {}
-      try { mdnsService?.stop?.() } catch {}
-      try { bonjourInstance?.destroy?.() } catch {}
-      try { tokenManager?.destroy() } catch {}
-      try { pairingManager?.destroy() } catch {}
-      try { sessionManager.destroyAll() } catch {}
+      await emergencyCleanup({ tunnel, wsServer, mdnsService, bonjourInstance, tokenManager, pairingManager, sessionManager })
       process.exitCode = 1
       return
     }
@@ -1206,55 +1242,24 @@ export async function startCliServer(config) {
   process.on('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(1)) })
   process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)) })
 
-  process.on('uncaughtException', (err) => {
+  // #5369: uncaughtException and unhandledRejection shared an identical body —
+  // unify them into one handler factory taking a `kind` log label. The "during
+  // shutdown" branch still just logs + schedules exit (otherwise installing
+  // these handlers would suppress Node's default crash-exit and a stuck
+  // shutdown — e.g. hung tunnel.stop() — could leave the process alive forever).
+  const onFatal = (kind) => (err) => {
     if (shuttingDown) {
-      // Late crash arriving during an already-running shutdown — still log
-      // it and schedule exit, otherwise installing this handler would
-      // suppress Node's default crash-exit and a stuck shutdown
-      // (e.g. hung tunnel.stop()) could leave the process alive forever.
-      log.error(`Uncaught exception during shutdown: ${err?.stack || err}`)
+      log.error(`${kind} during shutdown: ${err?.stack || err}`)
       setTimeout(() => process.exit(1), 100)
       return
     }
     shuttingDown = true
-    log.error(`Uncaught exception: ${err?.stack || err}`)
-    try { wsServer.broadcastShutdown('crash', 0) } catch {}
-    // Persist sessions before destroying — losing the user's restored state
-    // on crash is worse UX than the small risk of writing partial state. The
-    // try/catch isolates serialization failures so destroyAll() still runs.
-    try { sessionManager.serializeState() } catch (serializeErr) {
-      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
-    }
-    // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
-    try { sessionManager.destroyAll() } catch {}
-    try { wsServer.close() } catch {}
-    try { if (tunnel) tunnel.stop() } catch {}
-    try { removeConnectionInfo() } catch {}
+    log.error(`${kind}: ${err?.stack || err}`)
+    emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager })
     setTimeout(() => process.exit(1), 100)
-  })
-
-  process.on('unhandledRejection', (err) => {
-    if (shuttingDown) {
-      log.error(`Unhandled rejection during shutdown: ${err?.stack || err}`)
-      setTimeout(() => process.exit(1), 100)
-      return
-    }
-    shuttingDown = true
-    log.error(`Unhandled rejection: ${err?.stack || err}`)
-    try { wsServer.broadcastShutdown('crash', 0) } catch {}
-    // Persist sessions before destroying — losing the user's restored state
-    // on crash is worse UX than the small risk of writing partial state. The
-    // try/catch isolates serialization failures so destroyAll() still runs.
-    try { sessionManager.serializeState() } catch (serializeErr) {
-      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
-    }
-    // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
-    try { sessionManager.destroyAll() } catch {}
-    try { wsServer.close() } catch {}
-    try { if (tunnel) tunnel.stop() } catch {}
-    try { removeConnectionInfo() } catch {}
-    setTimeout(() => process.exit(1), 100)
-  })
+  }
+  process.on('uncaughtException', onFatal('Uncaught exception'))
+  process.on('unhandledRejection', onFatal('Unhandled rejection'))
 
   // Return references for supervised child drain protocol
   return { sessionManager, wsServer }
