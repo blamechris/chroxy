@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
 import {
@@ -6,6 +6,7 @@ import {
   sendSessionInfo,
   replayHistory,
   flushPostAuthQueue,
+  scheduleAfterDrain,
 } from '../src/ws-history.js'
 import { PERMISSION_MODES } from '../src/handler-utils.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
@@ -1959,3 +1960,82 @@ describe('sendPostAuthInfo — per-device active session restore (#4835)', () =>
   })
 })
 
+
+// #5328 (WP-5.6) — scheduleAfterDrain must not poll a half-open socket forever.
+// A connection stuck in OPEN that never drains would re-arm setTimeout(poll)
+// indefinitely, leaking one timer chain per stuck replay. A hard max-wait cap
+// closes the socket so the client reconnects and re-runs the replay.
+describe('scheduleAfterDrain — max-wait cap (#5328)', () => {
+  it('closes the socket once the drain stalls past the cap', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    try {
+      let closed = null
+      const ws = {
+        readyState: 1,
+        bufferedAmount: 512 * 1024, // permanently above the 256KB pause threshold
+        close: (code, reason) => { closed = { code, reason } },
+      }
+      let fnCalled = false
+      scheduleAfterDrain(ws, () => { fnCalled = true })
+
+      // Advance well past the 30s cap; each poll re-arms every 20ms.
+      mock.timers.tick(31_000)
+
+      assert.equal(fnCalled, false, 'fn must not run when the drain never completes')
+      assert.ok(closed, 'socket must be closed after the cap')
+      assert.equal(closed.code, 1013, 'closes with 1013 Try Again Later')
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('does NOT close the socket when the buffer drains before the cap', () => {
+    // NB: only setTimeout + Date are faked — NOT setImmediate. scheduleAfterDrain
+    // calls setImmediate(fn) on a healthy drain; leaving it real lets that fire
+    // harmlessly after the (synchronous) test instead of a faked-but-unfired
+    // immediate wedging the test runner.
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    try {
+      let closed = false
+      const ws = {
+        readyState: 1,
+        bufferedAmount: 512 * 1024,
+        close: () => { closed = true },
+      }
+      scheduleAfterDrain(ws, () => {})
+
+      // Peer acknowledges; buffer drops below threshold before the cap.
+      ws.bufferedAmount = 0
+      mock.timers.tick(25)        // poll sees the drain, schedules fn, returns
+      // Advancing far past the cap must NOT close a socket that already drained.
+      mock.timers.tick(60_000)
+
+      assert.equal(closed, false, 'a socket that drained is never closed by the cap')
+    } finally {
+      mock.timers.reset()
+    }
+  })
+
+  it('stops polling immediately when the socket leaves OPEN (no close call)', () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    try {
+      let closed = false
+      const ws = {
+        readyState: 1,
+        bufferedAmount: 512 * 1024,
+        close: () => { closed = true },
+      }
+      let fnCalled = false
+      scheduleAfterDrain(ws, () => { fnCalled = true })
+
+      // Client disconnects while paused.
+      ws.readyState = 3
+      mock.timers.tick(31_000)
+
+      assert.equal(fnCalled, false)
+      assert.equal(closed, false, 'a disconnected socket needs no close from the drain poll')
+    } finally {
+      mock.timers.reset()
+    }
+  })
+})

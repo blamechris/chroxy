@@ -97,6 +97,64 @@ describe('CloudflareTunnelAdapter', () => {
         /cloudflared exited with code 1 before establishing tunnel/
       )
     })
+
+    it('includes the captured cloudflared output in a named-tunnel failure (#5328)', async () => {
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          // The real reason a named tunnel fails to start — previously discarded.
+          proc.stderr.emit('data', Buffer.from("ERR couldn't find tunnel credentials file"))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({
+        port: 3000,
+        mockSpawn,
+        mode: 'named',
+        config: { tunnelName: 'mytunnel', tunnelHostname: 'host.example.com' },
+      })
+
+      // Call _startNamedTunnel directly — start() wraps it in a 3-attempt retry
+      // with real 3s/6s backoff sleeps, which we don't want to exercise here.
+      await assert.rejects(
+        () => tunnel._startNamedTunnel(),
+        /cloudflared exited with code 1 before establishing tunnel\. Last output: .*couldn't find tunnel credentials file/,
+      )
+    })
+
+    it('redacts token-shaped runs in the captured cloudflared output (#5328)', async () => {
+      // 48 chars after the prefix — redactSensitive's sk-ant- pattern needs 40+.
+      const secret = 'sk-ant-api03-' + 'A'.repeat(48)
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          proc.stderr.emit('data', Buffer.from(`ERR auth failed with token ${secret}`))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({
+        port: 3000,
+        mockSpawn,
+        mode: 'named',
+        config: { tunnelName: 'mytunnel', tunnelHostname: 'host.example.com' },
+      })
+
+      await tunnel._startNamedTunnel().then(
+        () => assert.fail('expected _startNamedTunnel() to reject'),
+        (err) => {
+          assert.match(err.message, /Last output:/)
+          assert.ok(!err.message.includes(secret), `token must be redacted, got: ${err.message}`)
+        },
+      )
+    })
   })
 
   describe('auto-recovery on unexpected exit', () => {
