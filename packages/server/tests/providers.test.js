@@ -1378,3 +1378,55 @@ describe('listProviders credential-file caching (#4658)', () => {
     }
   })
 })
+
+// #5379 — validateProviderClass's inProcessPermissions guard (registration-time
+// safety gate). The happy paths are covered elsewhere; these lock in the two
+// throw branches so a regression that drops the guard fails CI.
+describe('validateProviderClass — inProcessPermissions guard (#5379)', () => {
+  // Minimal class exposing every REQUIRED_METHODS entry on its prototype, so a
+  // test isolates the inProcessPermissions check from the base-method check.
+  function makeProviderClass({ inProcessPermissions, respondToPermission, respondToQuestion }) {
+    class Stub {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+    }
+    if (respondToPermission) Stub.prototype.respondToPermission = function () {}
+    if (respondToQuestion) Stub.prototype.respondToQuestion = function () {}
+    Object.defineProperty(Stub, 'capabilities', { get: () => ({ inProcessPermissions }) })
+    return Stub
+  }
+
+  it('passes when inProcessPermissions=true and both methods are present', async () => {
+    const { validateProviderClass } = await import('../src/providers.js')
+    const Stub = makeProviderClass({ inProcessPermissions: true, respondToPermission: true, respondToQuestion: true })
+    assert.doesNotThrow(() => validateProviderClass(Stub, 'stub-ok'))
+  })
+
+  it('throws when inProcessPermissions=true but respondToPermission is missing', async () => {
+    const { validateProviderClass } = await import('../src/providers.js')
+    const Stub = makeProviderClass({ inProcessPermissions: true, respondToPermission: false, respondToQuestion: true })
+    assert.throws(
+      () => validateProviderClass(Stub, 'stub-no-perm'),
+      /stub-no-perm.*inProcessPermissions=true.*respondToPermission/,
+    )
+  })
+
+  it('throws when inProcessPermissions=true but respondToQuestion is missing', async () => {
+    const { validateProviderClass } = await import('../src/providers.js')
+    const Stub = makeProviderClass({ inProcessPermissions: true, respondToPermission: true, respondToQuestion: false })
+    assert.throws(
+      () => validateProviderClass(Stub, 'stub-no-question'),
+      /stub-no-question.*inProcessPermissions=true.*respondToQuestion/,
+    )
+  })
+
+  it('does NOT require the permission methods when inProcessPermissions is false', async () => {
+    const { validateProviderClass } = await import('../src/providers.js')
+    const Stub = makeProviderClass({ inProcessPermissions: false, respondToPermission: false, respondToQuestion: false })
+    assert.doesNotThrow(() => validateProviderClass(Stub, 'stub-no-inproc'))
+  })
+})
