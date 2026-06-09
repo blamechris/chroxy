@@ -1,4 +1,5 @@
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
+import { buildBaseSessionOpts } from './base-session.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
@@ -282,15 +283,18 @@ export class GeminiSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, resumeSessionId } = {}) {
-    // #3899: hardTimeoutMs forwarded to BaseSession — same shape as
-    // CodexSession. When Gemini gets the soft/hard split as a follow-
-    // up, the operator config will already be flowing in.
-    // #4790: streamStallTimeoutMs likewise forwarded so the per-provider
-    // override SessionManager wired in PR #4745 actually reaches
-    // BaseSession's stream-stall timer — same middle-layer trap as the
-    // other BaseSession opts above ([[feedback_jsonl_subprocess_middle_layer]]).
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'gemini', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, resumeSessionId })
+  constructor(opts = {}) {
+    // #5367: forward every BaseSession opt via the canonical picker (which
+    // preserves the #3899 hardTimeoutMs / #4790 streamStallTimeoutMs plumbing
+    // that used to be hand-maintained here). Overrides: provider default,
+    // `model || DEFAULT_MODEL`, and `resumeSessionId` — the last is a
+    // JsonlSubprocessSession-local opt (not a BaseSession key) so it must ride
+    // through the overrides bag to reach the middle layer.
+    super(buildBaseSessionOpts(opts, {
+      provider: opts.provider || 'gemini',
+      model: opts.model || DEFAULT_MODEL,
+      resumeSessionId: opts.resumeSessionId,
+    }))
   }
 
   // #5374: removed the no-op `setModel` override — it only forwarded to

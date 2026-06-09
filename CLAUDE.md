@@ -193,13 +193,15 @@ Two layers of defence are wired up:
 
 If you need to write to the real home for a legitimate reason (no current test does), set `process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'` scoped to the test and restore it after. The sandbox guard MUST stay enabled in `package.json`.
 
-### Provider session constructors must forward every BaseSession opt (#4797)
+### Provider session constructors must forward every BaseSession opt (#4797 / #5367)
 
-Every class that extends `BaseSession` (or `JsonlSubprocessSession`, the middle layer above the subprocess providers) **must** destructure every opt accepted by `BaseSession`'s constructor AND forward it via `super({ ... })`. Otherwise the opt is silently dropped on its way down — the "middle-layer trap" that has bitten three times (#3224, #3231, #4790) and is documented in project memory as `feedback_jsonl_subprocess_middle_layer.md`.
+Every class that extends `BaseSession` (or `JsonlSubprocessSession`, the middle layer above the subprocess providers) **must** forward every opt accepted by `BaseSession`'s constructor. Dropping one silently disables it on its way down — the "middle-layer trap" that has bitten three times (#3224, #3231, #4790) and is documented in project memory as `feedback_jsonl_subprocess_middle_layer.md`.
 
-The CI lint (`packages/server/scripts/lint-session-opt-forwarding.sh`) parses `base-session.js` for the canonical opt set and diffs it against every subclass's destructure + `super()` block, failing the build with a `file:line` pointer if any opt is missing. Run locally with `cd packages/server && ./scripts/lint-session-opt-forwarding.sh`.
+Since #5367, the canonical way to forward is the **picker**, not a hand-maintained parallel destructure: each subclass takes a single `constructor(opts = {})` and calls `super(buildBaseSessionOpts(opts, { ...overrides }))`, where `buildBaseSessionOpts` (in `base-session.js`) copies exactly the keys in the exported `BASE_SESSION_OPT_KEYS` array. Subclass-local opts are read off `opts` directly; per-subclass defaults (e.g. `provider`, `model`) go in the `overrides` bag (which wins). The single source of truth is `BASE_SESSION_OPT_KEYS` + the `BaseSession` ctor destructure — the lint asserts they stay equal.
 
-When adding a new BaseSession opt: update every subclass constructor (`cli-session.js`, `sdk-session.js`, `claude-tui-session.js`, `jsonl-subprocess-session.js`, `codex-session.js`, `gemini-session.js`) in the same PR. If an opt deliberately should not propagate to a particular subclass (rare), add `// lint-ignore-opt-forwarding: <key>` immediately above the class declaration and explain why.
+The CI lint (`packages/server/scripts/lint-session-opt-forwarding.sh`) now: (1) asserts `BASE_SESSION_OPT_KEYS` equals the `BaseSession` ctor destructure (drift → fail), and (2) requires every subclass to forward via `super(buildBaseSessionOpts(...))` (or a rest-spread, or the legacy explicit `super({ ... })` which is still checked per-key) — a hand-rolled `super({ a, b })` that drops keys, or a `super(someOtherFn(opts))`, fails. Run locally with `cd packages/server && ./scripts/lint-session-opt-forwarding.sh`.
+
+**When adding a new BaseSession opt:** add it to the `BaseSession` constructor destructure AND to `BASE_SESSION_OPT_KEYS` (same PR) — every picker subclass then inherits it for free. If an opt deliberately should not propagate to a particular subclass (rare), add `// lint-ignore-opt-forwarding: <key>` immediately above the class declaration and explain why.
 
 ## Architecture
 

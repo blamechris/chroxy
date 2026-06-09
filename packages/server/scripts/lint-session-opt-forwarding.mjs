@@ -2,38 +2,48 @@
 /**
  * Lint: every class that extends `BaseSession` (or
  * `JsonlSubprocessSession`, the middle layer above the subprocess
- * providers) MUST destructure every constructor opt accepted by
- * `BaseSession` AND forward it via `super({ ... })`. Otherwise the opt
- * is silently dropped on its way down — the middle-layer trap
- * documented in project memory as `feedback_jsonl_subprocess_middle_layer.md`
- * and repeated three times historically (#3224, #3231, #4790).
+ * providers) MUST forward every constructor opt accepted by
+ * `BaseSession` down to `super()`. Otherwise the opt is silently dropped
+ * on its way down — the middle-layer trap documented in project memory as
+ * `feedback_jsonl_subprocess_middle_layer.md` and repeated three times
+ * historically (#3224, #3231, #4790).
  *
- * Detection strategy (regex, intentionally — same style as
- * `lint-tests-state-file-path.mjs`):
+ * #5367 inverted the policing model. Subclasses no longer hand-maintain a
+ * parallel destructure + `super({ ... })`; they call the canonical picker
+ * `super(buildBaseSessionOpts(opts, { ...overrides }))`. The lint now:
  *
- * 1. Parse `base-session.js` to extract the canonical set of opt names
- *    from the destructure inside the `BaseSession` constructor.
- * 2. Walk every `*.js` file under `packages/server/src/`.
- * 3. For each `export class X extends (BaseSession|JsonlSubprocessSession)`,
- *    locate the constructor's destructure list and the matching
- *    `super({ ... })` call.
- * 4. Diff the canonical opt set against the destructure + super forward
- *    sets. Any opt that is missing from EITHER side is reported.
+ * 1. Parses the canonical opt set from the `BaseSession` constructor
+ *    destructure (parseBaseSessionOpts).
+ * 2. Parses the exported `BASE_SESSION_OPT_KEYS` array literal
+ *    (parseBaseSessionOptKeysArray) and ASSERTS it equals (1). This array
+ *    is what `buildBaseSessionOpts()` iterates at runtime, so a drift
+ *    between it and the real ctor would silently drop the mismatched key —
+ *    this is the NEW primary drift guard (exit 2).
+ * 3. Walks every `*.js` under `packages/server/src/` and, for each
+ *    `export class X extends (BaseSession|JsonlSubprocessSession)`,
+ *    inspects the `super(...)` shape:
+ *      - `super(buildBaseSessionOpts(...))` → COMPLIANT by construction
+ *        (coverage guaranteed by step 2 + the picker copying every key).
+ *      - `super(opts)` / `super({ ...opts })` → naturally immune.
+ *      - `super({ explicit, keys })` object literal → analyzed per-key
+ *        against the canonical set (catches a hand-rolled drop, including
+ *        a single-arg ctor that writes `super({ cwd })` and loses the rest).
+ *      - anything else (e.g. `super(someOtherFn(opts))`) → OFFENSE, since
+ *        it could silently drop keys.
  *
- * Two opt-outs:
- *
- *   - `super(opts)` or `super({ ...opts })` style is naturally immune
- *     because every opt is forwarded by reference; the lint skips these
- *     classes.
+ * Opt-out:
  *   - A `// lint-ignore-opt-forwarding: <key1>,<key2>` comment placed
  *     immediately above the class declaration whitelists specific opts
- *     for that class. Use sparingly — the comment should explain why.
+ *     for that class (object-literal path only). Use sparingly — the
+ *     comment should explain why.
  *
- * Issue: #4797. Trap that motivated this lint: #4790 (fixed in #4795).
+ * Issue: #4797 (original), #5367 (picker + inversion). Trap that motivated
+ * this lint: #4790 (fixed in #4795).
  *
  * Exit codes:
  *   0 — every subclass forwards every BaseSession opt (or is whitelisted)
- *   1 — at least one offender found (printed with file:line + missing key)
+ *   1 — at least one subclass offender found (printed with file:line)
+ *   2 — BASE_SESSION_OPT_KEYS drifted from the ctor, or a parser failure
  *
  * Flags:
  *   --src-dir <path>   Override the src directory (used by tests against
@@ -231,6 +241,38 @@ function parseBaseSessionOpts(baseSessionPath) {
   return extractDestructureKeys(block)
 }
 
+// #5367: parse the `BASE_SESSION_OPT_KEYS = [ ... ]` array literal exported by
+// base-session.js. This array is the runtime source of truth that
+// `buildBaseSessionOpts()` iterates, so the lint asserts it stays in lockstep
+// with the constructor destructure (parseBaseSessionOpts above). If the two
+// drift — a key added to the ctor but not the array, or vice-versa — the
+// picker would silently stop forwarding it, re-arming the middle-layer trap.
+// Returns { keys: Set<string>, order: string[] }.
+function parseBaseSessionOptKeysArray(baseSessionPath) {
+  const src = readFileSync(baseSessionPath, 'utf8')
+  const stripped = stripComments(src)
+  const declIdx = stripped.indexOf('BASE_SESSION_OPT_KEYS')
+  if (declIdx === -1) {
+    throw new Error(`Could not find "BASE_SESSION_OPT_KEYS" in ${baseSessionPath}`)
+  }
+  const bracketOpen = stripped.indexOf('[', declIdx)
+  if (bracketOpen === -1) {
+    throw new Error(`Could not find [ opening BASE_SESSION_OPT_KEYS array`)
+  }
+  const bracketClose = findMatchingBracket(stripped, bracketOpen, '[', ']')
+  if (bracketClose === -1) {
+    throw new Error(`Unbalanced brackets in BASE_SESSION_OPT_KEYS array`)
+  }
+  const inner = stripped.slice(bracketOpen + 1, bracketClose)
+  const order = []
+  const keys = new Set()
+  for (const m of inner.matchAll(/['"`]([A-Za-z_$][\w$]*)['"`]/g)) {
+    order.push(m[1])
+    keys.add(m[1])
+  }
+  return { keys, order }
+}
+
 // ----------------------------------------------------------------------
 // Subclass scanning
 // ----------------------------------------------------------------------
@@ -291,26 +333,28 @@ function analyzeClass(filePath, origSrc, strippedSrc, classDeclIdx, className) {
     return { skipped: true, reason: 'no constructor found' }
   }
   const { ctorAbsIdx } = block
-  // Find the destructure pattern inside `constructor(`. Two shapes:
-  //   constructor({ a, b } = {}) — destructured
-  //   constructor(opts = {}) — single-arg, naturally immune (rest-spread)
+  // Find the constructor arg list. Two shapes:
+  //   constructor({ a, b } = {}) — legacy hand-rolled destructure
+  //   constructor(opts = {})     — #5367 single-arg picker style
   const parenOpen = strippedSrc.indexOf('(', ctorAbsIdx)
   const parenClose = findMatchingBracket(strippedSrc, parenOpen, '(', ')')
   if (parenClose === -1) return { skipped: true, reason: 'unbalanced ctor parens' }
   const args = strippedSrc.slice(parenOpen + 1, parenClose).trim()
-  if (!args.startsWith('{')) {
-    // Single positional arg — caller is `super(opts)` or `super({ ...opts })`.
-    // Naturally immune, skip.
-    return { skipped: true, reason: 'single-arg constructor (rest-spread style)' }
-  }
-  // Find the destructure `{ ... }` inside the args.
-  const destructureOpenAbs = strippedSrc.indexOf('{', parenOpen)
-  const destructureCloseAbs = findMatchingBracket(strippedSrc, destructureOpenAbs, '{', '}')
-  if (destructureCloseAbs === -1) return { skipped: true, reason: 'unbalanced destructure' }
-  const destructureBlock = strippedSrc.slice(destructureOpenAbs, destructureCloseAbs + 1)
-  const destructureKeys = extractDestructureKeys(destructureBlock)
+  const hasDestructureArg = args.startsWith('{')
 
-  // Find the super({ ... }) call in the constructor body.
+  // Legacy destructure keys (only meaningful when the ctor destructures its
+  // arg). For single-arg `constructor(opts = {})` there's nothing to check on
+  // the destructure side — coverage is proven by the super() shape instead.
+  let destructureKeys = null
+  if (hasDestructureArg) {
+    const destructureOpenAbs = strippedSrc.indexOf('{', parenOpen)
+    const destructureCloseAbs = findMatchingBracket(strippedSrc, destructureOpenAbs, '{', '}')
+    if (destructureCloseAbs === -1) return { skipped: true, reason: 'unbalanced destructure' }
+    const destructureBlock = strippedSrc.slice(destructureOpenAbs, destructureCloseAbs + 1)
+    destructureKeys = extractDestructureKeys(destructureBlock)
+  }
+
+  // Find the super(...) call in the constructor body.
   const ctorBodyOpen = strippedSrc.indexOf('{', parenClose)
   const ctorBodyClose = findMatchingBracket(strippedSrc, ctorBodyOpen, '{', '}')
   if (ctorBodyClose === -1) return { skipped: true, reason: 'unbalanced ctor body' }
@@ -325,32 +369,44 @@ function analyzeClass(filePath, origSrc, strippedSrc, classDeclIdx, className) {
   if (superCloseAbs === -1) return { skipped: true, reason: 'unbalanced super()' }
   const superArgs = strippedSrc.slice(superOpenAbs + 1, superCloseAbs).trim()
 
-  // super({ ...opts, ... }) or super(opts) — naturally immune.
+  const classDeclLine = lineOf(strippedSrc, classDeclIdx)
+  const ctorLine = lineOf(strippedSrc, ctorAbsIdx)
+
+  // #5367: `super(buildBaseSessionOpts(...))` — the sanctioned picker. Coverage
+  // of every BaseSession opt is guaranteed by the picker copying every key in
+  // BASE_SESSION_OPT_KEYS, which main() has already asserted equals the ctor
+  // destructure. Per-subclass `overrides` only ADD or replace values; they
+  // cannot drop a key. So this shape is compliant-by-construction.
+  if (/^buildBaseSessionOpts\s*\(/.test(superArgs)) {
+    return { className, compliant: 'picker', classDeclLine, ctorLine }
+  }
+
+  // super(opts) or super({ ...opts, ... }) — every opt forwarded by reference.
   if (superArgs.startsWith('...') || /^[A-Za-z_$][\w$]*$/.test(superArgs)) {
     return { skipped: true, reason: 'super forwards rest-spread/positional' }
   }
-  if (!superArgs.startsWith('{')) {
-    return { skipped: true, reason: 'super() call shape not recognised' }
+
+  // super({ ...explicit object literal... }) — the legacy hand-rolled path AND
+  // the shape a regression would take in a single-arg ctor (someone writes
+  // `super({ cwd })` and silently drops the rest). Analyze per-key below.
+  if (superArgs.startsWith('{')) {
+    const superBraceOpenAbs = strippedSrc.indexOf('{', superOpenAbs)
+    const superBraceCloseAbs = findMatchingBracket(strippedSrc, superBraceOpenAbs, '{', '}')
+    if (superBraceCloseAbs === -1) return { skipped: true, reason: 'unbalanced super({})' }
+    const superBlock = strippedSrc.slice(superBraceOpenAbs, superBraceCloseAbs + 1)
+    // `super({ ...identifier, ... })` spreads every opt — naturally immune.
+    if (/\{\s*\.\.\.[A-Za-z_$]/.test(superBlock)) {
+      return { skipped: true, reason: 'super spreads an identifier' }
+    }
+    const superKeys = extractObjectKeys(superBlock)
+    return { className, destructureKeys, superKeys, classDeclLine, ctorLine }
   }
 
-  // Detect `{ ...opts, ... }` style super calls — also naturally immune.
-  // (Look at the inner content for a leading `...identifier`.)
-  const superBraceOpenAbs = strippedSrc.indexOf('{', superOpenAbs)
-  const superBraceCloseAbs = findMatchingBracket(strippedSrc, superBraceOpenAbs, '{', '}')
-  if (superBraceCloseAbs === -1) return { skipped: true, reason: 'unbalanced super({})' }
-  const superBlock = strippedSrc.slice(superBraceOpenAbs, superBraceCloseAbs + 1)
-  if (/\{\s*\.\.\.[A-Za-z_$]/.test(superBlock)) {
-    return { skipped: true, reason: 'super spreads an identifier' }
-  }
-  const superKeys = extractObjectKeys(superBlock)
-
-  return {
-    className,
-    destructureKeys,
-    superKeys,
-    classDeclLine: lineOf(strippedSrc, classDeclIdx),
-    ctorLine: lineOf(strippedSrc, ctorAbsIdx),
-  }
+  // #5367: any other super() shape (e.g. `super(someOtherFn(opts))`) is NOT a
+  // recognized safe forwarder and could silently drop keys. Flag it as an
+  // offense rather than skipping (the pre-#5367 lint skipped these, which is
+  // exactly the hole the picker would have slipped through).
+  return { className, unrecognizedSuper: superArgs.slice(0, 60), classDeclLine, ctorLine }
 }
 
 function walk(dir, acc = []) {
@@ -381,6 +437,43 @@ function main() {
     process.exit(2)
   }
 
+  // #5367: the array `BASE_SESSION_OPT_KEYS` is what `buildBaseSessionOpts()`
+  // iterates at runtime. Assert it equals the set parsed from the constructor
+  // destructure — if they drift, the picker silently stops forwarding the
+  // mismatched key(s), re-arming the middle-layer trap. This is the new drift
+  // guard that replaces the per-subclass destructure check for picker classes.
+  let optArray
+  try {
+    optArray = parseBaseSessionOptKeysArray(baseSessionPath)
+  } catch (err) {
+    console.error(`ERROR: failed to parse BASE_SESSION_OPT_KEYS from ${baseSessionPath}: ${err.message}`)
+    process.exit(2)
+  }
+  if (optArray.keys.size === 0) {
+    console.error(`ERROR: parsed 0 keys from BASE_SESSION_OPT_KEYS at ${baseSessionPath} — parser is broken`)
+    process.exit(2)
+  }
+  {
+    const inArrayNotCtor = [...optArray.keys].filter(k => !baseOpts.has(k))
+    const inCtorNotArray = [...baseOpts].filter(k => !optArray.keys.has(k))
+    if (inArrayNotCtor.length || inCtorNotArray.length) {
+      console.error('ERROR: BASE_SESSION_OPT_KEYS has drifted from the BaseSession constructor destructure.')
+      console.error(`  in ${baseSessionPath}`)
+      if (inCtorNotArray.length) {
+        console.error(`    In constructor but MISSING from BASE_SESSION_OPT_KEYS: ${inCtorNotArray.join(', ')}`)
+      }
+      if (inArrayNotCtor.length) {
+        console.error(`    In BASE_SESSION_OPT_KEYS but MISSING from constructor: ${inArrayNotCtor.join(', ')}`)
+      }
+      console.error('')
+      console.error('buildBaseSessionOpts() iterates BASE_SESSION_OPT_KEYS, so any key only in the')
+      console.error('constructor would be silently dropped on its way to super() — the middle-layer')
+      console.error('trap (feedback_jsonl_subprocess_middle_layer.md, bit #3224/#3231/#4790).')
+      console.error('Fix: keep BASE_SESSION_OPT_KEYS in lockstep with the constructor destructure.')
+      process.exit(2)
+    }
+  }
+
   const files = walk(SRC_DIR).filter(f => !f.endsWith('/base-session.js'))
   const offenders = []
   let analyzedCount = 0
@@ -399,12 +492,35 @@ function main() {
       const analysis = analyzeClass(file, origSrc, strippedSrc, classDeclIdx, className)
       if (analysis.skipped) continue
       analyzedCount++
+
+      // #5367: `super(buildBaseSessionOpts(...))` — compliant by construction
+      // (coverage guaranteed by the array-vs-ctor assertion above + the picker
+      // copying every key). Counts as analyzed-and-ok.
+      if (analysis.compliant === 'picker') continue
+
+      // #5367: an unrecognized super() shape (not the picker, not a bare
+      // identifier/spread, not an object literal) could silently drop keys.
+      if (analysis.unrecognizedSuper !== undefined) {
+        offenders.push({
+          file,
+          line: declLine,
+          className,
+          unrecognizedSuper: analysis.unrecognizedSuper,
+        })
+        continue
+      }
+
+      // Legacy / hand-rolled `super({ ... })` object-literal path: every
+      // BaseSession opt must appear in the super() object (and, when the ctor
+      // destructures its arg, in the destructure too).
       const { destructureKeys, superKeys } = analysis
       const missingDestructure = []
       const missingSuper = []
       for (const opt of baseOpts) {
         if (ignore.has(opt)) continue
-        if (!destructureKeys.has(opt)) missingDestructure.push(opt)
+        // destructureKeys is null for single-arg `constructor(opts = {})` —
+        // there's no destructure to check, only the super() object.
+        if (destructureKeys && !destructureKeys.has(opt)) missingDestructure.push(opt)
         // Only flag missing-from-super if it's NOT also missing from
         // destructure (avoids double-reporting; the destructure miss
         // is the root cause and the super miss is its symptom).
@@ -428,10 +544,16 @@ function main() {
     console.error('')
     for (const o of offenders) {
       console.error(`  ${o.file}:${o.line}  class ${o.className}`)
-      if (o.missingDestructure.length) {
+      if (o.unrecognizedSuper !== undefined) {
+        console.error(`    Unrecognized super() shape: super(${o.unrecognizedSuper}...)`)
+        console.error('    Expected super(buildBaseSessionOpts(opts, { ...overrides })), super(opts),')
+        console.error('    super({ ...opts }), or an explicit super({ <every BaseSession opt> }).')
+        continue
+      }
+      if (o.missingDestructure && o.missingDestructure.length) {
         console.error(`    Missing from constructor destructure: ${o.missingDestructure.join(', ')}`)
       }
-      if (o.missingSuper.length) {
+      if (o.missingSuper && o.missingSuper.length) {
         console.error(`    Destructured but not forwarded via super(): ${o.missingSuper.join(', ')}`)
       }
     }

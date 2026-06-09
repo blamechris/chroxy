@@ -17,7 +17,7 @@
 import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { join } from 'path'
 import { homedir } from 'os'
-import { BaseSession } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { PermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -228,7 +228,7 @@ export class ClaudeByokSession extends BaseSession {
    * @param {number} [opts.mcpToolCallTimeoutMs]  Per-tools/call timeout; null/undefined = MCPClient default (30s).
    */
   constructor(opts = {}) {
-    super({ ...opts, provider: opts.provider || 'claude-byok' })
+    super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-byok' }))
     // Anthropic SDK client; lazily instantiated in start() so unit tests
     // can stub it via this._client = ... before start().
     this._client = null

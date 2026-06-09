@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { BaseSession } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('jsonl-subprocess-session')
@@ -85,74 +85,15 @@ export class JsonlSubprocessSession extends BaseSession {
   // Lifecycle
   // ------------------------------------------------------------------
 
-  constructor({
-    cwd,
-    model,
-    permissionMode,
-    skillsDir,
-    repoSkillsDir,
-    maxSkillBytes,
-    maxTotalSkillBytes,
-    provider,
-    activeManualSkills,
-    providerSkillAllowlist,
-    trustStore,
-    trustMismatchMode,
-    promptEvaluator,
-    promptEvaluatorSkipPattern,
-    // #3805: Chroxy context hint flows through this middle layer to
-    // BaseSession so Codex / Gemini sessions also pick up the toggle.
-    // Same pattern as the other per-session opts — drop it here and
-    // the flag silently fails to take effect on subprocess providers.
-    chroxyContextHint,
-    // #4660: per-session preamble flows through this middle layer to
-    // BaseSession so Codex / Gemini sessions also pick up the user-
-    // authored text. Same middle-layer trap as chroxyContextHint —
-    // drop it here and the preamble silently fails to inject on
-    // subprocess providers (see [[feedback_jsonl_subprocess_middle_layer]]).
-    sessionPreamble,
-    resultTimeoutMs,
-    // #3899: hard-cap timeout (per-session backstop) flows through this
-    // middle layer to BaseSession exactly like resultTimeoutMs. Memory
-    // [[feedback_jsonl_subprocess_middle_layer]] — when adding a
-    // BaseSession option, plumb it through here too or Codex / Gemini
-    // silently fall back to the default.
-    hardTimeoutMs,
-    // #4790: per-provider stream-stall recovery timeout. PR #4745 wired
-    // SessionManager → providerOpts.streamStallTimeoutMs but this
-    // destructure dropped it, so Codex / Gemini sessions silently fell
-    // back to BaseSession's 5min default — exactly the trap documented
-    // in [[feedback_jsonl_subprocess_middle_layer]] landing again.
-    streamStallTimeoutMs,
-    // #5288: hard-quiesce window flows through this middle layer to
-    // BaseSession exactly like streamStallTimeoutMs — drop it here and
-    // Codex / Gemini silently fall back to the 4h default
-    // ([[feedback_jsonl_subprocess_middle_layer]]).
-    backgroundShellHardQuiesceMs,
-    resumeSessionId,
-  } = {}) {
-    super({
-      cwd,
-      model,
-      permissionMode: permissionMode || 'auto',
-      skillsDir,
-      repoSkillsDir,
-      maxSkillBytes,
-      maxTotalSkillBytes,
-      provider,
-      activeManualSkills,
-      providerSkillAllowlist,
-      trustStore,
-      trustMismatchMode,
-      promptEvaluator,
-      promptEvaluatorSkipPattern,
-      chroxyContextHint,
-      sessionPreamble,
-      resultTimeoutMs,
-      hardTimeoutMs,
-      streamStallTimeoutMs,
-      backgroundShellHardQuiesceMs,
-    })
+  constructor(opts = {}) {
+    // #5367: forward every BaseSession opt via the canonical picker (preserves
+    // the #3805 / #4660 / #3899 / #4790 / #5288 plumbing that this middle layer
+    // historically had to re-declare by hand — the trap documented in
+    // [[feedback_jsonl_subprocess_middle_layer]]). The lone override is
+    // permissionMode, which defaults to 'auto' for subprocess providers.
+    super(buildBaseSessionOpts(opts, { permissionMode: opts.permissionMode || 'auto' }))
+    // JsonlSubprocessSession-local opt (not a BaseSession opt).
+    const { resumeSessionId } = opts
     // #3865: accept resumeSessionId from constructor so SessionManager's
     // serializeState/restoreState path carries a captured Codex thread_id
     // across server restarts. Without this, persistence was wired up at

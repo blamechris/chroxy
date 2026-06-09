@@ -1,4 +1,5 @@
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
+import { buildBaseSessionOpts } from './base-session.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
@@ -463,20 +464,21 @@ export class CodexSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, resumeSessionId } = {}) {
+  constructor(opts = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // _buildArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    // #3899: hardTimeoutMs forwarded to BaseSession even though Codex
-    // doesn't (yet) split its timer into soft/hard — the config flows
-    // through here so when Codex gets the #3899 treatment as a follow-
-    // up the plumbing is already in place.
-    // #4790: streamStallTimeoutMs likewise forwarded so the per-provider
-    // override SessionManager wired in PR #4745 actually reaches
-    // BaseSession's stream-stall timer. Dropping it here silently reverted
-    // operators to the 5min default — the trap documented in
-    // [[feedback_jsonl_subprocess_middle_layer]].
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs, backgroundShellHardQuiesceMs, resumeSessionId })
+    // #5367: forward every BaseSession opt via the canonical picker (which
+    // preserves the #3899 hardTimeoutMs / #4790 streamStallTimeoutMs plumbing
+    // that used to be hand-maintained here). Overrides: provider default,
+    // `model || DEFAULT_MODEL`, and `resumeSessionId` — the last is a
+    // JsonlSubprocessSession-local opt (not a BaseSession key) so it must ride
+    // through the overrides bag to reach the middle layer.
+    super(buildBaseSessionOpts(opts, {
+      provider: opts.provider || 'codex',
+      model: opts.model || DEFAULT_MODEL,
+      resumeSessionId: opts.resumeSessionId,
+    }))
   }
 
   // ------------------------------------------------------------------

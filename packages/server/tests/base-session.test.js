@@ -9,6 +9,8 @@ import {
   DEFAULT_HARD_TIMEOUT_MS,
   DEFAULT_STREAM_STALL_TIMEOUT_MS,
   BACKGROUND_SHELL_HARD_QUIESCE_MS,
+  BASE_SESSION_OPT_KEYS,
+  buildBaseSessionOpts,
 } from '../src/base-session.js'
 import { SkillsTrustStore, sha256Hex } from '../src/skills-trust.js'
 
@@ -1701,6 +1703,167 @@ describe('BaseSession operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)', ()
       })
       assert.equal(s[internalField], MAX_SANE_DURATION_MS,
         `the boundary must be INCLUSIVE — clamping it would surprise operators who tuned the dial to exactly 24h`)
+    })
+  }
+})
+
+// #5367: the canonical opt picker that every session subclass now uses to
+// forward BaseSession opts via `super(buildBaseSessionOpts(opts, overrides))`.
+describe('buildBaseSessionOpts (#5367)', () => {
+  it('copies only BaseSession opts, omitting absent keys and subclass-local opts', () => {
+    const out = buildBaseSessionOpts({
+      cwd: '/tmp/x',
+      model: 'sonnet',
+      // subclass-local opts that must NOT be copied:
+      allowedTools: ['Bash'],
+      resumeSessionId: 'abc',
+      port: 9999,
+    })
+    assert.deepEqual(Object.keys(out).sort(), ['cwd', 'model'])
+    assert.equal(out.cwd, '/tmp/x')
+    assert.equal(out.model, 'sonnet')
+  })
+
+  it('preserves an explicit falsy value (backgroundShellHardQuiesceMs: 0) via `in`, not `??`', () => {
+    const out = buildBaseSessionOpts({ backgroundShellHardQuiesceMs: 0 })
+    assert.ok('backgroundShellHardQuiesceMs' in out, 'explicit 0 must be carried through')
+    assert.equal(out.backgroundShellHardQuiesceMs, 0)
+  })
+
+  it('omits keys that are absent entirely (no undefined leakage)', () => {
+    const out = buildBaseSessionOpts({ cwd: '/tmp/x' })
+    assert.equal('model' in out, false, 'absent keys must be omitted so BaseSession `|| default` fallbacks apply')
+  })
+
+  it('overrides win over picked values', () => {
+    const out = buildBaseSessionOpts({ provider: 'gemini', model: 'm1' }, { provider: 'codex' })
+    assert.equal(out.provider, 'codex')
+    assert.equal(out.model, 'm1')
+  })
+
+  it('every key it can emit is a real BaseSession opt (array is the source of truth)', () => {
+    // Build a full bag and confirm the picker never invents a key.
+    const full = Object.fromEntries(BASE_SESSION_OPT_KEYS.map((k) => [k, `s_${k}`]))
+    const out = buildBaseSessionOpts(full)
+    for (const k of Object.keys(out)) {
+      assert.ok(BASE_SESSION_OPT_KEYS.includes(k), `${k} is not in BASE_SESSION_OPT_KEYS`)
+    }
+    assert.equal(Object.keys(out).length, BASE_SESSION_OPT_KEYS.length)
+  })
+})
+
+// #5367: the "no opt dropped" proof. Instantiate every session subclass with
+// every BaseSession opt set to a distinct, coercion-surviving sentinel and
+// assert each landed on the resulting instance's BaseSession-owned field. This
+// is hand-list-INDEPENDENT: it derives the opt list from BASE_SESSION_OPT_KEYS,
+// so a future opt added to the array (and the ctor) is automatically covered.
+describe('subclass opt forwarding — no opt dropped (#5367)', () => {
+  let tmpDir
+  let trustStore
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-opt-fwd-'))
+    trustStore = new SkillsTrustStore({ filePath: join(tmpDir, 'trust.json'), mode: 'warn' })
+  })
+  afterEach(() => {
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+  })
+
+  // Each entry: how to make a valid sentinel for the opt, the instance field
+  // BaseSession stores it on, and how to assert it landed. Values are chosen to
+  // SURVIVE BaseSession's coercion (valid permissionMode, in-range timeouts,
+  // real regex, object allowlist, etc.) so a forwarded value is observable.
+  function sentinelOpts() {
+    return {
+      cwd: join(tmpDir, 'work'),
+      model: 'sentinel-model',
+      permissionMode: 'plan',
+      skillsDir: join(tmpDir, 'skills'),
+      repoSkillsDir: join(tmpDir, 'repo-skills'),
+      maxSkillBytes: 4242,
+      maxTotalSkillBytes: 8484,
+      // An explicit truthy provider survives every subclass's
+      // `opts.provider || '<default>'` override, so it lands verbatim.
+      provider: 'sentinel-provider',
+      activeManualSkills: ['skill-a', 'skill-b'],
+      providerSkillAllowlist: { 'claude-sdk': ['x'] },
+      trustStore,
+      trustMismatchMode: 'block',
+      promptEvaluator: true,
+      promptEvaluatorSkipPattern: '^ack$',
+      chroxyContextHint: true,
+      sessionPreamble: 'sentinel preamble',
+      resultTimeoutMs: 11 * 60 * 1000,
+      hardTimeoutMs: 33 * 60 * 1000,
+      streamStallTimeoutMs: 7 * 60 * 1000,
+      backgroundShellHardQuiesceMs: 0, // explicit 0 — the falsy-preservation case
+    }
+  }
+
+  // (instance) => assertions. Each checks the BaseSession-owned field landed.
+  // permissionMode is special: jsonl-family subclasses default it to 'auto',
+  // but an explicit 'plan' survives the `|| 'auto'` override, so it lands.
+  const assertions = {
+    cwd: (s, o) => assert.equal(s.cwd, o.cwd),
+    model: (s, o) => assert.equal(s.model, o.model),
+    permissionMode: (s, o) => assert.equal(s.permissionMode, o.permissionMode),
+    skillsDir: (s, o) => assert.equal(s._skillsDir, o.skillsDir),
+    repoSkillsDir: (s, o) => assert.equal(s._repoSkillsDir, o.repoSkillsDir),
+    maxSkillBytes: (s, o) => assert.equal(s._maxSkillBytes, o.maxSkillBytes),
+    maxTotalSkillBytes: (s, o) => assert.equal(s._maxTotalSkillBytes, o.maxTotalSkillBytes),
+    provider: (s, o) => assert.equal(s._provider, o.provider),
+    activeManualSkills: (s) => {
+      assert.ok(s._activeManualSkills.has('skill-a'))
+      assert.ok(s._activeManualSkills.has('skill-b'))
+    },
+    providerSkillAllowlist: (s, o) => assert.deepEqual(s._providerSkillAllowlist, o.providerSkillAllowlist),
+    trustStore: (s) => assert.equal(s._trustStore, trustStore),
+    // trustMismatchMode only matters when trustStore is absent; with an
+    // explicit trustStore the store wins (so no separate field to assert).
+    trustMismatchMode: () => {},
+    promptEvaluator: (s) => assert.equal(s.promptEvaluator, true),
+    promptEvaluatorSkipPattern: (s, o) => assert.equal(s.promptEvaluatorSkipPattern, o.promptEvaluatorSkipPattern),
+    chroxyContextHint: (s) => assert.equal(s.chroxyContextHint, true),
+    sessionPreamble: (s, o) => assert.equal(s.sessionPreamble, o.sessionPreamble),
+    resultTimeoutMs: (s, o) => assert.equal(s._resultTimeoutMs, o.resultTimeoutMs),
+    hardTimeoutMs: (s, o) => assert.equal(s._hardTimeoutMs, o.hardTimeoutMs),
+    streamStallTimeoutMs: (s, o) => assert.equal(s._streamStallTimeoutMs, o.streamStallTimeoutMs),
+    backgroundShellHardQuiesceMs: (s) => assert.equal(s._backgroundShellHardQuiesceMs, 0),
+  }
+
+  // Guard: the assertion table must cover exactly the canonical opt set, so a
+  // new BaseSession opt forces this test to be extended (it can't silently
+  // pass with a stale list).
+  it('assertion table covers exactly BASE_SESSION_OPT_KEYS', () => {
+    assert.deepEqual(
+      Object.keys(assertions).sort(),
+      [...BASE_SESSION_OPT_KEYS].sort(),
+      'add the new opt to BOTH the sentinel bag and the assertions table',
+    )
+  })
+
+  const subclasses = [
+    ['CliSession', '../src/cli-session.js', 'CliSession'],
+    ['SdkSession', '../src/sdk-session.js', 'SdkSession'],
+    ['ClaudeTuiSession', '../src/claude-tui-session.js', 'ClaudeTuiSession'],
+    ['ClaudeByokSession', '../src/byok-session.js', 'ClaudeByokSession'],
+    ['JsonlSubprocessSession', '../src/jsonl-subprocess-session.js', 'JsonlSubprocessSession'],
+    ['CodexSession', '../src/codex-session.js', 'CodexSession'],
+    ['GeminiSession', '../src/gemini-session.js', 'GeminiSession'],
+  ]
+
+  for (const [label, modPath, exportName] of subclasses) {
+    it(`${label} forwards every BaseSession opt to super()`, async () => {
+      const mod = await import(modPath)
+      const Klass = mod[exportName]
+      const opts = sentinelOpts()
+      const inst = new Klass(opts)
+      for (const key of BASE_SESSION_OPT_KEYS) {
+        assertions[key](inst, opts)
+      }
+      // Clean teardown so timers/processes don't leak between cases.
+      if (typeof inst.destroy === 'function') {
+        try { await inst.destroy() } catch {}
+      }
     })
   }
 })
