@@ -4,6 +4,7 @@ import {
   resolveEnvironmentBackend,
   resolveRancherToken,
   buildEnvironmentBackend,
+  validateConfig,
 } from '../src/config.js'
 import { writeFileSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -231,5 +232,55 @@ describe('resolveRancherToken (#5144)', () => {
     } finally {
       delete process.env.CHROXY_TEST_EMPTY
     }
+  })
+})
+
+// #5380 — validateRancherBlock makes a security promise (never echo the token
+// value) and carries non-trivial gating + format-validation logic. It had no
+// direct coverage; config-backend-selection only covered resolveRancherToken.
+// Reached through validateConfig({ environments: { rancher } }).
+describe('validateRancherBlock via validateConfig (#5380)', () => {
+  const rancher = (extra) => validateConfig({ environments: { rancher: extra } })
+  const rancherWarnings = (r) => r.warnings.filter((w) => /rancher/.test(w))
+
+  it('never echoes the token value in a warning', () => {
+    const token = 'kubeconfig-user-SUPERSECRET-abc123'
+    // Valid token (string) but a malformed clusterId so a warning DOES fire —
+    // and assert that warning never contains the token value.
+    const r = rancher({ rancherUrl: 'https://rancher.example.com', clusterId: 'NOT-A-CLUSTER-ID', token })
+    assert.ok(r.warnings.some((w) => /clusterId/.test(w)), 'malformed clusterId should warn')
+    assert.ok(!r.warnings.some((w) => w.includes(token)), 'the token value must never be echoed in any warning')
+  })
+
+  it('configured-gate: a partial block (no token source) emits no rancher warnings', () => {
+    // rancherUrl + clusterId but no token/tokenEnv/tokenFile → "not configured
+    // yet" → only the top-level shape is checked, no format spam during setup.
+    const r = rancher({ rancherUrl: 'https://rancher.example.com', clusterId: 'c-abcde' })
+    assert.deepEqual(rancherWarnings(r), [], `expected no rancher warnings, got: ${JSON.stringify(rancherWarnings(r))}`)
+  })
+
+  it('a complete, valid block produces no rancher warnings', () => {
+    const r = rancher({ rancherUrl: 'https://rancher.example.com', clusterId: 'c-abcde', token: 'tok' })
+    assert.deepEqual(rancherWarnings(r), [], `valid block should not warn, got: ${JSON.stringify(rancherWarnings(r))}`)
+  })
+
+  it('warns on a non-http(s) rancherUrl', () => {
+    const r = rancher({ rancherUrl: 'ftp://rancher.example.com', clusterId: 'c-abcde', token: 'tok' })
+    assert.ok(r.warnings.some((w) => /rancherUrl.*http/.test(w)), `expected protocol warning, got: ${JSON.stringify(r.warnings)}`)
+  })
+
+  it('warns on a malformed clusterId (must be c-...)', () => {
+    const r = rancher({ rancherUrl: 'https://rancher.example.com', clusterId: 'cluster-1', token: 'tok' })
+    assert.ok(r.warnings.some((w) => /clusterId.*c-/.test(w)), `expected clusterId warning, got: ${JSON.stringify(r.warnings)}`)
+  })
+
+  it('warns on a malformed defaultProjectId (must be p-...)', () => {
+    const r = rancher({ rancherUrl: 'https://rancher.example.com', clusterId: 'c-abcde', token: 'tok', defaultProjectId: 'project-x' })
+    assert.ok(r.warnings.some((w) => /defaultProjectId.*p-/.test(w)), `expected projectId warning, got: ${JSON.stringify(r.warnings)}`)
+  })
+
+  it('warns when caData is a non-string', () => {
+    const r = rancher({ rancherUrl: 'https://rancher.example.com', clusterId: 'c-abcde', token: 'tok', caData: 12345 })
+    assert.ok(r.warnings.some((w) => /caData/.test(w)), `expected caData warning, got: ${JSON.stringify(r.warnings)}`)
   })
 })
