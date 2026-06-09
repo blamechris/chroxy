@@ -94,6 +94,20 @@ describe('emergencyCleanupSync (#5369 — sync crash teardown)', () => {
     assert.deepEqual(calls, ['broadcast:crash', 'serialize', 'destroyAll', 'ws.close', 'tunnel.stop'])
   })
 
+  it('survives a non-Error (Symbol) throw without the log formatting itself throwing', () => {
+    // Copilot #5393: `${err}` interpolation throws a TypeError for a Symbol, so
+    // a non-Error throw could break the best-effort cleanup. String(...) guards it.
+    let destroyed = false
+    assert.doesNotThrow(() => emergencyCleanupSync({
+      kind: 'Test crash',
+      wsServer: { broadcastShutdown() {}, close() {} },
+      // serializeState throws a Symbol — the catch's log must not re-throw.
+      sessionManager: { serializeState() { throw Symbol('boom') }, destroyAll() { destroyed = true } },
+      logger: silent,
+    }))
+    assert.equal(destroyed, true, 'destroyAll still runs after a Symbol-throwing serializeState')
+  })
+
   it('returns synchronously even while tunnel.stop() hangs (the no-await invariant)', () => {
     let stopCalled = false
     const ret = emergencyCleanupSync({

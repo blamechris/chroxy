@@ -384,13 +384,15 @@ export async function emergencyCleanup({
   tunnel, wsServer, mdnsService, bonjourInstance,
   tokenManager, pairingManager, sessionManager, logger = log,
 }) {
-  try { if (tunnel) await tunnel.stop() } catch (err) { logger.warn?.(`emergencyCleanup: tunnel.stop failed: ${err?.message || err}`) }
-  try { wsServer?.close() } catch (err) { logger.warn?.(`emergencyCleanup: wsServer.close failed: ${err?.message || err}`) }
+  // String(err?.message || err) so a non-Error throw (e.g. a Symbol) can't make
+  // the log-formatting itself throw and break this best-effort teardown chain.
+  try { if (tunnel) await tunnel.stop() } catch (err) { logger?.warn?.(`emergencyCleanup: tunnel.stop failed: ${String(err?.message || err)}`) }
+  try { wsServer?.close() } catch (err) { logger?.warn?.(`emergencyCleanup: wsServer.close failed: ${String(err?.message || err)}`) }
   try { mdnsService?.stop?.() } catch {}
   try { bonjourInstance?.destroy?.() } catch {}
   try { tokenManager?.destroy() } catch {}
   try { pairingManager?.destroy() } catch {}
-  try { sessionManager?.destroyAll() } catch (err) { logger.warn?.(`emergencyCleanup: destroyAll failed: ${err?.message || err}`) }
+  try { sessionManager?.destroyAll() } catch (err) { logger?.warn?.(`emergencyCleanup: destroyAll failed: ${String(err?.message || err)}`) }
 }
 
 /**
@@ -408,8 +410,10 @@ export function emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager, l
   // Persist sessions before destroying — losing the user's restored state on
   // crash is worse UX than the small risk of writing partial state. The
   // try/catch isolates serialization failures so destroyAll() still runs.
+  // logger?.warn?.() + String(...) so a minimal/nullish logger or a non-Error
+  // throw can't itself throw and abort the remaining crash teardown.
   try { sessionManager?.serializeState() } catch (serializeErr) {
-    logger.warn(`Failed to serialize state during ${kind}: ${serializeErr?.stack || serializeErr}`)
+    logger?.warn?.(`Failed to serialize state during ${kind}: ${String(serializeErr?.stack || serializeErr)}`)
   }
   try { sessionManager?.destroyAll() } catch {}
   try { wsServer?.close() } catch {}
