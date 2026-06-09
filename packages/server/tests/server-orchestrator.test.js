@@ -145,9 +145,14 @@ describe('ServerOrchestrator — crash handlers (onFatal)', () => {
 })
 
 describe('ServerOrchestrator — install', () => {
-  it('registers the four process handlers', () => {
+  // SIGHUP included (#5336): Node's default SIGHUP action is to terminate the
+  // process, which bypasses the shutdown() state flush — so a daemon whose
+  // controlling terminal closes would lose unsaved session state. install()
+  // must register a SIGHUP handler routed through the same graceful path.
+  const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'uncaughtException', 'unhandledRejection']
+
+  it('registers the five process handlers', () => {
     const { orchestrator } = build()
-    const signals = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection']
     // Snapshot the EXACT listeners present before install() so cleanup can
     // remove only the ones this test adds — never the test runner's own SIGINT/
     // SIGTERM handlers (removeAllListeners would clobber those, flaking the run).
@@ -163,6 +168,23 @@ describe('ServerOrchestrator — install', () => {
           if (!before[s].includes(l)) process.removeListener(s, l)
         }
       }
+    }
+  })
+
+  it('routes SIGHUP through the graceful shutdown flush (#5336)', async () => {
+    const { orchestrator, seq } = build()
+    const before = process.listeners('SIGHUP')
+    orchestrator.install()
+    const added = process.listeners('SIGHUP').filter((l) => !before.includes(l))
+    try {
+      assert.equal(added.length, 1, 'exactly one SIGHUP handler added')
+      added[0]() // simulate the signal
+      await tick()
+      // The graceful path ran: state was serialized before exit (not a hard kill).
+      assert.ok(seq.some((e) => e[0] === 'serializeState'), 'serializeState ran on SIGHUP')
+      assert.deepEqual(seq.at(-1), ['exit', 0], 'exited cleanly after the flush')
+    } finally {
+      for (const l of added) process.removeListener('SIGHUP', l)
     }
   })
 })

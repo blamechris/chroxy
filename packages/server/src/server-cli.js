@@ -946,7 +946,7 @@ export async function startCliServer(config) {
   // against an already-empty `_sessions` Map and wrote 0 sessions to disk,
   // erasing the user's restored state across upgrade/quit cycles (#3697).
   // #5368 slice (d): the process lifecycle — the shuttingDown latch, the
-  // graceful shutdown() teardown sequence, and the SIGINT/SIGTERM/
+  // graceful shutdown() teardown sequence, and the SIGINT/SIGTERM/SIGHUP/
   // uncaughtException/unhandledRejection registrations (#5369 onFatal +
   // emergencyCleanupSync) — lives in ServerOrchestrator. `worktreeReapTimer` is
   // passed as a GETTER because it's assigned inside an async import().then() and

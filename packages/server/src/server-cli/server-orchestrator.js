@@ -2,7 +2,7 @@
 // startCliServer.
 //
 // Owns the process lifecycle: the `shuttingDown` latch, the graceful
-// `shutdown(signal)` teardown sequence, and the SIGINT / SIGTERM /
+// `shutdown(signal)` teardown sequence, and the SIGINT / SIGTERM / SIGHUP /
 // uncaughtException / unhandledRejection registrations (the last two via the
 // #5369 `onFatal` factory that calls `emergencyCleanupSync`). This is the
 // silent-failure-prone surface — a missed teardown step orphans processes / hangs
@@ -132,6 +132,12 @@ export class ServerOrchestrator {
   install() {
     process.on('SIGINT', () => { this.shutdown('SIGINT').catch(() => this._exit(1)) })
     process.on('SIGTERM', () => { this.shutdown('SIGTERM').catch(() => this._exit(1)) })
+    // #5336: a PTY-owning daemon receives SIGHUP when its controlling terminal
+    // closes. Node's default SIGHUP action is to terminate the process, which
+    // skips the shutdown() state flush — so the user's session state is lost on
+    // terminal close. Chroxy has no config-reload semantics, so route SIGHUP
+    // through the same graceful shutdown as SIGINT/SIGTERM.
+    process.on('SIGHUP', () => { this.shutdown('SIGHUP').catch(() => this._exit(1)) })
     process.on('uncaughtException', this._onFatal.bind(this, 'Uncaught exception'))
     process.on('unhandledRejection', this._onFatal.bind(this, 'Unhandled rejection'))
   }
