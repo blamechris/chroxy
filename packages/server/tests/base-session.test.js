@@ -462,10 +462,14 @@ describe('BaseSession', () => {
     // that's the method that invokes loadActiveSkillsLayered. After
     // the refactor, validation no longer scans (it reads the cached
     // `_manualSkillNames` populated by the most-recent `_loadSkills`).
+    // #5376: the layered scan moved to SkillsManager.loadSkills — activate /
+    // deactivate now call it on the manager, not via session._loadSkills — so
+    // spy there to count the real scans.
     function countScans(s) {
       const counts = { load: 0 }
-      const origLoad = s._loadSkills.bind(s)
-      s._loadSkills = function loadSpy(...args) {
+      const mgr = s._skillsManager
+      const origLoad = mgr.loadSkills.bind(mgr)
+      mgr.loadSkills = function loadSpy(...args) {
         counts.load++
         return origLoad(...args)
       }
@@ -1035,7 +1039,9 @@ describe('BaseSession', () => {
     })
 
     it('returns cached skills when set', () => {
-      session._skills = [{ name: 'a', body: 'x', description: 'x' }]
+      // #5376: skills state lives on the manager; set it there (the session
+      // exposes `_skills` as a read-through getter).
+      session._skillsManager._skills = [{ name: 'a', body: 'x', description: 'x' }]
       const out = session._getSkills()
       assert.equal(out.length, 1)
       assert.equal(out[0].name, 'a')
