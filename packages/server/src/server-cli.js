@@ -13,6 +13,7 @@ import { PushManager } from './push.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { StartupDisplay } from './server-cli/startup-display.js'
 import { TunnelLifecycleHandler } from './server-cli/tunnel-lifecycle-handler.js'
+import { ServerOrchestrator } from './server-cli/server-orchestrator.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -944,73 +945,30 @@ export async function startCliServer(config) {
   // returns immediately. Without this, the second call ran serializeState()
   // against an already-empty `_sessions` Map and wrote 0 sessions to disk,
   // erasing the user's restored state across upgrade/quit cycles (#3697).
-  let shuttingDown = false
-  const shutdown = async (signal) => {
-    if (shuttingDown) {
-      log.info(`[${signal}] Shutdown already in progress, ignoring duplicate signal`)
-      return
-    }
-    shuttingDown = true
-    log.info(`[${signal}] Shutting down...`)
-    // Notify connected clients (ETA 0 = not coming back unless supervised)
-    wsServer.broadcastShutdown('shutdown', 0)
-    if (mdnsService) {
-      try { mdnsService.stop?.() } catch {}
-    }
-    if (bonjourInstance) {
-      try { bonjourInstance.destroy?.() } catch {}
-    }
-    if (tokenManager) tokenManager.destroy()
-    if (pairingManager) pairingManager.destroy()
-    // #5326 (WP-5.4): stop the periodic worktree reaper. It's unref'd so it
-    // wouldn't block exit, but clearing it avoids a sweep racing shutdown.
-    if (worktreeReapTimer) clearInterval(worktreeReapTimer)
-    // Persist sessions before destroying (enables restore on restart)
-    try { sessionManager.serializeState() } catch (err) {
-      log.error(`Failed to serialize session state: ${err?.message || err}`)
-    }
-    sessionManager.destroyAll()
-    // #5042: drain the docker-byok across-session pool so the `sleep
-    // infinity` containers it holds don't outlive the server. Default-OFF
-    // (`isPoolEnabled` returns false unless `CHROXY_DOCKER_BYOK_POOL=1`),
-    // so this is a no-op for the common path. When the flag is on, the
-    // pool's `docker rm -f` calls run in parallel and we let them settle
-    // before `process.exit(0)` strands them.
-    if (isPoolEnabled(process.env)) {
-      try {
-        const pool = getSharedPool(process.env)
-        if (pool) await pool.shutdown()
-      } catch (err) {
-        log.error(`Failed to drain docker-byok pool: ${err?.message || err}`)
-      }
-    }
-    wsServer.close()
-    if (tunnel) await tunnel.stop()
-    removeConnectionInfo()
-    process.exit(0)
-  }
-
-  process.on('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(1)) })
-  process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)) })
-
-  // #5369: uncaughtException and unhandledRejection shared an identical body —
-  // unify them into one handler factory taking a `kind` log label. The "during
-  // shutdown" branch still just logs + schedules exit (otherwise installing
-  // these handlers would suppress Node's default crash-exit and a stuck
-  // shutdown — e.g. hung tunnel.stop() — could leave the process alive forever).
-  const onFatal = (kind) => (err) => {
-    if (shuttingDown) {
-      log.error(`${kind} during shutdown: ${err?.stack || err}`)
-      setTimeout(() => process.exit(1), 100)
-      return
-    }
-    shuttingDown = true
-    log.error(`${kind}: ${err?.stack || err}`)
-    emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager })
-    setTimeout(() => process.exit(1), 100)
-  }
-  process.on('uncaughtException', onFatal('Uncaught exception'))
-  process.on('unhandledRejection', onFatal('Unhandled rejection'))
+  // #5368 slice (d): the process lifecycle — the shuttingDown latch, the
+  // graceful shutdown() teardown sequence, and the SIGINT/SIGTERM/
+  // uncaughtException/unhandledRejection registrations (#5369 onFatal +
+  // emergencyCleanupSync) — lives in ServerOrchestrator. `worktreeReapTimer` is
+  // passed as a GETTER because it's assigned inside an async import().then() and
+  // may still be null now — the original shutdown closure read it lazily at
+  // shutdown time, so the getter reproduces that. emergencyCleanupSync is
+  // injected (server-cli-defined → avoids a circular import).
+  const orchestrator = new ServerOrchestrator({
+    wsServer,
+    sessionManager,
+    tunnel,
+    mdnsService,
+    bonjourInstance,
+    tokenManager,
+    pairingManager,
+    getWorktreeReapTimer: () => worktreeReapTimer,
+    emergencyCleanupSync,
+    removeConnectionInfo,
+    isPoolEnabled,
+    getSharedPool,
+    logger: log,
+  })
+  orchestrator.install()
 
   // Return references for supervised child drain protocol
   return { sessionManager, wsServer }
