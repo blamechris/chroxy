@@ -410,7 +410,7 @@ describe('IntegrationsSection — repo-relay (#5501)', () => {
     expect(cell.querySelector('.cr-warn')).toBeNull()
   })
 
-  it('a bare sha pin renders the short sha with a drift-unknown tooltip', () => {
+  it('a bare sha pin renders the short sha with a drift-unknown tooltip and the latest for context', () => {
     renderSection(oneRepoSnapshot([
       relayRepo('sha', repoRelay({
         pinnedVersion: null,
@@ -421,7 +421,33 @@ describe('IntegrationsSection — repo-relay (#5501)', () => {
     ]))
     const cell = screen.getByTestId('integration-relay-version-sha')
     expect(cell.textContent).toContain('f08840b')
+    expect(cell.textContent).toContain('→ v1.1.0')
     expect(cell.getAttribute('title')?.toLowerCase()).toContain('drift')
+  })
+
+  it('a drift-unknown row prefers the per-repo reason as the tooltip (branch pin, unparseable uses line)', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('branchy', repoRelay({
+        pinnedVersion: null,
+        pinnedSha: null,
+        driftUnknown: true,
+        verdict: 'ok',
+        reason: 'could not parse the repo-relay uses pin from the workflow',
+      })),
+    ]))
+    const cell = screen.getByTestId('integration-relay-version-branchy')
+    expect(cell.getAttribute('title')).toContain('could not parse the repo-relay uses pin')
+  })
+
+  it('an equal-but-differently-formatted pin (no drift) renders without the → latest arrow', () => {
+    // Server-side compareVersions treats v1.1 == v1.1.0 → verdict ok, no
+    // driftUnknown. The cell must not suggest an upgrade is available.
+    renderSection(oneRepoSnapshot([
+      relayRepo('formatted', repoRelay({ pinnedVersion: 'v1.1', latestVersion: 'v1.1.0', verdict: 'ok' })),
+    ]))
+    const cell = screen.getByTestId('integration-relay-version-formatted')
+    expect(cell.textContent).toBe('v1.1')
+    expect(cell.textContent).not.toContain('→')
   })
 
   it('last-run cell shows the conclusion, age, and the Actions deep link', () => {

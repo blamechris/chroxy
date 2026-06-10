@@ -197,16 +197,29 @@ function RelayVersionCell({ repo }: { repo: IntegrationRepo }) {
   const pinnedLabel = relay.pinnedVersion
     ?? (relay.pinnedSha ? relay.pinnedSha.slice(0, 7) : null)
   const drifted = relay.verdict === 'drifted'
+  // Drift-unknown covers more than the bare-sha case (branch pins, an
+  // unparseable uses line) — prefer the per-repo reason when the survey
+  // recorded one, fall back to the sha-specific hint, then the general one.
   const title = relay.driftUnknown
-    ? 'pin does not resolve to a version (no # vX.Y.Z comment) — drift unknown'
+    ? (relay.reason
+      ?? (relay.pinnedSha
+        ? 'sha pin has no # vX.Y.Z comment — drift unknown'
+        : 'pin does not resolve to a version — drift unknown'))
     : undefined
   if (!pinnedLabel && !relay.latestVersion) {
     return <td className="cr-dim" data-testid={`integration-relay-version-${repo.name}`} title={title}>—</td>
   }
+  // The `→ latest` arrow only renders when it carries signal: a confirmed
+  // drift, or an unresolvable pin (show what latest is for context). An
+  // up-to-date pin that merely FORMATS differently (e.g. `v1.1` vs `v1.1.0`,
+  // equal under the server's numeric compare) must not suggest an upgrade.
+  const showLatest = Boolean(
+    relay.latestVersion && pinnedLabel !== relay.latestVersion && (drifted || relay.driftUnknown),
+  )
   return (
     <td className="cr-mono" data-testid={`integration-relay-version-${repo.name}`} title={title}>
       <span className={drifted ? 'cr-warn' : undefined}>{pinnedLabel ?? '—'}</span>
-      {relay.latestVersion && pinnedLabel !== relay.latestVersion && (
+      {showLatest && (
         <span className="cr-dim"> → {relay.latestVersion}</span>
       )}
     </td>
@@ -224,7 +237,7 @@ function RelayLastRunCell({ repo, now }: { repo: IntegrationRepo; now: number })
           <a
             href={relay.workflowUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             data-testid={`integration-relay-link-${repo.name}`}
             title="Open the workflow in the GitHub Actions UI"
           >
@@ -248,7 +261,7 @@ function RelayLastRunCell({ repo, now }: { repo: IntegrationRepo; now: number })
           <a
             href={relay.workflowUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             data-testid={`integration-relay-link-${repo.name}`}
             title="Open the workflow in the GitHub Actions UI"
           >
@@ -532,7 +545,8 @@ export function IntegrationsSection({
           {snapshot.ghCli && !snapshot.ghCli.found && (
             <div className="cr-callout" data-testid="integration-gh-note">
               <b>gh CLI unavailable:</b> {snapshot.ghCli.note ?? 'binary not found'} — relay install and version-pin
-              columns still populate from the filesystem; the run and release columns are degraded for every repo.
+              columns still populate from the filesystem; the run and release columns are degraded for every repo
+              with repo-relay installed.
             </div>
           )}
 
