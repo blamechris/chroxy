@@ -17,12 +17,16 @@
  *     `getAllowedModels()` returns null (session-manager treats a
  *     non-array as "no restriction"). `getFallbackModels()` seeds the
  *     dashboard picker with Ollama's recommended coder models; dynamic
- *     discovery via GET /api/tags is a tracked follow-up.
+ *     discovery via GET /api/tags (#5421, ollama-tags.js) replaces the
+ *     seed with the actually-installed list when the daemon is reachable.
+ *     Discovery is ADVISORY only — it feeds the picker, never validation.
  *   - Zero pricing. Local inference is free; `_getPricing` returns a
  *     zero-rate entry (not null) so byok-session's "no pricing entry"
  *     warn never fires and result.cost is an honest 0.
  *
- * Base URL resolution (first match wins):
+ * Base URL resolution (first match wins; lives in ollama-tags.js since
+ * #5421 so the tags probe and the SDK client can't disagree — re-exported
+ * here for compatibility):
  *   1. CHROXY_OLLAMA_BASE_URL — full URL, chroxy-specific override
  *   2. OLLAMA_HOST — Ollama's own convention; may be `host:port` without
  *      a scheme, normalized to http:// here
@@ -36,8 +40,10 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
+import { resolveOllamaBaseUrl, ollamaEnvOverride, refreshOllamaModels } from './ollama-tags.js'
 
-const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434'
+// Compatibility re-export — resolution moved to ollama-tags.js (#5421).
+export { resolveOllamaBaseUrl }
 
 // Ollama's documented "required but ignored" placeholder key. The
 // Anthropic SDK refuses an empty apiKey, so something must be sent.
@@ -62,50 +68,6 @@ const OLLAMA_FALLBACK_MODELS = Object.freeze([
 // tells operators to update CLAUDE_PRICING_USD_PER_MTOK) never fires for
 // a provider where missing pricing is not a bug.
 const OLLAMA_ZERO_PRICING = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
-
-/**
- * Resolve the Ollama endpoint. Exported for tests and for the auth
- * panel's detail string — keep resolution in exactly one place.
- *
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {string}
- */
-export function resolveOllamaBaseUrl(env = process.env) {
-  // Trimmed-non-empty is the single "is set" predicate — resolveAuth
-  // derives its override-var label from the same helper so the detail
-  // string and the actual routing can never disagree. An exported-but-
-  // empty (or whitespace) var counts as unset. Deliberately NO URL
-  // validation here: silently redirecting a typo'd override to localhost
-  // would mask the misconfig — a malformed value flows through and fails
-  // loudly in the SDK's request path, and resolveAuth's `detail` shows
-  // the exact string in the dashboard.
-  const explicit = ollamaEnvOverride(env)
-  if (explicit === 'CHROXY_OLLAMA_BASE_URL') return env.CHROXY_OLLAMA_BASE_URL.trim()
-  if (explicit === 'OLLAMA_HOST') {
-    const host = env.OLLAMA_HOST.trim()
-    // OLLAMA_HOST accepts bare `host`, `host:port`, or a full URL.
-    return /^[a-z][a-z0-9+.-]*:\/\//i.test(host) ? host : `http://${host}`
-  }
-  return DEFAULT_OLLAMA_BASE_URL
-}
-
-/**
- * Which env var (if any) is overriding the endpoint. Shared by
- * resolveOllamaBaseUrl (routing) and resolveAuth (labelling) so the two
- * can't drift.
- *
- * @param {NodeJS.ProcessEnv} env
- * @returns {'CHROXY_OLLAMA_BASE_URL'|'OLLAMA_HOST'|null}
- */
-function ollamaEnvOverride(env) {
-  if (typeof env.CHROXY_OLLAMA_BASE_URL === 'string' && env.CHROXY_OLLAMA_BASE_URL.trim().length > 0) {
-    return 'CHROXY_OLLAMA_BASE_URL'
-  }
-  if (typeof env.OLLAMA_HOST === 'string' && env.OLLAMA_HOST.trim().length > 0) {
-    return 'OLLAMA_HOST'
-  }
-  return null
-}
 
 export class OllamaSession extends ClaudeByokSession {
   static get displayLabel() {
@@ -172,14 +134,57 @@ export class OllamaSession extends ClaudeByokSession {
   static getModelMetadata(modelId) {
     if (typeof modelId !== 'string' || modelId.length === 0) return null
     const hit = OLLAMA_FALLBACK_MODELS.find((m) => m.id === modelId || m.fullId === modelId)
-    if (!hit) return null
-    return { id: hit.id, label: hit.label, fullId: hit.fullId, contextWindow: hit.contextWindow }
+    if (hit) {
+      return { id: hit.id, label: hit.label, fullId: hit.fullId, contextWindow: hit.contextWindow }
+    }
+    // #5421: any other non-empty id is a locally-pulled tag discovered via
+    // /api/tags (or a user-typed alias) — valid metadata with an UNKNOWN
+    // context window. `contextWindow: null` is deliberate and load-bearing:
+    // the registry hook in models.js preserves an explicit null instead of
+    // substituting DEFAULT_CONTEXT_WINDOW, so the dashboard omits the
+    // context chip rather than showing a fabricated 200k (#5418's
+    // never-fabricate rule). The raw tag doubles as the label — Ollama tags
+    // (`llama3.2:7b`) don't survive Claude-style humanization.
+    return { id: modelId, label: modelId, fullId: modelId, contextWindow: null }
+  }
+
+  /**
+   * Dynamic model discovery hook (#5421) — ws-history calls this (fire-and-
+   * forget) whenever it sends `available_models` for an ollama session, and
+   * pushes a refreshed list if discovery changed the registry. Resolves to
+   * the updated model list on change, null otherwise (failure / no change /
+   * TTL-cached). Never throws, never blocks validation: getAllowedModels()
+   * above stays null regardless of what discovery finds.
+   */
+  static refreshModels(opts) {
+    return refreshOllamaModels(opts)
   }
 
   constructor(opts = {}) {
     // Force the registry name so the provider id on this session is
     // always 'ollama' — independent of whatever the embedder passed.
     super({ ...opts, provider: 'ollama' })
+  }
+
+  /**
+   * #5421: kick off model discovery when a session starts — the moment we
+   * know the user actually cares about this Ollama instance. Fire-and-
+   * forget: discovery must never delay or fail session start (byok's
+   * start() already emitted 'ready' by the time the probe resolves). On a
+   * changed list, emit `models_updated` — session-manager forwards it and
+   * ws-forwarding broadcasts a provider-tagged `available_models` to every
+   * connected client (same path the Claude SDK's supportedModels() push
+   * uses), so newly pulled models appear without a daemon restart.
+   */
+  async start() {
+    await super.start()
+    refreshOllamaModels()
+      .then((models) => {
+        if (Array.isArray(models) && models.length > 0) {
+          this.emit('models_updated', { models })
+        }
+      })
+      .catch(() => {})
   }
 
   // --- Seam overrides (see byok-session.js for the contract) ---

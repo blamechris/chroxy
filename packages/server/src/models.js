@@ -981,7 +981,13 @@ export function getRegistryForProvider(providerName) {
       const meta = typeof ProviderClass.getModelMetadata === 'function'
         ? ProviderClass.getModelMetadata(fullId)
         : null
-      return meta?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
+      // #5421: preserve an EXPLICIT null — providers like ollama return
+      // `contextWindow: null` to say "window unknown, never fabricate"
+      // (#5418), and substituting DEFAULT_CONTEXT_WINDOW here would pin a
+      // made-up 200k chip on every discovered local model. Only fall back
+      // to the default when the provider has no metadata entry at all.
+      if (meta && 'contextWindow' in meta) return meta.contextWindow
+      return DEFAULT_CONTEXT_WINDOW
     },
     // #4413: provider-scoped cache path. Lazy resolver so tests that mutate
     // `CHROXY_CONFIG_DIR` after registry creation still hit the temp dir.
