@@ -1,0 +1,24 @@
+{
+  "name": "@chroxy/claude-hooks",
+  "version": "0.9.44",
+  "description": "Stateless Claude Code hook emitters for chroxy's POST /api/events ingest",
+  "type": "module",
+  "bin": {
+    "chroxy-hooks": "bin/chroxy-hooks.js"
+  },
+  "scripts": {
+    "test": "node --import ./tests/_setup.mjs --test --test-force-exit './tests/**/*.test.js'"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blamechris/chroxy.git",
+    "directory": "packages/claude-hooks"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@chroxy/protocol": "*"
+  }
+}
