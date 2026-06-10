@@ -43,6 +43,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
 import { validateAnthropicCompatibleProviders } from './anthropic-compatible-config.js'
 import { registerProvider, getRegisteredProviderNames } from './providers.js'
+import { cachedResolveCredentialFile } from './auth-probes.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('anthropic-compatible')
@@ -119,10 +120,42 @@ function readCredentialsField(field) {
  *
  * Never logged.
  *
+ * `resolveAuth` calls this once per configured entry on every dashboard
+ * `list_providers` round-trip, so entries with a `credentialsKey` route the
+ * credentials.json stat+read+parse through the shared
+ * `cachedResolveCredentialFile` cache (#5461) — the same mtime+size+mode /
+ * env-value invalidation contract the built-in byok/deepseek/discord slots
+ * use, with one dynamic slot per (apiKeyEnv, credentialsKey) pair. Keying by
+ * the resolver's actual inputs (rather than entry.id) means two entries that
+ * share a credential spec share the cached result, and an id-less raw entry
+ * can never poison a sibling's slot.
+ *
  * @param {{ apiKeyEnv: string|null, credentialsKey: string|null }} entry
  * @returns {{ key: string, source: 'env' | 'file' } | { key: null, source: 'none', reason: string }}
  */
 export function resolveAnthropicCompatibleApiKey(entry) {
+  const { apiKeyEnv, credentialsKey } = entry
+  if (!credentialsKey) {
+    // Keyless placeholder or env-only entry — no credentials.json I/O to
+    // cache; the uncached resolver never touches the file on these paths.
+    return resolveAnthropicCompatibleApiKeyUncached(entry)
+  }
+  return cachedResolveCredentialFile(
+    `compat:${apiKeyEnv || ''}:${credentialsKey}`,
+    apiKeyEnv ? process.env[apiKeyEnv] : undefined,
+    () => resolveAnthropicCompatibleApiKeyUncached(entry),
+    apiKeyEnv || null,
+  )
+}
+
+/**
+ * The uncached resolver body — does the actual env lookup and (0600-enforced)
+ * credentials.json read. Exercised through the cache wrapper above.
+ *
+ * @param {{ apiKeyEnv: string|null, credentialsKey: string|null }} entry
+ * @returns {{ key: string, source: 'env' | 'file' } | { key: null, source: 'none', reason: string }}
+ */
+function resolveAnthropicCompatibleApiKeyUncached(entry) {
   const { apiKeyEnv, credentialsKey } = entry
 
   if (!apiKeyEnv && !credentialsKey) {

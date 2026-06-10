@@ -303,6 +303,78 @@ describe('auth-probes module (#4769)', () => {
       })
     })
 
+    it('lazily creates dynamic slots and caches by env value (#5461)', () => {
+      withSavedEnv(() => {
+        resetCachesForTest()
+        let called = 0
+        const r1 = cachedResolveCredentialFile('compat:ZAI_API_KEY:zaiApiKey', 'sk-dyn', () => {
+          called++
+          return { key: 'sk-dyn', source: 'env' }
+        })
+        assert.equal(called, 1)
+        assert.equal(r1.key, 'sk-dyn')
+
+        const r2 = cachedResolveCredentialFile('compat:ZAI_API_KEY:zaiApiKey', 'sk-dyn', () => {
+          called++
+          return { key: 'should-not-be-returned' }
+        })
+        assert.equal(called, 1, 'cached dynamic-slot entry must not re-invoke resolver')
+        assert.equal(r2.key, 'sk-dyn')
+
+        // A different dynamic slot is independent.
+        const r3 = cachedResolveCredentialFile('compat:OTHER_KEY:otherApiKey', 'sk-other', () => {
+          called++
+          return { key: 'sk-other', source: 'env' }
+        })
+        assert.equal(called, 2, 'distinct dynamic slots must not share cache entries')
+        assert.equal(r3.key, 'sk-other')
+      })
+    })
+
+    it('dynamic-slot ENOENT reason uses the provided env var name (#5461)', () => {
+      withSavedEnv(() => {
+        resetCachesForTest()
+        const tmp = mkdtempSync(join(tmpdir(), 'auth-probes-dyn-noent-'))
+        const savedHome = process.env.HOME
+        process.env.HOME = tmp
+        try {
+          let called = 0
+          const r = cachedResolveCredentialFile('compat:ZAI_API_KEY:zaiApiKey', undefined, () => {
+            called++
+            return { key: 'should-not-be-called' }
+          }, 'ZAI_API_KEY')
+          assert.equal(called, 0, 'ENOENT short-circuit must skip resolver')
+          assert.equal(r.key, null)
+          assert.equal(r.source, 'none')
+          assert.match(r.reason, /ZAI_API_KEY not set and .*does not exist/)
+        } finally {
+          if (savedHome === undefined) delete process.env.HOME
+          else process.env.HOME = savedHome
+          rmSync(tmp, { recursive: true, force: true })
+        }
+      })
+    })
+
+    it('dynamic-slot ENOENT reason omits the env clause when no env var is configured (#5461)', () => {
+      withSavedEnv(() => {
+        resetCachesForTest()
+        const tmp = mkdtempSync(join(tmpdir(), 'auth-probes-dyn-noent-'))
+        const savedHome = process.env.HOME
+        process.env.HOME = tmp
+        try {
+          const r = cachedResolveCredentialFile('compat::zaiApiKey', undefined, () => ({ key: null }), null)
+          assert.equal(r.key, null)
+          assert.equal(r.source, 'none')
+          assert.doesNotMatch(r.reason, /not set/)
+          assert.match(r.reason, /does not exist/)
+        } finally {
+          if (savedHome === undefined) delete process.env.HOME
+          else process.env.HOME = savedHome
+          rmSync(tmp, { recursive: true, force: true })
+        }
+      })
+    })
+
     it('synthesises DEEPSEEK_API_KEY reason for the deepseek slot', () => {
       withSavedEnv(() => {
         resetCachesForTest()
@@ -341,6 +413,20 @@ describe('auth-probes module (#4769)', () => {
         } finally {
           rmSync(tmp, { recursive: true, force: true })
         }
+      })
+    })
+
+    it('drops dynamic credential-file slots (#5461)', () => {
+      withSavedEnv(() => {
+        resetCachesForTest()
+        let called = 0
+        cachedResolveCredentialFile('compat:X:y', 'v', () => { called++; return { key: 'v1' } })
+        cachedResolveCredentialFile('compat:X:y', 'v', () => { called++; return { key: 'v2' } })
+        assert.equal(called, 1, 'precondition: the dynamic slot is cached')
+        resetCachesForTest()
+        const r = cachedResolveCredentialFile('compat:X:y', 'v', () => { called++; return { key: 'v3' } })
+        assert.equal(called, 2, 'reset must drop dynamic slots')
+        assert.equal(r.key, 'v3')
       })
     })
   })
