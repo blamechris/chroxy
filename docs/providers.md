@@ -390,24 +390,24 @@ Older configs use `legacyCli: true` to force the `claude-cli` provider. This sti
 
 Rows marked **(capability)** come directly from each session class's `static get capabilities()` object — those are the keys the provider registry inspects at runtime. The remaining rows are **(behavioural)** — derived from reading the session class's implementation (attachment handling, agent-tracking events, cost parsing, continuity across `sendMessage` calls). Behavioural rows are not currently part of the `capabilities` contract and may change if the class is refactored.
 
-| Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `claude-channel` | `codex` | `gemini` | `ollama` |
-|------------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — | Yes (in-process) |
-| **(capability)** In-process permissions | Yes | — | — | — | — | — | Yes |
-| **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — | — | Yes |
-| **(capability)** Plan mode | — | **Yes** | — | — | — | — | — |
-| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — | — | — |
-| **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — |
-| **(capability)** Thinking level control | Yes | — | — | — | — | — | — |
-| **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes |
-| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — | — |
-| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes |
-| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — | Yes (always $0) |
-| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | **No** | **No** | Yes (in-memory history) |
+| Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `claude-channel` | `codex` | `gemini` | `claude-byok` | `deepseek` | `ollama` |
+|------------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — | Yes (in-process) | Yes (in-process) | Yes (in-process) |
+| **(capability)** In-process permissions | Yes | — | — | — | — | — | Yes | Yes | Yes |
+| **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes | Yes | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
+| **(capability)** Plan mode | — | **Yes** | — | — | — | — | — | — | — |
+| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — | — | — | — | — |
+| **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — | — | — |
+| **(capability)** Thinking level control | Yes | — | — | — | — | — | — | — | — |
+| **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
+| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — | — | — | — |
+| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
+| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — | Yes (per-token API) | Yes (per-token API) | Yes (always $0) |
+| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | **No** | **No** | Yes (in-memory history) | Yes (in-memory history) | Yes (in-memory history) |
 
-> The `ollama` column inherits `claude-byok`'s session class (same `capabilities` object and agent loop) — the BYOK and DeepSeek providers, which share it, behave identically and are omitted here only because their columns predate this table's last sweep.
+> The `claude-byok`, `deepseek`, and `ollama` columns share one session class — `deepseek-session.js` and `ollama-session.js` subclass `ClaudeByokSession` (`byok-session.js`), overriding only credentials, endpoint, model registry, and pricing — so their **(capability)** rows are identical by construction. Behaviourally they differ in cost reporting: `claude-byok` and `deepseek` compute real per-token API cost from their pricing tables, while `ollama` reports an honest $0 (local inference). Attachments are dropped with a session-level error ("does not yet materialise attachments") on all three; in-memory history means continuity within the server process but no cross-restart resume (`resume: false`, tracked in #4047).
 
 For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
