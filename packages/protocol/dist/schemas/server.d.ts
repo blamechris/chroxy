@@ -1049,11 +1049,91 @@ export declare const RepoMemoryStatusSchema: z.ZodObject<{
     reason: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
 /**
+ * #5501 — one recent repo-relay workflow run, distilled from
+ * `gh run list --workflow=repo-relay.yml --json status,conclusion,event,createdAt,databaseId`.
+ * `databaseId` is GitHub's run id — #5502's rerun action consumes it, so it is
+ * carried verbatim. `conclusion` is null while the run is still in progress.
+ */
+export declare const RepoRelayRunSchema: z.ZodObject<{
+    databaseId: z.ZodNumber;
+    status: z.ZodNullable<z.ZodString>;
+    conclusion: z.ZodNullable<z.ZodString>;
+    event: z.ZodNullable<z.ZodString>;
+    createdAt: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+/**
+ * #5501 — per-repo repo-relay verdict, mirroring the runner tab's bucket
+ * style:
+ *
+ *   - 'failing'       — the latest CONCLUDED run failed (wins over drift:
+ *     a broken relay is more urgent than a stale pin).
+ *   - 'drifted'       — pinned version < latest release (sha pins resolve via
+ *     their `# vX.Y.Z` comment first).
+ *   - 'ok'            — latest concluded run succeeded and no drift.
+ *   - 'not_installed' — no `.github/workflows/repo-relay.yml` in the checkout.
+ *   - 'unknown'       — installed but unassessable (gh missing / rate-limited /
+ *     no GitHub remote / no concluded runs and no drift signal); the row's
+ *     `reason` explains why.
+ */
+export declare const RepoRelayVerdictSchema: z.ZodEnum<{
+    unknown: "unknown";
+    failing: "failing";
+    ok: "ok";
+    drifted: "drifted";
+    not_installed: "not_installed";
+}>;
+/**
+ * #5501 — one repo's repo-relay status.
+ *
+ *   - `installed` — answered from the filesystem alone (the workflow file),
+ *     so it survives every gh/network degradation.
+ *   - `pinnedVersion` / `pinnedSha` — parsed from the workflow's
+ *     `uses: blamechris/repo-relay@<ref>` line. A tag pin fills
+ *     `pinnedVersion` only; a sha pin fills `pinnedSha` plus `pinnedVersion`
+ *     when a `# vX.Y.Z` comment resolves it.
+ *   - `driftUnknown` — installed but the pin couldn't be resolved to a
+ *     version (bare sha with no comment, branch pin, unparseable uses line)
+ *     so drift can't be assessed.
+ *   - `latestVersion` — `releases/latest` tag of blamechris/repo-relay,
+ *     fetched ONCE per snapshot (and cached briefly across snapshots).
+ *   - `runs` — most-recent-first; empty when unavailable (see `reason`).
+ *   - `failureStreak` — consecutive failed conclusions from the most recent
+ *     run backwards (in-progress runs are skipped, not streak-breaking).
+ *   - `workflowUrl` — Actions UI deep link, null without a GitHub remote.
+ *   - `reason` — per-repo degradation note (gh missing, rate limit, no
+ *     GitHub remote, …). Null when nothing degraded.
+ */
+export declare const RepoRelayStatusSchema: z.ZodObject<{
+    installed: z.ZodBoolean;
+    pinnedVersion: z.ZodNullable<z.ZodString>;
+    pinnedSha: z.ZodNullable<z.ZodString>;
+    latestVersion: z.ZodNullable<z.ZodString>;
+    runs: z.ZodArray<z.ZodObject<{
+        databaseId: z.ZodNumber;
+        status: z.ZodNullable<z.ZodString>;
+        conclusion: z.ZodNullable<z.ZodString>;
+        event: z.ZodNullable<z.ZodString>;
+        createdAt: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>;
+    failureStreak: z.ZodNumber;
+    verdict: z.ZodEnum<{
+        unknown: "unknown";
+        failing: "failing";
+        ok: "ok";
+        drifted: "drifted";
+        not_installed: "not_installed";
+    }>;
+    driftUnknown: z.ZodBoolean;
+    workflowUrl: z.ZodNullable<z.ZodString>;
+    reason: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+/**
  * One surveyed repo in the Integrations snapshot. `repoMemory` is nullable so
- * a future integration can appear without forcing a repo-memory block; a
- * sibling `repoRelay` block lands in the follow-up issue (#5501) as an
- * additive key — consumers must tolerate unknown extra keys per the usual Zod
- * non-strict object semantics.
+ * a future integration can appear without forcing a repo-memory block.
+ * `repoRelay` (#5501) is additive — optional so #5503-era producers/fixtures
+ * stay valid; the current survey always emits it (a repo without the workflow
+ * file gets a quiet `installed: false` block, same posture as unconfigured
+ * repo-memory).
  */
 export declare const IntegrationRepoSchema: z.ZodObject<{
     name: z.ZodString;
@@ -1079,6 +1159,30 @@ export declare const IntegrationRepoSchema: z.ZodObject<{
         }, z.core.$strip>>;
         reason: z.ZodNullable<z.ZodString>;
     }, z.core.$strip>>;
+    repoRelay: z.ZodOptional<z.ZodNullable<z.ZodObject<{
+        installed: z.ZodBoolean;
+        pinnedVersion: z.ZodNullable<z.ZodString>;
+        pinnedSha: z.ZodNullable<z.ZodString>;
+        latestVersion: z.ZodNullable<z.ZodString>;
+        runs: z.ZodArray<z.ZodObject<{
+            databaseId: z.ZodNumber;
+            status: z.ZodNullable<z.ZodString>;
+            conclusion: z.ZodNullable<z.ZodString>;
+            event: z.ZodNullable<z.ZodString>;
+            createdAt: z.ZodNullable<z.ZodString>;
+        }, z.core.$strip>>;
+        failureStreak: z.ZodNumber;
+        verdict: z.ZodEnum<{
+            unknown: "unknown";
+            failing: "failing";
+            ok: "ok";
+            drifted: "drifted";
+            not_installed: "not_installed";
+        }>;
+        driftUnknown: z.ZodBoolean;
+        workflowUrl: z.ZodNullable<z.ZodString>;
+        reason: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>>;
 }, z.core.$strip>;
 /**
  * Aggregate repo-memory counts across the surveyed repos, carried alongside
@@ -1090,6 +1194,9 @@ export declare const IntegrationStatusSummarySchema: z.ZodObject<{
     configured: z.ZodNumber;
     notConfigured: z.ZodNumber;
     degraded: z.ZodNumber;
+    relayInstalled: z.ZodOptional<z.ZodNumber>;
+    relayFailing: z.ZodOptional<z.ZodNumber>;
+    relayDrifted: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 /**
  * Snapshot-level note about the `repo-memory` CLI binary, probed ONCE per
@@ -1120,6 +1227,9 @@ export declare const ServerIntegrationStatusSnapshotSchema: z.ZodObject<{
         configured: z.ZodNumber;
         notConfigured: z.ZodNumber;
         degraded: z.ZodNumber;
+        relayInstalled: z.ZodOptional<z.ZodNumber>;
+        relayFailing: z.ZodOptional<z.ZodNumber>;
+        relayDrifted: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strip>;
     repos: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
@@ -1145,8 +1255,37 @@ export declare const ServerIntegrationStatusSnapshotSchema: z.ZodObject<{
             }, z.core.$strip>>;
             reason: z.ZodNullable<z.ZodString>;
         }, z.core.$strip>>;
+        repoRelay: z.ZodOptional<z.ZodNullable<z.ZodObject<{
+            installed: z.ZodBoolean;
+            pinnedVersion: z.ZodNullable<z.ZodString>;
+            pinnedSha: z.ZodNullable<z.ZodString>;
+            latestVersion: z.ZodNullable<z.ZodString>;
+            runs: z.ZodArray<z.ZodObject<{
+                databaseId: z.ZodNumber;
+                status: z.ZodNullable<z.ZodString>;
+                conclusion: z.ZodNullable<z.ZodString>;
+                event: z.ZodNullable<z.ZodString>;
+                createdAt: z.ZodNullable<z.ZodString>;
+            }, z.core.$strip>>;
+            failureStreak: z.ZodNumber;
+            verdict: z.ZodEnum<{
+                unknown: "unknown";
+                failing: "failing";
+                ok: "ok";
+                drifted: "drifted";
+                not_installed: "not_installed";
+            }>;
+            driftUnknown: z.ZodBoolean;
+            workflowUrl: z.ZodNullable<z.ZodString>;
+            reason: z.ZodNullable<z.ZodString>;
+        }, z.core.$strip>>>;
     }, z.core.$strip>>;
     repoMemoryCli: z.ZodOptional<z.ZodObject<{
+        found: z.ZodBoolean;
+        path: z.ZodNullable<z.ZodString>;
+        note: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>;
+    ghCli: z.ZodOptional<z.ZodObject<{
         found: z.ZodBoolean;
         path: z.ZodNullable<z.ZodString>;
         note: z.ZodNullable<z.ZodString>;
@@ -1824,6 +1963,9 @@ export type ServerRunnerStatusSnapshotMessage = z.infer<typeof ServerRunnerStatu
 export type RepoMemoryCache = z.infer<typeof RepoMemoryCacheSchema>;
 export type RepoMemoryReport = z.infer<typeof RepoMemoryReportSchema>;
 export type RepoMemoryStatus = z.infer<typeof RepoMemoryStatusSchema>;
+export type RepoRelayRun = z.infer<typeof RepoRelayRunSchema>;
+export type RepoRelayVerdict = z.infer<typeof RepoRelayVerdictSchema>;
+export type RepoRelayStatus = z.infer<typeof RepoRelayStatusSchema>;
 export type IntegrationRepo = z.infer<typeof IntegrationRepoSchema>;
 export type IntegrationStatusSummary = z.infer<typeof IntegrationStatusSummarySchema>;
 export type IntegrationCliStatus = z.infer<typeof IntegrationCliStatusSchema>;

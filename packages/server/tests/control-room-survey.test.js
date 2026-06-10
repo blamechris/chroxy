@@ -24,6 +24,7 @@ import {
   countWorktrees,
   parseOpenPRs,
   parsePrChecks,
+  parseGithubOwnerRepo,
   parseGithubPrsUrl,
   parseAheadBehind,
   detectAttribution,
@@ -177,6 +178,19 @@ describe('parsePrChecks', () => {
   it('a PR with no checks counts as neither failing nor pending', () => {
     const json = JSON.stringify([pr({ statusCheckRollup: [] })])
     assert.deepEqual(parsePrChecks(json), { failing: 0, pending: 0, approved: 0, changesRequested: 0 })
+  })
+})
+
+describe('parseGithubOwnerRepo (#5501 shared derivation)', () => {
+  it('derives { owner, repo } from the three GitHub remote forms', () => {
+    assert.deepEqual(parseGithubOwnerRepo('git@github.com:owner/repo.git'), { owner: 'owner', repo: 'repo' })
+    assert.deepEqual(parseGithubOwnerRepo('https://github.com/owner/repo'), { owner: 'owner', repo: 'repo' })
+    assert.deepEqual(parseGithubOwnerRepo('ssh://git@github.com:443/owner/repo.git'), { owner: 'owner', repo: 'repo' })
+  })
+  it('returns null for non-GitHub / malformed remotes', () => {
+    assert.equal(parseGithubOwnerRepo('git@gitlab.com:owner/repo.git'), null)
+    assert.equal(parseGithubOwnerRepo('git@github.com:owner/repo/extra.git'), null)
+    assert.equal(parseGithubOwnerRepo(null), null)
   })
 })
 

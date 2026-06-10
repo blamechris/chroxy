@@ -165,23 +165,26 @@ export function parseOpenPRs(json) {
 }
 
 /**
- * Derive a repo's GitHub pull-requests URL from its `origin` remote URL.
+ * Derive a repo's GitHub `{ owner, repo }` from its `origin` remote URL.
  *
  * Handles the three forms `git remote get-url origin` can return for a GitHub
  * remote — SCP-style SSH (`git@github.com:owner/repo.git`), `ssh://` URLs, and
- * `https://` URLs — with or without a trailing `.git`. Returns
- * `https://github.com/<owner>/<repo>/pulls`, or `null` for a non-GitHub remote,
- * an empty/failed lookup, or anything that doesn't match.
+ * `https://` URLs — with or without a trailing `.git`. Returns null for a
+ * non-GitHub remote, an empty/failed lookup, or anything that doesn't match.
+ *
+ * Shared derivation: this survey builds the PR rollup link from it (see
+ * {@link parseGithubPrsUrl}); the Integrations survey (#5501) reuses it to
+ * target `gh run list -R <owner>/<repo>` and the Actions deep link.
  *
  * @param {string|null} remote - raw `git remote get-url origin` stdout.
- * @returns {string|null}
+ * @returns {{ owner: string, repo: string }|null}
  */
-export function parseGithubPrsUrl(remote) {
+export function parseGithubOwnerRepo(remote) {
   if (!remote || typeof remote !== 'string') return null
   const trimmed = remote.trim()
   // owner + repo are each a single path segment ([^/]+) so an extra segment
   // (e.g. `owner/repo/extra`) does NOT match (returns null rather than minting
-  // a bogus `.../pulls`). The ssh URL form allows an optional port (e.g. the
+  // a bogus target). The ssh URL form allows an optional port (e.g. the
   // common ssh-over-:443 remote).
   const patterns = [
     /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/, // scp-style ssh
@@ -190,9 +193,22 @@ export function parseGithubPrsUrl(remote) {
   ]
   for (const re of patterns) {
     const m = re.exec(trimmed)
-    if (m) return `https://github.com/${m[1]}/${m[2]}/pulls`
+    if (m) return { owner: m[1], repo: m[2] }
   }
   return null
+}
+
+/**
+ * Derive a repo's GitHub pull-requests URL from its `origin` remote URL —
+ * `https://github.com/<owner>/<repo>/pulls`, or null when the remote isn't a
+ * recognisable GitHub repo (see {@link parseGithubOwnerRepo}).
+ *
+ * @param {string|null} remote - raw `git remote get-url origin` stdout.
+ * @returns {string|null}
+ */
+export function parseGithubPrsUrl(remote) {
+  const target = parseGithubOwnerRepo(remote)
+  return target ? `https://github.com/${target.owner}/${target.repo}/pulls` : null
 }
 
 /**
