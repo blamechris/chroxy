@@ -2,7 +2,7 @@
  * Control Room v2 (#5174) — Host/Repo Status WS handler.
  *
  * Handles: host_status_request, runner_status_request (#5253),
- * integration_status_request (#5499), integration_action (#5500)
+ * integration_status_request (#5499), integration_action (#5500/#5502)
  *
  * Wires the host survey (control-room/repo-set.js + control-room/survey.js) to
  * the WS protocol. On a `host_status_request` the handler:
@@ -34,7 +34,7 @@ import { createLogger } from '../logger.js'
 import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-set.js'
 import { surveyRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
-import { surveyIntegrations, runRepoMemoryIndex } from '../control-room/integrations.js'
+import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 
 const log = createLogger('ws')
 
@@ -325,31 +325,40 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// #5500 (epic #5498) — integration_action: repo-memory Reindex
+// #5500/#5502 (epic #5498) — integration_action: repo-memory Reindex and
+// repo-relay Re-run
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
- * #5500: per-repo in-flight reindex guard, keyed by the repo's CANONICAL
- * realpath (so a symlinked alias can't sidestep the overlap check). A plain
- * Map (not a WeakSet like the survey guards) because the key is a string and
- * entries are explicitly deleted in the handler's `finally` — nothing leaks
- * across client disconnects since completion always settles the promise.
- * Map.size doubles as the global concurrency gauge.
+ * #5500: per-repo in-flight guard for ALL integration actions, keyed by the
+ * repo's CANONICAL realpath (so a symlinked alias can't sidestep the overlap
+ * check). A plain Map (not a WeakSet like the survey guards) because the key
+ * is a string and entries are explicitly deleted in the handler's `finally`
+ * — nothing leaks across client disconnects since completion always settles
+ * the promise. Map.size doubles as the global concurrency gauge.
+ *
+ * #5502: deliberately ONE bucket across action kinds (reindex + relay
+ * re-run share it): a repo gets at most one mutating integration action at a
+ * time, and the global cap bounds total subprocess fan-out regardless of
+ * which buttons the operator mashes. Actions are rare operator clicks — a
+ * shared bucket is the simplest cap that still can't be sidestepped by
+ * mixing action kinds.
  */
-const reindexInFlight = new Map()
+const actionInFlight = new Map()
 /**
- * #5500: global concurrency cap — the Reindex button must not be able to
+ * #5500: global concurrency cap — the action buttons must not be able to
  * fork-bomb the host. No queue by design: a request above the cap is
  * rejected with a legible "busy" error and the operator retries.
  */
-export const MAX_CONCURRENT_REINDEX = 2
+export const MAX_CONCURRENT_INTEGRATION_ACTIONS = 2
 
 /**
  * #5500: shared INTEGRATION_ACTION_FAILED reply. Mirrors how the
  * CANCEL_ACTIVITY_FAILED session_error is built in input-handlers.js: the
  * `session_error` envelope with a stable `code`, a `reason` discriminator,
- * and the request's correlation fields (`requestId` / `action` / `repoPath`)
- * echoed so the dashboard can clear the exact row's pending state.
+ * and the request's correlation fields (`requestId` / `action` / `repoPath`,
+ * plus `runId` for #5502 re-runs) echoed so the dashboard can clear the
+ * exact row's pending state.
  */
 function integrationActionError(ws, ctx, msg, reason, message) {
   ctx.send(ws, {
@@ -359,22 +368,88 @@ function integrationActionError(ws, ctx, msg, reason, message) {
     reason,
     action: typeof msg?.action === 'string' ? msg.action : null,
     repoPath: typeof msg?.repoPath === 'string' ? msg.repoPath : null,
+    runId: Number.isInteger(msg?.runId) ? msg.runId : null,
     requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
   })
 }
 
 /**
- * #5500 (epic #5498) — `integration_action` handler. Currently one action:
- * `repo_memory_reindex`, which runs `repo-memory index <repoRoot>` host-side
- * to prewarm/refresh the summary cache (there is no watcher — the cache only
- * refreshes on agent reads or an explicit index run). Success replies with an
- * `integration_action_ack` carrying the parsed scanned/summarized/fresh/
- * skipped counts (or `counts: null` when the CLI output is unparseable);
- * every failure replies with an INTEGRATION_ACTION_FAILED session_error.
+ * #5500/#5502 — integration action registry. The shared handler below runs
+ * the authority / repoPath / repo-set-membership / in-flight gates ONCE for
+ * every action; each entry only contributes:
+ *   - `validate(msg)` — action-specific request-shape checks, run before any
+ *     path resolution. Returns `[reason, message]` to reject, or null.
+ *   - `run({ msg, ctx, config, targetKey })` — the exec, against the
+ *     CANONICAL realpath. Resolves the action-specific ack fields (spread
+ *     into the `integration_action_ack`); throws (optionally with a machine
+ *     `.reason`) to fail.
+ *   - `failureReason` — the fallback `reason` when a thrown error has none.
  *
- * SECURITY (docs/security/bearer-token-authority.md checklist): this handler
+ * The schema's closed enum already rejects unknown actions at the wire; the
+ * registry lookup is defence in depth for in-process callers/future drift.
+ */
+const integrationActions = {
+  /**
+   * #5500: `repo-memory index <repoRoot>` — prewarm/refresh the summary
+   * cache (there is no watcher — the cache only refreshes on agent reads or
+   * an explicit index run). Acks with the parsed scanned/summarized/fresh/
+   * skipped counts (or `counts: null` when the CLI output is unparseable).
+   * Safe alongside live sessions: repo-memory's cache is SQLite in WAL mode,
+   * so a concurrent index is safe next to an agent session reading summaries.
+   */
+  repo_memory_reindex: {
+    failureReason: 'index-failed',
+    validate: () => null,
+    async run({ ctx, config, targetKey }) {
+      const runFn = typeof ctx?.runRepoMemoryIndex === 'function' ? ctx.runRepoMemoryIndex : runRepoMemoryIndex
+      const bin = typeof config.controlRoomRepoMemoryBin === 'string' && config.controlRoomRepoMemoryBin.length > 0
+        ? config.controlRoomRepoMemoryBin
+        : undefined
+      const result = await runFn(targetKey, { bin })
+      return { counts: result && result.counts ? result.counts : null }
+    },
+  },
+  /**
+   * #5502: `gh run rerun <databaseId> -R <owner>/<repo>` for a FAILED
+   * repo-relay run. The client's `runId` is only a lookup key —
+   * runRepoRelayRerun re-fetches the run list server-side and requires the
+   * id to name a surfaced run with conclusion 'failure' before any exec.
+   * The rerun ack echoes the runId and carries `counts: null` (nothing to
+   * count — the new attempt shows as in_progress on the next refresh).
+   */
+  repo_relay_rerun: {
+    failureReason: 'rerun-failed',
+    validate(msg) {
+      if (!Number.isInteger(msg?.runId) || msg.runId < 0) {
+        return ['invalid-run-id',
+          'repo_relay_rerun requires an integer runId (the databaseId of a surveyed failed run)']
+      }
+      return null
+    },
+    async run({ msg, ctx, targetKey }) {
+      const runFn = typeof ctx?.runRepoRelayRerun === 'function' ? ctx.runRepoRelayRerun : runRepoRelayRerun
+      const result = await runFn(targetKey, msg.runId)
+      return { runId: result && Number.isInteger(result.runId) ? result.runId : msg.runId, counts: null }
+    },
+  },
+  // #5502 Part 2 (BLOCKED upstream) — `repo_relay_dispatch` ("Sync now")
+  // slots in HERE once blamechris/repo-relay#168 ships a workflow_dispatch
+  // trigger: same shared gates, `gh workflow run repo-relay.yml -R
+  // <owner>/<repo> -f ...`, additionally gated on the repo's pinned
+  // repo-relay version supporting dispatch (the #5501 drift data already
+  // carries the pin). Lands as its own PR when upstream releases.
+}
+
+/**
+ * #5500/#5502 (epic #5498) — `integration_action` handler. Dispatches to the
+ * `integrationActions` registry above; success replies with an
+ * `integration_action_ack` (the registry entry's fields + the correlation
+ * echo), every failure replies with exactly one INTEGRATION_ACTION_FAILED
+ * session_error.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md checklist): every action
  * execs a binary against a host filesystem path, so two gates run BEFORE any
- * exec:
+ * exec — shared here, never per-action:
  *   1. Host-level authority — same bound-vs-unbound check as the surveys: a
  *      pairing-bound (share-a-session) client is scoped to one session and
  *      must not run host-wide actions.
@@ -386,13 +461,10 @@ function integrationActionError(ws, ctx, msg, reason, message) {
  *      realpath, never the raw client string — so traversal tricks
  *      (`repo/../../etc`) and symlink aliases collapse before comparison.
  *
- * Concurrency: one in-flight index per repo (overlapping requests on the
+ * Concurrency: one in-flight action per repo (overlapping requests on the
  * same repo are rejected with a clear error) plus a global cap of
- * MAX_CONCURRENT_REINDEX across all repos — rejected, not queued.
- *
- * Safe alongside live sessions: repo-memory's cache is SQLite in WAL mode,
- * so a concurrent index is safe next to an agent session reading summaries —
- * no session coordination is needed here.
+ * MAX_CONCURRENT_INTEGRATION_ACTIONS across all repos and action kinds —
+ * rejected, not queued (see the `actionInFlight` note on the shared bucket).
  */
 async function handleIntegrationAction(ws, client, msg, ctx) {
   const config = ctx?.config || {}
@@ -404,11 +476,14 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
     return
   }
 
-  // The schema's closed enum already rejects unknown actions at the wire;
-  // this is defence in depth for in-process callers and future drift.
-  if (msg?.action !== 'repo_memory_reindex') {
+  // Registry lookup (Object.hasOwn so '__proto__'/'constructor' can't match
+  // inherited keys). The schema's closed enum already rejects unknown
+  // actions at the wire; this is defence in depth.
+  const action = typeof msg?.action === 'string' ? msg.action : ''
+  const actionEntry = Object.hasOwn(integrationActions, action) ? integrationActions[action] : null
+  if (!actionEntry) {
     integrationActionError(ws, ctx, msg, 'unsupported-action',
-      `Unsupported integration action: ${typeof msg?.action === 'string' ? msg.action : '(none)'}`)
+      `Unsupported integration action: ${action.length > 0 ? action : '(none)'}`)
     return
   }
 
@@ -422,16 +497,25 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
       'integration_action requires a non-empty repoPath')
     return
   }
+
+  // Action-specific request-shape validation (e.g. #5502's required runId),
+  // still before any path resolution or exec.
+  const invalid = actionEntry.validate(msg)
+  if (invalid) {
+    integrationActionError(ws, ctx, msg, invalid[0], invalid[1])
+    return
+  }
+
   const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
     ? config.controlRoomRoot
     : DEFAULT_CONTROL_ROOM_ROOT
   const repos = Array.isArray(config.repos) ? config.repos : []
 
-  // Tests inject ctx.resolveRepoSet / ctx.realpath / ctx.runRepoMemoryIndex
-  // to stub fs/exec; production falls through to the real implementations.
+  // Tests inject ctx.resolveRepoSet / ctx.realpath (and the per-action run
+  // seams, ctx.runRepoMemoryIndex / ctx.runRepoRelayRerun) to stub fs/exec;
+  // production falls through to the real implementations.
   const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
   const realpathFn = typeof ctx?.realpath === 'function' ? ctx.realpath : realpathSync
-  const runFn = typeof ctx?.runRepoMemoryIndex === 'function' ? ctx.runRepoMemoryIndex : runRepoMemoryIndex
 
   // Repo-set membership gate (#2 above): canonicalize, then compare.
   let targetKey
@@ -468,42 +552,42 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
     return
   }
 
-  // Per-repo overlap guard, then the global cap (reject, never queue).
-  if (reindexInFlight.has(targetKey)) {
-    integrationActionError(ws, ctx, msg, 'reindex-in-progress',
-      `A reindex is already in progress for ${targetKey}`)
+  // Per-repo overlap guard, then the global cap (reject, never queue). One
+  // shared bucket across action kinds — see the `actionInFlight` note.
+  if (actionInFlight.has(targetKey)) {
+    integrationActionError(ws, ctx, msg, 'action-in-progress',
+      `An integration action (${actionInFlight.get(targetKey)}) is already in progress for ${targetKey}`)
     return
   }
-  if (reindexInFlight.size >= MAX_CONCURRENT_REINDEX) {
+  if (actionInFlight.size >= MAX_CONCURRENT_INTEGRATION_ACTIONS) {
     integrationActionError(ws, ctx, msg, 'busy',
-      `The host is busy: ${reindexInFlight.size} reindex runs are already in flight (max ${MAX_CONCURRENT_REINDEX}) — retry when one finishes`)
+      `The host is busy: ${actionInFlight.size} integration actions are already in flight (max ${MAX_CONCURRENT_INTEGRATION_ACTIONS}) — retry when one finishes`)
     return
   }
 
-  const bin = typeof config.controlRoomRepoMemoryBin === 'string' && config.controlRoomRepoMemoryBin.length > 0
-    ? config.controlRoomRepoMemoryBin
-    : undefined
-
-  reindexInFlight.set(targetKey, true)
+  actionInFlight.set(targetKey, action)
   try {
     // Exec against the canonical realpath — never the raw client string.
-    const result = await runFn(targetKey, { bin })
-    log.info(`integration_action repo_memory_reindex completed for ${targetKey} (client=${client?.id})`)
+    const ackFields = await actionEntry.run({ msg, ctx, config, targetKey })
+    log.info(`integration_action ${action} completed for ${targetKey} (client=${client?.id})`)
     ctx.send(ws, {
       type: 'integration_action_ack',
-      action: 'repo_memory_reindex',
+      action,
       // Echo the CLIENT-supplied path so the dashboard's pending state
       // (keyed by what it sent) correlates even through a symlink alias.
       repoPath,
       requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-      counts: result && result.counts ? result.counts : null,
+      ...ackFields,
     })
   } catch (err) {
-    const message = err && err.message ? err.message : 'repo-memory index failed'
-    log.warn(`integration_action repo_memory_reindex failed for ${targetKey}: ${message}`)
-    integrationActionError(ws, ctx, msg, 'index-failed', message)
+    const message = err && err.message ? err.message : `${action} failed`
+    log.warn(`integration_action ${action} failed for ${targetKey}: ${message}`)
+    const reason = err && typeof err.reason === 'string' && err.reason.length > 0
+      ? err.reason
+      : actionEntry.failureReason
+    integrationActionError(ws, ctx, msg, reason, message)
   } finally {
-    reindexInFlight.delete(targetKey)
+    actionInFlight.delete(targetKey)
   }
 }
 
