@@ -75,6 +75,8 @@ function makeReq(body, headers = {}) {
     emitter.emit('end')
   })
   emitter.destroy = mock.fn()
+  emitter.setEncoding = mock.fn()
+  emitter.pause = mock.fn()
   return emitter
 }
 

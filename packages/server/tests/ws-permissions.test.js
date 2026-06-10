@@ -37,6 +37,10 @@ function makeReq(body, headers = {}) {
     emitter.emit('end')
   })
   emitter.destroy = mock.fn()
+  // Real IncomingMessage API used by the byte-accurate cap (#5433): the
+  // fake keeps emitting Buffers, which Buffer.byteLength handles the same.
+  emitter.setEncoding = mock.fn()
+  emitter.pause = mock.fn()
   return emitter
 }
 
