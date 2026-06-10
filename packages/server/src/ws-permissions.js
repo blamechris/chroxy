@@ -3,6 +3,7 @@ import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { createPermissionResolver } from './permission-resolver.js'
+import { sendOversizeResponse } from './http-oversize.js'
 
 const log = createLogger('ws')
 
@@ -133,10 +134,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     let body = ''
     let oversized = false
     req.on('data', (chunk) => {
+      if (oversized) return
       body += chunk
       if (body.length > MAX_BODY) {
         oversized = true
-        req.destroy()
+        // #5433: respond BEFORE teardown — req.destroy() here suppressed
+        // 'end' (the 413 branch below was dead code) and the hook saw a
+        // socket reset instead of the documented 413 deny. The helper stops
+        // consumption without buffering past the cap and closes the
+        // connection after the response flushes.
+        sendOversizeResponse(req, res, { decision: 'deny' })
       }
     })
     req.on('end', () => {
@@ -148,10 +155,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // on a torn-down socket, downstream session/broadcast calls) so any other
       // throw is contained and returns a 500 to the client when possible.
       try {
-      if (oversized) {
-        sendJson(res, 413, { decision: 'deny' })
-        return
-      }
+      // #5433: the 413 deny was already sent from the 'data' handler.
+      if (oversized) return
 
       let hookData
       try {
@@ -315,13 +320,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       body += chunk
       if (body.length > MAX_BODY) {
         oversized = true
-        // #5389 review: this 'data' callback runs on a later tick outside the
-        // route wrapper, so a throw here (e.g. writing to a torn-down socket)
-        // would escape to uncaughtException and crash the daemon — same shape
-        // as the #5313 guard on the 'end' handler. Contain it.
-        try {
-          sendJson(res, 413, { error: 'body too large' })
-        } catch { /* socket already torn down — nothing more we can do */ }
+        // #5433: same shared rejection as handlePermissionRequest /
+        // /api/events — this site already responded before teardown, but the
+        // helper also stops consumption (pause + listener removal, so an
+        // attacker can't keep streaming into a live connection) and closes
+        // the socket after the 413 flushes (Connection: close). It contains
+        // torn-down-socket throws internally (#5389 guard preserved).
+        sendOversizeResponse(req, res, { error: 'body too large' })
       }
     })
     req.on('end', () => {

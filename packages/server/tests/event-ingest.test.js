@@ -172,10 +172,10 @@ describe('event-ingest', () => {
     it('413 on an oversized body', async () => {
       await startWith(createMockServer())
       const big = JSON.stringify(validEvent({ project: 'x'.repeat(MAX_INGEST_BODY_BYTES) }))
-      const res = await post(big).catch(() => null)
-      // The server destroys the socket after flagging oversize; depending on
-      // timing the client sees the 413 or a reset. Both prove the cap.
-      if (res) assert.equal(res.status, 413)
+      // #5433: the 413 must actually be DELIVERED — no reset hedge. A
+      // connection reset rejects fetch() and fails the test.
+      const res = await post(big)
+      assert.equal(res.status, 413)
       assert.equal(mockServer.pushManager.calls.length, 0)
     })
 

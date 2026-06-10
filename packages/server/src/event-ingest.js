@@ -30,6 +30,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { safeTokenCompare } from './token-compare.js'
+import { sendOversizeResponse } from './http-oversize.js'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
@@ -248,10 +249,15 @@ export function handleEventIngest(server, req, res) {
   let body = ''
   let oversized = false
   req.on('data', (chunk) => {
+    if (oversized) return
     body += chunk
     if (body.length > MAX_INGEST_BODY_BYTES) {
       oversized = true
-      req.destroy()
+      // #5433: respond BEFORE teardown — destroying the socket here would
+      // suppress 'end' and the client would see a reset instead of the 413.
+      // The helper stops consumption (no buffering past the cap) and closes
+      // the connection after the response flushes.
+      sendOversizeResponse(req, res, { error: 'body too large' })
     }
   })
   req.on('end', () => {
@@ -259,10 +265,8 @@ export function handleEventIngest(server, req, res) {
     // dispatch try/catch (#5312) — wrap everything so a throw here can't
     // escape to uncaughtException and take the daemon down.
     try {
-      if (oversized) {
-        sendJson(res, 413, { error: 'body too large' })
-        return
-      }
+      // #5433: the 413 was already sent from the 'data' handler.
+      if (oversized) return
 
       let parsed
       try {
