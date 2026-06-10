@@ -1389,8 +1389,8 @@ export class ClaudeTuiSession extends BaseSession {
               'as unknown on this machine — it may have been wiped from ~/.claude/projects/). Retrying once with ' +
               'a fresh conversation; the model will not see the earlier transcript.'
             : 'Previous Claude conversation could not be resumed (claude reports the conversation id as unknown — ' +
-              'it was likely never persisted before the PTY died). Retrying once with a fresh conversation; the ' +
-              'model will not see any earlier transcript.',
+              'it may never have been persisted before the PTY died, or it was removed from this machine). ' +
+              'Retrying once with a fresh conversation; the model will not see any earlier transcript.',
           attemptedResumeId: abandonedId,
         })
         // Fall through to the scheduling below — this IS the extra attempt.
