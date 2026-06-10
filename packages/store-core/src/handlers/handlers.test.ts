@@ -100,6 +100,14 @@ import {
   handleStreamStart,
   sharedStreamDelta,
   handleStreamEnd,
+  // #5454 — remaining both-sides duplicates
+  handleRawOutput,
+  handleTokenRotated,
+  handlePairFail,
+  PAIR_FAIL_MESSAGES,
+  handleSessionCostThresholdCrossed,
+  handleNotificationPrefs,
+  resolvePermissionStreamSplit,
 } from './index'
 import type { StreamDeltaContext, PendingDelta } from './index'
 import { nextMessageId } from '../utils'
@@ -8295,5 +8303,207 @@ describe('sharedStreamDelta (#4981)', () => {
     expect(buffered).toBeDefined()
     expect(buffered!.sessionId).toBe('s1')
     expect(buffered!.delta).toBe('world')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleRawOutput (#5454)
+// ---------------------------------------------------------------------------
+describe('handleRawOutput', () => {
+  it('extracts the data field verbatim', () => {
+    expect(handleRawOutput({ data: 'hello\x1b[0m' }).data).toBe('hello\x1b[0m')
+  })
+
+  it('falls back to the empty string for missing or non-string data', () => {
+    // The declared `{ data: string }` type is honest: a malformed payload
+    // appends nothing rather than letting `undefined` flow into the
+    // dashboard's `stripAnsi(data)` (which throws on non-strings). The
+    // server's raw payload is always a PTY string, so this is unreachable
+    // from a well-behaved producer.
+    expect(handleRawOutput({}).data).toBe('')
+    expect(handleRawOutput({ data: 42 }).data).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleTokenRotated (#5454)
+// ---------------------------------------------------------------------------
+describe('handleTokenRotated', () => {
+  it('returns the token when it is a string', () => {
+    expect(handleTokenRotated({ token: 'tok-1' }).token).toBe('tok-1')
+  })
+
+  it('passes the empty string through verbatim (call sites gate on truthiness)', () => {
+    expect(handleTokenRotated({ token: '' }).token).toBe('')
+  })
+
+  it('returns null for missing or non-string tokens', () => {
+    expect(handleTokenRotated({}).token).toBeNull()
+    expect(handleTokenRotated({ token: 42 }).token).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePairFail (#5454)
+// ---------------------------------------------------------------------------
+describe('handlePairFail', () => {
+  it('maps known reasons to the friendly QR-flow copy', () => {
+    for (const reason of Object.keys(PAIR_FAIL_MESSAGES)) {
+      const result = handlePairFail({ reason }, 'pairing_failed')
+      expect(result.reason).toBe(reason)
+      expect(result.alertMessage).toBe(PAIR_FAIL_MESSAGES[reason])
+    }
+  })
+
+  it('falls back to the generic template for unknown reasons', () => {
+    const result = handlePairFail({ reason: 'weird_reason' }, 'pairing_failed')
+    expect(result.reason).toBe('weird_reason')
+    expect(result.alertMessage).toBe('Pairing failed: weird_reason')
+  })
+
+  it('uses the injected fallback for missing, empty, and non-string reasons', () => {
+    expect(handlePairFail({}, 'pairing_failed').reason).toBe('pairing_failed')
+    expect(handlePairFail({ reason: '' }, 'unknown').reason).toBe('unknown')
+    expect(handlePairFail({ reason: 42 }, 'unknown').reason).toBe('unknown')
+    expect(handlePairFail({}, 'unknown').alertMessage).toBe('Pairing failed: unknown')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionCostThresholdCrossed (#5454)
+// ---------------------------------------------------------------------------
+describe('handleSessionCostThresholdCrossed', () => {
+  it('builds the costThresholdWarning patch for the explicit session', () => {
+    const result = handleSessionCostThresholdCrossed({
+      sessionId: 'sess-1',
+      costUsd: 5.25,
+      thresholdUsd: 5,
+    })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.patch).toEqual({
+      costThresholdWarning: { costUsd: 5.25, thresholdUsd: 5, dismissedAt: null },
+    })
+  })
+
+  it('does NOT fall back to any active session — explicit sessionId only', () => {
+    expect(handleSessionCostThresholdCrossed({ costUsd: 1, thresholdUsd: 1 }).sessionId).toBeNull()
+    expect(handleSessionCostThresholdCrossed({ sessionId: 42 }).sessionId).toBeNull()
+  })
+
+  it('defaults non-finite / missing / non-number amounts to 0', () => {
+    const result = handleSessionCostThresholdCrossed({
+      sessionId: 's',
+      costUsd: Number.NaN,
+      thresholdUsd: '5',
+    })
+    expect(result.patch.costThresholdWarning.costUsd).toBe(0)
+    expect(result.patch.costThresholdWarning.thresholdUsd).toBe(0)
+    expect(
+      handleSessionCostThresholdCrossed({ sessionId: 's', costUsd: Infinity })
+        .patch.costThresholdWarning.costUsd,
+    ).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleNotificationPrefs (#5454)
+// ---------------------------------------------------------------------------
+describe('handleNotificationPrefs', () => {
+  const validMsg = {
+    type: 'notification_prefs',
+    prefs: {
+      categories: { permission: true, activity_error: false },
+      devices: {},
+      quietHours: null,
+    },
+  }
+
+  it('parses a valid snapshot into the stored shape', () => {
+    const { notificationPrefs, issues } = handleNotificationPrefs(validMsg)
+    expect(issues).toBeNull()
+    expect(notificationPrefs).toEqual({
+      categories: { permission: true, activity_error: false },
+      devices: {},
+      quietHours: null,
+    })
+    // bypassCategories must be OMITTED (not undefined-valued) when absent
+    expect(Object.prototype.hasOwnProperty.call(notificationPrefs, 'bypassCategories')).toBe(false)
+  })
+
+  it('forwards bypassCategories and quietHours when present (#4544)', () => {
+    const { notificationPrefs } = handleNotificationPrefs({
+      type: 'notification_prefs',
+      prefs: {
+        categories: { permission: true },
+        devices: {
+          'device-1': { quietHours: { start: '22:00', end: '07:00', timezone: 'Australia/Melbourne' } },
+        },
+        quietHours: { start: '23:00', end: '06:00', timezone: 'Australia/Melbourne' },
+        bypassCategories: ['permission'],
+      },
+    })
+    expect(notificationPrefs).not.toBeNull()
+    expect(notificationPrefs!.bypassCategories).toEqual(['permission'])
+    expect(notificationPrefs!.quietHours).toEqual({
+      start: '23:00',
+      end: '06:00',
+      timezone: 'Australia/Melbourne',
+    })
+    expect(notificationPrefs!.devices['device-1']!.quietHours).toEqual({
+      start: '22:00',
+      end: '07:00',
+      timezone: 'Australia/Melbourne',
+    })
+  })
+
+  it('returns issues (and null prefs) when validation fails', () => {
+    const { notificationPrefs, issues } = handleNotificationPrefs({
+      type: 'notification_prefs',
+      prefs: { categories: { permission: 'yes' }, devices: {}, quietHours: null },
+    })
+    expect(notificationPrefs).toBeNull()
+    expect(Array.isArray(issues)).toBe(true)
+    expect((issues as unknown[]).length).toBeGreaterThan(0)
+  })
+
+  it('rejects a quiet-hours window missing its timezone (#4544)', () => {
+    const { notificationPrefs } = handleNotificationPrefs({
+      type: 'notification_prefs',
+      prefs: {
+        categories: {},
+        devices: {},
+        quietHours: { start: '22:00', end: '07:00' },
+      },
+    })
+    expect(notificationPrefs).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resolvePermissionStreamSplit (#554 / #5454)
+// ---------------------------------------------------------------------------
+describe('resolvePermissionStreamSplit', () => {
+  it('returns null when there is no current stream', () => {
+    expect(resolvePermissionStreamSplit(null, new Map())).toBeNull()
+  })
+
+  it('returns null for the "pending" placeholder id', () => {
+    expect(resolvePermissionStreamSplit('pending', new Map())).toBeNull()
+  })
+
+  it('returns the current stream id verbatim when no remap matches', () => {
+    expect(resolvePermissionStreamSplit('msg-1', new Map([['orig-9', 'other']]))).toEqual({
+      serverStreamId: 'msg-1',
+    })
+  })
+
+  it('reverse-maps a remapped client id back to the server-origin id', () => {
+    const remaps = new Map([
+      ['orig-1', 'client-1'],
+      ['orig-2', 'client-2'],
+    ])
+    expect(resolvePermissionStreamSplit('client-2', remaps)).toEqual({
+      serverStreamId: 'orig-2',
+    })
   })
 })

@@ -383,6 +383,11 @@ export type {
   StreamDeltaContext,
   PendingDelta,
   ResultUsagePayload,
+  // #5454 — remaining both-sides duplicates extracted into store-core
+  PairFailPayload,
+  SessionCostThresholdCrossedPayload,
+  NotificationPrefsState,
+  NotificationPrefsPayload,
 } from './handlers'
 
 export {
@@ -490,6 +495,15 @@ export {
   sharedStreamDelta,
   handleStreamEnd,
   handleResultUsage,
+  // #5454 — remaining both-sides duplicates extracted into store-core
+  handleRawOutput,
+  handleTokenRotated,
+  handlePairFail,
+  PAIR_FAIL_MESSAGES,
+  handleSessionCostThresholdCrossed,
+  handleNotificationPrefs,
+  // #5454 — pure core of the #554 stream-split block (permission_request)
+  resolvePermissionStreamSplit,
 } from './handlers'
 
 // #4591: shared device-list formatters. Eliminates duplicated copies of

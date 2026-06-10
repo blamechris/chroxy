@@ -62,6 +62,21 @@ import {
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
   handlePermissionExpired as sharedPermissionExpired,
   handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  // #5454 — dashboard adopts the shared permission family + the remaining
+  // both-sides duplicates
+  handlePermissionRequest as sharedPermissionRequest,
+  handlePermissionResolved as sharedPermissionResolved,
+  handlePermissionTimeout as sharedPermissionTimeout,
+  handleSessionStopped as sharedSessionStopped,
+  handleCheckpointRestored as sharedCheckpointRestored,
+  handleConversationsList as sharedConversationsList,
+  handleRawOutput as sharedRawOutput,
+  handleTokenRotated as sharedTokenRotated,
+  handlePairFail as sharedPairFail,
+  handleSessionCostThresholdCrossed as sharedSessionCostThresholdCrossed,
+  handleNotificationPrefs as sharedNotificationPrefs,
+  // #5454 — pure core of the #554 stream-split block (permission_request)
+  resolvePermissionStreamSplit,
   handleDirectoryListing as sharedDirectoryListing,
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
@@ -115,7 +130,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerNotificationPrefsSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -146,7 +161,6 @@ import type {
   SessionState,
   SlashCommand,
   FilePickerItem,
-  ConversationSummary,
   ProviderInfo,
   WebTask,
 } from './types';
@@ -783,15 +797,17 @@ function handlePong(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _
 }
 
 function handleRaw(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  get().appendTerminalData(msg.data as string);
+  get().appendTerminalData(sharedRawOutput(msg).data);
 }
 
 function handleRawBackground(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  get().appendTerminalData(msg.data as string);
+  get().appendTerminalData(sharedRawOutput(msg).data);
 }
 
 function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const newToken = typeof msg.token === 'string' ? msg.token : null;
+  // Token parse shared via store-core (#5454); the URL-rewrite side effect
+  // stays dashboard-specific.
+  const { token: newToken } = sharedTokenRotated(msg);
   if (newToken) {
     // Server sent the new token — update URL query param for reconnection
     console.log('[ws] Server token rotated — updating stored token');
@@ -805,9 +821,18 @@ function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: Ms
   }
 }
 
-function handleCheckpointRestored(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  // Server has created a new session from the checkpoint.
-  // The session_list update will follow from the server — nothing to do here.
+function handleCheckpointRestored(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  // Server has created a new session from the checkpoint and already moved
+  // this client's server-side activeSessionId onto it (the message is sent
+  // only to the requesting client — see checkpoint-handlers.js). #5454:
+  // adopt the shared parser and auto-switch to the restored session, matching
+  // the app. Previously the dashboard left the operator on the old tab until
+  // they clicked the new "Rewind: …" entry; the session_list broadcast that
+  // follows still populates the tab strip.
+  const restored = sharedCheckpointRestored(msg);
+  if (restored) {
+    get().switchSession(restored.newSessionId);
+  }
 }
 
 /**
@@ -830,7 +855,9 @@ function handleWebTaskList(msg: Record<string, unknown>, _get: MsgGet, set: MsgS
 }
 
 function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
+  // Parser shared via store-core (#5454); the dashboard intentionally has no
+  // `conversationHistoryError` / conversation-store mirror (those are app-only).
+  const { conversations } = sharedConversationsList(msg);
   set({ conversationHistory: conversations, conversationHistoryLoading: false });
 }
 
@@ -1589,25 +1616,33 @@ function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet
 }
 
 function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  // Split streaming response at permission boundary (#554)
+  // #5454: payload parse is shared via store-core (`handlePermissionRequest`)
+  // — same handler the app uses. Dashboard-specific glue kept below:
+  //   - flat-state fallbacks (`get().messages` / top-level `streamingMessageId`)
+  //     for sessions not yet in `sessionStates`;
+  //   - #2853 options trimming (allow/deny only — see comment below);
+  //   - the simpler 4-arg `pushSessionNotification` (no input preview).
+  const permPayload = sharedPermissionRequest(msg);
+  // Skip malformed messages with missing/non-string requestId — matches the
+  // app and the shared-handler contract. (Previously the dashboard would
+  // insert a prompt with an `undefined` requestId and still run the stream
+  // split; such a message is unanswerable, so drop it outright.)
+  if (!permPayload.requestId) return;
+  // Split streaming response at permission boundary (#554). The pure
+  // split/remap-resolution core is shared via store-core (#5454); the side
+  // effects below keep their original order.
   {
-    const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+    const permTargetId = permPayload.sessionId || get().activeSessionId;
     const currentStreamId = permTargetId && get().sessionStates[permTargetId]
       ? get().sessionStates[permTargetId]!.streamingMessageId
       : get().streamingMessageId;
-    if (currentStreamId && currentStreamId !== 'pending') {
+    const split = resolvePermissionStreamSplit(currentStreamId, _deltaIdRemaps);
+    if (split) {
       if (deltaFlushTimer) {
         clearTimeout(deltaFlushTimer);
       }
       flushPendingDeltas();
-      let serverStreamId = currentStreamId;
-      for (const [origId, remappedId] of _deltaIdRemaps) {
-        if (remappedId === currentStreamId) {
-          serverStreamId = origId;
-          break;
-        }
-      }
-      _postPermissionSplits.add(serverStreamId);
+      _postPermissionSplits.add(split.serverStreamId);
       if (permTargetId && get().sessionStates[permTargetId]) {
         updateSession(permTargetId, () => ({ streamingMessageId: null }));
       } else {
@@ -1615,19 +1650,21 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       }
     }
   }
-  const permRequestId = msg.requestId as string;
+  const permRequestId = permPayload.requestId;
   // #2853: PermissionPrompt hardcodes its own buttons (Allow / Allow for Session
   // / Deny) and never reads this array; `sendPermissionResponse` only accepts
   // 'allow' | 'deny' | 'allowSession'. Keep only the wire-level allow/deny
   // options in the stored payload for history/debug inspection, without
   // advertising dashboard-only decisions ('allowSession') or unreachable ones
-  // ('allowAlways') here.
+  // ('allowAlways') here. (Intentional divergence from the app, which builds
+  // its options list dynamically — including the #3072 provider-capability
+  // gate for 'Allow for Session' — because its prompt UI renders from it.)
   const newOptions = [
     { label: 'Allow', value: 'allow' },
     { label: 'Deny', value: 'deny' },
   ];
-  const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
-  const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+  const newExpiresAt = permPayload.remainingMs !== null ? Date.now() + permPayload.remainingMs : undefined;
+  const permTargetId = permPayload.sessionId || get().activeSessionId;
 
   const targetMessages = permTargetId && get().sessionStates[permTargetId]
     ? get().sessionStates[permTargetId]!.messages
@@ -1650,25 +1687,21 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       set({ messages: updater({ messages: get().messages }).messages });
     }
   } else {
-    // Validate string fields up front so the prompt content and tool slot
-    // are guaranteed strings — non-string `msg.tool`/`msg.description` could
-    // otherwise leak through `as string` casts and violate ChatMessage.content.
-    const tool = typeof msg.tool === 'string' ? msg.tool : null;
-    const description = typeof msg.description === 'string' ? msg.description : null;
     const permMsg: ChatMessage = {
       id: nextMessageId('perm'),
       type: 'prompt',
       // Render only the tool name when description is missing; otherwise
       // combine `"<tool>: <description>"`. Fallback to a generic label when
       // neither is available. Fixes the "Tool: undefined" string that the
-      // prior `${tool}: ${description}` template produced (#3122).
-      content: tool
-        ? (description ? `${tool}: ${description}` : tool)
-        : (description || 'Permission required'),
-      tool: tool ?? undefined,
+      // prior `${tool}: ${description}` template produced (#3122). The
+      // string guards (#3122) and the array-rejecting input guard (#3123)
+      // live in the shared parser.
+      content: permPayload.tool
+        ? (permPayload.description ? `${permPayload.tool}: ${permPayload.description}` : permPayload.tool)
+        : (permPayload.description || 'Permission required'),
+      tool: permPayload.tool ?? undefined,
       requestId: permRequestId,
-      // Reject arrays — match the tightened guard in handlePermissionRequest (#3123)
-      toolInput: msg.input && typeof msg.input === 'object' && !Array.isArray(msg.input) ? msg.input as Record<string, unknown> : undefined,
+      toolInput: permPayload.input ?? undefined,
       options: newOptions,
       expiresAt: newExpiresAt,
       timestamp: Date.now(),
@@ -1682,7 +1715,7 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     }
   }
   if (permTargetId) {
-    const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
+    const toolDesc = permPayload.tool ?? 'Permission needed';
     pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId);
   }
 }
@@ -1691,13 +1724,16 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   // Another client resolved this permission — dismiss the prompt on this client.
   // The permission_request may have been stored in ANY session state (whichever tab
   // was active when it arrived), so search all session states for the matching requestId.
-  const resolvedRequestId = msg.requestId as string;
-  const resolvedDecision = msg.decision as string;
+  // #5454: payload parse shared via store-core (same handler the app uses);
+  // the flat-messages fallback and #5008 mark-read banner draining below are
+  // dashboard-specific.
+  const { requestId: resolvedRequestId, decision: resolvedDecision } =
+    sharedPermissionResolved(msg);
   if (resolvedRequestId) {
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === resolvedRequestId && m.type === 'prompt'
-          ? { ...m, answered: resolvedDecision, answeredAt: Date.now(), options: undefined }
+          ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
           : m
       ),
     });
@@ -2266,7 +2302,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         if (entry && !entry.token) get().removeServer(failedServerId);
       }
       if (!ctx.silent) {
-        const reason = typeof msg.reason === 'string' ? msg.reason : 'unknown';
+        // Reason parse shared via store-core (#5454). The dashboard keeps its
+        // plain `Pairing failed: <reason>` copy — the friendly
+        // PAIR_FAIL_MESSAGES strings are QR-flow wording ("Scan the latest QR
+        // code…") that doesn't fit this paste-a-pairing-URL surface.
+        const { reason } = sharedPairFail(msg, 'unknown');
         _adapters.alert.alert('Pairing Failed', `Pairing failed: ${reason}`);
       }
       break;
@@ -2619,7 +2659,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // "Session stopped." carries the full signal there. Missing code
       // (future in-process providers per the #4756 follow-up) is also
       // bare; surfacing "(exit undefined)" would be noisier than useful.
-      const stoppedCode = typeof msg.code === 'number' ? msg.code : null;
+      //
+      // #5454: parse + session patch shared via store-core (same handler the
+      // app uses; it also tightens the code guard with Number.isInteger so a
+      // fractional/NaN code renders bare instead of "(exit 1.5)"). The patch
+      // sets `stoppedAt`/`stoppedCode` on the target session — already part
+      // of the dashboard's BaseSessionState shape (#4879 parity) and cleared
+      // by `handleClaudeReady` exactly as on the app. The info toast stays
+      // dashboard-specific (#4878).
+      const stoppedPatch = sharedSessionStopped(msg, get().activeSessionId);
+      const stoppedTarget = stoppedPatch.sessionId;
+      if (stoppedTarget && get().sessionStates[stoppedTarget]) {
+        updateSession(stoppedTarget, () => stoppedPatch.patch);
+      }
+      const stoppedCode = stoppedPatch.patch.stoppedCode as number | null;
       const stoppedMessage = stoppedCode != null && stoppedCode !== 0
         ? `Session stopped. (exit ${stoppedCode})`
         : 'Session stopped.';
@@ -3042,6 +3095,57 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'permission_timeout': {
+      // #5454: the dashboard previously dropped this event on the floor while
+      // the app handled it (the #2661 close-out flagged the gap). Not yet
+      // emitted by the server (see the handler-coverage SYNTHETIC_TYPES
+      // note) — wired up now for parity via the shared store-core handler so
+      // both clients react identically when the server grows the emit side.
+      const { requestId: timeoutRequestId, systemMessage: timeoutSystemMsg } =
+        sharedPermissionTimeout(msg);
+      if (timeoutRequestId) {
+        // Mark the matching prompt as auto-denied. Scan all session states
+        // first (the prompt may have been stored in any session — mirrors the
+        // handlePermissionResolved all-sessions search), then fall back to
+        // the flat messages array for sessions not in sessionStates.
+        const timeoutUpdater = (ss: { messages: ChatMessage[] }) => ({
+          messages: ss.messages.map((m) =>
+            m.requestId === timeoutRequestId && m.type === 'prompt'
+              ? { ...m, content: `${m.content}\n(Auto-denied — permission timed out)`, options: undefined }
+              : m
+          ),
+        });
+        const timeoutStates = get().sessionStates;
+        let timeoutFound = false;
+        for (const sid of Object.keys(timeoutStates)) {
+          if (timeoutStates[sid]?.messages.some((m) => m.requestId === timeoutRequestId)) {
+            updateSession(sid, timeoutUpdater);
+            timeoutFound = true;
+            break;
+          }
+        }
+        if (!timeoutFound) {
+          set({ messages: timeoutUpdater({ messages: get().messages }).messages });
+        }
+        // #5008 — drain the banner stack without dropping the row from the
+        // NotificationsWidget's durable history: stamp `readAt` instead of
+        // removing (see handlePermissionResolved for the pattern source).
+        const readStamp = Date.now();
+        set((s) => ({
+          sessionNotifications: s.sessionNotifications.map((n) =>
+            n.requestId === timeoutRequestId && n.readAt === undefined
+              ? { ...n, readAt: readStamp }
+              : n
+          ),
+        }));
+      }
+      // Surface a dismissible error toast so the operator knows the
+      // permission was auto-denied (wording comes from the shared handler so
+      // the two clients stay in sync).
+      get().addServerError(timeoutSystemMsg.content);
+      break;
+    }
+
     case 'permission_rules_updated': {
       // Server broadcasts the full rule set for a session after a successful
       // set_permission_rules call. Store it on the session so "Allow for
@@ -3382,30 +3486,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // `notification_prefs_get` and broadcast after every
       // `notification_prefs_set`. The wire schema is permissive
       // (z.record(string, boolean) for categories) — adding a category
-      // server-side does not require a client rebuild.
-      const parsed = ServerNotificationPrefsSchema.safeParse(msg);
-      if (!parsed.success) {
+      // server-side does not require a client rebuild. Zod validation +
+      // #4544 bypassCategories handling are shared via store-core (#5454);
+      // a failed parse logs and leaves existing state alone, as before.
+      const { notificationPrefs, issues } = sharedNotificationPrefs(msg);
+      if (!notificationPrefs) {
         // eslint-disable-next-line no-console
-        console.warn('notification_prefs: invalid payload from server', parsed.error.issues);
+        console.warn('notification_prefs: invalid payload from server', issues);
         break;
       }
-      const prefs = parsed.data.prefs;
-      // #4544: the wire snapshot now carries an optional `bypassCategories`
-      // array (categories that fire even during quiet hours). Older servers
-      // omit it — clients fall back to the documented defaults
-      // (permission + activity_error). The quiet-hours window's
-      // `timezone` field is also new in #4544; the schema requires it
-      // when present, so per-device timezone-less windows from an
-      // intermediate state simply won't validate.
-      const bypassCategories = (prefs as { bypassCategories?: string[] }).bypassCategories;
-      set({
-        notificationPrefs: {
-          categories: prefs.categories,
-          devices: prefs.devices,
-          quietHours: prefs.quietHours,
-          ...(Array.isArray(bypassCategories) ? { bypassCategories } : {}),
-        },
-      });
+      set({ notificationPrefs });
       break;
     }
 
@@ -3474,14 +3564,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // #4075: soft "you've spent $X" warning. Fires ONCE per session.
       // The dashboard owns the dismissible banner state per-session; the
       // server doesn't re-fire even if costs continue rising, so a
-      // missed banner stays missed (don't store-and-replay).
-      const sid = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      const costUsd = typeof msg.costUsd === 'number' && Number.isFinite(msg.costUsd) ? msg.costUsd : 0;
-      const thresholdUsd = typeof msg.thresholdUsd === 'number' && Number.isFinite(msg.thresholdUsd) ? msg.thresholdUsd : 0;
-      if (sid && get().sessionStates[sid]) {
-        updateSession(sid, () => ({
-          costThresholdWarning: { costUsd, thresholdUsd, dismissedAt: null },
-        }));
+      // missed banner stays missed (don't store-and-replay). Parse shared
+      // via store-core (#5454) — explicit sessionId only, no fallback.
+      const { sessionId: thresholdSid, patch: thresholdPatch } =
+        sharedSessionCostThresholdCrossed(msg);
+      if (thresholdSid && get().sessionStates[thresholdSid]) {
+        updateSession(thresholdSid, () => thresholdPatch);
       }
       break;
     }
