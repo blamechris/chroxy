@@ -1,17 +1,20 @@
 # Providers
 
-Chroxy runs AI coding sessions through pluggable **providers**. Each provider wraps a different AI backend (Claude Code, OpenAI Codex, Google Gemini) behind the same WebSocket/event contract, so the mobile app and desktop dashboard work identically regardless of which one you pick.
+Chroxy runs AI coding sessions through pluggable **providers**. Each provider wraps a different AI backend (Claude Code, the Anthropic API directly, DeepSeek, local Ollama models, Google Gemini, OpenAI Codex) behind the same WebSocket/event contract, so the mobile app and desktop dashboard work identically regardless of which one you pick.
 
-Six first-party providers ship built-in (one, `claude-channel`, is a research-preview scaffold):
+Nine first-party providers ship built-in (one, `claude-channel`, is a research-preview scaffold):
 
 - `claude-sdk` — **default**. Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process).
 - `claude-cli` — Legacy `claude -p` subprocess. Use if the SDK is unavailable or you need plan mode.
 - `claude-tui` — Interactive `claude` TUI driven under a PTY. Bills as your Claude subscription's interactive allowance and bypasses the programmatic credit pool. See [Billing & API usage](../README.md#billing--api-usage).
 - `claude-channel` — **Research preview, scaffold only (not yet runnable).** Will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`): same subscription billing as `claude-tui`, but a documented protocol instead of a TUI scrape, and — once the backend lands — live streaming plus a first-party permission relay. See [`claude-channel`](#claude-channel-research-preview).
+- `claude-byok` — "Bring your own key": the Anthropic Messages API driven directly via `@anthropic-ai/sdk`, no `claude` binary. Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP servers).
+- `deepseek` — DeepSeek's Anthropic-compatible API. A subclass of `claude-byok` — same agent loop, DeepSeek credentials/endpoint/pricing.
+- `ollama` — Local models via Ollama's Anthropic-compatible API (v0.14+). Same agent loop, no API key, cost always $0. See [Ollama (local models)](#ollama-local-models).
 - `gemini` — Google Gemini CLI (`gemini -p`).
 - `codex` — OpenAI Codex CLI (`codex exec`).
 
-Two additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` (containerized wrappers of `claude-cli` / `claude-sdk`).
+Three additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli`, `docker-sdk`, and `docker-byok` (containerized variants of `claude-cli` / `claude-sdk` / `claude-byok`).
 
 Beyond the built-ins, any service or local server that exposes an **Anthropic-compatible Messages API** (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp server, vLLM, OpenRouter, custom proxies) can be registered straight from `config.json` — no code required. See [Anthropic-compatible endpoints (config-driven)](#anthropic-compatible-endpoints-config-driven).
 
@@ -37,10 +40,13 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
 | `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
+| `claude-byok` | `@anthropic-ai/sdk` (npm) → Anthropic Messages API | `ANTHROPIC_API_KEY` (or `anthropicApiKey` in `~/.chroxy/credentials.json`) | `claude-opus-4-7` | Anthropic API key (per-token billing) | No `claude` binary — Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP); no cross-restart resume (#4047) |
+| `deepseek` | `@anthropic-ai/sdk` → DeepSeek's Anthropic-compatible endpoint | `DEEPSEEK_API_KEY` (or `deepseekApiKey` in `~/.chroxy/credentials.json`); `DEEPSEEK_BASE_URL` (optional endpoint override) | `deepseek-chat` | DeepSeek API key (per-token billing) | Subclass of `claude-byok` — same agent loop with DeepSeek credentials, endpoint, and pricing |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
 | *(config-driven)* | `@anthropic-ai/sdk` → any Anthropic-compatible endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.anthropicCompatible` (config.json): Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom. Full BYOK agent loop. See [below](#anthropic-compatible-endpoints-config-driven) |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
+| `docker-byok` | Docker image; agent loop stays on the host via `@anthropic-ai/sdk` | Same as `claude-byok` | Inherits `claude-byok` | Same as `claude-byok` | Only registered when `environments.enabled=true` and Docker daemon is reachable; built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) runs inside the container |
 
 > **Default model behaviour differs by provider.** Codex and Gemini have a `DEFAULT_MODEL` constant inside their session class (`gpt-5.4`, `gemini-2.5-pro`) — that's the value the provider actually passes when nothing is set. The Claude providers do NOT define an internal default: when `--model` / `CHROXY_MODEL` / `config.model` is unset, Chroxy passes `null` through `BaseSession` to the SDK or `claude` CLI, which then picks its own default (typically whatever the current Claude Code / SDK release ships with — often Sonnet, but subject to change upstream). The `claude-sonnet-4-6` string you'll see elsewhere in the code is the full ID the `sonnet` alias resolves to in `models.js`, not a hardcoded default.
 >
@@ -480,6 +486,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — | — | — |
 | **(capability)** Thinking level control | Yes | — | — | — | — | — | — | — | — |
 | **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
+| **(capability)** Skill toggle (`skillToggle` — live skill activate/deactivate) | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — | — | — | — |
 | **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — | Yes (per-token API) | Yes (per-token API) | Yes (always $0) |
@@ -490,7 +497,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 >
 > [Config-driven Anthropic-compatible endpoints](#anthropic-compatible-endpoints-config-driven) (#5419 — Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) are generated subclasses of the same `ClaudeByokSession`, so they **share the `claude-byok` capability column** exactly. Cost reporting follows the entry's `pricing` block: per-token API cost when declared, an honest $0 when omitted (local endpoints).
 
-For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
+For capability rows, "—" means the provider's `capabilities` object reports `false` (or omits the key — e.g. only `claude-sdk` and the BYOK family declare `skillToggle`: they rebuild the system prompt every turn, so toggling a skill takes effect on the next message; subprocess providers snapshot the skills text at session start). For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
 > The `claude-channel` column reflects the provider's declared `capabilities`
 > object and the spike's verified protocol contract — **not** runtime behaviour,
