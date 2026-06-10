@@ -12,7 +12,7 @@
  */
 
 import { resolveIngestSecret, resolveIngestUrl } from './config.js'
-import { deriveProject } from './project.js'
+import { classifyNonProjectCwd, deriveProject } from './project.js'
 import { EMITTERS, HOOK_EVENT_FOR_TYPE } from './emitters.js'
 
 export const SOURCE = 'claude-hooks'
@@ -125,6 +125,24 @@ export async function runEmit({
     if (!hookEvent) {
       debugLog(env, `unknown hook event "${hookEventArg}"`)
       return { sent: false, reason: 'unknown_event' }
+    }
+
+    // #5439 GAP B — non-project session filter (port of claude-notify.sh's
+    // tmp / home / worktree cwd filter): temp-dir and home-root sessions are
+    // suppressed outright; worktree-agent cwds pass ONLY subagent events
+    // through (their counts belong to the parent project — deriveProject
+    // remaps the name), so parallel agents don't thrash the parent embed's
+    // lifecycle. CHROXY_HOOKS_SKIP_CWD_FILTER=1 bypasses (tests/debugging),
+    // mirroring the bash CLAUDE_NOTIFY_SKIP_TMP_FILTER.
+    if (env.CHROXY_HOOKS_SKIP_CWD_FILTER !== '1') {
+      const cwdKind = classifyNonProjectCwd(typeof payload.cwd === 'string' ? payload.cwd : null, env)
+      if (
+        cwdKind === 'tmp' || cwdKind === 'home' ||
+        (cwdKind === 'worktree' && hookEvent !== 'SubagentStart' && hookEvent !== 'SubagentStop')
+      ) {
+        debugLog(env, `suppressed ${hookEvent} from non-project cwd (${cwdKind})`)
+        return { sent: false, reason: 'non_project_cwd' }
+      }
     }
 
     const secret = resolveIngestSecret(env)

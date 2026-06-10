@@ -63,6 +63,12 @@ export function notification(payload) {
   if (message) data.message = message
   const title = str(payload.title)
   if (title) data.title = title
+  // #5439 GAP A: forward the matcher discriminator. The server maps
+  // `idle_prompt` to the idle embed state (🦀 Ready for input) and
+  // `permission_prompt` (or absent) to needs-approval (🔐) — dropping it
+  // made every idle prompt render as a permission ping.
+  const notificationType = str(payload.notification_type)
+  if (notificationType) data.notificationType = notificationType
   return { type: 'notification', data }
 }
 

@@ -75,6 +75,9 @@ const INGEST_IP_BURST = 30
  *   post_tool_use  → session_activity
  *   notification   → activity_waiting (existing category: input/approval needed —
  *                                      ping-worthy, like the bash Notification arm)
+ *                    EXCEPT data.notificationType === 'idle_prompt' (#5439
+ *                    GAP A) → activity_update (embed: idle — 🦀 ready ping
+ *                    with idle→idle dedup, the bash idle_prompt arm)
  */
 export const INGEST_CATEGORY_FOR_TYPE = {
   session_start: { category: 'session_online', title: 'Session online', body: 'External session started' },
@@ -83,6 +86,21 @@ export const INGEST_CATEGORY_FOR_TYPE = {
   subagent_stop: { category: 'session_activity', title: 'Subagent finished', body: 'A subagent completed' },
   notification: { category: 'activity_waiting', title: 'Input needed', body: 'Claude is waiting' },
   post_tool_use: { category: 'session_activity', title: 'Tool activity', body: 'Tool use completed' },
+}
+
+/**
+ * #5439 GAP A: the hooks' Notification emitter forwards the matcher
+ * discriminator as data.notificationType. `idle_prompt` is the bash
+ * original's highest-volume ping ("ready for input") and must ride the
+ * activity_update category — the Discord sink maps it to the `idle` embed
+ * state (project color, idle→idle dedup). `permission_prompt` (and any
+ * payload without the discriminator) keeps the activity_waiting default
+ * above (permission embed, always re-pings).
+ */
+export const INGEST_IDLE_PROMPT_MAPPING = {
+  category: 'activity_update',
+  title: 'Ready for input',
+  body: 'Claude is waiting for input',
 }
 
 /** Default on-disk location for the ingest secret (0600, same-user reads). */
@@ -321,7 +339,7 @@ export function handleEventIngest(server, req, res) {
         return
       }
 
-      const mapping = INGEST_CATEGORY_FOR_TYPE[event.type]
+      let mapping = INGEST_CATEGORY_FOR_TYPE[event.type]
       // Schema enum and this map are kept in lockstep; belt-and-braces only.
       if (!mapping) {
         sendJson(res, 400, { error: 'invalid event', details: [`type: unsupported type ${event.type}`] })
@@ -332,6 +350,12 @@ export function handleEventIngest(server, req, res) {
       // walk). The Discord sink's _projectKey prefers data.project, so this
       // is what keys the per-project status embed.
       const data = event.data || {}
+
+      // #5439 GAP A: split the Notification hook by its discriminator —
+      // idle prompts are "ready for input" (idle embed), not approvals.
+      if (event.type === 'notification' && data.notificationType === 'idle_prompt') {
+        mapping = INGEST_IDLE_PROMPT_MAPPING
+      }
       const project = event.project
         || (typeof data.cwd === 'string' ? deriveProjectFromCwd(data.cwd) : null)
 

@@ -39,9 +39,17 @@ Everything resolves automatically from the chroxy daemon's config; env vars over
 | `CHROXY_CONFIG_DIR` | `~/.chroxy` |
 | `CHROXY_HOOKS_SETTINGS_PATH` | `~/.claude/settings.json` (install/uninstall target) |
 | `CHROXY_HOOKS_DEBUG=1` | stderr diagnostics from `emit` (silent otherwise) |
+| `CHROXY_HOOKS_SKIP_CWD_FILTER=1` | bypass the non-project cwd filter (tests/debugging) |
 
-`project` is derived hook-side (cwd → nearest `.git`, then `$CLAUDE_PROJECT_DIR`) and sent
-explicitly; the server's cwd derivation is fallback only.
+`project` is derived hook-side (worktree-parent remap for `.claude/worktrees/*` checkouts,
+then cwd → nearest `.git`, then `$CLAUDE_PROJECT_DIR`) and sent explicitly; the server's
+cwd derivation is fallback only.
+
+Non-project sessions are filtered hook-side (#5439): temp-dir (`/tmp`, `/var/tmp`) and
+home-root cwds emit nothing; worktree-agent cwds emit only subagent events, attributed to
+the parent project. The `Notification` emitter forwards `notification_type`
+(`idle_prompt` / `permission_prompt`) so the server can distinguish "ready for input"
+from "needs approval".
 
 Subagent counting is server-side: the daemon aggregates `subagent_start` / `subagent_stop`
 per (source, sessionId) and surfaces active counts in notification text — emitters carry

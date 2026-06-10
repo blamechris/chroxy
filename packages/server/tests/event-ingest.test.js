@@ -322,6 +322,42 @@ describe('event-ingest', () => {
       }
     })
 
+    // #5439 GAP A — both directions pinned: idle_prompt must ride the
+    // activity_update category (Discord sink: `idle` embed, 🦀 "Ready for
+    // input", idle→idle dedup), while permission_prompt (and a missing
+    // discriminator) stays activity_waiting (🔐 "Needs Approval" ping).
+    it('notification + notificationType=idle_prompt maps to activity_update (idle embed)', async () => {
+      await startWith(createMockServer())
+      const res = await post(validEvent({
+        type: 'notification',
+        data: { notificationType: 'idle_prompt' },
+      }))
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.equal(body.category, 'activity_update')
+      const call = mockServer.pushManager.calls[0]
+      assert.equal(call.category, 'activity_update')
+      assert.equal(call.title, 'Ready for input')
+    })
+
+    it('notification + notificationType=permission_prompt stays activity_waiting', async () => {
+      await startWith(createMockServer())
+      const res = await post(validEvent({
+        type: 'notification',
+        data: { notificationType: 'permission_prompt' },
+      }))
+      assert.equal(res.status, 200)
+      assert.equal((await res.json()).category, 'activity_waiting')
+      assert.equal(mockServer.pushManager.calls[0].category, 'activity_waiting')
+    })
+
+    it('notification without a notificationType stays activity_waiting (back-compat)', async () => {
+      await startWith(createMockServer())
+      const res = await post(validEvent({ type: 'notification' }))
+      assert.equal(res.status, 200)
+      assert.equal((await res.json()).category, 'activity_waiting')
+    })
+
     it('derives project from data.cwd (git-root walk) when project is absent', async () => {
       const repo = mkdtempSync(join(tmpdir(), 'ingest-repo-'))
       mkdirSync(join(repo, '.git'))
