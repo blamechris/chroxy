@@ -267,6 +267,34 @@ pub(crate) fn build_enriched_path(
     format!("{}{}{}", dirs.join(path_sep), path_sep, base_path)
 }
 
+/// Build the one-line cause shown on the loading page when the spawned
+/// server child exits before the health check ever succeeds (issue #5492).
+///
+/// Pure so it can be unit-tested: scans the buffered log lines for the
+/// Node `EADDRINUSE` marker and renders a port-conflict hint (the canonical
+/// failure is another chroxy already owning the port); otherwise falls back
+/// to a generic exit message carrying the exit code.
+pub(crate) fn classify_startup_exit(
+    log_lines: &[String],
+    port: u16,
+    exit_code: Option<i32>,
+) -> String {
+    if log_lines.iter().any(|l| l.contains("EADDRINUSE")) {
+        return format!(
+            "Port {} is in use — another chroxy server may already be running on port {}. \
+             Quit it or change the app's port, then retry.",
+            port, port
+        );
+    }
+    match exit_code {
+        Some(code) => format!(
+            "Server exited during startup (exit code {}). See logs below.",
+            code
+        ),
+        None => "Server exited during startup (terminated by signal). See logs below.".to_string(),
+    }
+}
+
 /// Current state of the server process.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerStatus {
@@ -445,6 +473,51 @@ impl ServerManager {
             1 => 6,
             _ => 12,
         })
+    }
+
+    /// Detect a child that died while we were still `Starting` (issue #5492).
+    ///
+    /// Called by the startup monitor loop in `lib.rs`. When the spawned
+    /// server process exits before the health check ever succeeds (the
+    /// canonical case is `EADDRINUSE` because another chroxy already owns
+    /// the port), the health poll alone can't tell "slow start" from
+    /// "already dead" — worse, a foreign healthy server on the same port
+    /// can answer the poll with 200 and mask the failure entirely, leaving
+    /// the splash on "Starting server..." forever. So we check the child
+    /// handle directly.
+    ///
+    /// Returns `None` when there is no child, the child is still running,
+    /// or status is no longer `Starting` (someone else already resolved
+    /// it). Otherwise: stops the health poll (generation bump) so a foreign
+    /// 200 can't flip us to Running post-mortem, classifies the failure
+    /// from the buffered logs, flips status to `Error`, and returns the
+    /// one-line cause for the UI.
+    pub fn check_startup_child_exit(&mut self) -> Option<String> {
+        if self.status() != ServerStatus::Starting {
+            return None;
+        }
+        let child = self.child.as_mut()?;
+        let exit_status = match child.try_wait() {
+            Ok(Some(st)) => st,
+            Ok(None) | Err(_) => return None,
+        };
+
+        // Stop the health poll: the child is dead, so any 200 from this
+        // port now belongs to a different server.
+        self.health_generation.fetch_add(1, Ordering::SeqCst);
+        self.child = None;
+
+        Self::push_log_line(
+            &self.log_buffer,
+            format!(
+                "[tray] server process exited during startup: {}",
+                exit_status
+            ),
+        );
+        let logs = self.get_logs();
+        let msg = classify_startup_exit(&logs, self.config.port, exit_status.code());
+        *lock_or_recover(&self.status) = ServerStatus::Error(msg.clone());
+        Some(msg)
     }
 
     /// Kill any process listening on the given port (cleanup from previous crash).
@@ -1651,6 +1724,118 @@ mod tests {
         assert!(tail.iter().any(|l| l.starts_with("[stderr]")));
         assert!(tail.iter().any(|l| l.contains("connection refused")));
         assert!(tail.iter().any(|l| l.contains("TIMEOUT after 60s")));
+    }
+
+    // -- classify_startup_exit + check_startup_child_exit (#5492) --
+
+    #[test]
+    fn classify_startup_exit_detects_eaddrinuse() {
+        let logs = vec![
+            "[chroxy] starting server".to_string(),
+            "[stderr] Error: listen EADDRINUSE: address already in use 0.0.0.0:8765".to_string(),
+        ];
+        let msg = classify_startup_exit(&logs, 8765, Some(1));
+        assert!(msg.contains("Port 8765 is in use"), "got: {}", msg);
+        assert!(
+            msg.contains("another chroxy server may already be running on port 8765"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn classify_startup_exit_generic_fallback_includes_exit_code() {
+        let logs = vec!["[stderr] something unrelated blew up".to_string()];
+        let msg = classify_startup_exit(&logs, 8765, Some(7));
+        assert!(msg.contains("exit code 7"), "got: {}", msg);
+        assert!(!msg.contains("EADDRINUSE"), "got: {}", msg);
+    }
+
+    #[test]
+    fn classify_startup_exit_signal_fallback_when_no_exit_code() {
+        let msg = classify_startup_exit(&[], 8765, None);
+        assert!(msg.contains("terminated by signal"), "got: {}", msg);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_startup_child_exit_flags_dead_child_and_stops_health_poll() {
+        let mut mgr = ServerManager::new();
+        mgr.config.port = 9911;
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+        ServerManager::push_log_line(
+            &mgr.log_buffer,
+            "[stderr] Error: listen EADDRINUSE: address already in use 0.0.0.0:9911".to_string(),
+        );
+
+        // Spawn a child that exits immediately and reap it so try_wait()
+        // deterministically reports the cached exit status.
+        let mut child = Command::new("sh").args(["-c", "exit 1"]).spawn().unwrap();
+        child.wait().unwrap();
+        mgr.child = Some(child);
+
+        let gen_before = mgr.health_generation.load(Ordering::SeqCst);
+        let msg = mgr
+            .check_startup_child_exit()
+            .expect("dead child during Starting must surface an error");
+
+        assert!(msg.contains("Port 9911 is in use"), "got: {}", msg);
+        assert!(matches!(mgr.status(), ServerStatus::Error(_)));
+        assert!(mgr.child.is_none(), "child handle must be cleared");
+        assert!(
+            mgr.health_generation.load(Ordering::SeqCst) > gen_before,
+            "health poll generation must advance so a foreign 200 can't flip status"
+        );
+        // The exit itself is logged so it shows up in the startup-log panel.
+        assert!(
+            mgr.get_logs()
+                .iter()
+                .any(|l| l.contains("exited during startup")),
+            "logs: {:?}",
+            mgr.get_logs()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_startup_child_exit_ignores_live_child() {
+        let mut mgr = ServerManager::new();
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        mgr.child = Some(child);
+
+        assert!(mgr.check_startup_child_exit().is_none());
+        assert_eq!(mgr.status(), ServerStatus::Starting);
+        assert!(mgr.child.is_some(), "live child must not be cleared");
+
+        // Cleanup.
+        if let Some(ref mut c) = mgr.child {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        mgr.child = None;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_startup_child_exit_noop_when_not_starting() {
+        let mut mgr = ServerManager::new();
+        // Status is Stopped (default) — even a dead child must not flip it.
+        let mut child = Command::new("sh").args(["-c", "exit 1"]).spawn().unwrap();
+        child.wait().unwrap();
+        mgr.child = Some(child);
+
+        assert!(mgr.check_startup_child_exit().is_none());
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[test]
+    fn check_startup_child_exit_noop_without_child() {
+        let mut mgr = ServerManager::new();
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+        assert!(mgr.check_startup_child_exit().is_none());
+        assert_eq!(mgr.status(), ServerStatus::Starting);
     }
 
     #[test]
