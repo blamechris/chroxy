@@ -3,13 +3,20 @@
  *
  * Renders the per-repo integration survey the server returns in an
  * `integration_status_snapshot`: an eyebrow + title + subtitle, a row of
- * summary chips (repos / configured / not configured / degraded), an optional
- * missing-CLI callout, and a table with one row per surveyed repo showing its
- * repo-memory status — configured (summarizer + tool groups), cache presence
- * + size, hit ratio, tokens saved, stale entries, and last activity. A repo
- * without `.repo-memory.json` renders a quiet "not configured" row — absence
- * is signal, not an error. A sibling repo-relay column block lands in the
- * follow-up issue (#5498 sub-issues).
+ * summary chips (repos / configured / not configured / degraded / relay
+ * tallies), optional missing-CLI callouts, and a table with one row per
+ * surveyed repo. The columns are grouped under two headers:
+ *
+ *   - repo-memory (#5499): configured (summarizer + tool groups), cache
+ *     presence + size, hit ratio, tokens saved, stale entries, last activity,
+ *     and the #5500 Reindex action. A repo without `.repo-memory.json`
+ *     renders a quiet "not configured" row — absence is signal, not an error.
+ *   - repo-relay (#5501): verdict chip (ok / failing / drifted / not
+ *     installed / unknown), version pin vs latest release (drift
+ *     highlighted; a bare sha pin renders the short sha with a drift-unknown
+ *     tooltip), last run conclusion + age with the Actions deep link, and the
+ *     failure streak. Degraded cells carry the per-repo `reason` as tooltip;
+ *     a repo without the workflow file is a quiet "Not installed" row.
  *
  * #5500 adds the control half: a per-row Reindex button for configured repos
  * that dispatches `integration_action` (repo_memory_reindex) via the store's
@@ -33,7 +40,7 @@
  *   - not configured               → neutral (dim)    — quiet, not an error.
  */
 import { useConnectionStore } from '../store/connection'
-import type { IntegrationRepo, RepoMemoryStatus, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
+import type { IntegrationRepo, RepoMemoryStatus, RepoRelayStatus, RepoRelayVerdict, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
 import type { ReindexResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
 
@@ -46,12 +53,16 @@ interface SummaryChip {
 }
 
 // Chip order mirrors the summary row: total first (neutral), then the healthy
-// bucket, then the ones the operator scans for.
+// bucket, then the ones the operator scans for. The #5501 relay tallies are
+// optional on pre-relay summaries — counts default to 0.
 const SUMMARY_CHIPS: readonly SummaryChip[] = [
   { key: 'total', label: 'Repos', accent: 'neutral' },
   { key: 'configured', label: 'Configured', accent: 'ok' },
   { key: 'notConfigured', label: 'Not configured', accent: 'neutral' },
   { key: 'degraded', label: 'Degraded', accent: 'warn' },
+  { key: 'relayInstalled', label: 'Relay installed', accent: 'neutral' },
+  { key: 'relayFailing', label: 'Relay failing', accent: 'bad' },
+  { key: 'relayDrifted', label: 'Relay drifted', accent: 'warn' },
 ]
 
 /** ISO date (no time) for the eyebrow, e.g. "2026-06-10". */
@@ -133,6 +144,131 @@ function HitRatioCell({ repo }: { repo: IntegrationRepo }) {
     <td data-testid={`integration-ratio-${repo.name}`}>
       <span className="cr-ok">{(report.cacheHitRatio * 100).toFixed(1)}%</span>
       <span className="cr-dim cr-mono"> ({report.cacheHits}/{lookups})</span>
+    </td>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// #5501 — repo-relay cells.
+// ---------------------------------------------------------------------------
+
+/** Verdict → tag label + accent (mirrors the runner tab's chip style). */
+const RELAY_VERDICT_META: Record<RepoRelayVerdict, { label: string; accent: Accent | 'neutral' }> = {
+  ok: { label: 'OK', accent: 'ok' },
+  failing: { label: 'Failing', accent: 'bad' },
+  drifted: { label: 'Drifted', accent: 'warn' },
+  not_installed: { label: 'Not installed', accent: 'neutral' },
+  unknown: { label: 'Unknown', accent: 'neutral' },
+}
+
+/**
+ * A missing `repoRelay` block (pre-#5501 producer) renders the same quiet
+ * cells as a not-installed one — the table never breaks on an old snapshot.
+ */
+function relayOf(repo: IntegrationRepo): RepoRelayStatus | null {
+  return repo.repoRelay ?? null
+}
+
+function RelayStatusTag({ repo }: { repo: IntegrationRepo }) {
+  const relay = relayOf(repo)
+  const { label, accent } = RELAY_VERDICT_META[relay?.verdict ?? 'not_installed']
+  return (
+    <span
+      className={`cr-tag${accent === 'neutral' ? '' : ` cr-tag-${accent}`}`}
+      data-testid={`integration-relay-status-${repo.name}`}
+      data-accent={accent}
+      title={relay?.reason ?? undefined}
+    >
+      {label}
+    </span>
+  )
+}
+
+/**
+ * Version cell: `pinned → latest` with a drift highlight when the verdict is
+ * drifted; a bare sha pin renders the short sha with a drift-unknown tooltip;
+ * a single side renders alone; nothing known renders "—".
+ */
+function RelayVersionCell({ repo }: { repo: IntegrationRepo }) {
+  const relay = relayOf(repo)
+  if (!relay || !relay.installed) {
+    return <td className="cr-dim" data-testid={`integration-relay-version-${repo.name}`}>—</td>
+  }
+  const pinnedLabel = relay.pinnedVersion
+    ?? (relay.pinnedSha ? relay.pinnedSha.slice(0, 7) : null)
+  const drifted = relay.verdict === 'drifted'
+  const title = relay.driftUnknown
+    ? 'pin does not resolve to a version (no # vX.Y.Z comment) — drift unknown'
+    : undefined
+  if (!pinnedLabel && !relay.latestVersion) {
+    return <td className="cr-dim" data-testid={`integration-relay-version-${repo.name}`} title={title}>—</td>
+  }
+  return (
+    <td className="cr-mono" data-testid={`integration-relay-version-${repo.name}`} title={title}>
+      <span className={drifted ? 'cr-warn' : undefined}>{pinnedLabel ?? '—'}</span>
+      {relay.latestVersion && pinnedLabel !== relay.latestVersion && (
+        <span className="cr-dim"> → {relay.latestVersion}</span>
+      )}
+    </td>
+  )
+}
+
+/** Last-run cell: latest run's conclusion/status + age, with the Actions deep link. */
+function RelayLastRunCell({ repo, now }: { repo: IntegrationRepo; now: number }) {
+  const relay = relayOf(repo)
+  const latest = relay?.runs[0] ?? null
+  if (!relay || !relay.installed || !latest) {
+    return (
+      <td className="cr-dim" data-testid={`integration-relay-lastrun-${repo.name}`} title={relay?.reason ?? undefined}>
+        {relay?.workflowUrl ? (
+          <a
+            href={relay.workflowUrl}
+            target="_blank"
+            rel="noreferrer"
+            data-testid={`integration-relay-link-${repo.name}`}
+            title="Open the workflow in the GitHub Actions UI"
+          >
+            —
+          </a>
+        ) : (
+          '—'
+        )}
+      </td>
+    )
+  }
+  const state = latest.conclusion ?? latest.status ?? 'unknown'
+  const stateClass = latest.conclusion === 'success' ? 'cr-ok' : latest.conclusion === 'failure' ? 'cr-bad' : 'cr-dim'
+  return (
+    <td data-testid={`integration-relay-lastrun-${repo.name}`} title={relay.reason ?? undefined}>
+      <span className={stateClass}>{state}</span>
+      <span className="cr-dim"> · {formatAgo(latest.createdAt, now)}</span>
+      {relay.workflowUrl && (
+        <>
+          {' '}
+          <a
+            href={relay.workflowUrl}
+            target="_blank"
+            rel="noreferrer"
+            data-testid={`integration-relay-link-${repo.name}`}
+            title="Open the workflow in the GitHub Actions UI"
+          >
+            ↗
+          </a>
+        </>
+      )}
+    </td>
+  )
+}
+
+/** Failure-streak cell: consecutive failed runs, "—" when clean/unknown. */
+function RelayStreakCell({ repo }: { repo: IntegrationRepo }) {
+  const relay = relayOf(repo)
+  if (!relay || !relay.installed || relay.failureStreak === 0) {
+    return <td className="cr-dim" data-testid={`integration-relay-streak-${repo.name}`}>—</td>
+  }
+  return (
+    <td data-testid={`integration-relay-streak-${repo.name}`}>
+      <span className="cr-bad">{relay.failureStreak}×</span>
     </td>
   )
 }
@@ -248,6 +384,10 @@ function IntegrationRow({
         connected={connected}
         onReindex={onReindex}
       />
+      <td><RelayStatusTag repo={repo} /></td>
+      <RelayVersionCell repo={repo} />
+      <RelayLastRunCell repo={repo} now={now} />
+      <RelayStreakCell repo={repo} />
     </tr>
   )
 }
@@ -328,8 +468,9 @@ export function IntegrationsSection({
         </div>
         {snapshot && (
           <p className="cr-sub" data-testid="integration-sub">
-            repo-memory status across {snapshot.repos.length} repo{snapshot.repos.length === 1 ? '' : 's'} under{' '}
-            <span className="cr-mono">{snapshot.root}</span> — config, cache, and telemetry from the read-only CLI report.
+            repo-memory and repo-relay status across {snapshot.repos.length} repo{snapshot.repos.length === 1 ? '' : 's'} under{' '}
+            <span className="cr-mono">{snapshot.root}</span> — config, cache, and telemetry from the read-only CLI
+            report; workflow presence, version drift, and run health from the filesystem + gh.
           </p>
         )}
         {snapshot && !Number.isNaN(generatedAtMs) && (
@@ -370,7 +511,7 @@ export function IntegrationsSection({
             {SUMMARY_CHIPS.map((chip) => (
               <span className="cr-chip" key={chip.key} data-testid={`integration-chip-${chip.key}`}>
                 {chip.accent !== 'neutral' && <span className={`cr-dot cr-dot-${chip.accent}`} aria-hidden="true" />}
-                {chip.label}: <b data-testid={`integration-chip-count-${chip.key}`}>{snapshot.summary[chip.key]}</b>
+                {chip.label}: <b data-testid={`integration-chip-count-${chip.key}`}>{snapshot.summary[chip.key] ?? 0}</b>
               </span>
             ))}
           </div>
@@ -388,12 +529,26 @@ export function IntegrationsSection({
             </div>
           )}
 
+          {snapshot.ghCli && !snapshot.ghCli.found && (
+            <div className="cr-callout" data-testid="integration-gh-note">
+              <b>gh CLI unavailable:</b> {snapshot.ghCli.note ?? 'binary not found'} — relay install and version-pin
+              columns still populate from the filesystem; the run and release columns are degraded for every repo.
+            </div>
+          )}
+
           <section className="cr-table-wrap">
             <table className="cr-table" data-testid="integration-table">
               <thead>
+                {/* #5501: two-row header — the repo-memory and repo-relay
+                    column families are grouped so the wide table stays
+                    legible. */}
                 <tr>
-                  <th>Repo</th>
-                  <th>repo-memory</th>
+                  <th rowSpan={2}>Repo</th>
+                  <th colSpan={8} className="cr-th-group" data-testid="integration-group-memory">repo-memory</th>
+                  <th colSpan={4} className="cr-th-group" data-testid="integration-group-relay">repo-relay</th>
+                </tr>
+                <tr>
+                  <th>Status</th>
                   <th>Summarizer / tools</th>
                   <th>Cache</th>
                   <th>Hit ratio</th>
@@ -401,12 +556,16 @@ export function IntegrationsSection({
                   <th>Entries</th>
                   <th>Last activity</th>
                   <th>Actions</th>
+                  <th>Status</th>
+                  <th>Version</th>
+                  <th>Last run</th>
+                  <th>Streak</th>
                 </tr>
               </thead>
               <tbody>
                 {snapshot.repos.length === 0 ? (
                   <tr data-testid="integration-no-repos">
-                    <td colSpan={9} className="cr-dim">
+                    <td colSpan={13} className="cr-dim">
                       No repos found under {snapshot.root}.
                     </td>
                   </tr>

@@ -8840,6 +8840,20 @@ button.sidebar-token-view-session-row:hover {
   font-weight: 700;
 }
 
+/* #5501 — Integrations table: amber drift highlight (version pin behind the
+   latest release). */
+.cr-warn {
+  color: var(--accent-orange);
+}
+
+/* #5501 — Integrations table: grouped column-family header cells (the
+   "repo-memory" / "repo-relay" spanning row above the per-column row). */
+.cr-th-group {
+  text-align: center;
+  color: var(--text-muted);
+  border-bottom: none;
+}
+
 .cr-empty {
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);

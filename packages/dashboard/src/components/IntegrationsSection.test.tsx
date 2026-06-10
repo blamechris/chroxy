@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import type { IntegrationRepo, RepoMemoryStatus, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
+import type { IntegrationRepo, RepoMemoryStatus, RepoRelayStatus, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: unknown) => unknown) =>
@@ -322,5 +322,155 @@ describe('formatBytes', () => {
     expect(formatBytes(421888)).toBe('412 KB')
     expect(formatBytes(2314240)).toBe('2.2 MB')
     expect(formatBytes(-1)).toBe('—')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5501 — repo-relay columns.
+// ---------------------------------------------------------------------------
+
+function repoRelay(over: Partial<RepoRelayStatus> = {}): RepoRelayStatus {
+  return {
+    installed: true,
+    pinnedVersion: 'v1.1.0',
+    pinnedSha: null,
+    latestVersion: 'v1.1.0',
+    runs: [
+      { databaseId: 9001, status: 'completed', conclusion: 'success', event: 'pull_request', createdAt: '2026-06-10T11:00:00.000Z' },
+      { databaseId: 9000, status: 'completed', conclusion: 'success', event: 'issues', createdAt: '2026-06-10T10:00:00.000Z' },
+    ],
+    failureStreak: 0,
+    verdict: 'ok',
+    driftUnknown: false,
+    workflowUrl: 'https://github.com/blamechris/chroxy/actions/workflows/repo-relay.yml',
+    reason: null,
+    ...over,
+  }
+}
+
+const RELAY_NOT_INSTALLED: RepoRelayStatus = {
+  installed: false,
+  pinnedVersion: null,
+  pinnedSha: null,
+  latestVersion: null,
+  runs: [],
+  failureStreak: 0,
+  verdict: 'not_installed',
+  driftUnknown: false,
+  workflowUrl: null,
+  reason: null,
+}
+
+function relayRepo(name: string, relay: RepoRelayStatus | undefined): IntegrationRepo {
+  return { name, path: `/p/${name}`, repoMemory: NOT_CONFIGURED, ...(relay !== undefined ? { repoRelay: relay } : {}) }
+}
+
+describe('IntegrationsSection — repo-relay (#5501)', () => {
+  it('renders the grouped repo-memory / repo-relay column headers', () => {
+    renderSection(snapshot())
+    expect(screen.getByTestId('integration-group-memory').textContent).toBe('repo-memory')
+    expect(screen.getByTestId('integration-group-relay').textContent).toBe('repo-relay')
+  })
+
+  it('renders the verdict chips with their accents', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('green', repoRelay()),
+      relayRepo('red', repoRelay({ verdict: 'failing', failureStreak: 2 })),
+      relayRepo('stale', repoRelay({ verdict: 'drifted', pinnedVersion: 'v1.0.0' })),
+      relayRepo('bare', RELAY_NOT_INSTALLED),
+    ]))
+    expect(screen.getByTestId('integration-relay-status-green').textContent).toBe('OK')
+    expect(screen.getByTestId('integration-relay-status-green').getAttribute('data-accent')).toBe('ok')
+    expect(screen.getByTestId('integration-relay-status-red').getAttribute('data-accent')).toBe('bad')
+    expect(screen.getByTestId('integration-relay-status-stale').getAttribute('data-accent')).toBe('warn')
+    expect(screen.getByTestId('integration-relay-status-bare').textContent).toBe('Not installed')
+    expect(screen.getByTestId('integration-relay-status-bare').getAttribute('data-accent')).toBe('neutral')
+  })
+
+  it('an unknown verdict carries its degradation reason as tooltip', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('island', repoRelay({ verdict: 'unknown', runs: [], reason: 'no GitHub remote' })),
+    ]))
+    expect(screen.getByTestId('integration-relay-status-island').getAttribute('title')).toContain('no GitHub remote')
+  })
+
+  it('version cell shows pinned → latest with a drift highlight when behind', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('stale', repoRelay({ verdict: 'drifted', pinnedVersion: 'v1.0.0', latestVersion: 'v1.1.0' })),
+    ]))
+    const cell = screen.getByTestId('integration-relay-version-stale')
+    expect(cell.textContent).toContain('v1.0.0 → v1.1.0')
+    expect(cell.querySelector('.cr-warn')).toBeTruthy()
+  })
+
+  it('an up-to-date pin renders without the drift highlight', () => {
+    renderSection(oneRepoSnapshot([relayRepo('green', repoRelay())]))
+    const cell = screen.getByTestId('integration-relay-version-green')
+    expect(cell.textContent).toContain('v1.1.0')
+    expect(cell.querySelector('.cr-warn')).toBeNull()
+  })
+
+  it('a bare sha pin renders the short sha with a drift-unknown tooltip', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('sha', repoRelay({
+        pinnedVersion: null,
+        pinnedSha: 'f08840b9c336b50f6aef8d6e157d8f7e705fa875',
+        driftUnknown: true,
+        verdict: 'ok',
+      })),
+    ]))
+    const cell = screen.getByTestId('integration-relay-version-sha')
+    expect(cell.textContent).toContain('f08840b')
+    expect(cell.getAttribute('title')?.toLowerCase()).toContain('drift')
+  })
+
+  it('last-run cell shows the conclusion, age, and the Actions deep link', () => {
+    renderSection(oneRepoSnapshot([relayRepo('green', repoRelay())]))
+    const cell = screen.getByTestId('integration-relay-lastrun-green')
+    expect(cell.textContent).toContain('success')
+    expect(cell.textContent).toContain('1h ago')
+    const link = screen.getByTestId('integration-relay-link-green') as HTMLAnchorElement
+    expect(link.getAttribute('href')).toBe('https://github.com/blamechris/chroxy/actions/workflows/repo-relay.yml')
+  })
+
+  it('streak cell shows the failure streak with the bad accent, "—" when clean', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('red', repoRelay({ verdict: 'failing', failureStreak: 3 })),
+      relayRepo('green', repoRelay()),
+    ]))
+    const streak = screen.getByTestId('integration-relay-streak-red')
+    expect(streak.textContent).toContain('3')
+    expect(streak.querySelector('.cr-bad')).toBeTruthy()
+    expect(screen.getByTestId('integration-relay-streak-green').textContent).toBe('—')
+  })
+
+  it('a snapshot without repoRelay blocks (pre-#5501 producer) renders quiet relay cells', () => {
+    renderSection(oneRepoSnapshot([relayRepo('legacy', undefined)]))
+    expect(screen.getByTestId('integration-relay-status-legacy').textContent).toBe('Not installed')
+    expect(screen.getByTestId('integration-relay-version-legacy').textContent).toBe('—')
+    expect(screen.getByTestId('integration-relay-lastrun-legacy').textContent).toBe('—')
+    expect(screen.getByTestId('integration-relay-streak-legacy').textContent).toBe('—')
+  })
+
+  it('renders the relay summary chips (defaulting to 0 for pre-#5501 summaries)', () => {
+    renderSection(snapshot({
+      summary: { total: 3, configured: 1, notConfigured: 2, degraded: 0, relayInstalled: 2, relayFailing: 1, relayDrifted: 1 },
+    }))
+    expect(screen.getByTestId('integration-chip-count-relayInstalled').textContent).toBe('2')
+    expect(screen.getByTestId('integration-chip-count-relayFailing').textContent).toBe('1')
+    expect(screen.getByTestId('integration-chip-count-relayDrifted').textContent).toBe('1')
+    cleanup()
+    renderSection(snapshot()) // summary without the relay keys
+    expect(screen.getByTestId('integration-chip-count-relayFailing').textContent).toBe('0')
+  })
+
+  it('renders the gh-missing callout when the snapshot says gh was not found', () => {
+    renderSection(snapshot({ ghCli: { found: false, path: null, note: 'gh CLI not found on PATH' } }))
+    expect(screen.getByTestId('integration-gh-note').textContent).toContain('gh CLI not found on PATH')
+  })
+
+  it('renders no gh callout when gh was found', () => {
+    renderSection(snapshot({ ghCli: { found: true, path: '/usr/local/bin/gh', note: null } }))
+    expect(screen.queryByTestId('integration-gh-note')).toBeNull()
   })
 })
