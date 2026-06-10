@@ -120,7 +120,13 @@ function chroxyWorktreeParentProject(worktreeDir) {
   const worktreesDir = dirname(linkedGitDir) // <repo>/.git/worktrees
   if (basename(worktreesDir) !== 'worktrees') return null
   const gitDir = dirname(worktreesDir) // <repo>/.git
-  const repoRoot = basename(gitDir) === '.git' ? dirname(gitDir) : gitDir
+  // Strict shape: the linked gitdir must be <repo>/.git/worktrees/<id> — the
+  // only shape `git worktree add` writes for the daemon's checkouts (the base
+  // cwd is always a normal working tree, never bare). Anything else (e.g.
+  // `/somewhere/worktrees/x`) is a shape surprise → null, so a tampered .git
+  // file can't misattribute the project; classification still suppresses.
+  if (basename(gitDir) !== '.git') return null
+  const repoRoot = dirname(gitDir)
   const name = basename(repoRoot)
   return name.length > 0 ? name : null
 }

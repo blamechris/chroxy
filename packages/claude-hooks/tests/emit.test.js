@@ -215,6 +215,12 @@ describe('worktreeParent (#5464 chroxy worktrees)', () => {
 
     const wrongShape = chroxyWorktreeFixture({ gitdir: '/somewhere/unrelated' })
     assert.equal(worktreeParent(wrongShape.wt, { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: wrongShape.root }), null, 'gitdir not under */worktrees/<id>')
+
+    // A worktrees-shaped gitdir that is NOT under a .git dir must also be
+    // rejected — without the strict <repo>/.git/worktrees/<id> check this
+    // would misattribute the project to 'somewhere' instead of returning null.
+    const noGitSegment = chroxyWorktreeFixture({ gitdir: '/somewhere/worktrees/x' })
+    assert.equal(worktreeParent(noGitSegment.wt, { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: noGitSegment.root }), null, 'gitdir */worktrees/<id> without a .git segment')
   })
 
   it('does not match the worktrees root itself or paths outside it', () => {
