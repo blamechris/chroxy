@@ -77,6 +77,13 @@ export const ALL_CATEGORIES = Object.freeze([
   'activity_error',
   'inactivity_warning',
   'live_activity',
+  // #5413 Phase 3: external-session categories fed by POST /api/events.
+  // Listed here so they are mutable in prefs and visible in snapshots —
+  // sanitizeCategoryMap strips unknown keys, so omitting them would make
+  // external-session pushes permanently un-mutable (#5432 review C1).
+  'session_online',
+  'session_offline',
+  'session_activity',
 ])
 
 /**

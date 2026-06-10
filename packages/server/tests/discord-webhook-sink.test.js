@@ -678,3 +678,136 @@ describe('formatDuration (ported from claude-code-notify)', () => {
     assert.equal(formatDuration(NaN), '0s')
   })
 })
+
+// #5413 Phase 3 — session lifecycle states fed by POST /api/events
+// (event-ingest.js): session_online / session_offline / session_activity.
+// Pins the bash original's SessionStart (DELETE old message + fresh POST,
+// clean slate) and SessionEnd (PATCH offline in place; no-op when nothing
+// is tracked or already offline) semantics.
+describe('DiscordWebhookSink — online/offline lifecycle (#5413 Phase 3)', () => {
+  const online = (data = {}) => ({
+    category: 'session_online',
+    title: 'Session online',
+    body: 'External session started',
+    data: { project: 'proj1', ...data },
+  })
+  const offline = (data = {}) => ({
+    category: 'session_offline',
+    title: 'Session offline',
+    body: 'External session ended',
+    data: { project: 'proj1', ...data },
+  })
+  const activity = (data = {}) => ({
+    category: 'session_activity',
+    title: 'Tool activity',
+    body: 'Tool use completed',
+    data: { project: 'proj1', ...data },
+  })
+
+  it('session_online POSTs a fresh message with the online title (no DELETE when nothing is tracked)', async () => {
+    const { sink, statePath } = makeSink()
+    const calls = scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    assert.equal(await sink.send(online()), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'POST')
+    assert.ok(calls[0].url.includes('?wait=true'))
+    const payload = JSON.parse(calls[0].body)
+    assert.match(payload.embeds[0].title, /proj1 — Session Online/)
+    assert.equal(payload.embeds[0].color, 3066993, 'bash CLAUDE_NOTIFY_ONLINE_COLOR default (green)')
+    assert.equal(readState(statePath).projects.proj1.state, 'online')
+  })
+
+  it('session_online DELETEs the previous (offline) message before POSTing — bash SessionStart parity', async () => {
+    const { sink, statePath, advance } = makeSink()
+    // Establish a tracked message, take it offline, then start a new session.
+    let calls = scriptFetch([{ status: 200, body: { id: 'm-old' } }])
+    await sink.send(online())
+    advance(60_000)
+    calls = scriptFetch([{ status: 200 }]) // PATCH offline
+    await sink.send(offline())
+    assert.equal(readState(statePath).projects.proj1.state, 'offline')
+    advance(60_000)
+    calls = scriptFetch([
+      { status: 204 },                       // DELETE m-old
+      { status: 200, body: { id: 'm-new' } }, // POST fresh
+    ])
+    assert.equal(await sink.send(online()), true)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].method, 'DELETE')
+    assert.ok(calls[0].url.endsWith('/messages/m-old'))
+    assert.equal(calls[1].method, 'POST')
+    const st = readState(statePath).projects.proj1
+    assert.equal(st.state, 'online')
+    assert.equal(st.messageId, 'm-new')
+  })
+
+  it('session_online resets the elapsed-time epoch and subagent count (clean slate)', async () => {
+    const { sink, statePath, advance, getNow } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online({ subagents: 3 }))
+    advance(120_000)
+    scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
+    await sink.send(online())
+    const st = readState(statePath).projects.proj1
+    assert.equal(st.firstSeenTs, getNow(), 'firstSeenTs reset to the new session start')
+    assert.equal(st.subagents, 0, 'subagent count cleared')
+  })
+
+  it('session_offline PATCHes the tracked message in place (routine, never DELETE+POST)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(60_000)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(offline()), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH')
+    assert.ok(calls[0].url.endsWith('/messages/m1'))
+    const payload = JSON.parse(calls[0].body)
+    assert.match(payload.embeds[0].title, /proj1 — Session Offline/)
+    assert.equal(readState(statePath).projects.proj1.state, 'offline')
+  })
+
+  it('session_offline is a no-op when nothing is tracked for the project', async () => {
+    const { sink } = makeSink()
+    const calls = scriptFetch()
+    assert.equal(await sink.send(offline()), true)
+    assert.equal(calls.length, 0, 'no message to mark offline → no fetch at all')
+  })
+
+  it('session_offline is a no-op when the project is already offline', async () => {
+    const { sink, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(60_000)
+    scriptFetch([{ status: 200 }])
+    await sink.send(offline())
+    advance(60_000)
+    const calls = scriptFetch()
+    assert.equal(await sink.send(offline()), true)
+    assert.equal(calls.length, 0)
+  })
+
+  it('session_activity is a routine PATCH keeping the online state, throttled within the window', async () => {
+    const { sink, advance } = makeSink({ updateThrottleMs: 15_000 })
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(16_000)
+    let calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity()), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH')
+    // Same-state activity inside the throttle window is suppressed.
+    advance(1_000)
+    calls = scriptFetch()
+    assert.equal(await sink.send(activity()), true)
+    assert.equal(calls.length, 0, 'throttled — no PATCH')
+  })
+
+  it('unmapped categories still no-op (parity guard unchanged)', async () => {
+    const { sink } = makeSink()
+    const calls = scriptFetch()
+    assert.equal(await sink.send({ category: 'mystery', title: 't', body: 'b', data: {} }), true)
+    assert.equal(calls.length, 0)
+  })
+})

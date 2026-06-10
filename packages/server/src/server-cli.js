@@ -10,6 +10,7 @@ import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 // waitForTunnel are still passed into the handler.
 import { waitForTunnel } from './tunnel-check.js'
 import { PushManager } from './push.js'
+import { ensureIngestSecret } from './event-ingest.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { StartupDisplay } from './server-cli/startup-display.js'
 import { TunnelLifecycleHandler } from './server-cli/tunnel-lifecycle-handler.js'
@@ -729,6 +730,13 @@ export async function startCliServer(config) {
       ...(config.notifications?.discord || {}),
     },
   })
+
+  // #5413 Phase 3: provision the daemon-level ingest secret for
+  // POST /api/events BEFORE any external hook needs to read it (emitters
+  // authenticate with the file's content, so it must exist up front).
+  // Fail-soft: on failure the route fails closed (rejects everything) and
+  // the warn log tells the operator why. Never logs the secret.
+  ensureIngestSecret()
 
   // #5368 slice (a): wire the session_event → push path now that pushManager
   // exists. `getWsServer` is lazy because the handler is started before wsServer
