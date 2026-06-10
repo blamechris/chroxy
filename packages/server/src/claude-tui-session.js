@@ -522,6 +522,10 @@ export class ClaudeTuiSession extends BaseSession {
     // FRESH (`--session-id` with the newly-minted uuid) instead of `--resume`.
     // Consumed (cleared) by _respawnPty before the spawn.
     this._freshRetryPending = false
+    // #5348 — the conversation uuid abandoned by the retry-FRESH fallback,
+    // surfaced as `attemptedResumeId` on the terminal resume_unknown_exhausted
+    // emit (by then `_sessionId` is already the replacement uuid).
+    this._abandonedResumeId = null
     // #4792: session-scoped logger. Assigned in start() once _sessionId is
     // generated. Until then, code paths that need to log MUST fall back to
     // the module-level `log` (e.g. trust pre-write failure, sink dir create
@@ -1237,6 +1241,9 @@ export class ClaudeTuiSession extends BaseSession {
         this._didFallbackFromUnknownResume = true
         this._freshRetryPending = true
         const abandonedId = this._sessionId
+        // Kept for the terminal resume_unknown_exhausted emit below — by the
+        // time the fallback attempt fails, _sessionId is already the new uuid.
+        this._abandonedResumeId = abandonedId
         this._sessionId = randomUUID()
         this._resumedFromPersisted = false
         // Rebind the session-scoped logger to the new conversation uuid so
@@ -1261,20 +1268,35 @@ export class ClaudeTuiSession extends BaseSession {
       } else {
         ;(this._log || log).error(`Max PTY respawn attempts reached (${this._respawnCount - 1}), giving up`)
         const tail = this._outputTailDiagnostic()
-        const base = `Claude PTY failed to stay alive after ${this._respawnCount - 1} respawn attempts`
-        // Distinct code so the dashboard can render a terminal "give up" state
-        // rather than a recoverable crash toast.
-        this.emit('error', { code: 'pty_respawn_exhausted', message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
+        // When the retry-FRESH fallback itself failed, escalate with the same
+        // terminal code CliSession uses (resume_unknown_exhausted, #5004) —
+        // event-normalizer forwards it + attemptedResumeId, and the dashboard/
+        // app already render the distinct "auto-recovery exhausted" affordance.
+        // Otherwise keep the provider's own distinct code so the dashboard can
+        // render a terminal "give up" state rather than a recoverable crash
+        // toast.
+        const failedFallback = this._didFallbackFromUnknownResume
+        const code = failedFallback ? 'resume_unknown_exhausted' : 'pty_respawn_exhausted'
+        const base = failedFallback
+          ? 'Auto-recovery exhausted: every --resume respawn died during warmup and a fresh-conversation retry also failed. Start a new session manually to continue.'
+          : `Claude PTY failed to stay alive after ${this._respawnCount - 1} respawn attempts`
+        const errEnvelope = { code, message: tail ? `${base}\nTUI output tail:\n${tail}` : base }
+        if (failedFallback && this._abandonedResumeId) errEnvelope.attemptedResumeId = this._abandonedResumeId
+        this.emit('error', errEnvelope)
         // SessionManager listens for this and calls destroySession() so the
         // session leaves the list cleanly (see _wireSessionEvents).
-        this.emit('respawn_exhausted', { reason: 'pty_respawn_exhausted', attempts: this._respawnCount - 1 })
+        this.emit('respawn_exhausted', { reason: code, attempts: this._respawnCount - 1 })
         return
       }
     }
 
     const delays = [1000, 2000, 4000, 8000, 15000]
     const delay = delays[Math.min(this._respawnCount - 1, delays.length - 1)]
-    ;(this._log || log).info(`Respawning claude PTY in ${delay}ms (attempt ${this._respawnCount}/5)`)
+    // The #5348 fallback attempt is the one-past-the-cap extra — label it
+    // honestly instead of logging a nonsensical "attempt 6/5".
+    ;(this._log || log).info(this._freshRetryPending
+      ? `Respawning claude PTY in ${delay}ms (fresh-conversation retry after ${this._respawnCount - 1} failed resume attempts)`
+      : `Respawning claude PTY in ${delay}ms (attempt ${this._respawnCount}/5)`)
 
     this._respawnScheduled = true
     this._respawnTimer = setTimeout(() => {

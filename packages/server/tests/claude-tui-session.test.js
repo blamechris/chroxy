@@ -680,9 +680,12 @@ describe('ClaudeTuiSession', () => {
 
     // Build a session with _spawnPty stubbed to succeed (live term, not exited).
     // `onSpawn` lets a test observe / mutate each spawn (e.g. count calls,
-    // capture the idArgs, or make the respawn die again).
-    function makeSession(onSpawn) {
-      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+    // capture the idArgs, or make the respawn die again). `ctorOpts` are merged
+    // into the constructor opts — pass `resumeSessionId` to exercise the REAL
+    // restore-seeding path (#5348: sets `_seededFromPersisted` in the ctor)
+    // instead of poking the private flags.
+    function makeSession(onSpawn, ctorOpts = {}) {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null, ...ctorOpts })
       s._spawnPty = async function () {
         this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
         if (onSpawn) onSpawn(this)
@@ -690,8 +693,11 @@ describe('ClaudeTuiSession', () => {
       // Pretend start() already ran: sink/settings/secret exist, PTY is live.
       s._sinkDir = '/tmp/fake-sink'
       s._settingsPath = '/tmp/fake-sink/settings.json'
-      s._sessionId = 'conv-uuid-1234'
-      s._resumedFromPersisted = false
+      if (!ctorOpts.resumeSessionId) {
+        // Fresh-session shape: start() minted the uuid (ctor left it null).
+        s._sessionId = 'conv-uuid-1234'
+        s._resumedFromPersisted = false
+      }
       s._processReady = true
       // EventEmitter throws on an unhandled 'error'; _onPtyGone emits one on
       // the no-active-turn death path. Swallow by default — tests that assert
@@ -771,14 +777,16 @@ describe('ClaudeTuiSession', () => {
       // Every respawn dies again during warmup → drives toward the cap. In
       // production the wired onExit/close handlers call _onPtyGone when the PTY
       // dies; the stub mimics that so the same scheduling path runs.
-      session = makeSession((self) => {
-        spawnCalls++
-        self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
-      })
       // #5348 — a session seeded from a persisted resume id must NOT fall back
       // to a fresh conversation (that would silently discard real prior
       // context): exhaustion after exactly 5 attempts is the honest outcome.
-      session._seededFromPersisted = true
+      // Seed through the REAL ctor path (resumeSessionId opt) so the
+      // `_seededFromPersisted` wiring is what's under test, not a poked flag.
+      session = makeSession((self) => {
+        spawnCalls++
+        self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      }, { resumeSessionId: 'conv-uuid-1234' })
+      assert.equal(session._seededFromPersisted, true, 'ctor seeds _seededFromPersisted from resumeSessionId')
       const errors = []
       const exhausted = []
       session.on('error', (e) => errors.push(e))
@@ -838,7 +846,12 @@ describe('ClaudeTuiSession', () => {
       assert.equal(resumeUnknown.length, 1, 'one loud resume_unknown error so the dashboard can render "starting fresh"')
       assert.equal(resumeUnknown[0].attemptedResumeId, 'conv-uuid-1234', 'the error carries the abandoned conversation id')
       assert.equal(exhausted.length, 1, 'when the fresh attempt also dies, the session exhausts (one-shot latch, no loop)')
-      assert.equal(exhausted[0].reason, 'pty_respawn_exhausted')
+      // Failed-fallback exhaustion escalates with CliSession's terminal code so
+      // the dashboard renders the "auto-recovery exhausted" affordance.
+      assert.equal(exhausted[0].reason, 'resume_unknown_exhausted')
+      const terminal = errors.find((e) => e.code === 'resume_unknown_exhausted')
+      assert.ok(terminal, 'terminal error carries the resume_unknown_exhausted code')
+      assert.equal(terminal.attemptedResumeId, 'conv-uuid-1234', 'terminal error carries the abandoned conversation id')
       assert.equal(session._respawnScheduled, false, 'no further respawn after exhaustion')
     })
 
