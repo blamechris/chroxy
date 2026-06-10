@@ -713,27 +713,35 @@ export const IntegrationStatusRequestSchema = z.object({
 });
 // #5500 (epic #5498): a MUTATING Control Room integration action — the
 // observe half of the tab is `integration_status_request`; this is the
-// control half. Currently one action: `repo_memory_reindex`, which runs
-// `repo-memory index <repoRoot>` host-side to prewarm/refresh the summary
-// cache (no watcher exists — the cache only refreshes on agent reads or an
-// explicit index run).
+// control half. Actions:
+//   - `repo_memory_reindex` (#5500): runs `repo-memory index <repoRoot>`
+//     host-side to prewarm/refresh the summary cache (no watcher exists —
+//     the cache only refreshes on agent reads or an explicit index run).
+//   - `repo_relay_rerun` (#5502): re-runs a FAILED repo-relay workflow run
+//     via `gh run rerun <databaseId>`. Requires `runId` (server-enforced).
 //
 // Designed as an extensible envelope: `action` is a CLOSED enum so an
 // unknown/mistyped action is rejected at the schema layer before it reaches
-// the handler, and #5502's `repo_relay_rerun` lands by extending the enum —
-// no new message type per action. `repoPath` identifies the target repo; the
-// server MUST validate it against the surveyed repo set before any exec
-// (bearer-token-authority checklist) — the schema bound here is only a
-// sanity cap, not the security boundary.
+// the handler — no new message type per action. `repoPath` identifies the
+// target repo; the server MUST validate it against the surveyed repo set
+// before any exec (bearer-token-authority checklist) — the schema bound here
+// is only a sanity cap, not the security boundary.
 //
 // Correlation contract clones `cancel_activity` (#5277): the optional
 // client-generated `requestId` is echoed on the `integration_action_ack`
 // (success) and the `INTEGRATION_ACTION_FAILED` session_error (failure), so
-// the dashboard can tie a specific Reindex click to its outcome.
+// the dashboard can tie a specific Reindex / Re-run click to its outcome.
 export const IntegrationActionSchema = z.object({
     type: z.literal('integration_action'),
-    action: z.enum(['repo_memory_reindex']),
+    action: z.enum(['repo_memory_reindex', 'repo_relay_rerun']),
     repoPath: z.string().min(1).max(4096),
+    // #5502: the GitHub Actions run to re-run (the `databaseId` the
+    // observability snapshot surfaced). Optional at the schema layer because
+    // the envelope is shared across actions — the server validates it as
+    // required-for-rerun, then RE-FETCHES the run list and only execs when the
+    // id names a run it itself surfaced with conclusion 'failure' (the client
+    // id is a lookup key, never a trusted exec target).
+    runId: z.number().int().nonnegative().finite().optional(),
     requestId: z.string().max(128).optional(),
 }).passthrough();
 // -- Encrypted envelope --

@@ -583,8 +583,10 @@ export declare const IntegrationActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"integration_action">;
     action: z.ZodEnum<{
         repo_memory_reindex: "repo_memory_reindex";
+        repo_relay_rerun: "repo_relay_rerun";
     }>;
     repoPath: z.ZodString;
+    runId: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const EncryptedEnvelopeSchema: z.ZodObject<{
@@ -949,8 +951,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"integration_action">;
     action: z.ZodEnum<{
         repo_memory_reindex: "repo_memory_reindex";
+        repo_relay_rerun: "repo_relay_rerun";
     }>;
     repoPath: z.ZodString;
+    runId: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>], "type">;
 export type AuthMessage = z.infer<typeof AuthSchema>;

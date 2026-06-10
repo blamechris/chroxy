@@ -1201,12 +1201,18 @@ export const IntegrationActionCountsSchema = z.object({
  * `repoPath` and treat unknown actions as opaque. `counts` is the parsed
  * index result for `repo_memory_reindex`, or null when the CLI output
  * couldn't be parsed (the UI then just refreshes the survey for the truth).
+ *
+ * #5502: `runId` echoes the re-run request's GitHub Actions run id on a
+ * `repo_relay_rerun` ack (null/absent on reindex acks). A rerun ack carries
+ * `counts: null` — there is nothing to count; the new attempt shows up as
+ * in_progress on the next survey refresh.
  */
 export const ServerIntegrationActionAckSchema = z.object({
     type: z.literal('integration_action_ack'),
     action: z.string(),
     repoPath: z.string(),
     requestId: z.string().max(128).nullable().optional(),
+    runId: z.number().int().nonnegative().finite().nullable().optional(),
     counts: IntegrationActionCountsSchema.nullable(),
 }).passthrough();
 export const ServerClientFocusChangedSchema = z.object({
