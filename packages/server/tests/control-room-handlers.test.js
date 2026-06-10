@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -386,6 +386,178 @@ describe('runner_status_request handler (#5253)', () => {
     await handleSessionMessage(ws, client, { type: 'runner_status_request', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'runner_status_snapshot')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5499 (epic #5498) — Integrations survey handler. Same contract shape as
+// host_status / runner_status; the survey itself is injected via
+// ctx.surveyIntegrations and the repo set via ctx.resolveRepoSet.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_INTEGRATION_SNAPSHOT = {
+  generatedAt: '2026-06-10T00:00:00.000Z',
+  root: '/home/user/Projects',
+  summary: { total: 2, configured: 1, notConfigured: 1, degraded: 0 },
+  repos: [
+    {
+      name: 'chroxy',
+      path: '/home/user/Projects/chroxy',
+      repoMemory: {
+        configured: true,
+        summarizer: 'ast',
+        toolGroups: ['telemetry'],
+        cache: { present: true, sizeBytes: 2310144, lastModified: '2026-06-09T22:00:00.000Z' },
+        report: {
+          totalEvents: 120,
+          cacheHits: 90,
+          cacheMisses: 30,
+          cacheHitRatio: 0.75,
+          estimatedTokensSaved: 48211,
+          cacheEntryCount: 1391,
+          staleEntryCount: 2,
+          lastActivity: null,
+        },
+        reason: null,
+      },
+    },
+    {
+      name: 'scratch',
+      path: '/home/user/Projects/scratch',
+      repoMemory: { configured: false, summarizer: null, toolGroups: [], cache: null, report: null, reason: null },
+    },
+  ],
+  repoMemoryCli: { found: true, path: '/usr/local/bin/repo-memory', note: null },
+}
+
+function makeIntegrationCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return {
+    send: sendSpy,
+    config: { repos: [], controlRoomRoot: '/home/user/Projects' },
+    surveyIntegrations: createSpy(async () => SAMPLE_INTEGRATION_SNAPSHOT),
+    resolveRepoSet: createSpy(() => SAMPLE_INTEGRATION_SNAPSHOT.repos.map(r => ({ name: r.name, path: r.path }))),
+    ...overrides,
+    _send: sendSpy,
+  }
+}
+
+describe('integration_status_request handler (#5499)', () => {
+  let ctx, client, ws
+
+  beforeEach(() => {
+    ctx = makeIntegrationCtx()
+    client = { id: 'client-I' }
+    ws = {}
+  })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('integration_status_request'))
+    assert.equal(typeof controlRoomHandlers.integration_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant integration_status_snapshot', async () => {
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request', requestId: 'i1' }, ctx)
+    assert.equal(ctx._send.callCount, 1)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'integration_status_snapshot')
+    assert.equal(payload.requestId, 'i1')
+    const { requestId, ...rest } = payload
+    assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse(rest).success, JSON.stringify(ServerIntegrationStatusSnapshotSchema.safeParse(rest).error?.issues))
+    assert.equal(payload.repos.length, 2)
+    assert.equal(payload.summary.configured, 1)
+    assert.equal(payload.repoMemoryCli.found, true)
+  })
+
+  it('resolves the repo set from config.repos + controlRoomRoot and passes the root to the survey', async () => {
+    ctx = makeIntegrationCtx({ config: { repos: [{ path: '/x', name: 'x' }], controlRoomRoot: '/root' } })
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request' }, ctx)
+    const [arg] = ctx.resolveRepoSet.lastCall
+    assert.deepEqual(arg.repos, [{ path: '/x', name: 'x' }])
+    assert.equal(arg.root, '/root')
+    const [repoSet, opts] = ctx.surveyIntegrations.lastCall
+    assert.ok(Array.isArray(repoSet))
+    assert.equal(opts.root, '/root')
+  })
+
+  it('passes the configured repo-memory bin override through to the survey', async () => {
+    ctx = makeIntegrationCtx({ config: { controlRoomRoot: '/root', controlRoomRepoMemoryBin: '/opt/bin/repo-memory' } })
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request' }, ctx)
+    const [, opts] = ctx.surveyIntegrations.lastCall
+    assert.equal(opts.bin, '/opt/bin/repo-memory')
+  })
+
+  it('leaves the bin override undefined when unset', async () => {
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request' }, ctx)
+    const [, opts] = ctx.surveyIntegrations.lastCall
+    assert.equal(opts.bin, undefined)
+  })
+
+  it('reports a resolved default root when controlRoomRoot is unset', async () => {
+    ctx = makeIntegrationCtx({ config: {} })
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request' }, ctx)
+    const [arg] = ctx.resolveRepoSet.lastCall
+    assert.ok(typeof arg.root === 'string' && arg.root.length > 0, 'root must resolve to the default, not empty')
+  })
+
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request', requestId: 'i1' }, ctx)
+    assert.equal(ctx.surveyIntegrations.callCount, 0, 'must not survey for a bound client')
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'FORBIDDEN')
+    assert.equal(payload.requestId, 'i1')
+    const { requestId, error, ...rest } = payload
+    assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse(rest).success, 'FORBIDDEN reply must be a valid snapshot')
+    assert.deepEqual(payload.repos, [])
+    assert.deepEqual(payload.summary, { total: 0, configured: 0, notConfigured: 0, degraded: 0 })
+  })
+
+  it('debounces concurrent requests from the same client', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeIntegrationCtx({ surveyIntegrations: createSpy(async () => { await gate; return SAMPLE_INTEGRATION_SNAPSHOT }) })
+    const first = controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request', requestId: 'b' }, ctx)
+    assert.equal(ctx.surveyIntegrations.callCount, 1)
+    const rejected = ctx._send.calls.find(c => c[1].requestId === 'b')
+    assert.equal(rejected[1].error.code, 'SURVEY_IN_PROGRESS')
+    release()
+    await first
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request', requestId: 'c' }, ctx)
+    assert.equal(ctx.surveyIntegrations.callCount, 2, 'survey is allowed again after the first settles')
+  })
+
+  it('sends an error snapshot when the survey throws', async () => {
+    ctx = makeIntegrationCtx({ surveyIntegrations: createSpy(async () => { throw new Error('stat exploded') }) })
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request', requestId: 'e1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'SURVEY_FAILED')
+    assert.match(payload.error.message, /stat exploded/)
+    const { requestId, error, ...rest } = payload
+    assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse(rest).success)
+  })
+
+  it('does not share its in-flight guard with the host or runner surveys', async () => {
+    let releaseHost
+    const hostGate = new Promise(r => { releaseHost = r })
+    const sharedCtx = makeCtx({ surveyRepos: createSpy(async () => { await hostGate; return SAMPLE_SNAPSHOT }) })
+    sharedCtx.surveyIntegrations = createSpy(async () => SAMPLE_INTEGRATION_SNAPSHOT)
+    const hostPromise = controlRoomHandlers.host_status_request(ws, client, { type: 'host_status_request', requestId: 'h' }, sharedCtx)
+    await controlRoomHandlers.integration_status_request(ws, client, { type: 'integration_status_request', requestId: 'i' }, sharedCtx)
+    assert.equal(sharedCtx.surveyIntegrations.callCount, 1, 'integrations survey runs even while a host survey is in flight')
+    const reply = sharedCtx._send.calls.find(c => c[1].requestId === 'i')
+    assert.equal(reply[1].type, 'integration_status_snapshot')
+    assert.ok(!reply[1].error, 'integrations survey should not be blocked')
+    releaseHost()
+    await hostPromise
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'integration_status_request', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'integration_status_snapshot')
     assert.equal(payload.requestId, 'reg')
   })
 })
