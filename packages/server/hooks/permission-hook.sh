@@ -157,6 +157,31 @@ EOF
   fi
 fi
 
+# #5330: fallback decision when chroxy cannot obtain an explicit user decision
+# (the daemon is unreachable, or the response is unparseable). The OLD behavior
+# emitted permissionDecision:"ask", which makes claude prompt at the PTY — but
+# in chroxy's model the user is on their phone, not at the keyboard, so "ask"
+# wedges the session on a dialog no one can answer. Default to "deny" (fail
+# closed): the tool is blocked with a reason claude can report/recover from,
+# instead of an indefinite hang. Set CHROXY_HOOK_UNREACHABLE_DECISION=ask to
+# restore the old behavior for a local-at-the-PTY setup.
+FALLBACK_DECISION="${CHROXY_HOOK_UNREACHABLE_DECISION:-deny}"
+case "$FALLBACK_DECISION" in
+  ask|deny) ;;
+  *) FALLBACK_DECISION="deny" ;;
+esac
+
+# Emit the fail-closed fallback ($1 = static reason string, no quotes/backslashes
+# so it stays valid JSON) and exit.
+emit_unreachable_fallback() {
+  if [ "$FALLBACK_DECISION" = "ask" ]; then
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}'
+  else
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$1"
+  fi
+  exit 0
+}
+
 # ---- Shared: route a permission request to the phone via HTTP ----
 # Expects $REQUEST to contain the JSON body to POST.
 # Outputs the appropriate hookSpecificOutput JSON and exits.
@@ -170,10 +195,8 @@ route_to_phone() {
   EXIT_CODE=$?
 
   if [ $EXIT_CODE -ne 0 ]; then
-    cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
-EOF
-    exit 0
+    # Daemon unreachable / curl timeout — the request never reached the phone.
+    emit_unreachable_fallback "Chroxy could not reach the daemon to request your approval; the request never reached your phone. Failing closed (denied). Retry once Chroxy is reachable."
   fi
 
   DECISION=$(echo "$RESPONSE" | grep -o '"decision":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -190,9 +213,9 @@ EOF
 EOF
       ;;
     *)
-      cat <<'EOF'
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}
-EOF
+      # Reached the daemon but got no recognizable decision — also unanswerable
+      # at the PTY, so fail closed rather than wedge on "ask".
+      emit_unreachable_fallback "Chroxy received an unrecognized permission response from the daemon. Failing closed (denied)."
       ;;
   esac
   exit 0
