@@ -121,8 +121,15 @@ name: Reconnect after tunnel drop (#4701)
 # iPhone 16 Pro — the wait timed out while the app had already
 # recovered). The `reconnect-banner` / `reconnect-spinner` mount on
 # phase=reconnecting is unit-test territory; what this flow can pin
-# deterministically end-to-end is (c): the drop happens and the app
-# recovers to a usable SessionScreen, asserted below.
+# deterministically end-to-end is (c): the app ends up recovered and
+# usable after the drop, asserted below.
+#
+# Caveat (be honest about the coverage): the flow cannot pin the drop
+# itself either — the placeholder is "Message Claude..." both before
+# the drop and after recovery, so if the mock's simulate-disconnect
+# stopped terminating the socket the asserts below would still pass.
+# A deterministic drop marker (mock emits a per-connection signal the
+# flow can hard-assert) is tracked in #5468.
 
 # Wait for the reconnect to succeed. The mock-server stays up on port
 # 9876 so the auto-reconnect lands → phase flips back to `connected`

@@ -67,9 +67,11 @@ name: All E2E flows
 - runFlow: terminal-view.yaml
 
 # Flow 15: Reconnect after tunnel drop (#4701) — exercises the
-# ConnectionPhase `connected → reconnecting → connected` transition +
-# the reconnect banner / spinner via mock-server 'simulate-disconnect'
-# trigger.
+# ConnectionPhase `connected → reconnecting → connected` transition
+# via mock-server 'simulate-disconnect' trigger and pins recovery to
+# a usable SessionScreen (input placeholder flips back). The banner /
+# spinner mount is unit-test territory — its visibility window is
+# shorter than Maestro's iOS hierarchy poll (see the flow's note).
 - runFlow: reconnect.yaml
 
 # Flow 16: AskUserQuestion approve path (#4697) — pins the wire→render
@@ -87,10 +89,9 @@ name: All E2E flows
 
 # Flow 18: AskUserQuestion multi-question form (#4697 / #4604 Chunk B)
 # — exercises the 4-question wire shape #4604 pinned at the server
-# level. Today MessageBubble renders Q[0] only; flow asserts Q[0]'s
-# render + round-trip and pins that handleUserQuestion accepts the
-# multi-question payload without bailing. Extends once mobile
-# renderer iterates all N questions.
+# level, on the landed multi-question renderer: asserts every
+# question's `question-multi-option-*` testIDs, answers all four,
+# submits, and pins the post-answer summary chip.
 - runFlow: ask-user-question-multi.yaml
 
 # Flow 19: AskUserQuestion Other → freeform send-path (#4877 / #4755)
@@ -98,19 +99,17 @@ name: All E2E flows
 # tapping the synthesized Other sentinel, typing a freeform answer,
 # and pressing Send. Pins the PR #4864 mobile parity with the
 # dashboard's `{answer:<otherLabel>, freeformText, toolUseId}` wire
-# shape end-to-end on a real RN runtime (testIDs `approval-freetext-input`
-# / `approval-freetext-send`).
+# shape end-to-end on a real RN runtime (anchored on the
+# `approval-freetext-send` testID + the input's placeholder — the
+# empty TextInput's testID isn't exposed in the iOS a11y tree).
 - runFlow: ask-question-other-freeform.yaml
 
 # Flow 20: ChatView mixed multi-question form (#4762) — sibling to
 # ask-user-question-multi.yaml that exercises the *mixed* wire shape
 # (single-select + multi-select + with-Other) the dashboard's
-# MultiQuestionForm (#4735 / #4760) handles. Today MessageBubble
-# renders Q[0] only; flow asserts Q[0]'s render (including the
-# model-supplied 'Other' label on Q[0]) + the answered round-trip,
-# and pins handleUserQuestion accepts the mixed payload (Q[1]
-# multi-select branch + Q[2] synthetic-Other branch) without
-# bailing on `firstNormalized == null`. Extends with
-# `question-prompt-multi` / `question-multi-submit` + summary-chip
-# assertions once the mobile multi-question renderer lands.
+# MultiQuestionForm (#4735 / #4760) handles. Asserts every question's
+# render (single-select radio, multi-select checkbox, model-supplied
+# 'Other' on Q[0]), answers them all, submits via
+# `question-multi-submit`, and pins the summary chip including the
+# multi-select answer list ("app, server").
 - runFlow: chat-multi-question.yaml

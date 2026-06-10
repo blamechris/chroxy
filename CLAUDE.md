@@ -279,8 +279,15 @@ curl -Ls "https://get.maestro.mobile.dev" | bash
 # Boot a simulator
 xcrun simctl boot <device-id>   # e.g. xcrun simctl list devices available
 
+# Build + install the chroxy dev client once (flows target com.blamechris.chroxy;
+# Expo Go can no longer load the app — native modules)
+cd packages/app && npx expo run:ios
+
 # Start Metro dev server (from packages/app/)
 npx expo start
+
+# Session/chat flows need the mock server on port 9876
+bash packages/app/.maestro/scripts/start-mock-server.sh
 ```
 
 ### Running Flows
@@ -308,10 +315,10 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 | Flow | What it verifies |
 |------|------------------|
 | `connect-screen.yaml` | ConnectScreen elements: title, QR button, LAN scan, manual entry, port |
-| `manual-connect.yaml` | Manual entry form expansion, URL input, Connect button, SessionScreen transition |
-| `lan-scan.yaml` | LAN scan trigger, scanning state with spinner |
-| `chat-todolist.yaml` | TodoList renderer end-to-end (mock-server emits TodoWrite tool_use+tool_result, ToolBubble expands, structured TodoList renders with testIDs) |
-| `run-all.yaml` | Runs all flows sequentially |
+| `manual-connect.yaml` | Manual entry form, URL input, Connect → optimistic SessionScreen + reconnect banner on unreachable server, header Disconnect back to ConnectScreen |
+| `lan-scan.yaml` | LAN scan trigger, in-progress or results state (scan can finish near-instantly) |
+| `chat-todolist.yaml` | TodoList renderer end-to-end (mock-server emits TodoWrite tool_use+tool_result, entry expands, structured TodoList renders with testIDs) |
+| `run-all.yaml` | Runs all 20 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, …) |
 
 ### Fixture Seeding for Structured Renderers
 
@@ -334,11 +341,12 @@ This keeps the app dependency-free (no debug menu, no URL scheme handler) and te
 ### Gotchas
 
 - **Always use `run-all.yaml`** for multiple flows — passing multiple `.yaml` files runs them in parallel (breaks on one simulator)
-- **Expo dev menu** appears on every `openLink` call — the setup flow dismisses it automatically
+- **Dev-client menu + onboarding** can appear on launch — flows dismiss them with `optional: true` taps (the dev menu's "Continue" sheet / a top-of-screen tap, then onboarding "Skip"); expect these as WARNED/SKIPPED steps in green runs
+- **Flow `name:` must not contain "/"** — Maestro derives report filenames from it; a slash crashes standalone runs with FileNotFoundException
 - **`wait` is not a valid command** — use `waitForAnimationToEnd` or `extendedWaitUntil`
-- **Emoji text matching** requires regex: `text: ".*Scan QR Code.*"` (not literal match)
+- **Emoji/icon text matching** is unreliable — prefer `testID` anchors; an `accessibilityLabel` overrides the visible text in Maestro's matcher, and accessible containers flatten children so exact text matches need `.*wildcards.*`
 - **Screenshots save to CWD** — always clean up after verification
-- **Device compatibility** — tested on iPhone 15 Pro and iPhone SE 3 (iOS 17+), portrait only; iPad and Android are untested (tap coordinates may differ)
+- **Device compatibility** — tested on iPhone 16 Pro (iOS 18.6), portrait only; iPad and Android are untested (tap coordinates may differ)
 
 ## Repo Memory MCP
 
