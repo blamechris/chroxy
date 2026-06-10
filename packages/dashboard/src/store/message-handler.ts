@@ -130,7 +130,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerIntegrationActionAckSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -2017,6 +2017,42 @@ function handleIntegrationStatusSnapshot(msg: Record<string, unknown>, _get: Msg
 }
 
 /**
+ * #5500 — resolve one repo's pending Reindex state: drop the repoPath from
+ * `reindexingRepoPaths` and record the outcome (ack counts or failure
+ * message) in `reindexResults` for inline display. Shared by the success ack
+ * and the INTEGRATION_ACTION_FAILED session_error — the same
+ * clear-pending-on-either-outcome contract as the cancel_activity pair.
+ */
+function resolveReindex(
+  get: MsgGet,
+  set: MsgSet,
+  repoPath: string,
+  result: { counts: import('@chroxy/protocol').IntegrationActionCounts | null; error: string | null },
+): void {
+  const pending = new Set(get().reindexingRepoPaths);
+  pending.delete(repoPath);
+  set({
+    reindexingRepoPaths: pending,
+    reindexResults: { ...get().reindexResults, [repoPath]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #5500 — Reindex success ack: positive confirmation that the
+ * `integration_action` repo_memory_reindex run completed, echoing the
+ * request's repoPath (+ requestId) with the parsed index counts (`null` when
+ * the server couldn't parse the CLI report — the row then shows a neutral
+ * "reindexed" note and the next Refresh shows the cache truth). A malformed
+ * ack is dropped (Zod safeParse) so the row keeps its honest pending state
+ * rather than rendering a half-true breakdown.
+ */
+function handleIntegrationActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerIntegrationActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  resolveReindex(get, set, parsed.data.repoPath, { counts: parsed.data.counts, error: null });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
@@ -2078,6 +2114,9 @@ const HANDLERS: Record<string, Handler> = {
   runner_status_snapshot: handleRunnerStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
+  // #5500: positive ack correlating an integration_action (repo-memory
+  // Reindex) request to its outcome.
+  integration_action_ack: handleIntegrationActionAck,
 };
 
 // ---------------------------------------------------------------------------
@@ -2578,6 +2617,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         clearCancellingActivity(get, set, msg.sessionId, msg.activityId);
       } else if (parsed.code === 'SESSION_NOT_FOUND') {
         clearCancellingForSession(get, set, parsed.attemptedSessionId ?? undefined);
+      } else if (parsed.code === 'INTEGRATION_ACTION_FAILED' && typeof msg.repoPath === 'string') {
+        // #5500: a failed Reindex echoes the exact repoPath — clear that
+        // row's "Reindexing…" pending state and surface the reason inline
+        // (the generic branch below still raises the toast, matching the
+        // CANCEL_ACTIVITY_FAILED precedent).
+        resolveReindex(get, set, msg.repoPath, {
+          counts: null,
+          error: parsed.message || 'Reindex failed.',
+        });
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;

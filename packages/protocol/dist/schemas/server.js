@@ -1101,6 +1101,41 @@ export const ServerIntegrationStatusSnapshotSchema = z.object({
     })
         .optional(),
 });
+/**
+ * #5500 (epic #5498) — counts distilled from a `repo-memory index` run, as
+ * printed by the CLI's human-readable report (field names verified against
+ * the IndexReport shape in @blamechris/repo-memory: scanned / summarized /
+ * "already fresh" / skipped). All four are required — a partially parsed
+ * report is treated as unparseable and the ack carries `counts: null`
+ * instead, so the dashboard never renders a half-true breakdown.
+ */
+export const IntegrationActionCountsSchema = z.object({
+    scanned: z.number().int().nonnegative().finite(),
+    summarized: z.number().int().nonnegative().finite(),
+    fresh: z.number().int().nonnegative().finite(),
+    skipped: z.number().int().nonnegative().finite(),
+});
+/**
+ * #5500 — positive ack that an `integration_action` request completed.
+ * Clones the `cancel_activity_ack` correlation contract (#5277): echoes the
+ * request's `action` + `repoPath` (and `requestId` when supplied) so the
+ * dashboard can clear the exact row's pending state. Failures surface as an
+ * `INTEGRATION_ACTION_FAILED` session_error, which also echoes
+ * `requestId` / `action` / `repoPath`.
+ *
+ * `action` is a plain string (not the client enum) so a future action's ack
+ * reaches older dashboards without a schema bump — consumers key off
+ * `repoPath` and treat unknown actions as opaque. `counts` is the parsed
+ * index result for `repo_memory_reindex`, or null when the CLI output
+ * couldn't be parsed (the UI then just refreshes the survey for the truth).
+ */
+export const ServerIntegrationActionAckSchema = z.object({
+    type: z.literal('integration_action_ack'),
+    action: z.string(),
+    repoPath: z.string(),
+    requestId: z.string().max(128).nullable().optional(),
+    counts: IntegrationActionCountsSchema.nullable(),
+}).passthrough();
 export const ServerClientFocusChangedSchema = z.object({
     type: z.literal('client_focus_changed'),
     clientId: z.string(),

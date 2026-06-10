@@ -2600,5 +2600,92 @@ describe('@chroxy/protocol schemas', () => {
         assert.ok(mod.ClientMessageSchema)
       })
     })
+
+    describe('integration action (#5500)', () => {
+      const counts = { scanned: 412, summarized: 12, fresh: 398, skipped: 2 }
+      const ack = {
+        type: 'integration_action_ack',
+        action: 'repo_memory_reindex',
+        repoPath: '/Users/dev/Projects/chroxy',
+        requestId: 'reindex-1',
+        counts,
+      }
+
+      it('IntegrationActionSchema validates + is accepted by the client union', async () => {
+        const { IntegrationActionSchema, ClientMessageSchema } = await import('../src/schemas/client.ts')
+        assert.ok(IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_memory_reindex',
+          repoPath: '/p/chroxy',
+        }).success)
+        assert.ok(IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_memory_reindex',
+          repoPath: '/p/chroxy',
+          requestId: 'r1',
+        }).success)
+        const u = ClientMessageSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_memory_reindex',
+          repoPath: '/p/chroxy',
+          requestId: 'r2',
+        })
+        assert.ok(u.success, JSON.stringify(u.error?.issues))
+        assert.equal(u.data.type, 'integration_action')
+      })
+
+      it('rejects an unknown action, a missing/empty repoPath, and an oversized requestId', async () => {
+        const { IntegrationActionSchema } = await import('../src/schemas/client.ts')
+        assert.ok(!IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'rm_rf_slash',
+          repoPath: '/p/chroxy',
+        }).success, 'action is a closed enum — unknown actions must not validate')
+        assert.ok(!IntegrationActionSchema.safeParse({ type: 'integration_action', action: 'repo_memory_reindex' }).success)
+        assert.ok(!IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_memory_reindex',
+          repoPath: '',
+        }).success)
+        assert.ok(!IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_memory_reindex',
+          repoPath: '/p/chroxy',
+          requestId: 'x'.repeat(129),
+        }).success)
+      })
+
+      it('ServerIntegrationActionAckSchema round-trips an ack with counts', async () => {
+        const { ServerIntegrationActionAckSchema } = await import('../src/schemas/server.ts')
+        const result = ServerIntegrationActionAckSchema.safeParse(ack)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.counts.summarized, 12)
+        assert.equal(result.data.requestId, 'reindex-1')
+      })
+
+      it('accepts a null-counts ack (unparseable index output) and a null/absent requestId', async () => {
+        const { ServerIntegrationActionAckSchema } = await import('../src/schemas/server.ts')
+        assert.ok(ServerIntegrationActionAckSchema.safeParse({ ...ack, counts: null }).success)
+        assert.ok(ServerIntegrationActionAckSchema.safeParse({ ...ack, requestId: null }).success)
+        const { requestId, ...noRequestId } = ack
+        assert.ok(ServerIntegrationActionAckSchema.safeParse(noRequestId).success)
+      })
+
+      it('rejects negative / non-integer / missing count fields', async () => {
+        const { ServerIntegrationActionAckSchema, IntegrationActionCountsSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!IntegrationActionCountsSchema.safeParse({ ...counts, scanned: -1 }).success)
+        assert.ok(!IntegrationActionCountsSchema.safeParse({ ...counts, fresh: 1.5 }).success)
+        const { skipped, ...partial } = counts
+        assert.ok(!ServerIntegrationActionAckSchema.safeParse({ ...ack, counts: partial }).success)
+        assert.ok(!ServerIntegrationActionAckSchema.safeParse({ ...ack, type: 'integration_action' }).success)
+      })
+
+      it('pins the integration-action contract at the package entry point', async () => {
+        const schemas = await import('../src/schemas/index.ts')
+        assert.ok(schemas.IntegrationActionSchema)
+        assert.ok(schemas.ServerIntegrationActionAckSchema)
+        assert.ok(schemas.IntegrationActionCountsSchema)
+      })
+    })
   })
 })

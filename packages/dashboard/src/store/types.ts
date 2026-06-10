@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, IntegrationActionCounts } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -478,6 +478,20 @@ export interface SessionState extends BaseSessionState {
   pendingEvaluatorClarify: PendingEvaluatorClarify | null;
 }
 
+/**
+ * #5500 — outcome of the last repo-memory Reindex action for one repo, kept
+ * for inline display in its Integrations row. Exactly one of `counts` /
+ * `error` is meaningful: a successful ack records `counts` (which is itself
+ * null when the server couldn't parse the CLI report) with `error: null`; an
+ * INTEGRATION_ACTION_FAILED session_error records the message with
+ * `counts: null`. `at` is the local receipt time (epoch ms).
+ */
+export interface ReindexResult {
+  counts: IntegrationActionCounts | null;
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -593,6 +607,22 @@ export interface ConnectionState {
    * Refresh button can spin. Cleared when a snapshot lands.
    */
   integrationStatusLoading: boolean;
+  /**
+   * #5500 — repo paths with an in-flight `integration_action` reindex request:
+   * set when sendRepoMemoryReindex is called, cleared on the
+   * `integration_action_ack` (success) or the INTEGRATION_ACTION_FAILED
+   * session_error (failure). Keyed by the repoPath the dashboard sent (the
+   * server echoes it verbatim), same pattern as `cancellingActivityIds`.
+   */
+  reindexingRepoPaths: Set<string>;
+  /**
+   * #5500 — last reindex outcome per repo path, for inline display in the
+   * Integrations row: the ack's scanned/summarized/fresh/skipped counts
+   * (null when the server couldn't parse the CLI output), or the
+   * INTEGRATION_ACTION_FAILED message as `error`. Replaced when the repo is
+   * reindexed again.
+   */
+  reindexResults: Record<string, ReindexResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1076,6 +1106,15 @@ export interface ConnectionState {
   // whether the message went on the wire (false = socket closed). Sets
   // `integrationStatusLoading` while in flight.
   requestIntegrationStatus: () => boolean;
+
+  // #5500 (epic #5498): run the repo-memory Reindex action for one surveyed
+  // repo. Dispatches an `integration_action` (action: repo_memory_reindex)
+  // tagged with a requestId the server echoes on the `integration_action_ack`
+  // / INTEGRATION_ACTION_FAILED session_error. Marks the repo in
+  // `reindexingRepoPaths` (and drops its stale `reindexResults` entry) ONLY
+  // when the message actually went on the wire — an offline send returns
+  // false without queuing, so the row can't strand "Reindexing…".
+  sendRepoMemoryReindex: (repoPath: string) => boolean;
 
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the

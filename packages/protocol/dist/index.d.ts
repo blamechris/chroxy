@@ -35,7 +35,9 @@ export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, Se
 export type { RepoVerdict, RepoTree, RepoStatus, HostStatusSummary, ServerHostStatusSnapshotMessage, } from './schemas/server.ts';
 export type { RunnerVerdict, RunnerServiceState, RunnerInfo, RepoRunners, RunnerStatusSummary, ServerRunnerStatusSnapshotMessage, } from './schemas/server.ts';
 export type { RepoMemoryCache, RepoMemoryReport, RepoMemoryStatus, IntegrationRepo, IntegrationStatusSummary, IntegrationCliStatus, ServerIntegrationStatusSnapshotMessage, } from './schemas/server.ts';
+export type { IntegrationActionCounts, ServerIntegrationActionAckMessage, } from './schemas/server.ts';
 export type { HostStatusRequestMessage } from './schemas/client.ts';
 export type { RunnerStatusRequestMessage } from './schemas/client.ts';
 export type { IntegrationStatusRequestMessage } from './schemas/client.ts';
+export type { IntegrationActionMessage } from './schemas/client.ts';
 export * from './error-categories.ts';
