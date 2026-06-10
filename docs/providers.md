@@ -1,17 +1,20 @@
 # Providers
 
-Chroxy runs AI coding sessions through pluggable **providers**. Each provider wraps a different AI backend (Claude Code, OpenAI Codex, Google Gemini) behind the same WebSocket/event contract, so the mobile app and desktop dashboard work identically regardless of which one you pick.
+Chroxy runs AI coding sessions through pluggable **providers**. Each provider wraps a different AI backend (Claude Code, the Anthropic API directly, DeepSeek, local Ollama models, Google Gemini, OpenAI Codex) behind the same WebSocket/event contract, so the mobile app and desktop dashboard work identically regardless of which one you pick.
 
-Six first-party providers ship built-in (one, `claude-channel`, is a research-preview scaffold):
+Nine first-party providers ship built-in (one, `claude-channel`, is a research-preview scaffold):
 
 - `claude-sdk` — **default**. Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process).
 - `claude-cli` — Legacy `claude -p` subprocess. Use if the SDK is unavailable or you need plan mode.
 - `claude-tui` — Interactive `claude` TUI driven under a PTY. Bills as your Claude subscription's interactive allowance and bypasses the programmatic credit pool. See [Billing & API usage](../README.md#billing--api-usage).
 - `claude-channel` — **Research preview, scaffold only (not yet runnable).** Will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`): same subscription billing as `claude-tui`, but a documented protocol instead of a TUI scrape, and — once the backend lands — live streaming plus a first-party permission relay. See [`claude-channel`](#claude-channel-research-preview).
+- `claude-byok` — "Bring your own key": the Anthropic Messages API driven directly via `@anthropic-ai/sdk`, no `claude` binary. Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP servers).
+- `deepseek` — DeepSeek's Anthropic-compatible API. A subclass of `claude-byok` — same agent loop, DeepSeek credentials/endpoint/pricing.
+- `ollama` — Local models via Ollama's Anthropic-compatible API (v0.14+). Same agent loop, no API key, cost always $0. See [Ollama (local models)](#ollama-local-models).
 - `gemini` — Google Gemini CLI (`gemini -p`).
 - `codex` — OpenAI Codex CLI (`codex exec`).
 
-Two additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` (containerized wrappers of `claude-cli` / `claude-sdk`).
+Three additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` run their `claude-cli` / `claude-sdk` provider inside the container, while `docker-byok` keeps the `claude-byok` agent loop on the host and redirects only built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) into the container.
 
 Beyond the built-ins, any service or local server that exposes an **Anthropic-compatible Messages API** (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp server, vLLM, OpenRouter, custom proxies) can be registered straight from `config.json` — no code required. See [Anthropic-compatible endpoints (config-driven)](#anthropic-compatible-endpoints-config-driven).
 
@@ -37,12 +40,15 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
 | `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
+| `claude-byok` | `@anthropic-ai/sdk` (npm) → Anthropic Messages API | `ANTHROPIC_API_KEY` (or `anthropicApiKey` in `~/.chroxy/credentials.json`) | `claude-opus-4-7` | Anthropic API key (per-token billing) | No `claude` binary — Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP); no cross-restart resume (#4047) |
+| `deepseek` | `@anthropic-ai/sdk` → DeepSeek's Anthropic-compatible endpoint | `DEEPSEEK_API_KEY` (or `deepseekApiKey` in `~/.chroxy/credentials.json`); `DEEPSEEK_BASE_URL` (optional endpoint override) | `deepseek-chat` | DeepSeek API key (per-token billing) | Subclass of `claude-byok` — same agent loop with DeepSeek credentials, endpoint, and pricing |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
 | *(config-driven)* | `@anthropic-ai/sdk` → any Anthropic-compatible endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.anthropicCompatible` (config.json): Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom. Full BYOK agent loop. See [below](#anthropic-compatible-endpoints-config-driven) |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
+| `docker-byok` | Docker image; agent loop stays on the host via `@anthropic-ai/sdk` | Same as `claude-byok` | Inherits `claude-byok` | Same as `claude-byok` | Only registered when `environments.enabled=true` and Docker daemon is reachable; built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) runs inside the container |
 
-> **Default model behaviour differs by provider.** Codex and Gemini have a `DEFAULT_MODEL` constant inside their session class (`gpt-5.4`, `gemini-2.5-pro`) — that's the value the provider actually passes when nothing is set. The Claude providers do NOT define an internal default: when `--model` / `CHROXY_MODEL` / `config.model` is unset, Chroxy passes `null` through `BaseSession` to the SDK or `claude` CLI, which then picks its own default (typically whatever the current Claude Code / SDK release ships with — often Sonnet, but subject to change upstream). The `claude-sonnet-4-6` string you'll see elsewhere in the code is the full ID the `sonnet` alias resolves to in `models.js`, not a hardcoded default.
+> **Default model behaviour differs by provider.** Codex and Gemini have a `DEFAULT_MODEL` constant inside their session class (`gpt-5.4`, `gemini-2.5-pro`) — that's the value the provider actually passes when nothing is set. The BYOK family likewise has an internal fallback: `ClaudeByokSession._defaultModel` returns `claude-opus-4-7`, overridden per subclass (`deepseek-chat`, `qwen3-coder`) — the defaults listed in the table above. The `claude`-binary providers (`claude-sdk`, `claude-cli`, `claude-tui`, `claude-channel`) do NOT define an internal default: when `--model` / `CHROXY_MODEL` / `config.model` is unset, Chroxy passes `null` through `BaseSession` to the SDK or `claude` CLI, which then picks its own default (typically whatever the current Claude Code / SDK release ships with — often Sonnet, but subject to change upstream). The `claude-sonnet-4-6` string you'll see elsewhere in the code is the full ID the `sonnet` alias resolves to in `models.js`, not a hardcoded default.
 >
 > Mobile/desktop clients can switch models live on providers that report `modelSwitch: true`. Docker providers inherit `modelSwitch` from their underlying Claude provider (`DockerSession` spreads `CliSession.capabilities`, `DockerSdkSession` spreads `SdkSession.capabilities`), so they behave the same as `claude-cli` / `claude-sdk` for model switching.
 
@@ -92,9 +98,9 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 |---------|--------------|--------------|--------------|
 | In-process permissions (`canUseTool`) | Yes | No (HTTP hook) | No (HTTP hook) |
 | Live `setModel` | Yes | Yes (restart) | — |
-| Live `setPermissionMode` | Yes | Yes (restart) | — |
+| Live `setPermissionMode` | Yes | Yes (restart) | Yes (sidecar file, no restart) |
 | Plan mode | No | **Yes** | No |
-| Resume (`resumeSessionId`) | Yes | No | No |
+| Resume (`resumeSessionId`) | Yes | Yes (`--resume` on respawn/restore) | Yes (`--resume` on restore) |
 | Thinking level control | Yes | No | No |
 | Live streaming (`stream_delta`) | Yes | Yes | No (deliver-on-complete) |
 | Auth | API key or `claude login` | API key or `claude login` | `claude login` only (`ANTHROPIC_API_KEY` rejected) |
@@ -105,7 +111,7 @@ Pick by billing surface and required features:
 
 - **`claude-sdk` (default)** — the right choice for most users. Programmatic billing, fastest startup, live model/mode switching, resume, thinking-level control.
 - **`claude-cli`** — pick this only when you need plan mode. Same billing as the SDK, but a `claude -p` subprocess per session.
-- **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no permission-mode switch, no resume, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
+- **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
 
 ### Common pitfalls
 
@@ -474,12 +480,13 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — | Yes (in-process) | Yes (in-process) | Yes (in-process) |
 | **(capability)** In-process permissions | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes | Yes | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes | Yes (sidecar file) | — | — | — | Yes | Yes | Yes |
 | **(capability)** Plan mode | — | **Yes** | — | — | — | — | — | — | — |
-| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — | — | — | — | — |
+| **(capability)** Resume (`resumeSessionId`) | Yes | Yes | Yes | — | — | — | — | — | — |
 | **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — | — | — |
 | **(capability)** Thinking level control | Yes | — | — | — | — | — | — | — | — |
 | **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
+| **(capability)** Skill toggle (`skillToggle` — live skill activate/deactivate) | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — | — | — | — |
 | **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — | Yes (per-token API) | Yes (per-token API) | Yes (always $0) |
@@ -490,7 +497,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 >
 > [Config-driven Anthropic-compatible endpoints](#anthropic-compatible-endpoints-config-driven) (#5419 — Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) are generated subclasses of the same `ClaudeByokSession`, so they **share the `claude-byok` capability column** exactly. Cost reporting follows the entry's `pricing` block: per-token API cost when declared, an honest $0 when omitted (local endpoints).
 
-For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
+For capability rows, "—" means the provider's `capabilities` object reports `false` (or omits the key — e.g. only `claude-sdk` and the BYOK family declare `skillToggle` — plus `docker-sdk` / `docker-byok`, which spread the parent class's capabilities: they rebuild the system prompt every turn, so toggling a skill takes effect on the next message; subprocess providers snapshot the skills text at session start). For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
 > The `claude-channel` column reflects the provider's declared `capabilities`
 > object and the spike's verified protocol contract — **not** runtime behaviour,
@@ -512,7 +519,6 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 
 ### `claude-cli`
 
-- **No resume** — each new session starts fresh; history replay is driven by Chroxy's own `session-manager.js`, not by `claude`.
 - **No thinking-level control** — SDK-only feature.
 - Requires the `claude` binary to be installed and executable.
 
@@ -520,7 +526,7 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 
 - **Subscription only** — `ANTHROPIC_API_KEY` is explicitly stripped from the spawn env. Auth via `claude login`; no API-key fallback.
 - **No live streaming** — the response is delivered as one `stream_start` → `stream_delta` → `stream_end` burst when Claude's `Stop` hook fires. No incremental token streaming inside a turn.
-- **No live model switch, no plan mode, no permission-mode switch, no resume, no thinking-level control, no attachments, no agent tracking, no cost reporting** — `result.cost` is emitted as `0` (a placeholder, not parsed from the Stop hook) and `result.usage` is `null` (the Stop hook payload doesn't expose either).
+- **No live model switch, no plan mode, no thinking-level control, no attachments, no agent tracking, no cost reporting** — `result.cost` is emitted as `0` (a placeholder, not parsed from the Stop hook) and `result.usage` is `null` (the Stop hook payload doesn't expose either).
 - **One PTY per session** — pays a ~3.5s warmup cost on `start()`, then every `sendMessage` writes to the same PTY. Concurrent sessions in the same `cwd` are not protected against each other; treat as one session per repo.
 - **Tool events are reconstructed from `PreToolUse` / `PostToolUse` hooks** — `tool_use_id` is taken from the hook payload when present, otherwise synthesized per turn (`<messageId>-tool-N`). Pre/Post pairing breaks if tool calls overlap or a Pre fires without a matching Post.
 - **Hook payloads write to a per-session directory under `tmpdir()/chroxy-claude-tui/s-<uuid>/`**. Cleaned up on `destroy()`.
@@ -549,7 +555,8 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - **No live model switch, no permission-mode switch, no plan mode, no resume,
   no thinking-level control** — the channel surface does not expose these
   (same gaps as `claude-tui`, except `claude-tui` fakes permission-mode via a
-  sidecar file). The channel's wins over `claude-tui` are live streaming and a
+  sidecar file and resumes across restarts via `--resume`). The channel's wins
+  over `claude-tui` are live streaming and a
   documented first-party permission relay.
 - **Not available on Bedrock / Vertex / Foundry**, and Team/Enterprise orgs
   must enable `channelsEnabled` in managed settings.
