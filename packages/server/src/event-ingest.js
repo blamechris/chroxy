@@ -32,7 +32,7 @@ import { homedir } from 'node:os'
 import { safeTokenCompare } from './token-compare.js'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
-import { RateLimiter } from './rate-limiter.js'
+import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { IngestEventSchema } from '@chroxy/protocol'
 
 const log = createLogger('ingest')
@@ -49,6 +49,16 @@ export const MAX_INGEST_BODY_BYTES = 65536
 const INGEST_WINDOW_MS = 60_000
 const INGEST_MAX_EVENTS = 60
 const INGEST_BURST = 10
+
+/**
+ * Pre-auth per-IP ceiling (#5432 review S1/S2): the per-source buckets
+ * above are keyed on a caller-chosen string, so a secret-holder rotating
+ * `source` per request would otherwise mint a fresh bucket every time.
+ * The per-IP limit is the hard total — sized above the per-source limit
+ * because one machine legitimately runs several emitting sessions.
+ */
+const INGEST_IP_MAX_EVENTS = 240
+const INGEST_IP_BURST = 30
 
 /**
  * Event type → notification category + default title/body. Categories ride
@@ -194,6 +204,35 @@ function resolveIngestSecret(server) {
  * and fail-silent (<100ms budget in Phase 4).
  */
 export function handleEventIngest(server, req, res) {
+  // Pre-auth per-IP limit (#5432 review S1/S2), mirroring POST /permission's
+  // #3980 limiter: caps total throughput per client BEFORE auth (cheap 429s
+  // for brute-force probing) and — crucially — bounds the post-auth abuse
+  // where a secret-holder rotates `source` per request to mint a fresh
+  // per-source bucket each time. Wider window than per-source (several
+  // concurrent sessions emit through one IP) but a hard ceiling all the same.
+  // getRateLimitKey prefers the forwarded client IP for loopback/tunneled
+  // peers so one noisy client can't exhaust everyone's bucket, and falls
+  // back to the kernel socket address for direct peers (unspoofable).
+  if (!server._ingestIpRateLimiter) {
+    server._ingestIpRateLimiter = new RateLimiter({
+      windowMs: INGEST_WINDOW_MS,
+      maxMessages: INGEST_IP_MAX_EVENTS,
+      burst: INGEST_IP_BURST,
+      name: 'ingest-ip',
+    })
+  }
+  const clientIp = getRateLimitKey(req.socket?.remoteAddress || '', req)
+  {
+    const { allowed, retryAfterMs } = server._ingestIpRateLimiter.check(clientIp)
+    if (!allowed) {
+      log.warn(`Rate limited POST /api/events from ${clientIp}`)
+      sendJson(res, 429, { error: 'rate limited', retryAfterMs }, {
+        'Retry-After': Math.ceil(retryAfterMs / 1000),
+      })
+      return
+    }
+  }
+
   const secret = resolveIngestSecret(server)
   const authHeader = req.headers['authorization'] || ''
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''

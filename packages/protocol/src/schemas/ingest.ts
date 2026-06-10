@@ -74,7 +74,11 @@ export const IngestEventDataSchema = z
  */
 export const IngestEventSchema = z
   .object({
-    source: z.string().min(1).max(64),
+    // Charset-restricted (#5432 review S3): `source` is the rate-limit
+    // bucket key AND appears in server log lines — newlines/ANSI in it
+    // would be log-line injection, and arbitrary bytes would inflate
+    // bucket cardinality for free.
+    source: z.string().min(1).max(64).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, 'source must be alphanumeric with ._- separators'),
     project: z.string().min(1).max(256).optional(),
     sessionId: z.string().min(1).max(256).optional(),
     type: z.enum(INGEST_EVENT_TYPES),

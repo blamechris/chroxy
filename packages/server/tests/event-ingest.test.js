@@ -241,6 +241,47 @@ describe('event-ingest', () => {
       assert.equal((await post(validEvent({ source: 'hooks-a' }))).status, 429)
       assert.equal((await post(validEvent({ source: 'hooks-b' }))).status, 200)
     })
+
+    // #5432 review S1/S2 — the per-source buckets are keyed on a
+    // caller-chosen string, so the pre-auth per-IP ceiling is the hard
+    // total: rotating `source` per request must NOT mint unlimited fresh
+    // buckets.
+    it('pre-auth per-IP ceiling caps rotating-source abuse', async () => {
+      const server = createMockServer({
+        _ingestIpRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 2, burst: 0, name: 'ingest-ip-test' }),
+      })
+      await startWith(server)
+      assert.equal((await post(validEvent({ source: 'spin-a' }))).status, 200)
+      assert.equal((await post(validEvent({ source: 'spin-b' }))).status, 200)
+      // Third request: fresh per-source bucket, but the IP ceiling fires.
+      const res = await post(validEvent({ source: 'spin-c' }))
+      assert.equal(res.status, 429)
+      assert.ok(res.headers.get('retry-after'))
+    })
+
+    it('the per-IP limit fires BEFORE auth (cheap 429s for brute-force probing)', async () => {
+      const server = createMockServer({
+        _ingestIpRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 1, burst: 0, name: 'ingest-ip-test' }),
+      })
+      await startWith(server)
+      assert.equal((await post(validEvent())).status, 200)
+      // Exhausted bucket + WRONG token → 429, not 401: the limiter gates
+      // the auth check itself.
+      const res = await post(validEvent(), { token: 'wrong-token' })
+      assert.equal(res.status, 429)
+    })
+  })
+
+  describe('source charset (#5432 review S3)', () => {
+    it('rejects sources with newlines / ANSI / spaces (log-injection guard)', async () => {
+      await startWith(createMockServer())
+      for (const source of ['evil\nsource', 'a\u001b[31mred', 'has space', '-leading-separator']) {
+        const res = await post(validEvent({ source }))
+        assert.equal(res.status, 400, `source ${JSON.stringify(source)} must be rejected`)
+      }
+      // The legitimate shapes still pass.
+      assert.equal((await post(validEvent({ source: 'claude-hooks_v2.1' }))).status, 200)
+    })
   })
 
   describe('pipeline dispatch', () => {
