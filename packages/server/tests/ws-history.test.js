@@ -1,5 +1,8 @@
-import { describe, it, beforeEach, mock } from 'node:test'
+import { describe, it, before, after, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
 import {
   sendPostAuthInfo,
@@ -7,13 +10,17 @@ import {
   replayHistory,
   flushPostAuthQueue,
   scheduleAfterDrain,
+  scheduleProviderModelsRefresh,
 } from '../src/ws-history.js'
 import { PERMISSION_MODES } from '../src/handler-utils.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../src/models.js'
 // Importing providers.js triggers built-in provider registration, which in turn
 // calls registerProviderRegistry() so getRegistryForProvider('codex'/'gemini')
 // resolves to the correct provider class in per-provider tests below.
-import '../src/providers.js'
+// registerProvider is used by the scheduleProviderModelsRefresh suite to
+// inject fake provider classes (#5450).
+import { registerProvider } from '../src/providers.js'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -2037,5 +2044,252 @@ describe('scheduleAfterDrain — max-wait cap (#5328)', () => {
     } finally {
       mock.timers.reset()
     }
+  })
+})
+
+// #5450 — direct unit coverage for the ws-layer dynamic-discovery glue
+// added in #5421/#5445. The discovery core (TTL cache, change detection,
+// in-flight dedupe) is covered by ollama-tags.test.js; these tests pin the
+// scheduleProviderModelsRefresh contract itself with injected fake provider
+// classes: provider gating, re-push-on-change only, readyState guard,
+// rejection swallowing, and single-schedule-per-handshake.
+describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
+  // Provider registries hydrate from `${CHROXY_CONFIG_DIR}/models-cache.<name>.json`
+  // on first access — point that at a temp dir so the suite never reads (or,
+  // via loadCache's heal path, writes) the real ~/.chroxy tree.
+  let savedConfigDir
+  before(() => {
+    savedConfigDir = process.env.CHROXY_CONFIG_DIR
+    process.env.CHROXY_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'chroxy-ws-history-refresh-'))
+    _resetProviderRegistryCacheForTests()
+  })
+  after(() => {
+    if (savedConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = savedConfigDir
+    _resetProviderRegistryCacheForTests()
+  })
+
+  /**
+   * Build and register a fake non-Claude provider class. Each test uses a
+   * unique name so PROVIDERS / providerRegistryCache entries never leak
+   * across tests. `refreshModels` (when given) is attached as the static
+   * dynamic-discovery hook scheduleProviderModelsRefresh looks for.
+   */
+  function registerFakeProvider(name, { refreshModels } = {}) {
+    class FakeProviderSession {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+      static get capabilities() { return {} }
+      static getFallbackModels() {
+        return [{ id: 'fake-seed', label: 'Fake Seed', fullId: 'fake-seed', contextWindow: 8192 }]
+      }
+    }
+    if (refreshModels) FakeProviderSession.refreshModels = refreshModels
+    registerProvider(name, FakeProviderSession)
+    return FakeProviderSession
+  }
+
+  /** Settle the fire-and-forget then/catch chain inside the scheduler. */
+  function flushAsync() {
+    return new Promise((resolve) => setImmediate(resolve))
+  }
+
+  it('is a no-op for a null provider name', async () => {
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    scheduleProviderModelsRefresh(ctx, ws, null)
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 0)
+  })
+
+  it('swallows an unknown provider name (getProvider throw) without sending', async () => {
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    // Must not throw synchronously despite getProvider throwing for
+    // unregistered names.
+    scheduleProviderModelsRefresh(ctx, ws, 'no-such-provider-5450')
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 0)
+  })
+
+  it('is a no-op for providers without a static refreshModels', async () => {
+    registerFakeProvider('fake-refresh-static-only')
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    scheduleProviderModelsRefresh(ctx, ws, 'fake-refresh-static-only')
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 0)
+  })
+
+  it('re-pushes available_models to the triggering client when the probe resolves a changed list', async () => {
+    const name = 'fake-refresh-changed'
+    // Mirror the provider refresh contract (see refreshOllamaModels): the
+    // registry is updated BEFORE the promise resolves with the changed list;
+    // the ws glue then re-reads the registry for the re-push payload.
+    registerFakeProvider(name, {
+      refreshModels: async () => {
+        getRegistryForProvider(name).updateModels([
+          { value: 'fake-discovered', displayName: 'Fake Discovered' },
+        ])
+        return ['fake-discovered']
+      },
+    })
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    scheduleProviderModelsRefresh(ctx, ws, name)
+    assert.equal(ctx.send.callCount, 0, 'the refresh must be async — no synchronous send')
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 1, 'exactly one re-push for one resolved probe')
+    const msg = ctx._sends[0]
+    assert.equal(msg.type, 'available_models')
+    assert.equal(msg.provider, name, 're-push must stay tagged with the probed provider')
+    // updateModels merges the static seed back in (stale-entry resilience),
+    // so assert the discovered model is present AND the payload mirrors the
+    // registry exactly — the glue must re-read the registry, not echo the
+    // probe's resolved array.
+    assert.ok(msg.models.some(m => m.id === 'fake-discovered'),
+      're-push must carry the freshly discovered model')
+    assert.deepEqual(msg.models, getRegistryForProvider(name).getModels(),
+      're-push payload must mirror the updated registry list')
+    assert.equal(msg.defaultModel, getRegistryForProvider(name).getDefaultModelId())
+  })
+
+  it('does not re-push on a null resolution and leaves the registry untouched (failed probe)', async () => {
+    const name = 'fake-refresh-null'
+    // null = probe failed / no change / TTL-cached: the snapshot already
+    // sent is still accurate, so nothing further may be emitted.
+    registerFakeProvider(name, { refreshModels: async () => null })
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    scheduleProviderModelsRefresh(ctx, ws, name)
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 0)
+    assert.deepEqual(getRegistryForProvider(name).getModels().map(m => m.id), ['fake-seed'],
+      'a failed probe must leave the registry on the static seed list')
+  })
+
+  it('does not re-push on an empty-array resolution', async () => {
+    const name = 'fake-refresh-empty'
+    registerFakeProvider(name, { refreshModels: async () => [] })
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    scheduleProviderModelsRefresh(ctx, ws, name)
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 0)
+  })
+
+  it('drops the re-push when the client leaves OPEN mid-probe', async () => {
+    const name = 'fake-refresh-gone'
+    let resolveProbe
+    registerFakeProvider(name, {
+      refreshModels: () => new Promise((resolve) => { resolveProbe = resolve }),
+    })
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    scheduleProviderModelsRefresh(ctx, ws, name)
+    // refreshModels is invoked on a later microtask (Promise.resolve().then),
+    // so flush once for the probe to actually start before disconnecting.
+    await flushAsync()
+    // Client disconnects while the probe is in flight, THEN the probe lands.
+    ws.readyState = 3
+    resolveProbe(['fake-discovered'])
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 0, 'no send to a socket that left OPEN')
+  })
+
+  it('still re-pushes when the test socket has no readyState at all', async () => {
+    // Plain-object sockets (some test harnesses) have readyState undefined;
+    // the guard only blocks sockets that EXPOSE a non-OPEN readyState.
+    const name = 'fake-refresh-bare-ws'
+    registerFakeProvider(name, { refreshModels: async () => ['fake-seed'] })
+    const ctx = makeCtx()
+    const ws = {} // no readyState, ctx.send records the payload
+
+    scheduleProviderModelsRefresh(ctx, ws, name)
+    await flushAsync()
+
+    assert.equal(ctx.send.callCount, 1)
+    assert.equal(ctx._sends[0].type, 'available_models')
+  })
+
+  it('swallows a rejecting refreshModels — no send, no unhandled rejection', async () => {
+    const name = 'fake-refresh-reject'
+    registerFakeProvider(name, {
+      refreshModels: async () => { throw new Error('probe exploded') },
+    })
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+
+    const rejections = []
+    const onRejection = (err) => rejections.push(err)
+    process.on('unhandledRejection', onRejection)
+    try {
+      scheduleProviderModelsRefresh(ctx, ws, name)
+      await flushAsync()
+      // Give a hypothetical unhandled rejection a second turn to surface.
+      await flushAsync()
+
+      assert.equal(ctx.send.callCount, 0)
+      assert.equal(rejections.length, 0,
+        `refreshModels rejection leaked as unhandled: ${rejections[0]}`)
+    } finally {
+      process.off('unhandledRejection', onRejection)
+    }
+  })
+
+  it('is scheduled exactly once per handshake — sendPostAuthInfo does not double-push', async () => {
+    const name = 'fake-refresh-once'
+    const refreshSpy = createSpy(async () => {
+      getRegistryForProvider(name).updateModels([
+        { value: 'fake-discovered', displayName: 'Fake Discovered' },
+      ])
+      return ['fake-discovered']
+    })
+    registerFakeProvider(name, { refreshModels: refreshSpy })
+
+    const { manager } = createMockSessionManager(
+      [{ id: 'sess-fake', name: 'Fake', cwd: '/tmp' }],
+      {
+        getSession: (id) => {
+          if (id !== 'sess-fake') return undefined
+          return { session: createMockSession(), name: 'Fake', cwd: '/tmp', provider: name }
+        },
+      },
+    )
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-fake' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    // The synchronous handshake pushes available_models twice (sendSessionInfo
+    // + the post-auth snapshot) — only sendSessionInfo may schedule a refresh.
+    const syncPushes = ctx._sends.filter(m => m.type === 'available_models').length
+    assert.equal(syncPushes, 2, 'handshake baseline: two synchronous available_models snapshots')
+
+    await flushAsync()
+
+    assert.equal(refreshSpy.callCount, 1,
+      'refreshModels must be scheduled exactly once per handshake (sendSessionInfo owns it)')
+    const totalPushes = ctx._sends.filter(m => m.type === 'available_models').length
+    assert.equal(totalPushes, syncPushes + 1,
+      'exactly one async re-push on top of the synchronous snapshots')
   })
 })
