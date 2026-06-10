@@ -61,20 +61,34 @@ const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
 const log = createLogger('ws')
 
 /**
- * Resolve the allowed model IDs for a specific provider — #2946.
+ * Sentinel: the provider opted OUT of static model validation entirely
+ * (#5418 — ollama's `getAllowedModels()` returns null because valid models
+ * are whatever the local daemon has pulled; a static list would reject
+ * them all). Distinct from the legacy "no per-provider list" fallback,
+ * which routes to the global Claude allowlist and would wrongly reject
+ * every non-Claude id.
+ */
+const PROVIDER_MODELS_UNRESTRICTED = Symbol('provider-models-unrestricted')
+
+/**
+ * Resolve the allowed model IDs for a specific provider — #2946 / #5418.
  *
  * Providers opt in to per-provider validation by exposing a static
  * `getAllowedModels()` returning an array of accepted IDs. Providers that
- * don't (claude-sdk/claude-cli/docker-*) fall back to the dynamic global
+ * don't have the method at all (docker-* wrappers and any pre-#2946
+ * embedder-registered class) fall back to the dynamic global
  * `ALLOWED_MODEL_IDS`, which is fed by the Claude Agent SDK's supported-
  * models list and is the historical source of truth for Claude sessions.
  *
- * Returning `null` means "no per-provider list available — use the global
- * allowlist." Returning an array means the provider has opted in and the
- * array is authoritative.
+ * Tri-state return:
+ *   - `string[]` — provider opted in; the array is authoritative.
+ *   - `PROVIDER_MODELS_UNRESTRICTED` — the method exists and returned a
+ *     non-array (#5418 ollama): accept any non-empty model id verbatim.
+ *   - `null` — no method / unknown provider / method threw: use the
+ *     global allowlist (conservative legacy behaviour).
  *
  * @param {string|undefined} providerName - Session's registered provider name
- * @returns {string[]|null}
+ * @returns {string[]|typeof PROVIDER_MODELS_UNRESTRICTED|null}
  */
 function getProviderAllowedModels(providerName) {
   if (!providerName) return null
@@ -88,7 +102,8 @@ function getProviderAllowedModels(providerName) {
   if (typeof ProviderClass.getAllowedModels !== 'function') return null
   try {
     const list = ProviderClass.getAllowedModels()
-    return Array.isArray(list) ? list : null
+    if (Array.isArray(list)) return list
+    return PROVIDER_MODELS_UNRESTRICTED
   } catch {
     return null
   }
@@ -110,6 +125,25 @@ function handleSetModel(ws, client, msg, ctx) {
   // crash opaquely (see issue #2946). Consult the session's provider first.
   if (entry) {
     const providerAllowed = getProviderAllowedModels(entry.provider)
+    if (providerAllowed === PROVIDER_MODELS_UNRESTRICTED) {
+      // #5418: the provider validates nothing statically (ollama — any
+      // locally pulled model id is valid; an unknown id surfaces as the
+      // backend's own error on the next message). Pass the id through
+      // verbatim after a minimal non-empty guard — without this branch the
+      // null fell through to the global Claude allowlist, which rejected
+      // every Ollama model and accepted Claude ids that 404 at the local
+      // daemon.
+      const model = msg.model.trim()
+      if (model.length === 0) {
+        log.warn(`Rejected empty model id on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+        return
+      }
+      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${model}`)
+      entry.session.setModel(model)
+      ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(model) })
+      return
+    }
     if (providerAllowed) {
       if (!providerAllowed.includes(msg.model)) {
         // #4828: session-scoped — modelSessionId identifies the affected

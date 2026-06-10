@@ -19,6 +19,7 @@ import { ClaudeTuiSession } from './claude-tui-session.js'
 import { ClaudeChannelSession } from './claude-channel-session.js'
 import { ClaudeByokSession } from './byok-session.js'
 import { DeepSeekSession } from './deepseek-session.js'
+import { OllamaSession } from './ollama-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
@@ -42,6 +43,10 @@ const PROVIDERS = {
   'claude-channel': ClaudeChannelSession,
   'claude-byok': ClaudeByokSession,
   'deepseek': DeepSeekSession,
+  // Local models via Ollama's Anthropic-compatible Messages API (v0.14+).
+  // Rides the BYOK agent loop; no credentials, zero cost, models are
+  // whatever the user has pulled locally. See ollama-session.js.
+  'ollama': OllamaSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
 }
