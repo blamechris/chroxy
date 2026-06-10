@@ -333,7 +333,7 @@ describe('Permission hook approve-mode curl passthrough (#2717)', () => {
       timeout: 10000,
       env: {
         ...process.env,
-        CHROXY_PORT: '1', // port 1 should be unreachable
+        CHROXY_PORT: '0', // port 0 is never connectable → curl fails deterministically
         CHROXY_HOOK_SECRET: 'secret',
         CHROXY_PERMISSION_MODE: 'approve',
       },
@@ -351,7 +351,7 @@ describe('Permission hook approve-mode curl passthrough (#2717)', () => {
       timeout: 10000,
       env: {
         ...process.env,
-        CHROXY_PORT: '1',
+        CHROXY_PORT: '0',
         CHROXY_HOOK_SECRET: 'secret',
         CHROXY_PERMISSION_MODE: 'approve',
         CHROXY_HOOK_UNREACHABLE_DECISION: 'ask',

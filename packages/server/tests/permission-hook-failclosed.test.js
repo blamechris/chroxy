@@ -28,7 +28,16 @@ function runHook({ input, env, timeout = 10000 } = {}) {
     child.stdout.on('data', (c) => { stdout += c.toString() })
     child.stderr.on('data', (c) => { stderr += c.toString() })
     child.on('error', (err) => settle(reject, err))
-    child.on('close', () => settle(resolve, { stdout, stderr }))
+    child.on('close', (status, signal) => {
+      // The hook must always exit 0 (it emits a hookSpecificOutput decision and
+      // returns). A non-zero exit or a timeout-kill is a real failure even if
+      // some JSON was printed — reject so it can't masquerade as a pass.
+      if (signal || status !== 0) {
+        settle(reject, new Error(`hook exited uncleanly (status=${status}, signal=${signal})\nstderr: ${stderr}`))
+        return
+      }
+      settle(resolve, { status, stdout, stderr })
+    })
     if (timeout) timer = setTimeout(() => child.kill('SIGKILL'), timeout)
     if (input != null) child.stdin.write(input)
     child.stdin.end()
