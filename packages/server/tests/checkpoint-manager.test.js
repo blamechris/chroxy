@@ -373,6 +373,28 @@ describe('CheckpointManager', () => {
       assert.ok(tags.includes(cp.gitRef), 'unloaded session ref must survive')
     })
 
+    it('does NOT delete a live tag owned by another worktree of the SAME repo (#5335 cross-worktree)', async () => {
+      // chroxy-checkpoint/* tags are repo-global — visible from every worktree.
+      // A prune fired in worktree B must not treat the main repo's live tag as
+      // an orphan just because that checkpoint's cwd differs.
+      const wt = mkdtempSync(join(tmpdir(), 'chroxy-cp-wt-'))
+      rmSync(wt, { recursive: true, force: true }) // git worktree add needs a non-existent path
+      execFileSync(GIT, ['worktree', 'add', wt, 'HEAD'], { cwd: gitDir })
+      try {
+        const main = await manager.createCheckpoint({ sessionId: 'sess-main', resumeSessionId: 's', cwd: gitDir, name: 'main' })
+        const branch = await manager.createCheckpoint({ sessionId: 'sess-wt', resumeSessionId: 's', cwd: wt, name: 'wt' })
+
+        // Prune from the worktree cwd — must keep BOTH live refs.
+        const pruned = await manager.pruneOrphanedRefs(wt)
+        assert.equal(pruned, 0, 'no live ref may be pruned across worktrees of the same repo')
+        const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+        assert.ok(tags.includes(main.gitRef), "main repo's live checkpoint tag must survive a worktree prune")
+        assert.ok(tags.includes(branch.gitRef), "worktree's own live checkpoint tag must survive")
+      } finally {
+        execFileSync(GIT, ['worktree', 'remove', '--force', wt], { cwd: gitDir })
+      }
+    })
+
     it('returns 0 on a non-git directory', async () => {
       const nonGit = mkdtempSync(join(tmpdir(), 'chroxy-cp-nogit-prune-'))
       try {

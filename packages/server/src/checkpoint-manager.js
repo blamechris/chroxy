@@ -422,18 +422,24 @@ export class CheckpointManager extends EventEmitter {
 
   // #5335: the eviction / delete / clear paths only log a warning when
   // `git tag -d` fails, so a transient failure leaks a `chroxy-checkpoint/*`
-  // tag forever. Build the set of refs still referenced by a live checkpoint
-  // for `cwd`, from BOTH the on-disk checkpoint files AND the in-memory map
-  // (a just-created checkpoint is pushed in-memory before it is persisted).
-  // Reading every persisted file is what makes this safe across sessions this
-  // manager hasn't loaded — without it, pruning could delete an unloaded
-  // session's live ref. (Single-daemon model: one process owns the repo.)
-  _liveRefsForCwd(cwd) {
+  // tag forever. Build the set of refs still referenced by ANY live checkpoint,
+  // from BOTH the on-disk checkpoint files AND the in-memory map (a just-created
+  // checkpoint is pushed in-memory before it is persisted; reading every
+  // persisted file covers sessions this manager hasn't loaded).
+  //
+  // NOT filtered by cwd: `chroxy-checkpoint/*` tags are repo-global (shared
+  // across every worktree of a repo). Two sessions in different cwds of the
+  // same repo — chroxy's parallel-agent worktree workflow — share the tag
+  // namespace, so a cwd filter would let a prune in one worktree delete the
+  // other's live tag. Checkpoint ids are randomUUID, so unioning every ref
+  // (across repos too) can never delete a live ref; the only cost is leaving a
+  // foreign-repo orphan for that repo's own prune to sweep.
+  _liveCheckpointRefs() {
     const live = new Set()
     // In-memory (covers the create-before-persist window).
     for (const list of this._checkpoints.values()) {
       for (const cp of list) {
-        if (cp?.gitRef && cp.cwd === cwd) live.add(cp.gitRef)
+        if (cp?.gitRef) live.add(cp.gitRef)
       }
     }
     // On-disk (covers sessions not loaded into this._checkpoints).
@@ -443,7 +449,7 @@ export class CheckpointManager extends EventEmitter {
       try {
         const data = JSON.parse(readFileSync(join(this._checkpointsDir, file), 'utf8'))
         for (const cp of data?.checkpoints || []) {
-          if (cp?.gitRef && cp.cwd === cwd) live.add(cp.gitRef)
+          if (cp?.gitRef) live.add(cp.gitRef)
         }
       } catch { /* skip unreadable / corrupt file */ }
     }
@@ -451,7 +457,7 @@ export class CheckpointManager extends EventEmitter {
   }
 
   /**
-   * Prune `chroxy-checkpoint/*` tags in `cwd` that no live checkpoint
+   * Prune `chroxy-checkpoint/*` tags in `cwd`'s repo that no live checkpoint
    * references. Best-effort: never throws, never deletes a ref still in use.
    * @param {string} cwd
    * @returns {Promise<number>} number of orphaned refs pruned
@@ -467,7 +473,7 @@ export class CheckpointManager extends EventEmitter {
       return 0
     }
     if (tags.length === 0) return 0
-    const live = this._liveRefsForCwd(cwd)
+    const live = this._liveCheckpointRefs()
     let pruned = 0
     for (const tag of tags) {
       if (!live.has(tag)) {
