@@ -20,8 +20,11 @@
  *     The /tmp state machine was the root cause of the reliability pain the
  *     epic exists to fix.
  *   - The heartbeat is a single unref'd in-process setInterval that PATCHes
- *     each tracked embed so the elapsed-time footer stays current — not a
- *     forked bash daemon with a PID file.
+ *     each LIVE embed so the elapsed-time footer stays current — not a
+ *     forked bash daemon with a PID file. Offline embeds are final and are
+ *     skipped; entries untouched longer than `pruneAfterMs` are pruned from
+ *     the state store at load time (#5429/#5434), keeping both the file and
+ *     the heartbeat's per-tick work bounded to live projects.
  *   - Driven by chroxy's own notification pipeline categories (Phase 2).
  *     External Claude Code hook ingest is Phase 3; subagent counting from
  *     hooks is Phase 4 — until then the embed reflects what chroxy-launched
@@ -63,6 +66,14 @@ const BACKOFF_BASE_MS = 1_000
 // globally limited and should give up (send() resolves false; the pipeline
 // retries on the next event) rather than hold the fan-out hostage.
 const MAX_RETRY_AFTER_MS = 30_000
+
+// #5429/#5434: retention for state-store entries. Project keys fall back to
+// session ids (and Phase 3 ingest accepts arbitrary project names), so
+// without pruning the store grows one entry per key forever — and the
+// heartbeat's per-tick work grows with it. Entries untouched for longer than
+// this are dropped at load time; the Discord message itself is KEPT (an
+// offline embed is a final record — only the tracking stops).
+const DEFAULT_PRUNE_AFTER_MS = 86_400_000 // 24h
 
 // Embed sidebar color defaults — ported from claude-code-notify
 // (colors.conf.example + the CLAUDE_NOTIFY_*_COLOR defaults).
@@ -154,6 +165,10 @@ export class DiscordWebhookSink extends NotificationSink {
    * @param {number} [opts.heartbeatIntervalMs] - Elapsed-time refresh PATCH
    *   interval. 0 disables; values below 10s fall back to the default
    *   (parity with the bash heartbeat's interval clamp).
+   * @param {number} [opts.pruneAfterMs] - Retention for state-store entries
+   *   (#5429/#5434): entries whose lastUpdateTs is older than this are
+   *   dropped at load time (the first load after init is the startup sweep).
+   *   0 disables pruning; invalid values fall back to the 24h default.
    * @param {Function} [opts.resolveWebhookUrl] - Injection seam for tests;
    *   defaults to the env > 0600-credentials.json resolver.
    * @param {Function} [opts.sleepImpl] - Injection seam for tests (429/backoff
@@ -169,6 +184,7 @@ export class DiscordWebhookSink extends NotificationSink {
     errorColor = DEFAULT_ERROR_COLOR,
     updateThrottleMs = 15_000,
     heartbeatIntervalMs = 300_000,
+    pruneAfterMs = DEFAULT_PRUNE_AFTER_MS,
     // Cached by default (#5427 review): isConfigured() is probed per
     // notification; the cache only re-reads credentials.json when its
     // mtime/size/mode or the env var changes.
@@ -187,6 +203,7 @@ export class DiscordWebhookSink extends NotificationSink {
     if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs < 0) heartbeatIntervalMs = 300_000
     if (heartbeatIntervalMs > 0 && heartbeatIntervalMs < 10_000) heartbeatIntervalMs = 300_000
     this._heartbeatIntervalMs = heartbeatIntervalMs
+    this._pruneAfterMs = Number.isFinite(pruneAfterMs) && pruneAfterMs >= 0 ? pruneAfterMs : DEFAULT_PRUNE_AFTER_MS
     this._resolveWebhookUrl = resolveWebhookUrl
     this._sleep = sleepImpl
     this._now = now
@@ -239,15 +256,45 @@ export class DiscordWebhookSink extends NotificationSink {
    * over cached copies.
    */
   _loadState() {
+    let store = { version: 1, projects: {} }
     try {
       const data = JSON.parse(readFileSync(this._resolvedStatePath(), 'utf-8'))
       if (data && typeof data === 'object' && data.projects && typeof data.projects === 'object') {
-        return { version: 1, projects: data.projects }
+        store = { version: 1, projects: data.projects }
       }
     } catch {
       // Missing or corrupt — start fresh; the next successful send rewrites it.
     }
-    return { version: 1, projects: {} }
+    // #5429/#5434: retention sweep on every load — the first load after init
+    // doubles as the startup sweep, and every send/heartbeat afterwards keeps
+    // the store (and the heartbeat's per-tick work) bounded to live projects.
+    // Persisting here reuses the atomic 0600 path, so the pruned file is
+    // durable even when the caller's own persist never fires (throttled
+    // sends, no-op heartbeat ticks).
+    if (this._pruneStale(store)) this._persistState(store)
+    return store
+  }
+
+  /**
+   * Drop entries untouched for longer than the retention (and entries with
+   * no usable lastUpdateTs — corrupt slots must not accumulate forever).
+   * The Discord message is deliberately NOT deleted: a pruned entry's last
+   * embed (typically a final offline one) stays in the channel as a record;
+   * chroxy just stops tracking and refreshing it. Returns true when the
+   * store was mutated. Disabled when pruneAfterMs is 0.
+   */
+  _pruneStale(store) {
+    if (this._pruneAfterMs === 0) return false
+    const now = this._now()
+    let pruned = false
+    for (const [project, entry] of Object.entries(store.projects)) {
+      const last = entry?.lastUpdateTs
+      if (!Number.isFinite(last) || now - last > this._pruneAfterMs) {
+        delete store.projects[project]
+        pruned = true
+      }
+    }
+    return pruned
   }
 
   /** Atomic persist (temp+rename, 0600) — mirrors how push.js persists tokens. */
@@ -580,7 +627,14 @@ export class DiscordWebhookSink extends NotificationSink {
     this._heartbeatTimer.unref?.()
   }
 
-  /** One heartbeat pass: refresh each tracked project's embed in place. */
+  /**
+   * One heartbeat pass: refresh each LIVE project's embed in place.
+   * Offline entries are skipped (#5434) — the offline embed is final, and
+   * re-PATCHing it would both keep its elapsed-time footer counting up
+   * forever and spend a Discord call per dead project per tick. Stale
+   * entries never even reach the loop: _loadState prunes them, so the
+   * tick's work is bounded to live projects.
+   */
   async _heartbeatTick() {
     const webhookUrl = this._configuredUrl()
     if (!webhookUrl) return
@@ -588,7 +642,7 @@ export class DiscordWebhookSink extends NotificationSink {
     const store = this._loadState()
     let mutated = false
     for (const [project, entry] of Object.entries(store.projects)) {
-      if (!entry?.messageId) continue
+      if (!entry?.messageId || entry.state === 'offline') continue
       try {
         const res = await this._discordFetch(`${base}/messages/${entry.messageId}`, {
           method: 'PATCH',

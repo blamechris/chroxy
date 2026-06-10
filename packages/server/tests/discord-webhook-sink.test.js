@@ -654,10 +654,17 @@ describe('config — notifications.discord block (#5413)', () => {
           errorColor: 15158332,
           updateThrottleMs: 15000,
           heartbeatIntervalMs: 300000,
+          pruneAfterMs: 86400000,
         },
       },
     })
     assert.equal(result.valid, true, JSON.stringify(result.warnings))
+  })
+
+  it('warns on an invalid pruneAfterMs (value warning, never fatal)', () => {
+    const result = validateConfig({ notifications: { discord: { pruneAfterMs: -1 } } })
+    assert.ok(result.warnings.some((w) => w.includes('pruneAfterMs')))
+    assert.ok(!result.warnings.some((w) => w.startsWith('Invalid type')))
   })
 
   it('does not flag notifications as an unknown key', () => {
@@ -822,5 +829,143 @@ describe('DiscordWebhookSink — online/offline lifecycle (#5413 Phase 3)', () =
     const calls = scriptFetch()
     assert.equal(await sink.send({ category: 'mystery', title: 't', body: 'b', data: {} }), true)
     assert.equal(calls.length, 0)
+  })
+})
+
+// #5429 / #5434 — stale-entry pruning. Entries in discord-webhook-state.json
+// accumulated forever (one per project key / session id), and the heartbeat
+// PATCHed every tracked entry — including final `offline` embeds —
+// indefinitely. Pins:
+//   - the heartbeat skips offline entries (the offline embed is final)
+//   - entries untouched longer than `pruneAfterMs` are dropped at load time
+//     (the startup sweep is the first load after init) and the pruned store
+//     persists via the same atomic 0600 path
+//   - the Discord message is KEPT (no DELETE) — only the tracking stops
+//   - retention is configurable; 0 disables; fresh entries are untouched
+describe('DiscordWebhookSink — stale-entry pruning (#5429 / #5434)', () => {
+  const DAY_MS = 86_400_000
+  const online = (data = {}) => ({
+    category: 'session_online',
+    title: 'Session online',
+    body: 'External session started',
+    data: { project: 'proj1', ...data },
+  })
+  const offline = (data = {}) => ({
+    category: 'session_offline',
+    title: 'Session offline',
+    body: 'External session ended',
+    data: { project: 'proj1', ...data },
+  })
+
+  it('the heartbeat skips offline entries (the final embed is never re-PATCHed)', async () => {
+    const { sink, advance } = makeSink()
+    scriptFetch([
+      { status: 200, body: { id: 'm-proj1' } }, // POST proj1 online
+      { status: 200, body: { id: 'm-live' } },  // POST live online
+      { status: 200 },                          // PATCH proj1 offline
+    ])
+    await sink.send(online())
+    await sink.send(online({ project: 'live' }))
+    advance(60_000)
+    await sink.send(offline())
+    const calls = scriptFetch()
+    await sink._heartbeatTick()
+    const patches = calls.filter((c) => c.method === 'PATCH')
+    assert.equal(patches.length, 1, 'only the live project is refreshed')
+    assert.ok(patches[0].url.endsWith('/messages/m-live'))
+    assert.ok(!calls.some((c) => c.url.endsWith('/messages/m-proj1')), 'offline embed left alone')
+  })
+
+  it('an entry offline longer than the retention is pruned; the Discord message is kept (no DELETE)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }, { status: 200 }])
+    await sink.send(online())
+    advance(60_000)
+    await sink.send(offline())
+    assert.equal(readState(statePath).projects.proj1.state, 'offline')
+    advance(DAY_MS + 1)
+    const calls = scriptFetch([{ status: 200, body: { id: 'm-beta' } }])
+    await sink.send(idle({ sessionName: 'beta' }))
+    const { projects } = readState(statePath)
+    assert.equal(projects.proj1, undefined, 'offline entry pruned after the retention')
+    assert.equal(projects.beta.messageId, 'm-beta', 'fresh entry tracked normally')
+    assert.ok(!calls.some((c) => c.method === 'DELETE'), 'the final offline message is never deleted')
+  })
+
+  it('startup sweep: a new sink drops ancient and corrupt entries from a pre-existing state file', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'discord-sink-'))
+    const statePath = join(dir, 'state.json')
+    const NOW = 200_000_000
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      projects: {
+        ancient: { messageId: 'm-ancient', state: 'idle', lastUpdateTs: NOW - DAY_MS - 1, firstSeenTs: 1 },
+        corrupt: { messageId: 'm-corrupt', state: 'idle' }, // no lastUpdateTs at all
+        fresh: { messageId: 'm-fresh', state: 'online', lastUpdateTs: NOW - 10_000, firstSeenTs: NOW - 10_000 },
+      },
+    }))
+    const sink = new DiscordWebhookSink({
+      statePath,
+      resolveWebhookUrl: () => ({ url: WEBHOOK, source: 'env' }),
+      sleepImpl: async () => {},
+      heartbeatIntervalMs: 0,
+      now: () => NOW,
+    })
+    const calls = scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    const { projects } = readState(statePath)
+    assert.equal(projects.ancient, undefined, 'ancient entry swept')
+    assert.equal(projects.corrupt, undefined, 'entry without a usable lastUpdateTs swept')
+    assert.ok(projects.fresh, 'fresh entry survives the sweep')
+    const patches = calls.filter((c) => c.method === 'PATCH')
+    assert.equal(patches.length, 1, 'heartbeat work bounded to live entries')
+    assert.ok(patches[0].url.endsWith('/messages/m-fresh'))
+  })
+
+  it('the retention is configurable via pruneAfterMs', async () => {
+    const { sink, statePath, advance } = makeSink({ pruneAfterMs: 60_000 })
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(errored())
+    advance(30_000)
+    assert.ok(sink._loadState().projects.alpha, 'entry younger than the retention is untouched')
+    advance(30_001)
+    assert.equal(sink._loadState().projects.alpha, undefined, 'entry older than the custom retention pruned')
+    assert.equal(readState(statePath).projects.alpha, undefined, 'pruned store persisted')
+  })
+
+  it('entries younger than the default 24h retention are untouched', async () => {
+    const { sink, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }, { status: 200 }])
+    await sink.send(online())
+    advance(60_000)
+    await sink.send(offline())
+    advance(DAY_MS - 120_000) // ~23h58m after the offline PATCH — inside retention
+    assert.equal(sink._loadState().projects.proj1.state, 'offline', 'recent offline entry retained')
+  })
+
+  it('pruneAfterMs: 0 disables pruning entirely', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'discord-sink-'))
+    const statePath = join(dir, 'state.json')
+    const NOW = 200_000_000
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      projects: { ancient: { messageId: 'm1', state: 'idle', lastUpdateTs: NOW - 10 * DAY_MS } },
+    }))
+    const sink = new DiscordWebhookSink({
+      statePath,
+      resolveWebhookUrl: () => ({ url: WEBHOOK, source: 'env' }),
+      sleepImpl: async () => {},
+      heartbeatIntervalMs: 0,
+      pruneAfterMs: 0,
+      now: () => NOW,
+    })
+    assert.ok(sink._loadState().projects.ancient, 'nothing pruned when disabled')
+  })
+
+  it('an invalid pruneAfterMs falls back to the default retention', () => {
+    const { sink } = makeSink({ pruneAfterMs: -5 })
+    assert.equal(sink._pruneAfterMs, DAY_MS)
+    const { sink: sink2 } = makeSink({ pruneAfterMs: 'soon' })
+    assert.equal(sink2._pruneAfterMs, DAY_MS)
   })
 })

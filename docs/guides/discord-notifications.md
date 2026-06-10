@@ -88,7 +88,8 @@ The non-secret knobs live in `~/.chroxy/config.json` under
       "permissionColor": 16753920,
       "errorColor": 15158332,
       "updateThrottleMs": 15000,
-      "heartbeatIntervalMs": 300000
+      "heartbeatIntervalMs": 300000,
+      "pruneAfterMs": 86400000
     }
   }
 }
@@ -113,7 +114,13 @@ The non-secret knobs live in `~/.chroxy/config.json` under
 - **`updateThrottleMs`** — minimum gap between same-state routine edits per
   project (state *changes* always go out immediately).
 - **`heartbeatIntervalMs`** — how often the elapsed-time footer refreshes.
-  `0` disables the refresh; minimum `10000`.
+  `0` disables the refresh; minimum `10000`. Only *live* embeds are
+  refreshed — an offline embed is final and is never re-PATCHed.
+- **`pruneAfterMs`** — how long a project entry may sit untouched in the
+  state file before chroxy stops tracking it (default `86400000` / 24h;
+  `0` disables pruning). Pruning only drops the bookkeeping entry — the
+  last Discord message (typically the final offline embed) stays in the
+  channel as a record.
 
 See [packages/server/CONFIG.md](../../packages/server/CONFIG.md#discord-notifications-notificationsdiscord)
 for the full key reference.
@@ -123,7 +130,9 @@ for the full key reference.
 Status-message bookkeeping (message id, current state, timestamps per
 project) persists in `~/.chroxy/discord-webhook-state.json`, written
 atomically. Deleting the file is safe — the next event posts a fresh status
-message.
+message. Entries untouched for longer than `pruneAfterMs` (24h by default)
+are swept automatically — on startup and on every subsequent load — so the
+file stays bounded even under heavy project/session rotation.
 
 ## External sessions via `POST /api/events`
 
