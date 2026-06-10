@@ -57,6 +57,14 @@ const API_KEY_PATTERNS = [
   // `eyJ` (base64 of `{"`), which makes this specific enough to avoid matching
   // ordinary dotted tokens. Length floors keep it off short `a.b.c` strings.
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // #5413: Discord webhook URLs. The token segment after the numeric webhook
+  // id grants post/edit/delete on the channel, so the URL is a credential.
+  // Covers discordapp.com (legacy), ptb/canary builds, and optional /vN/ API
+  // version segments; anything after the token (e.g. /messages/<id>) is left
+  // intact. Real webhook tokens are 60+ chars; the 20 floor keeps doc
+  // placeholders like .../webhooks/123/abc readable while catching any
+  // plausible real token.
+  /\bhttps:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[A-Za-z0-9_-]{20,}/g,
 ]
 
 /**

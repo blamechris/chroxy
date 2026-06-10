@@ -228,6 +228,15 @@ if (fs.promises) {
 // `_setCredentialKeychainForTests(...)`, which takes precedence over this flag.
 process.env.CHROXY_CRED_DISABLE_KEYCHAIN = '1'
 
+// --- Scrub Discord webhook env -------------------------------------------------
+// #5413: PushManager always registers a DiscordWebhookSink that activates the
+// moment CHROXY_DISCORD_WEBHOOK_URL resolves. A developer with the webhook
+// exported in their shell would otherwise have every PushManager-touching test
+// posting to their REAL Discord channel — the network analogue of the home-write
+// contamination above. Tests that exercise the env path set the var themselves
+// in beforeEach and restore it after.
+delete process.env.CHROXY_DISCORD_WEBHOOK_URL
+
 // --- Diagnostic ---------------------------------------------------------------
 // Quiet by default; set CHROXY_TEST_SANDBOX_DEBUG=1 to see the protected
 // paths once per process.

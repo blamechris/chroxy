@@ -717,6 +717,17 @@ export async function startCliServer(config) {
     // #4541: notification preferences persistence. Co-located in
     // ~/.chroxy alongside push-tokens.json so cleanup is one step.
     prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
+    // #5413 Phase 2: Discord status-embed sink. Off by default — only
+    // active when a webhook URL resolves from CHROXY_DISCORD_WEBHOOK_URL
+    // or ~/.chroxy/credentials.json (0600). Non-secret knobs (bot name,
+    // per-project embed colors, throttle/heartbeat intervals) come from
+    // the `notifications.discord` config block; the status-message state
+    // (message ids, current state) persists alongside the other
+    // notification state in ~/.chroxy.
+    discord: {
+      statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
+      ...(config.notifications?.discord || {}),
+    },
   })
 
   // #5368 slice (a): wire the session_event → push path now that pushManager
@@ -961,6 +972,7 @@ export async function startCliServer(config) {
     bonjourInstance,
     tokenManager,
     pairingManager,
+    pushManager,
     getWorktreeReapTimer: () => worktreeReapTimer,
     emergencyCleanupSync,
     removeConnectionInfo,

@@ -9,10 +9,15 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PushNotificationHandler } from '../src/server-cli/push-notification-handler.js'
 
-function makeFakes({ hasTokens = true, sendResult = true, wsServer = undefined } = {}) {
+function makeFakes({ hasTokens = true, hasConfiguredSinks, sendResult = true, wsServer = undefined } = {}) {
   const sends = []
+  // #5413 Phase 2: the handler gates on the sink-agnostic
+  // hasConfiguredSinks(); `hasConfiguredSinks` defaults to mirroring
+  // `hasTokens` so the pre-existing Expo-only cases keep their meaning.
+  const sinksConfigured = hasConfiguredSinks ?? hasTokens
   const pushManager = {
     hasTokens,
+    hasConfiguredSinks: () => sinksConfigured,
     send(category, title, body, data) {
       sends.push({ category, title, body, data })
       return Promise.resolve(sendResult)
@@ -138,11 +143,50 @@ describe('PushNotificationHandler — active-viewer + token gating', () => {
     assert.ok(logs.debug.some((m) => m.includes('active viewers present')))
   })
 
-  it('sends nothing (and debug-logs) when there are no registered tokens', () => {
+  it('sends nothing (and debug-logs) when no sink is configured', () => {
     const { sessionManager, sends, logs } = makeFakes({ hasTokens: false, wsServer: fakeWsServer() })
     sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: {} })
     assert.equal(sends.length, 0)
-    assert.ok(logs.debug.some((m) => m.includes('no registered tokens')))
+    assert.ok(logs.debug.some((m) => m.includes('no configured notification sinks')))
+  })
+})
+
+describe('PushNotificationHandler — sink-agnostic gate (#5413 Phase 2)', () => {
+  it('a Discord-only setup (no Expo tokens, sink configured) still gets the idle push', () => {
+    const ws = fakeWsServer({ authenticatedClientCount: 0 })
+    const { sessionManager, sends } = makeFakes({ hasTokens: false, hasConfiguredSinks: true, wsServer: ws })
+    sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: {} })
+    assert.equal(sends.length, 1, 'hasTokens=false must not suppress when another sink is configured')
+    assert.equal(sends[0].category, 'activity_update')
+  })
+
+  it('a Discord-only setup gets error and waiting pushes too', () => {
+    const { sessionManager, sends } = makeFakes({ hasTokens: false, hasConfiguredSinks: true, wsServer: fakeWsServer() })
+    sessionManager.emit('session_event', { sessionId: 's1', event: 'error', data: { message: 'boom' } })
+    sessionManager.emit('session_event', { sessionId: 's1', event: 'permission_request', data: { tool: 'Bash' } })
+    assert.deepEqual(sends.map((s) => s.category), ['activity_error', 'activity_waiting'])
+  })
+
+  it('falls back to hasTokens for a legacy pushManager double without hasConfiguredSinks', () => {
+    const sends = []
+    const pushManager = {
+      hasTokens: true,
+      send(category, title, body, data) {
+        sends.push({ category, title, body, data })
+        return Promise.resolve(true)
+      },
+    }
+    const sessionManager = new EventEmitter()
+    sessionManager.getSession = () => ({ name: 'n' })
+    const handler = new PushNotificationHandler({
+      sessionManager,
+      pushManager,
+      getWsServer: () => fakeWsServer({ authenticatedClientCount: 0 }),
+      logger: { debug: () => {}, warn: () => {}, error: () => {}, info: () => {} },
+    })
+    handler.start()
+    sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: {} })
+    assert.equal(sends.length, 1)
   })
 })
 

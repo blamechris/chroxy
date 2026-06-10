@@ -23,7 +23,7 @@ export class PushNotificationHandler {
   /**
    * @param {{
    *   sessionManager: import('events').EventEmitter & { getSession: Function },
-   *   pushManager: { hasTokens: boolean, send: Function },
+   *   pushManager: { hasConfiguredSinks: () => boolean, send: Function },
    *   getWsServer: () => ({ authenticatedClientCount: number, hasActiveViewersForSession: Function } | undefined),
    *   logger: { info: Function, warn: Function, error: Function, debug: Function },
    * }} deps
@@ -66,6 +66,14 @@ export class PushNotificationHandler {
     const sessionManager = this._sessionManager
     const wsServer = this._getWsServer()
 
+    // #5413 Phase 2: gate on "any sink configured" rather than the
+    // Expo-only `hasTokens` — a Discord-only setup must not have its
+    // notifications suppressed here, upstream of the pipeline. The
+    // `hasTokens` fallback keeps legacy fakes/PushManager doubles working.
+    const hasSinks = typeof pushManager.hasConfiguredSinks === 'function'
+      ? pushManager.hasConfiguredSinks()
+      : pushManager.hasTokens
+
     if (event === 'ready') {
       log.info(`Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
     } else if (event === 'error') {
@@ -74,7 +82,7 @@ export class PushNotificationHandler {
       // the forwarding path (ws-forwarding.js → EventNormalizer). Don't also broadcastError()
       // here — that produces a duplicate server_error message on every client.
       // Activity update: error (immediate)
-      if (pushManager.hasTokens) {
+      if (hasSinks) {
         const sessionName = sessionManager.getSession(sessionId)?.name
         pushManager.send('activity_error', 'Session error', data.message, {
           sessionId,
@@ -118,14 +126,15 @@ export class PushNotificationHandler {
 
     // Push notifications for actionable events only (#2612)
     // Intermediate events (stream_start, tool_start) no longer trigger pushes.
-    if (!pushManager.hasTokens && (event === 'result' || event === 'permission_request' || event === 'user_question')) {
-      // #3866 diagnostic — silently dropping a push because no client ever
-      // registered a push token is the most common "I'm getting nothing on
-      // Android" failure mode. Surface it at debug so operators can confirm
-      // registration happened on their last connect.
-      log.debug(`Push suppressed for ${event} on ${sessionId}: no registered tokens`)
+    if (!hasSinks && (event === 'result' || event === 'permission_request' || event === 'user_question')) {
+      // #3866 diagnostic — silently dropping a push because no delivery
+      // channel is configured (no push token ever registered, no Discord
+      // webhook) is the most common "I'm getting nothing" failure mode.
+      // Surface it at debug so operators can confirm registration happened
+      // on their last connect.
+      log.debug(`Push suppressed for ${event} on ${sessionId}: no configured notification sinks`)
     }
-    if (pushManager.hasTokens) {
+    if (hasSinks) {
       if (event === 'result') {
         // Session idle push (#3866). Gate on noActiveViewers so the user
         // isn't pinged while actively chatting with this session. The

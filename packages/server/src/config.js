@@ -94,6 +94,18 @@ const CONFIG_SCHEMA = {
   showToken: 'boolean',
   logFormat: 'string',
   environments: 'object',
+  // #5413: notification-sink settings. Currently one sub-block,
+  // `notifications.discord`, carrying the Discord status-embed sink's
+  // non-secret knobs: `botName` (string), `colors` (project → decimal
+  // 24-bit RGB map for the embed sidebar), `defaultColor` /
+  // `permissionColor` / `errorColor` (decimal RGB), `updateThrottleMs`
+  // (min interval between same-state routine embed updates) and
+  // `heartbeatIntervalMs` (elapsed-time refresh; 0 disables). The webhook
+  // URL itself is a SECRET and deliberately NOT a config key — it lives in
+  // CHROXY_DISCORD_WEBHOOK_URL or ~/.chroxy/credentials.json (0600); see
+  // discord-credentials.js. Documented in CONFIG.md +
+  // docs/guides/discord-notifications.md.
+  notifications: 'object',
   // #5158: worktree garbage-collection. `{ autoReap: boolean }` — when true,
   // the server reclaims orphaned, dead-pid-locked agent worktrees on startup
   // (clean trees only, never --force). Defaults to off; the `chroxy worktree
@@ -388,6 +400,80 @@ function validateRancherBlock(rancher, warnings) {
   }
 }
 
+/** #5413: decimal 24-bit RGB range for Discord embed sidebar colors. */
+const MAX_DISCORD_COLOR = 16777215
+
+/**
+ * #5413: validate the `notifications.discord` block (the Discord
+ * status-embed sink's non-secret knobs). Every field is optional; only
+ * fields actually present are checked. The webhook URL is a secret and
+ * does NOT belong here — a `webhookUrl` key in this block gets a pointed
+ * warning steering the operator to the credential paths.
+ *
+ * All warnings use the "Invalid value" wording so a cosmetic typo never
+ * escalates to a fatal startup error (the CLI layer treats "Invalid type"
+ * prefixes as fatal); the sink clamps bad values to defaults at runtime.
+ *
+ * @param {*} discord - The `notifications.discord` value
+ * @param {string[]} warnings - Accumulator the caller logs/returns
+ */
+function validateDiscordNotificationsBlock(discord, warnings) {
+  if (typeof discord !== 'object' || discord === null || Array.isArray(discord)) {
+    warnings.push(`Invalid value for 'notifications.discord': expected object, got ${Array.isArray(discord) ? 'array' : typeof discord}`)
+    return
+  }
+
+  // Secrets do not belong in config.json (not permission-restricted, echoed
+  // in verbose output). Warn loudly and point at the right place.
+  for (const key of ['webhookUrl', 'webhook', 'url']) {
+    if (Object.prototype.hasOwnProperty.call(discord, key)) {
+      warnings.push(
+        `'notifications.discord.${key}' is not supported: the webhook URL is a secret — set CHROXY_DISCORD_WEBHOOK_URL or add "discordWebhookUrl" to ~/.chroxy/credentials.json (mode 0600) instead`,
+      )
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(discord, 'botName') && (typeof discord.botName !== 'string' || discord.botName.length === 0)) {
+    warnings.push(`Invalid value for 'notifications.discord.botName': expected a non-empty string`)
+  }
+
+  const isValidColor = (v) => Number.isInteger(v) && v >= 0 && v <= MAX_DISCORD_COLOR
+  for (const key of ['defaultColor', 'permissionColor', 'errorColor']) {
+    if (Object.prototype.hasOwnProperty.call(discord, key) && !isValidColor(discord[key])) {
+      warnings.push(`Invalid value for 'notifications.discord.${key}': expected an integer 0-${MAX_DISCORD_COLOR} (decimal 24-bit RGB), got ${JSON.stringify(discord[key])}`)
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(discord, 'colors')) {
+    const colors = discord.colors
+    if (typeof colors !== 'object' || colors === null || Array.isArray(colors)) {
+      warnings.push(`Invalid value for 'notifications.discord.colors': expected an object mapping project name → decimal color`)
+    } else {
+      for (const [project, value] of Object.entries(colors)) {
+        if (!isValidColor(value)) {
+          warnings.push(`Invalid value for 'notifications.discord.colors.${project}': expected an integer 0-${MAX_DISCORD_COLOR} (decimal 24-bit RGB), got ${JSON.stringify(value)}`)
+        }
+      }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(discord, 'updateThrottleMs')) {
+    const v = discord.updateThrottleMs
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      warnings.push(`Invalid value for 'notifications.discord.updateThrottleMs': expected a number >= 0, got ${JSON.stringify(v)}`)
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(discord, 'heartbeatIntervalMs')) {
+    const v = discord.heartbeatIntervalMs
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      warnings.push(`Invalid value for 'notifications.discord.heartbeatIntervalMs': expected a number >= 0 (0 disables), got ${JSON.stringify(v)}`)
+    } else if (v !== 0 && v < 10_000) {
+      warnings.push(`Invalid value for 'notifications.discord.heartbeatIntervalMs': ${v} (minimum 10000 / 10s; set 0 to disable — the sink falls back to its default)`)
+    }
+  }
+}
+
 /**
  * Return a copy of config with sensitive fields replaced by '***'.
  * Use this whenever the config object is serialized to logs or debug output.
@@ -670,6 +756,19 @@ export function validateConfig(config, verbose = false) {
           warnings.push(`Invalid value for 'worktreeGc.reapIntervalMs': expected a positive number, got ${typeof v === 'number' ? v : typeof v}`)
         }
       }
+    }
+  }
+
+  // #5413: notifications block. Only `notifications.discord` is recognised
+  // today. All warnings here are "Invalid value" (not "Invalid type") so a
+  // typo in a cosmetic color can never become a fatal startup error via the
+  // loadAndMergeConfig "Invalid type" escalation — the sink clamps bad
+  // values to its defaults at runtime.
+  if (config.notifications !== undefined) {
+    if (typeof config.notifications !== 'object' || config.notifications === null || Array.isArray(config.notifications)) {
+      warnings.push(`Invalid type for 'notifications': expected object, got ${Array.isArray(config.notifications) ? 'array' : typeof config.notifications}`)
+    } else if (config.notifications.discord !== undefined) {
+      validateDiscordNotificationsBlock(config.notifications.discord, warnings)
     }
   }
 

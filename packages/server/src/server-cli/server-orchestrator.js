@@ -31,6 +31,7 @@ export class ServerOrchestrator {
     bonjourInstance,
     tokenManager,
     pairingManager,
+    pushManager = null,
     getWorktreeReapTimer,
     emergencyCleanupSync,
     removeConnectionInfo = defaultRemoveConnectionInfo,
@@ -47,6 +48,7 @@ export class ServerOrchestrator {
     this._bonjourInstance = bonjourInstance
     this._tokenManager = tokenManager
     this._pairingManager = pairingManager
+    this._pushManager = pushManager
     this._getWorktreeReapTimer = typeof getWorktreeReapTimer === 'function' ? getWorktreeReapTimer : () => null
     this._emergencyCleanupSync = emergencyCleanupSync
     this._removeConnectionInfo = removeConnectionInfo
@@ -81,6 +83,11 @@ export class ServerOrchestrator {
     }
     if (this._tokenManager) this._tokenManager.destroy()
     if (this._pairingManager) this._pairingManager.destroy()
+    // #5413: stop the Discord sink's heartbeat. It's unref'd so it wouldn't
+    // block exit, but clearing it avoids a refresh PATCH racing shutdown.
+    if (this._pushManager) {
+      try { this._pushManager.destroy?.() } catch {}
+    }
     // #5326 (WP-5.4): stop the periodic worktree reaper. It's unref'd so it
     // wouldn't block exit, but clearing it avoids a sweep racing shutdown.
     const worktreeReapTimer = this._getWorktreeReapTimer()

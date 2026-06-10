@@ -36,6 +36,7 @@ import {
   MAX_RETRIES,
   BACKOFF_BASE_MS,
 } from './notifications/expo-push-sink.js'
+import { DiscordWebhookSink } from './notifications/discord-webhook-sink.js'
 
 const log = createLogger('push')
 
@@ -66,7 +67,18 @@ const RATE_LIMITS = {
 export { fetchWithRetry, FETCH_TIMEOUT_MS, MAX_RETRIES, BACKOFF_BASE_MS }
 
 export class PushManager {
-  constructor({ storagePath, prefsPath } = {}) {
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.storagePath] - Expo push-token persistence file
+   * @param {string} [opts.prefsPath] - Notification-prefs persistence file
+   * @param {object} [opts.discord] - DiscordWebhookSink options (#5413
+   *   Phase 2): `statePath` + the config-surface knobs (botName, colors,
+   *   throttle/heartbeat intervals). The sink is ALWAYS registered but is
+   *   off by default — `isConfigured()` is true only when a webhook URL
+   *   resolves from CHROXY_DISCORD_WEBHOOK_URL or the 0600
+   *   ~/.chroxy/credentials.json, so unconfigured setups never touch it.
+   */
+  constructor({ storagePath, prefsPath, discord = {} } = {}) {
     // #4541: notification-prefs path. Optional — when omitted PushManager
     // operates entirely in-memory (callers like one-off tests don't need
     // to write to disk). When set, getPrefs / setPrefs round-trip
@@ -83,6 +95,36 @@ export class PushManager {
     this._expoSink = new ExpoPushSink({ storagePath })
     this._sinks = new SinkRegistry({ logger: log })
     this._sinks.register(this._expoSink)
+    // #5413 Phase 2: the Discord status-embed sink. Registered alongside
+    // Expo, gated on configuration via the registry's isConfigured() skip.
+    this._discordSink = new DiscordWebhookSink(discord)
+    this._sinks.register(this._discordSink)
+  }
+
+  /**
+   * True when at least one delivery channel is currently configured
+   * (Expo tokens registered, Discord webhook URL present, ...). The
+   * sink-agnostic replacement for gating on the Expo-only `hasTokens`
+   * (#5413 Phase 2): a Discord-only setup must not have its notifications
+   * suppressed upstream of the pipeline.
+   */
+  hasConfiguredSinks() {
+    return this._sinks.hasConfigured()
+  }
+
+  /**
+   * Release sink resources (today: the Discord heartbeat interval). Safe
+   * to call multiple times. Call when discarding a PushManager before
+   * process exit (e.g. the supervisor's per-send instances).
+   */
+  destroy() {
+    for (const sink of this._sinks.sinks) {
+      try {
+        sink.destroy?.()
+      } catch (err) {
+        log.error(`Sink '${sink.name}' threw during destroy: ${err?.message || err}`)
+      }
+    }
   }
 
   /**
