@@ -406,6 +406,19 @@ describe('DiscordWebhookSink — status-message state machine', () => {
     assert.ok(embed.timestamp)
   })
 
+  it('the #5438-enriched idle body rides notification.body into the Status field', async () => {
+    // The ready-for-input enrichment is composed upstream (PushNotificationHandler
+    // via composeReadyNotificationBody) and rides notification.body — this pins
+    // that the status embed surfaces it without any sink special-casing.
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    const enriched = 'Ready for input — still watching: deploy monitor +1 more'
+    await sink.send({ ...idle(), body: enriched })
+    const embed = JSON.parse(calls[0].body).embeds[0]
+    assert.ok(embed.title.includes('Ready for input'))
+    assert.ok(embed.fields.some((f) => f.name === 'Status' && f.value === enriched))
+  })
+
   it('uses the permission color for needs-approval regardless of project overrides', async () => {
     const calls = scriptFetch()
     const { sink } = makeSink({ colors: { alpha: 1752220 } })

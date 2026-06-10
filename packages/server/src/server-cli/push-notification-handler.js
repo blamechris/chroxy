@@ -19,6 +19,11 @@
 // logger) make this unit-testable with fakes — the biggest coverage win of the
 // split, since the inline version was impossible to exercise in isolation.
 
+import {
+  composeReadyNotificationBody,
+  readBackgroundTaskSnapshot,
+} from '../notifications/ready-body.js'
+
 export class PushNotificationHandler {
   /**
    * @param {{
@@ -146,7 +151,15 @@ export class PushNotificationHandler {
           const allowed = noClients || noActiveViewers
           const alreadyNotified = this._idleNotifiedSessions.has(sessionId)
           if (allowed && !alreadyNotified) {
-            const sessionName = sessionManager.getSession(sessionId)?.name
+            const session = sessionManager.getSession(sessionId)
+            const sessionName = session?.name
+            // #5438 — enrich the idle body with the #5436 background-task
+            // snapshot ("still watching: <task>" / "resumes at HH:MM").
+            // Absent snapshot (session type doesn't expose one, or the
+            // transcript scan degraded) = no information → body unchanged.
+            // The body rides the pipeline to every sink, so the Expo push
+            // and the Discord status embed both pick this up.
+            const body = composeReadyNotificationBody(readBackgroundTaskSnapshot(session))
             // #3870: latch SYNCHRONOUSLY before send() returns its promise
             // so a second `result` arriving in the same tick can't double-
             // fire (passes the !alreadyNotified gate twice). `send()` now
@@ -159,7 +172,7 @@ export class PushNotificationHandler {
             // *and* permanently latched until the session went busy again.
             this._idleNotifiedSessions.add(sessionId)
             Promise.resolve(
-              pushManager.send('activity_update', 'Session idle', 'Ready for next message', {
+              pushManager.send('activity_update', 'Session idle', body, {
                 sessionId,
                 sessionName,
                 state: 'idle',
