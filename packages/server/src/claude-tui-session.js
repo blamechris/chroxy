@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
+import { performance } from 'node:perf_hooks'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
@@ -461,7 +462,23 @@ export class ClaudeTuiSession extends BaseSession {
   constructor(opts = {}) {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-tui' }))
     // ClaudeTuiSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
-    const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId } = opts
+    const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId, monotonicNow } = opts
+
+    // #5332: monotonic clock for turn-duration logging and watchdog poll-loop
+    // deadlines (hook poll, waitForPrompt, PTY write). Wall-clock (Date.now())
+    // jumps backward on laptop sleep / NTP step, which can make a `while
+    // (Date.now() - start < timeout)` deadline never expire (hang) or expire
+    // early (false stall). performance.now() is monotonic — immune to both.
+    // Truncated to integer ms so it is a drop-in for the Date.now() deltas the
+    // instrumentation logs already print. Injectable so tests can step the
+    // clock backward and prove the watchdogs don't false-fire. Date.now() is
+    // retained ONLY where a real wall-clock epoch is required (file mtime
+    // comparison, timestamp payloads to clients, log-throttle bookkeeping).
+    // Truncate at the seam (not just the default) so the integer-ms invariant
+    // holds for an injected clock too — `performance.now()` and a test clock
+    // may both be fractional.
+    const rawMonotonicNow = typeof monotonicNow === 'function' ? monotonicNow : () => performance.now()
+    this._monotonicNowFn = () => Math.trunc(rawMonotonicNow())
 
     this._port = port || null
     // #4044: when true, spawn `claude` with --dangerously-skip-permissions
@@ -792,6 +809,11 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  // #5332: monotonic now (integer ms). Used for every turn-duration delta and
+  // watchdog poll-loop deadline so a wall-clock jump can't hang or false-fire
+  // them. See the _monotonicNowFn note in the constructor.
+  _nowMonotonic() { return this._monotonicNowFn() }
+
   // Tail length to keep + length to include in error diagnostics.
   static get PTY_TAIL_BYTES() { return 4096 }
   static get PTY_TAIL_DIAGNOSTIC_BYTES() { return 1024 }
@@ -919,6 +941,8 @@ export class ClaudeTuiSession extends BaseSession {
         // dirs a grace window before reaping so we can't delete one mid-creation;
         // a genuinely orphaned dir is older than the grace and still gets swept.
         try {
+          // #5332: wall-clock deliberately — compared against the filesystem
+          // mtime (also wall-clock). A monotonic clock would be meaningless here.
           if (Date.now() - statSync(dir).mtimeMs < ClaudeTuiSession.SINK_SWEEP_GRACE_MS) {
             kept++
             continue
@@ -1529,9 +1553,9 @@ export class ClaudeTuiSession extends BaseSession {
     // whether the call returned promptly (write stage stalled) or
     // burned its 5s timeout (probe degraded). Routes via `_activeTurn`
     // so the line is sourced from the same turn the caller is logging.
-    const startMs = Date.now()
+    const startMs = this._nowMonotonic()
     const finish = (ready) => {
-      const elapsedMs = Date.now() - startMs
+      const elapsedMs = this._nowMonotonic() - startMs
       if (this._activeTurn) {
         this._activeTurn.waitForPromptMs = elapsedMs
         this._activeTurn.waitForPromptReady = ready
@@ -1557,7 +1581,7 @@ export class ClaudeTuiSession extends BaseSession {
       if (status !== null) sawStatus = true
       return status !== null && status !== 'busy'
     }
-    while (Date.now() - startMs < timeoutMs) {
+    while (this._nowMonotonic() - startMs < timeoutMs) {
       if (this._ptyExited) {
         this._lastProbeSawStatus = sawStatus
         return finish(false)
@@ -1686,7 +1710,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._messageCounter += 1
     const messageId = `${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId
-    const startedAt = Date.now()
+    const startedAt = this._nowMonotonic()
     this._activeTurn = { messageId, startedAt, aborted: false, synthSeq: 0 }
     // Wedge instrumentation (#4678 follow-up): entry log for grep'ing
     // every turn from chroxy.log. Per-stage timings + completion get
@@ -1829,7 +1853,7 @@ export class ClaudeTuiSession extends BaseSession {
     // session-level _consumedFiles Set ensures we never re-process a file
     // that an earlier turn already handled.
     const HOOK_TIMEOUT_MS = this._hardTimeoutMs
-    const pollStart = Date.now()
+    const pollStart = this._nowMonotonic()
     let stopPayload = null
     // Wedge instrumentation (#4678 follow-up): track loop progress so
     // a wedge that manifests as "stuck waiting for stop-hook" produces
@@ -1926,7 +1950,7 @@ export class ClaudeTuiSession extends BaseSession {
       }
     }
 
-    while (Date.now() - pollStart < HOOK_TIMEOUT_MS) {
+    while (this._nowMonotonic() - pollStart < HOOK_TIMEOUT_MS) {
       if (this._activeTurn?.aborted) break
       if (this._ptyExited) break
       // _handleHardTimeout clears _isBusy; bail out cleanly if it fired.
@@ -1938,7 +1962,7 @@ export class ClaudeTuiSession extends BaseSession {
       // stop-hook, emit a progress line. Sized at 5s so a healthy
       // ~2-5s tool turn emits zero heartbeats while a wedge gets
       // logged every 5s with sink-dir state.
-      const now = Date.now()
+      const now = this._nowMonotonic()
       if (now - lastHeartbeatMs >= ClaudeTuiSession.HOOK_HEARTBEAT_MS) {
         lastHeartbeatMs = now
         let sinkFileCount = 0
@@ -1952,7 +1976,7 @@ export class ClaudeTuiSession extends BaseSession {
     // exit shape — whether it broke on stopPayload, abort, ptyExited,
     // !isBusy, or timeout. Pair with sendMessage's final summary to
     // reconstruct the wedge stage post-hoc.
-    log.info(`hookPoll exit (msg=${messageId} iters=${pollIters} elapsedMs=${Date.now() - pollStart} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'} aborted=${this._activeTurn?.aborted ? 'yes' : 'no'} ptyExited=${this._ptyExited ? 'yes' : 'no'} stillBusy=${this._isBusy ? 'yes' : 'no'})`)
+    log.info(`hookPoll exit (msg=${messageId} iters=${pollIters} elapsedMs=${this._nowMonotonic() - pollStart} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'} aborted=${this._activeTurn?.aborted ? 'yes' : 'no'} ptyExited=${this._ptyExited ? 'yes' : 'no'} stillBusy=${this._isBusy ? 'yes' : 'no'})`)
 
     if (!stopPayload) {
       let reason
@@ -1967,14 +1991,14 @@ export class ClaudeTuiSession extends BaseSession {
         // error. Just return without double-firing.
         return
       } else {
-        reason = `Stop hook timeout after ${Math.round((Date.now() - pollStart) / 1000)}s`
+        reason = `Stop hook timeout after ${Math.round((this._nowMonotonic() - pollStart) / 1000)}s`
       }
       const tail = this._outputTailDiagnostic()
       this._finishTurnError(tail ? `${reason}\nTUI output tail:\n${tail}` : reason, messageId)
       return
     }
 
-    const duration = Date.now() - startedAt
+    const duration = this._nowMonotonic() - startedAt
     const text = typeof stopPayload.last_assistant_message === 'string' ? stopPayload.last_assistant_message : ''
 
     // Deliver the response as a single stream burst so the dashboard renders
@@ -2083,11 +2107,11 @@ export class ClaudeTuiSession extends BaseSession {
     // the two — if the line never appears in the log, the wedge is in
     // here; if it appears with completed=true, the wedge is downstream
     // (hook poll loop, or claude TUI itself).
-    const writeStartMs = Date.now()
+    const writeStartMs = this._nowMonotonic()
     const codePointCount = [...text].length
     const byteLength = Buffer.byteLength(text, 'utf8')
     const finish = (path, completed) => {
-      const elapsedMs = Date.now() - writeStartMs
+      const elapsedMs = this._nowMonotonic() - writeStartMs
       if (this._activeTurn) {
         this._activeTurn.writePath = path
         this._activeTurn.writeMs = elapsedMs
@@ -2396,7 +2420,8 @@ export class ClaudeTuiSession extends BaseSession {
               toolUseId,
               questionCount,
               reason: 'multi_question',
-              timestamp: Date.now(),
+              timestamp: Date.now(), // #5332: wall-clock epoch — a payload field for clients, not a duration
+
             })
           } catch (err) {
             ;(this._log || log).warn(`multi_question_intervention listener threw (continuing): ${err?.message || err}`)
@@ -2445,7 +2470,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (toolName === 'AskUserQuestion' && toolUseId && this._multiQuestionSubmitAt.has(toolUseId)) {
       const submitAt = this._multiQuestionSubmitAt.get(toolUseId)
       this._multiQuestionSubmitAt.delete(toolUseId)
-      const deltaMs = Date.now() - submitAt
+      const deltaMs = this._nowMonotonic() - submitAt
       ;(this._log || log).info(`AskUserQuestion multi-question: Submit→PostToolUse=${deltaMs}ms (tool=${toolUseId}) — forensic for #4884 trailing-'\\r' verification`)
     }
     if (toolName === 'AskUserQuestion' && toolUseId) {
@@ -2531,7 +2556,7 @@ export class ClaudeTuiSession extends BaseSession {
       log.info(`sendMessage done (msg=none reason=${reason})`)
       return
     }
-    const duration = Date.now() - turn.startedAt
+    const duration = this._nowMonotonic() - turn.startedAt
     log.info(`sendMessage done (msg=${turn.messageId} reason=${reason} duration=${duration}` +
       ` waitForPromptMs=${turn.waitForPromptMs ?? 'n/a'} ready=${turn.waitForPromptReady ?? 'n/a'} sawStatus=${turn.waitForPromptSawStatus ?? 'n/a'}` +
       ` writePath=${turn.writePath ?? 'n/a'} writeMs=${turn.writeMs ?? 'n/a'} writeBytes=${turn.writeBytes ?? 'n/a'} writeCompleted=${turn.writeCompleted ?? 'n/a'})`)
@@ -2588,7 +2613,7 @@ export class ClaudeTuiSession extends BaseSession {
     // stream_end, leaving session-message-history._pendingStreams holding
     // the entry until destroy().
     const messageId = callerMessageId || this._currentMessageId
-    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
+    const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : 0
     if (messageId) this.emit('stream_end', { messageId })
     this.emit('error', { message })
     // #4072: subscription-billed → cost: null so SessionManager skips
@@ -2766,7 +2791,7 @@ export class ClaudeTuiSession extends BaseSession {
     }
     if (this._firstOutputTimeoutMs <= 0) return
     if (this._firstOutputDisarmed) return
-    this._firstOutputArmedAt = Date.now()
+    this._firstOutputArmedAt = this._nowMonotonic()
     this._firstOutputTimeout = setTimeout(() => {
       this._firstOutputTimeout = null
       this._handleFirstOutputTimeout()
@@ -2828,7 +2853,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._assertBusyHasMessageId('_handleHardTimeout')
     const friendly = formatIdleDuration(this._hardTimeoutMs)
     log.warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
-    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._hardTimeoutMs
+    const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : this._hardTimeoutMs
     // #4641: shared teardown helper. Flags preserve exact historical
     // behaviour — hard-timeout emits stream_end unconditionally (even if
     // messageId is null) and emits error BEFORE _emitResult; stream-stall
@@ -2876,7 +2901,7 @@ export class ClaudeTuiSession extends BaseSession {
     log.warn(
       `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
     )
-    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : this._streamStallTimeoutMs
+    const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : this._streamStallTimeoutMs
     // #5321 (WP-4.1) — a turn that stalled WITH a logged-out / expired-login
     // banner in its tail is an auth failure, not a generic stall. Upgrade the
     // error so mid-session expiry gives actionable `claude login` guidance
@@ -2933,12 +2958,12 @@ export class ClaudeTuiSession extends BaseSession {
     // surfaces from THIS path too.
     this._assertBusyHasMessageId('_handleFirstOutputTimeout')
     const elapsedMs = this._firstOutputArmedAt > 0
-      ? Date.now() - this._firstOutputArmedAt
+      ? this._nowMonotonic() - this._firstOutputArmedAt
       : this._firstOutputTimeoutMs
     const friendly = formatIdleDuration(this._firstOutputTimeoutMs)
     log.warn(`first-output watchdog fired (elapsedMs=${elapsedMs}) — claude TUI did not respond`)
     const duration = this._activeTurn
-      ? Date.now() - this._activeTurn.startedAt
+      ? this._nowMonotonic() - this._activeTurn.startedAt
       : this._firstOutputTimeoutMs
     // #5321 (WP-4.1) — upgrade to AUTH_REQUIRED when the pre-first-output
     // silence came WITH a logged-out / expired-login banner (e.g. an expired
@@ -3792,7 +3817,7 @@ export class ClaudeTuiSession extends BaseSession {
         if (item && typeof item === 'object' && item.type === 'mark') {
           // #4884 — record submit-time marker for the PostToolUse delta log.
           if (item.label === 'submit' && item.toolUseId) {
-            this._multiQuestionSubmitAt.set(item.toolUseId, Date.now())
+            this._multiQuestionSubmitAt.set(item.toolUseId, this._nowMonotonic())
           }
           continue
         }
@@ -3942,7 +3967,7 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _teardownAskUserQuestion(toolUseId, { synthResult, emitResultReason, errorCode, errorMessage }) {
     const messageId = this._currentMessageId
-    const duration = this._activeTurn ? Date.now() - this._activeTurn.startedAt : 0
+    const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : 0
 
     // #4691: surgical clear — drop ONLY the entry for the tool that
     // timed out. The other teardown sites (_finishTurnError, hard
