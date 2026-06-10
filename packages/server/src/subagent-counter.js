@@ -19,6 +19,17 @@
  *     even though the route is bearer-gated and rate-limited)
  *
  * Events without a sessionId are not counted — there is nothing to key on.
+ *
+ * Project dimension (#5463): the Discord status embed is keyed per PROJECT,
+ * and several sessions can emit into one project (main session + worktree
+ * agents remapped to the parent by the hooks' GAP B filter). Each entry
+ * therefore remembers the project its events carried, and
+ * `getProjectTotal(project)` sums the live entries of that project — the
+ * per-session entries stay the single source of truth (they carry the
+ * TTL/LRU lifecycle), so session_end and TTL/LRU eviction subtract a
+ * session's contribution automatically; there is no maintained per-project
+ * counter to drift. The total deliberately spans sources: the embed's
+ * project key has no source dimension either.
  */
 
 /** Default time-to-live for an untouched entry. */
@@ -35,7 +46,7 @@ export class SubagentCounter {
     this._ttlMs = ttlMs
     this._maxEntries = maxEntries
     this._now = now
-    /** @type {Map<string, { count: number, touchedAt: number }>} */
+    /** @type {Map<string, { count: number, touchedAt: number, project: string|null }>} */
     this._entries = new Map()
     this._lastSweepAt = 0
   }
@@ -68,8 +79,13 @@ export class SubagentCounter {
    * Fold one ingested event into the counter. Returns the active count for
    * the event's (source, sessionId) after the update, or null when the
    * event doesn't participate (no sessionId, or an uncounted type).
+   *
+   * `project` (#5463) is the post-remap project the event was attributed to
+   * (the same key the Discord embed uses) — stored on the entry so
+   * getProjectTotal can aggregate across the sessions of one project.
+   * Latest event wins if a session's project ever changes.
    */
-  record(type, source, sessionId) {
+  record(type, source, sessionId, project = null) {
     if (typeof sessionId !== 'string' || sessionId.length === 0) return null
     this._sweep()
     const key = this._key(source, sessionId)
@@ -84,7 +100,9 @@ export class SubagentCounter {
     this._entries.delete(key)
     if (count > 0 || type === 'subagent_stop') {
       this._evictIfFull()
-      this._entries.set(key, { count, touchedAt: this._now() })
+      const normalizedProject =
+        typeof project === 'string' && project.length > 0 ? project : (prev?.project ?? null)
+      this._entries.set(key, { count, touchedAt: this._now(), project: normalizedProject })
     }
     return count
   }
@@ -100,6 +118,28 @@ export class SubagentCounter {
       return 0
     }
     return entry.count
+  }
+
+  /**
+   * Per-project active-subagent total (#5463): the sum over all LIVE
+   * session entries attributed to `project`, across sources (the embed's
+   * project key has no source dimension). Computed lazily at read time —
+   * expired entries are dropped as they're encountered, so TTL expiry (and
+   * session_end / LRU eviction, which delete entries outright) subtracts a
+   * session's contribution with no maintained counter to drift.
+   */
+  getProjectTotal(project) {
+    if (typeof project !== 'string' || project.length === 0) return 0
+    const now = this._now()
+    let total = 0
+    for (const [key, entry] of this._entries) {
+      if (now - entry.touchedAt > this._ttlMs) {
+        this._entries.delete(key)
+        continue
+      }
+      if (entry.project === project) total += entry.count
+    }
+    return total
   }
 
   /** Number of tracked entries (tests + observability). */
