@@ -1639,6 +1639,19 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
     for _ in 0..60 {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let state = app.state::<Mutex<ServerManager>>();
+
+        // Child-exit fast path (issue #5492): if the spawned server process
+        // died before health ever succeeded (e.g. EADDRINUSE because another
+        // chroxy owns the port), fail immediately with a classified cause
+        // instead of spinning — a foreign healthy server on the same port
+        // can answer the health poll and mask the death entirely.
+        if let Some(msg) = lock_or_recover(&state).check_startup_child_exit() {
+            update_menu_state(app, MenuState::Stopped);
+            window::emit_server_error(app, &msg);
+            send_notification(app, error_title, &msg);
+            return false;
+        }
+
         let status = lock_or_recover(&state).status();
         match status {
             ServerStatus::Running => {
