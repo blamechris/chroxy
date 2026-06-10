@@ -38,6 +38,15 @@ function realResolve(p) {
 }
 
 /**
+ * Normalize separators for the shape checks below: resolve()/realpathSync()
+ * emit backslash-separated paths on Windows, where the POSIX marker/prefix
+ * substrings would never match (Copilot review on #5462). No-op on POSIX.
+ */
+function normSlashes(p) {
+  return p.replace(/\\/g, '/')
+}
+
+/**
  * #5439 GAP B: a cwd inside a worktree checkout belongs to the PARENT
  * project — the segment before /.claude/worktrees/ — not the agent-*
  * checkout (port of extract_project_name's worktree remap; without this
@@ -47,9 +56,11 @@ export function worktreeParent(cwd) {
   if (typeof cwd !== 'string' || cwd.length === 0) return null
   const dir = realResolve(cwd)
   if (!dir) return null
-  const idx = dir.indexOf(WORKTREE_MARKER)
+  const norm = normSlashes(dir)
+  const idx = norm.indexOf(WORKTREE_MARKER)
   if (idx <= 0) return null
-  const name = basename(dir.slice(0, idx))
+  // basename() handles '/' on every platform (win32 accepts both separators).
+  const name = basename(norm.slice(0, idx))
   return name.length > 0 ? name : null
 }
 
@@ -69,10 +80,13 @@ export function classifyNonProjectCwd(cwd, env = process.env) {
   if (typeof cwd !== 'string' || cwd.length === 0) return null
   const dir = realResolve(cwd)
   if (!dir) return null
+  // Shape checks run on the slash-normalized path so Windows backslash
+  // paths classify identically (Copilot review on #5462).
+  const norm = normSlashes(dir)
   for (const prefix of TMP_PREFIXES) {
-    if (dir === prefix || dir.startsWith(prefix + '/')) return 'tmp'
+    if (norm === prefix || norm.startsWith(prefix + '/')) return 'tmp'
   }
-  if (dir.includes(WORKTREE_MARKER)) return 'worktree'
+  if (norm.includes(WORKTREE_MARKER)) return 'worktree'
   const homeRaw = typeof env.HOME === 'string' && env.HOME.length > 0 ? env.HOME : homedir()
   if (homeRaw) {
     let homeResolved
@@ -81,7 +95,13 @@ export function classifyNonProjectCwd(cwd, env = process.env) {
     } catch {
       homeResolved = null
     }
-    if (dir === homeResolved || dir === realResolve(homeRaw)) return 'home'
+    // Home-root equality is also separator-normalized — both sides come
+    // from resolve()/realpath, so on POSIX this is byte-identical to the
+    // raw comparison.
+    if (
+      (homeResolved && norm === normSlashes(homeResolved)) ||
+      norm === normSlashes(realResolve(homeRaw) ?? '')
+    ) return 'home'
   }
   return null
 }

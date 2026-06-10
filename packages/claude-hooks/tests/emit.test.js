@@ -23,7 +23,7 @@ import { IngestEventSchema } from '@chroxy/protocol'
 import { buildEnvelope, resolveHookEvent, runEmit, sanitizeData, SOURCE } from '../src/emit.js'
 import { EMITTERS } from '../src/emitters.js'
 import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT } from '../src/config.js'
-import { deriveProject } from '../src/project.js'
+import { classifyNonProjectCwd, deriveProject, worktreeParent } from '../src/project.js'
 
 const SECRET = 'test-hooks-secret'
 const NOW = 1_750_000_000_000
@@ -142,6 +142,18 @@ describe('deriveProject', () => {
     writeFileSync(join(wt, '.git'), 'gitdir: /elsewhere/worktrees/agent-abc123\n')
     assert.equal(deriveProject(wt, {}), 'myproj')
     assert.equal(deriveProject(join(wt, 'packages', 'server'), {}), 'myproj', 'nested worktree cwd remaps too')
+  })
+
+  // Copilot review on #5462: resolve()/realpathSync() emit backslash paths
+  // on Windows, where the POSIX marker/prefix substrings would never match —
+  // the shape checks must be separator-normalized. The fixture is a POSIX
+  // absolute path with backslash-separated components: resolve() keeps it
+  // as-is on every platform (no cwd-prefix artifact), so the assertion is
+  // deterministic and fails exactly when the normalization is missing.
+  it('normalizes backslash separators in the worktree shape checks (Windows paths)', () => {
+    const winish = '/nonexistent-hooks-tests/C:\\checkouts\\parentproj\\.claude\\worktrees\\agent-1'
+    assert.equal(worktreeParent(winish), 'parentproj')
+    assert.equal(classifyNonProjectCwd(winish, {}), 'worktree')
   })
 })
 
