@@ -28,11 +28,19 @@ const TMP_PREFIXES = ['/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp']
  * would classify as 'tmp' and legit-repo tests fail on CI but pass on macOS
  * (/var/folders/...). Tests point this at a path that doesn't exist so their
  * fixtures classify by the real rules. Never set in production.
+ *
+ * Entries are trimmed and stripped of trailing slashes; if the override
+ * yields no usable absolute prefixes (e.g. only relative/empty segments),
+ * fall back to the built-in list rather than silently disabling suppression.
  */
 function tmpPrefixes(env) {
   const raw = env?.CHROXY_HOOKS_TMP_PREFIXES
   if (typeof raw !== 'string' || raw.length === 0) return TMP_PREFIXES
-  return raw.split(':').filter((p) => p.startsWith('/'))
+  const prefixes = raw
+    .split(':')
+    .map((p) => p.trim().replace(/\/+$/, ''))
+    .filter((p) => p.startsWith('/'))
+  return prefixes.length > 0 ? prefixes : TMP_PREFIXES
 }
 
 /** resolve() then realpath (macOS: /tmp → /private/tmp); best-effort, never throws. */
