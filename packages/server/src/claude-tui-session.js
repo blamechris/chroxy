@@ -7,7 +7,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
-import { createLogger, loggerForSession, redactSensitive } from './logger.js'
+import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
@@ -1640,7 +1640,17 @@ export class ClaudeTuiSession extends BaseSession {
     // columns. The redact runs on a latin1 (binary) round-trip, which preserves
     // every byte 0–255 losslessly (so 0x1b / OSC / SS3 escape bytes still land
     // in the dump); redactSensitive only rewrites the ASCII token runs.
-    const redacted = Buffer.from(redactSensitive(this._outputTailRaw.toString('latin1')), 'latin1')
+    // #5358: redactSensitivePreservingEscapes is used ALONE (NOT layered after
+    // redactSensitive). It must see the ORIGINAL bytes to reassemble a token the
+    // TUI split with a mid-token escape: running redactSensitive first would
+    // partially redact a marker-prefixed split token (e.g. `token=sk-ant-AAAA`
+    // → `token= [REDACTED]`), consuming the marker so the escape-aware pass can
+    // no longer detect the run — and the tail after the escape would LEAK. This
+    // pass covers the contiguous case too (same patterns, incl. Bearer / JWT /
+    // key=value), scrubbing token chars to 'X' while preserving the escape bytes
+    // the dump exists to show.
+    const latin1 = this._outputTailRaw.toString('latin1')
+    const redacted = Buffer.from(redactSensitivePreservingEscapes(latin1), 'latin1')
     return formatHexDump(redacted, ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
   }
 

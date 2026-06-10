@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, existsSync, chmodSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createLogger, initFileLogging, closeFileLogging, setLogListener, redactSensitive } from '../src/logger.js'
+import { createLogger, initFileLogging, closeFileLogging, setLogListener, redactSensitive, redactSensitivePreservingEscapes } from '../src/logger.js'
 
 describe('createLogger backward compatibility', () => {
   it('returns object with info, warn, error methods', () => {
@@ -798,5 +798,70 @@ describe('loggerForSession (#4792)', () => {
       /component/,
       'empty string component must also throw',
     )
+  })
+})
+
+describe('redactSensitive — JWT (#5358)', () => {
+  it('redacts a bare JWT printed without a Bearer/key marker', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdefghij'
+    const out = redactSensitive(`token expired: ${jwt} please re-login`)
+    assert.ok(!out.includes(jwt), 'JWT must be redacted')
+    assert.ok(out.includes('[REDACTED]'))
+  })
+
+  it('does NOT redact an ordinary dotted version/identifier', () => {
+    const s = 'upgraded to v1.2.3 and module a.b.c loaded'
+    assert.equal(redactSensitive(s), s, 'short dotted strings are not JWTs')
+  })
+})
+
+describe('redactSensitivePreservingEscapes — ANSI-split tokens (#5358)', () => {
+  it('redacts a token split mid-run by an escape sequence, preserving the escape bytes', () => {
+    // sk-ant-api03-<50 A's>, but with a CSI escape injected mid-token.
+    const head = 'sk-ant-api03-' + 'A'.repeat(20)
+    const tail = 'A'.repeat(30)
+    const input = `key ${head}\x1b[1m${tail} done`
+    const out = redactSensitivePreservingEscapes(input)
+    // The contiguous token never appears (it was split, but detection strips the escape)
+    assert.ok(!out.includes(head + tail), 'reassembled token must not survive')
+    assert.ok(!out.includes('sk-ant-api03-AAAA'), 'token head redacted')
+    assert.ok(out.includes('\x1b[1m'), 'the escape sequence is preserved for diagnostics')
+  })
+
+  it('is a no-op on text with no sensitive tokens (escapes untouched)', () => {
+    const s = 'plain output \x1b[0m with \x1b[31m colors and a uuid 550e8400-e29b-41d4-a716-446655440000'
+    assert.equal(redactSensitivePreservingEscapes(s), s, 'no token → unchanged, including the UUID')
+  })
+
+  it('also catches a contiguous token (so it is safe to use alone)', () => {
+    const token = 'sk-ant-api03-' + 'B'.repeat(50)
+    const out = redactSensitivePreservingEscapes(`oops ${token} leaked`)
+    assert.ok(!out.includes(token), 'contiguous token redacted too')
+  })
+
+  it('redacts an ANSI-split JWT', () => {
+    const jwt1 = 'eyJhbGciOiJIUzI1NiJ9'
+    const jwt2 = 'eyJzdWIiOiJhYmMifQ'
+    const jwt3 = 'sig0123456789abcd'
+    const out = redactSensitivePreservingEscapes(`${jwt1}.${jwt2}\x1b[0m.${jwt3}`)
+    assert.ok(!out.includes(`${jwt1}.${jwt2}`), 'split JWT redacted')
+    assert.ok(out.includes('\x1b[0m'), 'escape preserved')
+  })
+})
+
+describe('redactSensitivePreservingEscapes — marker-prefixed split tokens (#5358 Copilot)', () => {
+  it('does NOT leak the tail of a `key=<split sk-ant>` token', () => {
+    const head = 'sk-ant-api03-' + 'A'.repeat(20)
+    const tail = 'B'.repeat(30)
+    const out = redactSensitivePreservingEscapes(`token=${head}\x1b[1m${tail} end`)
+    assert.ok(!out.includes('BBBB'), 'the tail after the escape must not leak')
+    assert.ok(!out.includes('sk-ant-api03-AAAA'), 'the head is redacted')
+    assert.ok(out.includes('\x1b[1m'), 'escape preserved')
+  })
+
+  it('does NOT leak the tail of a `Bearer <split jwt>`', () => {
+    const out = redactSensitivePreservingEscapes('Bearer eyJhbGciOiJIUzI1NiJ9\x1b[0meyJzdWIiOiJhYmMifQ.sigABCDEFGH end')
+    assert.ok(!out.includes('eyJzdWIiOiJhYmMifQ'), 'the jwt tail after the escape must not leak')
+    assert.ok(out.includes('\x1b[0m'), 'escape preserved')
   })
 })

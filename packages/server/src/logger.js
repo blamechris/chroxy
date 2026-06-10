@@ -52,6 +52,11 @@ const API_KEY_PATTERNS = [
   // Google API keys: AIza + exactly 35 chars of [A-Za-z0-9_-].
   // Trailing \b prevents matching into longer alphanumerics (e.g., AIzawa…).
   /\bAIza[A-Za-z0-9_-]{35}\b/g,
+  // #5358: JWTs (incl. claude/OAuth bearer JWTs printed without a "Bearer"/key
+  // marker). header.payload.signature, each base64url; the header always starts
+  // `eyJ` (base64 of `{"`), which makes this specific enough to avoid matching
+  // ordinary dotted tokens. Length floors keep it off short `a.b.c` strings.
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
 ]
 
 /**
@@ -79,6 +84,69 @@ export function redactSensitive(msg) {
     result = result.replace(pattern, '[REDACTED]')
   }
   return result
+}
+
+// #5358: escape/control sequences a TUI can interleave INTO a token while
+// styling it (e.g. `sk-ant-oat01-AAAA\x1b[1mBBBB`), splitting the run so the
+// contiguous patterns above miss it. Mirrors the claude-tui ANSI_STRIP set,
+// kept local so logger.js stays dependency-free.
+const TOKEN_SPLITTING_ESCAPE = new RegExp(
+  [
+    '\\x1b\\[[0-9;?]*[\\x40-\\x7E]', // CSI
+    '\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)', // OSC ... BEL/ST
+    '\\x1bO.', // SS3
+    '\\x1b[=>cN]', // single-char terminal-mode codes
+    '[\\x00-\\x08\\x0b-\\x1f\\x7f]', // stray C0 controls (except \t and \n)
+  ].join('|'),
+  'g',
+)
+
+/**
+ * #5358: redact tokens from a string that may have escape sequences interleaved
+ * MID-TOKEN — the PTY hex-dump source. The contiguous `redactSensitive` misses
+ * a token split by an escape; this detects tokens in an escape-STRIPPED copy,
+ * then redacts the corresponding characters in the ORIGINAL while LEAVING the
+ * escape bytes in place. So a hex dump keeps the escape structure it exists to
+ * show, but the token leaks in neither the hex nor the ASCII column.
+ *
+ * Length-preserving (each token char → 'X'), so escape-byte offsets in the dump
+ * stay meaningful. Intended to be layered AFTER redactSensitive (which handles
+ * the contiguous case + key-name preservation); this pass only changes a string
+ * when a split token survived.
+ *
+ * NOTE: a generic high-entropy "any token-shaped string" heuristic is
+ * deliberately NOT added — on a diagnostic dump it would redact UUIDs, git
+ * SHAs, and base64 payloads (the very content the dump exists to show). The
+ * marker-prefixed patterns (sk-/AIza/Bearer/JWT/key=value) are the safe set.
+ *
+ * @param {string} s latin1/utf8 string (one char per byte for the dump path)
+ * @returns {string}
+ */
+export function redactSensitivePreservingEscapes(s) {
+  // Walk s, skipping escape runs, building a stripped copy + index map back to s.
+  let stripped = ''
+  const map = []
+  let i = 0
+  while (i < s.length) {
+    TOKEN_SPLITTING_ESCAPE.lastIndex = i
+    const m = TOKEN_SPLITTING_ESCAPE.exec(s)
+    if (m && m.index === i) { i += m[0].length || 1; continue }
+    stripped += s[i]
+    map.push(i)
+    i++
+  }
+  const chars = s.split('')
+  let changed = false
+  for (const pattern of [...SENSITIVE_PATTERNS, ...API_KEY_PATTERNS]) {
+    pattern.lastIndex = 0
+    let match
+    while ((match = pattern.exec(stripped)) !== null) {
+      for (let k = match.index; k < match.index + match[0].length; k++) chars[map[k]] = 'X'
+      changed = true
+      if (match[0].length === 0) pattern.lastIndex++ // guard against a zero-width match
+    }
+  }
+  return changed ? chars.join('') : s
 }
 
 let _logLevel = LOG_LEVELS[process.env.LOG_LEVEL] ?? LOG_LEVELS.info
