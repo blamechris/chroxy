@@ -1258,7 +1258,9 @@ function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: M
 }
 
 function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const patch = sharedClaudeReady();
+  // #5431: pass the wire message through — enriched ready carries
+  // transcript-derived backgroundTasks / scheduledWakeup fields.
+  const patch = sharedClaudeReady(msg);
   const targetId = resolveSessionId(msg, get().activeSessionId);
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, () => patch);

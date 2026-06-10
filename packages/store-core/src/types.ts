@@ -434,6 +434,22 @@ export interface PendingBackgroundShell {
   startedAt: number;
 }
 
+/**
+ * #5431 — one outstanding background task derived from the session
+ * transcript: a `run_in_background` Bash or Agent call, or a Monitor
+ * stream, whose completion task-notification hasn't landed yet.
+ * `toolUseId` is the launching tool_use id (the pairing key);
+ * `description` is the tool call's human-readable description (or a
+ * truncated Agent prompt); `startedAt` is epoch ms from the transcript
+ * entry's timestamp.
+ */
+export interface TranscriptBackgroundTask {
+  toolUseId: string;
+  kind: 'bash' | 'agent' | 'monitor';
+  description: string;
+  startedAt: number;
+}
+
 export interface ConnectedClient {
   clientId: string;
   deviceName: string | null;
@@ -792,6 +808,23 @@ export interface BaseSessionState {
    * state the activity indicator surfaces.
    */
   pendingBackgroundShells: PendingBackgroundShell[];
+  /**
+   * #5431 — outstanding background work derived from the session
+   * TRANSCRIPT (run_in_background Bash/Agent calls and Monitor streams
+   * without a matching task-notification yet). Arrives on enriched
+   * `claude_ready` messages. Complements `pendingBackgroundShells`
+   * (PTY-side tracker, Bash only, mtime-quiescence reaping): transcript
+   * pairing is exact, so silent watcher loops the quiescence sweep
+   * falsely reaps still surface here. An absent field on `claude_ready`
+   * leaves this unchanged; an explicit `[]` clears it.
+   */
+  transcriptBackgroundTasks: TranscriptBackgroundTask[];
+  /**
+   * #5431 — a pending ScheduleWakeup: the agent ended its turn but
+   * arranged to be re-invoked at `at` (epoch ms). Null when none is
+   * scheduled or it already fired.
+   */
+  scheduledWakeup: { at: number; reason: string } | null;
   isPlanPending: boolean;
   planAllowedPrompts: { tool: string; prompt: string }[];
   primaryClientId: string | null;

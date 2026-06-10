@@ -12,6 +12,7 @@ import { createLogger, loggerForSession, redactSensitive, redactSensitivePreserv
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
+import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
 import {
   parseBackgroundShellId,
@@ -643,6 +644,18 @@ export class ClaudeTuiSession extends BaseSession {
     // don't re-arm the first-output timer. Reset to false on each new
     // turn via `_resetFirstOutputWatchdogForTurn` (sendMessage entry path).
     this._firstOutputDisarmed = false
+    // #5431: incremental transcript scanner for outstanding background work
+    // (run_in_background Bash/Agent, Monitor, ScheduleWakeup). Created
+    // lazily by getBackgroundTaskSnapshot() once the per-PID session file
+    // resolves to a transcript path; replaced if the transcript path
+    // changes (new conversation id after /clear or resume).
+    this._transcriptTaskScanner = null
+    // #5431: change-detection poll armed while the last snapshot reported
+    // outstanding work. Re-scans the transcript so a task-notification that
+    // lands while the session is IDLE still clears the dashboard indicator
+    // (the TUI re-invokes itself on notifications — chroxy sees no turn).
+    this._backgroundTaskPollTimer = null
+    this._lastBackgroundTaskKey = null
   }
 
   /**
@@ -915,6 +928,99 @@ export class ClaudeTuiSession extends BaseSession {
       return typeof data.status === 'string' ? data.status : null
     } catch {
       return null
+    }
+  }
+
+  // #5431: cadence for the idle background-task re-scan. 15s mirrors the
+  // BackgroundShellTracker sweep — fast enough that a task-notification
+  // landing while the session is idle clears the dashboard indicator
+  // promptly, slow enough to be negligible I/O (each tick reads only the
+  // transcript bytes appended since the last scan).
+  static get BACKGROUND_TASK_POLL_MS() { return 15_000 }
+
+  /**
+   * #5431 — outstanding background work derived from the session transcript:
+   * `{ backgroundTasks: [{ toolUseId, kind, description, startedAt }],
+   *    scheduledWakeup: { at, reason } | null }`, or null when no transcript
+   * is resolvable (no PTY pid, no per-PID session file, parse failure — the
+   * "degrade to plain ready" contract).
+   *
+   * The per-PID session file that drives the readiness probe carries
+   * `sessionId` + `cwd`, which derive the transcript path
+   * (`~/.claude/projects/<slug>/<sessionId>.jsonl`). The scanner is
+   * incremental (byte offset per instance) so calling this on every
+   * readiness edge costs only the new transcript tail.
+   *
+   * Side effect: arms/disarms the idle re-scan poll (`_backgroundTaskPollTimer`)
+   * based on whether the snapshot reports outstanding work, so callers
+   * (event-normalizer's `ready` / `result` handlers, ws-history replay)
+   * keep the watch fresh without extra wiring. Never throws.
+   */
+  getBackgroundTaskSnapshot() {
+    try {
+      const pid = this._term && this._term.pid
+      if (!Number.isInteger(pid) || pid <= 0) return null
+      const transcriptPath = transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid))
+      if (!transcriptPath) return null
+      if (!this._transcriptTaskScanner || this._transcriptTaskScanner.path !== transcriptPath) {
+        this._transcriptTaskScanner = new TranscriptTaskScanner(transcriptPath, this._log || log)
+      }
+      const snapshot = this._transcriptTaskScanner.scan()
+      this._lastBackgroundTaskKey = JSON.stringify(snapshot)
+      this._refreshBackgroundTaskPoll(snapshot)
+      return snapshot
+    } catch (err) {
+      ;(this._log || log).debug?.(`getBackgroundTaskSnapshot failed: ${err.message} — degrading to plain ready`)
+      return null
+    }
+  }
+
+  /**
+   * #5431 — arm the idle re-scan while work is outstanding, stop it when
+   * the snapshot drains. The tick skips busy turns (the turn-end `result`
+   * path recomputes anyway) and emits `background_tasks_changed` only when
+   * the snapshot actually changed, which the event-normalizer maps to an
+   * enriched `claude_ready` wire message (empty `backgroundTasks: []` on
+   * the final tick clears the client indicator).
+   */
+  _refreshBackgroundTaskPoll(snapshot) {
+    const outstanding = snapshot && (snapshot.backgroundTasks.length > 0 || snapshot.scheduledWakeup)
+    if (!outstanding) {
+      this._stopBackgroundTaskPoll()
+      return
+    }
+    if (this._backgroundTaskPollTimer || this._destroying) return
+    this._backgroundTaskPollTimer = setInterval(() => {
+      try {
+        if (this._destroying || this._ptyExited) {
+          this._stopBackgroundTaskPoll()
+          return
+        }
+        if (this._isBusy || !this._transcriptTaskScanner) return
+        const next = this._transcriptTaskScanner.scan()
+        const key = JSON.stringify(next)
+        if (key === this._lastBackgroundTaskKey) return
+        this._lastBackgroundTaskKey = key
+        this.emit('background_tasks_changed', next)
+        if (next.backgroundTasks.length === 0 && !next.scheduledWakeup) {
+          this._stopBackgroundTaskPoll()
+        }
+      } catch (err) {
+        // Never let the poll throw out of a timer tick — stop watching and
+        // degrade to "no live updates until the next readiness edge".
+        ;(this._log || log).debug?.(`background-task poll failed: ${err.message} — stopping poll`)
+        this._stopBackgroundTaskPoll()
+      }
+    }, ClaudeTuiSession.BACKGROUND_TASK_POLL_MS)
+    // Don't keep the event loop alive solely for the background-task watch.
+    if (typeof this._backgroundTaskPollTimer.unref === 'function') this._backgroundTaskPollTimer.unref()
+  }
+
+  /** #5431 — idempotent stop for the background-task re-scan poll. */
+  _stopBackgroundTaskPoll() {
+    if (this._backgroundTaskPollTimer) {
+      clearInterval(this._backgroundTaskPollTimer)
+      this._backgroundTaskPollTimer = null
     }
   }
 
@@ -4178,6 +4284,9 @@ export class ClaudeTuiSession extends BaseSession {
     // none can fire a stale ASK_USER_QUESTION_STALL event into a torn-down
     // listener.
     this._clearAllAskUserQuestionWatchdogs()
+    // #5431: stop the background-task transcript re-scan so a late tick
+    // can't emit background_tasks_changed into a torn-down listener set.
+    this._stopBackgroundTaskPoll()
     if (this._term) {
       // #5317 (WP-2.3) — capture the handle + pid BEFORE nulling so the
       // escalation timer (and _onPtyGone's cancel) still have something to act

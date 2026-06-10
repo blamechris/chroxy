@@ -32,6 +32,10 @@ describe('createEmptyBaseSessionState', () => {
       // #4307: empty array on init — populated by background_work_changed
       // events and/or session_list snapshot seed.
       pendingBackgroundShells: [],
+      // #5431: transcript-derived outstanding work — empty/null until an
+      // enriched claude_ready arrives.
+      transcriptBackgroundTasks: [],
+      scheduledWakeup: null,
       isPlanPending: false,
       planAllowedPrompts: [],
       primaryClientId: null,

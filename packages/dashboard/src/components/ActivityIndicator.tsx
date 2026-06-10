@@ -154,6 +154,8 @@ export function ActivityIndicator() {
     agentDescription,
     agentStartedAt,
     pendingShells,
+    transcriptTasks,
+    scheduledWakeup,
   } = useConnectionStore(
     useShallow((s) => {
       const id = s.activeSessionId
@@ -191,6 +193,11 @@ export function ActivityIndicator() {
         agentDescription: mostRecentAgent?.description ?? null,
         agentStartedAt: mostRecentAgent?.startedAt ?? null,
         pendingShells: ss?.pendingBackgroundShells ?? null,
+        // #5431 — transcript-derived outstanding work + pending wakeup, the
+        // idle-state fallbacks when the PTY shell tracker has nothing (or
+        // falsely reaped a silent watcher via the mtime-quiescence sweep).
+        transcriptTasks: ss?.transcriptBackgroundTasks ?? null,
+        scheduledWakeup: ss?.scheduledWakeup ?? null,
       }
     }),
   )
@@ -381,6 +388,62 @@ export function ActivityIndicator() {
               </ul>
             </div>
           )}
+        </div>
+      )
+    }
+    // #5431 — no PTY-tracked shell, but the transcript reports outstanding
+    // background work (run_in_background Bash/Agent or Monitor without a
+    // matching task-notification yet). Transcript pairing is exact, so this
+    // chip survives the mtime-quiescence sweep falsely reaping silent
+    // watcher loops that write no output until they finish. Same neutral
+    // green chip as the pending-shell state.
+    if (transcriptTasks && transcriptTasks.length > 0) {
+      let newest = transcriptTasks[0]!
+      for (let i = 1; i < transcriptTasks.length; i++) {
+        if (transcriptTasks[i]!.startedAt > newest.startedAt) newest = transcriptTasks[i]!
+      }
+      const rawDetail = newest.description || newest.toolUseId
+      const detail = truncatePendingShellCommand(rawDetail)
+      const extra = transcriptTasks.length - 1
+      return (
+        <div
+          className="activity-indicator activity-indicator--green"
+          aria-label="Waiting on background work"
+          title={rawDetail}
+          data-testid="activity-indicator-transcript-tasks"
+        >
+          <span className="activity-indicator__dot" aria-hidden="true" />
+          <span
+            className="activity-indicator__label"
+            data-testid="activity-indicator-label"
+          >
+            Waiting on background work · {detail}{extra > 0 ? ` (+${extra} more)` : ''}
+          </span>
+        </div>
+      )
+    }
+    // #5431 — turn ended with a ScheduleWakeup armed: the agent will resume
+    // on its own. Say so instead of presenting the session as done.
+    if (scheduledWakeup) {
+      const at = new Date(scheduledWakeup.at)
+      const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+      const reasonSuffix = scheduledWakeup.reason
+        ? ` · ${truncatePendingShellCommand(scheduledWakeup.reason)}`
+        : ''
+      return (
+        <div
+          className="activity-indicator activity-indicator--green"
+          aria-label="Agent resumes automatically"
+          title={scheduledWakeup.reason || undefined}
+          data-testid="activity-indicator-scheduled-wakeup"
+        >
+          <span className="activity-indicator__dot" aria-hidden="true" />
+          <span
+            className="activity-indicator__label"
+            data-testid="activity-indicator-label"
+          >
+            Resumes at {hhmm}{reasonSuffix}
+          </span>
         </div>
       )
     }

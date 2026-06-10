@@ -1828,7 +1828,12 @@ export class SessionManager extends EventEmitter {
    * Handles both CliSession and PtySession events.
    */
   _wireSessionEvents(sessionId, session) {
-    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question']
+    // #5431: background_tasks_changed — claude-tui's idle transcript re-scan
+    // reporting that outstanding background work changed (a task-notification
+    // landed or a wakeup fired while no turn was running). Deliberately NOT
+    // an ACTIVITY_EVENT: the session is idle by definition when it fires, so
+    // it must not reset the idle timeout.
+    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question', 'background_tasks_changed']
     // Events that indicate meaningful activity (reset idle timeout)
     const ACTIVITY_EVENTS = new Set(['message', 'stream_start', 'tool_start', 'result', 'user_question'])
     // Session-scoped logger — entries are tagged with sessionId for per-session routing

@@ -244,6 +244,9 @@ const EMPTY_ACTIVE_TOOLS: never[] = [];
 // #4307: stable empty reference for `pendingBackgroundShells` —
 // same `useShallow` stability rationale as the others above.
 const EMPTY_PENDING_BACKGROUND_SHELLS: never[] = [];
+// #5431: stable empty reference for `transcriptBackgroundTasks` — same
+// `useShallow` stability rationale as the others above.
+const EMPTY_TRANSCRIPT_BACKGROUND_TASKS: never[] = [];
 // #4653: stable empty reference for `interventions` — same `useShallow`
 // stability rationale as the others above. SessionIntervention[] in the
 // type system; never[] here because the array is provably empty and
@@ -920,6 +923,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #4307: parity with the BaseSessionState shape; no live
       // background-shell tracking in the flat-state fallback.
       pendingBackgroundShells: EMPTY_PENDING_BACKGROUND_SHELLS,
+      // #5431: parity — transcript-derived tasks only populate real
+      // SessionStates (enriched claude_ready resolves a sessionId).
+      transcriptBackgroundTasks: EMPTY_TRANSCRIPT_BACKGROUND_TASKS,
+      scheduledWakeup: null,
       isPlanPending: false,
       planAllowedPrompts: EMPTY_PROMPTS,
       primaryClientId: null,

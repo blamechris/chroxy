@@ -20,10 +20,42 @@ const log = createLogger('event-normalizer')
  *   mode: 'multi' | 'legacy-cli'
  */
 
+/**
+ * #5431 — project a session's outstanding-background-work snapshot into the
+ * optional `claude_ready` wire fields. Returns null when the session type
+ * doesn't expose a snapshot (only claude-tui implements
+ * `getBackgroundTaskSnapshot()` today), the snapshot is unavailable
+ * (degraded transcript parse), or there is simply nothing outstanding —
+ * in all of those cases the wire message stays byte-identical to the
+ * pre-#5431 plain ready, which is the no-regression contract.
+ */
+function backgroundTaskFields(ctx) {
+  try {
+    const snap = ctx?.getSessionEntry?.()?.session?.getBackgroundTaskSnapshot?.()
+    if (!snap) return null
+    // A computed snapshot is ALWAYS emitted, even when empty: clients treat a
+    // present `backgroundTasks` (including `[]`) as authoritative and an
+    // absent field as "no information — keep state". A task-notification that
+    // lands mid-turn would otherwise strand a stale indicator: the turn-end
+    // ready computes an empty snapshot, and the idle re-scan poll never arms
+    // because nothing is outstanding.
+    const tasks = Array.isArray(snap.backgroundTasks) ? snap.backgroundTasks : []
+    const fields = { backgroundTasks: tasks }
+    if (snap.scheduledWakeup) fields.scheduledWakeup = snap.scheduledWakeup
+    return fields
+  } catch (err) {
+    log.debug?.(`backgroundTaskFields failed: ${err?.message} — emitting plain ready`)
+    return null
+  }
+}
+
 const EVENT_MAP = Object.create(null)
 Object.assign(EVENT_MAP, {
   ready: (data, ctx) => {
-    const messages = [{ msg: { type: 'claude_ready' } }]
+    // #5431: attach outstanding background work (if any) so a respawn /
+    // reconnect mid-orchestration doesn't present the session as fully idle.
+    const bgFields = backgroundTaskFields(ctx)
+    const messages = [{ msg: { type: 'claude_ready', ...(bgFields || {}) } }]
     const entry = ctx.getSessionEntry?.()
     if (entry) {
       // #3687: prefer the actual model the underlying CLI/SDK reports at
@@ -50,6 +82,19 @@ Object.assign(EVENT_MAP, {
       })
     }
     return { messages }
+  },
+
+  // #5431: claude-tui's idle transcript re-scan saw the outstanding-work set
+  // change (a task-notification landed / a wakeup fired while no turn was
+  // running). Re-emit `claude_ready` with the fresh snapshot — the session is
+  // idle by definition when this fires, so the ready state is accurate, and
+  // an explicit empty `backgroundTasks: []` is the client's signal to clear a
+  // stale indicator (absence means "no information", per the schema contract).
+  background_tasks_changed: (data) => {
+    const tasks = Array.isArray(data?.backgroundTasks) ? data.backgroundTasks : []
+    const msg = { type: 'claude_ready', backgroundTasks: tasks }
+    if (data?.scheduledWakeup) msg.scheduledWakeup = data.scheduledWakeup
+    return { messages: [{ msg }] }
   },
 
   conversation_id: (data, ctx) => {

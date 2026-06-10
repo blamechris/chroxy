@@ -83,6 +83,65 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.type, 'claude_ready')
     })
 
+    // #5431 — enriched ready: a session exposing getBackgroundTaskSnapshot()
+    // gets its outstanding work attached; a computed-but-empty snapshot still
+    // emits backgroundTasks: [] (the authoritative clear — a task-notification
+    // that landed mid-turn must not strand a stale client indicator); sessions
+    // without the method (or a throwing one) stay byte-identical plain ready.
+    it('attaches backgroundTasks + scheduledWakeup from the session snapshot (#5431)', () => {
+      const task = { toolUseId: 'toolu_01', kind: 'bash', description: 'Wait for CI', startedAt: 1781068000000 }
+      const wakeup = { at: 1781068600000, reason: 'watching CI' }
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: {
+            model: 'claude-sonnet-4-6',
+            permissionMode: 'approve',
+            getBackgroundTaskSnapshot: () => ({ backgroundTasks: [task], scheduledWakeup: wakeup }),
+          },
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[0].msg.type, 'claude_ready')
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [task])
+      assert.deepEqual(result.messages[0].msg.scheduledWakeup, wakeup)
+    })
+
+    it('emits an explicit empty backgroundTasks for a computed empty snapshot (#5431)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: {
+            model: 'claude-sonnet-4-6',
+            permissionMode: 'approve',
+            getBackgroundTaskSnapshot: () => ({ backgroundTasks: [], scheduledWakeup: null }),
+          },
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [])
+      assert.equal('scheduledWakeup' in result.messages[0].msg, false)
+    })
+
+    it('omits the fields entirely when the session has no snapshot method (#5431)', () => {
+      const result = normalizer.normalize('ready', {}, makeCtx())
+      assert.equal('backgroundTasks' in result.messages[0].msg, false)
+      assert.equal('scheduledWakeup' in result.messages[0].msg, false)
+    })
+
+    it('omits the fields and stays plain when the snapshot getter throws (#5431)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: {
+            model: 'claude-sonnet-4-6',
+            permissionMode: 'approve',
+            getBackgroundTaskSnapshot: () => { throw new Error('boom') },
+          },
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[0].msg.type, 'claude_ready')
+      assert.equal('backgroundTasks' in result.messages[0].msg, false)
+    })
+
     // #3687: when the user didn't specify a model, session.model is null
     // but the underlying CLI booted with SOMETHING. The init event carries
     // that real model in data.model — normalizer must surface it instead
@@ -156,6 +215,29 @@ describe('EventNormalizer', () => {
   })
 
   // ---- EVENT_MAP: conversation_id ----
+
+  // ---- EVENT_MAP: background_tasks_changed (#5431) ----
+
+  describe('background_tasks_changed event', () => {
+    it('re-emits claude_ready with the fresh snapshot', () => {
+      const task = { toolUseId: 'toolu_02', kind: 'monitor', description: 'tail log', startedAt: 5 }
+      const result = normalizer.normalize(
+        'background_tasks_changed',
+        { backgroundTasks: [task], scheduledWakeup: { at: 9, reason: 'r' } },
+        makeCtx()
+      )
+      assert.equal(result.messages.length, 1)
+      assert.equal(result.messages[0].msg.type, 'claude_ready')
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [task])
+      assert.deepEqual(result.messages[0].msg.scheduledWakeup, { at: 9, reason: 'r' })
+    })
+
+    it('emits the explicit empty-array clear when work drains', () => {
+      const result = normalizer.normalize('background_tasks_changed', { backgroundTasks: [], scheduledWakeup: null }, makeCtx())
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [])
+      assert.equal('scheduledWakeup' in result.messages[0].msg, false)
+    })
+  })
 
   describe('conversation_id event', () => {
     it('emits conversation_id message and session_list side effect', () => {

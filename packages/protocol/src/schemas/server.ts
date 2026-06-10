@@ -106,8 +106,40 @@ export const ServerPairFailSchema = z.object({
   reason: z.string(),
 })
 
+/**
+ * #5431 — one outstanding background task surfaced on `claude_ready`.
+ *
+ * `kind` maps the launching tool: a `run_in_background` Bash call, a
+ * `run_in_background` Agent (subagent) call, or a Monitor stream. The
+ * task is "outstanding" when its launch has no matching task-notification
+ * in the session transcript yet. `startedAt` is epoch ms (the transcript
+ * entry's timestamp), matching the `startedAt` convention used by
+ * `pendingBackgroundShells` / `activeTools`.
+ */
+export const BackgroundTaskSchema = z.object({
+  toolUseId: z.string(),
+  kind: z.enum(['bash', 'agent', 'monitor']),
+  description: z.string(),
+  startedAt: z.number().int().nonnegative().finite(),
+})
+
 export const ServerClaudeReadySchema = z.object({
   type: z.literal('claude_ready'),
+  // #5431: outstanding background work detected from the session
+  // transcript when the readiness probe flips to "ready for input".
+  // Both fields are OPTIONAL — servers from before #5431 (and session
+  // providers without transcript access) never emit them, and clients
+  // treat absence exactly like today's plain ready. An explicit empty
+  // `backgroundTasks: []` means "previously-reported tasks have all
+  // completed" so clients can clear a stale indicator.
+  backgroundTasks: z.array(BackgroundTaskSchema).optional(),
+  // #5431: a pending ScheduleWakeup — the agent ended its turn but
+  // arranged to resume at `at` (epoch ms). Absent when no wakeup is
+  // scheduled or it has already fired/been superseded.
+  scheduledWakeup: z.object({
+    at: z.number().int().nonnegative().finite(),
+    reason: z.string(),
+  }).optional(),
 })
 
 export const ServerStreamStartSchema = z.object({
