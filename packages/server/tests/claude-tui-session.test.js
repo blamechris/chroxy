@@ -3271,9 +3271,10 @@ describe('ClaudeTuiSession', () => {
       session._currentMessageId = 'msg-stall'
       // Backdated startedAt so we can assert duration > 0 below — proves the
       // computed duration is derived from _activeTurn.startedAt rather than
-      // the fallback to _streamStallTimeoutMs.
+      // the fallback to _streamStallTimeoutMs. #5332: startedAt is now on the
+      // monotonic clock, so seed it from the same clock (not Date.now()).
       const TURN_AGE_MS = 100
-      session._activeTurn = { startedAt: Date.now() - TURN_AGE_MS, aborted: false }
+      session._activeTurn = { startedAt: session._nowMonotonic() - TURN_AGE_MS, aborted: false }
       const ptyWrites = []
       session._term = { write: (b) => ptyWrites.push(b), kill: () => {} }
 
@@ -7382,5 +7383,91 @@ describe('ClaudeTuiSession — hook-sink vanish recovery (#5329)', () => {
     assert.equal(ok, true, 'a squatted path must be recoverable, not a permanent spin')
     assert.ok(statSync(session._sinkDir).isDirectory(), 'the squatter file is replaced by a directory')
     assert.equal(readFileSync(join(session._sinkDir, 'owner.pid'), 'utf8'), String(process.pid))
+  })
+})
+
+// #5332 — turn-duration logging and watchdog poll-loop deadlines used to read
+// the wall clock (Date.now()). A laptop sleep / NTP step that moves the wall
+// clock backward made `Date.now() - startedAt` negative (bogus durations) and
+// could make a `while (Date.now() - start < timeout)` poll-loop deadline never
+// expire — a silent hang. These now read a monotonic clock (performance.now()),
+// injectable here so the wall clock can be frozen/stepped to prove immunity.
+describe('ClaudeTuiSession — monotonic watchdog clocks (#5332)', () => {
+  let skillsDir, session
+  beforeEach(() => {
+    skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-mono-skills-'))
+  })
+  afterEach(async () => {
+    if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
+    rmSync(skillsDir, { recursive: true, force: true })
+  })
+
+  it('honors an injected monotonicNow clock', () => {
+    let mono = 1000
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      monotonicNow: () => mono,
+    })
+    assert.equal(session._nowMonotonic(), 1000, 'reads the injected clock')
+    mono = 4200
+    assert.equal(session._nowMonotonic(), 4200, 'advances with the injected clock')
+  })
+
+  it('the default clock never regresses when the wall clock (Date.now) steps backward', (t) => {
+    session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
+    const before = session._nowMonotonic()
+    // Laptop sleep / NTP step: wall clock jumps an hour into the past.
+    t.mock.method(Date, 'now', () => 0)
+    const after = session._nowMonotonic()
+    assert.ok(after >= before, `monotonic clock does not regress (before=${before} after=${after})`)
+    assert.ok(Number.isInteger(after), 'integer ms — a drop-in for the Date.now() deltas the logs print')
+  })
+
+  it('stream-stall duration is the bounded monotonic turn age, not a wall-clock delta', async () => {
+    // Fixed monotonic clock at 10_000; turn started 100 monotonic-ms ago.
+    const mono = 10_000
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      resultTimeoutMs: 5000, hardTimeoutMs: 5000, streamStallTimeoutMs: 25,
+      monotonicNow: () => mono,
+    })
+    session._isBusy = true
+    session._currentMessageId = 'msg-mono-stall'
+    const TURN_AGE_MS = 100
+    session._activeTurn = { startedAt: mono - TURN_AGE_MS, aborted: false }
+    session._term = { write: () => {}, kill: () => {} }
+    const results = []
+    session.on('result', (e) => results.push(e))
+    session.on('error', () => {})
+
+    session._armResultTimeout()
+    await new Promise((r) => setTimeout(r, 80))
+
+    const result = results.find(Boolean)
+    assert.ok(result, 'stall watchdog fired and emitted a result')
+    // The fix discriminator: a wall-clock `Date.now() - startedAt` (startedAt
+    // ≈ 9900) would be ~1.7e12. The monotonic delta is exactly the turn age.
+    assert.ok(result.duration >= TURN_AGE_MS && result.duration < 60_000,
+      `duration is the bounded monotonic turn age (got ${result.duration})`)
+  })
+
+  it('the _waitForPrompt deadline loop terminates via the monotonic clock even with the wall clock frozen (no hang)', async (t) => {
+    // Monotonic clock advances 1s per read, so the 50ms deadline trips on the
+    // first while-check. Pre-fix the loop read Date.now(); with the wall clock
+    // frozen below it would spin on `while (0 - 0 < 50)` forever — a hang.
+    let mono = 0
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      monotonicNow: () => { mono += 1000; return mono },
+    })
+    // Valid-looking pid with no session file → readSessionStatus stays null →
+    // never "ready", so only the deadline can end the loop.
+    session._term = { pid: 2 ** 30, write: () => {}, kill: () => {} }
+    t.mock.method(Date, 'now', () => 0) // wall clock frozen in the past
+    const ready = await Promise.race([
+      session._waitForPrompt(50),
+      new Promise((res) => setTimeout(() => res('HANG'), 2000)),
+    ])
+    assert.equal(ready, false, 'loop exits not-ready via the monotonic deadline (did not hang on the frozen wall clock)')
   })
 })
