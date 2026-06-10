@@ -699,6 +699,18 @@ export const RunnerStatusRequestSchema = z.object({
     type: z.literal('runner_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
+// server to survey integration status across the host's repos — repo-memory
+// for this slice (config presence, cache stats, telemetry report); repo-relay
+// is the follow-up (#5498 sub-issues). The server resolves the same repo set
+// as `host_status_request` and replies with a single
+// `integration_status_snapshot` (see server.ts). Pull-on-Refresh, same as the
+// host and runner surveys. The optional `requestId` lets the dashboard
+// correlate a Refresh click to its snapshot.
+export const IntegrationStatusRequestSchema = z.object({
+    type: z.literal('integration_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // -- Encrypted envelope --
 export const EncryptedEnvelopeSchema = z.object({
     type: z.literal('encrypted'),
@@ -786,4 +798,5 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     EvaluateDraftSchema,
     HostStatusRequestSchema,
     RunnerStatusRequestSchema,
+    IntegrationStatusRequestSchema,
 ]);

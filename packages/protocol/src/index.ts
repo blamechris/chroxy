@@ -84,11 +84,26 @@ export type {
   ServerRunnerStatusSnapshotMessage,
 } from './schemas/server.ts'
 
+// #5499 (epic #5498): pin the Integrations tab contract at the entry point so
+// the dashboard panel + store import `RepoMemoryStatus` / `IntegrationRepo` /
+// `ServerIntegrationStatusSnapshotMessage` as a stable public contract.
+export type {
+  RepoMemoryCache,
+  RepoMemoryReport,
+  RepoMemoryStatus,
+  IntegrationRepo,
+  IntegrationStatusSummary,
+  IntegrationCliStatus,
+  ServerIntegrationStatusSnapshotMessage,
+} from './schemas/server.ts'
+
 // #5171: the client→server request type is pinned at the entry point too so
 // consumers can import the alias without reaching into `./schemas/client.ts`.
 export type { HostStatusRequestMessage } from './schemas/client.ts'
 // #5253: runner survey request alias.
 export type { RunnerStatusRequestMessage } from './schemas/client.ts'
+// #5499: integrations survey request alias.
+export type { IntegrationStatusRequestMessage } from './schemas/client.ts'
 
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'
