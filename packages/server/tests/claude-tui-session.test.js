@@ -508,6 +508,27 @@ describe('ClaudeTuiSession', () => {
       assert.ok(dump.replace(/\s+/g, ' ').includes('1b 5b 30 6d'), 'escape sequence preserved — diagnostic value intact')
     })
 
+    it('_outputTailHexDump redacts an ANSI-SPLIT token the contiguous patterns miss (#5358)', () => {
+      const s = makeSession()
+      // A token split mid-run by a CSI escape — the contiguous redactor sees
+      // each half as too short (sk-ant-api03- + only 20 chars before the escape,
+      // 30 after), so pre-#5358 the secret leaked in the dump.
+      const head = 'sk-ant-api03-' + 'Z'.repeat(20)
+      const tail = 'Z'.repeat(30)
+      // "auth " (5 bytes) then "sk-ant" so its hex lands inside the first row.
+      s._outputTailRaw = Buffer.from(`auth ${head}\x1b[1m${tail} end`, 'latin1')
+      const dumpNorm = s._outputTailHexDump().replace(/\s+/g, ' ')
+
+      // Meaningful (hex-column) check — the formatted dump wraps every 16 bytes,
+      // so a string-contains check on the token would be vacuous. The "sk-ant"
+      // bytes (73 6b 2d 61 6e 74) and the token's Z-run (5a) must be scrubbed to
+      // 'X' (58); without the escape-preserving layer they'd survive split.
+      assert.ok(!dumpNorm.includes('73 6b 2d 61 6e 74'), 'token "sk-ant" hex bytes scrubbed from the hex column')
+      assert.ok(!dumpNorm.includes('5a 5a 5a 5a 5a 5a'), 'token Z-byte run scrubbed (no leaked token bytes)')
+      // The escape RUN `\x1b[1m` (1b 5b 31 6d) survives — only token chars scrubbed.
+      assert.ok(dumpNorm.includes('1b 5b 31 6d'), 'escape sequence preserved — diagnostic value intact')
+    })
+
     it('_outputTailDiagnostic redacts a token-shaped run (client-facing error path)', () => {
       const s = makeSession()
       const token = 'sk-ant-api03-' + 'B'.repeat(50)

@@ -7,7 +7,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
-import { createLogger, loggerForSession, redactSensitive } from './logger.js'
+import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
@@ -1640,7 +1640,12 @@ export class ClaudeTuiSession extends BaseSession {
     // columns. The redact runs on a latin1 (binary) round-trip, which preserves
     // every byte 0–255 losslessly (so 0x1b / OSC / SS3 escape bytes still land
     // in the dump); redactSensitive only rewrites the ASCII token runs.
-    const redacted = Buffer.from(redactSensitive(this._outputTailRaw.toString('latin1')), 'latin1')
+    // Layered redaction (#5358): redactSensitive catches contiguous tokens
+    // (preserving key names); redactSensitivePreservingEscapes then catches any
+    // token the TUI split with a mid-token escape sequence — the contiguous
+    // patterns miss those, leaving the secret in the dump's ASCII column.
+    const latin1 = this._outputTailRaw.toString('latin1')
+    const redacted = Buffer.from(redactSensitivePreservingEscapes(redactSensitive(latin1)), 'latin1')
     return formatHexDump(redacted, ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
   }
 
