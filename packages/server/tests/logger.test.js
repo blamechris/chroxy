@@ -848,3 +848,20 @@ describe('redactSensitivePreservingEscapes — ANSI-split tokens (#5358)', () =>
     assert.ok(out.includes('\x1b[0m'), 'escape preserved')
   })
 })
+
+describe('redactSensitivePreservingEscapes — marker-prefixed split tokens (#5358 Copilot)', () => {
+  it('does NOT leak the tail of a `key=<split sk-ant>` token', () => {
+    const head = 'sk-ant-api03-' + 'A'.repeat(20)
+    const tail = 'B'.repeat(30)
+    const out = redactSensitivePreservingEscapes(`token=${head}\x1b[1m${tail} end`)
+    assert.ok(!out.includes('BBBB'), 'the tail after the escape must not leak')
+    assert.ok(!out.includes('sk-ant-api03-AAAA'), 'the head is redacted')
+    assert.ok(out.includes('\x1b[1m'), 'escape preserved')
+  })
+
+  it('does NOT leak the tail of a `Bearer <split jwt>`', () => {
+    const out = redactSensitivePreservingEscapes('Bearer eyJhbGciOiJIUzI1NiJ9\x1b[0meyJzdWIiOiJhYmMifQ.sigABCDEFGH end')
+    assert.ok(!out.includes('eyJzdWIiOiJhYmMifQ'), 'the jwt tail after the escape must not leak')
+    assert.ok(out.includes('\x1b[0m'), 'escape preserved')
+  })
+})

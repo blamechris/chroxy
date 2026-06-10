@@ -492,7 +492,10 @@ describe('ClaudeTuiSession', () => {
 
     it('_outputTailHexDump redacts a token-shaped run in BOTH the hex and ASCII columns', () => {
       const s = makeSession()
-      const token = 'sk-ant-api03-' + 'A'.repeat(50)
+      // 44 A's keeps the token ≥40 chars (matches the sk-ant pattern) while
+      // placing the trailing escape mid-row so its 4 hex bytes stay on one line
+      // (length-preserving X-redaction doesn't shift the escape's position).
+      const token = 'sk-ant-api03-' + 'A'.repeat(44)
       // Include an escape byte to prove control bytes survive the latin1 round-trip.
       s._outputTailRaw = Buffer.from(`Invalid API key ${token}\x1b[0m done`, 'latin1')
       const dump = s._outputTailHexDump()
@@ -502,10 +505,27 @@ describe('ClaudeTuiSession', () => {
       // (Fixture is sized so "sk-ant" lands within one 16-byte hex row.)
       const prefixHex = Buffer.from('sk-ant', 'latin1').toString('hex').match(/../g).join(' ')
       assert.ok(!dump.replace(/\s+/g, ' ').includes(prefixHex), 'token hex bytes absent from the hex column')
-      assert.ok(dump.includes('REDACTED'), 'redaction marker present')
+      // Token chars are scrubbed to 'X' (0x58) — the 'A' body run (0x41) is gone.
+      assert.ok(!dump.replace(/\s+/g, ' ').includes('41 41 41 41 41 41'), 'token body bytes scrubbed (redacted)')
       // The full escape RUN `\x1b[0m` (1b 5b 30 6d) survives — proves redaction
       // scrubbed only the token, not the control bytes the dump exists to show.
       assert.ok(dump.replace(/\s+/g, ' ').includes('1b 5b 30 6d'), 'escape sequence preserved — diagnostic value intact')
+    })
+
+    it('_outputTailHexDump does not leak the tail of a MARKER-PREFIXED split token (#5358 Copilot)', () => {
+      const s = makeSession()
+      // The bypass: `token=<sk-ant head>\x1b...<tail>`. If redactSensitive ran
+      // first it would collapse `token=sk-ant-AAAA` → `token= [REDACTED]`,
+      // consuming the marker so the escape-aware pass couldn't reassemble the
+      // run — leaking the BBBB tail. Using the escape-aware pass alone fixes it.
+      const head = 'sk-ant-api03-' + 'A'.repeat(20)
+      const tail = 'B'.repeat(30)
+      s._outputTailRaw = Buffer.from(`token=${head}\x1b[1m${tail} end`, 'latin1')
+      const dumpNorm = s._outputTailHexDump().replace(/\s+/g, ' ')
+      // The tail "BBBB…" (0x42 run) must NOT survive after the escape.
+      assert.ok(!dumpNorm.includes('42 42 42 42 42 42'), 'split-token TAIL must not leak past the escape')
+      assert.ok(!dumpNorm.includes('41 41 41 41 41 41'), 'split-token HEAD redacted too')
+      assert.ok(dumpNorm.includes('1b 5b 31 6d'), 'escape sequence preserved')
     })
 
     it('_outputTailHexDump redacts an ANSI-SPLIT token the contiguous patterns miss (#5358)', () => {
