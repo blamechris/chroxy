@@ -10,11 +10,14 @@
  *   - `hasClaudeOAuthCreds()` / `hasCodexOAuthCreds()` / `hasGeminiOAuthCreds()`:
  *     5s-TTL cached existence checks for the OAuth files written by the
  *     respective `claude login` / `codex login` / `gemini login` flows.
- *   - `cachedResolveCredentialFile(slot, envValue, resolve)`:
+ *   - `cachedResolveCredentialFile(slot, envValue, resolve, envVarName)`:
  *     mtime+size+mode keyed cache around the BYOK / DeepSeek
  *     `~/.chroxy/credentials.json` resolvers — repeats reuse the parsed
  *     resolver result so the dashboard's list_providers poll doesn't re-read
- *     and re-JSON.parse the file on every call.
+ *     and re-JSON.parse the file on every call. Slots beyond the fixed
+ *     byok/deepseek/discord trio are created lazily (#5461) so config-driven
+ *     Anthropic-compatible entries can route their resolveAuth file reads
+ *     through the same cache (one `compat:` slot per entry credential spec).
  *   - `resetCachesForTest()`: drops both caches so tests can isolate runs
  *     under temporary `CHROXY_*_HOME` overrides without flakiness.
  *
@@ -176,7 +179,16 @@ let _credFileCache = {
   // sink's isConfigured() is probed on every notification, so the resolver
   // must not re-stat/re-parse the file per probe.
   discord: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+  // #5461: config-driven Anthropic-compatible entries add dynamic
+  // `compat:<apiKeyEnv>:<credentialsKey>` slots lazily on first use —
+  // bounded by the configured entries, dropped by resetCachesForTest().
 }
+
+// Empty template for a slot that has never resolved (also the lazy seed for
+// dynamic slots). Frozen — every cache write replaces the whole slot object.
+const _EMPTY_CRED_FILE_SLOT = Object.freeze({
+  envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null,
+})
 
 const _SLOT_ENV_VAR = {
   byok: 'ANTHROPIC_API_KEY',
@@ -190,13 +202,21 @@ const _SLOT_ENV_VAR = {
  * the env var is unchanged AND either (env-var path was taken last time) or
  * (the file's stat-mtime+size+mode still matches what we cached).
  *
- * @param {'byok' | 'deepseek' | 'discord'} slot
+ * Fixed slots (byok/deepseek/discord) pre-exist; any other slot name is
+ * created lazily on first use (#5461 — dynamic `compat:` slots for the
+ * config-driven Anthropic-compatible entries). For dynamic slots the env var
+ * named in the synthesized ENOENT reason comes from `envVarName` (pass null
+ * for a file-only credential spec — the env clause is omitted); fixed slots
+ * keep their `_SLOT_ENV_VAR` mapping and don't pass it.
+ *
+ * @param {string} slot - 'byok' | 'deepseek' | 'discord' | dynamic (e.g. 'compat:ZAI_API_KEY:zaiApiKey')
  * @param {string | undefined} envValue - current value of the relevant env var
  * @param {() => object} resolve - the underlying *-credentials resolver
+ * @param {string | null} [envVarName] - env var to name in the ENOENT reason (dynamic slots only)
  * @returns {object} resolver result
  */
-export function cachedResolveCredentialFile(slot, envValue, resolve) {
-  const entry = _credFileCache[slot]
+export function cachedResolveCredentialFile(slot, envValue, resolve, envVarName) {
+  const entry = _credFileCache[slot] || _EMPTY_CRED_FILE_SLOT
   const credPath = join(homedir(), '.chroxy', 'credentials.json')
 
   if (typeof envValue === 'string' && envValue.length > 0) {
@@ -214,10 +234,16 @@ export function cachedResolveCredentialFile(slot, envValue, resolve) {
   } catch (err) {
     _credFileCache[slot] = { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null }
     if (err.code === 'ENOENT') {
+      // The reason must match what the slot's own resolver would produce —
+      // dynamic slots name their entry's env var (or none, for file-only
+      // specs); fixed slots fall back to the static mapping.
+      const label = envVarName ?? _SLOT_ENV_VAR[slot]
       return {
         key: null,
         source: 'none',
-        reason: `${_SLOT_ENV_VAR[slot]} not set and ${credPath} does not exist`,
+        reason: label
+          ? `${label} not set and ${credPath} does not exist`
+          : `${credPath} does not exist`,
       }
     }
     return resolve()
@@ -250,9 +276,10 @@ export function cachedResolveCredentialFile(slot, envValue, resolve) {
 /**
  * Test-only hook: drop both cached probe results and the cached credential-
  * file resolver entries so suites that mutate the `CHROXY_*_HOME` overrides or
- * write/delete files under them start from a clean slate. Production code
- * should never call this — the env-var-keyed invalidation + 5s TTL + mtime
- * stat are what users see.
+ * write/delete files under them start from a clean slate. Replacing the whole
+ * `_credFileCache` object also discards any dynamic `compat:` slots (#5461).
+ * Production code should never call this — the env-var-keyed invalidation +
+ * 5s TTL + mtime stat are what users see.
  */
 export function resetCachesForTest() {
   _credsCache = {

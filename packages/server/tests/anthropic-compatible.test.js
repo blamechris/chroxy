@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -18,6 +18,7 @@ import { ClaudeByokSession } from '../src/byok-session.js'
 import { getProvider } from '../src/providers.js'
 import { OllamaSession } from '../src/ollama-session.js'
 import { validateConfig } from '../src/config.js'
+import { resetCachesForTest } from '../src/auth-probes.js'
 
 /**
  * Tests for config-driven Anthropic-compatible provider endpoints
@@ -517,6 +518,7 @@ describe('credential resolution', () => {
     originalHome = process.env.HOME
     process.env.HOME = tmpHome
     delete process.env[ENV_VAR]
+    resetCachesForTest()
   })
 
   afterEach(() => {
@@ -524,6 +526,7 @@ describe('credential resolution', () => {
     else delete process.env.HOME
     delete process.env[ENV_VAR]
     rmSync(tmpHome, { recursive: true, force: true })
+    resetCachesForTest()
   })
 
   function writeCredentialsFile(contents, mode = 0o600) {
@@ -583,6 +586,173 @@ describe('credential resolution', () => {
     const resolved = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
     assert.equal(resolved.key, null)
     assert.match(resolved.reason, /"compatApiKey"/)
+  })
+})
+
+describe('credential file read caching (#5461)', () => {
+  // resolveAuth runs once per configured entry on every dashboard
+  // list_providers round-trip; the credentials.json read must go through
+  // the same mtime+size+mode keyed cache the built-in byok/deepseek/discord
+  // slots use (auth-probes.js#cachedResolveCredentialFile), via dynamic
+  // `compat:` slots. Same proof technique as the providers.test.js cache
+  // suite: mutate the file contents while restoring (mtime,size,mode) so a
+  // cache hit returns the stale result and an uncached path would re-read.
+
+  let tmpHome
+  let originalHome
+
+  const ENV_VAR = 'CHROXY_TEST_COMPAT_CACHE_KEY'
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-compat-cache-test-'))
+    originalHome = process.env.HOME
+    process.env.HOME = tmpHome
+    delete process.env[ENV_VAR]
+    resetCachesForTest()
+  })
+
+  afterEach(() => {
+    if (originalHome) process.env.HOME = originalHome
+    else delete process.env.HOME
+    delete process.env[ENV_VAR]
+    rmSync(tmpHome, { recursive: true, force: true })
+    resetCachesForTest()
+  })
+
+  function writeRawCredentialsFile(raw) {
+    const dir = join(tmpHome, '.chroxy')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'credentials.json')
+    writeFileSync(file, raw)
+    chmodSync(file, 0o600)
+    return file
+  }
+
+  // Pin mtime to a round second so utimesSync's second-granularity Dates
+  // round-trip exactly against statSync's sub-millisecond mtimeMs (same
+  // caveat as the providers.test.js cache suite).
+  function pinnedDate() {
+    return new Date(Math.floor(Date.now() / 1000) * 1000)
+  }
+
+  it('reuses the cached credentials.json read while the file stat is unchanged', () => {
+    // Two same-length payloads: the field rename keeps (size) constant while
+    // making a fresh re-read miss the field. Cache hit → stale key returned.
+    const original = JSON.stringify({ compatApiKey: 'sk-compat-cached' })
+    const renamed = JSON.stringify({ compatXpiKey: 'sk-compat-cached' })
+    assert.equal(original.length, renamed.length,
+      'rename fixture must be byte-equal to original for the cache key to hit')
+
+    const file = writeRawCredentialsFile(original)
+    const pinned = pinnedDate()
+    utimesSync(file, pinned, pinned)
+
+    const first = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(first.key, 'sk-compat-cached', 'baseline: file key resolves')
+    assert.equal(first.source, 'file')
+
+    const beforeStat = statSync(file)
+    writeFileSync(file, renamed)
+    chmodSync(file, 0o600)
+    utimesSync(file, pinned, pinned)
+    const afterStat = statSync(file)
+    assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs,
+      'mtime restore must succeed for this test to actually exercise the cache')
+    assert.equal(afterStat.size, beforeStat.size,
+      'size must match for the cache key to hit')
+
+    const second = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(second.key, 'sk-compat-cached',
+      'cache hit: stale-but-cached key returned because (mtime,size,mode) is unchanged')
+  })
+
+  it('re-reads when credentials.json mtime changes', () => {
+    const file = writeRawCredentialsFile(JSON.stringify({ compatApiKey: 'sk-compat-original' }))
+    const first = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(first.key, 'sk-compat-original')
+
+    writeFileSync(file, JSON.stringify({ compatApiKey: 'sk-compat-rotated' }))
+    chmodSync(file, 0o600)
+    // Defensive explicit mtime bump in case the rewrite landed in the same
+    // sub-millisecond tick as the original write.
+    const future = new Date(Date.now() + 2000)
+    utimesSync(file, future, future)
+
+    const second = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(second.key, 'sk-compat-rotated', 'mtime change must invalidate the cached read')
+  })
+
+  it('re-reads when the file mode changes (cached 0600 read does not mask a loosened file)', () => {
+    const file = writeRawCredentialsFile(JSON.stringify({ compatApiKey: 'sk-compat-cached' }))
+    const pinned = pinnedDate()
+    utimesSync(file, pinned, pinned)
+    const first = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(first.key, 'sk-compat-cached')
+
+    // chmod alone leaves mtime+size untouched — only the mode key differs.
+    chmodSync(file, 0o644)
+    utimesSync(file, pinned, pinned)
+
+    const second = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(second.key, null, 'mode change must invalidate the cached read')
+    assert.match(second.reason, /mode 644/)
+  })
+
+  it('invalidates the cached env-path result when the env var changes', () => {
+    writeRawCredentialsFile(JSON.stringify({ compatApiKey: 'sk-compat-from-file' }))
+    const entry = { apiKeyEnv: ENV_VAR, credentialsKey: 'compatApiKey' }
+
+    process.env[ENV_VAR] = 'sk-compat-env-a'
+    const a = resolveAnthropicCompatibleApiKey(entry)
+    assert.equal(a.key, 'sk-compat-env-a')
+    assert.equal(a.source, 'env')
+
+    process.env[ENV_VAR] = 'sk-compat-env-b'
+    const b = resolveAnthropicCompatibleApiKey(entry)
+    assert.equal(b.key, 'sk-compat-env-b', 'env value change must invalidate the cached result')
+
+    delete process.env[ENV_VAR]
+    const c = resolveAnthropicCompatibleApiKey(entry)
+    assert.equal(c.key, 'sk-compat-from-file', 'unsetting the env var must fall back to a fresh file read')
+    assert.equal(c.source, 'file')
+  })
+
+  it('resetCachesForTest drops the dynamic compat slots', () => {
+    const original = JSON.stringify({ compatApiKey: 'sk-compat-cached' })
+    const renamed = JSON.stringify({ compatXpiKey: 'sk-compat-cached' })
+    const file = writeRawCredentialsFile(original)
+    const pinned = pinnedDate()
+    utimesSync(file, pinned, pinned)
+
+    const first = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(first.key, 'sk-compat-cached')
+
+    writeFileSync(file, renamed)
+    chmodSync(file, 0o600)
+    utimesSync(file, pinned, pinned)
+
+    const stale = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(stale.key, 'sk-compat-cached', 'precondition: the slot is serving the cached result')
+
+    resetCachesForTest()
+    const fresh = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(fresh.key, null, 'after reset the fresh read sees the renamed field')
+    assert.match(fresh.reason, /"compatApiKey"/)
+  })
+
+  it('keeps the not-found reason shape when credentials.json is absent', () => {
+    // The cache layer synthesises the ENOENT result without invoking the
+    // resolver — the reason must still match the uncached resolver's shape.
+    const both = resolveAnthropicCompatibleApiKey({ apiKeyEnv: ENV_VAR, credentialsKey: 'compatApiKey' })
+    assert.equal(both.key, null)
+    assert.equal(both.source, 'none')
+    assert.match(both.reason, new RegExp(`${ENV_VAR} not set and .*credentials\\.json does not exist`))
+
+    const fileOnly = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(fileOnly.key, null)
+    assert.equal(fileOnly.source, 'none')
+    assert.doesNotMatch(fileOnly.reason, /not set/, 'no env clause when no apiKeyEnv is configured')
+    assert.match(fileOnly.reason, /credentials\.json does not exist/)
   })
 })
 
