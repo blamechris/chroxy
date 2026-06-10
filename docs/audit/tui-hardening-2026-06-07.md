@@ -1,5 +1,7 @@
 # claude-tui Backend Hardening Audit
 
+> **Snapshot:** audited at commit `ebae034ad` (main as of 2026-06-07). All file:line cites refer to that snapshot — remediation has since landed (tracked in epic [#5338](https://github.com/blamechris/chroxy/issues/5338)), so cites may not match current main.
+
 ## Executive Summary
 
 The `claude-tui` provider is **not yet failure-ready to be the primary backend.** It works on the happy path, but its error-handling and recovery story regresses from the SDK/CLI providers it replaces in exactly the dimensions that matter when it becomes load-bearing: it silently throws away conversation continuity on every restart, it has multiple unguarded throw/reject paths that take down the *entire* daemon (and every other session) on routine events, and it has no per-session recovery so a single PTY death bricks a session forever. The interactive `AskUserQuestion` flow — a first-class part of the subscription UX — can force-cancel a slow human with a misleading "stream stalled" error. Auth/subscription expiry, the single most common operational state for a subscription-driven backend, is undetectable and surfaces only as a generic ~90s silent hang with actively wrong "try again" advice.
@@ -14,12 +16,14 @@ The state-flush-on-shutdown class of bug (project memory #3697 / SIGTERM-not-SIG
 
 ## Severity Tally
 
-| Severity | Count |
-|----------|-------|
-| CRITICAL | 9 |
-| MAJOR | 16 |
-| MINOR | 14 |
-| **Total** | **39** |
+| Severity | Finding blocks enumerated | Deduped root causes |
+|----------|---------------------------|---------------------|
+| CRITICAL | 10 | 9 |
+| MAJOR | 18 | 16 |
+| MINOR | 20 | 14 |
+| **Total** | **48** | **39** |
+
+This document enumerates 48 `TUI-AUDIT-*` blocks; several are facets of the same root cause kept under separate headings for per-site fixes (each facet cross-references its sibling, e.g. TUI-AUDIT-022/023). The deduped count of 39 root causes is what the decomposed plan (`tui-hardening-plan.html`) and the PR summary report.
 
 ---
 
