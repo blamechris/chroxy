@@ -7,8 +7,10 @@
  *   historical 0.0.0.0 default included), so devices on the local network
  *   can reach its auth/pairing endpoints (bearer-gated, but the server is
  *   fingerprintable via /health).
- * - `quickTunnel`: a public trycloudflare quick tunnel is up, so the server
- *   is internet-reachable at a random public URL (bearer-gated).
+ * - `quickTunnel`: a public trycloudflare quick tunnel is configured —
+ *   recorded by the server before tunnel startup, so this is a posture
+ *   signal, not proof the tunnel is established. Once it comes up, the
+ *   server is internet-reachable at a random public URL (bearer-gated).
  *
  * This banner changes no defaults — it only surfaces the current posture and
  * how to restrict it. Dismissal is per-connection (store flag, reset on a
@@ -32,7 +34,7 @@ export function ExposureWarningBanner({ lanBind, quickTunnel, onDismiss }: Expos
   }
   if (quickTunnel) {
     parts.push(
-      'Quick tunnel is publicly reachable — anyone with the URL can probe this server (bearer-token gated). Use --tunnel none or --tunnel named to change this.',
+      'A public quick tunnel is configured — once established, anyone with its URL can probe this server (bearer-token gated). Use --tunnel none or --tunnel named to change this.',
     )
   }
 

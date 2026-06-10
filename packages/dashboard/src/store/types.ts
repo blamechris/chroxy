@@ -677,10 +677,13 @@ export interface ConnectionState {
 
   // #5356: exposure snapshot from auth_ok (`lanBind` = server bound to a
   // non-loopback interface so LAN peers can reach its auth/pairing
-  // endpoints; `quickTunnel` = a public trycloudflare quick tunnel is up).
+  // endpoints; `quickTunnel` = a public trycloudflare quick tunnel is
+  // CONFIGURED — the server records it before tunnel startup, so treat it
+  // as a posture signal, not proof the tunnel is established).
   // null = server didn't report (pre-#5356 server) — no banner. quickTunnel
   // is also flipped true by a `server_status { phase: 'ready',
-  // tunnelMode: 'quick' }` broadcast for clients that connected mid-warming.
+  // tunnelMode: 'quick' }` broadcast (which DOES mean the tunnel is live)
+  // for clients that connected mid-warming.
   serverExposure: { lanBind: boolean; quickTunnel: boolean } | null;
   // #5356: user dismissed the exposure warning banner. Reset on a fresh
   // (non-reconnect) auth so a new connection re-surfaces the warning, but

@@ -30,7 +30,8 @@ describe('ExposureWarningBanner', () => {
   it('renders the quick-tunnel warning', () => {
     render(<ExposureWarningBanner lanBind={false} quickTunnel onDismiss={vi.fn()} />)
     const message = screen.getByTestId('exposure-warning-message')
-    expect(message.textContent).toMatch(/quick tunnel is publicly reachable/i)
+    expect(message.textContent).toMatch(/public quick tunnel is configured/i)
+    expect(message.textContent).toMatch(/once established/i)
     expect(message.textContent).toMatch(/bearer-token gated/i)
     expect(message.textContent).not.toMatch(/all network interfaces/i)
   })
@@ -39,7 +40,7 @@ describe('ExposureWarningBanner', () => {
     render(<ExposureWarningBanner lanBind quickTunnel onDismiss={vi.fn()} />)
     const message = screen.getByTestId('exposure-warning-message')
     expect(message.textContent).toMatch(/all network interfaces/i)
-    expect(message.textContent).toMatch(/quick tunnel is publicly reachable/i)
+    expect(message.textContent).toMatch(/public quick tunnel is configured/i)
   })
 
   it('calls onDismiss when the dismiss button is clicked', () => {
