@@ -2124,6 +2124,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         get().updateServer(pairedServerId, { token: auth.sessionToken });
       }
 
+      // #5356: exposure snapshot (non-loopback bind / public quick tunnel).
+      // Read off the raw message — the auth_ok schema is passthrough and the
+      // shared parser predates the field. Absent/malformed → null (no banner).
+      const rawExposure = (msg as { exposure?: { lanBind?: unknown; quickTunnel?: unknown } }).exposure;
+      const serverExposure =
+        rawExposure && typeof rawExposure === 'object'
+          ? { lanBind: rawExposure.lanBind === true, quickTunnel: rawExposure.quickTunnel === true }
+          : null;
+
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
@@ -2149,6 +2158,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // Clear shutdown / startup state on successful connect
         serverPhase: null,
         tunnelProgress: null,
+        serverExposure,
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
@@ -2160,6 +2170,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         set({
           ...connectedState,
+          // #5356: a fresh (non-reconnect) connection re-surfaces the
+          // exposure banner; silent reconnects keep the user's dismissal.
+          exposureBannerDismissed: false,
           messages: [],
           terminalBuffer: '',
           terminalRawBuffer: '',
@@ -3073,10 +3086,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         break;
       }
       if (phase === 'ready') {
-        set({
+        const readyPatch: Partial<ConnectionState> = {
           serverPhase: 'ready',
           tunnelProgress: null,
-        } as Partial<ConnectionState>);
+        };
+        // #5356: a quick tunnel coming up mid-connection makes the server
+        // publicly reachable — merge into the exposure snapshot so the
+        // warning banner appears even when auth_ok predated the tunnel.
+        if ((msg as { tunnelMode?: unknown }).tunnelMode === 'quick') {
+          const prevExposure = get().serverExposure;
+          readyPatch.serverExposure = {
+            lanBind: prevExposure?.lanBind ?? false,
+            quickTunnel: true,
+          };
+        }
+        set(readyPatch);
         break;
       }
 

@@ -188,6 +188,15 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           const wsUrl = this.url.replace('https://', 'wss://')
 
           log.info(`Cloudflare tunnel established: HTTP=${this.url} WebSocket=${wsUrl}`)
+          // #5356 (visibility layer): a quick tunnel publishes the server on a
+          // public trycloudflare.com URL. Every endpoint stays bearer-token
+          // gated, but anyone who learns the URL can fingerprint the server
+          // via /health and attempt auth/pairing — make that visible once.
+          log.warn(
+            `Quick tunnel is publicly reachable at ${this.url} — endpoints are bearer-token gated, ` +
+            'but anyone with this URL can fingerprint the server via /health and attempt auth. ' +
+            'Use --tunnel none to disable remote access, or --tunnel named for a stable domain you control.'
+          )
 
           resolve({ httpUrl: this.url, wsUrl })
         }

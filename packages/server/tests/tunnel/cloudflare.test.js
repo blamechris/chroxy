@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test'
+import { describe, it, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { CloudflareTunnelAdapter } from '../../src/tunnel/cloudflare.js'
@@ -404,5 +404,62 @@ describe('CloudflareTunnelAdapter', () => {
     it('has correct static name', () => {
       assert.equal(CloudflareTunnelAdapter.name, 'cloudflare')
     })
+  })
+})
+
+// #5356 (visibility layer): quick-tunnel startup emits one public-exposure
+// warning. The tunnel logger writes warn-level lines via console.warn, so the
+// warning is captured there (same pattern as tunnel-check-logging.test.js).
+describe('quick-tunnel public exposure warning (#5356)', () => {
+  afterEach(() => {
+    mock.restoreAll()
+  })
+
+  it('warns that the quick tunnel URL is publicly reachable', async () => {
+    const warns = []
+    mock.method(console, 'warn', (msg) => warns.push(String(msg)))
+
+    const mockSpawn = () => createMockProcess({ url: 'https://exposed-test.trycloudflare.com' })
+    const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+    await tunnel.start()
+
+    const exposureWarns = warns.filter((l) => l.includes('publicly reachable'))
+    assert.equal(exposureWarns.length, 1, `expected exactly one exposure warning, got: ${JSON.stringify(warns)}`)
+    assert.ok(exposureWarns[0].includes('https://exposed-test.trycloudflare.com'), 'warning names the public URL')
+    assert.match(exposureWarns[0], /bearer-token gated/)
+    assert.match(exposureWarns[0], /--tunnel none/)
+
+    await tunnel.stop()
+  })
+
+  it('does not emit the exposure warning for a named tunnel', async () => {
+    const warns = []
+    mock.method(console, 'warn', (msg) => warns.push(String(msg)))
+
+    const mockSpawn = () => {
+      const proc = new EventEmitter()
+      proc.stdout = new EventEmitter()
+      proc.stderr = new EventEmitter()
+      proc.killed = false
+      proc.kill = function () {
+        this.killed = true
+        setImmediate(() => this.emit('close', 0, null))
+      }
+      setImmediate(() => {
+        proc.stderr.emit('data', Buffer.from('Registered tunnel connection connIndex=0'))
+      })
+      return proc
+    }
+    const tunnel = new TestCloudflareAdapter({
+      port: 3000,
+      mockSpawn,
+      mode: 'named',
+      config: { tunnelName: 'chroxy', tunnelHostname: 'chroxy.example.com' },
+    })
+    await tunnel.start()
+
+    assert.equal(warns.filter((l) => l.includes('publicly reachable')).length, 0)
+
+    await tunnel.stop()
   })
 })

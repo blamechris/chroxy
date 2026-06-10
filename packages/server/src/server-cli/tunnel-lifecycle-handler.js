@@ -177,7 +177,7 @@ export class TunnelLifecycleHandler {
       await this._emergencyCleanup(this._cleanupBag(tunnel))
       return { ok: false, tunnel }
     }
-    wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, this._buildTunnelReadyStatus({ tunnelUrl: httpUrl }))
+    wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, this._buildTunnelReadyStatus({ tunnelUrl: httpUrl, tunnelMode: tunnelArg.mode }))
 
     // 7. Generate connection info (modeLabel computed up-front; see above)
     startupDisplay.currentTunnelMode = modeLabel

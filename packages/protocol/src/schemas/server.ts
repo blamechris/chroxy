@@ -94,6 +94,20 @@ export const ServerAuthOkSchema = z.object({
   // constant is `DEFAULT_STREAM_STALL_TIMEOUT_MS` exported from
   // `base-session.js` but is not re-exported from this package.
   streamStallTimeoutMs: z.number().int().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
+  // #5356 (visibility layer): exposure snapshot so clients can warn about the
+  // server's network posture. `lanBind` = the HTTP/WS socket is bound to a
+  // non-loopback interface (the historical 0.0.0.0 default included), so LAN
+  // peers can reach the unauthenticated surface (/health fingerprint,
+  // dashboard assets, rate-limited auth/pairing attempts). `quickTunnel` =
+  // a public trycloudflare quick tunnel is configured, so the server is
+  // internet-reachable at a random public URL (bearer-gated). `bindHost` is
+  // the literal address passed to listen(). Optional — servers from before
+  // #5356 don't emit it, and clients treat absence as "unknown" (no banner).
+  exposure: z.object({
+    lanBind: z.boolean(),
+    bindHost: z.string().nullable(),
+    quickTunnel: z.boolean(),
+  }).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({

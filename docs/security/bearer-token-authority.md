@@ -142,7 +142,29 @@ Before merging any PR that adds a new HTTP route or WebSocket message handler th
 4. **Never log raw tokens.** `maskToken()` exists for a reason.
 5. **Use `safeTokenCompare()`** for any byte-equality check against a token.
 
-## 10. Known Risks
+## 10. LAN-Bind Unauthenticated Surface (#5356)
+
+By default the server binds **all interfaces** (`resolveBindHost()` in [`packages/server/src/bind-host.js`](../../packages/server/src/bind-host.js) returns `undefined` unless `--no-auth` or an explicit `host` is set, so `httpServer.listen(port)` binds `0.0.0.0`). Every device on the local network can therefore reach the HTTP/WS socket. Possession of a bearer token remains the authorization boundary — but the following is reachable **without any token**:
+
+| Surface | What it leaks / allows |
+|---|---|
+| `GET /`, `GET /health` | `{ status, mode, version }` — fingerprints a running chroxy daemon and its exact version. This is the same probe the mobile app's LAN scanner uses, so it is also what a hostile subnet scan finds. |
+| `GET /dashboard/*`, `GET /assets/xterm/*` | Static dashboard shell + JS only; no session data without a token. |
+| WS pre-auth | `auth` (256-bit token, constant-time compare, exponential-backoff lockout) and `pair` (live 60-second, single-use, ~96-bit pairing ID) attempts; 10s pre-auth timeout, pre-auth connection cap. |
+| `POST /api/events`, `GET /diagnostics` | Pre-auth per-IP rate limit, then secret-/bearer-gated (see §6). |
+
+So the unauthenticated blast radius on a LAN bind is **service fingerprinting (existence + version) plus an online brute-force surface** — not session access. Note also that direct LAN connections use `ws://` (no TLS), so when LAN mode is actually used the token travels plaintext on the local network — see [`encryption-threat-model.md` §8](encryption-threat-model.md).
+
+Mitigations / visibility:
+
+- **Opt-in loopback bind**: `--host 127.0.0.1`, `CHROXY_HOST=127.0.0.1`, or `"host": "127.0.0.1"` in `~/.chroxy/config.json` restricts the socket to the local machine. The Cloudflare tunnel is unaffected (cloudflared dials `http://localhost:<port>`); only mobile LAN mode and LAN-client flows need a non-loopback bind.
+- **Startup warning** (`maybeWarnNonLoopbackBind()` in `bind-host.js`): one `log.warn` whenever the server binds non-loopback, naming the bind address and the restriction knob.
+- **Quick-tunnel warning**: when a public trycloudflare quick tunnel comes up, the tunnel adapter warns that the URL is internet-reachable (bearer-gated, but fingerprintable).
+- **Dashboard banner**: the auth_ok `exposure` snapshot (`{ lanBind, bindHost, quickTunnel }`) drives a dismissible dashboard warning banner reflecting the same two conditions.
+
+Whether the *defaults* should change (loopback-by-default for the desktop app, explicit tunnel choice in the wizard) is tracked in issue #5356 and deliberately not decided here.
+
+## 11. Known Risks
 
 - **Static primary token is the default.** The QR shown at startup encodes an ephemeral pairing URL (not the primary token), so the leak surface is the OS keychain entry, a fallback `~/.chroxy/config.json` on systems without keychain support, or any environment / launcher that surfaces the token in process listings. If any of those are exfiltrated, the attacker has full authority until the user rotates. Rotation is opt-in.
 - **No certificate pinning or out-of-band key verification.** See [`encryption-threat-model.md` §8 — Trust On First Use](encryption-threat-model.md#trust-on-first-use-tofu).

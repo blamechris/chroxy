@@ -28,7 +28,7 @@ import { removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
 import { getLanIp } from './lan-ip.js'
-import { resolveBindHost, isLoopbackHost, formatHostForUrl } from './bind-host.js'
+import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopbackBind } from './bind-host.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
@@ -87,14 +87,19 @@ export function buildTunnelWarmingStatus({ tunnelMode, tunnelUrl, attempt, maxAt
  * signals the dashboard banner to disappear and the tunnel URL to be
  * considered routable.
  *
- * @param {{ tunnelUrl: string }} args
+ * `tunnelMode` (#5356) lets clients that connected before the tunnel came up
+ * (whose auth_ok exposure snapshot predates it) learn that a public quick
+ * tunnel is now live. Optional so older callers/tests stay valid.
+ *
+ * @param {{ tunnelUrl: string, tunnelMode?: string }} args
  * @returns {object} WS message envelope
  */
-export function buildTunnelReadyStatus({ tunnelUrl }) {
+export function buildTunnelReadyStatus({ tunnelUrl, tunnelMode }) {
   return {
     type: 'server_status',
     phase: 'ready',
     tunnelUrl,
+    ...(tunnelMode ? { tunnelMode } : {}),
     message: 'Tunnel is ready',
   }
 }
@@ -806,6 +811,11 @@ export async function startCliServer(config) {
   // config.host (e.g. --host 127.0.0.1) binds that interface with auth still
   // on, and the default (undefined) binds 0.0.0.0 as before.
   const bindHost = resolveBindHost({ noAuth: NO_AUTH, host: config.host })
+  // #5356 (visibility layer): one warning when binding non-loopback (the
+  // default 0.0.0.0 included) — LAN peers can reach the unauthenticated
+  // surface (/health fingerprint, dashboard assets, rate-limited auth and
+  // pairing attempts). No default change; points at --host 127.0.0.1.
+  maybeWarnNonLoopbackBind({ bindHost, log })
   wsServer.start(bindHost)
 
   // #5053: wire the pool stats aggregator to the shared pool so the
@@ -867,6 +877,9 @@ export async function startCliServer(config) {
   const SKIP_TUNNEL = NO_AUTH || !tunnelArg || !!externalUrl
 
   if (!SKIP_TUNNEL) {
+    // #5356 (visibility layer): record quick-tunnel exposure before startup so
+    // the auth_ok exposure snapshot covers clients that connect mid-warming.
+    wsServer.setQuickTunnelActive(tunnelArg.mode === 'quick')
     // #5368 slice (c): the tunnel lifecycle (create + start + emergency-cleanup
     // on a start throw, wireTunnelEvents, tunnel_recovered re-verify + QR
     // re-render, waitForTunnel with warming/ready broadcasts + emergency-cleanup

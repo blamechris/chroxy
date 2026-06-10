@@ -52,6 +52,7 @@ import { ResumeUnknownChip } from './components/ResumeUnknownChip'
 import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
+import { ExposureWarningBanner } from './components/ExposureWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
@@ -298,6 +299,10 @@ export function App() {
   const connectionError = useConnectionStore(s => s.connectionError)
   const serverPhase = useConnectionStore(s => s.serverPhase)
   const tunnelProgress = useConnectionStore(s => s.tunnelProgress)
+  // #5356: exposure snapshot from auth_ok + per-connection dismissal flag.
+  const serverExposure = useConnectionStore(s => s.serverExposure)
+  const exposureBannerDismissed = useConnectionStore(s => s.exposureBannerDismissed)
+  const dismissExposureBanner = useConnectionStore(s => s.dismissExposureBanner)
   const serverStartupLogs = useConnectionStore(s => s.serverStartupLogs)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
@@ -2121,6 +2126,17 @@ export function App() {
           </>
         ) : null}
       </div>
+
+      {/* Exposure warning banner (#5356) — server reported a non-loopback
+          bind and/or a public quick tunnel in auth_ok. Dismissible per
+          connection; no defaults are changed by this banner. */}
+      {serverExposure && !exposureBannerDismissed && (
+        <ExposureWarningBanner
+          lanBind={serverExposure.lanBind}
+          quickTunnel={serverExposure.quickTunnel}
+          onDismiss={dismissExposureBanner}
+        />
+      )}
 
       {/* Header */}
       <header id="header">

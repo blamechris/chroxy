@@ -462,6 +462,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   resolvedPermissions: {},
   serverPhase: null,
   tunnelProgress: null,
+  // #5356: exposure snapshot from auth_ok + banner dismissal flag.
+  serverExposure: null,
+  exposureBannerDismissed: false,
   shutdownReason: null,
   restartEtaMs: null,
   restartingSince: null,
@@ -1445,6 +1448,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       resolvedPermissions: {},
       serverPhase: null,
       tunnelProgress: null,
+      // #5356: clear exposure on disconnect so a reconnect against a
+      // different server can't show a stale banner.
+      serverExposure: null,
+      exposureBannerDismissed: false,
       shutdownReason: null,
       restartEtaMs: null,
       restartingSince: null,
@@ -2629,6 +2636,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set((state) => ({
       serverErrors: state.serverErrors.filter((e) => e.id !== id),
     }));
+  },
+
+  // #5356: dismiss the exposure warning banner for this connection.
+  dismissExposureBanner: () => {
+    set({ exposureBannerDismissed: true });
   },
 
   addInfoNotification: (message: string) => {
