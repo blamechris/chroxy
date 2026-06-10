@@ -23,7 +23,7 @@ import { IngestEventSchema } from '@chroxy/protocol'
 import { buildEnvelope, resolveHookEvent, runEmit, sanitizeData, SOURCE } from '../src/emit.js'
 import { EMITTERS } from '../src/emitters.js'
 import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT } from '../src/config.js'
-import { deriveProject } from '../src/project.js'
+import { classifyNonProjectCwd, deriveProject, worktreeParent } from '../src/project.js'
 
 const SECRET = 'test-hooks-secret'
 const NOW = 1_750_000_000_000
@@ -37,6 +37,29 @@ function tempRepo({ gitFile = false } = {}) {
   }
   mkdirSync(join(root, 'src', 'deep'), { recursive: true })
   return root
+}
+
+/**
+ * #5464: chroxy's SECOND worktree source — session worktrees under
+ * ~/.chroxy/worktrees/<sessionId> (DEFAULT_WORKTREE_BASE in
+ * session-manager.js). The basename is an opaque hex session id, so the
+ * parent project is only recoverable from the worktree's .git FILE
+ * (`gitdir: <repo>/.git/worktrees/<id>` — written by `git worktree add`).
+ * The root is env-injected (CHROXY_HOOKS_CHROXY_WORKTREES_ROOT) so fixtures
+ * are hermetic on any OS, same pattern as CHROXY_HOOKS_TMP_PREFIXES.
+ */
+function chroxyWorktreeFixture({ gitdir, noGitFile = false } = {}) {
+  const base = mkdtempSync(join(tmpdir(), 'hooks-chroxywt-'))
+  const root = join(base, 'worktrees')
+  const id = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+  const wt = join(root, id)
+  mkdirSync(join(wt, 'packages', 'server'), { recursive: true })
+  const repoRoot = join(base, 'projects', 'coolproj')
+  mkdirSync(join(repoRoot, '.git', 'worktrees', id), { recursive: true })
+  if (!noGitFile) {
+    writeFileSync(join(wt, '.git'), `gitdir: ${gitdir ?? join(repoRoot, '.git', 'worktrees', id)}\n`)
+  }
+  return { base, root, id, wt, repoRoot }
 }
 
 describe('buildEnvelope', () => {
@@ -142,6 +165,85 @@ describe('deriveProject', () => {
     writeFileSync(join(wt, '.git'), 'gitdir: /elsewhere/worktrees/agent-abc123\n')
     assert.equal(deriveProject(wt, {}), 'myproj')
     assert.equal(deriveProject(join(wt, 'packages', 'server'), {}), 'myproj', 'nested worktree cwd remaps too')
+  })
+
+  // #5464: the SECOND worktree source — chroxy session worktrees under
+  // ~/.chroxy/worktrees/<id>. The opaque id basename must never name the
+  // project; the parent is recovered from the worktree .git file's gitdir.
+  it('maps ~/.chroxy/worktrees/<id> cwds to the parent project via the .git gitdir (#5464)', () => {
+    const { root, wt } = chroxyWorktreeFixture()
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
+    assert.equal(deriveProject(wt, env), 'coolproj')
+    assert.equal(deriveProject(join(wt, 'packages', 'server'), env), 'coolproj', 'nested chroxy worktree cwd remaps too')
+  })
+
+  it('resolves the chroxy worktrees root from $HOME when no override is set (#5464)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hooks-chroxyhome-'))
+    const id = 'feedfacefeedfacefeedfacefeedface'
+    const wt = join(home, '.chroxy', 'worktrees', id)
+    mkdirSync(wt, { recursive: true })
+    const repoRoot = join(home, 'projects', 'homeproj')
+    mkdirSync(join(repoRoot, '.git', 'worktrees', id), { recursive: true })
+    writeFileSync(join(wt, '.git'), `gitdir: ${join(repoRoot, '.git', 'worktrees', id)}\n`)
+    assert.equal(deriveProject(wt, { HOME: home }), 'homeproj')
+  })
+})
+
+describe('worktreeParent (#5464 chroxy worktrees)', () => {
+  it('parses an absolute gitdir back to the parent repo basename', () => {
+    const { root, wt } = chroxyWorktreeFixture()
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
+    assert.equal(worktreeParent(wt, env), 'coolproj')
+    assert.equal(worktreeParent(join(wt, 'packages', 'server'), env), 'coolproj')
+  })
+
+  it('resolves a relative gitdir against the worktree dir', () => {
+    const { root, wt } = chroxyWorktreeFixture({
+      gitdir: join('..', '..', 'projects', 'coolproj', '.git', 'worktrees', 'x'),
+    })
+    assert.equal(worktreeParent(wt, { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }), 'coolproj')
+  })
+
+  it('returns null when the .git file is missing or malformed (classification still suppresses)', () => {
+    const missing = chroxyWorktreeFixture({ noGitFile: true })
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: missing.root }
+    assert.equal(worktreeParent(missing.wt, env), null, 'no .git file')
+
+    const garbled = chroxyWorktreeFixture({ gitdir: null })
+    writeFileSync(join(garbled.wt, '.git'), 'not a gitdir line\n')
+    assert.equal(worktreeParent(garbled.wt, { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: garbled.root }), null, 'malformed .git file')
+
+    const wrongShape = chroxyWorktreeFixture({ gitdir: '/somewhere/unrelated' })
+    assert.equal(worktreeParent(wrongShape.wt, { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: wrongShape.root }), null, 'gitdir not under */worktrees/<id>')
+  })
+
+  it('does not match the worktrees root itself or paths outside it', () => {
+    const { base, root } = chroxyWorktreeFixture()
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
+    assert.equal(worktreeParent(root, env), null, 'the base dir is not a worktree')
+    assert.equal(worktreeParent(join(base, 'projects', 'coolproj'), env), null, 'sibling paths are untouched')
+  })
+})
+
+describe('classifyNonProjectCwd (#5464 chroxy worktrees)', () => {
+  it("classifies ~/.chroxy/worktrees/<id> cwds as 'worktree'", () => {
+    const { root, wt } = chroxyWorktreeFixture()
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root, CHROXY_HOOKS_TMP_PREFIXES: '/chroxy-nonexistent-tmp' }
+    assert.equal(classifyNonProjectCwd(wt, env), 'worktree')
+    assert.equal(classifyNonProjectCwd(join(wt, 'packages', 'server'), env), 'worktree', 'nested cwds too')
+  })
+
+  it("still classifies as 'worktree' when the .git file is unreadable (suppression must not depend on the parse)", () => {
+    const { root, wt } = chroxyWorktreeFixture({ noGitFile: true })
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root, CHROXY_HOOKS_TMP_PREFIXES: '/chroxy-nonexistent-tmp' }
+    assert.equal(classifyNonProjectCwd(wt, env), 'worktree')
+  })
+
+  it('does not classify the worktrees base dir itself or sibling paths', () => {
+    const { base, root } = chroxyWorktreeFixture()
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root, CHROXY_HOOKS_TMP_PREFIXES: '/chroxy-nonexistent-tmp' }
+    assert.equal(classifyNonProjectCwd(root, env), null)
+    assert.equal(classifyNonProjectCwd(join(base, 'projects', 'coolproj'), env), null)
   })
 })
 
@@ -405,6 +507,35 @@ describe('runEmit', () => {
       const sent = JSON.parse(received.at(-1).body)
       assert.equal(sent.type, 'subagent_stop')
       assert.equal(sent.project, 'parentproj', 'subagent counts belong to the parent project')
+    })
+
+    // #5464: chroxy session worktrees (~/.chroxy/worktrees/<id>) get the
+    // SAME semantics as agent worktrees — without this, every chroxy
+    // worktree session mints a noise embed keyed on the opaque hex id.
+    it('suppresses non-subagent events from ~/.chroxy/worktrees cwds, but lets subagent events through remapped to the parent (#5464)', async () => {
+      const { root, wt } = chroxyWorktreeFixture()
+      const env = { ...envFor(), CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
+
+      const countBefore = received.length
+      const start = await runEmit({
+        hookEventArg: 'session_start',
+        stdinText: JSON.stringify({ cwd: wt, session_id: 's-cwt' }),
+        env,
+        now: () => NOW,
+      })
+      assert.deepEqual(start, { sent: false, reason: 'non_project_cwd' })
+      assert.equal(received.length, countBefore, 'chroxy worktree SessionStart suppressed')
+
+      const stop = await runEmit({
+        hookEventArg: 'subagent_stop',
+        stdinText: JSON.stringify({ cwd: wt, session_id: 's-cwt' }),
+        env,
+        now: () => NOW,
+      })
+      assert.deepEqual(stop, { sent: true }, 'chroxy worktree SubagentStop reaches the counting code')
+      const sent = JSON.parse(received.at(-1).body)
+      assert.equal(sent.type, 'subagent_stop')
+      assert.equal(sent.project, 'coolproj', 'subagent counts belong to the parent repo, not the opaque worktree id')
     })
 
     it('CHROXY_HOOKS_SKIP_CWD_FILTER=1 bypasses the filter (test/debug escape hatch)', async () => {
