@@ -496,6 +496,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._log = null
     this._sinkDir = null     // created on start, removed on destroy
     this._sinkRecoverErrLoggedMs = 0  // #5329: throttle the can't-recreate error log
+    this._sinkTransientWarnLoggedMs = 0  // #5329: throttle the dir-exists-but-readdir-failed warn
     this._term = null        // persistent PTY for the session's lifetime
     this._settingsPath = null
     // #4013: sidecar file containing the current permission mode. The
@@ -744,13 +745,26 @@ export class ClaudeTuiSession extends BaseSession {
   _recoverSinkDir(cause) {
     if (!this._sinkDir) return false
     const logger = this._log || log
-    if (existsSync(this._sinkDir)) {
-      // The dir exists but readdir failed — a transient/permission error, not a
-      // vanished sink. Log so it isn't fully silent; don't thrash recreation.
-      logger.warn(`hook sink readdir failed though ${this._sinkDir} exists: ${cause?.message || cause}`)
+    // Distinguish three states by what's actually AT the sink path:
+    //   - a real directory → readdir failed transiently (EACCES/EMFILE); warn
+    //     (throttled) but don't thrash recreation.
+    //   - nothing → vanished (tmpwatch/rm); recreate.
+    //   - a non-directory (file/symlink squatting the path) → readdir would
+    //     throw ENOTDIR forever; rm the squatter, then recreate.
+    let isDir = false
+    try { isDir = statSync(this._sinkDir).isDirectory() } catch { /* missing or unstat-able */ }
+    if (isDir) {
+      const now = Date.now()
+      if (now - this._sinkTransientWarnLoggedMs >= 5000) {
+        this._sinkTransientWarnLoggedMs = now
+        logger.warn(`hook sink readdir failed though ${this._sinkDir} is a directory: ${cause?.message || cause}`)
+      }
       return true
     }
     try {
+      // Clear a non-directory squatting the path (no-op if nothing is there)
+      // so mkdir can create a real directory.
+      try { rmSync(this._sinkDir, { recursive: true, force: true }) } catch { /* best effort */ }
       mkdirSync(this._sinkDir, { recursive: true })
       try { writeFileSync(join(this._sinkDir, 'owner.pid'), String(process.pid)) } catch { /* best effort */ }
       if (this._permissionModeFile) {

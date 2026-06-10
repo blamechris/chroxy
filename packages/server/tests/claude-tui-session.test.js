@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
@@ -7300,12 +7300,24 @@ describe('ClaudeTuiSession — hook-sink vanish recovery (#5329)', () => {
     assert.equal(errorLines.length, 1, 'only one error logged across rapid repeated failures')
   })
 
-  it('does not thrash recreation when the dir exists but readdir failed transiently', () => {
+  it('does not thrash recreation when the path is a directory but readdir failed transiently (warn throttled)', () => {
     session = makeSession()
     session._sinkDir = join(dir, 's-exists')
     mkdirSync(session._sinkDir, { recursive: true })
-    const ok = session._recoverSinkDir(new Error('EACCES: permission denied'))
-    assert.equal(ok, true)
-    assert.ok(warnLines.some((m) => /readdir failed though .* exists/.test(m)), 'warns about the transient error')
+    for (let i = 0; i < 5; i++) {
+      assert.equal(session._recoverSinkDir(new Error('EACCES: permission denied')), true)
+    }
+    const transient = warnLines.filter((m) => /readdir failed though .* is a directory/.test(m))
+    assert.equal(transient.length, 1, 'transient warn is throttled to one across rapid repeats')
+  })
+
+  it('replaces a non-directory squatting the sink path (file/symlink) with a real dir', () => {
+    session = makeSession()
+    session._sinkDir = join(dir, 's-squatted')
+    writeFileSync(session._sinkDir, 'not a dir') // a file occupies the sink path
+    const ok = session._recoverSinkDir(new Error('ENOTDIR'))
+    assert.equal(ok, true, 'a squatted path must be recoverable, not a permanent spin')
+    assert.ok(statSync(session._sinkDir).isDirectory(), 'the squatter file is replaced by a directory')
+    assert.equal(readFileSync(join(session._sinkDir, 'owner.pid'), 'utf8'), String(process.pid))
   })
 })
