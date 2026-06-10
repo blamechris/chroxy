@@ -344,79 +344,74 @@ describe('CheckpointManager', () => {
   })
 
   // #5335 (IP-7) — orphaned `chroxy-checkpoint/*` tags accrue when `git tag -d`
-  // fails; pruneOrphanedRefs sweeps them without deleting live refs.
-  describe('pruneOrphanedRefs (#5335)', () => {
-    it('deletes stray refs and keeps refs a live checkpoint still references', async () => {
-      const a = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'a' })
-      const b = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'b' })
-      // A stray tag with no backing checkpoint (simulates a failed `git tag -d`).
-      execFileSync(GIT, ['tag', 'chroxy-checkpoint/orphan-xyz', 'HEAD'], { cwd: gitDir })
-
-      const pruned = await manager.pruneOrphanedRefs(gitDir)
-      assert.equal(pruned, 1, 'exactly the one orphan is pruned')
-
-      const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
-        .split('\n').map((s) => s.trim()).filter(Boolean)
-      assert.ok(tags.includes(a.gitRef) && tags.includes(b.gitRef), 'live refs must survive')
-      assert.ok(!tags.includes('chroxy-checkpoint/orphan-xyz'), 'orphan ref must be gone')
-    })
-
-    it('does NOT delete a ref owned by a persisted-but-unloaded session', async () => {
-      // sess-A's checkpoint is persisted to disk.
-      const cp = await manager.createCheckpoint({ sessionId: 'sess-A', resumeSessionId: 's', cwd: gitDir, name: 'a' })
-      // A fresh manager has NOTHING in memory but shares the checkpoints dir.
-      const fresh = new CheckpointManager({ checkpointsDir: tmpCheckpointsDir })
-
-      const pruned = await fresh.pruneOrphanedRefs(gitDir)
-      assert.equal(pruned, 0, 'must read persisted files and treat the unloaded ref as live')
-      const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
-      assert.ok(tags.includes(cp.gitRef), 'unloaded session ref must survive')
-    })
-
-    it('does NOT delete a live tag owned by another worktree of the SAME repo (#5335 cross-worktree)', async () => {
-      // chroxy-checkpoint/* tags are repo-global — visible from every worktree.
-      // A prune fired in worktree B must not treat the main repo's live tag as
-      // an orphan just because that checkpoint's cwd differs.
-      const wt = mkdtempSync(join(tmpdir(), 'chroxy-cp-wt-'))
-      rmSync(wt, { recursive: true, force: true }) // git worktree add needs a non-existent path
-      execFileSync(GIT, ['worktree', 'add', wt, 'HEAD'], { cwd: gitDir })
-      try {
-        const main = await manager.createCheckpoint({ sessionId: 'sess-main', resumeSessionId: 's', cwd: gitDir, name: 'main' })
-        const branch = await manager.createCheckpoint({ sessionId: 'sess-wt', resumeSessionId: 's', cwd: wt, name: 'wt' })
-
-        // Prune from the worktree cwd — must keep BOTH live refs.
-        const pruned = await manager.pruneOrphanedRefs(wt)
-        assert.equal(pruned, 0, 'no live ref may be pruned across worktrees of the same repo')
-        const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
-        assert.ok(tags.includes(main.gitRef), "main repo's live checkpoint tag must survive a worktree prune")
-        assert.ok(tags.includes(branch.gitRef), "worktree's own live checkpoint tag must survive")
-      } finally {
-        execFileSync(GIT, ['worktree', 'remove', '--force', wt], { cwd: gitDir })
+  // fails. Rather than speculatively prune (which races in-flight tag creation
+  // and, since tags are repo-global, could delete a sibling worktree's live
+  // ref), we record the KNOWN-orphaned ref and retry deleting it later.
+  describe('orphan ref retry (#5335)', () => {
+    it('a tag-delete that fails is recorded and cleared on a later retry', async () => {
+      const cp = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'a' })
+      // Force the first delete to fail; record it, leave the tag in place.
+      const realDelete = manager._deleteGitRef.bind(manager)
+      let failOnce = true
+      manager._deleteGitRef = async (cwd, ref) => {
+        if (failOnce && ref === cp.gitRef) { failOnce = false; return false }
+        return realDelete(cwd, ref)
       }
+      manager.deleteCheckpoint('sess-1', cp.id)
+      await new Promise((r) => setImmediate(r)) // let the fire-and-forget delete settle
+
+      // The checkpoint is gone from the manager but its tag leaked + was recorded.
+      let tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+      assert.ok(tags.includes(cp.gitRef), 'tag survives the failed delete')
+      assert.ok(manager._failedRefDeletes.get(gitDir)?.has(cp.gitRef), 'failed delete is recorded for retry')
+
+      // Retry now succeeds (the forced failure was one-shot).
+      const cleared = await manager.retryFailedRefDeletes(gitDir)
+      assert.equal(cleared, 1, 'the recorded orphan is cleared on retry')
+      tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+      assert.ok(!tags.includes(cp.gitRef), 'orphan tag is gone after retry')
+      assert.ok(!manager._failedRefDeletes.has(gitDir), 'cleared cwd is dropped from the map')
     })
 
-    it('returns 0 on a non-git directory', async () => {
-      const nonGit = mkdtempSync(join(tmpdir(), 'chroxy-cp-nogit-prune-'))
-      try {
-        assert.equal(await manager.pruneOrphanedRefs(nonGit), 0)
-      } finally {
-        rmSync(nonGit, { recursive: true, force: true })
-      }
+    it('retry only ever touches KNOWN orphans — never a live or sibling-worktree ref', async () => {
+      // A live checkpoint exists; the retry set is empty → retry must be a no-op
+      // and must not list/inspect repo-global tags at all.
+      const cp = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'a' })
+      assert.equal(await manager.retryFailedRefDeletes(gitDir), 0, 'no recorded orphans → no-op')
+      const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+      assert.ok(tags.includes(cp.gitRef), 'a live ref is never touched by retry')
     })
 
-    it('createCheckpoint sweeps orphans after an eviction', async () => {
-      // Seed the session at the eviction threshold with cheap fakes so we don't
-      // create 50 real snapshots. The oldest fake (with a gitRef) is evicted.
+    it('retryFailedRefDeletes counts only successful deletions', async () => {
+      // Record two orphans; make one delete keep failing.
+      manager._recordFailedRefDelete(gitDir, 'chroxy-checkpoint/gone-1')
+      manager._recordFailedRefDelete(gitDir, 'chroxy-checkpoint/stuck-2')
+      execFileSync(GIT, ['tag', 'chroxy-checkpoint/gone-1', 'HEAD'], { cwd: gitDir })
+      manager._deleteGitRef = async (_cwd, ref) =>
+        ref === 'chroxy-checkpoint/stuck-2' ? false : true
+
+      const cleared = await manager.retryFailedRefDeletes(gitDir)
+      assert.equal(cleared, 1, 'only the successful delete is counted')
+      assert.ok(manager._failedRefDeletes.get(gitDir)?.has('chroxy-checkpoint/stuck-2'),
+        'the still-failing ref stays recorded for a future retry')
+    })
+
+    it('createCheckpoint retries recorded orphans after an eviction', async () => {
       const fakes = Array.from({ length: 50 }, (_, i) => ({
         id: `fake-${i}`, sessionId: 'sess-1', cwd: gitDir,
         gitRef: `chroxy-checkpoint/fake-${i}`, createdAt: i,
       }))
       manager._checkpoints.set('sess-1', fakes)
-      let prunedCwd = null
-      manager.pruneOrphanedRefs = async (cwd) => { prunedCwd = cwd; return 0 }
+      let retriedCwd = null
+      manager.retryFailedRefDeletes = async (cwd) => { retriedCwd = cwd; return 0 }
 
       await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'new' })
-      assert.equal(prunedCwd, gitDir, 'eviction must trigger a prune sweep for the evicted cwd')
+      assert.equal(retriedCwd, gitDir, 'eviction must trigger an orphan-retry for the evicted cwd')
+    })
+
+    it('_deleteGitRef reports already-absent tags as success', async () => {
+      assert.equal(await manager._deleteGitRef(gitDir, 'chroxy-checkpoint/never-existed'), true,
+        'a missing tag is "gone afterwards" → success, not a recorded failure')
     })
   })
 })

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { execFile as execFileCb } from 'child_process'
@@ -79,6 +79,12 @@ export class CheckpointManager extends EventEmitter {
     this._checkpoints = new Map() // sessionId -> Checkpoint[]
     this._counters = new Map() // sessionId -> monotonic counter for default names
     this._checkpointsDir = options.checkpointsDir || defaultCheckpointsDir()
+    // #5335: refs whose `git tag -d` failed (cwd -> Set<gitRef>). These are
+    // KNOWN orphans — the checkpoint they backed was already removed — so they
+    // can be retried later without any speculative "is this tag still live?"
+    // guess (which would race in-flight tag creation and, since tags are
+    // repo-global, delete a sibling worktree's live ref).
+    this._failedRefDeletes = new Map()
     this._ensureDir()
   }
 
@@ -108,9 +114,7 @@ export class CheckpointManager extends EventEmitter {
       const evicted = checkpoints.shift()
       if (evicted?.gitRef) {
         evictedCwd = evicted.cwd
-        this._deleteGitRef(evicted.cwd, evicted.gitRef).catch((err) => {
-          log.warn(`Failed to delete evicted git ref ${evicted.gitRef}: ${err.message} (non-critical, orphaned ref)`)
-        })
+        this._deleteGitRefTracked(evicted.cwd, evicted.gitRef)
       }
     }
 
@@ -142,13 +146,13 @@ export class CheckpointManager extends EventEmitter {
     this._checkpoints.set(sessionId, checkpoints)
     this._persist(sessionId)
 
-    // #5335: after an eviction (the moment an orphan can be born if the
-    // best-effort `git tag -d` above failed), sweep any stray refs. Runs after
-    // the new checkpoint is in-memory + persisted, so its ref counts as live.
-    // Fire-and-forget: never blocks or fails checkpoint creation.
+    // #5335: opportunistically retry any refs whose delete previously failed
+    // for this cwd, so transient `git tag -d` failures don't accrue. Race-free
+    // (only known orphans are retried) and fire-and-forget — never blocks or
+    // fails checkpoint creation.
     if (evictedCwd) {
-      this.pruneOrphanedRefs(evictedCwd).catch((err) => {
-        log.warn(`pruneOrphanedRefs failed for ${evictedCwd}: ${err.message}`)
+      this.retryFailedRefDeletes(evictedCwd).catch((err) => {
+        log.warn(`retryFailedRefDeletes failed for ${evictedCwd}: ${err.message}`)
       })
     }
 
@@ -224,9 +228,7 @@ export class CheckpointManager extends EventEmitter {
 
     // Clean up git ref if present
     if (checkpoint.gitRef) {
-      this._deleteGitRef(checkpoint.cwd, checkpoint.gitRef).catch((err) => {
-        log.warn(`Failed to delete git ref ${checkpoint.gitRef}: ${err.message} (non-critical, orphaned ref)`)
-      })
+      this._deleteGitRefTracked(checkpoint.cwd, checkpoint.gitRef)
     }
 
     checkpoints.splice(idx, 1)
@@ -242,9 +244,7 @@ export class CheckpointManager extends EventEmitter {
     const checkpoints = this._getCheckpoints(sessionId)
     for (const cp of checkpoints) {
       if (cp.gitRef) {
-        this._deleteGitRef(cp.cwd, cp.gitRef).catch((err) => {
-          log.warn(`Failed to delete git ref ${cp.gitRef}: ${err.message} (non-critical, orphaned ref)`)
-        })
+        this._deleteGitRefTracked(cp.cwd, cp.gitRef)
       }
     }
     this._checkpoints.delete(sessionId)
@@ -414,75 +414,55 @@ export class CheckpointManager extends EventEmitter {
     }
   }
 
+  // Delete a checkpoint's git tag. Returns true if the tag is gone afterwards
+  // (deleted now, or already absent), false if the delete genuinely failed
+  // (e.g. a transient lock) so the caller can record it for retry.
   async _deleteGitRef(cwd, gitRef) {
     try {
       await execFileAsync(GIT, ['tag', '-d', gitRef], { cwd })
-    } catch { /* tag may already be gone */ }
+      return true
+    } catch (err) {
+      // "tag '...' not found" → already gone; treat as success.
+      if (/not found|No such|unknown tag/i.test(err.message || '')) return true
+      return false
+    }
   }
 
-  // #5335: the eviction / delete / clear paths only log a warning when
-  // `git tag -d` fails, so a transient failure leaks a `chroxy-checkpoint/*`
-  // tag forever. Build the set of refs still referenced by ANY live checkpoint,
-  // from BOTH the on-disk checkpoint files AND the in-memory map (a just-created
-  // checkpoint is pushed in-memory before it is persisted; reading every
-  // persisted file covers sessions this manager hasn't loaded).
-  //
-  // NOT filtered by cwd: `chroxy-checkpoint/*` tags are repo-global (shared
-  // across every worktree of a repo). Two sessions in different cwds of the
-  // same repo — chroxy's parallel-agent worktree workflow — share the tag
-  // namespace, so a cwd filter would let a prune in one worktree delete the
-  // other's live tag. Checkpoint ids are randomUUID, so unioning every ref
-  // (across repos too) can never delete a live ref; the only cost is leaving a
-  // foreign-repo orphan for that repo's own prune to sweep.
-  _liveCheckpointRefs() {
-    const live = new Set()
-    // In-memory (covers the create-before-persist window).
-    for (const list of this._checkpoints.values()) {
-      for (const cp of list) {
-        if (cp?.gitRef) live.add(cp.gitRef)
+  // #5335: best-effort delete of a checkpoint's ref that records the ref for a
+  // later retry if the delete fails, so a transient `git tag -d` failure does
+  // not leak a `chroxy-checkpoint/*` tag forever.
+  _deleteGitRefTracked(cwd, gitRef) {
+    this._deleteGitRef(cwd, gitRef).then((ok) => {
+      if (!ok) {
+        this._recordFailedRefDelete(cwd, gitRef)
+        log.warn(`Failed to delete git ref ${gitRef} (recorded for retry)`)
       }
-    }
-    // On-disk (covers sessions not loaded into this._checkpoints).
-    let files = []
-    try { files = readdirSync(this._checkpointsDir).filter((f) => f.endsWith('.json')) } catch { return live }
-    for (const file of files) {
-      try {
-        const data = JSON.parse(readFileSync(join(this._checkpointsDir, file), 'utf8'))
-        for (const cp of data?.checkpoints || []) {
-          if (cp?.gitRef) live.add(cp.gitRef)
-        }
-      } catch { /* skip unreadable / corrupt file */ }
-    }
-    return live
+    })
+  }
+
+  _recordFailedRefDelete(cwd, gitRef) {
+    if (!this._failedRefDeletes.has(cwd)) this._failedRefDeletes.set(cwd, new Set())
+    this._failedRefDeletes.get(cwd).add(gitRef)
   }
 
   /**
-   * Prune `chroxy-checkpoint/*` tags in `cwd`'s repo that no live checkpoint
-   * references. Best-effort: never throws, never deletes a ref still in use.
+   * Retry deleting refs whose previous delete failed for `cwd`. Race-free: only
+   * KNOWN orphans (a checkpoint we already removed) are retried — never a
+   * speculative classification of a repo-global tag — so this can never delete
+   * an in-flight or sibling-worktree checkpoint's ref.
    * @param {string} cwd
-   * @returns {Promise<number>} number of orphaned refs pruned
+   * @returns {Promise<number>} number of orphaned refs successfully cleared
    */
-  async pruneOrphanedRefs(cwd) {
-    if (!(await this._isGitRepo(cwd))) return 0
-    let tags = []
-    try {
-      const { stdout } = await execFileAsync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd })
-      tags = stdout.split('\n').map((s) => s.trim()).filter(Boolean)
-    } catch (err) {
-      log.warn(`pruneOrphanedRefs: failed to list tags in ${cwd}: ${err.message}`)
-      return 0
+  async retryFailedRefDeletes(cwd) {
+    const set = this._failedRefDeletes.get(cwd)
+    if (!set || set.size === 0) return 0
+    let cleared = 0
+    for (const ref of [...set]) {
+      if (await this._deleteGitRef(cwd, ref)) { set.delete(ref); cleared++ }
     }
-    if (tags.length === 0) return 0
-    const live = this._liveCheckpointRefs()
-    let pruned = 0
-    for (const tag of tags) {
-      if (!live.has(tag)) {
-        await this._deleteGitRef(cwd, tag)
-        pruned++
-      }
-    }
-    if (pruned > 0) log.info(`Pruned ${pruned} orphaned checkpoint ref(s) in ${cwd}`)
-    return pruned
+    if (set.size === 0) this._failedRefDeletes.delete(cwd)
+    if (cleared > 0) log.info(`Cleared ${cleared} previously-orphaned checkpoint ref(s) in ${cwd}`)
+    return cleared
   }
 
   // -- Persistence --
