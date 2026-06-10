@@ -475,7 +475,7 @@ impl ServerManager {
         })
     }
 
-    /// Detect a child that died while we were still `Starting` (issue #5492).
+    /// Detect a child that died during the startup window (issue #5492).
     ///
     /// Called by the startup monitor loop in `lib.rs`. When the spawned
     /// server process exits before the health check ever succeeds (the
@@ -486,14 +486,25 @@ impl ServerManager {
     /// the splash on "Starting server..." forever. So we check the child
     /// handle directly.
     ///
+    /// The gate accepts both `Starting` and `Running`: a foreign 200 can
+    /// land before the child even finishes crashing (a healthy server
+    /// answers in milliseconds, Node needs ~0.5s to die on `EADDRINUSE`),
+    /// flipping status to `Running` pre-mortem — the dead child must still
+    /// be surfaced before `monitor_startup` reports success. A child found
+    /// dead while `Running` inside the startup window is a startup failure,
+    /// not a crash for the phase-2 auto-restart loop.
+    ///
     /// Returns `None` when there is no child, the child is still running,
-    /// or status is no longer `Starting` (someone else already resolved
-    /// it). Otherwise: stops the health poll (generation bump) so a foreign
-    /// 200 can't flip us to Running post-mortem, classifies the failure
-    /// from the buffered logs, flips status to `Error`, and returns the
-    /// one-line cause for the UI.
+    /// or status was already resolved to a terminal state (`Error`,
+    /// `Stopped`). Otherwise: stops the health poll (generation bump) so a
+    /// foreign 200 can't flip us to Running post-mortem, classifies the
+    /// failure from the buffered logs, flips status to `Error`, and returns
+    /// the one-line cause for the UI.
     pub fn check_startup_child_exit(&mut self) -> Option<String> {
-        if self.status() != ServerStatus::Starting {
+        if !matches!(
+            self.status(),
+            ServerStatus::Starting | ServerStatus::Running
+        ) {
             return None;
         }
         let child = self.child.as_mut()?;
@@ -1167,7 +1178,16 @@ impl ServerManager {
                         eprintln!("{}", msg);
                         Self::push_log_line(&log_buf, msg);
                         if code == 200 {
-                            *lock_or_recover(&status) = ServerStatus::Running;
+                            // Re-check the generation under the status lock
+                            // (#5495): this request may have been in flight
+                            // when the child-exit path (or kill_child) bumped
+                            // the generation and resolved status — a late 200
+                            // must not overwrite Error/Stopped post-mortem.
+                            let mut s = lock_or_recover(&status);
+                            if generation.load(Ordering::SeqCst) != my_gen {
+                                return;
+                            }
+                            *s = ServerStatus::Running;
                             break;
                         } else {
                             non200 += 1;
@@ -1205,7 +1225,14 @@ impl ServerManager {
                 match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
                     Ok(resp) => {
                         if resp.status() == 200 {
-                            *lock_or_recover(&status) = ServerStatus::Running;
+                            // Same in-flight guard as the startup loop: a
+                            // 200 that raced a generation bump must not
+                            // resurrect a resolved status (#5495).
+                            let mut s = lock_or_recover(&status);
+                            if generation.load(Ordering::SeqCst) != my_gen {
+                                return;
+                            }
+                            *s = ServerStatus::Running;
                         }
                     }
                     Err(err) => {
@@ -1828,6 +1855,28 @@ mod tests {
 
         assert!(mgr.check_startup_child_exit().is_none());
         assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_startup_child_exit_flags_dead_child_when_running() {
+        // A foreign 200 can flip status to Running before the child finishes
+        // dying (pre-mortem masking) — the dead child must still be surfaced
+        // while the startup monitor is watching.
+        let mut mgr = ServerManager::new();
+        mgr.config.port = 9912;
+        *lock_or_recover(&mgr.status) = ServerStatus::Running;
+
+        let mut child = Command::new("sh").args(["-c", "exit 1"]).spawn().unwrap();
+        child.wait().unwrap();
+        mgr.child = Some(child);
+
+        let msg = mgr
+            .check_startup_child_exit()
+            .expect("dead child during Running must surface an error");
+        assert!(msg.contains("exit code 1"), "got: {}", msg);
+        assert!(matches!(mgr.status(), ServerStatus::Error(_)));
+        assert!(mgr.child.is_none(), "child handle must be cleared");
     }
 
     #[test]
