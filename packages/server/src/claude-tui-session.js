@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { createLogger, loggerForSession, redactSensitive } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -522,6 +523,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._respawnTimer = null
     this._respawnScheduled = false
     this._respawning = false
+    // #5349: a rolling-window cap INDEPENDENT of `_respawnCount` (which resets
+    // on every warmup that survives — see _onWarmupComplete). A session that
+    // dies shortly after each successful warmup flaps forever under the
+    // consecutive cap alone; this gives up once it exceeds the window cap
+    // regardless of warmup success. Mirrors the same guard in CliSession.
+    this._respawnRateLimiter = new RespawnRateLimiter()
     // #5317 (WP-2.3) — SIGKILL escalation timer armed by destroy() after SIGTERM.
     // Cleared by _onPtyGone the moment the process is confirmed gone (which also
     // closes the pid-reuse window — we only force-kill when onExit never fired).
@@ -1155,6 +1162,19 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._destroying) return
     if (this._respawning) return
     if (this._respawnScheduled) return
+
+    // #5349: rolling-window cap, checked BEFORE _respawnCount so a session that
+    // keeps surviving warmup (resetting _respawnCount) still gives up once it
+    // flaps past the window cap.
+    if (!this._respawnRateLimiter.record()) {
+      const { maxPerWindow, windowMs } = this._respawnRateLimiter
+      ;(this._log || log).error(`PTY respawn rate cap reached (>${maxPerWindow} respawns in ${Math.round(windowMs / 60000)}min), giving up — session is flapping`)
+      const tail = this._outputTailDiagnostic()
+      const base = `Claude PTY is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes`
+      this.emit('error', { code: 'pty_respawn_exhausted', message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
+      this.emit('respawn_exhausted', { reason: 'pty_respawn_rate_capped' })
+      return
+    }
 
     this._respawnCount++
     if (this._respawnCount > 5) {

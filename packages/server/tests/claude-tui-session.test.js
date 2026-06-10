@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSyn
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 
 describe('ClaudeTuiSession', () => {
@@ -755,6 +756,27 @@ describe('ClaudeTuiSession', () => {
       assert.equal(exhausted.length, 1, 'respawn_exhausted emitted exactly once')
       assert.ok(errors.some((e) => e.code === 'pty_respawn_exhausted'), 'a categorized fatal error is emitted on exhaustion')
       assert.equal(session._respawnScheduled, false, 'no further respawn is scheduled after exhaustion')
+    })
+
+    it('a flapping session (warmup keeps resetting _respawnCount) gives up via the rolling rate cap (#5349)', () => {
+      session = makeSession()
+      // Small cap + fixed clock so the rolling window is deterministic. Each
+      // respawn "survives warmup" (resets the consecutive _respawnCount), so the
+      // consecutive cap of 5 never trips — only the rate cap can stop the flap.
+      session._respawnRateLimiter = new RespawnRateLimiter({ maxPerWindow: 3, windowMs: 5 * 60_000, now: () => 1000 })
+      const exhausted = []
+      session.on('respawn_exhausted', (d) => exhausted.push(d))
+
+      for (let i = 0; i < 4; i++) {
+        session._respawnCount = 0          // warmup success reset
+        session._respawnScheduled = false  // allow the next schedule
+        session._respawnTimer = null
+        session._scheduleRespawn()
+      }
+
+      assert.equal(exhausted.length, 1, 'gives up exactly once despite the warmup resets')
+      assert.equal(exhausted[0].reason, 'pty_respawn_rate_capped', 'distinct reason from the consecutive cap')
+      assert.equal(session._respawnScheduled, false, 'no respawn scheduled after the rate cap')
     })
 
     it('suppresses respawn when _destroying (deliberate teardown)', () => {
