@@ -48,9 +48,21 @@ export class SinkRegistry {
     return [...this._sinks]
   }
 
-  /** True when at least one registered sink is currently configured. */
+  /**
+   * True when at least one registered sink is currently configured.
+   * A throwing isConfigured() is the same contract-violation class fanOut
+   * contains for send() — treat that sink as not configured rather than
+   * letting the probe take the caller down.
+   */
   hasConfigured() {
-    return this._sinks.some((sink) => sink.isConfigured())
+    return this._sinks.some((sink) => {
+      try {
+        return sink.isConfigured()
+      } catch (err) {
+        this._log?.error?.(`Sink '${sink.name}' threw during isConfigured: ${err?.message || err}`)
+        return false
+      }
+    })
   }
 
   /**
@@ -62,14 +74,22 @@ export class SinkRegistry {
   async fanOut(notification, context = {}) {
     let ok = true
     for (const sink of this._sinks) {
-      if (!sink.isConfigured()) continue
       try {
+        // isConfigured() inside the containment too: a throwing probe
+        // (same contract-violation class as a throwing send) must not
+        // reject the whole fan-out — PushManager.send() is called
+        // un-awaited at several sites (e.g. ws-permissions), so an
+        // escaped rejection becomes an unhandledRejection.
+        if (!sink.isConfigured()) continue
+        // Only an explicit `false` counts as a hard failure — `undefined`
+        // (a sink with a void success path) is success. This is the
+        // documented sink contract, not an oversight.
         const result = await sink.send(notification, context)
         if (result === false) ok = false
       } catch (err) {
         // Contract violation — sinks must resolve false on delivery
         // failure, not throw. Contain it so the other sinks still deliver.
-        this._log?.error?.(`Sink '${sink.name}' threw during send: ${err?.message || err}`)
+        this._log?.error?.(`Sink '${sink.name}' threw during send or isConfigured: ${err?.message || err}`)
         ok = false
       }
     }

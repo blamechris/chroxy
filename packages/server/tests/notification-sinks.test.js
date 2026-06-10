@@ -164,6 +164,39 @@ describe('SinkRegistry', () => {
       registry.register(fakeSink({ name: 'b' }))
       assert.equal(await registry.fanOut(notification), true)
     })
+
+    // #5425 review S1 — a throwing isConfigured() is the same contract-
+    // violation class as a throwing send(). It must be contained, not
+    // escape as a rejection: PushManager.send() is called un-awaited at
+    // several sites (e.g. ws-permissions), so an escaped rejection is an
+    // unhandledRejection → daemon-level fallout.
+    it('contains a throwing isConfigured() in fanOut: logs, counts as failure, others deliver', async () => {
+      const errors = []
+      const registry = new SinkRegistry({ logger: { error: (msg) => errors.push(msg) } })
+      const broken = fakeSink({ name: 'broken-probe' })
+      broken.isConfigured = () => { throw new Error('probe-boom') }
+      const healthy = fakeSink({ name: 'healthy' })
+      registry.register(broken)
+      registry.register(healthy)
+      assert.equal(await registry.fanOut(notification), false)
+      assert.equal(healthy.calls.length, 1, 'healthy sink still receives the notification')
+      assert.equal(errors.length, 1)
+      assert.match(errors[0], /broken-probe/)
+      assert.match(errors[0], /probe-boom/)
+    })
+
+    it('hasConfigured treats a throwing isConfigured() as not configured (and logs)', () => {
+      const errors = []
+      const registry = new SinkRegistry({ logger: { error: (msg) => errors.push(msg) } })
+      const broken = fakeSink({ name: 'broken-probe' })
+      broken.isConfigured = () => { throw new Error('probe-boom') }
+      registry.register(broken)
+      assert.equal(registry.hasConfigured(), false)
+      assert.equal(errors.length, 1)
+
+      registry.register(fakeSink({ name: 'on', configured: true }))
+      assert.equal(registry.hasConfigured(), true, 'a healthy sink is still discoverable past the broken one')
+    })
   })
 })
 
