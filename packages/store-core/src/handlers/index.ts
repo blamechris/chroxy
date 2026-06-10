@@ -262,8 +262,9 @@ export function handleClaudeReady(msg?: Record<string, unknown>): {
       (t): t is TranscriptBackgroundTask =>
         !!t && typeof t === 'object' &&
         typeof (t as TranscriptBackgroundTask).toolUseId === 'string' &&
+        ['bash', 'agent', 'monitor'].includes((t as TranscriptBackgroundTask).kind) &&
         typeof (t as TranscriptBackgroundTask).description === 'string' &&
-        typeof (t as TranscriptBackgroundTask).startedAt === 'number',
+        Number.isFinite((t as TranscriptBackgroundTask).startedAt),
     )
     const wakeup = msg.scheduledWakeup as { at?: unknown; reason?: unknown } | undefined
     patch.scheduledWakeup =

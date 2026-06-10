@@ -33,11 +33,15 @@ function backgroundTaskFields(ctx) {
   try {
     const snap = ctx?.getSessionEntry?.()?.session?.getBackgroundTaskSnapshot?.()
     if (!snap) return null
+    // A computed snapshot is ALWAYS emitted, even when empty: clients treat a
+    // present `backgroundTasks` (including `[]`) as authoritative and an
+    // absent field as "no information — keep state". A task-notification that
+    // lands mid-turn would otherwise strand a stale indicator: the turn-end
+    // ready computes an empty snapshot, and the idle re-scan poll never arms
+    // because nothing is outstanding.
     const tasks = Array.isArray(snap.backgroundTasks) ? snap.backgroundTasks : []
-    const wakeup = snap.scheduledWakeup || null
-    if (tasks.length === 0 && !wakeup) return null
     const fields = { backgroundTasks: tasks }
-    if (wakeup) fields.scheduledWakeup = wakeup
+    if (snap.scheduledWakeup) fields.scheduledWakeup = snap.scheduledWakeup
     return fields
   } catch (err) {
     log.debug?.(`backgroundTaskFields failed: ${err?.message} — emitting plain ready`)
