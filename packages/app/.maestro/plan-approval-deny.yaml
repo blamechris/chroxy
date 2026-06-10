@@ -1,5 +1,5 @@
 appId: com.blamechris.chroxy
-name: PlanApprovalCard deny/feedback path
+name: PlanApprovalCard deny-feedback path
 ---
 
 # #4696 — Sibling to plan-approval.yaml that exercises the "Give

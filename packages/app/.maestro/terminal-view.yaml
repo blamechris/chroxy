@@ -114,8 +114,14 @@ name: TerminalView render + raw data forwarding (#4701)
 # `raw` envelope. The store's `case 'raw'` handler calls
 # `appendTerminalData(data)` → the imperative `terminalWrite`
 # callback fires → xterm.js inside the WebView renders the text.
+#
+# Tap by the placeholder text, NOT `id: chat-message-input`: in
+# terminal viewMode the input is in newline mode (multiline TextInput
+# → UITextView), and XCUITest does not expose the testID on the empty
+# multiline field — the placeholder accessibilityText is the reliable
+# anchor (verified via `maestro hierarchy` on-device 2026-06-10).
 - tapOn:
-    id: "chat-message-input"
+    text: "Message Claude..."
 - inputText: "show-terminal"
 
 - tapOn:

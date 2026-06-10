@@ -169,6 +169,11 @@ name: ChatView StreamStallChip render + retry (#4507)
     visible:
       id: "stream-stall-chip"
     timeout: 10000
-- assertVisible: "show-stream-stall"
+# Wildcard match: the user bubble is an accessible container that the
+# a11y tree flattens to "You, show-stream-stall", so an exact
+# "show-stream-stall" match finds no element (verified via
+# `maestro hierarchy` on-device 2026-06-10).
+- assertVisible:
+    text: ".*show-stream-stall.*"
 
 - takeScreenshot: stream-stall-chip-retry-tapped

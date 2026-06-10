@@ -48,12 +48,21 @@ name: Ensure ConnectScreen
           text: "^Skip$"
       - waitForAnimationToEnd
 
-# If on SessionScreen (auto-connected), tap the red X to disconnect
+# If on SessionScreen (auto-connected from saved state — possibly wedged on
+# the reconnect banner, or live-connected to the mock server), tap the
+# header's red "Disconnect" button to get back to ConnectScreen. The button's
+# accessibilityLabel ("Disconnect and go back") is both the detector and the
+# tap target: it's present in every SessionScreen state, whereas the header
+# TITLE is the session name (e.g. "tmp/mock-project"), so matching "Session"
+# does not reliably detect this state. (The label also overrides the visible
+# "Disconnect" text in Maestro's matcher, and the old "✕" close icon is gone.)
 - runFlow:
     when:
-      visible: "Session"
+      visible:
+        text: "Disconnect and go back"
     commands:
-      - tapOn: "✕"
+      - tapOn:
+          text: "Disconnect and go back"
       - waitForAnimationToEnd
 
 # If on auto-connect spinner, tap Cancel

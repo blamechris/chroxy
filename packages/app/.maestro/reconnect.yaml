@@ -113,21 +113,16 @@ name: Reconnect after tunnel drop (#4701)
 
 - hideKeyboard
 
-# Wait for the reconnect banner to appear. The mock-server's 1s
-# scheduled close + AUTO_RECONNECT_DELAY (1s) + a generous Metro
-# bridge buffer warrants the long timeout. We assert on the testID
-# rather than the banner text because text varies by retry count
-# (`Reconnecting...` vs `Reconnecting (attempt 2)...`).
-- extendedWaitUntil:
-    visible:
-      id: "reconnect-banner"
-    timeout: 15000
-
-# Spinner is wired inside the banner (RNActivityIndicator).
-- assertVisible:
-    id: "reconnect-spinner"
-
-- takeScreenshot: reconnect-banner-visible
+# NOTE (2026-06-10, dev-client migration): the banner/spinner pins from
+# (a)/(b) in the header are NOT hard-asserted here anymore. The mock
+# server stays up, so the app reconnects in ~1-2s and the banner's
+# visibility window is shorter than Maestro's iOS view-hierarchy poll
+# interval more often than not (observed ~1-in-3 catch rate on
+# iPhone 16 Pro — the wait timed out while the app had already
+# recovered). The `reconnect-banner` / `reconnect-spinner` mount on
+# phase=reconnecting is unit-test territory; what this flow can pin
+# deterministically end-to-end is (c): the drop happens and the app
+# recovers to a usable SessionScreen, asserted below.
 
 # Wait for the reconnect to succeed. The mock-server stays up on port
 # 9876 so the auto-reconnect lands → phase flips back to `connected`
@@ -138,6 +133,16 @@ name: Reconnect after tunnel drop (#4701)
 - extendedWaitUntil:
     notVisible:
       id: "reconnect-banner"
+    timeout: 30000
+
+# Recovered-state signal: while dropped, the input bar's placeholder is
+# "Reconnecting..." (disabled); once phase returns to connected it flips
+# back to "Message Claude...". Waiting for the placeholder pins the
+# actual recovery (the banner notVisible check above can be trivially
+# true if the poll never caught the banner at all).
+- extendedWaitUntil:
+    visible:
+      text: "Message Claude..."
     timeout: 30000
 
 # Positive confirmation: the input bar is still wired and we can

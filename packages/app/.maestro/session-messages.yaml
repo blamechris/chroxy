@@ -1,4 +1,4 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: SessionScreen send and receive messages
 ---
 
@@ -11,10 +11,10 @@ name: SessionScreen send and receive messages
 - tapOn: "Chat"
 - waitForAnimationToEnd
 
-# Find and tap the text input area
+# Tap the message input. testID is the stable selector — the placeholder
+# text isn't reliably matchable on the dev client.
 - tapOn:
-    text: ".*Message.*"
-    optional: true
+    id: "chat-message-input"
 
 # Type a test message
 - inputText: "Hello from Maestro"
@@ -22,9 +22,10 @@ name: SessionScreen send and receive messages
 # Take screenshot of input
 - takeScreenshot: session-message-input
 
-# Send the message (tap the send button)
+# Send the message — testID on InputBar's send button (the ↑ icon button
+# isn't text-matchable in Maestro on iOS).
 - tapOn:
-    text: ".*\u2191.*"
+    id: "chat-send-button"
 
 # Wait for the mock response to appear
 - extendedWaitUntil:

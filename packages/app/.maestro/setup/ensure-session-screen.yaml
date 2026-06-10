@@ -1,82 +1,99 @@
-# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17), portrait orientation
+appId: com.blamechris.chroxy
+name: Ensure SessionScreen (connected to mock server)
+---
+
+# Tested devices: iPhone 16 Pro (iOS 18), portrait orientation. iPad / Android
+# untested — tap coordinates may differ in landscape / larger screens.
 #
-# Shared setup: connect to mock server and land on SessionScreen.
+# Shared setup: connect to the mock server and land on SessionScreen.
 # Requires: mock server running on port 9876 (see scripts/start-mock-server.sh)
 # Usage: - runFlow: setup/ensure-session-screen.yaml
+#
+# The app requires a dev build (expo-speech-recognition + expo-secure-store
+# native modules), so this drives the chroxy dev client (com.blamechris.chroxy)
+# rather than Expo Go. This is the same launch + connect sequence the
+# self-contained session flows (chat-todolist.yaml, terminal-view.yaml, …)
+# inline — kept in sync with them.
 
-# Open the Expo project via deep link
-- openLink: exp://localhost:8081
+# Launch via the dev client's deep link so we skip the "Development Build /
+# pick a dev server" screen and load the chroxy bundle directly.
+# `clearState: true` resets app data but NOT the SecureStore Keychain entry
+# that holds saved connections, so the app may auto-connect to a
+# previously-used server — the conditional below handles both fresh and
+# warm starts.
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
 
-# Wait for the app to load
-- extendedWaitUntil:
-    visible:
-      text: ".*(Session|Chroxy|Connect).*"
-    timeout: 15000
-
-# Dismiss Expo dev menu if it appeared
+# Dismiss the dev menu sheet that shows on first launch of a dev build.
+# Two forms: (a) intro sheet with a "Continue" button, (b) main dev menu
+# (Reload/Go home/Toggle...) with an X close icon. Tapping the top of the
+# screen (outside the sheet) dismisses either by iOS convention.
 - tapOn:
-    point: "93%,43%"
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
     optional: true
 
-# If already on SessionScreen (auto-connected), we're done — skip to end
+# Skip the onboarding carousel (post-clearState the `onboarding_complete`
+# SecureStore flag is gone, so it always shows).
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands — extended timeout because
+# Metro may need to bundle on first launch.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we auto-connected to a stale saved server (SessionScreen with the
+# reconnect banner showing "Could not reach server"), bail out via the
+# header's Disconnect button — matched by its accessibilityLabel, which
+# overrides the visible "Disconnect" text — and fall through to the
+# ConnectScreen branch below.
 - runFlow:
     when:
-      visible: "Chat"
+      visible:
+        id: "reconnect-banner"
     commands:
-      - assertVisible: "Chat"
+      - tapOn:
+          text: "Disconnect and go back"
+      - extendedWaitUntil:
+          visible: "Connect to Chroxy"
+          timeout: 8000
 
-# If on ConnectScreen, connect to mock server
+# If we landed on ConnectScreen, fill the manual-entry form. If the Keychain
+# already had our mock connection (warm start from a prior run), this block
+# is skipped and we jump straight to Chat. testIDs are the stable selectors
+# (Maestro's text matcher has regex quirks with the leading U+25B6 glyph on
+# the manual-entry toggle).
 - runFlow:
     when:
       visible: "Connect to Chroxy"
     commands:
-      # Expand manual entry form
       - tapOn:
-          text: ".*Enter manually.*"
+          id: "connect-manual-toggle"
 
-      # Clear and enter mock server URL
-      - tapOn: "Server URL"
+      - tapOn:
+          id: "connect-server-url"
       - eraseText: 50
       - inputText: "ws://localhost:9876"
 
-      # Enter API token
       - tapOn:
-          text: "API Token.*"
+          id: "connect-api-token"
       - eraseText: 50
       - inputText: "test-token-maestro"
 
-      # Tap Connect
-      - tapOn:
-          text: "^Connect$"
+      # Hide keyboard before tapping Connect (keyboard can cover it)
+      - hideKeyboard
 
-      # Wait for SessionScreen to appear (Chat mode button indicates we're connected)
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+      - tapOn:
+          id: "connect-submit"
 
-# If on auto-connect spinner, cancel and reconnect manually
-- runFlow:
-    when:
-      visible:
-        text: "^Cancel$"
-    commands:
-      - tapOn:
-          text: "^Cancel$"
-      - waitForAnimationToEnd
-      - extendedWaitUntil:
-          visible: "Connect to Chroxy"
-          timeout: 5000
-      - tapOn:
-          text: ".*Enter manually.*"
-      - tapOn: "Server URL"
-      - eraseText: 50
-      - inputText: "ws://localhost:9876"
-      - tapOn:
-          text: "API Token.*"
-      - eraseText: 50
-      - inputText: "test-token-maestro"
-      - tapOn:
-          text: "^Connect$"
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+# Verify we're on SessionScreen (the Chat mode button indicates connected).
+- extendedWaitUntil:
+    visible: "Chat"
+    timeout: 15000

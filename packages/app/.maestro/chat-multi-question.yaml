@@ -1,5 +1,5 @@
 appId: com.blamechris.chroxy
-name: ChatView mixed multi-question AskUserQuestion form (#4762 / #4973)
+name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
 ---
 
 # #4762 / #4973 — Mobile Maestro coverage for the mixed multi-question
@@ -153,9 +153,14 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762 / #4973)
     id: "question-multi-option-2-auto-rollback"
 - assertVisible:
     id: "question-multi-option-2-manual-rollback"
-- assertVisible: "Q1 — deploy to production?"
-- assertVisible: "Q2 — which areas to verify?"
-- assertVisible: "Q3 — rollback strategy?"
+# Wildcard matches — the multi-question card flattens its children
+# into accessible containers, so exact text matches find nothing.
+- assertVisible:
+    text: ".*Q1 — deploy to production\\?.*"
+- assertVisible:
+    text: ".*Q2 — which areas to verify\\?.*"
+- assertVisible:
+    text: ".*Q3 — rollback strategy\\?.*"
 
 # Answer every question: Q[0] approve (single-select radio), Q[1]
 # app + server (multi-select checkbox — two taps add to the array),
@@ -186,6 +191,8 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762 / #4973)
     visible:
       id: "question-multi-summary"
     timeout: 10000
-- assertVisible: "Q2 — which areas to verify?: app, server"
+# Wildcard match — the summary chip flattens like the card above.
+- assertVisible:
+    text: ".*Q2 — which areas to verify\\?: app, server.*"
 
 - takeScreenshot: chat-multi-question-answered
