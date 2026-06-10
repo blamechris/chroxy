@@ -74,6 +74,13 @@ const MAX_RETRY_AFTER_MS = 30_000
 // this are dropped at load time; the Discord message itself is KEPT (an
 // offline embed is a final record — only the tracking stops).
 const DEFAULT_PRUNE_AFTER_MS = 86_400_000 // 24h
+// #5457: sanity floor. A retention shorter than the gap between consecutive
+// events prunes the entry (and its messageId) in between, so every event
+// takes the no-`prev` path and POSTs a brand-new message — message-per-event
+// spam instead of one embed PATCHed in place. Anything below updateThrottleMs
+// is definitely pathological; 60s is the conservative line. 0 stays the
+// documented disable (parity with the heartbeatIntervalMs 10s floor).
+const MIN_PRUNE_AFTER_MS = 60_000 // 60s
 
 // Embed sidebar color defaults — ported from claude-code-notify
 // (colors.conf.example + the CLAUDE_NOTIFY_*_COLOR defaults).
@@ -168,7 +175,9 @@ export class DiscordWebhookSink extends NotificationSink {
    * @param {number} [opts.pruneAfterMs] - Retention for state-store entries
    *   (#5429/#5434): entries whose lastUpdateTs is older than this are
    *   dropped at load time (the first load after init is the startup sweep).
-   *   0 disables pruning; invalid values fall back to the 24h default.
+   *   0 disables pruning; invalid values and values below 60s fall back to
+   *   the 24h default (#5457 — a tiny retention prunes the messageId between
+   *   events and turns the status embed into message-per-event spam).
    * @param {Function} [opts.resolveWebhookUrl] - Injection seam for tests;
    *   defaults to the env > 0600-credentials.json resolver.
    * @param {Function} [opts.sleepImpl] - Injection seam for tests (429/backoff
@@ -203,7 +212,9 @@ export class DiscordWebhookSink extends NotificationSink {
     if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs < 0) heartbeatIntervalMs = 300_000
     if (heartbeatIntervalMs > 0 && heartbeatIntervalMs < 10_000) heartbeatIntervalMs = 300_000
     this._heartbeatIntervalMs = heartbeatIntervalMs
-    this._pruneAfterMs = Number.isFinite(pruneAfterMs) && pruneAfterMs >= 0 ? pruneAfterMs : DEFAULT_PRUNE_AFTER_MS
+    if (!Number.isFinite(pruneAfterMs) || pruneAfterMs < 0) pruneAfterMs = DEFAULT_PRUNE_AFTER_MS
+    if (pruneAfterMs > 0 && pruneAfterMs < MIN_PRUNE_AFTER_MS) pruneAfterMs = DEFAULT_PRUNE_AFTER_MS
+    this._pruneAfterMs = pruneAfterMs
     this._resolveWebhookUrl = resolveWebhookUrl
     this._sleep = sleepImpl
     this._now = now

@@ -485,11 +485,16 @@ function validateDiscordNotificationsBlock(discord, warnings) {
   }
 
   // #5429/#5434: state-store entry retention. 0 disables pruning; the sink
-  // falls back to its 24h default on invalid values.
+  // falls back to its 24h default on invalid values. #5457: values below 60s
+  // get the same treatment — a retention shorter than the gap between events
+  // prunes the messageId in between and turns the single status embed into
+  // message-per-event spam (parity with the heartbeatIntervalMs floor).
   if (Object.prototype.hasOwnProperty.call(discord, 'pruneAfterMs')) {
     const v = discord.pruneAfterMs
     if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
       warnings.push(`Invalid value for 'notifications.discord.pruneAfterMs': expected a number >= 0 (0 disables pruning), got ${JSON.stringify(v)}`)
+    } else if (v !== 0 && v < 60_000) {
+      warnings.push(`Invalid value for 'notifications.discord.pruneAfterMs': ${v} (minimum 60000 / 60s; set 0 to disable pruning — the sink falls back to its default)`)
     }
   }
 }

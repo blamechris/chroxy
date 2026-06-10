@@ -289,6 +289,41 @@ describe('classifyNonProjectCwd (#5464 chroxy worktrees)', () => {
   })
 })
 
+// #5471: every runEmit suppression test sets CHROXY_HOOKS_TMP_PREFIXES, so
+// the default `return TMP_PREFIXES` branch of tmpPrefixes() is never hit by
+// the emit tests — a regression in the production list would ship silently
+// while the pinned tests stayed green. Pin the built-in list (and the
+// override normalization) directly. Hermetic: the paths don't need to exist
+// (realResolve falls back to the resolved path when realpathSync throws), so
+// this passes under any TMPDIR on both Linux and macOS; on macOS an existing
+// /tmp/... realpaths to /private/tmp/..., which the default list also covers.
+describe('classifyNonProjectCwd — default TMP_PREFIXES fallback (#5471)', () => {
+  it('classifies /tmp and /var/tmp as tmp with the env var unset (production list)', () => {
+    assert.equal(classifyNonProjectCwd('/tmp/some-session', {}), 'tmp')
+    assert.equal(classifyNonProjectCwd('/var/tmp/x', {}), 'tmp')
+    // macOS realpaths of the same roots are first-class entries too
+    assert.equal(classifyNonProjectCwd('/private/tmp/some-session', {}), 'tmp')
+    assert.equal(classifyNonProjectCwd('/private/var/tmp/x', {}), 'tmp')
+  })
+
+  it('falls back to the built-ins on an empty override', () => {
+    assert.equal(classifyNonProjectCwd('/tmp/x', { CHROXY_HOOKS_TMP_PREFIXES: '' }), 'tmp')
+  })
+
+  it('falls back to the built-ins when the override yields no usable absolute prefixes', () => {
+    const env = { CHROXY_HOOKS_TMP_PREFIXES: 'relative/path: ::  ' }
+    assert.equal(classifyNonProjectCwd('/tmp/x', env), 'tmp')
+  })
+
+  it('trims override entries and strips trailing slashes (cea68b30b normalization)', () => {
+    const env = { CHROXY_HOOKS_TMP_PREFIXES: ' /chroxy-test-tmp/ ' }
+    assert.equal(classifyNonProjectCwd('/chroxy-test-tmp/session', env), 'tmp', 'trailing slash stripped — prefix + "/" still matches')
+    assert.equal(classifyNonProjectCwd('/chroxy-test-tmp', env), 'tmp', 'the root itself matches after trimming')
+    assert.equal(classifyNonProjectCwd('/chroxy-test-tmpfoo', env), null, 'no false prefix match on a sibling name')
+    assert.equal(classifyNonProjectCwd('/tmp/x', env), null, 'a usable override REPLACES the built-ins')
+  })
+})
+
 describe('sanitizeData', () => {
   it('truncates strings to 4096 chars (schema per-value cap)', () => {
     const out = sanitizeData({ big: 'x'.repeat(5000) })

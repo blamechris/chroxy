@@ -687,6 +687,22 @@ describe('config — notifications.discord block (#5413)', () => {
     const result = validateConfig({ notifications: { discord: { heartbeatIntervalMs: 500 } } })
     assert.ok(result.warnings.some((w) => w.includes('heartbeatIntervalMs')))
   })
+
+  // #5457: a tiny retention prunes the entry (and its messageId) between
+  // consecutive events — every event then POSTs a brand-new message instead
+  // of PATCHing in place. Same non-fatal warning as the heartbeat floor.
+  it('warns on a too-small pruneAfterMs (value warning, never fatal) (#5457)', () => {
+    const result = validateConfig({ notifications: { discord: { pruneAfterMs: 5_000 } } })
+    assert.ok(result.warnings.some((w) => w.includes('pruneAfterMs') && w.includes('60000')))
+    assert.ok(!result.warnings.some((w) => w.startsWith('Invalid type')))
+  })
+
+  it('does not warn on pruneAfterMs at the floor or at 0 (disable)', () => {
+    for (const v of [0, 60_000, 86_400_000]) {
+      const result = validateConfig({ notifications: { discord: { pruneAfterMs: v } } })
+      assert.ok(!result.warnings.some((w) => w.includes('pruneAfterMs')), `unexpected warning for ${v}: ${JSON.stringify(result.warnings)}`)
+    }
+  })
 })
 
 describe('formatDuration (ported from claude-code-notify)', () => {
@@ -1163,6 +1179,21 @@ describe('DiscordWebhookSink — stale-entry pruning (#5429 / #5434)', () => {
     assert.equal(sink._pruneAfterMs, DAY_MS)
     const { sink: sink2 } = makeSink({ pruneAfterMs: 'soon' })
     assert.equal(sink2._pruneAfterMs, DAY_MS)
+  })
+
+  // #5457: a retention below the 60s floor prunes the entry between
+  // consecutive events, breaking PATCH-in-place into message-per-event spam.
+  // Clamp to the default (parity with the heartbeatIntervalMs clamp); 0
+  // stays 0 — it is the documented disable.
+  it('a too-small pruneAfterMs (0 < v < 60s) falls back to the default retention (#5457)', () => {
+    const { sink } = makeSink({ pruneAfterMs: 5_000 })
+    assert.equal(sink._pruneAfterMs, DAY_MS)
+    const { sink: sink2 } = makeSink({ pruneAfterMs: 59_999 })
+    assert.equal(sink2._pruneAfterMs, DAY_MS)
+    const { sink: sink3 } = makeSink({ pruneAfterMs: 60_000 })
+    assert.equal(sink3._pruneAfterMs, 60_000, 'the floor itself is accepted')
+    const { sink: sink4 } = makeSink({ pruneAfterMs: 0 })
+    assert.equal(sink4._pruneAfterMs, 0, '0 stays the documented disable')
   })
 
   it('a state file whose projects slot is an array is treated as corrupt (fresh map, tracking persists)', async () => {
