@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 
 /**
  * Minimal harness that mirrors CliSession's respawn logic.
@@ -8,13 +9,16 @@ import { EventEmitter } from 'node:events'
  * This avoids pulling in spawn/permission-hook/etc dependencies.
  */
 class RespawnTestHarness extends EventEmitter {
-  constructor() {
+  constructor(rateLimiter) {
     super()
     this._destroying = false
     this._respawnCount = 0
     this._respawnTimer = null
     this._respawnScheduled = false
     this._startCallCount = 0
+    // #5349: mirrors cli-session.js — a rolling-window cap independent of the
+    // warmup-resetting _respawnCount.
+    this._respawnRateLimiter = rateLimiter || new RespawnRateLimiter()
   }
 
   start() {
@@ -25,6 +29,13 @@ class RespawnTestHarness extends EventEmitter {
   _scheduleRespawn() {
     if (this._destroying) return
     if (this._respawnScheduled) return
+
+    // #5349: rolling-window cap, checked BEFORE _respawnCount.
+    if (!this._respawnRateLimiter.record()) {
+      const { maxPerWindow, windowMs } = this._respawnRateLimiter
+      this.emit('error', { message: `Claude process is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes` })
+      return
+    }
 
     this._respawnCount++
     if (this._respawnCount > 5) {
@@ -67,6 +78,25 @@ describe('CliSession _scheduleRespawn guard', () => {
 
   afterEach(() => {
     session.destroy()
+  })
+
+  it('a flapping session (system.init keeps resetting _respawnCount) gives up via the rolling rate cap (#5349)', () => {
+    // Fixed clock + small cap: each respawn "survives warmup" (resets the
+    // consecutive _respawnCount on system.init), so the consecutive cap of 5
+    // never trips — only the rolling rate cap can stop the flap.
+    const limited = new RespawnTestHarness(new RespawnRateLimiter({ maxPerWindow: 3, windowMs: 5 * 60_000, now: () => 1000 }))
+    const errors = []
+    limited.on('error', (e) => errors.push(e))
+    for (let i = 0; i < 4; i++) {
+      limited._respawnCount = 0          // system.init warmup reset
+      if (limited._respawnTimer) { clearTimeout(limited._respawnTimer); limited._respawnTimer = null }
+      limited._respawnScheduled = false  // allow the next schedule
+      limited._scheduleRespawn()
+    }
+    assert.equal(errors.length, 1, 'gives up exactly once despite the warmup resets')
+    assert.match(errors[0].message, /flapping/, 'error names the flapping rate cap')
+    assert.equal(limited._respawnScheduled, false, 'no respawn scheduled after the rate cap')
+    limited.destroy()
   })
 
   it('calling _scheduleRespawn twice only creates one timer', () => {

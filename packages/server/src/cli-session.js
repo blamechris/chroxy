@@ -13,6 +13,7 @@ import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 
@@ -354,6 +355,11 @@ export class CliSession extends BaseSession {
     this._respawnTimer = null
     this._respawnScheduled = false
     this._respawning = false
+    // #5349: rolling-window respawn cap independent of `_respawnCount`, which
+    // resets on every `system.init` (warmup success). Without it a session that
+    // dies shortly after each successful init flaps forever. Mirrors the same
+    // guard in ClaudeTuiSession.
+    this._respawnRateLimiter = new RespawnRateLimiter()
     this._interruptTimer = null
     // #4929: track in-flight `--resume <id>` attempts so we can detect when
     // claude CLI rejects an unknown id and avoid the spin-retry loop reported
@@ -576,6 +582,16 @@ export class CliSession extends BaseSession {
     if (this._destroying) return
     if (this._respawning) return
     if (this._respawnScheduled) return
+
+    // #5349: rolling-window cap, checked BEFORE _respawnCount so a session that
+    // keeps surviving warmup (resetting _respawnCount on system.init) still
+    // gives up once it flaps past the window cap.
+    if (!this._respawnRateLimiter.record()) {
+      const { maxPerWindow, windowMs } = this._respawnRateLimiter
+      log.error(`Respawn rate cap reached (>${maxPerWindow} in ${Math.round(windowMs / 60000)}min), giving up — session is flapping`)
+      this.emit('error', { message: `Claude process is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes` })
+      return
+    }
 
     this._respawnCount++
     if (this._respawnCount > 5) {
