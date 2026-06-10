@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.45] - 2026-06-10
+
+The notifications release. Epic #5413 lands in full: chroxy now maintains a live per-project **Discord status embed** for any Claude Code session on the machine — not just chroxy-managed ones — via the new `@chroxy/claude-hooks` package (stateless hook emitters + idempotent installer), a `POST /api/events` ingest endpoint with its own daemon-level token class, and server-side subagent counting. Alongside it: a deep **claude-tui reliability wave** (~30 fixes off the failure-readiness audit, from crash containment to PTY redaction to restart-resume), **provider expansion** (local Ollama models with auto-discovery, plus any Anthropic-compatible endpoint via config), and the desktop app finally **surfaces server-startup failures** on the loading screen instead of spinning forever.
+
+### Added
+
+- **Notifications epic #5413 — Discord status embed + external-session ingest (complete):**
+  - **`NotificationSink` registry (#5425):** notification delivery extracted behind a sink interface; Expo push becomes `ExpoPushSink`.
+  - **`DiscordWebhookSink` (#5427):** per-project status embed ported from `claude-code-notify` — ready/approval states delete + re-post (so Discord pings), routine updates edit in place; shared pipeline preferences, quiet hours, and rate limits apply. See `docs/guides/discord-notifications.md`.
+  - **`POST /api/events` ingest (#5432):** external session events enter the notification pipeline, authenticated by a generated daemon-level **ingest secret** (`~/.chroxy/ingest-secret`, 0600) — a fourth token class alongside primary/pairing/hook-secret.
+  - **`@chroxy/claude-hooks` (#5447):** six stateless hook emitters (<100ms, silent-fail) plus a `chroxy-hooks install|uninstall|emit` CLI that idempotently registers them in Claude Code settings; server-side per-`(source, sessionId)` subagent counting (2h TTL, LRU-bounded).
+  - **Parity gaps closed before cutover (#5465):** idle prompts map to activity updates, worktree/tmp/home cwds don't mint their own project embeds, an idle-armed embed re-pings when the last subagent finishes, and a hand-deleted embed message is re-posted instead of 404-looping offline.
+  - **`~/.chroxy/worktrees` remap (#5481):** sessions in chroxy's own session worktrees attribute to the parent project (recovered from the worktree `.git` gitdir), like `.claude/worktrees` agents already did.
+  - **Ready-for-input notifications carry the background-task snapshot (#5436, #5452):** "ready" pushes enumerate still-running agents/shells so you know whether ready means *done*.
+  - **Embed-state hygiene (#5456):** stale per-project webhook-state entries are pruned (24h default) and the footer-refresh heartbeat is bounded to live projects.
+  - **Client preference surfaces:** `session_online` / `session_offline` / `session_activity` categories in mobile notification prefs (#5443) and labeled in the dashboard prefs panel (#5477).
+- **Providers:**
+  - **Ollama (#5418):** local models via Ollama's Anthropic-compatible API, with installed-model discovery through `GET /api/tags` (#5445).
+  - **Config-driven Anthropic-compatible endpoints (#5458):** point a provider at any Anthropic-compatible server (LM Studio ≥0.4.1, llama.cpp, vLLM, OpenRouter, …) via `providers.anthropicCompatible` config — BYOK seams, per-endpoint model validation, inline secrets rejected.
+- **Security & operations:**
+  - **Exposure warnings (#5459):** startup log + dashboard banner when the daemon binds non-loopback or a public quick tunnel comes up.
+  - **Subscription auth-failure detection (#5355):** a dead subscription surfaces immediately instead of a 90-second silent hang.
+  - **Configurable background-shell hard-quiesce window (#5303)** and a **periodic worktree auto-reaper (#5363)** (no longer boot-only).
+- **Desktop:**
+  - **Startup failures are visible (#5494):** a dead server child (e.g. `EADDRINUSE` port conflict) turns the loading screen into a classified error + last server log lines + Retry button, with a 30s "still starting" fallback; startup health-poll races closed so a foreign server answering on the port can't mask the dead child (#5495).
+  - **Editable summon hotkey (#5301)** with live re-registration.
+  - **Windows MSI is Authenticode-signed** via Azure Trusted Signing (#5299).
+
+### Fixed
+
+- **claude-tui reliability wave** (from the failure-readiness audit, `docs/audit/`, #5306):
+  - **Restart durability:** conversations persist and `--resume` across daemon restart (#5339); session state flushes on every supervised shutdown/crash path (#5340) with per-pid temp files (#5341); worktree bindings rebind after restart (#5342); retry-FRESH fallback when every `--resume` respawn dies in warmup (#5415), with PTY-tail failure classification gating eligibility (#5449).
+  - **Crash containment:** daemon survives PTY socket faults (#5343), route handler throws (#5344), fire-and-forget rejections and listener/broadcast throws (#5345); supervisor crash safety + cloudflared boot-leak (#5346); bounded per-session PTY auto-respawn (#5347) under a rolling-window rate cap shared by both providers (#5411).
+  - **Lifecycle:** `start()` rejects on PTY spawn failure and restore preserves history (#5350); `destroy()` escalates to SIGKILL so no orphan `claude`/tool children outlive the session (#5351); SIGHUP routes through graceful shutdown (#5406); watchdog timing moved to a monotonic clock (#5414).
+  - **AskUserQuestion:** silence backstops suspend while a human is answering (#5352); per-`toolUseId` stall watchdogs (#5353); recovery arms on every respond path (#5354).
+  - **Redaction:** credentials scrubbed from PTY hex/tail diagnostics (#5357); ANSI-split tokens + JWTs caught in PTY dumps (#5412); ANSI stripped from the concatenated tail, not per-chunk (#5362).
+  - **Hooks/permissions:** hook sink recovers if it vanishes mid-turn (#5410); hook-sink files bounded + stale dirs boot-swept (#5359); permission hook fails closed when it can't reach the user (#5409); atomic permission-mode sidecar writes (#5407); checkpoint-restore failures preserve pending changes and orphan refs are pruned (#5408).
+  - **Streams/observability:** error listeners on subprocess stdout/stderr (#5360, #5397); swallowed observability errors surfaced (#5366); WebTaskManager poll completes healthy tasks and unrefs its timer (#5364).
+- **Server:** oversize request bodies get their 413 before teardown (#5442); unknown `contextWindow` no longer assumed to be 200k (#5444); dashboard auth path caches the credentials.json read (#5484); supervisor-sent notifications honor `notifications.discord` config (#5451).
+- **App:** `chroxy://` QR pairing infers ws/wss by port so LAN pairing connects (#5302).
+- **CI/tests:** Windows ACL tests pinned against runner-image default drift (#5478); GAP B cwd-filter tests hermetic to the OS temp dir (#5470); all Maestro flows migrated to the dev client (#5395, #5466); coverage for provider-models refresh scheduling (#5482), respawn exhaustion, Rancher config validation, and permission-guard branches (#5384–#5387, #5391).
+
+### Changed
+
+- **`startCliServer` decomposed** into `PushNotificationHandler`, `StartupDisplay`, `TunnelLifecycleHandler`, and `ServerOrchestrator` (#5400–#5403), with shared emergency-cleanup helpers (#5393) and a shared sleep-with-abort/backoff helper (#5405).
+- **`BaseSession` opt forwarding** now goes through the `buildBaseSessionOpts` picker, single-sourced from `BASE_SESSION_OPT_KEYS`, with the CI lint inverted to catch drift (#5398); `SkillsManager` + `BackgroundShellTracker` extracted (#5399); `_intentionalStop` hoisted (#5392); setter guards centralized (#5394); session-scoped logger selection centralized (#5390).
+- **Permission resolution single-sourced** across WS and hook transports (#5404); JSON responses centralized in `ws-permissions` handlers (#5389).
+- **Dashboard adopts shared store-core handlers** for the remaining duplicated message types (#5487).
+- **Docs:** Unattended Merge Authority codified for autonomous sessions (#5485); provider docs cover the BYOK family, DeepSeek, and Ollama in the capability matrix (#5440, #5476); claude-tui failure-readiness audit published (#5306).
+
 ## [0.9.44] - 2026-06-07
 
 Big-feature consolidation plus a fleet-management push: the docker-byok / Task-subagent arc lands its final round of follow-ups, two cloud backends arrive (config-driven K8s/Rancher with per-tenant namespace isolation + resource quotas), the dashboard becomes a multi-host LAN client (epic #5281) able to join shared sessions on remote daemons, Control Room graduates to v2 with a navigable host/repo status section + self-hosted-runner page, a `cancel_activity` request/response chain lets the operator stop in-flight agents/subagents from the Control Room tree, and credentials.json is now encrypted at rest behind an OS-keychain data key (with a rotation path) on keychain-capable hosts — falling back to the prior 0600 plaintext store where no keychain is available. Rounded out by worktree-gc safety hardening, background-shell reap fixes, and the dashboard Provider Credentials pane.
