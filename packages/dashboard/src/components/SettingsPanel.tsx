@@ -92,6 +92,19 @@ const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: strin
     label: 'Live Activity (iOS)',
     hint: 'iOS Dynamic Island / lock-screen Live Activity updates.',
   },
+  // #5413 Phase 3: external-session categories fed by POST /api/events.
+  session_online: {
+    label: 'External session online',
+    hint: 'An external session reported in via /api/events.',
+  },
+  session_offline: {
+    label: 'External session offline',
+    hint: 'An external session ended or went away.',
+  },
+  session_activity: {
+    label: 'External session activity',
+    hint: 'Subagent and tool activity from external sessions.',
+  },
 }
 
 /** Render order for known categories. Unknown keys append at the end in snapshot order. */
@@ -102,6 +115,11 @@ const NOTIFICATION_CATEGORY_ORDER = [
   'activity_update',
   'inactivity_warning',
   'result',
+  // External-session categories (#5413) grouped together, ahead of the
+  // platform-specific Live Activity entry which stays last.
+  'session_online',
+  'session_offline',
+  'session_activity',
   'live_activity',
 ]
 

@@ -6,6 +6,8 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import fs from 'node:fs'
+import path from 'node:path'
 import { SettingsPanel } from './SettingsPanel'
 
 // Mock theme-engine
@@ -1191,6 +1193,165 @@ describe('SettingsPanel', () => {
       })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(screen.getByTestId('notification-prefs-toggle-future_category')).toBeInTheDocument()
+    })
+  })
+
+  describe('Notification preferences — external-session categories (#5446)', () => {
+    // #5413 Phase 3 added session_online / session_offline / session_activity
+    // server-side; #5435 labeled them on mobile. These tests pin the dashboard
+    // labels + order to the same wording so the two clients never drift.
+    const categories = {
+      permission: true,
+      result: true,
+      activity_update: true,
+      activity_waiting: true,
+      activity_error: true,
+      inactivity_warning: true,
+      live_activity: true,
+      session_online: true,
+      session_offline: true,
+      session_activity: true,
+    }
+    const defaultPrefs = { categories, devices: {}, quietHours: null }
+
+    // Wording copied verbatim from packages/app/src/screens/SettingsScreen.tsx
+    // (#5435) — change both together or not at all.
+    const expectedLabels: Record<string, { label: string; hint: string }> = {
+      session_online: {
+        label: 'External session online',
+        hint: 'An external session reported in via /api/events.',
+      },
+      session_offline: {
+        label: 'External session offline',
+        hint: 'An external session ended or went away.',
+      },
+      session_activity: {
+        label: 'External session activity',
+        hint: 'Subagent and tool activity from external sessions.',
+      },
+    }
+
+    it('labels the three categories instead of falling back to the raw-key tail', () => {
+      setMockState({ notificationPrefs: defaultPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      for (const [cat, { label, hint }] of Object.entries(expectedLabels)) {
+        const toggle = screen.getByTestId(`notification-prefs-toggle-${cat}`)
+        // The row label is `meta?.label ?? cat` — raw key means no label entry.
+        expect(toggle.closest('label')?.textContent).toBe(label)
+        expect(screen.getByText(hint)).toBeInTheDocument()
+      }
+    })
+
+    it('orders them after result and before live_activity, matching mobile', () => {
+      setMockState({ notificationPrefs: defaultPrefs })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const rendered = screen
+        .getAllByTestId(/^notification-prefs-toggle-/)
+        .map((el) => el.getAttribute('data-testid')!.replace('notification-prefs-toggle-', ''))
+      expect(rendered).toEqual([
+        'permission',
+        'activity_waiting',
+        'activity_error',
+        'activity_update',
+        'inactivity_warning',
+        'result',
+        'session_online',
+        'session_offline',
+        'session_activity',
+        'live_activity',
+      ])
+    })
+  })
+
+  describe('Notification preferences — label sync with server ALL_CATEGORIES (#5446)', () => {
+    // Hardening: parse the canonical category enum straight out of
+    // packages/server/src/notification-prefs.js so a future server-side
+    // addition fails HERE (and in the mirror check below) instead of
+    // silently shipping a raw-key row in the unknown tail — the exact gap
+    // #5435 (mobile) and #5446 (dashboard) had to close after #5413.
+    function parseServerCategories(): string[] {
+      const src = fs.readFileSync(
+        path.resolve(__dirname, '../../../server/src/notification-prefs.js'),
+        'utf-8',
+      )
+      const m = src.match(/export const ALL_CATEGORIES = Object\.freeze\(\[([\s\S]*?)\]\)/)
+      if (!m) {
+        throw new Error(
+          'ALL_CATEGORIES not found in packages/server/src/notification-prefs.js — update this sync test',
+        )
+      }
+      return [...m[1]!.matchAll(/'([^']+)'/g)].map((hit) => hit[1]!)
+    }
+    const allCategories = parseServerCategories()
+
+    it('parses a sane category list from the server source', () => {
+      expect(allCategories.length).toBeGreaterThanOrEqual(10)
+      expect(allCategories).toContain('permission')
+      expect(allCategories).toContain('session_activity')
+    })
+
+    it('renders a friendly label for every server category (no raw-key fallback)', () => {
+      setMockState({
+        notificationPrefs: {
+          categories: Object.fromEntries(allCategories.map((c) => [c, true])),
+          devices: {},
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      for (const cat of allCategories) {
+        const toggle = screen.getByTestId(`notification-prefs-toggle-${cat}`)
+        // The unknown-key tail renders the raw key as the label text.
+        expect(toggle.closest('label')?.textContent).not.toBe(cat)
+      }
+    })
+
+    it('gives every server category an order slot (renders ahead of unknown keys)', () => {
+      // Known keys render in NOTIFICATION_CATEGORY_ORDER first; unknown keys
+      // append after in *insertion order* (Object.keys is insertion-ordered
+      // for string keys — the zz_ prefix is cosmetic, nothing sorts). The
+      // sentinel therefore MUST be seeded FIRST: a server category missing
+      // its order slot falls into the unknown tail, and only a leading
+      // sentinel forces it to render after the sentinel. Seeded last, the
+      // missing category would render before the sentinel and this guard
+      // would pass vacuously (the #5032 lesson, again).
+      setMockState({
+        notificationPrefs: {
+          categories: {
+            zz_unknown_sentinel: true,
+            ...Object.fromEntries(allCategories.map((c) => [c, true])),
+          },
+          devices: {},
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const rendered = screen
+        .getAllByTestId(/^notification-prefs-toggle-/)
+        .map((el) => el.getAttribute('data-testid')!.replace('notification-prefs-toggle-', ''))
+      const sentinelIdx = rendered.indexOf('zz_unknown_sentinel')
+      expect(sentinelIdx).toBeGreaterThan(-1)
+      for (const cat of allCategories) {
+        expect(rendered.indexOf(cat), `order slot for ${cat}`).toBeLessThan(sentinelIdx)
+      }
+    })
+
+    it('mobile SettingsScreen also labels every server category (cross-client guard)', () => {
+      // Same guard for the other client, asserted from one place so a new
+      // server category cannot fall into the raw-key tail on either UI.
+      const mobileSource = fs.readFileSync(
+        path.resolve(__dirname, '../../../app/src/screens/SettingsScreen.tsx'),
+        'utf-8',
+      )
+      const m = mobileSource.match(/const NOTIFICATION_CATEGORY_LABELS[^=]*=\s*\{([\s\S]*?)\n\};/)
+      if (!m) {
+        throw new Error(
+          'NOTIFICATION_CATEGORY_LABELS not found in packages/app/src/screens/SettingsScreen.tsx — update this sync test',
+        )
+      }
+      for (const cat of allCategories) {
+        expect(m[1], `mobile label for ${cat}`).toMatch(new RegExp(`\\b${cat}:`))
+      }
     })
   })
 
