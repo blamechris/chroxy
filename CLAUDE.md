@@ -145,10 +145,12 @@ type(scope): Short summary in present tense
 1. Create feature branch from `main`
 2. Develop and test
 3. Push and create PR
-4. Get user confirmation before merging
+4. Get user confirmation before merging (interactive sessions) or pass the Unattended Merge Gate (autonomous sessions — see below)
 5. Squash merge to main
 
-**NEVER auto-merge.** Always present a summary and wait for explicit user confirmation.
+**Unattended Merge Authority:** During autonomous/unattended sessions, a session-created PR may be self-merged ONLY after the full review pipeline (`/full-review`: agent review + thread triage) passes with a clean verdict, ALL CI checks are green on the final commit, and ALL review threads are resolved. NEVER use `gh pr merge --auto` or GitHub auto-merge — verify the gates, then merge synchronously and confirm the PR reports `MERGED`. No `--admin`, no protection overrides. Every self-merged PR MUST appear as its own entry in the end-of-session report (PR, issue, review verdict, checks, merge SHA). If any gate fails, flag the PR with the failed gate named and leave it for the user.
+
+**Outside autonomous sessions, NEVER auto-merge.** Always present a summary and wait for explicit user confirmation.
 
 **Merge Gate — MANDATORY triage when merge is blocked:**
 
