@@ -11,6 +11,14 @@
  * is signal, not an error. A sibling repo-relay column block lands in the
  * follow-up issue (#5498 sub-issues).
  *
+ * #5500 adds the control half: a per-row Reindex button for configured repos
+ * that dispatches `integration_action` (repo_memory_reindex) via the store's
+ * `sendRepoMemoryReindex`. The row shows "Reindexing…" (keyed by repoPath in
+ * `reindexingRepoPaths`) until the `integration_action_ack` /
+ * INTEGRATION_ACTION_FAILED session_error lands, then renders the ack's
+ * scanned/summarized/fresh/skipped counts (or the failure reason) inline
+ * from `reindexResults`.
+ *
  * Lives next to the Project status and Self-hosted runners tables inside the
  * Control Room (see ControlRoomView). Same pull-on-Refresh data flow as the
  * sibling surveys: the Refresh button dispatches `integration_status_request`
@@ -26,6 +34,7 @@
  */
 import { useConnectionStore } from '../store/connection'
 import type { IntegrationRepo, RepoMemoryStatus, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
+import type { ReindexResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
 
 type Accent = 'ok' | 'warn' | 'bad'
@@ -128,7 +137,76 @@ function HitRatioCell({ repo }: { repo: IntegrationRepo }) {
   )
 }
 
-function IntegrationRow({ repo, now }: { repo: IntegrationRepo; now: number }) {
+/**
+ * #5500 — per-row Reindex action cell. Only configured repos get the button
+ * (an unconfigured repo has nothing to index into). The button disables while
+ * this repo's request is pending OR the socket is down (a dead-socket click
+ * would silently do nothing — sendRepoMemoryReindex refuses to queue). The
+ * last outcome renders inline under the button: the ack's counts, a neutral
+ * "reindexed" note when the server couldn't parse the CLI report (Refresh
+ * shows the cache truth), or the INTEGRATION_ACTION_FAILED reason.
+ */
+function ReindexCell({
+  repo,
+  reindexing,
+  result,
+  connected,
+  onReindex,
+}: {
+  repo: IntegrationRepo
+  reindexing: boolean
+  result: ReindexResult | undefined
+  connected: boolean
+  onReindex: (repoPath: string) => void
+}) {
+  if (repo.repoMemory?.configured !== true) {
+    return <td className="cr-dim" data-testid={`integration-actions-${repo.name}`}>—</td>
+  }
+  const disabled = reindexing || !connected
+  return (
+    <td data-testid={`integration-actions-${repo.name}`}>
+      <button
+        type="button"
+        className="cr-refresh"
+        data-testid={`integration-reindex-${repo.name}`}
+        onClick={() => { if (!disabled) onReindex(repo.path) }}
+        disabled={disabled}
+        aria-busy={reindexing}
+        title={connected ? 'Run repo-memory index to refresh the summary cache' : 'Not connected — reconnect to reindex'}
+      >
+        {reindexing ? 'Reindexing…' : 'Reindex'}
+      </button>
+      {!reindexing && result && result.error !== null && (
+        <div className="cr-bad" data-testid={`integration-reindex-error-${repo.name}`}>
+          {result.error}
+        </div>
+      )}
+      {!reindexing && result && result.error === null && (
+        <div className="cr-dim" data-testid={`integration-reindex-result-${repo.name}`}>
+          {result.counts
+            ? `✓ ${result.counts.summarized} summarized · ${result.counts.fresh} fresh · ${result.counts.skipped} skipped`
+            : '✓ reindexed — refresh for cache stats'}
+        </div>
+      )}
+    </td>
+  )
+}
+
+function IntegrationRow({
+  repo,
+  now,
+  reindexing,
+  reindexResult,
+  connected,
+  onReindex,
+}: {
+  repo: IntegrationRepo
+  now: number
+  reindexing: boolean
+  reindexResult: ReindexResult | undefined
+  connected: boolean
+  onReindex: (repoPath: string) => void
+}) {
   const rm = repo.repoMemory
   const report = rm?.report ?? null
   const configured = rm?.configured === true
@@ -163,6 +241,13 @@ function IntegrationRow({ repo, now }: { repo: IntegrationRepo; now: number }) {
       <td className="cr-dim" data-testid={`integration-activity-${repo.name}`}>
         {formatAgo(lastActivity, now)}
       </td>
+      <ReindexCell
+        repo={repo}
+        reindexing={reindexing}
+        result={reindexResult}
+        connected={connected}
+        onReindex={onReindex}
+      />
     </tr>
   )
 }
@@ -176,6 +261,12 @@ export interface IntegrationsSectionProps {
   connected?: boolean
   /** Refresh action. Defaults to the store's requestIntegrationStatus. */
   onRefresh?: () => void
+  /** #5500: repo paths with an in-flight reindex. Defaults to the store. */
+  reindexingRepoPaths?: Set<string>
+  /** #5500: last reindex outcome per repo path. Defaults to the store. */
+  reindexResults?: Record<string, ReindexResult>
+  /** #5500: Reindex action. Defaults to the store's sendRepoMemoryReindex. */
+  onReindex?: (repoPath: string) => void
   /** Injectable clock (epoch ms) for the "generated Nm ago" / activity cells. */
   now?: () => number
 }
@@ -185,17 +276,26 @@ export function IntegrationsSection({
   loading: loadingProp,
   connected: connectedProp,
   onRefresh: onRefreshProp,
+  reindexingRepoPaths: reindexingProp,
+  reindexResults: reindexResultsProp,
+  onReindex: onReindexProp,
   now = Date.now,
 }: IntegrationsSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.integrationStatus)
   const storeLoading = useConnectionStore((s) => s.integrationStatusLoading)
   const storeConnected = useConnectionStore((s) => s.connectionPhase === 'connected')
   const requestIntegrationStatus = useConnectionStore((s) => s.requestIntegrationStatus)
+  const storeReindexing = useConnectionStore((s) => s.reindexingRepoPaths)
+  const storeReindexResults = useConnectionStore((s) => s.reindexResults)
+  const sendRepoMemoryReindex = useConnectionStore((s) => s.sendRepoMemoryReindex)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
   const connected = connectedProp !== undefined ? connectedProp : storeConnected
   const onRefresh = onRefreshProp ?? requestIntegrationStatus
+  const reindexingRepoPaths = reindexingProp ?? storeReindexing
+  const reindexResults = reindexResultsProp ?? storeReindexResults
+  const onReindex = onReindexProp ?? sendRepoMemoryReindex
 
   const refreshDisabled = loading || !connected
   const handleRefresh = () => {
@@ -300,17 +400,28 @@ export function IntegrationsSection({
                   <th>Tokens saved</th>
                   <th>Entries</th>
                   <th>Last activity</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {snapshot.repos.length === 0 ? (
                   <tr data-testid="integration-no-repos">
-                    <td colSpan={8} className="cr-dim">
+                    <td colSpan={9} className="cr-dim">
                       No repos found under {snapshot.root}.
                     </td>
                   </tr>
                 ) : (
-                  snapshot.repos.map((repo) => <IntegrationRow key={repo.path} repo={repo} now={nowMs} />)
+                  snapshot.repos.map((repo) => (
+                    <IntegrationRow
+                      key={repo.path}
+                      repo={repo}
+                      now={nowMs}
+                      reindexing={reindexingRepoPaths.has(repo.path)}
+                      reindexResult={reindexResults[repo.path]}
+                      connected={connected}
+                      onReindex={onReindex}
+                    />
+                  ))
                 )}
               </tbody>
             </table>

@@ -385,6 +385,40 @@ describe('useConnectionStore', () => {
     expect(useConnectionStore.getState().cancellingActivityIds.has('s1:act-1')).toBe(false);
   });
 
+  it('#5500: sendRepoMemoryReindex marks the repo pending, clears its stale result, and sends', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({
+      socket: openSocket,
+      reindexingRepoPaths: new Set(),
+      reindexResults: { '/p/chroxy': { counts: null, error: 'old failure', at: 1 } },
+    });
+
+    const result = useConnectionStore.getState().sendRepoMemoryReindex('/p/chroxy');
+
+    expect(result).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse((send.mock.calls[0]![0]) as string);
+    expect(payload.type).toBe('integration_action');
+    expect(payload.action).toBe('repo_memory_reindex');
+    expect(payload.repoPath).toBe('/p/chroxy');
+    expect(typeof payload.requestId).toBe('string');
+    expect(useConnectionStore.getState().reindexingRepoPaths.has('/p/chroxy')).toBe(true);
+    // A fresh request invalidates the previous inline result for the repo.
+    expect(useConnectionStore.getState().reindexResults['/p/chroxy']).toBeUndefined();
+  });
+
+  it('#5500: sendRepoMemoryReindex is a no-op offline (not queueable — would strand the row pending)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, reindexingRepoPaths: new Set(), reindexResults: {} });
+
+    const result = useConnectionStore.getState().sendRepoMemoryReindex('/p/chroxy');
+
+    expect(result).toBe(false);
+    expect(useConnectionStore.getState().reindexingRepoPaths.has('/p/chroxy')).toBe(false);
+  });
+
   it('exposes all required actions', async () => {
     const { useConnectionStore } = await import('./connection');
     const state = useConnectionStore.getState();

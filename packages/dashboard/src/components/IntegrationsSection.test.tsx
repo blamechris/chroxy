@@ -25,6 +25,10 @@ vi.mock('../store/connection', () => ({
       integrationStatusLoading: false,
       connectionPhase: 'connected',
       requestIntegrationStatus: () => false,
+      // #5500: Reindex action state.
+      reindexingRepoPaths: new Set<string>(),
+      reindexResults: {},
+      sendRepoMemoryReindex: () => false,
     }),
 }))
 import { IntegrationsSection, formatBytes } from './IntegrationsSection'
@@ -252,6 +256,63 @@ describe('IntegrationsSection — refresh', () => {
     expect(btn.disabled).toBe(true)
     fireEvent.click(btn)
     expect(onRefresh).not.toHaveBeenCalled()
+  })
+})
+
+describe('IntegrationsSection — Reindex action (#5500)', () => {
+  const COUNTS = { scanned: 412, summarized: 12, fresh: 398, skipped: 2 }
+
+  it('renders a Reindex button for a configured repo only', () => {
+    renderSection(snapshot())
+    expect(screen.getByTestId('integration-reindex-chroxy')).toBeTruthy()
+    expect(screen.queryByTestId('integration-reindex-scratch')).toBeNull()
+  })
+
+  it('dispatches onReindex with the repo path when clicked', () => {
+    const onReindex = vi.fn()
+    renderSection(snapshot(), { onReindex })
+    fireEvent.click(screen.getByTestId('integration-reindex-chroxy'))
+    expect(onReindex).toHaveBeenCalledWith('/Users/x/Projects/chroxy')
+  })
+
+  it('shows the pending "Reindexing…" state, disabled, and does not re-dispatch', () => {
+    const onReindex = vi.fn()
+    renderSection(snapshot(), { onReindex, reindexingRepoPaths: new Set(['/Users/x/Projects/chroxy']) })
+    const btn = screen.getByTestId('integration-reindex-chroxy') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(btn.textContent).toContain('Reindexing…')
+    fireEvent.click(btn)
+    expect(onReindex).not.toHaveBeenCalled()
+  })
+
+  it('disables Reindex when disconnected', () => {
+    renderSection(snapshot(), { connected: false })
+    const btn = screen.getByTestId('integration-reindex-chroxy') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+  })
+
+  it('renders the ack counts inline after a completed reindex', () => {
+    renderSection(snapshot(), {
+      reindexResults: { '/Users/x/Projects/chroxy': { counts: COUNTS, error: null, at: NOW } },
+    })
+    const result = screen.getByTestId('integration-reindex-result-chroxy')
+    expect(result.textContent).toContain('12 summarized')
+    expect(result.textContent).toContain('398 fresh')
+    expect(result.textContent).toContain('2 skipped')
+  })
+
+  it('renders a neutral "reindexed" note when the ack carried no counts', () => {
+    renderSection(snapshot(), {
+      reindexResults: { '/Users/x/Projects/chroxy': { counts: null, error: null, at: NOW } },
+    })
+    expect(screen.getByTestId('integration-reindex-result-chroxy').textContent?.toLowerCase()).toContain('reindexed')
+  })
+
+  it('renders the inline error from an INTEGRATION_ACTION_FAILED reply', () => {
+    renderSection(snapshot(), {
+      reindexResults: { '/Users/x/Projects/chroxy': { counts: null, error: 'The host is busy', at: NOW } },
+    })
+    expect(screen.getByTestId('integration-reindex-error-chroxy').textContent).toContain('The host is busy')
   })
 })
 

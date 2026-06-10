@@ -401,6 +401,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // integration_status_snapshot handler. Null until the first survey lands.
   integrationStatus: null,
   integrationStatusLoading: false,
+  // #5500: repo-memory Reindex action — in-flight repo paths + last outcome
+  // per repo for inline display (same lifecycle as cancellingActivityIds).
+  reindexingRepoPaths: new Set<string>(),
+  reindexResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -707,6 +711,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return true;
     }
     return false;
+  },
+
+  // #5500 (epic #5498): run the repo-memory Reindex action for one surveyed
+  // repo. Clones the sendCancelActivity contract (#5277): tag the request
+  // with an opaque requestId the server echoes on the integration_action_ack
+  // / INTEGRATION_ACTION_FAILED session_error, and mark the repo pending
+  // ONLY when the request is genuinely on the wire — reindex is deliberately
+  // NOT queued offline (a reindex that drains seconds later would strand the
+  // row "Reindexing…" with no ack ever arriving). The repo's previous inline
+  // result is dropped so a stale "✓" can't sit next to the pending state.
+  sendRepoMemoryReindex: (repoPath: string): boolean => {
+    const { socket } = get();
+    if (!repoPath || !socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `reindex-${nextMessageId()}`;
+    const pending = new Set(get().reindexingRepoPaths);
+    pending.add(repoPath);
+    const results = { ...get().reindexResults };
+    delete results[repoPath];
+    set({ reindexingRepoPaths: pending, reindexResults: results });
+    wsSend(socket, { type: 'integration_action', action: 'repo_memory_reindex', repoPath, requestId });
+    return true;
   },
 
   // #4542: notification-prefs round-trip. Requests the current snapshot
@@ -1302,6 +1327,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().cancellingActivityIds.size > 0) {
         set({ cancellingActivityIds: new Set<string>() });
       }
+      // #5500: same contract for in-flight reindex requests — their ack/failure
+      // is socket-scoped, so clear the pending rows on a drop. (The server-side
+      // index keeps running; the next survey refresh shows its effect.)
+      if (get().reindexingRepoPaths.size > 0) {
+        set({ reindexingRepoPaths: new Set<string>() });
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -1516,6 +1547,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
       cancellingActivityIds: new Set<string>(),
+      // #5500: drop reindex pending/result state with the rest of the
+      // connection-scoped Control Room state.
+      reindexingRepoPaths: new Set<string>(),
+      reindexResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -1546,6 +1581,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // connection re-seeds it from activity_snapshot on subscribe.
       activity: createEmptyActivityState(),
       cancellingActivityIds: new Set<string>(),
+      // #5500: drop reindex pending/result state with the rest of the
+      // connection-scoped Control Room state.
+      reindexingRepoPaths: new Set<string>(),
+      reindexResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
