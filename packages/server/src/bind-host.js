@@ -76,7 +76,7 @@ export function maybeWarnNonLoopbackBind({ bindHost, log }) {
   log.warn(
     `Listening on ${shown} — devices on your local network can reach this server's ` +
     'auth and pairing endpoints (bearer-token gated, but the server is fingerprintable via /health). ' +
-    'To restrict to this machine only, start with --host 127.0.0.1 or set "host": "127.0.0.1" in ~/.chroxy/config.json'
+    'To restrict to this machine only, start with --host 127.0.0.1, set CHROXY_HOST=127.0.0.1, or set "host": "127.0.0.1" in ~/.chroxy/config.json'
   )
   return true
 }

@@ -100,6 +100,7 @@ describe('maybeWarnNonLoopbackBind', () => {
     maybeWarnNonLoopbackBind({ bindHost: undefined, log })
     assert.match(warns[0], /auth and pairing endpoints/)
     assert.match(warns[0], /--host 127\.0\.0\.1/)
+    assert.match(warns[0], /CHROXY_HOST=127\.0\.0\.1/)
     assert.match(warns[0], /config\.json/)
   })
 
