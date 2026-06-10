@@ -5,6 +5,10 @@ import { performance } from 'node:perf_hooks'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+// #5417 — the TUI shares CliSession's pinned "unknown resume id" patterns
+// (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
+// merges stdout+stderr, so claude's resume rejection lands in _outputTail.
+import { stderrIndicatesUnknownResume } from './cli-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
@@ -509,10 +513,12 @@ export class ClaudeTuiSession extends BaseSession {
     // #5348 — remember whether this session was SEEDED from a persisted resume
     // id. `_resumedFromPersisted` flips to true on every respawn (the respawn
     // must `--resume` the live conversation), so later code can't use it to
-    // tell a restored session from an originally-fresh one. Only an
-    // originally-fresh session is eligible for the drop-and-retry-FRESH
-    // fallback in _scheduleRespawn — falling back on a restored session would
-    // silently discard a real prior conversation.
+    // tell a restored session from an originally-fresh one. #5417: no longer
+    // the retry-FRESH eligibility gate (the PTY-tail classification in
+    // _scheduleRespawn is — claude itself must report the conversation id as
+    // unknown); kept to word the resume_unknown message honestly (restored =
+    // "the persisted conversation is gone from this machine" vs fresh = "it
+    // was likely never persisted before the PTY died").
     this._seededFromPersisted = this._resumedFromPersisted
     // #5348 — one-shot latch for the retry-FRESH fallback (mirrors
     // cli-session.js's `_didFallbackFromUnknownResume`). Re-armed by a respawn
@@ -1303,8 +1309,9 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * #5315 (WP-2.1) — schedule a bounded PTY respawn with exponential backoff,
    * mirroring CliSession._scheduleRespawn (cli-session.js:556). Backoff is
-   * [1s,2s,4s,8s,15s] and caps at 5 attempts (an originally-fresh session gets
-   * ONE extra drop-and-retry-FRESH attempt at the cap, #5348); on exhaustion it
+   * [1s,2s,4s,8s,15s] and caps at 5 attempts (a session whose dying PTY tail
+   * confirms the resume id is unknown gets ONE extra drop-and-retry-FRESH
+   * attempt at the cap, #5348/#5417); on exhaustion it
    * emits a categorized `error` AND a `respawn_exhausted` event so
    * SessionManager drops the session from its list (no input-rejecting zombie
    * tab — the audit AC).
@@ -1335,15 +1342,28 @@ export class ClaudeTuiSession extends BaseSession {
       // `--session-id`) that died before claude persisted its conversation
       // makes every `--resume` respawn doomed: claude can't find the
       // conversation and exits during warmup. Reaching this cap means 5
-      // consecutive respawns never survived warmup — for an originally-fresh
-      // session, spend ONE extra attempt on a brand-new conversation id before
-      // giving up. Restored sessions are excluded: their conversation existed
-      // before this process, so dropping the id here would silently discard
-      // real context (the TUI-AUDIT-001 amnesia class) — for them, exhaustion
-      // is the honest outcome. Mirrors cli-session.js's resume_unknown
-      // fallback, just triggered by exhaustion instead of stderr classification
-      // (the TUI renders no machine-readable resume-failure diagnostic).
-      if (!this._seededFromPersisted && !this._didFallbackFromUnknownResume) {
+      // consecutive respawns never survived warmup — spend ONE extra attempt
+      // on a brand-new conversation id before giving up.
+      //
+      // #5417 — eligibility is the PTY-tail CLASSIFICATION, not the seeding
+      // origin. The cap alone proves 5 respawns died during warmup, NOT that
+      // the conversation is missing: a crash loop with an unrelated cause
+      // (OOM, broken install, claude crashing while loading a large-but-
+      // present conversation file) used to trigger the #5348 blunt fallback
+      // on originally-fresh sessions and abandon real context a fresh spawn
+      // may not even fix. Requiring claude's own resume rejection in the
+      // dying output ("No conversation found with session ID …" — the same
+      // pinned patterns CliSession's #4929 stderr classifier uses; the PTY
+      // merges stdout+stderr so it lands in _outputTail, which _spawnPty
+      // resets per attempt so the match describes the LAST death) confines
+      // the fallback to the failure it was designed for AND safely extends
+      // it to RESTORED sessions (CliSession parity): when claude confirms
+      // the persisted conversation is gone (wiped ~/.claude/projects/, state
+      // file from another machine), a loud fresh retry beats burning to a
+      // destroyed session. No match → exhaustion is the honest outcome for
+      // both seeding origins (the TUI-AUDIT-001 amnesia class stays closed:
+      // an UNCONFIRMED cause never abandons a conversation id).
+      if (this._scanOutputForUnknownResume() && !this._didFallbackFromUnknownResume) {
         this._didFallbackFromUnknownResume = true
         this._freshRetryPending = true
         const abandonedId = this._sessionId
@@ -1357,17 +1377,20 @@ export class ClaudeTuiSession extends BaseSession {
         // re-emitted `ready` (mirrors cli-session.js rebinding on system.init).
         this._log = loggerForSession('claude-tui-session', this._sessionId)
         ;(this._log || log).warn(
-          `all --resume respawns died during warmup (attemptedResumeId=${abandonedId}) — ` +
-          'retrying once with a fresh --session-id (the original fresh conversation was likely never persisted)',
+          `all --resume respawns died during warmup and the PTY tail confirms claude does not know the ` +
+          `conversation id (attemptedResumeId=${abandonedId}) — retrying once with a fresh --session-id`,
         )
         // Loud one-shot signal (same code as cli-session.js) so the dashboard
         // can render "starting fresh" instead of a generic crash toast.
         this.emit('error', {
           code: 'resume_unknown',
-          message:
-            'Previous Claude conversation could not be resumed after repeated respawn failures (it was likely ' +
-            'never persisted before the PTY died). Retrying once with a fresh conversation; the model will not ' +
-            'see any earlier transcript.',
+          message: this._seededFromPersisted
+            ? 'Previous Claude conversation could not be resumed (claude reports the persisted conversation id ' +
+              'as unknown on this machine — it may have been wiped from ~/.claude/projects/). Retrying once with ' +
+              'a fresh conversation; the model will not see the earlier transcript.'
+            : 'Previous Claude conversation could not be resumed (claude reports the conversation id as unknown — ' +
+              'it may never have been persisted before the PTY died, or it was removed from this machine). ' +
+              'Retrying once with a fresh conversation; the model will not see any earlier transcript.',
           attemptedResumeId: abandonedId,
         })
         // Fall through to the scheduling below — this IS the extra attempt.
@@ -1570,10 +1593,11 @@ export class ClaudeTuiSession extends BaseSession {
     // is rejected by claude. Falls back to the fresh path whenever the session
     // wasn't seeded from a persisted id. Resume-failure handling (claude can't
     // find the conversation, e.g. cleared ~/.claude history) surfaces via the
-    // warmup `_ptyExited` error path → bounded respawn (#5315) → and, for an
-    // originally-fresh session whose 5 resume-respawns all died during warmup,
-    // ONE drop-and-retry-FRESH attempt with a new uuid (#5348, see
-    // _scheduleRespawn) before exhaustion destroys the session.
+    // warmup `_ptyExited` error path → bounded respawn (#5315) → and, when 5
+    // resume-respawns all died during warmup AND the dying PTY tail confirms
+    // claude does not know the conversation id, ONE drop-and-retry-FRESH
+    // attempt with a new uuid (#5348/#5417, see _scheduleRespawn) before
+    // exhaustion destroys the session.
     const idArgs = this._resumedFromPersisted
       ? ['--resume', this._sessionId]
       : ['--session-id', this._sessionId]
@@ -1889,6 +1913,48 @@ export class ClaudeTuiSession extends BaseSession {
     // spaces) so a line-wrapped "Please run\n  /login" still matches.
     const normalized = tail.replace(/\s+/g, ' ')
     return AUTH_FAILURE_PATTERNS.some((re) => re.test(normalized))
+  }
+
+  /**
+   * #5417 — classify the ANSI-stripped PTY tail as a "--resume id unknown"
+   * failure. The PTY merges stdout+stderr, so the same diagnostics
+   * CliSession's stderr classifier pins ("No conversation found with session
+   * ID …" — RESUME_UNKNOWN_STDERR_PATTERNS in cli-session.js, #4929/#4950)
+   * land in `_outputTail` when claude rejects a `--resume <id>` and exits
+   * during warmup. `_outputTail` is reset at the top of every _spawnPty, so a
+   * match always describes the MOST RECENT death, never a stale prior
+   * attempt.
+   *
+   * Matching is PER LINE plus adjacent-line pairs — NOT one collapsed blob.
+   * CliSession's classifier tests each stderr line separately, which bounds
+   * the `.*` in the #4950 co-occurrence patterns (e.g.
+   * `/(fail|error|…).*resum(e|ing).*(session|conversation|\bid\b)/i`) to a
+   * single line. Collapsing the whole 4KB tail into one string would let
+   * those patterns match "error" + "resume" + "session" scattered across
+   * UNRELATED lines — and a `--resume` warmup re-renders the restored
+   * transcript into the tail, so ordinary conversation content (the exact
+   * large-but-present-conversation crash this gate exists to protect) could
+   * false-positive and abandon a real conversation id. Joining each adjacent
+   * line pair (whitespace-collapsed, mirroring _scanOutputForAuthFailure's
+   * normalization) still catches a rejection the TUI wrapped/box-padded
+   * across one rendered line break, while keeping the match window ≤ two
+   * lines instead of the whole tail. Consulted by _scheduleRespawn at the
+   * respawn cap to decide retry-FRESH eligibility. The tail is only SCANNED
+   * here, never logged — every diagnostic surface keeps routing through the
+   * redaction helpers (_outputTailDiagnostic / _outputTailHexDump,
+   * #5322/#5358).
+   */
+  _scanOutputForUnknownResume() {
+    const tail = this._outputTail || ''
+    if (!tail) return false
+    const lines = tail
+      .split(/[\r\n]+/)
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+    if (lines.length === 0) return false
+    const candidates = lines.slice()
+    for (let i = 0; i + 1 < lines.length; i++) candidates.push(`${lines[i]} ${lines[i + 1]}`)
+    return stderrIndicatesUnknownResume(candidates)
   }
 
   async sendMessage(prompt, attachments, _options = {}) {
