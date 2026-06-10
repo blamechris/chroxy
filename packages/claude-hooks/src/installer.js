@@ -10,7 +10,9 @@
  *     previous checkout location)
  *   - never clobbers unrelated hooks: only commands containing the
  *     COMMAND_MARKER are ever touched; other entries/matcher groups/event
- *     keys pass through byte-for-byte
+ *     keys pass through structurally unchanged (the whole file is
+ *     re-serialized as 2-space JSON, so FORMATTING may normalize — the
+ *     data never changes)
  *   - uninstall removes ONLY our own entries (groups/event arrays left
  *     empty by that removal are dropped; everything else untouched)
  *   - unparseable settings.json → abort with an error, never overwrite

@@ -15,6 +15,7 @@ import fs from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const REAL_HOME = homedir()
 const GUARDED_ROOTS = [join(REAL_HOME, '.chroxy'), join(REAL_HOME, '.claude')]
@@ -28,7 +29,10 @@ function isGuardedPath(target) {
   if (typeof target !== 'string' && !(target instanceof URL)) return false
   let abs
   try {
-    abs = resolve(String(target instanceof URL ? target.pathname : target))
+    // `fileURLToPath` (not `.pathname`) for URL targets — it percent-decodes
+    // and handles the Windows `file:///C:/...` leading-slash quirk, same as
+    // packages/server/tests/_setup.mjs.
+    abs = resolve(target instanceof URL ? fileURLToPath(target) : target)
   } catch {
     return false
   }
@@ -49,7 +53,19 @@ function guard(original, name) {
 
 fs.writeFileSync = guard(fs.writeFileSync, 'writeFileSync')
 fs.mkdirSync = guard(fs.mkdirSync, 'mkdirSync')
-fs.renameSync = guard(fs.renameSync, 'renameSync')
+// renameSync checks BOTH paths: renaming real state OUT of the tree and
+// renaming a temp file INTO it are equally destructive (same as
+// packages/server/tests/_setup.mjs).
+const realRenameSync = fs.renameSync
+fs.renameSync = function guardedRenameSync(oldPath, newPath) {
+  if (isGuardedPath(oldPath) || isGuardedPath(newPath)) {
+    throw new Error(
+      `CHROXY_TEST_SANDBOX: renameSync touching real user state blocked: ${String(oldPath)} -> ${String(newPath)}\n` +
+      `Tests must use temp paths (env overrides) — see tests/_setup.mjs`
+    )
+  }
+  return realRenameSync.call(this, oldPath, newPath)
+}
 fs.rmSync = guard(fs.rmSync, 'rmSync')
 fs.unlinkSync = guard(fs.unlinkSync, 'unlinkSync')
 fs.createWriteStream = guard(fs.createWriteStream, 'createWriteStream')
