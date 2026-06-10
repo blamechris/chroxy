@@ -118,9 +118,12 @@ The non-secret knobs live in `~/.chroxy/config.json` under
   refreshed — an offline embed is final and is never re-PATCHed.
 - **`pruneAfterMs`** — how long a project entry may sit untouched in the
   state file before chroxy stops tracking it (default `86400000` / 24h;
-  `0` disables pruning). Pruning only drops the bookkeeping entry — the
-  last Discord message (typically the final offline embed) stays in the
-  channel as a record.
+  `0` disables pruning). Only real pipeline events count as touches —
+  heartbeat footer refreshes deliberately don't reset the clock, so an
+  entry whose session stopped emitting events (e.g. ended without a
+  session-end event) is dropped instead of being refreshed forever.
+  Pruning only drops the bookkeeping entry — the last Discord message
+  (typically the final offline embed) stays in the channel as a record.
 
 See [packages/server/CONFIG.md](../../packages/server/CONFIG.md#discord-notifications-notificationsdiscord)
 for the full key reference.
