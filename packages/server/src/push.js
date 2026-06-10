@@ -1,23 +1,25 @@
 /**
- * PushManager — sends push notifications via Expo Push API.
+ * PushManager — the shared notification pipeline (#5413 Phase 1).
  *
- * Stores push tokens registered by connected clients and sends
- * notifications for permission prompts, user questions, session errors,
- * and unattended query completions. Categories and their rate limits are
- * declared in RATE_LIMITS below.
+ * Owns everything that must behave identically for every delivery channel:
+ * notification preferences (#4541/#4544), the per-category RATE_LIMITS
+ * throttle, and the fan-out to configured sinks via SinkRegistry. The
+ * Expo-specific delivery (token registry, exp.host POST, ticket pruning,
+ * Live Activity) lives in ExpoPushSink (notifications/expo-push-sink.js) —
+ * extracted from this file so #5413 Phase 2 can register a
+ * DiscordWebhookSink alongside it with no pipeline changes. See
+ * notifications/sink.js for the sink contract.
  *
- * No Expo account or additional infrastructure required — uses the
- * free Expo Push Service (HTTPS POST to exp.host).
+ * For now PushManager keeps its full pre-extraction public surface
+ * (registerToken, releaseTokenOwner, Live Activity registration, the
+ * `tokens` set, ...) by delegating to the Expo sink, so callers
+ * (server-cli.js, supervisor.js, ws handlers) and existing tests are
+ * untouched. Per-sink wiring/config is a Phase 2 concern.
  *
  * Wired into server-cli.js via SessionManager event listeners.
  */
 
-import { readFileSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
-import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
-import { metrics } from './metrics.js'
-import { sleep, backoffDelay } from './utils/sleep.js'
 import {
   loadPrefs as loadNotificationPrefs,
   savePrefs as saveNotificationPrefs,
@@ -26,57 +28,16 @@ import {
   isInQuietHoursIn,
   shouldBypassQuietHours,
 } from './notification-prefs.js'
+import { SinkRegistry } from './notifications/sink-registry.js'
+import {
+  ExpoPushSink,
+  fetchWithRetry,
+  FETCH_TIMEOUT_MS,
+  MAX_RETRIES,
+  BACKOFF_BASE_MS,
+} from './notifications/expo-push-sink.js'
 
 const log = createLogger('push')
-
-const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
-
-// Fetch timeout and retry configuration
-const FETCH_TIMEOUT_MS = 10_000
-const MAX_RETRIES = 3
-const BACKOFF_BASE_MS = 1_000
-
-/**
- * Fetch with timeout and exponential backoff retry.
- * Retries on 5xx responses and timeout/network errors.
- * Does NOT retry on 4xx client errors.
- */
-async function fetchWithRetry(url, options) {
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-
-    try {
-      const res = await fetch(url, { ...options, signal: controller.signal })
-      clearTimeout(timer)
-
-      if (res.ok || (res.status >= 400 && res.status < 500)) {
-        return res
-      }
-
-      // 5xx — retry if attempts remain
-      if (attempt < MAX_RETRIES) {
-        const delay = backoffDelay(attempt, BACKOFF_BASE_MS)
-        log.warn(`Expo API returned ${res.status}, retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
-        await sleep(delay)
-        continue
-      }
-
-      return res
-    } catch (err) {
-      clearTimeout(timer)
-
-      if (attempt < MAX_RETRIES) {
-        const delay = backoffDelay(attempt, BACKOFF_BASE_MS)
-        log.warn(`Fetch failed (${err.name}: ${err.message}), retrying in ${delay}ms (attempt ${attempt}/${MAX_RETRIES})`)
-        await sleep(delay)
-        continue
-      }
-
-      throw err
-    }
-  }
-}
 
 // Rate limits per category (ms) — prevents notification spam.
 //
@@ -100,12 +61,12 @@ const RATE_LIMITS = {
   live_activity: 5_000,     // Live Activity updates: 5s throttle
 }
 
-// Exported for testing
+// Re-exported for existing importers/tests — the implementation moved to
+// notifications/expo-push-sink.js with the rest of the Expo delivery code.
 export { fetchWithRetry, FETCH_TIMEOUT_MS, MAX_RETRIES, BACKOFF_BASE_MS }
 
 export class PushManager {
   constructor({ storagePath, prefsPath } = {}) {
-    this._storagePath = storagePath || null
     // #4541: notification-prefs path. Optional — when omitted PushManager
     // operates entirely in-memory (callers like one-off tests don't need
     // to write to disk). When set, getPrefs / setPrefs round-trip
@@ -114,57 +75,27 @@ export class PushManager {
     this._prefs = this._prefsPath
       ? loadNotificationPrefs(this._prefsPath, { log })
       : defaultNotificationPrefs()
-    this.tokens = new Set()
-    this._liveActivityTokens = new Set()
     this._lastSent = new Map() // category -> timestamp
-    // Owner tracking for session-binding + prune-on-disconnect (audit
-    // blocker 6). `_tokenOwners` maps token -> Set<ownerId> so that when
-    // a client disconnects we can decrement its ownership and only
-    // actually prune the token from `this.tokens` when the last owner
-    // goes away. Without ref-counting, two connections registering the
-    // same token would cause the first disconnect to strip the token
-    // even though the second connection is still active (found by Copilot
-    // review on PR #2806). Owner IDs are client connection IDs in
-    // production; tests can use any unique string.
-    this._tokenOwners = new Map()
-    this._loadFromDisk()
+    // #5413 Phase 1: delivery channels live behind the sink registry. The
+    // Expo sink owns the token registry + persistence; it's also kept on a
+    // named field because PushManager's legacy public surface (registerToken,
+    // Live Activity, the `tokens` set) delegates to it directly.
+    this._expoSink = new ExpoPushSink({ storagePath })
+    this._sinks = new SinkRegistry({ logger: log })
+    this._sinks.register(this._expoSink)
   }
 
-  /** Load tokens from disk if storagePath is set */
-  _loadFromDisk() {
-    if (!this._storagePath) return
-    try {
-      const data = JSON.parse(readFileSync(this._storagePath, 'utf-8'))
-      // Support legacy format (plain array) and new format (object with keys)
-      const pushTokens = Array.isArray(data) ? data : (data.tokens || [])
-      const laTokens = Array.isArray(data) ? [] : (data.liveActivityTokens || [])
-      for (const token of pushTokens) {
-        if (typeof token === 'string' && token.length > 0) {
-          this.tokens.add(token)
-        }
-      }
-      for (const token of laTokens) {
-        if (typeof token === 'string' && token.length > 0) {
-          this._liveActivityTokens.add(token)
-        }
-      }
-    } catch {
-      // File missing or corrupt — start with empty set
-    }
+  /**
+   * Registered push tokens (delegates to the Expo sink — same live Set,
+   * so existing callers/tests that mutate it directly keep working).
+   */
+  get tokens() {
+    return this._expoSink.tokens
   }
 
-  /** Persist current tokens to disk if storagePath is set */
-  _persistToDisk() {
-    if (!this._storagePath) return
-    try {
-      mkdirSync(dirname(this._storagePath), { recursive: true })
-      writeFileRestricted(this._storagePath, JSON.stringify({
-        tokens: [...this.tokens],
-        liveActivityTokens: [...this._liveActivityTokens],
-      }))
-    } catch (err) {
-      log.error(`Failed to persist tokens: ${err.message}`)
-    }
+  /** Live Activity tokens (delegates to the Expo sink — same live Set). */
+  get _liveActivityTokens() {
+    return this._expoSink._liveActivityTokens
   }
 
   /**
@@ -396,47 +327,12 @@ export class PushManager {
   }
 
   /**
-   * Register a push token from a client.
-   *
-   * Accepts Expo push tokens (`ExponentPushToken[...]`) and FCM tokens
-   * (Firebase Cloud Messaging for Android) — both work with the Expo
-   * Push API. Rejects obviously-malformed values.
-   *
-   * Per the 2026-04-11 production readiness audit (blocker 6), the old
-   * implementation accepted ANY non-empty string, which let an
-   * authenticated attacker register their own `ExponentPushToken[attacker]`
-   * and intercept every future permission-prompt push notification. This
-   * method now validates the format and (via the caller) binds each
-   * registered token to the connection that registered it, so tokens get
-   * pruned on client disconnect.
+   * Register a push token from a client. Delegates to the Expo sink —
+   * see ExpoPushSink.registerToken for format validation and the
+   * 2026-04-11 audit (blocker 6) history.
    */
   registerToken(token, ownerId = null) {
-    if (typeof token !== 'string' || token.length === 0) {
-      log.warn(`Rejected invalid push credential: ${String(token).slice(0, 40)}`)
-      return false
-    }
-    if (!PushManager.isValidPushTokenFormat(token)) {
-      log.warn(`Rejected malformed push credential (unrecognized format): ${token.slice(0, 40)}`)
-      return false
-    }
-    if (!this.tokens.has(token)) {
-      this.tokens.add(token)
-      this._persistToDisk()
-    }
-    // Track ownership for ref-counted prune-on-disconnect (2026-04-11
-    // audit blocker 6 + Copilot review on PR #2806). Multiple clients
-    // may register the same token (reconnect race, multi-device); the
-    // token is only pruned when the last owner disconnects.
-    if (ownerId != null) {
-      let owners = this._tokenOwners.get(token)
-      if (!owners) {
-        owners = new Set()
-        this._tokenOwners.set(token, owners)
-      }
-      owners.add(ownerId)
-    }
-    log.info(`Registered push credential ${token.slice(0, 30)}...`)
-    return true
+    return this._expoSink.registerToken(token, ownerId)
   }
 
   /**
@@ -449,49 +345,16 @@ export class PushManager {
    * without breaking legitimate multi-connection scenarios.
    */
   releaseTokenOwner(token, ownerId) {
-    const owners = this._tokenOwners.get(token)
-    if (!owners) {
-      // No owner tracking — legacy / test path. Remove unconditionally.
-      return this.removeToken(token)
-    }
-    owners.delete(ownerId)
-    if (owners.size === 0) {
-      this._tokenOwners.delete(token)
-      return this.removeToken(token)
-    }
-    return false
+    return this._expoSink.releaseTokenOwner(token, ownerId)
   }
 
   /**
-   * Validate a push-token string. This is a soft defense — it rejects
-   * obviously-malformed input (empty strings, whitespace, JSON
-   * punctuation, URLs) so typos and automated fuzzers don't land in
-   * the token set. The REAL defense against push-token hijack is the
-   * session-binding + prune-on-disconnect added in the same audit fix
-   * (blocker 6): any token registered by a client is tracked on that
-   * client's _ownedPushTokens and removed on disconnect.
-   *
-   * Policy: any non-empty string that is >= 20 characters, free of
-   * whitespace/control characters, and free of JSON/URL punctuation
-   * that would never appear in a real Expo or FCM token. Real tokens:
-   *
-   * - Expo: `ExponentPushToken[...]` (50+ chars)
-   * - FCM: base64url-ish, ~150 chars typically but as short as 40 in
-   *   some SDKs
-   * - Legacy device tokens via the Firebase-Expo passthrough: variable
+   * Validate a push-token string. Implementation lives on ExpoPushSink
+   * (it's an Expo/FCM token format concern); kept on PushManager because
+   * the WS prefs handler validates device keys through this surface.
    */
   static isValidPushTokenFormat(token) {
-    if (typeof token !== 'string') return false
-    if (token.length < 20) return false
-    // Reject whitespace (including tabs/newlines), quotes, braces,
-    // angle brackets, forward slashes, and shell metacharacters that
-    // signal the caller sent garbage (a URL, a JSON blob, an error
-    // message, a shell-injection attempt) rather than a real push
-    // token. Real Expo/FCM push tokens use only alphanumerics + a
-    // restricted set of punctuation ([_-.:~%]) — the characters in
-    // this reject list never appear in them.
-    if (/[\s"'`<>{}&|;/\\?#]/.test(token)) return false
-    return true
+    return ExpoPushSink.isValidPushTokenFormat(token)
   }
 
   /**
@@ -500,54 +363,28 @@ export class PushManager {
    * when one connection drops.
    */
   removeToken(token) {
-    if (this.tokens.delete(token)) {
-      this._tokenOwners.delete(token)
-      this._persistToDisk()
-      return true
-    }
-    return false
+    return this._expoSink.removeToken(token)
   }
 
-  /**
-   * Register a Live Activity push token (iOS).
-   * Stored separately from regular push tokens.
-   *
-   * Applies the same format check as registerToken so the Live Activity
-   * path can't be used as a bypass for the 2026-04-11 audit blocker 6
-   * hardening. No WS handler currently exposes this path (verified on
-   * PR #2806) but the check is cheap regression prevention.
-   */
+  /** Register a Live Activity push token (iOS). Delegates to the Expo sink. */
   registerLiveActivityToken(token) {
-    if (typeof token !== 'string' || token.length === 0) {
-      log.warn(`Rejected invalid Live Activity credential: ${String(token).slice(0, 40)}`)
-      return false
-    }
-    if (!PushManager.isValidPushTokenFormat(token)) {
-      log.warn(`Rejected malformed Live Activity credential (unrecognized format): ${token.slice(0, 40)}`)
-      return false
-    }
-    if (!this._liveActivityTokens.has(token)) {
-      this._liveActivityTokens.add(token)
-      this._persistToDisk()
-    }
-    log.info(`Registered Live Activity credential ${token.slice(0, 30)}...`)
-    return true
+    return this._expoSink.registerLiveActivityToken(token)
   }
 
   /** Remove a Live Activity push token */
   unregisterLiveActivityToken(token) {
-    if (this._liveActivityTokens.delete(token)) {
-      this._persistToDisk()
-    }
+    return this._expoSink.unregisterLiveActivityToken(token)
   }
 
   /** Check if we have any registered tokens */
   get hasTokens() {
-    return this.tokens.size > 0
+    return this._expoSink.hasTokens
   }
 
   /**
-   * Send a push notification to all registered tokens.
+   * Send a notification through the pipeline: shared rate limit, then fan
+   * out to every configured sink (per-device category/quiet-hours prefs
+   * are evaluated inside each sink via the context evaluators below).
    *
    * Category names listed here are the only ones with explicit RATE_LIMITS
    * entries. Any other string still works but falls through to the
@@ -563,15 +400,19 @@ export class PushManager {
    * @param {object} [data] - Extra data payload
    * @param {string} [categoryId] - iOS notification category for action buttons
    * @returns {Promise<boolean>} `true` when no hard delivery failure occurred
-   *   (Expo accepted the post, or there was nothing to send / we were
+   *   (the sinks accepted it, or there was nothing to send / we were
    *   rate-limited — both of which are "no error" from the caller's view).
-   *   `false` ONLY when the Expo API hard-failed (non-2xx, network throw).
-   *   Callers like the idle-push dedupe in server-cli.js (#3870) use this
-   *   to decide whether to release a latch so a transient failure doesn't
-   *   permanently suppress future notifications.
+   *   `false` ONLY when a configured sink hard-failed (for Expo: non-2xx,
+   *   network throw). Callers like the idle-push dedupe in server-cli.js
+   *   (#3870) use this to decide whether to release a latch so a transient
+   *   failure doesn't permanently suppress future notifications.
    */
   async send(category, title, body, data = {}, categoryId = undefined) {
-    if (this.tokens.size === 0) return true
+    // No sink has anywhere to deliver to — silent no-op, and intentionally
+    // BEFORE the rate-limit stamp (matching the pre-extraction
+    // `tokens.size === 0` early return) so a tokenless send doesn't burn
+    // the category's rate-limit window.
+    if (!this._sinks.hasConfigured()) return true
 
     // Rate limit check — the FIRST line of defence. Stays in place
     // ahead of the #4542 per-category mute and the #4544 quiet-hours
@@ -584,43 +425,28 @@ export class PushManager {
     }
     this._lastSent.set(category, Date.now())
 
-    // #4542 per-category mute + #4544 quiet-hours gate, evaluated PER
-    // TOKEN so a desktop and a phone with different prefs both get the
-    // right behaviour from a single send() call. The quiet-hours gate
-    // is conditional: a category in the device's bypass list (default
-    // permission + activity_error) still fires even at 3am.
-    const now = Date.now()
-    const eligibleTokens = []
-    for (const token of this.tokens) {
-      if (!this.isCategoryEnabled(category, token)) continue
-      if (this.isInQuietHours(now, token) && !this.shouldBypassQuietHours(category, token)) continue
-      eligibleTokens.push(token)
-    }
-    if (eligibleTokens.length === 0) {
-      // Every token filtered — no Expo POST. Returning `true` matches the
-      // existing "nothing to send is not a failure" contract.
-      return true
-    }
-
-    const messages = eligibleTokens.map((token) => ({
-      to: token,
-      sound: 'default',
-      title,
-      body,
-      data: { ...data, category },
-      ...(categoryId && { categoryId }),
-    }))
-
-    return await this._sendToTokenSet(this.tokens, messages, category, 'notification')
+    return await this._sinks.fanOut(
+      { category, title, body, data, categoryId },
+      {
+        now: Date.now(),
+        isCategoryEnabled: (cat, deviceId) => this.isCategoryEnabled(cat, deviceId),
+        isInQuietHours: (now, deviceId) => this.isInQuietHours(now, deviceId),
+        shouldBypassQuietHours: (cat, deviceId) => this.shouldBypassQuietHours(cat, deviceId),
+      }
+    )
   }
 
   /**
    * Send a Live Activity update to all registered Live Activity tokens.
+   * Expo-only side channel — goes straight to the Expo sink rather than
+   * through the registry fan-out (no other sink has a Live Activity
+   * concept). The shared rate-limit map still applies here so the
+   * `live_activity` throttle and notification categories share one clock.
    * @param {string} state - Current activity state (e.g. 'thinking', 'writing', 'idle')
    * @param {string} detail - Human-readable detail text
    */
   async sendLiveActivityUpdate(state, detail) {
-    if (this._liveActivityTokens.size === 0) return
+    if (!this._expoSink.hasLiveActivityTokens) return
 
     // Rate limit check (live_activity category: 5s)
     const category = 'live_activity'
@@ -631,70 +457,6 @@ export class PushManager {
     }
     this._lastSent.set(category, Date.now())
 
-    const messages = [...this._liveActivityTokens].map((token) => ({
-      to: token,
-      sound: 'default',
-      title: 'Live Activity',
-      body: detail,
-      data: { state, detail, category },
-    }))
-
-    await this._sendToTokenSet(this._liveActivityTokens, messages, category, 'update')
-  }
-
-  /**
-   * Post messages to the Expo Push API and prune any tokens that come back
-   * with an error status. Shared by send() and sendLiveActivityUpdate().
-   *
-   * @param {Set<string>} tokenSet - The Set to prune invalid tokens from
-   * @param {object[]} messages - Pre-built Expo push message objects
-   * @param {string} category - Category label used in log output
-   * @param {string} logLabel - Human-readable label for log messages (e.g. 'notification', 'Live Activity update')
-   * @returns {Promise<boolean>} `true` if Expo accepted the post (even when
-   *   individual tokens came back with per-message errors — those are
-   *   handled by pruning, not by reporting hard failure). `false` when the
-   *   HTTPS POST itself failed (non-2xx, network/timeout caught here).
-   *   Surfacing this lets callers (#3870) release per-session dedupe
-   *   latches on real delivery failure so the next idle cycle can retry.
-   */
-  async _sendToTokenSet(tokenSet, messages, category, logLabel) {
-    try {
-      const res = await fetchWithRetry(EXPO_PUSH_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(messages),
-      })
-
-      if (!res.ok) {
-        metrics.inc('push.failures')
-        log.error(`Expo Push API returned ${res.status}`)
-        return false
-      }
-
-      const result = await res.json()
-
-      // Prune tokens that returned errors (invalid/expired)
-      let pruned = false
-      if (result.data) {
-        for (let i = 0; i < result.data.length; i++) {
-          const ticket = result.data[i]
-          if (ticket.status === 'error') {
-            const token = messages[i].to
-            log.warn(`Removing invalid push credential ${token.slice(0, 30)}... (${ticket.message})`)
-            tokenSet.delete(token)
-            pruned = true
-          }
-        }
-      }
-      if (pruned) this._persistToDisk()
-
-      metrics.inc('push.sent')
-      log.info(`Sent ${category} ${logLabel} to ${messages.length} device(s)`)
-      return true
-    } catch (err) {
-      metrics.inc('push.failures')
-      log.error(`Failed to send ${logLabel}: ${err.message}`)
-      return false
-    }
+    await this._expoSink.sendLiveActivityUpdate(state, detail)
   }
 }
