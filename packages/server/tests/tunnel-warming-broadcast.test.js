@@ -89,6 +89,13 @@ describe('buildTunnelReadyStatus (production helper)', () => {
     assert.equal(msg.tunnelUrl, 'https://example.trycloudflare.com')
     assert.match(msg.message, /ready/i)
   })
+
+  it('passes tunnelMode through when provided, omits it otherwise (#5356)', () => {
+    const withMode = buildTunnelReadyStatus({ tunnelUrl: 'https://example.trycloudflare.com', tunnelMode: 'quick' })
+    assert.equal(withMode.tunnelMode, 'quick')
+    const withoutMode = buildTunnelReadyStatus({ tunnelUrl: 'https://example.trycloudflare.com' })
+    assert.ok(!('tunnelMode' in withoutMode))
+  })
 })
 
 describe('tunnel_warming broadcast sequencing via waitForTunnel.onAttempt', () => {

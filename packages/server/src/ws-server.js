@@ -27,6 +27,7 @@ import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { getProviderDataDirs } from './providers.js'
+import { isLoopbackHost } from './bind-host.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -484,6 +485,12 @@ export class WsServer {
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
     this._localhostBypass = localhostBypass ?? true
     this._maxPendingConnections = maxPendingConnections ?? 20
+    // #5356 (visibility layer): exposure snapshot surfaced in auth_ok so the
+    // dashboard can warn about non-loopback binds / public quick tunnels.
+    // _boundHost is set in start(); _quickTunnelActive by server-cli when a
+    // quick (trycloudflare) tunnel is configured.
+    this._boundHost = undefined
+    this._quickTunnelActive = false
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     // #3996: name each limiter so eviction logs and /diagnostics
@@ -698,6 +705,10 @@ export class WsServer {
       // always supplies the default disk-backed store from the WsServer
       // constructor.
       get devicePreferences() { return self._devicePreferences },
+      // #5356: exposure snapshot (non-loopback bind / public quick tunnel)
+      // surfaced in auth_ok so the dashboard can render a warning banner.
+      // null until start() has bound a socket.
+      get exposure() { return self.exposure },
     }
     this._authCtx = {
       get clients() { return self.clients },
@@ -1066,7 +1077,35 @@ export class WsServer {
     if (secret) this._hookSecrets.delete(secret)
   }
 
+  /**
+   * #5356: record whether the configured tunnel is a public quick
+   * (trycloudflare) tunnel. Called by server-cli before tunnel startup so the
+   * exposure snapshot in auth_ok reflects the public URL.
+   * @param {boolean} active
+   */
+  setQuickTunnelActive(active) {
+    this._quickTunnelActive = !!active
+  }
+
+  /**
+   * #5356: exposure snapshot included in auth_ok (see sendPostAuthInfo).
+   * `null` until start() has bound a socket — test harnesses that never call
+   * start() simply omit the field from auth_ok.
+   * @returns {{ lanBind: boolean, bindHost: string, quickTunnel: boolean }|null}
+   */
+  get exposure() {
+    if (this._boundHost === undefined) return null
+    return {
+      lanBind: !isLoopbackHost(this._boundHost),
+      bindHost: this._boundHost,
+      quickTunnel: this._quickTunnelActive,
+    }
+  }
+
   start(host) {
+    // #5356: remember what we bound. `undefined` means the default
+    // all-interfaces bind — record it as 0.0.0.0 so exposure reads true.
+    this._boundHost = host ?? '0.0.0.0'
     // Create HTTP server — route handling extracted to http-routes.js
     this.httpServer = createServer(createHttpHandler(this))
 

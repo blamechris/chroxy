@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveBindHost, isLoopbackHost, formatHostForUrl } from '../src/bind-host.js'
+import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopbackBind } from '../src/bind-host.js'
 
 describe('isLoopbackHost', () => {
   it('treats 127.0.0.1 and the 127.0.0.0/8 range as loopback', () => {
@@ -69,5 +69,45 @@ describe('resolveBindHost', () => {
     assert.equal(resolveBindHost({ noAuth: false, host: '127.0.0.1' }), '127.0.0.1')
     assert.equal(resolveBindHost({ noAuth: false, host: '0.0.0.0' }), '0.0.0.0')
     assert.equal(resolveBindHost({ noAuth: false, host: '192.168.1.10' }), '192.168.1.10')
+  })
+})
+
+// #5356 (visibility layer): one startup warning when binding non-loopback.
+describe('maybeWarnNonLoopbackBind', () => {
+  function captureLogger() {
+    const warns = []
+    return { warns, log: { warn: (msg) => warns.push(msg) } }
+  }
+
+  it('warns once for the default undefined bind (0.0.0.0)', () => {
+    const { warns, log } = captureLogger()
+    assert.equal(maybeWarnNonLoopbackBind({ bindHost: undefined, log }), true)
+    assert.equal(warns.length, 1)
+    assert.match(warns[0], /0\.0\.0\.0 \(all interfaces\)/)
+  })
+
+  it('warns for an explicit 0.0.0.0 or LAN bind, naming the bind address', () => {
+    for (const bindHost of ['0.0.0.0', '192.168.1.10', '::']) {
+      const { warns, log } = captureLogger()
+      assert.equal(maybeWarnNonLoopbackBind({ bindHost, log }), true)
+      assert.equal(warns.length, 1)
+      assert.ok(warns[0].includes(bindHost), `warning names ${bindHost}: ${warns[0]}`)
+    }
+  })
+
+  it('says LAN peers can reach auth/pairing endpoints and how to restrict', () => {
+    const { warns, log } = captureLogger()
+    maybeWarnNonLoopbackBind({ bindHost: undefined, log })
+    assert.match(warns[0], /auth and pairing endpoints/)
+    assert.match(warns[0], /--host 127\.0\.0\.1/)
+    assert.match(warns[0], /config\.json/)
+  })
+
+  it('stays silent for loopback binds', () => {
+    for (const bindHost of ['127.0.0.1', '127.0.0.53', 'localhost', '::1']) {
+      const { warns, log } = captureLogger()
+      assert.equal(maybeWarnNonLoopbackBind({ bindHost, log }), false)
+      assert.equal(warns.length, 0, `no warning for ${bindHost}`)
+    }
   })
 })

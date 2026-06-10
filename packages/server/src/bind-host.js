@@ -56,3 +56,27 @@ export function resolveBindHost({ noAuth, host } = {}) {
   if (typeof host === 'string' && host.length > 0) return host
   return undefined
 }
+
+/**
+ * #5356 (visibility layer): emit a single startup warning when the server is
+ * about to bind a non-loopback interface — the default `undefined` →
+ * 0.0.0.0 bind included. LAN peers can then reach the unauthenticated
+ * surface (`/health` fingerprint, dashboard assets, rate-limited auth and
+ * pairing attempts). This does NOT change any default — it only makes the
+ * existing posture visible and points at the existing restriction knob.
+ *
+ * @param {object} opts
+ * @param {string} [opts.bindHost] - resolved bind host (`undefined` = 0.0.0.0).
+ * @param {{ warn: (msg: string) => void }} opts.log - logger to warn through.
+ * @returns {boolean} true when the warning was emitted.
+ */
+export function maybeWarnNonLoopbackBind({ bindHost, log }) {
+  if (isLoopbackHost(bindHost)) return false
+  const shown = bindHost || '0.0.0.0 (all interfaces)'
+  log.warn(
+    `Listening on ${shown} — devices on your local network can reach this server's ` +
+    'auth and pairing endpoints (bearer-token gated, but the server is fingerprintable via /health). ' +
+    'To restrict to this machine only, start with --host 127.0.0.1 or set "host": "127.0.0.1" in ~/.chroxy/config.json'
+  )
+  return true
+}

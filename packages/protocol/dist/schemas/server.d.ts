@@ -59,6 +59,11 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     resultTimeoutMs: z.ZodOptional<z.ZodNumber>;
     hardTimeoutMs: z.ZodOptional<z.ZodNumber>;
     streamStallTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    exposure: z.ZodOptional<z.ZodObject<{
+        lanBind: z.ZodBoolean;
+        bindHost: z.ZodNullable<z.ZodString>;
+        quickTunnel: z.ZodBoolean;
+    }, z.core.$strip>>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;

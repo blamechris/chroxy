@@ -105,6 +105,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // Optional — older callers (and most tests) leave this undefined and
     // get the legacy default/first behavior.
     devicePreferences,
+    // #5356: exposure snapshot ({ lanBind, bindHost, quickTunnel }) — null /
+    // undefined when the server hasn't bound a socket (test harnesses) or the
+    // ctx predates the field; the auth_ok field is omitted in that case.
+    exposure,
   } = ctx
   const client = clients.get(ws)
 
@@ -231,6 +235,9 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     resultTimeoutMs: effectiveResultTimeoutMs,
     hardTimeoutMs: effectiveHardTimeoutMs,
     streamStallTimeoutMs: effectiveStreamStallTimeoutMs,
+    // #5356: exposure snapshot for the dashboard warning banner. Optional on
+    // the wire — older servers omit it and clients treat that as "unknown".
+    ...(exposure ? { exposure } : {}),
     ...extra,
   })
 
