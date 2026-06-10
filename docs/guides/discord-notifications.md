@@ -118,7 +118,11 @@ The non-secret knobs live in `~/.chroxy/config.json` under
   refreshed — an offline embed is final and is never re-PATCHed.
 - **`pruneAfterMs`** — how long a project entry may sit untouched in the
   state file before chroxy stops tracking it (default `86400000` / 24h;
-  `0` disables pruning). Only real pipeline events count as touches —
+  `0` disables pruning; minimum `60000` / 60s — smaller values fall back
+  to the default, since a retention shorter than the gap between events
+  would prune the tracked message id in between and turn the single
+  status embed into one message per event). Only real pipeline events
+  count as touches —
   heartbeat footer refreshes deliberately don't reset the clock, so an
   entry whose session stopped emitting events (e.g. ended without a
   session-end event) is dropped instead of being refreshed forever.
