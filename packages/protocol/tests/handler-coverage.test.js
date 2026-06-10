@@ -118,6 +118,7 @@ const PLATFORM_SPECIFIC = {
   'host_status_snapshot': 'dashboard', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter / #5175 dashboard section) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5170
   'runner_status_snapshot': 'dashboard', // Control Room self-hosted runner survey reply (#5253) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'integration_status_snapshot': 'dashboard', // Control Room Integrations survey reply (#5499, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'integration_action_ack': 'dashboard', // Control Room Integrations Reindex action ack (#5500, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   // 'agent_event' (#5016) is now handled by both dashboard and mobile
   // app (#5060 — mobile renders the same nested sub-bubbles inside the
   // parent Task tool_call). No PLATFORM_SPECIFIC entry needed; the

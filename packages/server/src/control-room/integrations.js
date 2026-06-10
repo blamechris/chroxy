@@ -60,6 +60,16 @@ const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
 export const CLI_MISSING_NOTE = 'repo-memory CLI not found on PATH — install @blamechris/repo-memory globally or set controlRoomRepoMemoryBin'
 
 /**
+ * #5500: timeout for `repo-memory index` — deliberately much more generous
+ * than the 20s survey probes: a cold index of a big repo summarizes every
+ * indexable file and legitimately takes minutes-of-seconds. A run that blows
+ * through this is treated as a failure with a reason, never a hang.
+ */
+export const INDEX_TIMEOUT_MS = 120000
+/** Output cap for the index subprocess (per-file report lines can add up). */
+const INDEX_EXEC_OPTS = { timeout: INDEX_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
+
+/**
  * Parse a repo's `.repo-memory.json` config.
  *
  * @param {string|null} text - raw config contents, or null when absent.
@@ -205,17 +215,88 @@ async function surveyCache(statFn, repoPath) {
 }
 
 /**
- * First meaningful line of a subprocess failure, for the per-repo `reason`.
+ * First meaningful line of a subprocess failure, for the per-repo `reason` /
+ * the reindex error message. `label` names the failing command ("repo-memory
+ * report" for the survey cell, "repo-memory index" for the #5500 action).
  *
  * @param {unknown} err
+ * @param {string} [label]
  * @returns {string}
  */
-function execFailureReason(err) {
+function execFailureReason(err, label = 'repo-memory report') {
   const stderr = err && typeof err === 'object' && typeof err.stderr === 'string' ? err.stderr : ''
   const firstLine = stderr.split('\n').map(l => l.trim()).find(l => l.length > 0)
-  if (firstLine) return `repo-memory report failed: ${firstLine}`
+  if (firstLine) return `${label} failed: ${firstLine}`
   const message = err && typeof err === 'object' && typeof err.message === 'string' ? err.message : 'unknown error'
-  return `repo-memory report failed: ${message}`
+  return `${label} failed: ${message}`
+}
+
+/**
+ * #5500: parse the human-readable `repo-memory index <root>` report into the
+ * `IntegrationActionCountsSchema` shape. The CLI has no `--json` for index —
+ * the report is line-based (verified empirically against the installed CLI):
+ *
+ *   Indexed <root>
+ *     scanned:       412
+ *     summarized:    12
+ *     already fresh: 398
+ *     skipped:       2
+ *     ...
+ *
+ * All four counts must parse or the whole result is null — the ack then
+ * carries `counts: null` and the dashboard falls back to a survey refresh
+ * rather than rendering a half-true breakdown.
+ *
+ * @param {string|null|undefined} stdout - raw stdout from the index command.
+ * @returns {{ scanned: number, summarized: number, fresh: number, skipped: number }|null}
+ */
+export function parseRepoMemoryIndexCounts(stdout) {
+  if (typeof stdout !== 'string' || stdout.length === 0) return null
+  const grab = re => {
+    const m = re.exec(stdout)
+    return m ? Number.parseInt(m[1], 10) : null
+  }
+  const counts = {
+    scanned: grab(/^\s*scanned:\s*(\d+)\s*$/m),
+    summarized: grab(/^\s*summarized:\s*(\d+)\s*$/m),
+    fresh: grab(/^\s*already fresh:\s*(\d+)\s*$/m),
+    skipped: grab(/^\s*skipped:\s*(\d+)\s*$/m),
+  }
+  for (const value of Object.values(counts)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  }
+  return counts
+}
+
+/**
+ * #5500: run `repo-memory index <repoPath>` to prewarm/refresh the summary
+ * cache. Shares the survey's binary resolution (`resolveRepoMemoryBin`) so a
+ * `controlRoomRepoMemoryBin` override behaves identically for both surfaces.
+ * Deliberately NOT `--quiet` — the human-readable report is the only place
+ * the scanned/summarized/fresh/skipped counts exist.
+ *
+ * Resolves `{ counts }` (null when the report is unparseable). Throws with a
+ * legible message when the binary is missing or the run fails/times out —
+ * the WS handler turns that into an INTEGRATION_ACTION_FAILED session_error.
+ *
+ * @param {string} repoPath - canonical repo root (the handler validates
+ *   membership in the surveyed repo set BEFORE calling this).
+ * @param {object} [opts]
+ * @param {string} [opts.bin] - explicit repo-memory binary path (skips probing).
+ * @param {Function} [opts._execFile] - promisified execFile seam.
+ * @returns {Promise<{ counts: object|null }>}
+ */
+export async function runRepoMemoryIndex(repoPath, opts = {}) {
+  const { bin, _execFile = execFileAsync } = opts
+  const binPath = await resolveRepoMemoryBin(_execFile, bin)
+  if (!binPath) throw new Error(CLI_MISSING_NOTE)
+  let stdout
+  try {
+    ;({ stdout } = await _execFile(binPath, ['index', repoPath], INDEX_EXEC_OPTS))
+  } catch (err) {
+    throw new Error(execFailureReason(err, 'repo-memory index'))
+  }
+  return { counts: parseRepoMemoryIndexCounts(typeof stdout === 'string' ? stdout : '') }
 }
 
 /**
