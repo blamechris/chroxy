@@ -33,6 +33,7 @@ import { safeTokenCompare } from './token-compare.js'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
+import { SubagentCounter } from './subagent-counter.js'
 import { IngestEventSchema } from '@chroxy/protocol'
 
 const log = createLogger('ingest')
@@ -322,8 +323,29 @@ export function handleEventIngest(server, req, res) {
       const project = event.project
         || (typeof data.cwd === 'string' ? deriveProjectFromCwd(data.cwd) : null)
 
+      // Server-side subagent counting (#5413 Phase 4): fold subagent_start/
+      // subagent_stop into the per-(source, sessionId) aggregate (session_end
+      // clears it), and surface the active count on every event so the
+      // Discord embed's `data.subagents` field and the notification text can
+      // use it. Lazily constructed like the rate limiters; tests can pre-seed
+      // `_subagentCounter` for clock injection.
+      if (!server._subagentCounter) {
+        server._subagentCounter = new SubagentCounter()
+      }
+      const counted = server._subagentCounter.record(event.type, event.source, event.sessionId)
+      const activeSubagents = counted !== null
+        ? counted
+        : server._subagentCounter.getCount(event.source, event.sessionId)
+
       const title = typeof data.title === 'string' && data.title.length > 0 ? data.title : mapping.title
-      const notifyBody = typeof data.message === 'string' && data.message.length > 0 ? data.message : mapping.body
+      let notifyBody = typeof data.message === 'string' && data.message.length > 0 ? data.message : mapping.body
+      if (event.sessionId) {
+        if (event.type === 'subagent_start' || event.type === 'subagent_stop') {
+          notifyBody = `${notifyBody} (${activeSubagents} active)`
+        } else if (activeSubagents > 0) {
+          notifyBody = `${notifyBody} — ${activeSubagents} subagent${activeSubagents === 1 ? '' : 's'} active`
+        }
+      }
 
       // Fire-and-forget: the pipeline owns delivery (category rate limits,
       // prefs, sink retries). A hard sink failure is logged, not surfaced —
@@ -335,6 +357,9 @@ export function handleEventIngest(server, req, res) {
           external: true,
           ...(event.sessionId ? { sessionId: event.sessionId } : {}),
           ...(project ? { project } : {}),
+          // `subagents` is the key the Discord sink already renders
+          // (discord-webhook-sink.js `data.subagents` → embed field).
+          ...(event.sessionId ? { subagents: activeSubagents } : {}),
           ts: event.ts,
         })
       ).then((ok) => {

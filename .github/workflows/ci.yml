@@ -330,6 +330,34 @@ jobs:
       - name: Run tests
         run: npm test
 
+  claude-hooks-tests:
+    name: Claude Hooks Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/claude-hooks
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      # Tests validate envelopes against the real IngestEventSchema
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      - name: Run tests
+        run: npm test
+
   store-core-typecheck:
     name: Store Core Type Check
     runs-on: ubuntu-24.04

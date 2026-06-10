@@ -53,6 +53,7 @@ DESKTOP_PKG="$ROOT/packages/desktop/package.json"
 PROTOCOL_PKG="$ROOT/packages/protocol/package.json"
 STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
 DASHBOARD_PKG="$ROOT/packages/dashboard/package.json"
+CLAUDE_HOOKS_PKG="$ROOT/packages/claude-hooks/package.json"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 ROOT_LOCK="$ROOT/package-lock.json"
@@ -169,6 +170,14 @@ node -e "
   const pkg = JSON.parse(fs.readFileSync('$DASHBOARD_PKG', 'utf-8'));
   pkg.version = '$NEW_VERSION';
   fs.writeFileSync('$DASHBOARD_PKG', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# Update claude-hooks package.json
+node -e "
+  const fs = require('fs');
+  const pkg = JSON.parse(fs.readFileSync('$CLAUDE_HOOKS_PKG', 'utf-8'));
+  pkg.version = '$NEW_VERSION';
+  fs.writeFileSync('$CLAUDE_HOOKS_PKG', JSON.stringify(pkg, null, 2) + '\n');
 "
 
 # Update tauri.conf.json
@@ -423,6 +432,7 @@ echo "  $APP_JSON"
 echo "  $DESKTOP_PKG"
 echo "  $PROTOCOL_PKG"
 echo "  $STORE_CORE_PKG"
+echo "  $CLAUDE_HOOKS_PKG"
 echo "  $TAURI_CONF"
 echo "  $CARGO_TOML"
 echo "  $ROOT_LOCK (top-level + all workspace entries)"
