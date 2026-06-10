@@ -68,8 +68,42 @@ export declare const ServerPairFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"pair_fail">;
     reason: z.ZodString;
 }, z.core.$strip>;
+/**
+ * #5431 — one outstanding background task surfaced on `claude_ready`.
+ *
+ * `kind` maps the launching tool: a `run_in_background` Bash call, a
+ * `run_in_background` Agent (subagent) call, or a Monitor stream. The
+ * task is "outstanding" when its launch has no matching task-notification
+ * in the session transcript yet. `startedAt` is epoch ms (the transcript
+ * entry's timestamp), matching the `startedAt` convention used by
+ * `pendingBackgroundShells` / `activeTools`.
+ */
+export declare const BackgroundTaskSchema: z.ZodObject<{
+    toolUseId: z.ZodString;
+    kind: z.ZodEnum<{
+        bash: "bash";
+        agent: "agent";
+        monitor: "monitor";
+    }>;
+    description: z.ZodString;
+    startedAt: z.ZodNumber;
+}, z.core.$strip>;
 export declare const ServerClaudeReadySchema: z.ZodObject<{
     type: z.ZodLiteral<"claude_ready">;
+    backgroundTasks: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        toolUseId: z.ZodString;
+        kind: z.ZodEnum<{
+            bash: "bash";
+            agent: "agent";
+            monitor: "monitor";
+        }>;
+        description: z.ZodString;
+        startedAt: z.ZodNumber;
+    }, z.core.$strip>>>;
+    scheduledWakeup: z.ZodOptional<z.ZodObject<{
+        at: z.ZodNumber;
+        reason: z.ZodString;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerStreamStartSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_start">;
