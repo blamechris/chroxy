@@ -1103,6 +1103,10 @@ export function SessionScreen() {
           sessionContext={sessionContext}
           latencyMs={latencyMs}
           connectionQuality={connectionQuality}
+          // #5424: provider drives context-window resolution — for providers
+          // that legitimately report no window (ollama) the usage meter shows
+          // the raw token count instead of a percentage against 200k.
+          provider={activeSessionProvider}
         />
       )}
 

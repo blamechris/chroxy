@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { DEFAULT_CONTEXT_WINDOW } from '@chroxy/store-core';
+import { resolveContextWindow } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge } from '@chroxy/store-core';
 import type { ModelInfo, ContextUsage, AgentInfo, ConnectedClient, CustomAgent, SessionContext, McpServer, PermissionMode } from '../store/connection';
@@ -80,6 +80,12 @@ export interface SettingsBarProps {
   sessionContext?: SessionContext | null;
   latencyMs?: number | null;
   connectionQuality?: 'good' | 'fair' | 'poor' | null;
+  // #5424: active session's provider name (e.g. 'claude-sdk', 'ollama').
+  // Drives context-window resolution — the 200k default only applies to
+  // claude-backed providers; for providers that legitimately report no
+  // window (ollama) the usage meter renders the raw token count without
+  // a percentage/progress bar instead of a misleading "% of 200k".
+  provider?: string | null;
 }
 
 // -- Helpers --
@@ -191,6 +197,7 @@ export function SettingsBar({
   sessionContext,
   latencyMs,
   connectionQuality,
+  provider,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -313,8 +320,14 @@ export function SettingsBar({
     const total = contextUsage.inputTokens + contextUsage.outputTokens;
     if (total > 0) {
       const mInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-      const cw = mInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
-      summaryParts.push(`${Math.min(Math.round((total / cw) * 100), 100)}%`);
+      const cw = resolveContextWindow(mInfo, provider);
+      // #5424: when the window is genuinely unknown (e.g. ollama reports
+      // none), show the raw token count instead of a fabricated "% of 200k".
+      summaryParts.push(
+        cw != null
+          ? `${Math.min(Math.round((total / cw) * 100), 100)}%`
+          : formatTokenCount(total),
+      );
     }
   }
 
@@ -513,7 +526,19 @@ export function SettingsBar({
                     const total = contextUsage.inputTokens + contextUsage.outputTokens;
                     if (total === 0) return null;
                     const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-                    const contextWindow = modelInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+                    const contextWindow = resolveContextWindow(modelInfo, provider);
+                    if (contextWindow == null) {
+                      // #5424: window genuinely unknown (e.g. ollama reports
+                      // none — the real limit is the local model file's
+                      // num_ctx). Show the raw token count, no percentage or
+                      // progress bar, instead of metering against a
+                      // fabricated 200k.
+                      return (
+                        <Text style={styles.contextText} testID="context-usage-unknown-window">
+                          {formatTokenCount(total)}
+                        </Text>
+                      );
+                    }
                     const pct = (total / contextWindow) * 100;
                     const barColor = pct >= 80 ? COLORS.accentRed : pct >= 50 ? COLORS.accentOrange : COLORS.accentGreen;
                     return (
