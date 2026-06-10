@@ -75,6 +75,18 @@ describe('SettingsScreen — Notification categories section (#4542)', () => {
     expect(settingsSource).toMatch(/activity_error:.*Session errors/);
     expect(settingsSource).toMatch(/inactivity_warning:.*Inactivity warnings/);
     expect(settingsSource).toMatch(/live_activity:.*Live Activity/);
+    // #5435: external-session categories fed by POST /api/events (#5413).
+    expect(settingsSource).toMatch(/session_online:.*External session online/);
+    expect(settingsSource).toMatch(/session_offline:.*External session offline/);
+    expect(settingsSource).toMatch(/session_activity:.*External session activity/);
+  });
+
+  it('includes the external-session categories in the render order (#5435)', () => {
+    // The order array drives rendering; a label without an order slot would
+    // fall through to the unknown-key tail and jitter on every snapshot.
+    expect(settingsSource).toMatch(
+      /NOTIFICATION_CATEGORY_ORDER\s*=\s*\[[\s\S]{0,600}'session_online',\s*\n\s*'session_offline',\s*\n\s*'session_activity',/,
+    );
   });
 
   it('passes the toggled value through Switch.onValueChange to setNotificationPrefsCategory', () => {
