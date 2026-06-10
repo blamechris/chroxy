@@ -160,7 +160,10 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
     )
     valid = false
   } else if (reservedIds.has(id)) {
-    warnings.push(`Invalid value for '${path}.id': '${id}' collides with a built-in provider id`)
+    // `reservedIds` merges the static built-in list with whatever the
+    // caller passed (at registration time: the LIVE registry, which can
+    // include docker/embedder-registered ids) — name both possibilities.
+    warnings.push(`Invalid value for '${path}.id': '${id}' collides with a built-in or already-registered provider id`)
     valid = false
   } else if (seenIds.has(id)) {
     warnings.push(`Invalid value for '${path}.id': duplicate id '${id}' (already declared by an earlier entry)`)
