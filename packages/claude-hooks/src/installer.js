@@ -24,7 +24,7 @@
  * Tests inject `settingsPath` — never the real ~/.claude/settings.json.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -146,6 +146,13 @@ export function addOwnHooks(settings, { nodePath, binPath } = {}) {
   const out = removeOwnHooks(settings)
   const hooks = { ...(out.hooks && typeof out.hooks === 'object' ? out.hooks : {}) }
   for (const event of HOOK_EVENTS) {
+    // A managed event key holding something other than an array is a
+    // malformed settings.json — appending would silently clobber whatever
+    // the user had there. Same policy as unparseable JSON: abort, never
+    // destroy.
+    if (event in hooks && hooks[event] !== undefined && !Array.isArray(hooks[event])) {
+      throw new Error(`hooks.${event} in settings.json has an unexpected shape (expected an array) — fix or remove it, then re-run`)
+    }
     const command = buildHookCommand(event, { nodePath, binPath })
     const entry = { type: 'command', command }
     const existing = Array.isArray(hooks[event]) ? hooks[event] : []
@@ -186,8 +193,17 @@ function readSettings(settingsPath) {
 
 function writeSettingsAtomic(settingsPath, settings) {
   mkdirSync(dirname(settingsPath), { recursive: true })
+  // Preserve the existing file's mode across the temp+rename — settings.json
+  // can carry sensitive values (env, apiKeyHelper) and users may have
+  // tightened it to 0600; a default-mode temp file must not loosen that.
+  let mode = null
+  try {
+    mode = statSync(settingsPath).mode & 0o777
+  } catch {
+    // New file — default mode (umask applies).
+  }
   const tmpPath = `${settingsPath}.chroxy-hooks-${process.pid}.tmp`
-  writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
+  writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + '\n', mode === null ? { encoding: 'utf-8' } : { encoding: 'utf-8', mode })
   renameSync(tmpPath, settingsPath)
 }
 

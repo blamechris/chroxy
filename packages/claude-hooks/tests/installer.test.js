@@ -16,7 +16,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -122,6 +122,20 @@ describe('installHooks', () => {
       }
       assert.equal(entries.length, event === 'Notification' ? 2 : 1)
     }
+  })
+
+  it('refuses to clobber a managed event key with an unexpected shape', () => {
+    const malformed = JSON.stringify({ hooks: { SessionStart: 'not-an-array' } })
+    const path = tempSettingsPath(malformed)
+    assert.throws(() => installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN }), /unexpected shape/)
+    assert.equal(readFileSync(path, 'utf-8'), malformed)
+  })
+
+  it('preserves the settings file mode across the atomic rewrite', () => {
+    const path = tempSettingsPath(JSON.stringify({ model: 'opus' }))
+    chmodSync(path, 0o600)
+    installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
+    assert.equal(statSync(path).mode & 0o777, 0o600)
   })
 
   it('refuses to overwrite an unparseable settings.json', () => {
