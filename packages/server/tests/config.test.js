@@ -305,7 +305,7 @@ describe('validateConfig', () => {
 
 describe('mergeConfig', () => {
   let originalEnv
-  const envKeys = ['API_TOKEN', 'PORT', 'CHROXY_HOST', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS', 'CHROXY_RESULT_TIMEOUT_MS', 'CHROXY_STREAM_STALL_TIMEOUT_MS', 'CHROXY_MCP_TOOL_CALL_TIMEOUT_MS', 'CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS']
+  const envKeys = ['API_TOKEN', 'PORT', 'CHROXY_HOST', 'CHROXY_CWD', 'CHROXY_MODEL', 'CHROXY_ALLOWED_TOOLS', 'CHROXY_NO_AUTH', 'CHROXY_TUNNEL', 'CHROXY_TUNNEL_NAME', 'CHROXY_TUNNEL_HOSTNAME', 'CHROXY_LEGACY_CLI', 'CHROXY_PROVIDER', 'CHROXY_PROVIDERS', 'CHROXY_SHOW_TOKEN', 'CHROXY_REPOS', 'CHROXY_RESULT_TIMEOUT_MS', 'CHROXY_STREAM_STALL_TIMEOUT_MS', 'CHROXY_MCP_TOOL_CALL_TIMEOUT_MS', 'CHROXY_PROVIDER_STREAM_STALL_TIMEOUT_MS']
 
   beforeEach(() => {
     originalEnv = {}
@@ -389,6 +389,34 @@ describe('mergeConfig', () => {
     assert.equal(merged.port, 9999)
     assert.ok(Array.isArray(merged.allowedTools))
     assert.deepEqual(merged.allowedTools, ['bash', 'read', 'write'])
+  })
+
+  it('CHROXY_PROVIDERS parses the JSON object form (#5419)', () => {
+    process.env.CHROXY_PROVIDERS = '{"anthropicCompatible":[{"id":"zai-glm","baseUrl":"https://api.z.ai/api/anthropic","defaultModel":"glm-4.7"}]}'
+
+    const merged = mergeConfig({ defaults: {} })
+
+    assert.ok(merged.providers && !Array.isArray(merged.providers), 'object form must parse as an object')
+    assert.equal(merged.providers.anthropicCompatible[0].id, 'zai-glm')
+  })
+
+  it('CHROXY_PROVIDERS keeps the legacy comma-split semantics', () => {
+    process.env.CHROXY_PROVIDERS = 'claude-sdk, codex'
+
+    const merged = mergeConfig({ defaults: {} })
+
+    assert.deepEqual(merged.providers, ['claude-sdk', 'codex'])
+  })
+
+  it('CHROXY_PROVIDERS with malformed JSON falls back to the comma-split list (warned, not silent — #5419)', () => {
+    // The log.warn side of this path is exercised at startup; the
+    // behavioural contract pinned here is that startup still proceeds on
+    // the legacy semantics instead of crashing or dropping the key.
+    process.env.CHROXY_PROVIDERS = '{"anthropicCompatible": [oops'
+
+    const merged = mergeConfig({ defaults: {} })
+
+    assert.ok(Array.isArray(merged.providers), 'malformed JSON degrades to the legacy array')
   })
 
   it('handles boolean environment variables', () => {

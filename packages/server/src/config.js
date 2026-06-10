@@ -996,7 +996,16 @@ function parseEnvValue(key, value) {
       try {
         return JSON.parse(trimmed)
       } catch {
-        // fall through to the comma-split legacy parse
+        // A JSON-looking value with a typo must not silently degrade into
+        // the comma-split legacy array — that would discard an intended
+        // `providers.anthropicCompatible` block without a trace. Warn
+        // loudly and still fall through so startup proceeds on the legacy
+        // semantics. Deliberately no err.message / value echo: Node's
+        // SyntaxError messages quote a snippet of the source, and a
+        // pasted env value could carry a secret.
+        log.warn(
+          `${envKeyForConfig(key)} looks like JSON but failed to parse — falling back to the legacy comma-split list; fix the JSON if you meant the object form`,
+        )
       }
     }
     return value.split(',').map(s => s.trim())
