@@ -14,7 +14,7 @@ Nine first-party providers ship built-in (one, `claude-channel`, is a research-p
 - `gemini` — Google Gemini CLI (`gemini -p`).
 - `codex` — OpenAI Codex CLI (`codex exec`).
 
-Three additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli`, `docker-sdk`, and `docker-byok` (containerized variants of `claude-cli` / `claude-sdk` / `claude-byok`).
+Three additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` run their `claude-cli` / `claude-sdk` provider inside the container, while `docker-byok` keeps the `claude-byok` agent loop on the host and redirects only built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) into the container.
 
 Beyond the built-ins, any service or local server that exposes an **Anthropic-compatible Messages API** (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp server, vLLM, OpenRouter, custom proxies) can be registered straight from `config.json` — no code required. See [Anthropic-compatible endpoints (config-driven)](#anthropic-compatible-endpoints-config-driven).
 
