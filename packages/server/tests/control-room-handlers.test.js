@@ -429,6 +429,8 @@ const SAMPLE_INTEGRATION_SNAPSHOT = {
     },
   ],
   repoMemoryCli: { found: true, path: '/usr/local/bin/repo-memory', note: null },
+  // #5501: snapshot-level gh CLI note for the repo-relay columns.
+  ghCli: { found: true, path: '/usr/local/bin/gh', note: null },
 }
 
 function makeIntegrationCtx(overrides = {}) {
@@ -468,6 +470,8 @@ describe('integration_status_request handler (#5499)', () => {
     assert.equal(payload.repos.length, 2)
     assert.equal(payload.summary.configured, 1)
     assert.equal(payload.repoMemoryCli.found, true)
+    // #5501: the gh CLI note passes through to the snapshot.
+    assert.equal(payload.ghCli.found, true)
   })
 
   it('resolves the repo set from config.repos + controlRoomRoot and passes the root to the survey', async () => {

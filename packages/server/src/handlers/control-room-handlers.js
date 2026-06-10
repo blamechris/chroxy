@@ -254,8 +254,8 @@ function integrationErrorSnapshot(root, requestId, error) {
 }
 
 /**
- * #5499 (epic #5498) — Integrations survey handler (repo-memory observability
- * for this slice). Same authority + in-flight + degraded-reply contract as
+ * #5499/#5501 (epic #5498) — Integrations survey handler (repo-memory and
+ * repo-relay observability). Same authority + in-flight + degraded-reply contract as
  * `handleHostStatusRequest`: the survey exposes host-wide per-repo metadata,
  * so it is served only to host-level (unbound) clients, one survey per client
  * at a time. The repo set is the same one the host survey resolves
@@ -310,6 +310,8 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
       summary: snapshot.summary,
       repos: snapshot.repos,
       repoMemoryCli: snapshot.repoMemoryCli,
+      // #5501: snapshot-level gh CLI note for the repo-relay columns.
+      ghCli: snapshot.ghCli,
     })
   } catch (err) {
     log.warn(`integration_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
