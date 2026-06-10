@@ -766,7 +766,7 @@ describe('ClaudeTuiSession', () => {
       assert.equal(spawnCalls, 2, 'second death triggers a second respawn')
     })
 
-    it('after 5 attempts emits a fatal error + respawn_exhausted and stops (no infinite loop)', async () => {
+    it('after 5 attempts a RESTORED session emits a fatal error + respawn_exhausted and stops (no infinite loop)', async () => {
       let spawnCalls = 0
       // Every respawn dies again during warmup → drives toward the cap. In
       // production the wired onExit/close handlers call _onPtyGone when the PTY
@@ -775,6 +775,10 @@ describe('ClaudeTuiSession', () => {
         spawnCalls++
         self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
       })
+      // #5348 — a session seeded from a persisted resume id must NOT fall back
+      // to a fresh conversation (that would silently discard real prior
+      // context): exhaustion after exactly 5 attempts is the honest outcome.
+      session._seededFromPersisted = true
       const errors = []
       const exhausted = []
       session.on('error', (e) => errors.push(e))
@@ -796,7 +800,72 @@ describe('ClaudeTuiSession', () => {
       assert.equal(spawnCalls, 5, 'exactly 5 respawn attempts, then it gives up')
       assert.equal(exhausted.length, 1, 'respawn_exhausted emitted exactly once')
       assert.ok(errors.some((e) => e.code === 'pty_respawn_exhausted'), 'a categorized fatal error is emitted on exhaustion')
+      assert.equal(errors.every((e) => e.code !== 'resume_unknown'), true, 'a restored session never falls back to a fresh conversation')
+      assert.equal(session._sessionId, 'conv-uuid-1234', 'the restored conversation id is never replaced')
       assert.equal(session._respawnScheduled, false, 'no further respawn is scheduled after exhaustion')
+    })
+
+    // #5348 — drop-and-retry-FRESH fallback: an originally-fresh session whose
+    // conversation was never persisted makes every --resume respawn doomed
+    // (claude can't find it → exits during warmup). At the 5-attempt cap the
+    // session gets ONE extra attempt with a brand-new --session-id before
+    // giving up, instead of burning to exhaustion on a futile resume.
+    it('an originally-fresh session gets ONE retry-FRESH attempt at the cap (#5348)', async () => {
+      const spawns = []
+      session = makeSession((self) => {
+        spawns.push({ resumed: self._resumedFromPersisted, id: self._sessionId })
+        self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      })
+      const errors = []
+      const exhausted = []
+      session.on('error', (e) => errors.push(e))
+      session.on('respawn_exhausted', (d) => exhausted.push(d))
+
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      // 5 doomed --resume attempts, then the fresh fallback (also 15s backoff).
+      for (const d of [1000, 2000, 4000, 8000, 15000, 15000]) {
+        mock.timers.tick(d)
+        await new Promise((r) => setImmediate(r))
+      }
+      mock.timers.tick(15000)
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(spawns.length, 6, '5 resume attempts + exactly one fresh fallback attempt')
+      assert.ok(spawns.slice(0, 5).every((s) => s.resumed && s.id === 'conv-uuid-1234'), 'first 5 attempts --resume the original conversation')
+      assert.equal(spawns[5].resumed, false, 'the fallback attempt spawns FRESH (--session-id, not --resume)')
+      assert.notEqual(spawns[5].id, 'conv-uuid-1234', 'the fallback attempt mints a brand-new conversation uuid')
+      const resumeUnknown = errors.filter((e) => e.code === 'resume_unknown')
+      assert.equal(resumeUnknown.length, 1, 'one loud resume_unknown error so the dashboard can render "starting fresh"')
+      assert.equal(resumeUnknown[0].attemptedResumeId, 'conv-uuid-1234', 'the error carries the abandoned conversation id')
+      assert.equal(exhausted.length, 1, 'when the fresh attempt also dies, the session exhausts (one-shot latch, no loop)')
+      assert.equal(exhausted[0].reason, 'pty_respawn_exhausted')
+      assert.equal(session._respawnScheduled, false, 'no further respawn after exhaustion')
+    })
+
+    it('a retry-FRESH attempt that survives warmup re-emits ready with the new uuid and re-arms the latch (#5348)', async () => {
+      let spawnCalls = 0
+      // First 5 spawns die during warmup (doomed resumes); the 6th — the fresh
+      // fallback — survives.
+      session = makeSession((self) => {
+        spawnCalls++
+        if (spawnCalls <= 5) self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      })
+      const readies = []
+      session.on('ready', (d) => readies.push(d))
+
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      for (const d of [1000, 2000, 4000, 8000, 15000, 15000]) {
+        mock.timers.tick(d)
+        await new Promise((r) => setImmediate(r))
+      }
+
+      assert.equal(spawnCalls, 6)
+      assert.equal(readies.length, 1, 'ready re-emitted once the fresh attempt survives warmup')
+      assert.notEqual(readies[0].sessionId, 'conv-uuid-1234', 'ready carries the NEW conversation uuid (persistence picks it up via the resumeSessionId getter)')
+      assert.equal(readies[0].sessionId, session._sessionId, 'emitted id matches the live session id')
+      assert.equal(session._respawnCount, 0, 'retry budget restored after the surviving warmup')
+      assert.equal(session._didFallbackFromUnknownResume, false, 'one-shot latch re-armed on success (a FUTURE doomed-resume window may fall back again)')
+      assert.equal(session._processReady, true)
     })
 
     it('a flapping session (warmup keeps resetting _respawnCount) gives up via the rolling rate cap (#5349)', () => {

@@ -505,6 +505,23 @@ export class ClaudeTuiSession extends BaseSession {
       ? resumeSessionId
       : null   // upstream claude conversation uuid, assigned at start() when fresh
     this._resumedFromPersisted = this._sessionId !== null
+    // #5348 — remember whether this session was SEEDED from a persisted resume
+    // id. `_resumedFromPersisted` flips to true on every respawn (the respawn
+    // must `--resume` the live conversation), so later code can't use it to
+    // tell a restored session from an originally-fresh one. Only an
+    // originally-fresh session is eligible for the drop-and-retry-FRESH
+    // fallback in _scheduleRespawn — falling back on a restored session would
+    // silently discard a real prior conversation.
+    this._seededFromPersisted = this._resumedFromPersisted
+    // #5348 — one-shot latch for the retry-FRESH fallback (mirrors
+    // cli-session.js's `_didFallbackFromUnknownResume`). Re-armed by a respawn
+    // that survives warmup, so a FUTURE doomed-resume window can fall back
+    // again; the #5349 rolling rate cap bounds any flapping alternation.
+    this._didFallbackFromUnknownResume = false
+    // #5348 — set by _scheduleRespawn when the next respawn attempt must spawn
+    // FRESH (`--session-id` with the newly-minted uuid) instead of `--resume`.
+    // Consumed (cleared) by _respawnPty before the spawn.
+    this._freshRetryPending = false
     // #4792: session-scoped logger. Assigned in start() once _sessionId is
     // generated. Until then, code paths that need to log MUST fall back to
     // the module-level `log` (e.g. trust pre-write failure, sink dir create
@@ -1176,9 +1193,11 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * #5315 (WP-2.1) — schedule a bounded PTY respawn with exponential backoff,
    * mirroring CliSession._scheduleRespawn (cli-session.js:556). Backoff is
-   * [1s,2s,4s,8s,15s] and caps at 5 attempts; on exhaustion it emits a
-   * categorized `error` AND a `respawn_exhausted` event so SessionManager drops
-   * the session from its list (no input-rejecting zombie tab — the audit AC).
+   * [1s,2s,4s,8s,15s] and caps at 5 attempts (an originally-fresh session gets
+   * ONE extra drop-and-retry-FRESH attempt at the cap, #5348); on exhaustion it
+   * emits a categorized `error` AND a `respawn_exhausted` event so
+   * SessionManager drops the session from its list (no input-rejecting zombie
+   * tab — the audit AC).
    * Guarded on `_destroying` / `_respawning` / `_respawnScheduled` so the
    * several wired PTY-fault events (onExit/close/error) can't stack timers.
    */
@@ -1202,16 +1221,55 @@ export class ClaudeTuiSession extends BaseSession {
 
     this._respawnCount++
     if (this._respawnCount > 5) {
-      ;(this._log || log).error('Max PTY respawn attempts reached (5), giving up')
-      const tail = this._outputTailDiagnostic()
-      const base = 'Claude PTY failed to stay alive after 5 respawn attempts'
-      // Distinct code so the dashboard can render a terminal "give up" state
-      // rather than a recoverable crash toast.
-      this.emit('error', { code: 'pty_respawn_exhausted', message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
-      // SessionManager listens for this and calls destroySession() so the
-      // session leaves the list cleanly (see _wireSessionEvents).
-      this.emit('respawn_exhausted', { reason: 'pty_respawn_exhausted', attempts: this._respawnCount - 1 })
-      return
+      // #5348 — drop-and-retry-FRESH fallback. A FRESH session (spawned with
+      // `--session-id`) that died before claude persisted its conversation
+      // makes every `--resume` respawn doomed: claude can't find the
+      // conversation and exits during warmup. Reaching this cap means 5
+      // consecutive respawns never survived warmup — for an originally-fresh
+      // session, spend ONE extra attempt on a brand-new conversation id before
+      // giving up. Restored sessions are excluded: their conversation existed
+      // before this process, so dropping the id here would silently discard
+      // real context (the TUI-AUDIT-001 amnesia class) — for them, exhaustion
+      // is the honest outcome. Mirrors cli-session.js's resume_unknown
+      // fallback, just triggered by exhaustion instead of stderr classification
+      // (the TUI renders no machine-readable resume-failure diagnostic).
+      if (!this._seededFromPersisted && !this._didFallbackFromUnknownResume) {
+        this._didFallbackFromUnknownResume = true
+        this._freshRetryPending = true
+        const abandonedId = this._sessionId
+        this._sessionId = randomUUID()
+        this._resumedFromPersisted = false
+        // Rebind the session-scoped logger to the new conversation uuid so
+        // subsequent lines route under the id the dashboard will see on the
+        // re-emitted `ready` (mirrors cli-session.js rebinding on system.init).
+        this._log = loggerForSession('claude-tui-session', this._sessionId)
+        ;(this._log || log).warn(
+          `all --resume respawns died during warmup (attemptedResumeId=${abandonedId}) — ` +
+          'retrying once with a fresh --session-id (the original fresh conversation was likely never persisted)',
+        )
+        // Loud one-shot signal (same code as cli-session.js) so the dashboard
+        // can render "starting fresh" instead of a generic crash toast.
+        this.emit('error', {
+          code: 'resume_unknown',
+          message:
+            'Previous Claude conversation could not be resumed after repeated respawn failures (it was likely ' +
+            'never persisted before the PTY died). Retrying once with a fresh conversation; the model will not ' +
+            'see any earlier transcript.',
+          attemptedResumeId: abandonedId,
+        })
+        // Fall through to the scheduling below — this IS the extra attempt.
+      } else {
+        ;(this._log || log).error(`Max PTY respawn attempts reached (${this._respawnCount - 1}), giving up`)
+        const tail = this._outputTailDiagnostic()
+        const base = `Claude PTY failed to stay alive after ${this._respawnCount - 1} respawn attempts`
+        // Distinct code so the dashboard can render a terminal "give up" state
+        // rather than a recoverable crash toast.
+        this.emit('error', { code: 'pty_respawn_exhausted', message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
+        // SessionManager listens for this and calls destroySession() so the
+        // session leaves the list cleanly (see _wireSessionEvents).
+        this.emit('respawn_exhausted', { reason: 'pty_respawn_exhausted', attempts: this._respawnCount - 1 })
+        return
+      }
     }
 
     const delays = [1000, 2000, 4000, 8000, 15000]
@@ -1256,8 +1314,15 @@ export class ClaudeTuiSession extends BaseSession {
     // re-evaluates fresh (a re-login between attempts must let the session
     // recover; a still-logged-out respawn re-sets it via _spawnPty's scan).
     this._authFailureDetected = false
-    // (2) continue the SAME upstream conversation via --resume.
-    this._resumedFromPersisted = true
+    // (2) continue the SAME upstream conversation via --resume — UNLESS
+    // #5348's retry-FRESH fallback armed this attempt: then `_sessionId` is a
+    // freshly-minted uuid claude has never seen, so the spawn must use
+    // `--session-id` (forcing `--resume` here would re-doom the attempt).
+    if (this._freshRetryPending) {
+      this._freshRetryPending = false
+    } else {
+      this._resumedFromPersisted = true
+    }
     // Recompute permissionsEnabled exactly as start() did — the sink dir, hook
     // secret and settings.json are all still in place from the original start,
     // so we re-use them rather than re-deriving (no re-mint, no re-create).
@@ -1313,6 +1378,11 @@ export class ClaudeTuiSession extends BaseSession {
     // CliSession resets _respawnCount on system.init, cli-session.js:888), mark
     // ready, and re-emit `ready` so the dashboard knows the session recovered.
     this._respawnCount = 0
+    // #5348 — release the one-shot retry-FRESH latch on a warmup that survived
+    // (mirrors cli-session.js releasing it on system.init): a FUTURE
+    // doomed-resume window may fall back again; the #5349 rolling rate cap
+    // bounds any flapping alternation.
+    this._didFallbackFromUnknownResume = false
     this._processReady = true
     this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
   }
@@ -1371,14 +1441,11 @@ export class ClaudeTuiSession extends BaseSession {
     // `--resume <id>` instead — reusing `--session-id` with an already-used id
     // is rejected by claude. Falls back to the fresh path whenever the session
     // wasn't seeded from a persisted id. Resume-failure handling (claude can't
-    // find the conversation, e.g. cleared ~/.claude history) currently surfaces
-    // via the warmup `_ptyExited` error path → bounded respawn (#5315) → if every
-    // resume-respawn dies, exhaustion destroys the session. NOTE: #5315 does NOT
-    // add a graceful drop-and-retry-FRESH fallback — a fresh session that dies
-    // before claude persists its conversation will burn all 5 respawns on a
-    // doomed `--resume` then get destroyed (bounded + safe, but recovery is
-    // futile in that narrow window). The retry-fresh fallback is tracked in its
-    // own follow-up (see #5315 review).
+    // find the conversation, e.g. cleared ~/.claude history) surfaces via the
+    // warmup `_ptyExited` error path → bounded respawn (#5315) → and, for an
+    // originally-fresh session whose 5 resume-respawns all died during warmup,
+    // ONE drop-and-retry-FRESH attempt with a new uuid (#5348, see
+    // _scheduleRespawn) before exhaustion destroys the session.
     const idArgs = this._resumedFromPersisted
       ? ['--resume', this._sessionId]
       : ['--session-id', this._sessionId]
