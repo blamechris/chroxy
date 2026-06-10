@@ -22,6 +22,27 @@ const WORKTREE_MARKER = '/.claude/worktrees/'
 /** Temp roots (plus their macOS /private realpaths) — never project sessions. */
 const TMP_PREFIXES = ['/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp']
 
+/**
+ * Test-surface override (colon-separated), sibling of CHROXY_HOOKS_SKIP_CWD_FILTER:
+ * on Linux os.tmpdir() IS /tmp, so test fixtures built under the OS temp dir
+ * would classify as 'tmp' and legit-repo tests fail on CI but pass on macOS
+ * (/var/folders/...). Tests point this at a path that doesn't exist so their
+ * fixtures classify by the real rules. Never set in production.
+ *
+ * Entries are trimmed and stripped of trailing slashes; if the override
+ * yields no usable absolute prefixes (e.g. only relative/empty segments),
+ * fall back to the built-in list rather than silently disabling suppression.
+ */
+function tmpPrefixes(env) {
+  const raw = env?.CHROXY_HOOKS_TMP_PREFIXES
+  if (typeof raw !== 'string' || raw.length === 0) return TMP_PREFIXES
+  const prefixes = raw
+    .split(':')
+    .map((p) => p.trim().replace(/\/+$/, ''))
+    .filter((p) => p.startsWith('/'))
+  return prefixes.length > 0 ? prefixes : TMP_PREFIXES
+}
+
 /** resolve() then realpath (macOS: /tmp → /private/tmp); best-effort, never throws. */
 function realResolve(p) {
   let dir
@@ -69,7 +90,7 @@ export function classifyNonProjectCwd(cwd, env = process.env) {
   if (typeof cwd !== 'string' || cwd.length === 0) return null
   const dir = realResolve(cwd)
   if (!dir) return null
-  for (const prefix of TMP_PREFIXES) {
+  for (const prefix of tmpPrefixes(env)) {
     if (dir === prefix || dir.startsWith(prefix + '/')) return 'tmp'
   }
   if (dir.includes(WORKTREE_MARKER)) return 'worktree'

@@ -234,7 +234,15 @@ describe('runEmit', () => {
 
   after(() => server.close())
 
-  const envFor = () => ({ CHROXY_INGEST_URL: baseUrl, CHROXY_INGEST_SECRET: SECRET })
+  // CHROXY_HOOKS_TMP_PREFIXES points at a nonexistent root so fixtures built
+  // under os.tmpdir() — which IS /tmp on Linux CI — don't classify as 'tmp'
+  // and get suppressed before the behavior under test runs (#5439 GAP B).
+  // The tests that exercise tmp suppression itself override this explicitly.
+  const envFor = () => ({
+    CHROXY_INGEST_URL: baseUrl,
+    CHROXY_INGEST_SECRET: SECRET,
+    CHROXY_HOOKS_TMP_PREFIXES: '/chroxy-nonexistent-tmp',
+  })
 
   it('POSTs a schema-valid envelope with the bearer secret', async () => {
     const repo = tempRepo()
@@ -337,7 +345,8 @@ describe('runEmit', () => {
       const result = await runEmit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: tmpCwd, session_id: 's-tmp' }),
-        env: envFor(),
+        // real prefixes, stated explicitly (incl. the macOS /tmp realpath)
+        env: { ...envFor(), CHROXY_HOOKS_TMP_PREFIXES: '/tmp:/private/tmp' },
         now: () => NOW,
       })
       assert.deepEqual(result, { sent: false, reason: 'non_project_cwd' })
@@ -403,7 +412,11 @@ describe('runEmit', () => {
       const result = await runEmit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: tmpCwd, session_id: 's-bypass' }),
-        env: { ...envFor(), CHROXY_HOOKS_SKIP_CWD_FILTER: '1' },
+        env: {
+          ...envFor(),
+          CHROXY_HOOKS_TMP_PREFIXES: '/tmp:/private/tmp',
+          CHROXY_HOOKS_SKIP_CWD_FILTER: '1',
+        },
         now: () => NOW,
       })
       assert.deepEqual(result, { sent: true })
