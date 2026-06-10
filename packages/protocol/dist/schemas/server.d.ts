@@ -1156,6 +1156,46 @@ export declare const ServerIntegrationStatusSnapshotSchema: z.ZodObject<{
         message: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+/**
+ * #5500 (epic #5498) — counts distilled from a `repo-memory index` run, as
+ * printed by the CLI's human-readable report (field names verified against
+ * the IndexReport shape in @blamechris/repo-memory: scanned / summarized /
+ * "already fresh" / skipped). All four are required — a partially parsed
+ * report is treated as unparseable and the ack carries `counts: null`
+ * instead, so the dashboard never renders a half-true breakdown.
+ */
+export declare const IntegrationActionCountsSchema: z.ZodObject<{
+    scanned: z.ZodNumber;
+    summarized: z.ZodNumber;
+    fresh: z.ZodNumber;
+    skipped: z.ZodNumber;
+}, z.core.$strip>;
+/**
+ * #5500 — positive ack that an `integration_action` request completed.
+ * Clones the `cancel_activity_ack` correlation contract (#5277): echoes the
+ * request's `action` + `repoPath` (and `requestId` when supplied) so the
+ * dashboard can clear the exact row's pending state. Failures surface as an
+ * `INTEGRATION_ACTION_FAILED` session_error, which also echoes
+ * `requestId` / `action` / `repoPath`.
+ *
+ * `action` is a plain string (not the client enum) so a future action's ack
+ * reaches older dashboards without a schema bump — consumers key off
+ * `repoPath` and treat unknown actions as opaque. `counts` is the parsed
+ * index result for `repo_memory_reindex`, or null when the CLI output
+ * couldn't be parsed (the UI then just refreshes the survey for the truth).
+ */
+export declare const ServerIntegrationActionAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"integration_action_ack">;
+    action: z.ZodString;
+    repoPath: z.ZodString;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    counts: z.ZodNullable<z.ZodObject<{
+        scanned: z.ZodNumber;
+        summarized: z.ZodNumber;
+        fresh: z.ZodNumber;
+        skipped: z.ZodNumber;
+    }, z.core.$strip>>;
+}, z.core.$loose>;
 export declare const ServerClientFocusChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_focus_changed">;
     clientId: z.ZodString;
@@ -1788,3 +1828,5 @@ export type IntegrationRepo = z.infer<typeof IntegrationRepoSchema>;
 export type IntegrationStatusSummary = z.infer<typeof IntegrationStatusSummarySchema>;
 export type IntegrationCliStatus = z.infer<typeof IntegrationCliStatusSchema>;
 export type ServerIntegrationStatusSnapshotMessage = z.infer<typeof ServerIntegrationStatusSnapshotSchema>;
+export type IntegrationActionCounts = z.infer<typeof IntegrationActionCountsSchema>;
+export type ServerIntegrationActionAckMessage = z.infer<typeof ServerIntegrationActionAckSchema>;
