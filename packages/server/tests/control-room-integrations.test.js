@@ -7,6 +7,7 @@ import {
   surveyIntegrations,
   CLI_MISSING_NOTE,
 } from '../src/control-room/integrations.js'
+import { validateConfig } from '../src/config.js'
 import { ServerIntegrationStatusSnapshotSchema } from '@chroxy/protocol'
 
 /**
@@ -341,5 +342,28 @@ describe('surveyIntegrations (#5499)', () => {
     assert.deepEqual(snapshot.summary, { total: 0, configured: 0, notConfigured: 0, degraded: 0 })
     const parsed = ServerIntegrationStatusSnapshotSchema.safeParse({ type: 'integration_status_snapshot', ...snapshot })
     assert.ok(parsed.success, JSON.stringify(parsed.error?.issues))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// controlRoomRepoMemoryBin — config-schema registration. Same posture as the
+// worktreeGc config test: the key must be a known schema key (no "Unknown
+// config key" warning, which claims the value "will be ignored" when the
+// handler does read it) and the wrong type must warn.
+// ---------------------------------------------------------------------------
+
+describe('controlRoomRepoMemoryBin config key (#5499)', () => {
+  it('is a known schema key (no unknown-key warning)', () => {
+    const result = validateConfig({ controlRoomRepoMemoryBin: '/opt/bin/repo-memory' })
+    const unknown = result.warnings.find(w => w.includes('Unknown config key') && w.includes('controlRoomRepoMemoryBin'))
+    assert.equal(unknown, undefined)
+    const typeWarn = result.warnings.find(w => w.includes("Invalid type for 'controlRoomRepoMemoryBin'"))
+    assert.equal(typeWarn, undefined)
+  })
+
+  it('warns when the value is not a string', () => {
+    const result = validateConfig({ controlRoomRepoMemoryBin: 42 })
+    const typeWarn = result.warnings.find(w => w.includes("Invalid type for 'controlRoomRepoMemoryBin'"))
+    assert.ok(typeWarn, 'expected a type warning for a non-string value')
   })
 })
