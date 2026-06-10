@@ -56,6 +56,22 @@ describe('RespawnRateLimiter (#5349)', () => {
     assert.equal(rl.count, 1)
   })
 
+  it('tolerates a backward clock step (NTP / VM suspend) without breaking the prune', () => {
+    // Clock jumps backward mid-stream. Timestamps are clamped non-decreasing,
+    // so `_times` stays ordered, head-pruning stays correct, and the array
+    // cannot grow unboundedly out of order.
+    let t = 1_000_000
+    const rl = new RespawnRateLimiter({ maxPerWindow: 3, windowMs: 1000, now: () => t })
+    assert.equal(rl.record(), true) // t=1_000_000
+    t = 500_000 // clock steps WAY back
+    assert.equal(rl.record(), true) // clamped to 1_000_000, count 2
+    assert.equal(rl.record(), true) // count 3
+    assert.equal(rl.record(), false) // count 4 → capped (not corrupted by the jump)
+    // Sanity: internal timestamps remain sorted ascending.
+    const times = rl._times
+    for (let i = 1; i < times.length; i++) assert.ok(times[i] >= times[i - 1], 'timestamps stay non-decreasing')
+  })
+
   it('reset() clears the window', () => {
     const clk = fakeClock()
     const rl = new RespawnRateLimiter({ maxPerWindow: 2, windowMs: 1000, now: clk.now })

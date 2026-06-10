@@ -9,10 +9,13 @@
 // `windowMs`, regardless of warmup success, so a persistently-flapping backend
 // eventually gives up.
 //
-// Clock: `now` is injectable for tests and defaults to Date.now. A coarse
-// event-count window doesn't need a monotonic clock the way a stall watchdog
-// does — a sleep/NTP step at worst shifts the window by a few timestamps, it
-// can't cause a false "flapping" verdict on a healthy session.
+// Clock: `now` is injectable for tests and defaults to Date.now. Wall-clock can
+// jump BACKWARD (NTP correction / VM suspend), which would break head-pruning
+// (it assumes `_times` is non-decreasing). So record() clamps each timestamp to
+// be >= the previous one: a backward step is treated as "no time passed", which
+// keeps `_times` sorted and the prune correct, and is the conservative
+// direction (it can only make the window advance slower, never falsely flag a
+// healthy session).
 
 const DEFAULT_MAX_PER_WINDOW = 10
 const DEFAULT_WINDOW_MS = 5 * 60 * 1000
@@ -37,7 +40,11 @@ export class RespawnRateLimiter {
    * @returns {boolean}
    */
   record() {
-    const t = this._now()
+    // Clamp to be non-decreasing so a backward clock step can't leave `_times`
+    // out of order (which would defeat the head-prune below and grow the array
+    // unboundedly).
+    const last = this._times.length ? this._times[this._times.length - 1] : -Infinity
+    const t = Math.max(this._now(), last)
     this._times.push(t)
     const cutoff = t - this.windowMs
     while (this._times.length && this._times[0] < cutoff) this._times.shift()
