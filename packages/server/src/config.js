@@ -14,6 +14,10 @@ import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
 import { parseDuration } from './duration.js'
 import { createLogger } from './logger.js'
+// #5419: pure validation helpers for `providers.anthropicCompatible` —
+// deliberately a dependency-free module so importing it here never pulls
+// the BYOK/SDK machinery into the config-load path.
+import { validateProvidersConfigBlock } from './anthropic-compatible-config.js'
 
 const log = createLogger('config')
 
@@ -55,14 +59,19 @@ const CONFIG_SCHEMA = {
   dangerouslySkipPermissions: 'boolean',
   skipPermissions: 'boolean',
   provider: 'string',
-  // Providers the user opted into during `chroxy init`. Informational
-  // today — `provider` remains the authoritative runtime selector — but
-  // recording the user's intent here lets future features (dashboard,
-  // multi-provider routing) know which backends are expected to be
-  // configured without re-prompting. Entries should be valid provider
-  // ids from the `providers.js` registry (e.g. 'claude-sdk', 'codex',
-  // 'gemini'). Added with the `chroxy init` provider picker (#2950).
-  providers: 'array',
+  // Two accepted forms (#2950 / #5419):
+  //   - array (legacy, written by `chroxy init`): provider ids the user
+  //     opted into. Informational today — `provider` remains the
+  //     authoritative runtime selector.
+  //   - object: `providers.anthropicCompatible` is an array of
+  //     config-driven Anthropic-compatible endpoint entries (Z.ai GLM,
+  //     Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter,
+  //     custom proxies). Each entry registers a first-class provider at
+  //     startup — see anthropic-compatible-config.js for the entry shape
+  //     and validation rules. API keys are NEVER inlined here: entries
+  //     name an env var (`apiKeyEnv`) or a ~/.chroxy/credentials.json
+  //     field (`credentialsKey`).
+  providers: 'array|object',
   maxPayload: 'number',
   maxToolInput: 'number',
   noEncrypt: 'boolean',
@@ -507,14 +516,17 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
-  // Check types for known keys
+  // Check types for known keys. A schema entry may be a union of types
+  // separated by '|' (#5419 — `providers` accepts the legacy array OR the
+  // object form); single-type entries keep the exact legacy wording.
   for (const [key, expectedType] of Object.entries(CONFIG_SCHEMA)) {
     if (key in config) {
       const value = config[key]
       const actualType = Array.isArray(value) ? 'array' : typeof value
+      const expectedTypes = expectedType.split('|')
 
-      if (actualType !== expectedType) {
-        warnings.push(`Invalid type for '${key}': expected ${expectedType}, got ${actualType}`)
+      if (!expectedTypes.includes(actualType)) {
+        warnings.push(`Invalid type for '${key}': expected ${expectedTypes.join(' or ')}, got ${actualType}`)
       }
     }
   }
@@ -776,6 +788,24 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
+  // #5419: providers block. The legacy array form (chroxy init's
+  // informational provider-id list) passes through unvalidated, as
+  // before; the object form carries `providers.anthropicCompatible` —
+  // config-driven Anthropic-compatible endpoint entries. All entry-level
+  // warnings use "Invalid value" wording (never the "Invalid type"
+  // prefix) so a malformed entry can't become a fatal startup error via
+  // the loadAndMergeConfig escalation — bad entries are dropped at
+  // registration (anthropic-compatible-session.js) and valid siblings
+  // still register.
+  if (
+    config.providers !== undefined &&
+    typeof config.providers === 'object' &&
+    config.providers !== null &&
+    !Array.isArray(config.providers)
+  ) {
+    validateProvidersConfigBlock(config.providers, warnings)
+  }
+
   // Validate externalUrl format if provided
   if (config.externalUrl && typeof config.externalUrl === 'string') {
     try {
@@ -956,6 +986,21 @@ function envKeyForConfig(key) {
  */
 function parseEnvValue(key, value) {
   const expectedType = CONFIG_SCHEMA[key]
+
+  // #5419: union-typed keys (currently only `providers`: 'array|object').
+  // JSON-looking values parse as JSON (the object form); anything else
+  // keeps the legacy comma-split array semantics of CHROXY_PROVIDERS.
+  if (expectedType === 'array|object') {
+    const trimmed = value.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        return JSON.parse(trimmed)
+      } catch {
+        // fall through to the comma-split legacy parse
+      }
+    }
+    return value.split(',').map(s => s.trim())
+  }
 
   if (expectedType === 'number') {
     const num = parseFloat(value)

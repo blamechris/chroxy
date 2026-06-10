@@ -7,6 +7,7 @@ import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { getProvider } from './providers.js'
+import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { checkDependencies } from './utils/check-dependencies.js'
 
 // Resolve the server package root (the directory containing package.json
@@ -165,6 +166,12 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
     try {
       const config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
       if (typeof config.provider === 'string') configProvider = config.provider
+      // #5419: register config-driven Anthropic-compatible endpoints before
+      // provider resolution so a config.provider pointing at one preflights
+      // its credential spec instead of failing as "Unknown provider".
+      // Invalid entries are warned about (and surface again through
+      // validateConfig below) and skipped.
+      registerAnthropicCompatibleProviders(config)
       const { valid, warnings } = validateConfig(config)
       if (valid) {
         configCheck = { name: 'Config', status: 'pass', message: CONFIG_FILE }

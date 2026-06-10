@@ -13,6 +13,8 @@ Six first-party providers ship built-in (one, `claude-channel`, is a research-pr
 
 Two additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` (containerized wrappers of `claude-cli` / `claude-sdk`).
 
+Beyond the built-ins, any service or local server that exposes an **Anthropic-compatible Messages API** (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp server, vLLM, OpenRouter, custom proxies) can be registered straight from `config.json` — no code required. See [Anthropic-compatible endpoints (config-driven)](#anthropic-compatible-endpoints-config-driven).
+
 ## Setting credentials from the dashboard
 
 The **primary** way to supply provider credentials is the **Settings → Provider Credentials** pane in the desktop dashboard (and the browser dashboard — same authenticated WebSocket path). It lets you view, set, rotate, test, and remove an API key per provider without dropping to a terminal to export environment variables:
@@ -36,6 +38,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
 | `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
+| *(config-driven)* | `@anthropic-ai/sdk` → any Anthropic-compatible endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.anthropicCompatible` (config.json): Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom. Full BYOK agent loop. See [below](#anthropic-compatible-endpoints-config-driven) |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 
@@ -352,6 +355,82 @@ CHROXY_OLLAMA_BASE_URL=http://gpu-box:11434 npx chroxy start --provider ollama
 - **Small context windows**: the effective context is set by the local model file (`num_ctx`), not by Chroxy — long agentic sessions on small-context quantizations will truncate. Chroxy deliberately doesn't display a context-window chip for Ollama models.
 - **Capability ≠ Claude**: tool-use quality depends entirely on the local model. The recommended coder models handle the agent loop well; small general models may loop or emit malformed tool calls.
 
+## Anthropic-compatible endpoints (config-driven)
+
+Many services and local inference servers now expose **Anthropic-compatible `/v1/messages` endpoints**: Z.ai (GLM), Moonshot (Kimi), MiniMax, **LM Studio 0.4.1+**, **llama.cpp server** (Jan 2026, requires `--jinja` for tools), **vLLM**, and **OpenRouter** (which accepts the Anthropic Messages format for *every* model on the platform). Instead of a hand-written session class per service, declare them under `providers.anthropicCompatible` in `~/.chroxy/config.json` — each entry registers a first-class provider at startup that drives the same agent loop as `claude-byok` (streaming, tools, permission prompts, MCP servers, history, cost).
+
+### Entry shape
+
+```json
+{
+  "providers": {
+    "anthropicCompatible": [
+      {
+        "id": "zai-glm",
+        "label": "Z.ai GLM",
+        "baseUrl": "https://api.z.ai/api/anthropic",
+        "apiKeyEnv": "ZAI_API_KEY",
+        "credentialsKey": "zaiApiKey",
+        "defaultModel": "glm-4.7",
+        "models": ["glm-4.7", "glm-4.7-air"],
+        "pricing": { "input": 0.6, "output": 2.2 },
+        "contextWindow": 200000
+      }
+    ]
+  }
+}
+```
+
+| Field | Required | Meaning |
+|-------|:--------:|---------|
+| `id` | yes | Provider id (lowercase letters, digits, dashes; must start with a letter). Must not collide with a built-in id. Select it via `--provider zai-glm`, `CHROXY_PROVIDER`, or the dashboard. |
+| `label` | no | Dashboard display label. Defaults to `id`. |
+| `baseUrl` | yes | `http(s)` base URL of the endpoint. The Anthropic SDK appends `/v1/messages` itself. No embedded `user:pass@`. |
+| `apiKeyEnv` | no | **NAME** of the environment variable holding the API key (e.g. `ZAI_API_KEY`). |
+| `credentialsKey` | no | **NAME** of a field in `~/.chroxy/credentials.json` (mode `0600`) holding the key (e.g. `zaiApiKey`). Env var wins when both are set. Omit both for keyless local servers. |
+| `defaultModel` | yes | Model used when none is selected. |
+| `models` | no | Model **allowlist** for live model switching. Omit entirely for an unrestricted endpoint (any model id is passed through verbatim — the `ollama` rule; an unknown id surfaces as the endpoint's own error). |
+| `pricing` | no | USD per million tokens: `{ "input", "output", "cacheRead", "cacheWrite" }` (missing rates default to 0). Omit for free/local endpoints — cost reports an honest $0. |
+| `contextWindow` | no | Context window in tokens (dashboard chip). Omit when unknown — Chroxy never fabricates a window; the chip is simply hidden. |
+
+**Secrets never go in `config.json`.** `apiKeyEnv` / `credentialsKey` name *where* the key lives; an entry carrying a literal key (an `apiKey`/`token` field, a value that looks like `sk-...`, or `user:pass@` in the URL) is rejected at startup with a pointed warning. Invalid entries are skipped; valid siblings still register.
+
+### Worked example: LM Studio (keyless local server)
+
+LM Studio 0.4.1+ serves an Anthropic-compatible `/v1/messages` locally. llama.cpp server (`llama-server --jinja`) and vLLM expose the same surface — just change `baseUrl` and `defaultModel`:
+
+```json
+{
+  "providers": {
+    "anthropicCompatible": [
+      {
+        "id": "lm-studio",
+        "label": "LM Studio (local)",
+        "baseUrl": "http://localhost:1234",
+        "defaultModel": "qwen3-coder-30b"
+      }
+    ]
+  }
+}
+```
+
+No `apiKeyEnv` / `credentialsKey` → no credential gate (a placeholder key is sent on the wire, which local servers ignore); no `pricing` → cost is always $0; no `models` → any loaded model id is accepted; no `contextWindow` → decided by the local model, so no chip is shown.
+
+For **OpenRouter**, use `"baseUrl": "https://openrouter.ai/api"`, `"apiKeyEnv": "OPENROUTER_API_KEY"`, and any platform model id (e.g. `"defaultModel": "qwen/qwen3-coder"`) — OpenRouter's `/v1/messages` accepts the Anthropic format for all models, not just Claude.
+
+### Use
+
+```bash
+ZAI_API_KEY=... npx chroxy start --provider zai-glm
+npx chroxy start --provider lm-studio
+```
+
+### Caveats
+
+- These compatibility layers are young — llama.cpp explicitly makes "no strong claims of compatibility". Probe streamed tool input (`input_json_delta`), parallel tool calls, and usage accounting against your specific server before relying on them.
+- Tool-use quality depends entirely on the model behind the endpoint (same caveat as Ollama).
+- Capabilities are identical to `claude-byok` by construction — see the [capability matrix](#capability-matrix) note.
+
 ## Selecting a provider
 
 Precedence (highest first): CLI flag > environment variable > config file > default (`claude-sdk`).
@@ -408,6 +487,8 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | **No** | **No** | Yes (in-memory history) | Yes (in-memory history) | Yes (in-memory history) |
 
 > The `claude-byok`, `deepseek`, and `ollama` columns share one session class — `deepseek-session.js` and `ollama-session.js` subclass `ClaudeByokSession` (`byok-session.js`), overriding only credentials, endpoint, model registry, and pricing — so their **(capability)** rows are identical by construction. Behaviourally they differ in cost reporting: `claude-byok` and `deepseek` compute real per-token API cost from their pricing tables, while `ollama` reports an honest $0 (local inference). Attachments are dropped with a session-level error ("does not yet materialise attachments") on all three; in-memory history means continuity within the server process but no cross-restart resume (`resume: false`, tracked in #4047).
+>
+> [Config-driven Anthropic-compatible endpoints](#anthropic-compatible-endpoints-config-driven) (#5419 — Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) are generated subclasses of the same `ClaudeByokSession`, so they **share the `claude-byok` capability column** exactly. Cost reporting follows the entry's `pricing` block: per-token API cost when declared, an honest $0 when omitted (local endpoints).
 
 For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
