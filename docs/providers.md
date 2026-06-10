@@ -35,6 +35,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
 | `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
+| `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 
@@ -314,6 +315,43 @@ GEMINI_API_KEY=... npx chroxy start --provider gemini
 - **Attachments error out**: sending a message with attachments emits a session-level error (`Gemini provider does not support attachments`).
 - **Event format drift**: the `gemini-session.js` handler maps the most common `assistant` / `tool_result` / `result` events. Newer Gemini CLI releases may emit additional event types that Chroxy currently ignores.
 
+## Ollama (local models)
+
+Run sessions against **local open-source models** — no API key, no per-token cost, nothing leaves your machine. Requires Ollama **v0.14.0+**, which exposes an Anthropic-compatible Messages API that Chroxy drives through the same agent loop as the BYOK provider (streaming, tools, permission prompts, MCP servers, history).
+
+### Install
+
+```bash
+# Install Ollama (https://ollama.com), then:
+ollama serve                  # if not already running as a service
+ollama pull qwen3-coder       # recommended coding model
+ollama --version              # must be >= 0.14.0
+```
+
+### Use
+
+```bash
+npx chroxy start --provider ollama                       # default model: qwen3-coder
+npx chroxy start --provider ollama --model glm-4.7       # any locally pulled model id
+```
+
+There is **no model allow-list**: whatever `ollama list` shows is valid. The dashboard picker seeds Ollama's recommended coder models (`qwen3-coder`, `glm-4.7`, `minimax-m2.1`); type any other pulled model id freely. An unknown id surfaces as Ollama's own error on the first message.
+
+### Remote / non-default endpoints
+
+Resolution order: `CHROXY_OLLAMA_BASE_URL` (full URL) → `OLLAMA_HOST` (Ollama's own convention; bare `host:port` is normalized to `http://`) → `http://localhost:11434`.
+
+```bash
+CHROXY_OLLAMA_BASE_URL=http://gpu-box:11434 npx chroxy start --provider ollama
+```
+
+### Common pitfalls
+
+- **Ollama < 0.14.0**: the Anthropic-compatible endpoint doesn't exist — requests 404. Upgrade Ollama.
+- **Ollama not running**: the session starts but the first message errors with a connection failure naming the endpoint. Start `ollama serve` and retry; the session recovers on the next message.
+- **Small context windows**: the effective context is set by the local model file (`num_ctx`), not by Chroxy — long agentic sessions on small-context quantizations will truncate. Chroxy deliberately doesn't display a context-window chip for Ollama models.
+- **Capability ≠ Claude**: tool-use quality depends entirely on the local model. The recommended coder models handle the agent loop well; small general models may loop or emit malformed tool calls.
+
 ## Selecting a provider
 
 Precedence (highest first): CLI flag > environment variable > config file > default (`claude-sdk`).
@@ -352,22 +390,24 @@ Older configs use `legacyCli: true` to force the `claude-cli` provider. This sti
 
 Rows marked **(capability)** come directly from each session class's `static get capabilities()` object — those are the keys the provider registry inspects at runtime. The remaining rows are **(behavioural)** — derived from reading the session class's implementation (attachment handling, agent-tracking events, cost parsing, continuity across `sendMessage` calls). Behavioural rows are not currently part of the `capabilities` contract and may change if the class is refactored.
 
-| Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `claude-channel` | `codex` | `gemini` |
-|------------|:-:|:-:|:-:|:-:|:-:|:-:|
-| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — |
-| **(capability)** In-process permissions | Yes | — | — | — | — | — |
-| **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — | — |
-| **(capability)** Plan mode | — | **Yes** | — | — | — | — |
-| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — | — |
-| **(capability)** Terminal (raw PTY) | — | — | — | — | — | — |
-| **(capability)** Thinking level control | Yes | — | — | — | — | — |
-| **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes |
-| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — |
-| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — |
-| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — |
-| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes |
-| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | **No** | **No** |
+| Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `claude-channel` | `codex` | `gemini` | `ollama` |
+|------------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — | Yes (in-process) |
+| **(capability)** In-process permissions | Yes | — | — | — | — | — | Yes |
+| **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — | — | Yes |
+| **(capability)** Plan mode | — | **Yes** | — | — | — | — | — |
+| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — | — | — |
+| **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — |
+| **(capability)** Thinking level control | Yes | — | — | — | — | — | — |
+| **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes |
+| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — | — |
+| **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes |
+| **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — | Yes (always $0) |
+| **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | **No** | **No** | Yes (in-memory history) |
+
+> The `ollama` column inherits `claude-byok`'s session class (same `capabilities` object and agent loop) — the BYOK and DeepSeek providers, which share it, behave identically and are omitted here only because their columns predate this table's last sweep.
 
 For capability rows, "—" means the provider's `capabilities` object reports `false`. For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
