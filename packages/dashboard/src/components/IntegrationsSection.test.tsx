@@ -29,6 +29,10 @@ vi.mock('../store/connection', () => ({
       reindexingRepoPaths: new Set<string>(),
       reindexResults: {},
       sendRepoMemoryReindex: () => false,
+      // #5502: relay Re-run action state.
+      relayRerunningRepoPaths: new Set<string>(),
+      relayRerunResults: {},
+      sendRepoRelayRerun: () => false,
     }),
 }))
 import { IntegrationsSection, formatBytes } from './IntegrationsSection'
@@ -498,5 +502,94 @@ describe('IntegrationsSection — repo-relay (#5501)', () => {
   it('renders no gh callout when gh was found', () => {
     renderSection(snapshot({ ghCli: { found: true, path: '/usr/local/bin/gh', note: null } }))
     expect(screen.queryByTestId('integration-gh-note')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5502 — repo-relay Re-run action (+ the upstream-blocked Sync now stub).
+// ---------------------------------------------------------------------------
+
+describe('IntegrationsSection — relay Re-run action (#5502)', () => {
+  const FAILED_LATEST = repoRelay({
+    verdict: 'failing',
+    failureStreak: 1,
+    runs: [
+      { databaseId: 9001, status: 'completed', conclusion: 'failure', event: 'pull_request', createdAt: '2026-06-10T11:00:00.000Z' },
+      { databaseId: 9000, status: 'completed', conclusion: 'success', event: 'issues', createdAt: '2026-06-10T10:00:00.000Z' },
+    ],
+  })
+
+  it('renders a Re-run button only when the latest run concluded failure', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('red', FAILED_LATEST),
+      relayRepo('green', repoRelay()),
+      relayRepo('bare', RELAY_NOT_INSTALLED),
+      // Latest run in progress (no conclusion) — older failure must not arm the button.
+      relayRepo('running', repoRelay({
+        runs: [
+          { databaseId: 9002, status: 'in_progress', conclusion: null, event: 'pull_request', createdAt: '2026-06-10T11:30:00.000Z' },
+          { databaseId: 9001, status: 'completed', conclusion: 'failure', event: 'pull_request', createdAt: '2026-06-10T11:00:00.000Z' },
+        ],
+      })),
+    ]))
+    expect(screen.getByTestId('integration-relay-rerun-red')).toBeTruthy()
+    expect(screen.queryByTestId('integration-relay-rerun-green')).toBeNull()
+    expect(screen.queryByTestId('integration-relay-rerun-bare')).toBeNull()
+    expect(screen.queryByTestId('integration-relay-rerun-running')).toBeNull()
+  })
+
+  it('dispatches onRelayRerun with the repo path and the latest run id', () => {
+    const onRelayRerun = vi.fn()
+    renderSection(oneRepoSnapshot([relayRepo('red', FAILED_LATEST)]), { onRelayRerun })
+    fireEvent.click(screen.getByTestId('integration-relay-rerun-red'))
+    expect(onRelayRerun).toHaveBeenCalledWith('/p/red', 9001)
+  })
+
+  it('shows the pending "Re-running…" state, disabled, and does not re-dispatch', () => {
+    const onRelayRerun = vi.fn()
+    renderSection(oneRepoSnapshot([relayRepo('red', FAILED_LATEST)]), {
+      onRelayRerun,
+      relayRerunningRepoPaths: new Set(['/p/red']),
+    })
+    const btn = screen.getByTestId('integration-relay-rerun-red') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(btn.textContent).toContain('Re-running…')
+    fireEvent.click(btn)
+    expect(onRelayRerun).not.toHaveBeenCalled()
+  })
+
+  it('disables Re-run when disconnected', () => {
+    renderSection(oneRepoSnapshot([relayRepo('red', FAILED_LATEST)]), { connected: false })
+    expect((screen.getByTestId('integration-relay-rerun-red') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('shows the "re-run requested" note (inviting a refresh) after the ack', () => {
+    renderSection(oneRepoSnapshot([relayRepo('red', FAILED_LATEST)]), {
+      relayRerunResults: { '/p/red': { error: null, at: NOW } },
+    })
+    const note = screen.getByTestId('integration-relay-rerun-result-red')
+    expect(note.textContent?.toLowerCase()).toContain('re-run requested')
+    expect(note.textContent?.toLowerCase()).toContain('refresh')
+  })
+
+  it('renders the inline error from an INTEGRATION_ACTION_FAILED reply', () => {
+    renderSection(oneRepoSnapshot([relayRepo('red', FAILED_LATEST)]), {
+      relayRerunResults: { '/p/red': { error: 'run 9001 did not fail (success)', at: NOW } },
+    })
+    expect(screen.getByTestId('integration-relay-rerun-error-red').textContent).toContain('did not fail')
+  })
+
+  it('renders a disabled Sync now stub naming the upstream blocker for installed repos', () => {
+    renderSection(oneRepoSnapshot([
+      relayRepo('red', FAILED_LATEST),
+      relayRepo('green', repoRelay()),
+      relayRepo('bare', RELAY_NOT_INSTALLED),
+    ]))
+    for (const name of ['red', 'green']) {
+      const sync = screen.getByTestId(`integration-relay-syncnow-${name}`) as HTMLButtonElement
+      expect(sync.disabled).toBe(true)
+      expect(sync.getAttribute('title')).toContain('repo-relay#168')
+    }
+    expect(screen.queryByTestId('integration-relay-syncnow-bare')).toBeNull()
   })
 })

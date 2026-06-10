@@ -419,6 +419,44 @@ describe('useConnectionStore', () => {
     expect(useConnectionStore.getState().reindexingRepoPaths.has('/p/chroxy')).toBe(false);
   });
 
+  it('#5502: sendRepoRelayRerun marks the repo pending, clears its stale result, and sends the runId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({
+      socket: openSocket,
+      relayRerunningRepoPaths: new Set(),
+      relayRerunResults: { '/p/chroxy': { error: 'old failure', at: 1 } },
+    });
+
+    const result = useConnectionStore.getState().sendRepoRelayRerun('/p/chroxy', 9001);
+
+    expect(result).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse((send.mock.calls[0]![0]) as string);
+    expect(payload.type).toBe('integration_action');
+    expect(payload.action).toBe('repo_relay_rerun');
+    expect(payload.repoPath).toBe('/p/chroxy');
+    expect(payload.runId).toBe(9001);
+    expect(typeof payload.requestId).toBe('string');
+    expect(useConnectionStore.getState().relayRerunningRepoPaths.has('/p/chroxy')).toBe(true);
+    // A fresh request invalidates the previous inline result for the repo.
+    expect(useConnectionStore.getState().relayRerunResults['/p/chroxy']).toBeUndefined();
+  });
+
+  it('#5502: sendRepoRelayRerun is a no-op offline and rejects a non-integer runId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, relayRerunningRepoPaths: new Set(), relayRerunResults: {} });
+    expect(useConnectionStore.getState().sendRepoRelayRerun('/p/chroxy', 9001)).toBe(false);
+    expect(useConnectionStore.getState().relayRerunningRepoPaths.has('/p/chroxy')).toBe(false);
+
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket });
+    expect(useConnectionStore.getState().sendRepoRelayRerun('/p/chroxy', 1.5)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('exposes all required actions', async () => {
     const { useConnectionStore } = await import('./connection');
     const state = useConnectionStore.getState();

@@ -2038,6 +2038,25 @@ function resolveReindex(
 }
 
 /**
+ * #5502 — same contract for the relay Re-run action, against its own bucket
+ * (`relayRerunningRepoPaths` / `relayRerunResults`): a rerun outcome must
+ * never clear, or be cleared by, a reindex on the same repoPath.
+ */
+function resolveRelayRerun(
+  get: MsgGet,
+  set: MsgSet,
+  repoPath: string,
+  result: { error: string | null },
+): void {
+  const pending = new Set(get().relayRerunningRepoPaths);
+  pending.delete(repoPath);
+  set({
+    relayRerunningRepoPaths: pending,
+    relayRerunResults: { ...get().relayRerunResults, [repoPath]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
  * #5500 — Reindex success ack: positive confirmation that the
  * `integration_action` repo_memory_reindex run completed, echoing the
  * request's repoPath (+ requestId) with the parsed index counts (`null` when
@@ -2049,6 +2068,13 @@ function resolveReindex(
 function handleIntegrationActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerIntegrationActionAckSchema.safeParse(msg);
   if (!parsed.success) return;
+  // #5502: route by the echoed action — a relay re-run ack resolves the
+  // rerun bucket; everything else (repo_memory_reindex today, unknown future
+  // actions) keeps the original reindex routing.
+  if (parsed.data.action === 'repo_relay_rerun') {
+    resolveRelayRerun(get, set, parsed.data.repoPath, { error: null });
+    return;
+  }
   resolveReindex(get, set, parsed.data.repoPath, { counts: parsed.data.counts, error: null });
 }
 
@@ -2618,14 +2644,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else if (parsed.code === 'SESSION_NOT_FOUND') {
         clearCancellingForSession(get, set, parsed.attemptedSessionId ?? undefined);
       } else if (parsed.code === 'INTEGRATION_ACTION_FAILED' && typeof msg.repoPath === 'string') {
-        // #5500: a failed Reindex echoes the exact repoPath — clear that
-        // row's "Reindexing…" pending state and surface the reason inline
-        // (the generic branch below still raises the toast, matching the
-        // CANCEL_ACTIVITY_FAILED precedent).
-        resolveReindex(get, set, msg.repoPath, {
-          counts: null,
-          error: parsed.message || 'Reindex failed.',
-        });
+        // #5500/#5502: a failed integration action echoes the exact repoPath
+        // (and action) — clear that row's pending state and surface the
+        // reason inline (the generic branch below still raises the toast,
+        // matching the CANCEL_ACTIVITY_FAILED precedent). Routed by the
+        // echoed action so a rerun failure can't clear a reindex pending.
+        if (msg.action === 'repo_relay_rerun') {
+          resolveRelayRerun(get, set, msg.repoPath, {
+            error: parsed.message || 'Re-run failed.',
+          });
+        } else {
+          resolveReindex(get, set, msg.repoPath, {
+            counts: null,
+            error: parsed.message || 'Reindex failed.',
+          });
+        }
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;

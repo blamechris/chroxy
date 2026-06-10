@@ -405,6 +405,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // per repo for inline display (same lifecycle as cancellingActivityIds).
   reindexingRepoPaths: new Set<string>(),
   reindexResults: {},
+  // #5502: relay Re-run pending/result buckets (separate from reindex).
+  relayRerunningRepoPaths: new Set<string>(),
+  relayRerunResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -731,6 +734,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     delete results[repoPath];
     set({ reindexingRepoPaths: pending, reindexResults: results });
     wsSend(socket, { type: 'integration_action', action: 'repo_memory_reindex', repoPath, requestId });
+    return true;
+  },
+
+  // #5502 (epic #5498): re-run a FAILED repo-relay run for one surveyed repo.
+  // Same contract as sendRepoMemoryReindex: pending state flips ONLY when the
+  // message is genuinely on the wire (never queued offline — a re-run that
+  // drains seconds later would strand the row "Re-running…" with no ack ever
+  // arriving), and the repo's previous inline result is dropped so a stale
+  // outcome can't sit next to the pending state. The runId is the databaseId
+  // the snapshot surfaced; the server re-validates it before any exec.
+  sendRepoRelayRerun: (repoPath: string, runId: number): boolean => {
+    const { socket } = get();
+    if (!repoPath || !Number.isInteger(runId) || runId < 0) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `relay-rerun-${nextMessageId()}`;
+    const pending = new Set(get().relayRerunningRepoPaths);
+    pending.add(repoPath);
+    const results = { ...get().relayRerunResults };
+    delete results[repoPath];
+    set({ relayRerunningRepoPaths: pending, relayRerunResults: results });
+    wsSend(socket, { type: 'integration_action', action: 'repo_relay_rerun', repoPath, runId, requestId });
     return true;
   },
 
@@ -1333,6 +1357,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().reindexingRepoPaths.size > 0) {
         set({ reindexingRepoPaths: new Set<string>() });
       }
+      // #5502: ditto for in-flight relay re-runs.
+      if (get().relayRerunningRepoPaths.size > 0) {
+        set({ relayRerunningRepoPaths: new Set<string>() });
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -1551,6 +1579,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // connection-scoped Control Room state.
       reindexingRepoPaths: new Set<string>(),
       reindexResults: {},
+      // #5502: relay re-run pending/result state goes with it.
+      relayRerunningRepoPaths: new Set<string>(),
+      relayRerunResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -1585,6 +1616,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // connection-scoped Control Room state.
       reindexingRepoPaths: new Set<string>(),
       reindexResults: {},
+      // #5502: relay re-run pending/result state goes with it.
+      relayRerunningRepoPaths: new Set<string>(),
+      relayRerunResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,

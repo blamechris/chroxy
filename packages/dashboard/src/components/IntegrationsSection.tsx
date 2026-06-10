@@ -14,9 +14,11 @@
  *   - repo-relay (#5501): verdict chip (ok / failing / drifted / not
  *     installed / unknown), version pin vs latest release (drift
  *     highlighted; a bare sha pin renders the short sha with a drift-unknown
- *     tooltip), last run conclusion + age with the Actions deep link, and the
- *     failure streak. Degraded cells carry the per-repo `reason` as tooltip;
- *     a repo without the workflow file is a quiet "Not installed" row.
+ *     tooltip), last run conclusion + age with the Actions deep link, the
+ *     failure streak, and the #5502 actions cell (Re-run for a failed latest
+ *     run; the upstream-blocked "Sync now" stub). Degraded cells carry the
+ *     per-repo `reason` as tooltip; a repo without the workflow file is a
+ *     quiet "Not installed" row.
  *
  * #5500 adds the control half: a per-row Reindex button for configured repos
  * that dispatches `integration_action` (repo_memory_reindex) via the store's
@@ -41,7 +43,7 @@
  */
 import { useConnectionStore } from '../store/connection'
 import type { IntegrationRepo, RepoMemoryStatus, RepoRelayStatus, RepoRelayVerdict, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
-import type { ReindexResult } from '../store/types'
+import type { ReindexResult, RelayRerunResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
 
 type Accent = 'ok' | 'warn' | 'bad'
@@ -341,20 +343,104 @@ function ReindexCell({
   )
 }
 
+/**
+ * #5502 — per-row relay actions cell.
+ *
+ * Re-run: only armed when the LATEST run concluded `failure` (an older
+ * failure behind an in-progress or green run is not re-runnable from here —
+ * the row's truth is the latest attempt). Dispatches `integration_action`
+ * (repo_relay_rerun) with the run's databaseId; the server re-validates the
+ * id against a fresh `gh run list` before exec. While pending (keyed by
+ * repoPath in `relayRerunningRepoPaths`) the button shows "Re-running…";
+ * the outcome renders inline — on ack a "re-run requested" note inviting a
+ * refresh (the new attempt appears as in_progress on the next survey), on
+ * INTEGRATION_ACTION_FAILED the echoed reason.
+ *
+ * Sync now: Part 2 of #5502, BLOCKED on upstream blamechris/repo-relay#168
+ * (repo-relay has no workflow_dispatch trigger, so a manual relay pass
+ * cannot be fired). Rendered as a permanently-disabled stub naming the
+ * blocker so the operator knows the capability is coming, not missing.
+ */
+function RelayActionsCell({
+  repo,
+  rerunning,
+  result,
+  connected,
+  onRerun,
+}: {
+  repo: IntegrationRepo
+  rerunning: boolean
+  result: RelayRerunResult | undefined
+  connected: boolean
+  onRerun: (repoPath: string, runId: number) => void
+}) {
+  const relay = relayOf(repo)
+  if (!relay || !relay.installed) {
+    return <td className="cr-dim" data-testid={`integration-relay-actions-${repo.name}`}>—</td>
+  }
+  const latest = relay.runs[0] ?? null
+  const canRerun = latest !== null && latest.conclusion === 'failure'
+  const disabled = rerunning || !connected
+  return (
+    <td data-testid={`integration-relay-actions-${repo.name}`}>
+      {canRerun && (
+        <button
+          type="button"
+          className="cr-refresh"
+          data-testid={`integration-relay-rerun-${repo.name}`}
+          onClick={() => { if (!disabled) onRerun(repo.path, latest.databaseId) }}
+          disabled={disabled}
+          aria-busy={rerunning}
+          title={connected
+            ? 'Re-run the failed repo-relay run via gh run rerun'
+            : 'Not connected — reconnect to re-run'}
+        >
+          {rerunning ? 'Re-running…' : 'Re-run'}
+        </button>
+      )}
+      <button
+        type="button"
+        className="cr-refresh"
+        data-testid={`integration-relay-syncnow-${repo.name}`}
+        disabled
+        title="Blocked on blamechris/repo-relay#168 — repo-relay has no workflow_dispatch trigger yet, so a manual relay pass cannot be fired"
+      >
+        Sync now
+      </button>
+      {!rerunning && result && result.error !== null && (
+        <div className="cr-bad" data-testid={`integration-relay-rerun-error-${repo.name}`}>
+          {result.error}
+        </div>
+      )}
+      {!rerunning && result && result.error === null && (
+        <div className="cr-dim" data-testid={`integration-relay-rerun-result-${repo.name}`}>
+          ✓ re-run requested — refresh to see the new run
+        </div>
+      )}
+    </td>
+  )
+}
+
 function IntegrationRow({
   repo,
   now,
   reindexing,
   reindexResult,
+  rerunning,
+  rerunResult,
   connected,
   onReindex,
+  onRelayRerun,
 }: {
   repo: IntegrationRepo
   now: number
   reindexing: boolean
   reindexResult: ReindexResult | undefined
+  rerunning: boolean
+  rerunResult: RelayRerunResult | undefined
   connected: boolean
   onReindex: (repoPath: string) => void
+  onRelayRerun: (repoPath: string, runId: number) => void
 }) {
   const rm = repo.repoMemory
   const report = rm?.report ?? null
@@ -401,6 +487,13 @@ function IntegrationRow({
       <RelayVersionCell repo={repo} />
       <RelayLastRunCell repo={repo} now={now} />
       <RelayStreakCell repo={repo} />
+      <RelayActionsCell
+        repo={repo}
+        rerunning={rerunning}
+        result={rerunResult}
+        connected={connected}
+        onRerun={onRelayRerun}
+      />
     </tr>
   )
 }
@@ -420,6 +513,12 @@ export interface IntegrationsSectionProps {
   reindexResults?: Record<string, ReindexResult>
   /** #5500: Reindex action. Defaults to the store's sendRepoMemoryReindex. */
   onReindex?: (repoPath: string) => void
+  /** #5502: repo paths with an in-flight relay re-run. Defaults to the store. */
+  relayRerunningRepoPaths?: Set<string>
+  /** #5502: last relay re-run outcome per repo path. Defaults to the store. */
+  relayRerunResults?: Record<string, RelayRerunResult>
+  /** #5502: Re-run action. Defaults to the store's sendRepoRelayRerun. */
+  onRelayRerun?: (repoPath: string, runId: number) => void
   /** Injectable clock (epoch ms) for the "generated Nm ago" / activity cells. */
   now?: () => number
 }
@@ -432,6 +531,9 @@ export function IntegrationsSection({
   reindexingRepoPaths: reindexingProp,
   reindexResults: reindexResultsProp,
   onReindex: onReindexProp,
+  relayRerunningRepoPaths: rerunningProp,
+  relayRerunResults: rerunResultsProp,
+  onRelayRerun: onRelayRerunProp,
   now = Date.now,
 }: IntegrationsSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.integrationStatus)
@@ -441,6 +543,9 @@ export function IntegrationsSection({
   const storeReindexing = useConnectionStore((s) => s.reindexingRepoPaths)
   const storeReindexResults = useConnectionStore((s) => s.reindexResults)
   const sendRepoMemoryReindex = useConnectionStore((s) => s.sendRepoMemoryReindex)
+  const storeRerunning = useConnectionStore((s) => s.relayRerunningRepoPaths)
+  const storeRerunResults = useConnectionStore((s) => s.relayRerunResults)
+  const sendRepoRelayRerun = useConnectionStore((s) => s.sendRepoRelayRerun)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
@@ -449,6 +554,9 @@ export function IntegrationsSection({
   const reindexingRepoPaths = reindexingProp ?? storeReindexing
   const reindexResults = reindexResultsProp ?? storeReindexResults
   const onReindex = onReindexProp ?? sendRepoMemoryReindex
+  const relayRerunningRepoPaths = rerunningProp ?? storeRerunning
+  const relayRerunResults = rerunResultsProp ?? storeRerunResults
+  const onRelayRerun = onRelayRerunProp ?? sendRepoRelayRerun
 
   const refreshDisabled = loading || !connected
   const handleRefresh = () => {
@@ -559,7 +667,7 @@ export function IntegrationsSection({
                 <tr>
                   <th rowSpan={2}>Repo</th>
                   <th colSpan={8} className="cr-th-group" data-testid="integration-group-memory">repo-memory</th>
-                  <th colSpan={4} className="cr-th-group" data-testid="integration-group-relay">repo-relay</th>
+                  <th colSpan={5} className="cr-th-group" data-testid="integration-group-relay">repo-relay</th>
                 </tr>
                 <tr>
                   <th>Status</th>
@@ -574,12 +682,13 @@ export function IntegrationsSection({
                   <th>Version</th>
                   <th>Last run</th>
                   <th>Streak</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {snapshot.repos.length === 0 ? (
                   <tr data-testid="integration-no-repos">
-                    <td colSpan={13} className="cr-dim">
+                    <td colSpan={14} className="cr-dim">
                       No repos found under {snapshot.root}.
                     </td>
                   </tr>
@@ -591,8 +700,11 @@ export function IntegrationsSection({
                       now={nowMs}
                       reindexing={reindexingRepoPaths.has(repo.path)}
                       reindexResult={reindexResults[repo.path]}
+                      rerunning={relayRerunningRepoPaths.has(repo.path)}
+                      rerunResult={relayRerunResults[repo.path]}
                       connected={connected}
                       onReindex={onReindex}
+                      onRelayRerun={onRelayRerun}
                     />
                   ))
                 )}
