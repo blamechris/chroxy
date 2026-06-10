@@ -11,6 +11,15 @@
 
 export { DEFAULT_CONTEXT_WINDOW } from './types'
 
+// #5424: shared context-window resolution. The 200k default is a Claude
+// default — for providers that legitimately report no window (ollama sends
+// `contextWindow: null` on purpose) `resolveContextWindow` returns null and
+// clients render an "unknown window" state instead of a % against 200k.
+export {
+  isClaudeBackedProvider,
+  resolveContextWindow,
+} from './context-window'
+
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an
 // exhaustive `Record<VoiceInputMode, true>` so widening the union is a
 // TS error in the guard, not a silent drop at the call site.

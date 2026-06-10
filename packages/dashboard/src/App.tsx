@@ -7,11 +7,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
-  DEFAULT_CONTEXT_WINDOW,
   deriveSessionVisualStatus,
   formatPasteMarker,
   formatTokensCompact,
   expandPasteMarkers,
+  resolveContextWindow,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -1999,15 +1999,26 @@ export function App() {
     return [...registryRows, ...extraEntries].map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
   })()
 
-  // Compute context window usage percentage from active model metadata
+  // #5424: resolve the active model's context window once for the header
+  // meter, the footer meter, and the percent computation. `null` when the
+  // window is genuinely unknown (e.g. ollama deliberately reports none) —
+  // the 200k fallback only applies to claude-backed providers, where it's
+  // a real default rather than a fabricated number.
+  const activeContextWindow = useMemo(() => {
+    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
+    return resolveContextWindow(modelInfo, activeSessionProvider)
+  }, [availableModels, activeModel, activeSessionProvider])
+
+  // Compute context window usage percentage from active model metadata.
+  // Null when the window is unknown (#5424) — the chips then fall back to
+  // the raw token-count text instead of a percentage/progress bar.
   const contextPercent = useMemo(() => {
     if (!contextUsage) return null
+    if (activeContextWindow == null) return null
     const total = contextUsage.inputTokens + contextUsage.outputTokens
     if (total === 0) return null
-    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
-    const contextWindow = modelInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
-    return (total / contextWindow) * 100
-  }, [contextUsage, activeModel, availableModels])
+    return (total / activeContextWindow) * 100
+  }, [contextUsage, activeContextWindow])
 
   // #5184: human-readable model label for the `provider-model` cost-badge
   // mode. Prefer the server-supplied `label`; fall back to the raw model id
@@ -2281,9 +2292,10 @@ export function App() {
             // the header. We only pass the window when there's an active
             // model — that's the "no session selected" gate the meter
             // hides on (`showMeter` requires a positive window).
-            contextWindow={activeModel
-              ? (availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow) ?? DEFAULT_CONTEXT_WINDOW
-              : undefined}
+            // #5424: `activeContextWindow` is null when the window is
+            // genuinely unknown (e.g. ollama) — the meter then hides and
+            // the chip falls back to the raw token-count text.
+            contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
             isBusy={!isIdle}
             agentCount={activeAgents.length}
             provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
@@ -2701,7 +2713,10 @@ export function App() {
         onShowQr={isConnected ? handleShowQr : undefined}
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
-        contextWindow={(availableModels.find(m => m.id === activeModel || m.fullId === activeModel)?.contextWindow) ?? DEFAULT_CONTEXT_WINDOW}
+        // #5424: null when the window is genuinely unknown (e.g. ollama) —
+        // the model tooltip then omits the context-window sentence instead
+        // of claiming a fabricated 200k.
+        contextWindow={activeContextWindow ?? undefined}
         // #3857: surface a clickable "/compact" suggestion past 80% so the
         // user gets a remedy hint rather than just a red bar. Only enabled
         // when there's an active session to route the input through — without

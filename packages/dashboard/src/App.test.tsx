@@ -2473,3 +2473,97 @@ describe('App', () => {
     })
   })
 })
+
+// #5424 — clients must not assume a 200k context window when a model's
+// contextWindow is unknown. Ollama deliberately reports none (the effective
+// window is the local model file's num_ctx), so the header meter must fall
+// back to the raw token-count chip instead of rendering a fabricated
+// "% of 200k". Claude-backed providers keep the 200k default — it's real.
+describe('context meter with unknown context window (#5424)', () => {
+  const contextUsage = { inputTokens: 12_000, outputTokens: 500 }
+
+  function sessionState(activeModel: string) {
+    return {
+      messages: [],
+      streamingMessageId: null,
+      activeModel,
+      permissionMode: null,
+      contextUsage,
+      sessionCost: null,
+      isIdle: true,
+      activeAgents: [],
+      isPlanPending: false,
+    }
+  }
+
+  function session(provider: string) {
+    return {
+      sessionId: 's1',
+      name: 'Test',
+      cwd: '/tmp',
+      type: 'cli' as const,
+      hasTerminal: true,
+      model: null,
+      permissionMode: null,
+      isBusy: false,
+      createdAt: Date.now(),
+      conversationId: null,
+      provider,
+    }
+  }
+
+  it('hides the percent meter and shows the raw token count for an ollama model with no contextWindow', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('ollama')],
+      activeSessionId: 's1',
+      availableModels: [
+        // Ollama models ship contextWindow: null on the wire; store-core
+        // drops it, so the entry simply has no contextWindow here.
+        { id: 'llama3:8b', label: 'llama3:8b', fullId: 'llama3:8b' },
+      ],
+      getActiveSessionState: () => sessionState('llama3:8b'),
+    }
+    const { container } = render(<App />)
+    // No used/total meter — there is no known total to meter against.
+    expect(screen.queryByTestId('status-context-meter')).not.toBeInTheDocument()
+    // The chip falls back to the raw token count (12.5k tokens), no percent.
+    const chip = container.querySelector('#header .status-context')
+    expect(chip).toBeTruthy()
+    expect(chip!.textContent).toContain('12.5k tokens')
+  })
+
+  it('still meters against the 200k default for a claude provider whose model entry lacks contextWindow', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-sdk')],
+      activeSessionId: 's1',
+      availableModels: [
+        // Legacy servers can omit contextWindow on claude models — the
+        // 200k default is genuine there.
+        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6' },
+      ],
+      getActiveSessionState: () => sessionState('sonnet'),
+    }
+    render(<App />)
+    const label = screen.getByTestId('status-context-label')
+    expect(label.textContent).toContain('12.5k')
+    expect(label.textContent).toContain('200.0k')
+  })
+
+  it('meters against the reported window when an ollama model does report one', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('ollama')],
+      activeSessionId: 's1',
+      availableModels: [
+        { id: 'llama3:8b', label: 'llama3:8b', fullId: 'llama3:8b', contextWindow: 32_000 },
+      ],
+      getActiveSessionState: () => sessionState('llama3:8b'),
+    }
+    render(<App />)
+    const label = screen.getByTestId('status-context-label')
+    expect(label.textContent).toContain('12.5k')
+    expect(label.textContent).toContain('32.0k')
+  })
+})
