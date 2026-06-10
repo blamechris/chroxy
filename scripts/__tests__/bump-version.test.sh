@@ -63,9 +63,10 @@ build_fake_repo() {
   local v="$2"
   mkdir -p "$dir/packages/server" "$dir/packages/app/ios/Chroxy" \
            "$dir/packages/desktop/src-tauri" "$dir/packages/protocol" \
-           "$dir/packages/store-core" "$dir/packages/dashboard"
+           "$dir/packages/store-core" "$dir/packages/dashboard" \
+           "$dir/packages/claude-hooks"
 
-  for pkg in server app desktop protocol store-core dashboard; do
+  for pkg in server app desktop protocol store-core dashboard claude-hooks; do
     printf '{"name":"%s","version":"%s"}\n' "$pkg" "$v" \
       > "$dir/packages/$pkg/package.json"
   done
