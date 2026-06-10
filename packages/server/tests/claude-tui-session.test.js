@@ -7413,6 +7413,17 @@ describe('ClaudeTuiSession — monotonic watchdog clocks (#5332)', () => {
     assert.equal(session._nowMonotonic(), 4200, 'advances with the injected clock')
   })
 
+  it('truncates an injected fractional clock to integer ms (the documented invariant)', () => {
+    // Copilot #5414: an injected monotonicNow could return fractional ms; the
+    // seam truncates so every call site gets the integer-ms drop-in it expects.
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      monotonicNow: () => 1234.987,
+    })
+    assert.equal(session._nowMonotonic(), 1234, 'fractional injected clock is truncated')
+    assert.ok(Number.isInteger(session._nowMonotonic()), 'always integer ms')
+  })
+
   it('the default clock never regresses when the wall clock (Date.now) steps backward', (t) => {
     session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir, repoSkillsDir: null })
     const before = session._nowMonotonic()

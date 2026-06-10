@@ -474,9 +474,11 @@ export class ClaudeTuiSession extends BaseSession {
     // clock backward and prove the watchdogs don't false-fire. Date.now() is
     // retained ONLY where a real wall-clock epoch is required (file mtime
     // comparison, timestamp payloads to clients, log-throttle bookkeeping).
-    this._monotonicNowFn = typeof monotonicNow === 'function'
-      ? monotonicNow
-      : () => Math.trunc(performance.now())
+    // Truncate at the seam (not just the default) so the integer-ms invariant
+    // holds for an injected clock too — `performance.now()` and a test clock
+    // may both be fractional.
+    const rawMonotonicNow = typeof monotonicNow === 'function' ? monotonicNow : () => performance.now()
+    this._monotonicNowFn = () => Math.trunc(rawMonotonicNow())
 
     this._port = port || null
     // #4044: when true, spawn `claude` with --dangerously-skip-permissions
