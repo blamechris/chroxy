@@ -766,7 +766,11 @@ export function validateConfig(config, verbose = false) {
   // values to its defaults at runtime.
   if (config.notifications !== undefined) {
     if (typeof config.notifications !== 'object' || config.notifications === null || Array.isArray(config.notifications)) {
-      warnings.push(`Invalid type for 'notifications': expected object, got ${Array.isArray(config.notifications) ? 'array' : typeof config.notifications}`)
+      // "Invalid value", NOT "Invalid type" — loadAndMergeConfig escalates
+      // the "Invalid type" prefix to a fatal startup error, and this block
+      // is deliberately warn-only (a cosmetic-notifications typo must never
+      // stop the daemon from booting).
+      warnings.push(`Invalid value for 'notifications': expected an object, got ${Array.isArray(config.notifications) ? 'array' : typeof config.notifications}`)
     } else if (config.notifications.discord !== undefined) {
       validateDiscordNotificationsBlock(config.notifications.discord, warnings)
     }

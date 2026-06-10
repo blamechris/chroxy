@@ -172,11 +172,16 @@ export function hasGeminiOAuthCreds() {
 let _credFileCache = {
   byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
   deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+  // #5427: Discord webhook URL — same credentials.json, different key. The
+  // sink's isConfigured() is probed on every notification, so the resolver
+  // must not re-stat/re-parse the file per probe.
+  discord: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
 }
 
 const _SLOT_ENV_VAR = {
   byok: 'ANTHROPIC_API_KEY',
   deepseek: 'DEEPSEEK_API_KEY',
+  discord: 'CHROXY_DISCORD_WEBHOOK_URL',
 }
 
 /**
@@ -185,7 +190,7 @@ const _SLOT_ENV_VAR = {
  * the env var is unchanged AND either (env-var path was taken last time) or
  * (the file's stat-mtime+size+mode still matches what we cached).
  *
- * @param {'byok' | 'deepseek'} slot
+ * @param {'byok' | 'deepseek' | 'discord'} slot
  * @param {string | undefined} envValue - current value of the relevant env var
  * @param {() => object} resolve - the underlying *-credentials resolver
  * @returns {object} resolver result
@@ -258,5 +263,6 @@ export function resetCachesForTest() {
   _credFileCache = {
     byok: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
     deepseek: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
+    discord: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
   }
 }

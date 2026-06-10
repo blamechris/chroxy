@@ -46,7 +46,7 @@ import { createLogger } from '../logger.js'
 import { sleep, backoffDelay } from '../utils/sleep.js'
 import { NotificationSink } from './sink.js'
 import {
-  resolveDiscordWebhookUrl,
+  cachedResolveDiscordWebhookUrl,
   isValidDiscordWebhookUrl,
   extractWebhookIdToken,
 } from '../discord-credentials.js'
@@ -155,7 +155,10 @@ export class DiscordWebhookSink extends NotificationSink {
     errorColor = DEFAULT_ERROR_COLOR,
     updateThrottleMs = 15_000,
     heartbeatIntervalMs = 300_000,
-    resolveWebhookUrl = resolveDiscordWebhookUrl,
+    // Cached by default (#5427 review): isConfigured() is probed per
+    // notification; the cache only re-reads credentials.json when its
+    // mtime/size/mode or the env var changes.
+    resolveWebhookUrl = cachedResolveDiscordWebhookUrl,
     sleepImpl = sleep,
     now = Date.now,
   } = {}) {
@@ -357,6 +360,16 @@ export class DiscordWebhookSink extends NotificationSink {
       } catch {
         // best-effort
       }
+      // Drop the id NOW, before the re-POST (#5427 review S2): if the POST
+      // below hard-fails, a persisted {state:'idle', messageId:<deleted>}
+      // would satisfy the idle→idle suppression and wedge the embed until
+      // a state change or a heartbeat 404 (never, if heartbeat is off).
+      // With the id cleared, the next event falls through to a fresh POST.
+      if (store.projects[project]) {
+        store.projects[project] = { ...store.projects[project], messageId: null }
+        this._persistState(store)
+      }
+      entry.messageId = null
     }
     return await this._post(base, project, entry, store)
   }

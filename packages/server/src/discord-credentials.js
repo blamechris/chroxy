@@ -28,6 +28,7 @@
 import { readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { cachedResolveCredentialFile } from './auth-probes.js'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home (same rationale as byok-credentials.js).
@@ -141,4 +142,19 @@ export function maskWebhookUrl(url) {
   const parts = extractWebhookIdToken(url)
   if (!parts) return '<invalid webhook url>'
   return `https://discord.com/api/webhooks/${parts.id}/[REDACTED]`
+}
+
+/**
+ * Cached resolver — same result as resolveDiscordWebhookUrl, but routed
+ * through auth-probes' mtime+size+mode-keyed credentials.json cache
+ * (#5427 review): the sink's isConfigured() is probed by the registry on
+ * every notification (and again inside send()/heartbeat), and the raw
+ * resolver statSync+readFileSync+JSON.parses the file each time. The
+ * cache repeats the parsed result until the env var or the file actually
+ * changes. Tests that need isolation call auth-probes'
+ * resetCachesForTest() (the suites already do, via the providers tests'
+ * shared setup) or inject their own resolveWebhookUrl.
+ */
+export function cachedResolveDiscordWebhookUrl() {
+  return cachedResolveCredentialFile('discord', process.env.CHROXY_DISCORD_WEBHOOK_URL, resolveDiscordWebhookUrl)
 }
