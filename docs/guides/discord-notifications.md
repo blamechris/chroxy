@@ -70,6 +70,16 @@ layer of defence.
 That's it. The sink is off by default and switches on the moment a webhook
 URL resolves — restart the daemon after adding it.
 
+> **Known limitation (#5493):** on keychain-capable hosts where BYOK keys have
+> been stored, `~/.chroxy/credentials.json` is an **encrypted envelope** — the
+> plain `discordWebhookUrl` field shown above can't coexist with it, so the
+> env var is the only working source on such hosts. That covers shell-started
+> daemons and wrapper-based launchd services, but a server spawned by the
+> desktop app gets no shell env and silently runs without the sink. Until the
+> keychain fallback lands (#5493), bridge it for GUI launches with
+> `launchctl setenv CHROXY_DISCORD_WEBHOOK_URL <url>` (macOS; resets at
+> logout) before opening the app.
+
 ### 3. (Optional) Colors and tuning
 
 The non-secret knobs live in `~/.chroxy/config.json` under

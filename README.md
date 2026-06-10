@@ -32,6 +32,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Encrypted** — End-to-end encryption over Cloudflare tunnel. Your machine, your tunnel, no cloud middleman.
 - **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
+- **Discord notifications** — A live status embed per project that pings when a session is ready for input or needs approval — even for plain Claude Code sessions outside chroxy, via the `chroxy-hooks` installer. See [docs/guides/discord-notifications.md](docs/guides/discord-notifications.md).
 - **Voice input** — Dictate messages with speech-to-text on mobile and macOS desktop.
 - **Docker isolation** — Run sessions in Docker containers with resource limits and security guards.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
@@ -63,7 +64,7 @@ Chroxy includes cost controls to help you stay within budget — see `CHROXY_COS
 ## Features
 
 **Server:**
-CLI headless mode, multi-provider support (Claude Agent SDK, legacy `claude -p`, Gemini, Codex — see [docs/providers.md](docs/providers.md)), WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, persistent container environments (Docker Compose, DevContainer, snapshot/restore), Docker session providers, git worktree isolation, permission rule engine, extensible provider/handler system, shared skills system (drop Markdown files in `~/.chroxy/skills/` — see [docs/skills.md](docs/skills.md))
+CLI headless mode, multi-provider support (Claude Agent SDK, legacy `claude -p`, Gemini, Codex, Ollama, any Anthropic-compatible endpoint — see [docs/providers.md](docs/providers.md)), WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, Discord status-embed notifications (see [docs/guides/discord-notifications.md](docs/guides/discord-notifications.md)), external-session event ingest via `@chroxy/claude-hooks`, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, persistent container environments (Docker Compose, DevContainer, snapshot/restore), Docker session providers, git worktree isolation, permission rule engine, encrypted credentials at rest, extensible provider/handler system, shared skills system (drop Markdown files in `~/.chroxy/skills/` — see [docs/skills.md](docs/skills.md))
 
 **Desktop (Tauri):**
 System tray app, web dashboard with syntax highlighting (15+ languages), xterm.js terminal, session tabs, desktop notifications, voice-to-text (macOS SFSpeechRecognizer), command palette with keyboard shortcuts
