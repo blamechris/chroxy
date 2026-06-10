@@ -98,9 +98,9 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 |---------|--------------|--------------|--------------|
 | In-process permissions (`canUseTool`) | Yes | No (HTTP hook) | No (HTTP hook) |
 | Live `setModel` | Yes | Yes (restart) | — |
-| Live `setPermissionMode` | Yes | Yes (restart) | — |
+| Live `setPermissionMode` | Yes | Yes (restart) | Yes (sidecar file, no restart) |
 | Plan mode | No | **Yes** | No |
-| Resume (`resumeSessionId`) | Yes | No | No |
+| Resume (`resumeSessionId`) | Yes | Yes (`--resume` on respawn/restore) | Yes (`--resume` on restore) |
 | Thinking level control | Yes | No | No |
 | Live streaming (`stream_delta`) | Yes | Yes | No (deliver-on-complete) |
 | Auth | API key or `claude login` | API key or `claude login` | `claude login` only (`ANTHROPIC_API_KEY` rejected) |
@@ -111,7 +111,7 @@ Pick by billing surface and required features:
 
 - **`claude-sdk` (default)** — the right choice for most users. Programmatic billing, fastest startup, live model/mode switching, resume, thinking-level control.
 - **`claude-cli`** — pick this only when you need plan mode. Same billing as the SDK, but a `claude -p` subprocess per session.
-- **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no permission-mode switch, no resume, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
+- **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
 
 ### Common pitfalls
 
@@ -480,9 +480,9 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — | Yes (in-process) | Yes (in-process) | Yes (in-process) |
 | **(capability)** In-process permissions | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes | Yes | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes | Yes (sidecar file) | — | — | — | Yes | Yes | Yes |
 | **(capability)** Plan mode | — | **Yes** | — | — | — | — | — | — | — |
-| **(capability)** Resume (`resumeSessionId`) | Yes | — | — | — | — | — | — | — | — |
+| **(capability)** Resume (`resumeSessionId`) | Yes | Yes | Yes | — | — | — | — | — | — |
 | **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — | — | — |
 | **(capability)** Thinking level control | Yes | — | — | — | — | — | — | — | — |
 | **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
@@ -497,7 +497,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 >
 > [Config-driven Anthropic-compatible endpoints](#anthropic-compatible-endpoints-config-driven) (#5419 — Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) are generated subclasses of the same `ClaudeByokSession`, so they **share the `claude-byok` capability column** exactly. Cost reporting follows the entry's `pricing` block: per-token API cost when declared, an honest $0 when omitted (local endpoints).
 
-For capability rows, "—" means the provider's `capabilities` object reports `false` (or omits the key — e.g. only `claude-sdk` and the BYOK family declare `skillToggle`: they rebuild the system prompt every turn, so toggling a skill takes effect on the next message; subprocess providers snapshot the skills text at session start). For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
+For capability rows, "—" means the provider's `capabilities` object reports `false` (or omits the key — e.g. only `claude-sdk` and the BYOK family declare `skillToggle` — plus `docker-sdk` / `docker-byok`, which spread the parent class's capabilities: they rebuild the system prompt every turn, so toggling a skill takes effect on the next message; subprocess providers snapshot the skills text at session start). For behavioural rows, "—" means the feature is unimplemented (the session class throws or emits a `not supported` error, or silently no-ops). Most provider-agnostic UI (session tabs, chat/terminal dual view, push notifications, conversation search, web dashboard) works across all providers.
 
 > The `claude-channel` column reflects the provider's declared `capabilities`
 > object and the spike's verified protocol contract — **not** runtime behaviour,
@@ -519,7 +519,6 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 
 ### `claude-cli`
 
-- **No resume** — each new session starts fresh; history replay is driven by Chroxy's own `session-manager.js`, not by `claude`.
 - **No thinking-level control** — SDK-only feature.
 - Requires the `claude` binary to be installed and executable.
 
@@ -527,7 +526,7 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 
 - **Subscription only** — `ANTHROPIC_API_KEY` is explicitly stripped from the spawn env. Auth via `claude login`; no API-key fallback.
 - **No live streaming** — the response is delivered as one `stream_start` → `stream_delta` → `stream_end` burst when Claude's `Stop` hook fires. No incremental token streaming inside a turn.
-- **No live model switch, no plan mode, no permission-mode switch, no resume, no thinking-level control, no attachments, no agent tracking, no cost reporting** — `result.cost` is emitted as `0` (a placeholder, not parsed from the Stop hook) and `result.usage` is `null` (the Stop hook payload doesn't expose either).
+- **No live model switch, no plan mode, no thinking-level control, no attachments, no agent tracking, no cost reporting** — `result.cost` is emitted as `0` (a placeholder, not parsed from the Stop hook) and `result.usage` is `null` (the Stop hook payload doesn't expose either).
 - **One PTY per session** — pays a ~3.5s warmup cost on `start()`, then every `sendMessage` writes to the same PTY. Concurrent sessions in the same `cwd` are not protected against each other; treat as one session per repo.
 - **Tool events are reconstructed from `PreToolUse` / `PostToolUse` hooks** — `tool_use_id` is taken from the hook payload when present, otherwise synthesized per turn (`<messageId>-tool-N`). Pre/Post pairing breaks if tool calls overlap or a Pre fires without a matching Post.
 - **Hook payloads write to a per-session directory under `tmpdir()/chroxy-claude-tui/s-<uuid>/`**. Cleaned up on `destroy()`.
@@ -556,7 +555,8 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - **No live model switch, no permission-mode switch, no plan mode, no resume,
   no thinking-level control** — the channel surface does not expose these
   (same gaps as `claude-tui`, except `claude-tui` fakes permission-mode via a
-  sidecar file). The channel's wins over `claude-tui` are live streaming and a
+  sidecar file and resumes across restarts via `--resume`). The channel's wins
+  over `claude-tui` are live streaming and a
   documented first-party permission relay.
 - **Not available on Bedrock / Vertex / Foundry**, and Team/Enterprise orgs
   must enable `channelsEnabled` in managed settings.
