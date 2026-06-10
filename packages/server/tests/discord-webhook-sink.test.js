@@ -967,6 +967,63 @@ describe('DiscordWebhookSink — subagent/idle interplay (#5439 GAP C)', () => {
     assert.equal(await sink.send(activity({ subagents: 2 })), true)
     assert.equal(calls.length, 0, 'same-state count refresh throttled')
   })
+
+  // idle_busy arming: the count→0 re-ping must only fire for embeds that
+  // went idle WHILE subagents were running (bash idle_busy, entered
+  // exclusively via the idle_prompt arm with a live count). A count that
+  // rises AFTER a plain idle ping means the main loop took input and is
+  // busy again — bash's plain `idle` never reposted on count→0
+  // (should_patch_subagent_update returns 1 for `idle`), and re-pinging
+  // "Ready for input" mid-task would be a false ping.
+  it('a PLAIN idle embed whose count rose via the demote path does NOT re-ping on count→0', async () => {
+    const { sink, statePath, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(16_000)
+    scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
+    await sink.send(ready()) // plain idle ping, no subagents → NOT armed
+    advance(16_000)
+    scriptFetch([{ status: 200 }])
+    await sink.send(activity({ subagents: 1 })) // user responded; main loop launched a subagent
+    advance(16_000)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 0 })), true)
+    assert.deepEqual(calls.map((c) => c.method), ['PATCH'], 'no DELETE+POST — falls through to online')
+    assert.match(JSON.parse(calls[0].body).embeds[0].title, /Session Online/)
+    const st = readState(statePath).projects.proj1
+    assert.equal(st.state, 'online')
+    assert.equal(st.idleBusy, false)
+  })
+
+  it('a deduped idle event carrying a live count arms the count→0 re-ping', async () => {
+    const { sink, statePath, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(16_000)
+    scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
+    await sink.send(ready()) // plain idle, not armed
+    advance(16_000)
+    let calls = scriptFetch()
+    await sink.send(ready({ subagents: 2 })) // re-idle WITH live count: dedup, but arm
+    assert.equal(calls.length, 0, 'deduped — no Discord call')
+    assert.equal(readState(statePath).projects.proj1.idleBusy, true)
+    advance(16_000)
+    calls = scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm3' } }])
+    assert.equal(await sink.send(activity({ subagents: 0 })), true)
+    assert.deepEqual(calls.map((c) => c.method), ['DELETE', 'POST'], 'armed count→0 re-pings')
+    assert.match(JSON.parse(calls[1].body).embeds[0].title, /Ready for input/)
+  })
+
+  it('an armed idle embed re-pings on an idle prompt with all agents done (bash :600-603, not a dedup no-op)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedWaitingWithSubagents(sink, advance, 'idle') // armed: idle ping with count 2
+    const calls = scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm3' } }])
+    assert.equal(await sink.send(ready({ subagents: 0 })), true)
+    assert.deepEqual(calls.map((c) => c.method), ['DELETE', 'POST'])
+    const st = readState(statePath).projects.proj1
+    assert.equal(st.idleBusy, false, 'disarmed after the repost')
+    assert.equal(st.messageId, 'm3')
+  })
 })
 
 // #5439 GAP D — SessionEnd 404 orphan (port of bash no_post_on_404). When

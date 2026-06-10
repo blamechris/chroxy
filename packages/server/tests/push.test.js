@@ -340,6 +340,18 @@ describe('PushManager', () => {
       assert.equal(fetchMock.mock.calls.length, 1)
     })
 
+    it('bypassRateLimit exempts a send from the window but still advances the stamp (#5439 GAP C)', async () => {
+      manager.registerToken(VALID_TOKEN)
+      const fetchMock = mockFetchOk()
+      globalThis.fetch = fetchMock
+
+      await manager.send('session_activity', 'T', 'B')
+      await manager.send('session_activity', 'T', 'B', {}, undefined, { bypassRateLimit: true })
+      assert.equal(fetchMock.mock.calls.length, 2, 'bypassed send goes out inside the window')
+      await manager.send('session_activity', 'T', 'B')
+      assert.equal(fetchMock.mock.calls.length, 2, 'routine send right after is still throttled')
+    })
+
     it('applies the 30s default rate limit to unknown/unregistered categories', async () => {
       manager.registerToken(VALID_TOKEN)
       const fetchMock = mockFetchOk()

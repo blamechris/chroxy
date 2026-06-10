@@ -373,6 +373,13 @@ export class DiscordWebhookSink extends NotificationSink {
       // Phase 4 fills this from the hook event stream; until then callers
       // may pass a count and we surface it.
       subagents: Number.isFinite(data.subagents) ? data.subagents : (prev?.subagents ?? 0),
+      // #5439 GAP C: true iff the embed went idle WHILE subagents were
+      // running — the bash `idle_busy` state, entered exclusively via an
+      // idle ping that carries a live count (set in the PING_STATES branch
+      // below). Carried through demoted count refreshes; the count→0
+      // re-ping requires it, so counts that rise AFTER a plain idle ping
+      // (main loop took input and is busy again) never arm a false ping.
+      idleBusy: prev?.idleBusy === true,
       firstSeenTs: prev?.firstSeenTs ?? now,
       lastUpdateTs: now,
       lastStateChangeTs: prev?.state === state ? (prev?.lastStateChangeTs ?? now) : now,
@@ -388,6 +395,7 @@ export class DiscordWebhookSink extends NotificationSink {
         entry.firstSeenTs = now
         entry.lastStateChangeTs = now
         entry.subagents = Number.isFinite(data.subagents) ? data.subagents : 0
+        entry.idleBusy = false
         return await this._repost(webhookUrl, project, entry, store, prev?.messageId)
       }
       if (state === 'offline') {
@@ -404,18 +412,23 @@ export class DiscordWebhookSink extends NotificationSink {
       // permission embed) with subagents still running, routine activity
       // must NOT flip the embed back to 🟢 online: keep the waiting state
       // and text, refreshing only the live fields (Subagents count, footer).
-      // And when the LAST subagent finishes while the embed sits idle,
-      // re-ping 🦀 "Ready for input" (the bash idle_busy → idle repost on
-      // count→0). Permission embeds with count→0 fall through to online —
-      // the row-20 intentional diff (approval cleared by the next activity).
+      // And when the LAST subagent finishes while the embed sits idle AND
+      // armed (`idleBusy` — it went idle with a live count, the bash
+      // idle_busy state), re-ping 🦀 "Ready for input" (the bash :383-384
+      // repost on count→0). A PLAIN idle embed whose count rose later (the
+      // demote branch below) means the main loop took input and is busy —
+      // bash never reposted from plain `idle`, and neither do we.
+      // Permission embeds with count→0 fall through to online — the row-20
+      // intentional diff (approval cleared by the next activity).
       if (state === 'online' && prev?.messageId && (prev.state === 'idle' || prev.state === 'permission')) {
-        const allDone = entry.subagents === 0 && Number.isFinite(prev.subagents) && prev.subagents > 0
-        if (entry.subagents > 0 || (allDone && prev.state === 'idle')) {
+        const allDone = entry.subagents === 0 && prev.state === 'idle' && prev.idleBusy === true
+        if (entry.subagents > 0 || allDone) {
           entry.state = prev.state
           if (typeof prev.body === 'string' && prev.body.length > 0) entry.body = prev.body
           entry.detail = prev.detail ?? entry.detail
           entry.lastStateChangeTs = prev.lastStateChangeTs ?? now
           if (allDone) {
+            entry.idleBusy = false
             return await this._repost(webhookUrl, project, entry, store, prev.messageId)
           }
           if (Number.isFinite(prev.lastUpdateTs) && now - prev.lastUpdateTs < this._updateThrottleMs) {
@@ -426,11 +439,32 @@ export class DiscordWebhookSink extends NotificationSink {
       }
 
       if (PING_STATES.has(state)) {
+        // #5439 GAP C: an idle ping that arrives with a live count IS the
+        // bash idle_busy state — arm the count→0 re-ping. Recomputed on
+        // every idle ping so a later plain-idle ping disarms.
+        if (state === 'idle') entry.idleBusy = entry.subagents > 0
         // Parity: an embed already sitting in `idle` is NOT re-posted for
         // another idle event (`[ "$CURRENT_STATE" = "idle" ] && exit 0`) —
         // re-pinging "still ready" is noise. `permission` always re-posts:
         // each new approval request deserves a fresh ping.
-        if (state === 'idle' && prev?.state === 'idle' && prev?.messageId) return true
+        if (state === 'idle' && prev?.state === 'idle' && prev?.messageId) {
+          // bash :600-603: idle_busy + an idle prompt with all agents done
+          // is NOT a dedup no-op — it reposts plain idle (fresh ping).
+          // Falling through also disarms (entry.idleBusy is false here), so
+          // no stale armed count lingers to mis-fire later.
+          const busyAllDone = prev.idleBusy === true && entry.subagents === 0
+          if (!busyAllDone) {
+            if (entry.idleBusy && prev.idleBusy !== true) {
+              // Deduped re-idle that carries a live count: record the
+              // arming (no Discord call) so a later count→0 can re-ping —
+              // covers the embed that was already idle when the main loop
+              // went idle again with subagents running.
+              store.projects[project] = { ...prev, idleBusy: true, subagents: entry.subagents, lastUpdateTs: now }
+              this._persistState(store)
+            }
+            return true
+          }
+        }
         return await this._repost(webhookUrl, project, entry, store, prev?.messageId)
       }
 

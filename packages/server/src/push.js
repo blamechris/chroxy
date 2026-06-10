@@ -448,6 +448,14 @@ export class PushManager {
    * @param {string} body - Notification body text
    * @param {object} [data] - Extra data payload
    * @param {string} [categoryId] - iOS notification category for action buttons
+   * @param {object} [opts]
+   * @param {boolean} [opts.bypassRateLimit] - Exempt this send from the
+   *   per-category window (#5439 GAP C: the count→0 subagent_stop is a
+   *   LOAD-BEARING transition — the Discord sink's idle re-ping triggers on
+   *   it, and the always-warm session_activity window would otherwise drop
+   *   it semi-randomly. The bash original equally exempted count-0 updates
+   *   from its throttle in should_patch_subagent_update). The window stamp
+   *   still advances so routine sends stay throttled.
    * @returns {Promise<boolean>} `true` when no hard delivery failure occurred
    *   (the sinks accepted it, or there was nothing to send / we were
    *   rate-limited — both of which are "no error" from the caller's view).
@@ -456,7 +464,7 @@ export class PushManager {
    *   (#3870) use this to decide whether to release a latch so a transient
    *   failure doesn't permanently suppress future notifications.
    */
-  async send(category, title, body, data = {}, categoryId = undefined) {
+  async send(category, title, body, data = {}, categoryId = undefined, { bypassRateLimit = false } = {}) {
     // No sink has anywhere to deliver to — silent no-op, and intentionally
     // BEFORE the rate-limit stamp (matching the pre-extraction
     // `tokens.size === 0` early return) so a tokenless send doesn't burn
@@ -469,7 +477,7 @@ export class PushManager {
     // per-device prefs. See RATE_LIMITS history comments above.
     const limit = RATE_LIMITS[category] ?? 30_000
     const lastSent = this._lastSent.get(category) || 0
-    if (Date.now() - lastSent < limit) {
+    if (!bypassRateLimit && Date.now() - lastSent < limit) {
       return true
     }
     this._lastSent.set(category, Date.now())

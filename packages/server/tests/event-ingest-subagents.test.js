@@ -28,8 +28,8 @@ function makePushManager() {
   return {
     calls,
     hasConfiguredSinks: () => true,
-    send: (category, title, body, data) => {
-      calls.push({ category, title, body, data })
+    send: (category, title, body, data, categoryId, opts) => {
+      calls.push({ category, title, body, data, opts })
       return Promise.resolve(true)
     },
   }
@@ -110,6 +110,30 @@ describe('event ingest subagent counting', () => {
     assert.equal(lastCall().data.subagents, 0)
     await post({ ...base, type: 'notification' })
     assert.equal(lastCall().body, 'Claude is waiting')
+  })
+
+  // #5439 GAP C: the count→0 subagent_stop is load-bearing (the Discord
+  // sink's idle_busy re-ping triggers on it) and session_activity's global
+  // 30s window is almost always warm during subagent work — so exactly that
+  // transition must request a rate-limit bypass (the bash original equally
+  // exempted count-0 updates in should_patch_subagent_update).
+  it('subagent_stop reaching count 0 requests a rate-limit bypass', async () => {
+    await post({ ...base, type: 'subagent_start' })
+    assert.equal(lastCall().opts?.bypassRateLimit, false, 'start never bypasses')
+    await post({ ...base, type: 'subagent_start' })
+    await post({ ...base, type: 'subagent_stop' })
+    assert.equal(lastCall().data.subagents, 1)
+    assert.equal(lastCall().opts?.bypassRateLimit, false, 'stop above 0 stays throttled')
+    await post({ ...base, type: 'subagent_stop' })
+    assert.equal(lastCall().data.subagents, 0)
+    assert.equal(lastCall().opts?.bypassRateLimit, true, 'count→0 bypasses the category window')
+  })
+
+  it('a sessionId-less subagent_stop never requests a bypass', async () => {
+    const { sessionId, ...noSession } = base
+    await post({ ...noSession, type: 'subagent_stop' })
+    assert.equal('subagents' in lastCall().data, false)
+    assert.equal(lastCall().opts?.bypassRateLimit, false)
   })
 
   it('counts are isolated per session', async () => {

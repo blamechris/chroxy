@@ -383,6 +383,18 @@ export function handleEventIngest(server, req, res) {
         }
       }
 
+      // #5439 GAP C: the count→0 subagent_stop is LOAD-BEARING — the Discord
+      // sink's idle_busy re-ping triggers on it. session_activity rides a
+      // global 30s category window (RATE_LIMITS in push.js) that is almost
+      // always warm during subagent work, so without an exemption the
+      // transition is dropped semi-randomly: the re-ping then never fires
+      // (the main loop is idle — nothing follows), or fires LATE off stale
+      // state as a false ping. Port of the bash exemption (notify-helpers.sh
+      // should_patch_subagent_update: "Count reaching 0 = all agents done;
+      // always let it through").
+      const bypassRateLimit =
+        event.type === 'subagent_stop' && !!event.sessionId && activeSubagents === 0
+
       // Fire-and-forget: the pipeline owns delivery (category rate limits,
       // prefs, sink retries). A hard sink failure is logged, not surfaced —
       // emitters can't act on it anyway.
@@ -397,7 +409,7 @@ export function handleEventIngest(server, req, res) {
           // (discord-webhook-sink.js `data.subagents` → embed field).
           ...(event.sessionId ? { subagents: activeSubagents } : {}),
           ts: event.ts,
-        })
+        }, undefined, { bypassRateLimit })
       ).then((ok) => {
         if (ok === false) log.warn(`Ingest event ${event.type} from "${event.source}" failed sink delivery`)
       }).catch((err) => {
