@@ -980,6 +980,127 @@ export const ServerRunnerStatusSnapshotSchema = z.object({
     })
         .optional(),
 });
+// ---------------------------------------------------------------------------
+// #5499 (epic #5498) — Control Room "Integrations" tab: per-repo repo-memory
+// observability. Emitted in reply to an `integration_status_request` (see
+// client.ts). Same pull-on-Refresh, degraded-snapshot-with-`error` contract as
+// the host and runner surveys above.
+// ---------------------------------------------------------------------------
+/**
+ * repo-memory cache file stats for one repo (`.repo-memory/cache.db` plus its
+ * `-wal` sidecar). `present` is false when the cache file doesn't exist yet
+ * (config without traffic); `sizeBytes` then reports 0. `lastModified` is the
+ * newest mtime across the db + wal files (ISO-8601), or null when absent —
+ * it doubles as a "last activity" proxy because the telemetry report carries
+ * no timestamp of its own.
+ */
+export const RepoMemoryCacheSchema = z.object({
+    present: z.boolean(),
+    sizeBytes: z.number().int().nonnegative().finite(),
+    lastModified: z.string().datetime().nullable(),
+});
+/**
+ * The repo-memory telemetry report for one repo, distilled from
+ * `repo-memory report <repoRoot> --json --diagnostics`. Field names follow the
+ * CLI's TokenReport shape (verified against `@blamechris/repo-memory` 0.15.0).
+ * The diagnostics-derived fields (`cacheEntryCount` / `staleEntryCount`) are
+ * nullable because older CLI versions may omit the `diagnostics` block.
+ * `lastActivity` is the newest telemetry timestamp when the CLI reports one
+ * (current versions don't — then it stays null and consumers fall back to
+ * `cache.lastModified`).
+ */
+export const RepoMemoryReportSchema = z.object({
+    totalEvents: z.number().int().nonnegative().finite(),
+    cacheHits: z.number().int().nonnegative().finite(),
+    cacheMisses: z.number().int().nonnegative().finite(),
+    cacheHitRatio: z.number().min(0).max(1),
+    estimatedTokensSaved: z.number().nonnegative().finite(),
+    cacheEntryCount: z.number().int().nonnegative().finite().nullable(),
+    staleEntryCount: z.number().int().nonnegative().finite().nullable(),
+    lastActivity: z.string().datetime().nullable(),
+});
+/**
+ * One repo's repo-memory status.
+ *
+ *   - `configured: false` — no `.repo-memory.json` in the repo root. A quiet
+ *     "not configured" row, not an error; every other field is null/empty.
+ *   - `configured: true` — `summarizer` + `toolGroups` parsed from the config
+ *     (null/empty when the file is unparseable), `cache` always present,
+ *     `report` populated from the CLI when it succeeded.
+ *   - `reason` — per-repo degradation note: why `report` is null for a
+ *     configured repo (CLI missing, CLI failed, unparseable output). Null when
+ *     nothing degraded.
+ */
+export const RepoMemoryStatusSchema = z.object({
+    configured: z.boolean(),
+    summarizer: z.string().nullable(),
+    toolGroups: z.array(z.string()),
+    cache: RepoMemoryCacheSchema.nullable(),
+    report: RepoMemoryReportSchema.nullable(),
+    reason: z.string().nullable(),
+});
+/**
+ * One surveyed repo in the Integrations snapshot. `repoMemory` is nullable so
+ * a future integration can appear without forcing a repo-memory block; a
+ * sibling `repoRelay` block lands in the follow-up issue (#5501) as an
+ * additive key — consumers must tolerate unknown extra keys per the usual Zod
+ * non-strict object semantics.
+ */
+export const IntegrationRepoSchema = z.object({
+    name: z.string(),
+    path: z.string(),
+    repoMemory: RepoMemoryStatusSchema.nullable(),
+});
+/**
+ * Aggregate repo-memory counts across the surveyed repos, carried alongside
+ * `repos` so the Integrations tab's summary chips don't re-tally. `degraded`
+ * counts configured repos whose report cell carries a `reason`.
+ */
+export const IntegrationStatusSummarySchema = z.object({
+    total: z.number().int().nonnegative().finite(),
+    configured: z.number().int().nonnegative().finite(),
+    notConfigured: z.number().int().nonnegative().finite(),
+    degraded: z.number().int().nonnegative().finite(),
+});
+/**
+ * Snapshot-level note about the `repo-memory` CLI binary, probed ONCE per
+ * survey. When `found` is false every configured repo's CLI-derived cells are
+ * degraded and `note` explains why (the per-repo `reason` repeats it).
+ */
+export const IntegrationCliStatusSchema = z.object({
+    found: z.boolean(),
+    path: z.string().nullable(),
+    note: z.string().nullable(),
+});
+/**
+ * #5499 — full Integrations survey snapshot. Emitted in reply to an
+ * `integration_status_request` (see client.ts). `root` is the Control Room
+ * discovery root the repo set was resolved under (same as the host survey).
+ * An empty `repos` array is the valid "no repos under the root" state.
+ * `repoMemoryCli` is optional so the degraded error-snapshot (FORBIDDEN /
+ * SURVEY_IN_PROGRESS / SURVEY_FAILED) can reuse the shared error envelope; a
+ * successful survey always carries it.
+ */
+export const ServerIntegrationStatusSnapshotSchema = z.object({
+    type: z.literal('integration_status_snapshot'),
+    // Echoes the client's `integration_status_request` requestId so the
+    // dashboard can correlate a snapshot to the Refresh click that triggered it.
+    requestId: z.string().nullable().optional(),
+    generatedAt: z.string().datetime(),
+    root: z.string(),
+    summary: IntegrationStatusSummarySchema,
+    repos: z.array(IntegrationRepoSchema),
+    repoMemoryCli: IntegrationCliStatusSchema.optional(),
+    // Additive degraded-snapshot annotation — same posture as the host/runner
+    // snapshots: on a forbidden/in-progress/failed survey the handler returns an
+    // otherwise-valid empty snapshot plus this `error`.
+    error: z
+        .object({
+        code: z.string(),
+        message: z.string(),
+    })
+        .optional(),
+});
 export const ServerClientFocusChangedSchema = z.object({
     type: z.literal('client_focus_changed'),
     clientId: z.string(),

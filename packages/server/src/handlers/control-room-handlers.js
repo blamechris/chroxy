@@ -1,7 +1,8 @@
 /**
  * Control Room v2 (#5174) — Host/Repo Status WS handler.
  *
- * Handles: host_status_request
+ * Handles: host_status_request, runner_status_request (#5253),
+ * integration_status_request (#5499)
  *
  * Wires the host survey (control-room/repo-set.js + control-room/survey.js) to
  * the WS protocol. On a `host_status_request` the handler:
@@ -31,6 +32,7 @@ import { createLogger } from '../logger.js'
 import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-set.js'
 import { surveyRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
+import { surveyIntegrations } from '../control-room/integrations.js'
 
 const log = createLogger('ws')
 
@@ -41,6 +43,8 @@ const inFlight = new WeakSet()
 // #5253: a separate in-flight guard for the runner survey, so a runner refresh
 // and a host refresh don't block each other (they shell out to different tools).
 const runnerInFlight = new WeakSet()
+// #5499: same again for the integrations survey — independent of both above.
+const integrationInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -238,7 +242,86 @@ async function handleRunnerStatusRequest(ws, client, msg, ctx) {
   }
 }
 
+/** #5499 — `integration_status_snapshot` error reply — see {@link buildSurveyErrorSnapshot}. */
+function integrationErrorSnapshot(root, requestId, error) {
+  return buildSurveyErrorSnapshot(
+    'integration_status_snapshot',
+    { total: 0, configured: 0, notConfigured: 0, degraded: 0 },
+    root, requestId, error,
+  )
+}
+
+/**
+ * #5499 (epic #5498) — Integrations survey handler (repo-memory observability
+ * for this slice). Same authority + in-flight + degraded-reply contract as
+ * `handleHostStatusRequest`: the survey exposes host-wide per-repo metadata,
+ * so it is served only to host-level (unbound) clients, one survey per client
+ * at a time. The repo set is the same one the host survey resolves
+ * (config.repos ∪ auto-discovered under controlRoomRoot).
+ */
+async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+
+  const config = ctx?.config || {}
+  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+    ? config.controlRoomRoot
+    : DEFAULT_CONTROL_ROOM_ROOT
+  const repos = Array.isArray(config.repos) ? config.repos : []
+
+  // Authority gate: a host-wide integrations survey is for host-level clients only.
+  if (client?.boundSessionId) {
+    ctx.send(ws, integrationErrorSnapshot(root, requestId, {
+      code: 'FORBIDDEN',
+      message: 'integration_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+
+  if (integrationInFlight.has(client)) {
+    ctx.send(ws, integrationErrorSnapshot(root, requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'An integration status survey is already in progress for this client',
+    }))
+    return
+  }
+
+  // Tests inject `ctx.resolveRepoSet` / `ctx.surveyIntegrations` to stub the
+  // fs/exec calls without patching modules.
+  const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
+  const surveyFn = typeof ctx?.surveyIntegrations === 'function' ? ctx.surveyIntegrations : surveyIntegrations
+
+  // Optional explicit repo-memory binary path — skips the PATH probe (useful
+  // when the daemon runs with a GUI/launchd PATH that misses npm globals).
+  const bin = typeof config.controlRoomRepoMemoryBin === 'string' && config.controlRoomRepoMemoryBin.length > 0
+    ? config.controlRoomRepoMemoryBin
+    : undefined
+
+  integrationInFlight.add(client)
+  try {
+    const repoSet = resolveFn({ repos, root })
+    const snapshot = await surveyFn(repoSet, { root, bin })
+    ctx.send(ws, {
+      type: 'integration_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      root: snapshot.root,
+      summary: snapshot.summary,
+      repos: snapshot.repos,
+      repoMemoryCli: snapshot.repoMemoryCli,
+    })
+  } catch (err) {
+    log.warn(`integration_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.send(ws, integrationErrorSnapshot(root, requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'integration status survey failed',
+    }))
+  } finally {
+    integrationInFlight.delete(client)
+  }
+}
+
 export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
+  integration_status_request: handleIntegrationStatusRequest,
 }

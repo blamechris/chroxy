@@ -397,6 +397,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // runner_status_snapshot handler. Null until the first survey lands.
   runnerStatus: null,
   runnerStatusLoading: false,
+  // #5499 (epic #5498): Control Room Integrations snapshot, fed by the
+  // integration_status_snapshot handler. Null until the first survey lands.
+  integrationStatus: null,
+  integrationStatusLoading: false,
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -685,6 +689,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ runnerStatusLoading: true });
       wsSend(socket, { type: 'runner_status_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #5499 (epic #5498): request an Integrations survey. Mirrors
+  // requestRunnerStatus — flips integrationStatusLoading and sends an
+  // integration_status_request; the reply is a single
+  // integration_status_snapshot handled into integrationStatus. Returns false
+  // (and does NOT set loading) when the socket is closed.
+  requestIntegrationStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ integrationStatusLoading: true });
+      wsSend(socket, { type: 'integration_status_request' });
       return true;
     }
     return false;

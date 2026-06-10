@@ -2492,5 +2492,113 @@ describe('@chroxy/protocol schemas', () => {
         assert.ok(mod.ClientMessageSchema)
       })
     })
+
+    // #5499 (epic #5498): Integrations tab — repo-memory observability contract.
+    describe('integration status (#5499)', () => {
+      const report = {
+        totalEvents: 120,
+        cacheHits: 90,
+        cacheMisses: 30,
+        cacheHitRatio: 0.75,
+        estimatedTokensSaved: 48211,
+        cacheEntryCount: 1391,
+        staleEntryCount: 2,
+        lastActivity: null,
+      }
+      const repoMemory = {
+        configured: true,
+        summarizer: 'ast',
+        toolGroups: ['telemetry'],
+        cache: { present: true, sizeBytes: 2310144, lastModified: '2026-06-09T22:00:00.000Z' },
+        report,
+        reason: null,
+      }
+      const snapshot = {
+        type: 'integration_status_snapshot',
+        generatedAt: '2026-06-10T12:00:00.000Z',
+        root: '/Users/dev/Projects',
+        summary: { total: 2, configured: 1, notConfigured: 1, degraded: 0 },
+        repos: [
+          { name: 'chroxy', path: '/Users/dev/Projects/chroxy', repoMemory },
+          {
+            name: 'scratch',
+            path: '/Users/dev/Projects/scratch',
+            repoMemory: { configured: false, summarizer: null, toolGroups: [], cache: null, report: null, reason: null },
+          },
+        ],
+        repoMemoryCli: { found: true, path: '/usr/local/bin/repo-memory', note: null },
+      }
+
+      it('ServerIntegrationStatusSnapshotSchema round-trips a full snapshot', async () => {
+        const { ServerIntegrationStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const result = ServerIntegrationStatusSnapshotSchema.safeParse(snapshot)
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.repos[0].repoMemory.report.cacheHitRatio, 0.75)
+        assert.equal(result.data.summary.configured, 1)
+      })
+
+      it('accepts a degraded configured repo (report null + reason) and a missing-CLI note', async () => {
+        const { ServerIntegrationStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        const degraded = {
+          ...snapshot,
+          summary: { total: 1, configured: 1, notConfigured: 0, degraded: 1 },
+          repos: [{
+            name: 'chroxy',
+            path: '/p/chroxy',
+            repoMemory: { ...repoMemory, report: null, reason: 'repo-memory CLI not found on PATH' },
+          }],
+          repoMemoryCli: { found: false, path: null, note: 'repo-memory CLI not found on PATH' },
+        }
+        assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse(degraded).success)
+      })
+
+      it('tolerates a missing diagnostics block (nullable entry counts) and a lastActivity timestamp', async () => {
+        const { RepoMemoryReportSchema } = await import('../src/schemas/server.ts')
+        assert.ok(RepoMemoryReportSchema.safeParse({ ...report, cacheEntryCount: null, staleEntryCount: null }).success)
+        assert.ok(RepoMemoryReportSchema.safeParse({ ...report, lastActivity: '2026-06-09T22:00:00.000Z' }).success)
+        assert.ok(!RepoMemoryReportSchema.safeParse({ ...report, cacheHitRatio: 1.5 }).success)
+        assert.ok(!RepoMemoryReportSchema.safeParse({ ...report, totalEvents: -1 }).success)
+      })
+
+      it('accepts an error snapshot without repoMemoryCli (shared error envelope)', async () => {
+        const { ServerIntegrationStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse({
+          type: 'integration_status_snapshot',
+          requestId: 'r1',
+          generatedAt: '2026-06-10T12:00:00.000Z',
+          root: '/Users/dev/Projects',
+          summary: { total: 0, configured: 0, notConfigured: 0, degraded: 0 },
+          repos: [],
+          error: { code: 'FORBIDDEN', message: 'nope' },
+        }).success)
+      })
+
+      it('rejects the wrong type and an invalid nested repoMemory block', async () => {
+        const { ServerIntegrationStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!ServerIntegrationStatusSnapshotSchema.safeParse({ ...snapshot, type: 'integration_status' }).success)
+        assert.ok(!ServerIntegrationStatusSnapshotSchema.safeParse({
+          ...snapshot,
+          repos: [{ name: 'x', path: '/x', repoMemory: { ...repoMemory, toolGroups: null } }],
+        }).success)
+      })
+
+      it('IntegrationStatusRequestSchema validates + is accepted by the client union', async () => {
+        const { IntegrationStatusRequestSchema, ClientMessageSchema } = await import('../src/schemas/client.ts')
+        assert.ok(IntegrationStatusRequestSchema.safeParse({ type: 'integration_status_request' }).success)
+        assert.ok(IntegrationStatusRequestSchema.safeParse({ type: 'integration_status_request', requestId: 'i1' }).success)
+        assert.ok(!IntegrationStatusRequestSchema.safeParse({ type: 'integration_status_request', requestId: 'x'.repeat(129) }).success)
+        const u = ClientMessageSchema.safeParse({ type: 'integration_status_request', requestId: 'i2' })
+        assert.ok(u.success, JSON.stringify(u.error?.issues))
+        assert.equal(u.data.type, 'integration_status_request')
+      })
+
+      it('pins the integrations contract at the package entry point', async () => {
+        const mod = await import('../src/index.ts')
+        const schemas = await import('../src/schemas/index.ts')
+        assert.ok(schemas.ServerIntegrationStatusSnapshotSchema)
+        assert.ok(schemas.IntegrationStatusRequestSchema)
+        assert.ok(mod.ClientMessageSchema)
+      })
+    })
   })
 })

@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -579,6 +579,21 @@ export interface ConnectionState {
    */
   runnerStatusLoading: boolean;
 
+  /**
+   * #5499 (epic #5498) — Control Room Integrations survey: the latest
+   * `integration_status_snapshot` from the server (per-repo repo-memory
+   * status). `null` until the first snapshot lands (the Integrations section
+   * renders an empty/loading state). Replaced wholesale on each snapshot
+   * (full picture, no delta stream).
+   */
+  integrationStatus: ServerIntegrationStatusSnapshotMessage | null;
+  /**
+   * #5499 — true between dispatching an `integration_status_request` and the
+   * matching `integration_status_snapshot` arriving, so the Integrations-tab
+   * Refresh button can spin. Cleared when a snapshot lands.
+   */
+  integrationStatusLoading: boolean;
+
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
   streamingMessageId: string | null;
@@ -1054,6 +1069,13 @@ export interface ConnectionState {
   // message went on the wire (false = socket closed). Sets `runnerStatusLoading`
   // while in flight.
   requestRunnerStatus: () => boolean;
+
+  // #5499 (epic #5498): request an Integrations survey. Dispatches an
+  // `integration_status_request`; the server replies with a single
+  // `integration_status_snapshot` handled into `integrationStatus`. Returns
+  // whether the message went on the wire (false = socket closed). Sets
+  // `integrationStatusLoading` while in flight.
+  requestIntegrationStatus: () => boolean;
 
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the

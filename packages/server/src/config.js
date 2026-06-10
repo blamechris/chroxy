@@ -97,6 +97,13 @@ const CONFIG_SCHEMA = {
   // true. Set false for a faster local-only survey, or on hosts where `gh`
   // isn't authenticated. Mirrored by the CHROXY_RUNNER_INCLUDE_GITHUB env var.
   controlRoomRunnerIncludeGithub: 'boolean',
+  // #5499 (Control Room): explicit path to the `repo-memory` binary the
+  // Integrations survey (control-room/integrations.js) shells out to for the
+  // per-repo telemetry report. When unset, the survey probes the PATH with
+  // `which repo-memory` once per snapshot — set this on hosts where the daemon
+  // runs with a GUI/launchd PATH that misses npm globals. Mirrored by the
+  // CHROXY_REPO_MEMORY_BIN env var.
+  controlRoomRepoMemoryBin: 'string',
   maxSessions: 'number',
   maxHistory: 'number',
   maxMessages: 'number',
@@ -962,6 +969,8 @@ function envKeyForConfig(key) {
     controlRoomRunnerRoot: 'CHROXY_RUNNER_ROOT',
     // #5260: toggle gh enrichment of the runner survey.
     controlRoomRunnerIncludeGithub: 'CHROXY_RUNNER_INCLUDE_GITHUB',
+    // #5499: explicit repo-memory binary path for the Integrations survey.
+    controlRoomRepoMemoryBin: 'CHROXY_REPO_MEMORY_BIN',
     logFormat: 'CHROXY_LOG_FORMAT',
     sandbox: 'CHROXY_SANDBOX',
     resultTimeoutMs: 'CHROXY_RESULT_TIMEOUT_MS',

@@ -810,6 +810,19 @@ export const RunnerStatusRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
+// server to survey integration status across the host's repos — repo-memory
+// for this slice (config presence, cache stats, telemetry report); repo-relay
+// is the follow-up (#5498 sub-issues). The server resolves the same repo set
+// as `host_status_request` and replies with a single
+// `integration_status_snapshot` (see server.ts). Pull-on-Refresh, same as the
+// host and runner surveys. The optional `requestId` lets the dashboard
+// correlate a Refresh click to its snapshot.
+export const IntegrationStatusRequestSchema = z.object({
+  type: z.literal('integration_status_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
@@ -899,6 +912,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   EvaluateDraftSchema,
   HostStatusRequestSchema,
   RunnerStatusRequestSchema,
+  IntegrationStatusRequestSchema,
 ])
 
 // -- Inferred TypeScript types --
@@ -915,5 +929,6 @@ export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>
 export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>
+export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>

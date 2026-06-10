@@ -130,7 +130,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -2005,6 +2005,18 @@ function handleRunnerStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, 
 }
 
 /**
+ * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
+ * REPLACE the stored survey and clear the loading flag. Same defensive,
+ * full-replace, clear-loading-only-on-valid-parse contract as the host and
+ * runner survey handlers above.
+ */
+function handleIntegrationStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerIntegrationStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ integrationStatus: parsed.data, integrationStatusLoading: false });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
@@ -2064,6 +2076,8 @@ const HANDLERS: Record<string, Handler> = {
   host_status_snapshot: handleHostStatusSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,
+  // #5499 (epic #5498): Control Room Integrations survey snapshot.
+  integration_status_snapshot: handleIntegrationStatusSnapshot,
 };
 
 // ---------------------------------------------------------------------------

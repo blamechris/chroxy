@@ -1,12 +1,12 @@
 /**
- * ControlRoomView (#5253) — the Control Room two-tab shell.
+ * ControlRoomView (#5253) — the Control Room tab shell.
  *
- * Covers: both tabs render, the repos tab is the default, clicking a tab swaps
+ * Covers: all tabs render, the repos tab is the default, clicking a tab swaps
  * the active section, the choice is persisted to localStorage and restored on
  * the next mount, a stale/garbage persisted value degrades to the default, and
  * onInvestigate is forwarded to the repo section.
  *
- * The two child sections each read the zustand store; stub them so this test
+ * The child sections each read the zustand store; stub them so this test
  * only exercises the tab shell.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
@@ -20,6 +20,9 @@ vi.mock('./ControlRoomSection', () => ({
 vi.mock('./RunnerStatusSection', () => ({
   RunnerStatusSection: () => <div data-testid="stub-runners">runners</div>,
 }))
+vi.mock('./IntegrationsSection', () => ({
+  IntegrationsSection: () => <div data-testid="stub-integrations">integrations</div>,
+}))
 
 import { ControlRoomView } from './ControlRoomView'
 
@@ -31,12 +34,14 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('ControlRoomView', () => {
-  it('renders both tabs and defaults to the repos section', () => {
+  it('renders all tabs and defaults to the repos section', () => {
     render(<ControlRoomView />)
     expect(screen.getByTestId('cr-tab-repos')).toBeTruthy()
     expect(screen.getByTestId('cr-tab-runners')).toBeTruthy()
+    expect(screen.getByTestId('cr-tab-integrations')).toBeTruthy()
     expect(screen.getByTestId('stub-repos')).toBeTruthy()
     expect(screen.queryByTestId('stub-runners')).toBeNull()
+    expect(screen.queryByTestId('stub-integrations')).toBeNull()
     expect(screen.getByTestId('cr-tab-repos').getAttribute('aria-selected')).toBe('true')
   })
 
@@ -49,10 +54,26 @@ describe('ControlRoomView', () => {
     expect(localStorage.getItem(KEY)).toBe('runners')
   })
 
+  it('switches to the integrations section when its tab is clicked, and persists it', () => {
+    render(<ControlRoomView />)
+    fireEvent.click(screen.getByTestId('cr-tab-integrations'))
+    expect(screen.getByTestId('stub-integrations')).toBeTruthy()
+    expect(screen.queryByTestId('stub-repos')).toBeNull()
+    expect(screen.queryByTestId('stub-runners')).toBeNull()
+    expect(screen.getByTestId('cr-tab-integrations').getAttribute('aria-selected')).toBe('true')
+    expect(localStorage.getItem(KEY)).toBe('integrations')
+  })
+
   it('restores the persisted tab on the next mount', () => {
     localStorage.setItem(KEY, 'runners')
     render(<ControlRoomView />)
     expect(screen.getByTestId('stub-runners')).toBeTruthy()
+  })
+
+  it('restores a persisted integrations tab on the next mount', () => {
+    localStorage.setItem(KEY, 'integrations')
+    render(<ControlRoomView />)
+    expect(screen.getByTestId('stub-integrations')).toBeTruthy()
   })
 
   it('degrades a garbage persisted value to the default tab', () => {
