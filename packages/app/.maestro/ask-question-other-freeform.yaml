@@ -1,5 +1,5 @@
 appId: com.blamechris.chroxy
-name: ChatView AskUserQuestion Other → freeform send-path (#4877 / #4755)
+name: ChatView AskUserQuestion Other → freeform send-path (#4877, #4755)
 ---
 
 # #4877 — Maestro coverage for the third (deferred) acceptance criterion of
@@ -148,28 +148,45 @@ name: ChatView AskUserQuestion Other → freeform send-path (#4877 / #4755)
 # Tap the synthesized Other button. MessageBubble flips local
 # `otherActive` true, which swaps the option row for the freetext
 # input + Send/Cancel buttons. Per the PR #4864 testIDs landing.
+# Tap by the visible text — on this surface the XCUITest id-tap on
+# the nested TouchableOpacity does not propagate to RN's touch
+# responder (observed on iPhone 16 Pro, 2026-06-10), while the text
+# tap resolves to the inner Text element's coordinates and lands.
 - tapOn:
-    id: "approval-button-__chroxy_other__"
+    text: "Other"
 - waitForAnimationToEnd
 
-# Assert the freetext input + Send button materialized. These are
-# the canonical PR #4864 anchors — a regression that drops the
-# testIDs (e.g. an Other → freetext refactor that loses the prop)
-# fails the flow here.
+# The tap occasionally lands during the card's mount animation and is
+# swallowed by RN's touch responder — re-tap once if the freetext UI
+# didn't materialize.
+- runFlow:
+    when:
+      notVisible:
+        id: "approval-freetext-send"
+    commands:
+      - tapOn:
+          text: "Other"
+      - waitForAnimationToEnd
+
+# Assert the freetext UI materialized. The Send button keeps its
+# PR #4864 testID anchor; the EMPTY freetext TextInput's testID is
+# not exposed in the iOS a11y tree (same quirk as the Term-mode
+# input bar), and its placeholder only surfaces inside the card's
+# flattened accessibility text — hence the wildcard match.
 - extendedWaitUntil:
     visible:
-      id: "approval-freetext-input"
+      id: "approval-freetext-send"
     timeout: 5000
 - assertVisible:
-    id: "approval-freetext-send"
+    text: ".*Type your response….*"
 
 - takeScreenshot: ask-question-other-freetext-mounted
 
 # Type a freeform answer into the input. Choose a phrase distinct
 # from any option label so the post-answer assertion can't pass
 # accidentally by matching 'production' / 'staging' / 'Other'.
-- tapOn:
-    id: "approval-freetext-input"
+# No tap needed to focus: the freetext TextInput mounts with
+# `autoFocus` (MessageBubble.tsx), so type straight into it.
 - inputText: "ephemeral-preview-env-42"
 - hideKeyboard
 
@@ -198,7 +215,10 @@ name: ChatView AskUserQuestion Other → freeform send-path (#4877 / #4755)
 #      match any option's value. This is the parity behaviour with
 #      `formatQuestionAnswerSummary` on the dashboard.
 - assertNotVisible:
-    id: "approval-freetext-input"
+    text: ".*Type your response….*"
 - assertNotVisible:
     id: "approval-freetext-send"
-- assertVisible: "ephemeral-preview-env-42"
+# Wildcard match — the answered card flattens its children into one
+# accessibility element, so an exact text match finds nothing.
+- assertVisible:
+    text: ".*ephemeral-preview-env-42.*"

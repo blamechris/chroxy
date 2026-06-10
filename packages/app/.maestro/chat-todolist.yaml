@@ -137,16 +137,17 @@ name: ChatView TodoWrite tool rendering
 - takeScreenshot: chat-todolist-entry-collapsed
 
 # Tap the TodoWrite entry to expand it → parseTodoList(message.toolResult)
-# runs and renders <TodoList /> inline. The mock server emits entries
-# with id `tool-todowrite-mock-<counter>` so we tap by regex prefix.
-# Stays a point-tap (50%,55% targets the entry row at ~y=492-536 on
-# iPhone 17 Pro Max) because Maestro's iOS XCUITest tap-by-id on a
-# nested TouchableOpacity doesn't always propagate to React Native's
-# touch responder system. We do NOT double-tap with both id and point
-# because if BOTH succeed they toggle the state twice and collapse the
-# entry — flaky. Point-tap is the production path.
+# runs and renders <TodoList /> inline. Maestro's iOS XCUITest tap-by-id
+# on a nested TouchableOpacity doesn't always propagate to React Native's
+# touch responder system, so tap the entry's collapsed-preview TEXT
+# ("Todo list (3 items): …" from the mock fixture) — the tap resolves to
+# that element's coordinates, which keeps it on the entry row on every
+# device. (The previous fixed point-tap at 50%,55% was calibrated for
+# iPhone 17 Pro Max and misses the row on iPhone 16 Pro.) We do NOT
+# double-tap with both id and point because if BOTH succeed they toggle
+# the state twice and collapse the entry — flaky.
 - tapOn:
-    point: "50%,55%"
+    text: ".*Todo list \\(3 items\\).*"
 - waitForAnimationToEnd
 
 # LayoutAnimation can defer the state→render commit on iOS; give it a

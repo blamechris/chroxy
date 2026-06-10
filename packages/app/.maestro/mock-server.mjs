@@ -150,7 +150,12 @@ wss.on('connection', (ws) => {
 
       case 'browse_files': {
         const requestedPath = msg.path || null
-        if (!requestedPath) {
+        // Treat an explicit request for the project root the same as no path:
+        // FileBrowser's navigateUp sends the parentPath ('/tmp/mock-project'),
+        // so Back from a subdirectory must resolve to the root listing —
+        // otherwise it falls into the empty-listing fallback and the
+        // session-file-browser flow's post-Back package.json assert fails.
+        if (!requestedPath || requestedPath === '/tmp/mock-project') {
           // Root directory
           send(ws, {
             type: 'file_listing',

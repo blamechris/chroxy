@@ -1,4 +1,4 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: Manual entry flow
 ---
 
@@ -8,9 +8,10 @@ name: Manual entry flow
 # Start from ConnectScreen
 - assertVisible: "Connect to Chroxy"
 
-# Expand manual entry form
+# Expand manual entry form. Use the testID — Maestro's text matcher has
+# regex quirks with the leading U+25B6 glyph on the toggle button.
 - tapOn:
-    text: ".*Enter manually.*"
+    id: "connect-manual-toggle"
 
 # Verify form fields appear
 - assertVisible: "Server URL"
@@ -20,22 +21,41 @@ name: Manual entry flow
 # Take screenshot of expanded form
 - takeScreenshot: manual-connect-form
 
-# Tap the Server URL input field and type
-- tapOn: "Server URL"
+# Tap the Server URL input field and type a URL that nothing listens on
+- tapOn:
+    id: "connect-server-url"
 - eraseText: 50
 - inputText: "ws://localhost:9999"
 
 # Take screenshot after entering URL
 - takeScreenshot: manual-connect-filled
 
+# Hide keyboard before tapping Connect (keyboard can cover it)
+- hideKeyboard
+
 # Tap Connect button
 - tapOn:
-    text: "^Connect$"
+    id: "connect-submit"
 
-# Take screenshot of connection attempt
+# The ConnectionPhase state machine navigates to SessionScreen optimistically
+# and keeps retrying when the server is unreachable — the failure surface is
+# the reconnect banner (testID reconnect-banner in SessionScreen.tsx), not a
+# bounce back to ConnectScreen.
+- extendedWaitUntil:
+    visible:
+      id: "reconnect-banner"
+    timeout: 15000
+
+# Take screenshot of the reconnecting state
 - takeScreenshot: manual-connect-attempt
 
-# After failed connection, verify we return to ConnectScreen
+# Bail out via the header's red Disconnect button and verify we return to
+# ConnectScreen (userDisconnected suppresses auto-reconnect). Match the
+# accessibilityLabel — it overrides the visible "Disconnect" text in
+# Maestro's matcher (same quirk as the manual-entry toggle).
+- tapOn:
+    text: "Disconnect and go back"
+
 - extendedWaitUntil:
     visible: "Connect to Chroxy"
     timeout: 10000

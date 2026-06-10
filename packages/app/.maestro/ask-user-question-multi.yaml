@@ -1,5 +1,7 @@
 appId: com.blamechris.chroxy
-name: ChatView AskUserQuestion multi-question form (#4697 / #4604 Chunk B)
+# Note: no "/" in the name — Maestro derives report filenames from it,
+# and a slash makes the standalone run crash with FileNotFoundException.
+name: ChatView AskUserQuestion multi-question form (#4697, #4604 Chunk B)
 ---
 
 # #4697 — Multi-question AskUserQuestion form coverage. Mirrors the
@@ -15,27 +17,19 @@ name: ChatView AskUserQuestion multi-question form (#4697 / #4604 Chunk B)
 # would surface as missing labels). The fixture seeding pattern is
 # documented in CLAUDE.md → "Fixture Seeding for Structured Renderers".
 #
-# Coverage today (MessageBubble only renders Q[0]):
+# Coverage (updated 2026-06-10 for the landed mobile multi-question
+# renderer — #4973-era `question-multi-*` testIDs; the original
+# Q[0]-only `approval-button-*` expectations predate it):
 #   - Pin Q[0]'s prompt render (`approval-question-0`)
-#   - Pin Q[0]'s value-based option testIDs (`approval-button-approve`
-#     / `approval-button-deny`) — the canonical names for the
-#     multi-question form's first decision
+#   - Pin every question's option testIDs
+#     (`question-multi-option-<i>-<value>`) — a regression in
+#     handleUserQuestion's normalizedAll filter that drops or merges
+#     entries surfaces as a missing option id
 #   - Pin Q[0] question text — proves wire normalization preserved
 #     the first entry's `question` field intact
-#   - Tap Approve on Q[0] — proves the answered round-trip still
-#     works for the multi-question payload shape (a regression in
-#     handleUserQuestion that emitted `null` for multi-question
-#     shapes would never produce the prompt bubble, and this assert
-#     would fail at the `approval-question-0` wait).
-#
-# Future work (#4604 Chunk B's mobile follow-up):
-#   - When MessageBubble iterates `message.questions[]` to render
-#     all N questions, extend this flow to assert
-#     `approval-question-1` / `approval-question-2` /
-#     `approval-question-3` and tap-through each. Currently only
-#     Q[0] renders so the multi-question proof is wire-level:
-#     `handleUserQuestion` accepted the 4-entry payload without
-#     bailing.
+#   - Answer all 4 questions + submit — proves the multi-answer
+#     round-trip (`user_question_response` with the per-question
+#     answers map) and the post-answer summary chip render.
 
 - launchApp:
     clearState: true
@@ -104,28 +98,41 @@ name: ChatView AskUserQuestion multi-question form (#4697 / #4604 Chunk B)
 
 - takeScreenshot: ask-user-question-multi-prompt-rendered
 
-# Assert Q[0]'s options + the Q[0] question text rendered. The
-# distinct label on Q[0] ("Q1 — deploy to production?") proves the
-# wire normalization didn't accidentally render Q[1]'s question by
-# mistake.
+# Assert one option per question rendered (value-based testIDs from
+# the multi-question form). A normalizedAll regression that drops or
+# merges questions surfaces as a missing id here.
 - assertVisible:
-    id: "approval-button-approve"
+    id: "question-multi-option-0-approve"
 - assertVisible:
-    id: "approval-button-deny"
-- assertVisible: "Q1 — deploy to production?"
+    id: "question-multi-option-1-yes-notify"
+- assertVisible:
+    id: "question-multi-option-2-wait"
+- assertVisible:
+    id: "question-multi-option-3-auto-rollback"
+# Wildcard match — the question card flattens its children into one
+# accessibility element, so exact text matches find nothing.
+- assertVisible:
+    text: ".*Q1 — deploy to production\\?.*"
 
-# Tap Approve to round-trip the answered state. The multi-question
-# wire shape uses the same `user_question_response { answer, toolUseId }`
-# the single-question path uses today (single answer field; the
-# multi-answer payload lands once mobile renders all N questions).
+# Answer all four questions (each is single-select) and submit —
+# round-trips the per-question answers map on the wire.
 - tapOn:
-    id: "approval-button-approve"
+    id: "question-multi-option-0-approve"
+- tapOn:
+    id: "question-multi-option-1-yes-notify"
+- tapOn:
+    id: "question-multi-option-2-wait"
+- tapOn:
+    id: "question-multi-option-3-auto-rollback"
+
+- tapOn:
+    id: "question-multi-submit"
 - waitForAnimationToEnd
 
-- takeScreenshot: ask-user-question-multi-approved
+# Post-answer the form is replaced by the summary chip (#4973).
+- extendedWaitUntil:
+    visible:
+      id: "question-multi-summary"
+    timeout: 10000
 
-# Buttons remain in the tree post-answer.
-- assertVisible:
-    id: "approval-button-approve"
-- assertVisible:
-    id: "approval-button-deny"
+- takeScreenshot: ask-user-question-multi-approved

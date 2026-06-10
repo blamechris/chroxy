@@ -130,8 +130,12 @@ name: ChatView AskUserQuestion approve flow (#4697)
 
 # Also assert the question text rendered — pins the wire→render path
 # for the question string field (a regression in handleUserQuestion's
-# normalizeQuestion drops this).
-- assertVisible: "Should I run the deploy script?"
+# normalizeQuestion drops this). Wildcard match: the approval card is
+# an accessible container that flattens to "Action Required, Should I
+# run the deploy script?, approve, deny, Other" in the a11y tree, so
+# an exact text match finds no element.
+- assertVisible:
+    text: ".*Should I run the deploy script\\?.*"
 
 # Tap Approve. SessionScreen.handleSelectOption fires
 # sendUserQuestionResponse → wire `user_question_response` → mock
