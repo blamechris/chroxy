@@ -88,6 +88,11 @@
     "project-audit": {
       "hash": "aae4d65",
       "installed": "2026-06-06"
+    },
+    "visual-brief": {
+      "hash": "a4c08cb",
+      "installed": "2026-06-10",
+      "profileHash": "57b5312"
     }
   }
 }

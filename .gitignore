@@ -71,6 +71,7 @@ tmp/
 
 # repo-memory MCP local cache (SQLite db + WAL/SHM)
 .repo-memory/
+.repo-memory.json
 
 # Local docs (never commit)
 ROADMAP.local.md
