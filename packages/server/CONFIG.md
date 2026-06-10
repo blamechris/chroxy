@@ -491,6 +491,51 @@ swallowed) and cached per process, so it adds one read (plus a create if the
 object is missing) per configured object the first time a tenant namespace is
 used, and nothing on subsequent calls for that namespace.
 
+### Discord notifications (`notifications.discord`)
+
+The Discord webhook sink (#5413 Phase 2) maintains one status-embed message
+per project in a Discord channel, alongside (or instead of) Expo push. It is
+**off by default** — it activates only when a webhook URL is present.
+
+The webhook URL is a **secret** (anyone holding it can post to the channel)
+and is therefore NOT a config key. Provide it via either:
+
+- `CHROXY_DISCORD_WEBHOOK_URL` environment variable, or
+- `~/.chroxy/credentials.json` (must be mode `0600`):
+  `{ "discordWebhookUrl": "https://discord.com/api/webhooks/<id>/<token>" }`
+
+The non-secret knobs live under `notifications.discord` in `config.json`:
+
+```json
+{
+  "notifications": {
+    "discord": {
+      "botName": "Chroxy",
+      "colors": { "chroxy": 1752220, "my-other-project": 10181046 },
+      "defaultColor": 5793266,
+      "permissionColor": 16753920,
+      "errorColor": 15158332,
+      "updateThrottleMs": 15000,
+      "heartbeatIntervalMs": 300000
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `botName` | string | Webhook display name + embed footer label (default `Chroxy`) |
+| `colors` | object | Per-project embed sidebar colors, project name → decimal 24-bit RGB (`0`–`16777215`) |
+| `defaultColor` | number | Sidebar color for projects without an override (default `5793266`, Discord blurple) |
+| `permissionColor` | number | Sidebar color for the needs-approval state (default `16753920`, orange) |
+| `errorColor` | number | Sidebar color for the session-error state (default `15158332`, red) |
+| `updateThrottleMs` | number | Minimum interval between same-state routine embed updates per project (default `15000`; state changes always go out) |
+| `heartbeatIntervalMs` | number | Elapsed-time footer refresh interval (default `300000`; `0` disables; minimum `10000`) |
+
+Status-message state (message ids, current state per project) persists in
+`~/.chroxy/discord-webhook-state.json`. Full setup walkthrough:
+[docs/guides/discord-notifications.md](../../docs/guides/discord-notifications.md).
+
 ## Examples
 
 ### Using Config File Only

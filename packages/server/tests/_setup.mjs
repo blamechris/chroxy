@@ -228,6 +228,24 @@ if (fs.promises) {
 // `_setCredentialKeychainForTests(...)`, which takes precedence over this flag.
 process.env.CHROXY_CRED_DISABLE_KEYCHAIN = '1'
 
+// --- Scrub Discord webhook env -------------------------------------------------
+// #5413: PushManager always registers a DiscordWebhookSink that activates the
+// moment a webhook URL resolves. A developer with the webhook exported in
+// their shell would otherwise have every PushManager-touching test posting to
+// their REAL Discord channel — the network analogue of the home-write
+// contamination above.
+//
+// Set a syntactically INVALID sentinel instead of deleting (#5427 review S1):
+// the resolver short-circuits on any non-empty env value, so the sentinel
+// also stops the fallthrough to the developer's real
+// ~/.chroxy/credentials.json `discordWebhookUrl` — which would configure a
+// LIVE sink in every PushManager test and let `_persistState` swallow the
+// #4633 sandbox-guard throw on the real-home state write. `_configuredUrl()`
+// rejects the sentinel shape, so the sink reads as unconfigured everywhere.
+// Tests that exercise the env path set the var themselves in beforeEach and
+// restore it after.
+process.env.CHROXY_DISCORD_WEBHOOK_URL = 'invalid://chroxy-test-scrub-not-a-webhook'
+
 // --- Diagnostic ---------------------------------------------------------------
 // Quiet by default; set CHROXY_TEST_SANDBOX_DEBUG=1 to see the protected
 // paths once per process.

@@ -159,7 +159,15 @@ export class Supervisor extends EventEmitter {
     // The child process writes tokens after clients connect, so the supervisor
     // must re-read the file to pick up any tokens registered since startup.
     const push = new PushManager({ storagePath: this._pushStoragePath })
-    await push.send(category, title, body)
+    try {
+      await push.send(category, title, body)
+    } finally {
+      // #5413: release sink resources (the Discord heartbeat interval) —
+      // these per-send managers are short-lived by design, and without the
+      // destroy a configured Discord sink would leak one live interval per
+      // supervisor notification.
+      push.destroy()
+    }
   }
 
   /** Override point: display QR code */
