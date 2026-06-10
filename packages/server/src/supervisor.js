@@ -158,7 +158,20 @@ export class Supervisor extends EventEmitter {
     // Create a fresh PushManager each time to reload tokens from disk.
     // The child process writes tokens after clients connect, so the supervisor
     // must re-read the file to pick up any tokens registered since startup.
-    const push = new PushManager({ storagePath: this._pushStoragePath })
+    //
+    // #5430: plumb the `notifications.discord` config block through, mirroring
+    // server-cli.js — otherwise the Discord sink runs with default botName/
+    // colors/throttle and a supervisor-emitted embed update ("Chroxy server is
+    // down") looks different from every other update. The statePath default
+    // matches the child server's so both processes converge on the same
+    // status message; the sink persists that state atomically (temp+rename).
+    const push = new PushManager({
+      storagePath: this._pushStoragePath,
+      discord: {
+        statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
+        ...(this.config.notifications?.discord || {}),
+      },
+    })
     try {
       await push.send(category, title, body)
     } finally {
