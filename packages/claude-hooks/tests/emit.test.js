@@ -242,7 +242,11 @@ describe('runEmit', () => {
     const result = await runEmit({
       hookEventArg: 'session_start',
       stdinText: JSON.stringify(payload),
-      env: envFor(),
+      // This test pins the wire shape, not the cwd filter — and tempRepo()
+      // lives under tmpdir(), which on Linux IS /tmp and would be
+      // tmp-suppressed (#5439 GAP B). Bypass, like the bash test suite's
+      // CLAUDE_NOTIFY_SKIP_TMP_FILTER.
+      env: { ...envFor(), CHROXY_HOOKS_SKIP_CWD_FILTER: '1' },
       now: () => NOW,
     })
     assert.deepEqual(result, { sent: true })
@@ -330,7 +334,18 @@ describe('runEmit', () => {
   // tmp / home / worktree cwd filter). Suppressed events never touch the
   // network; worktree cwds still pass SUBAGENT events through (their counts
   // belong to the parent project).
+  //
+  // Home/worktree fixtures are deliberately NONEXISTENT absolute paths:
+  // the classifier falls back from realpath to resolve() for them, so the
+  // tests exercise pure path shape. Real fixtures under tmpdir() are a
+  // platform trap — Linux's tmpdir IS /tmp (tmp-classified), and a checkout
+  // inside an agent worktree puts cwd-relative scratch dirs under
+  // `/.claude/worktrees/` (worktree-classified). macOS /var/folders hid
+  // both on local runs.
   describe('non-project cwd suppression (#5439 GAP B)', () => {
+    const FAKE_HOME = '/nonexistent-hooks-tests/home/someuser'
+    const FAKE_WT = '/nonexistent-hooks-tests/checkouts/parentproj/.claude/worktrees/agent-xyz'
+
     it('suppresses events from /tmp cwds', async () => {
       const tmpCwd = mkdtempSync('/tmp/hooks-tmpfilter-')
       const countBefore = received.length
@@ -345,12 +360,11 @@ describe('runEmit', () => {
     })
 
     it('suppresses events from the home directory root (basename = username, not a project)', async () => {
-      const home = mkdtempSync(join(tmpdir(), 'hooks-home-'))
       const countBefore = received.length
       const result = await runEmit({
         hookEventArg: 'notification',
-        stdinText: JSON.stringify({ cwd: home }),
-        env: { ...envFor(), HOME: home },
+        stdinText: JSON.stringify({ cwd: FAKE_HOME }),
+        env: { ...envFor(), HOME: FAKE_HOME },
         now: () => NOW,
       })
       assert.deepEqual(result, { sent: false, reason: 'non_project_cwd' })
@@ -358,13 +372,13 @@ describe('runEmit', () => {
     })
 
     it('does NOT suppress a project under the home directory', async () => {
-      const home = mkdtempSync(join(tmpdir(), 'hooks-home-'))
-      const proj = join(home, 'realproject')
-      mkdirSync(join(proj, '.git'), { recursive: true })
+      const proj = join(FAKE_HOME, 'realproject')
       const result = await runEmit({
         hookEventArg: 'session_start',
         stdinText: JSON.stringify({ cwd: proj, session_id: 's-proj' }),
-        env: { ...envFor(), HOME: home },
+        // No real .git to walk to — CLAUDE_PROJECT_DIR supplies the name
+        // (the git-root derivation has its own deriveProject coverage).
+        env: { ...envFor(), HOME: FAKE_HOME, CLAUDE_PROJECT_DIR: proj },
         now: () => NOW,
       })
       assert.deepEqual(result, { sent: true })
@@ -372,9 +386,7 @@ describe('runEmit', () => {
     })
 
     it('suppresses non-subagent events from worktree cwds, but lets subagent events through remapped to the parent', async () => {
-      const root = mkdtempSync(join(tmpdir(), 'hooks-wtfilter-'))
-      const wt = join(root, 'parentproj', '.claude', 'worktrees', 'agent-xyz')
-      mkdirSync(wt, { recursive: true })
+      const wt = FAKE_WT
 
       const countBefore = received.length
       const start = await runEmit({
