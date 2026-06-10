@@ -71,14 +71,40 @@ const OLLAMA_ZERO_PRICING = Object.freeze({ input: 0, output: 0, cacheRead: 0, c
  * @returns {string}
  */
 export function resolveOllamaBaseUrl(env = process.env) {
-  const explicit = env.CHROXY_OLLAMA_BASE_URL
-  if (typeof explicit === 'string' && explicit.length > 0) return explicit
-  const host = env.OLLAMA_HOST
-  if (typeof host === 'string' && host.length > 0) {
+  // Trimmed-non-empty is the single "is set" predicate — resolveAuth
+  // derives its override-var label from the same helper so the detail
+  // string and the actual routing can never disagree. An exported-but-
+  // empty (or whitespace) var counts as unset. Deliberately NO URL
+  // validation here: silently redirecting a typo'd override to localhost
+  // would mask the misconfig — a malformed value flows through and fails
+  // loudly in the SDK's request path, and resolveAuth's `detail` shows
+  // the exact string in the dashboard.
+  const explicit = ollamaEnvOverride(env)
+  if (explicit === 'CHROXY_OLLAMA_BASE_URL') return env.CHROXY_OLLAMA_BASE_URL.trim()
+  if (explicit === 'OLLAMA_HOST') {
+    const host = env.OLLAMA_HOST.trim()
     // OLLAMA_HOST accepts bare `host`, `host:port`, or a full URL.
     return /^[a-z][a-z0-9+.-]*:\/\//i.test(host) ? host : `http://${host}`
   }
   return DEFAULT_OLLAMA_BASE_URL
+}
+
+/**
+ * Which env var (if any) is overriding the endpoint. Shared by
+ * resolveOllamaBaseUrl (routing) and resolveAuth (labelling) so the two
+ * can't drift.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {'CHROXY_OLLAMA_BASE_URL'|'OLLAMA_HOST'|null}
+ */
+function ollamaEnvOverride(env) {
+  if (typeof env.CHROXY_OLLAMA_BASE_URL === 'string' && env.CHROXY_OLLAMA_BASE_URL.trim().length > 0) {
+    return 'CHROXY_OLLAMA_BASE_URL'
+  }
+  if (typeof env.OLLAMA_HOST === 'string' && env.OLLAMA_HOST.trim().length > 0) {
+    return 'OLLAMA_HOST'
+  }
+  return null
 }
 
 export class OllamaSession extends ClaudeByokSession {
@@ -117,9 +143,10 @@ export class OllamaSession extends ClaudeByokSession {
    */
   static resolveAuth(env) {
     const baseURL = resolveOllamaBaseUrl(env)
-    const overrideVar = env.CHROXY_OLLAMA_BASE_URL ? 'CHROXY_OLLAMA_BASE_URL'
-      : env.OLLAMA_HOST ? 'OLLAMA_HOST'
-      : null
+    // Same predicate as resolveOllamaBaseUrl (via the shared helper) — a
+    // truthy-but-whitespace var must not be labelled as the active
+    // override while routing ignores it.
+    const overrideVar = ollamaEnvOverride(env)
     return {
       ready: true,
       source: 'env',

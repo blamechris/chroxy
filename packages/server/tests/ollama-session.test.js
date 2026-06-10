@@ -15,8 +15,8 @@ import { ClaudeByokSession } from '../src/byok-session.js'
  * gate", and base-URL resolution honours both override env vars.
  */
 
-// Run a block with the three base-URL env vars in a known state and
-// restore the originals afterwards — every test here mutates process.env.
+// Run a block with both base-URL env vars in a known state and restore
+// the originals afterwards — every test here mutates process.env.
 function withEnv(overrides, fn) {
   const VARS = ['CHROXY_OLLAMA_BASE_URL', 'OLLAMA_HOST']
   const saved = {}
@@ -137,6 +137,24 @@ describe('OllamaSession', () => {
     it('OLLAMA_HOST with a scheme passes through untouched', () => {
       withEnv({ OLLAMA_HOST: 'https://ollama.lan' }, () => {
         assert.equal(resolveOllamaBaseUrl(process.env), 'https://ollama.lan')
+      })
+    })
+
+    it('exported-but-empty / whitespace vars count as unset (routing AND labelling agree)', () => {
+      // A truthy-check would label CHROXY_OLLAMA_BASE_URL='' as the
+      // active override while routing fell through — the two share one
+      // predicate so they cannot disagree.
+      withEnv({ CHROXY_OLLAMA_BASE_URL: '', OLLAMA_HOST: '   ' }, () => {
+        assert.equal(resolveOllamaBaseUrl(process.env), 'http://localhost:11434')
+        const auth = OllamaSession.resolveAuth(process.env)
+        assert.equal(auth.envVar, null, 'whitespace overrides must not be labelled active')
+        assert.match(auth.detail, /localhost:11434/)
+      })
+    })
+
+    it('surrounding whitespace is trimmed off override values', () => {
+      withEnv({ OLLAMA_HOST: '  gpu-box:11434  ' }, () => {
+        assert.equal(resolveOllamaBaseUrl(process.env), 'http://gpu-box:11434')
       })
     })
   })

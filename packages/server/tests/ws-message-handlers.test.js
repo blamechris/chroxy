@@ -214,6 +214,50 @@ describe('handleSessionMessage', () => {
       await handleSessionMessage(WS, client, { type: 'set_model', model: 'fake-model-xyz' }, ctx)
       assert.equal(entry.session.setModel.callCount, 0)
     })
+
+    // #5418 — providers whose getAllowedModels() returns null (ollama)
+    // validate nothing statically: any locally pulled model id must pass
+    // through verbatim. Before the tri-state fix, the null fell through to
+    // the global Claude allowlist, which rejected every Ollama model AND
+    // accepted Claude ids that 404 at the local daemon.
+    it('accepts any non-empty model id on an unrestricted provider (ollama, #5418)', async () => {
+      const ctx = makeCtx()
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      const entry = addSession(ctx, 'sess-1', makeSession({ provider: 'ollama' }))
+      await handleSessionMessage(WS, client, { type: 'set_model', model: 'my-custom-finetune:7b' }, ctx)
+      assert.equal(entry.session.setModel.callCount, 1)
+      assert.equal(entry.session.setModel.lastCall[0], 'my-custom-finetune:7b')
+      const broadcast = ctx.broadcastToSession.mock.calls.at(-1)?.arguments[1]
+      assert.equal(broadcast?.type, 'model_changed')
+      assert.equal(broadcast?.model, 'my-custom-finetune:7b', 'opaque local ids broadcast verbatim')
+    })
+
+    it('rejects a whitespace-only model id even on an unrestricted provider (#5418)', async () => {
+      const ctx = makeCtx()
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      const entry = addSession(ctx, 'sess-1', makeSession({ provider: 'ollama' }))
+      // sendError writes to the ws handle directly (not ctx.send), so a
+      // live fake is needed to observe the rejection envelope.
+      const ws = { readyState: 1, send: mock.fn() }
+      await handleSessionMessage(ws, client, { type: 'set_model', model: '   ' }, ctx)
+      assert.equal(entry.session.setModel.callCount, 0)
+      const sent = JSON.parse(ws.send.mock.calls.at(-1).arguments[0])
+      assert.equal(sent.type, 'error')
+      assert.equal(sent.code, 'INVALID_MODEL')
+    })
+
+    it('a provider allow-list still rejects unknown ids (tri-state regression guard, #5418)', async () => {
+      // deepseek opts IN with an authoritative array — the unrestricted
+      // branch must not leak to providers that declare a real list.
+      const ctx = makeCtx()
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      const entry = addSession(ctx, 'sess-1', makeSession({ provider: 'deepseek' }))
+      const ws = { readyState: 1, send: mock.fn() }
+      await handleSessionMessage(ws, client, { type: 'set_model', model: 'my-custom-finetune:7b' }, ctx)
+      assert.equal(entry.session.setModel.callCount, 0)
+      const sent = JSON.parse(ws.send.mock.calls.at(-1).arguments[0])
+      assert.equal(sent.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+    })
   })
 
   describe('set_permission_mode', () => {
