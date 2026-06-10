@@ -410,7 +410,16 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
     return
   }
 
+  // Defence in depth behind the schema's `min(1)` bound: an absent/empty
+  // repoPath must hard-fail HERE, before `resolve()` — `resolve('')` is the
+  // daemon's cwd, so falling through would let a malformed in-process message
+  // target whatever directory the daemon happened to be launched from.
   const repoPath = typeof msg?.repoPath === 'string' ? msg.repoPath : ''
+  if (repoPath.length === 0) {
+    integrationActionError(ws, ctx, msg, 'invalid-repo-path',
+      'integration_action requires a non-empty repoPath')
+    return
+  }
   const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
     ? config.controlRoomRoot
     : DEFAULT_CONTROL_ROOM_ROOT

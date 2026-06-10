@@ -265,6 +265,24 @@ describe('integration_action handler (#5500)', () => {
     assert.equal(payload.code, 'INTEGRATION_ACTION_FAILED')
   })
 
+  it('hard-fails an absent/empty repoPath before resolve() — never defaults to the daemon cwd', async () => {
+    // resolve('') is process.cwd(); if the daemon was launched from inside a
+    // surveyed repo, falling through would index the cwd. Both the missing
+    // and the empty-string shape must reject before any path resolution.
+    for (const over of [{ repoPath: undefined }, { repoPath: '' }]) {
+      ctx = makeActionCtx()
+      await controlRoomHandlers.integration_action(ws, client, reindexMsg(over), ctx)
+      assert.equal(ctx.realpath.callCount, 0, 'must reject before any realpath/resolve work')
+      assert.equal(ctx.resolveRepoSet.callCount, 0)
+      assert.equal(ctx.runRepoMemoryIndex.callCount, 0)
+      const [, payload] = ctx._send.lastCall
+      assert.equal(payload.type, 'session_error')
+      assert.equal(payload.code, 'INTEGRATION_ACTION_FAILED')
+      assert.equal(payload.requestId, 'rx-1')
+      assert.match(payload.message, /non-empty repoPath/)
+    }
+  })
+
   it('passes the configured repo-memory bin override to the runner', async () => {
     ctx = makeActionCtx({
       config: { repos: [], controlRoomRoot: '/home/user/Projects', controlRoomRepoMemoryBin: '/opt/bin/repo-memory' },
