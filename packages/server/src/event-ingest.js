@@ -246,19 +246,27 @@ export function handleEventIngest(server, req, res) {
     return
   }
 
+  // utf8 decoding so multi-byte chars split across TCP chunks reassemble
+  // correctly, and the cap below counts BYTES (Buffer.byteLength), not
+  // UTF-16 code units — body.length undercounts non-ASCII ~3x.
+  req.setEncoding('utf8')
   let body = ''
+  let bodyBytes = 0
   let oversized = false
   req.on('data', (chunk) => {
     if (oversized) return
-    body += chunk
-    if (body.length > MAX_INGEST_BODY_BYTES) {
+    bodyBytes += Buffer.byteLength(chunk, 'utf8')
+    if (bodyBytes > MAX_INGEST_BODY_BYTES) {
       oversized = true
       // #5433: respond BEFORE teardown — destroying the socket here would
       // suppress 'end' and the client would see a reset instead of the 413.
-      // The helper stops consumption (no buffering past the cap) and closes
-      // the connection after the response flushes.
+      // The helper stops consumption and closes the connection after the
+      // response flushes. Cap checked BEFORE append: the violating chunk is
+      // never buffered, so `body` never exceeds the cap in memory.
       sendOversizeResponse(req, res, { error: 'body too large' })
+      return
     }
+    body += chunk
   })
   req.on('end', () => {
     // #5313 pattern: this callback runs on a later tick, OUTSIDE the HTTP

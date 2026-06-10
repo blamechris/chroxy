@@ -106,6 +106,20 @@ describe('oversize-body 413 delivery over real sockets (#5433)', () => {
     assert.equal((await res.json()).error, 'body too large')
   })
 
+  it('the cap counts BYTES, not UTF-16 code units (multi-byte payloads)', async () => {
+    await start()
+    // '€' is 1 UTF-16 code unit but 3 UTF-8 bytes: this payload is well under
+    // the cap in code units (the old body.length check would admit it) and
+    // ~50% over it in bytes.
+    const codeUnits = Math.floor(MAX_INGEST_BODY_BYTES / 2)
+    const big = '€'.repeat(codeUnits)
+    assert.ok(big.length < MAX_INGEST_BODY_BYTES)
+    assert.ok(Buffer.byteLength(big, 'utf8') > MAX_INGEST_BODY_BYTES)
+    const res = await post('/api/events', big, { Authorization: `Bearer ${INGEST_SECRET}` })
+    assert.equal(res.status, 413)
+    assert.equal((await res.json()).error, 'body too large')
+  })
+
   it('the oversize response closes the connection (Connection: close semantics)', async () => {
     await start()
     const big = 'x'.repeat(MAX_INGEST_BODY_BYTES + 1024)

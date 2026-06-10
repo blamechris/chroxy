@@ -31,13 +31,8 @@ export function sendOversizeResponse(req, res, payload = { error: 'body too larg
   req.pause()
   // Captured now — Node detaches res.socket before user 'finish' listeners run.
   const socket = res.socket
-  try {
-    res.writeHead(413, { 'Content-Type': 'application/json', 'Connection': 'close' })
-    res.end(JSON.stringify(payload))
-  } catch {
-    // Socket already torn down — nothing left to deliver the 413 to.
-    return
-  }
+  // Attached BEFORE end(): 'finish' is emitted async on Node streams, but
+  // ordering the listener first makes that guarantee irrelevant.
   res.once('finish', () => {
     try {
       if (socket && !socket.destroyed && typeof socket.destroySoon === 'function') {
@@ -45,4 +40,12 @@ export function sendOversizeResponse(req, res, payload = { error: 'body too larg
       }
     } catch { /* already gone */ }
   })
+  try {
+    res.writeHead(413, { 'Content-Type': 'application/json', 'Connection': 'close' })
+    res.end(JSON.stringify(payload))
+  } catch {
+    // Socket already torn down — nothing left to deliver the 413 to. The
+    // 'finish' listener stays attached harmlessly (destroySoon is idempotent
+    // and guarded); teardown falls to Node's requestTimeout backstop.
+  }
 }

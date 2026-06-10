@@ -131,12 +131,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     }
 
     const MAX_BODY = 65536
+    // utf8 decoding + byte-accurate cap (Buffer.byteLength, not UTF-16 code
+    // units), checked BEFORE append so the violating chunk is never buffered.
+    req.setEncoding('utf8')
     let body = ''
+    let bodyBytes = 0
     let oversized = false
     req.on('data', (chunk) => {
       if (oversized) return
-      body += chunk
-      if (body.length > MAX_BODY) {
+      bodyBytes += Buffer.byteLength(chunk, 'utf8')
+      if (bodyBytes > MAX_BODY) {
         oversized = true
         // #5433: respond BEFORE teardown — req.destroy() here suppressed
         // 'end' (the 413 branch below was dead code) and the hook saw a
@@ -144,7 +148,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // consumption without buffering past the cap and closes the
         // connection after the response flushes.
         sendOversizeResponse(req, res, { decision: 'deny' })
+        return
       }
+      body += chunk
     })
     req.on('end', () => {
       // #5313 (WP-1.3): this callback fires on a later tick, after the HTTP
@@ -313,12 +319,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       : null
 
     const MAX_BODY = 4096
+    // utf8 decoding + byte-accurate cap, checked BEFORE append — see
+    // handlePermissionRequest above; the three capped readers stay in lockstep.
+    req.setEncoding('utf8')
     let body = ''
+    let bodyBytes = 0
     let oversized = false
     req.on('data', (chunk) => {
       if (oversized) return
-      body += chunk
-      if (body.length > MAX_BODY) {
+      bodyBytes += Buffer.byteLength(chunk, 'utf8')
+      if (bodyBytes > MAX_BODY) {
         oversized = true
         // #5433: same shared rejection as handlePermissionRequest /
         // /api/events — this site already responded before teardown, but the
@@ -327,7 +337,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // the socket after the 413 flushes (Connection: close). It contains
         // torn-down-socket throws internally (#5389 guard preserved).
         sendOversizeResponse(req, res, { error: 'body too large' })
+        return
       }
+      body += chunk
     })
     req.on('end', () => {
       // #5313 (WP-1.3): same crash shape as handlePermissionRequest's end
