@@ -225,6 +225,80 @@ describe('PushNotificationHandler — per-event push fan-out', () => {
   })
 })
 
+describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
+  const wireSession = (fakes, session) => { fakes.sessionManager.getSession = () => session }
+  const emitResult = (fakes) =>
+    fakes.sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: {} })
+
+  it('keeps the plain body when the session has no getBackgroundTaskSnapshot (absent = no info)', () => {
+    const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
+    wireSession(fakes, { name: 'n' })
+    emitResult(fakes)
+    assert.equal(fakes.sends[0].body, 'Ready for next message')
+  })
+
+  it('keeps the plain body when the snapshot is null (degraded transcript scan)', () => {
+    const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
+    wireSession(fakes, { name: 'n', getBackgroundTaskSnapshot: () => null })
+    emitResult(fakes)
+    assert.equal(fakes.sends[0].body, 'Ready for next message')
+  })
+
+  it('keeps the plain body for an explicit empty snapshot (authoritative nothing-outstanding)', () => {
+    const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
+    wireSession(fakes, {
+      name: 'n',
+      getBackgroundTaskSnapshot: () => ({ backgroundTasks: [], scheduledWakeup: null }),
+    })
+    emitResult(fakes)
+    assert.equal(fakes.sends[0].body, 'Ready for next message')
+  })
+
+  it('enriches the body with the most recent outstanding task (+N more)', () => {
+    const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
+    wireSession(fakes, {
+      name: 'n',
+      getBackgroundTaskSnapshot: () => ({
+        backgroundTasks: [
+          { toolUseId: 'a', kind: 'bash', description: 'older watcher', startedAt: 1_000 },
+          { toolUseId: 'b', kind: 'agent', description: 'deploy monitor', startedAt: 2_000 },
+        ],
+        scheduledWakeup: null,
+      }),
+    })
+    emitResult(fakes)
+    assert.equal(fakes.sends.length, 1)
+    assert.equal(fakes.sends[0].body, 'Ready for input — still watching: deploy monitor +1 more')
+    assert.equal(fakes.sends[0].category, 'activity_update')
+    assert.equal(fakes.sends[0].data.state, 'idle')
+  })
+
+  it('enriches the body with an armed wakeup (local HH:MM + reason)', () => {
+    const at = new Date(2026, 5, 10, 7, 30).getTime()
+    const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
+    wireSession(fakes, {
+      name: 'n',
+      getBackgroundTaskSnapshot: () => ({
+        backgroundTasks: [],
+        scheduledWakeup: { at, reason: 'poll the release build' },
+      }),
+    })
+    emitResult(fakes)
+    assert.equal(fakes.sends[0].body, 'Ready for input — resumes at 07:30: poll the release build')
+  })
+
+  it('a throwing snapshot read degrades to the plain body (push still fires)', () => {
+    const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
+    wireSession(fakes, {
+      name: 'n',
+      getBackgroundTaskSnapshot: () => { throw new Error('transcript gone') },
+    })
+    assert.doesNotThrow(() => emitResult(fakes))
+    assert.equal(fakes.sends.length, 1)
+    assert.equal(fakes.sends[0].body, 'Ready for next message')
+  })
+})
+
 describe('PushNotificationHandler — session_destroyed clears dedupe', () => {
   let fakes
   beforeEach(() => { fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) }) })
