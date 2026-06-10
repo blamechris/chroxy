@@ -832,6 +832,202 @@ describe('DiscordWebhookSink — online/offline lifecycle (#5413 Phase 3)', () =
   })
 })
 
+// #5439 GAP C — subagent/idle interplay (port of claude-notify.sh:528-539
+// and :383-384). While the user is being waited on (idle / permission embed)
+// with subagents still running, routine session_activity must NOT flip the
+// embed back to 🟢 "Session Online"; and when the LAST subagent finishes
+// while the embed sits idle, the sink re-pings 🦀 "Ready for input" (the
+// bash idle_busy → idle repost on count→0).
+describe('DiscordWebhookSink — subagent/idle interplay (#5439 GAP C)', () => {
+  const online = (data = {}) => ({
+    category: 'session_online',
+    title: 'Session online',
+    body: 'External session started',
+    data: { project: 'proj1', ...data },
+  })
+  const activity = (data = {}) => ({
+    category: 'session_activity',
+    title: 'Subagent finished',
+    body: 'A subagent completed',
+    data: { project: 'proj1', ...data },
+  })
+  const ready = (data = {}) => ({
+    category: 'activity_update',
+    title: 'Ready for input',
+    body: 'Claude is waiting for input',
+    data: { project: 'proj1', ...data },
+  })
+  const approval = (data = {}) => ({
+    category: 'activity_waiting',
+    title: 'Input needed',
+    body: 'Claude is waiting',
+    data: { project: 'proj1', ...data },
+  })
+
+  /** online (m1) → idle ping with running subagents (DELETE m1 + POST m2). */
+  async function seedWaitingWithSubagents(sink, advance, state = 'idle') {
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(16_000)
+    scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
+    await sink.send(state === 'idle' ? ready({ subagents: 2 }) : approval({ subagents: 2 }))
+    advance(16_000)
+  }
+
+  it('session_activity does NOT flip an idle embed back online while subagents are running', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedWaitingWithSubagents(sink, advance, 'idle')
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 2 })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH', 'count refresh PATCHes in place — no ping')
+    assert.ok(calls[0].url.endsWith('/messages/m2'))
+    const embed = JSON.parse(calls[0].body).embeds[0]
+    assert.match(embed.title, /Ready for input/, 'embed keeps the waiting title')
+    assert.ok(embed.fields.some((f) => f.name === 'Subagents' && f.value === '2'))
+    const st = readState(statePath).projects.proj1
+    assert.equal(st.state, 'idle', 'stored state stays idle')
+  })
+
+  it('session_activity does NOT flip a permission embed back online while subagents are running', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedWaitingWithSubagents(sink, advance, 'permission')
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 1 })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH')
+    assert.match(JSON.parse(calls[0].body).embeds[0].title, /Needs Approval/)
+    assert.equal(readState(statePath).projects.proj1.state, 'permission')
+  })
+
+  it('the demoted count refresh keeps the waiting body, not the activity text', async () => {
+    const { sink, advance } = makeSink()
+    await seedWaitingWithSubagents(sink, advance, 'idle')
+    const calls = scriptFetch([{ status: 200 }])
+    await sink.send(activity({ subagents: 1 }))
+    const embed = JSON.parse(calls[0].body).embeds[0]
+    assert.ok(
+      embed.fields.some((f) => f.name === 'Status' && f.value === 'Claude is waiting for input'),
+      'Status field keeps the waiting text'
+    )
+  })
+
+  it('count→0 while idle re-pings Ready for input (DELETE + POST — bash :383-384)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedWaitingWithSubagents(sink, advance, 'idle')
+    const calls = scriptFetch([
+      { status: 204 },                       // DELETE m2
+      { status: 200, body: { id: 'm3' } },   // fresh POST pings
+    ])
+    assert.equal(await sink.send(activity({ subagents: 0 })), true)
+    assert.deepEqual(calls.map((c) => c.method), ['DELETE', 'POST'])
+    assert.ok(calls[0].url.endsWith('/messages/m2'))
+    const embed = JSON.parse(calls[1].body).embeds[0]
+    assert.match(embed.title, /Ready for input/)
+    const st = readState(statePath).projects.proj1
+    assert.equal(st.state, 'idle')
+    assert.equal(st.messageId, 'm3')
+    assert.equal(st.subagents, 0)
+  })
+
+  it('count→0 while permission falls through to online (row-20 intentional diff, no false ready ping)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedWaitingWithSubagents(sink, advance, 'permission')
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 0 })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH', 'no ping — permission clears to online on next activity')
+    assert.match(JSON.parse(calls[0].body).embeds[0].title, /Session Online/)
+    assert.equal(readState(statePath).projects.proj1.state, 'online')
+  })
+
+  it('an idle embed with NO subagents still wakes to online on session_activity (guard scoped to live counts)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(16_000)
+    scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
+    await sink.send(ready()) // plain idle, no subagents
+    advance(16_000)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 0 })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH')
+    assert.match(JSON.parse(calls[0].body).embeds[0].title, /Session Online/)
+    assert.equal(readState(statePath).projects.proj1.state, 'online')
+  })
+
+  it('demoted count refreshes are still throttled inside the window', async () => {
+    const { sink, advance } = makeSink({ updateThrottleMs: 15_000 })
+    await seedWaitingWithSubagents(sink, advance, 'idle')
+    scriptFetch([{ status: 200 }])
+    await sink.send(activity({ subagents: 2 }))
+    advance(1_000) // inside the window
+    const calls = scriptFetch()
+    assert.equal(await sink.send(activity({ subagents: 2 })), true)
+    assert.equal(calls.length, 0, 'same-state count refresh throttled')
+  })
+})
+
+// #5439 GAP D — SessionEnd 404 orphan (port of bash no_post_on_404). When
+// the tracked message was deleted externally, marking the session offline
+// must NOT POST a fresh offline embed — drop the messageId and move on.
+describe('DiscordWebhookSink — offline 404 leaves no orphan (#5439 GAP D)', () => {
+  const online = (data = {}) => ({
+    category: 'session_online',
+    title: 'Session online',
+    body: 'External session started',
+    data: { project: 'proj1', ...data },
+  })
+  const offline = (data = {}) => ({
+    category: 'session_offline',
+    title: 'Session offline',
+    body: 'External session ended',
+    data: { project: 'proj1', ...data },
+  })
+
+  it('a 404 on the offline PATCH drops the messageId without POSTing an orphan', async () => {
+    const { sink, statePath, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(60_000)
+    const calls = scriptFetch([{ status: 404 }])
+    assert.equal(await sink.send(offline()), true)
+    assert.equal(calls.length, 1, 'no healing POST after the 404')
+    assert.equal(calls[0].method, 'PATCH')
+    const st = readState(statePath).projects.proj1
+    assert.equal(st.messageId, null, 'tracking dropped')
+    assert.equal(st.state, 'offline')
+  })
+
+  it('after the 404-drop, the next session_online POSTs fresh with no DELETE', async () => {
+    const { sink, statePath, advance } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(60_000)
+    scriptFetch([{ status: 404 }])
+    await sink.send(offline())
+    advance(60_000)
+    const calls = scriptFetch([{ status: 200, body: { id: 'm2' } }])
+    assert.equal(await sink.send(online()), true)
+    assert.deepEqual(calls.map((c) => c.method), ['POST'], 'nothing tracked → no DELETE')
+    assert.equal(readState(statePath).projects.proj1.messageId, 'm2')
+  })
+
+  it('a NON-offline PATCH 404 still self-heals by POSTing (regression guard)', async () => {
+    const { sink, statePath } = makeSink()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(idle())
+    const calls = scriptFetch([
+      { status: 404 },                     // PATCH 404 (message gone)
+      { status: 200, body: { id: 'm2' } }, // healing POST
+    ])
+    assert.equal(await sink.send(errored()), true)
+    assert.deepEqual(calls.map((c) => c.method), ['PATCH', 'POST'])
+    assert.equal(readState(statePath).projects.alpha.messageId, 'm2')
+  })
+})
+
 // #5429 / #5434 — stale-entry pruning. Entries in discord-webhook-state.json
 // accumulated forever (one per project key / session id), and the heartbeat
 // PATCHed every tracked entry — including final `offline` embeds —

@@ -88,6 +88,21 @@ describe('buildEnvelope', () => {
     assert.equal(buildEnvelope('PreCompact', {}, { env: {}, now: () => NOW }), null)
   })
 
+  // #5439 GAP A: the Notification emitter must forward the matcher
+  // discriminator — without it the server cannot tell idle prompts from
+  // permission prompts and every "ready for input" renders as 🔐.
+  it('Notification forwards notification_type as data.notificationType (#5439 GAP A)', () => {
+    const idle = buildEnvelope('Notification', { notification_type: 'idle_prompt', message: 'Ready' }, { env: {}, now: () => NOW })
+    assert.equal(idle.data.notificationType, 'idle_prompt')
+    assert.equal(IngestEventSchema.safeParse(idle).success, true)
+
+    const perm = buildEnvelope('Notification', { notification_type: 'permission_prompt' }, { env: {}, now: () => NOW })
+    assert.equal(perm.data.notificationType, 'permission_prompt')
+
+    const none = buildEnvelope('Notification', { message: 'hi' }, { env: {}, now: () => NOW })
+    assert.equal('notificationType' in none.data, false, 'absent on payloads without notification_type')
+  })
+
   it('omits sessionId/project when underivable and still validates', () => {
     const envelope = buildEnvelope('Notification', {}, { env: {}, now: () => NOW })
     assert.equal('sessionId' in envelope, false)
@@ -113,6 +128,20 @@ describe('deriveProject', () => {
 
   it('returns null with no cwd and no CLAUDE_PROJECT_DIR', () => {
     assert.equal(deriveProject(null, {}), null)
+  })
+
+  // #5439 GAP B: worktree-agent cwds belong to the PARENT project — the
+  // segment before /.claude/worktrees/ — not the agent-* checkout (port of
+  // extract_project_name's worktree remap).
+  it('maps .claude/worktrees/agent-* cwds to the parent project (#5439 GAP B)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'hooks-wt-'))
+    const proj = join(root, 'myproj')
+    const wt = join(proj, '.claude', 'worktrees', 'agent-abc123')
+    mkdirSync(join(wt, 'packages', 'server'), { recursive: true })
+    // Worktree checkouts carry a .git FILE — the remap must win over the walk.
+    writeFileSync(join(wt, '.git'), 'gitdir: /elsewhere/worktrees/agent-abc123\n')
+    assert.equal(deriveProject(wt, {}), 'myproj')
+    assert.equal(deriveProject(join(wt, 'packages', 'server'), {}), 'myproj', 'nested worktree cwd remaps too')
   })
 })
 
@@ -295,5 +324,89 @@ describe('runEmit', () => {
     const result = await runEmit({ hookEventArg: 'PreCompact', stdinText: '{}', env: envFor(), now: () => NOW })
     assert.deepEqual(result, { sent: false, reason: 'unknown_event' })
     assert.equal(received.length, countBefore)
+  })
+
+  // #5439 GAP B — non-project session filtering (port of claude-notify.sh's
+  // tmp / home / worktree cwd filter). Suppressed events never touch the
+  // network; worktree cwds still pass SUBAGENT events through (their counts
+  // belong to the parent project).
+  describe('non-project cwd suppression (#5439 GAP B)', () => {
+    it('suppresses events from /tmp cwds', async () => {
+      const tmpCwd = mkdtempSync('/tmp/hooks-tmpfilter-')
+      const countBefore = received.length
+      const result = await runEmit({
+        hookEventArg: 'session_start',
+        stdinText: JSON.stringify({ cwd: tmpCwd, session_id: 's-tmp' }),
+        env: envFor(),
+        now: () => NOW,
+      })
+      assert.deepEqual(result, { sent: false, reason: 'non_project_cwd' })
+      assert.equal(received.length, countBefore, 'no network call for a /tmp session')
+    })
+
+    it('suppresses events from the home directory root (basename = username, not a project)', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'hooks-home-'))
+      const countBefore = received.length
+      const result = await runEmit({
+        hookEventArg: 'notification',
+        stdinText: JSON.stringify({ cwd: home }),
+        env: { ...envFor(), HOME: home },
+        now: () => NOW,
+      })
+      assert.deepEqual(result, { sent: false, reason: 'non_project_cwd' })
+      assert.equal(received.length, countBefore)
+    })
+
+    it('does NOT suppress a project under the home directory', async () => {
+      const home = mkdtempSync(join(tmpdir(), 'hooks-home-'))
+      const proj = join(home, 'realproject')
+      mkdirSync(join(proj, '.git'), { recursive: true })
+      const result = await runEmit({
+        hookEventArg: 'session_start',
+        stdinText: JSON.stringify({ cwd: proj, session_id: 's-proj' }),
+        env: { ...envFor(), HOME: home },
+        now: () => NOW,
+      })
+      assert.deepEqual(result, { sent: true })
+      assert.equal(JSON.parse(received.at(-1).body).project, 'realproject')
+    })
+
+    it('suppresses non-subagent events from worktree cwds, but lets subagent events through remapped to the parent', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'hooks-wtfilter-'))
+      const wt = join(root, 'parentproj', '.claude', 'worktrees', 'agent-xyz')
+      mkdirSync(wt, { recursive: true })
+
+      const countBefore = received.length
+      const start = await runEmit({
+        hookEventArg: 'session_start',
+        stdinText: JSON.stringify({ cwd: wt, session_id: 's-wt' }),
+        env: envFor(),
+        now: () => NOW,
+      })
+      assert.deepEqual(start, { sent: false, reason: 'non_project_cwd' })
+      assert.equal(received.length, countBefore, 'worktree SessionStart suppressed')
+
+      const stop = await runEmit({
+        hookEventArg: 'subagent_stop',
+        stdinText: JSON.stringify({ cwd: wt, session_id: 's-wt' }),
+        env: envFor(),
+        now: () => NOW,
+      })
+      assert.deepEqual(stop, { sent: true }, 'worktree SubagentStop reaches the counting code')
+      const sent = JSON.parse(received.at(-1).body)
+      assert.equal(sent.type, 'subagent_stop')
+      assert.equal(sent.project, 'parentproj', 'subagent counts belong to the parent project')
+    })
+
+    it('CHROXY_HOOKS_SKIP_CWD_FILTER=1 bypasses the filter (test/debug escape hatch)', async () => {
+      const tmpCwd = mkdtempSync('/tmp/hooks-tmpfilter-')
+      const result = await runEmit({
+        hookEventArg: 'session_start',
+        stdinText: JSON.stringify({ cwd: tmpCwd, session_id: 's-bypass' }),
+        env: { ...envFor(), CHROXY_HOOKS_SKIP_CWD_FILTER: '1' },
+        now: () => NOW,
+      })
+      assert.deepEqual(result, { sent: true })
+    })
   })
 })

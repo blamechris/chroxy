@@ -393,8 +393,36 @@ export class DiscordWebhookSink extends NotificationSink {
       if (state === 'offline') {
         // SessionEnd PATCHes in place — and only when there is something to
         // mark offline (bash: skip when state is empty or already offline).
+        // #5439 GAP D: if the tracked message was deleted externally, do NOT
+        // POST a fresh offline embed (bash no_post_on_404) — just drop the id.
         if (!prev?.messageId || prev.state === 'offline') return true
-        return await this._patchOrPost(webhookUrl, project, entry, store)
+        return await this._patchOrPost(webhookUrl, project, entry, store, { noPostOn404: true })
+      }
+
+      // #5439 GAP C — subagent/idle interplay (port of claude-notify.sh
+      // :528-539 and :383-384). While the user is being waited on (idle /
+      // permission embed) with subagents still running, routine activity
+      // must NOT flip the embed back to 🟢 online: keep the waiting state
+      // and text, refreshing only the live fields (Subagents count, footer).
+      // And when the LAST subagent finishes while the embed sits idle,
+      // re-ping 🦀 "Ready for input" (the bash idle_busy → idle repost on
+      // count→0). Permission embeds with count→0 fall through to online —
+      // the row-20 intentional diff (approval cleared by the next activity).
+      if (state === 'online' && prev?.messageId && (prev.state === 'idle' || prev.state === 'permission')) {
+        const allDone = entry.subagents === 0 && Number.isFinite(prev.subagents) && prev.subagents > 0
+        if (entry.subagents > 0 || (allDone && prev.state === 'idle')) {
+          entry.state = prev.state
+          if (typeof prev.body === 'string' && prev.body.length > 0) entry.body = prev.body
+          entry.detail = prev.detail ?? entry.detail
+          entry.lastStateChangeTs = prev.lastStateChangeTs ?? now
+          if (allDone) {
+            return await this._repost(webhookUrl, project, entry, store, prev.messageId)
+          }
+          if (Number.isFinite(prev.lastUpdateTs) && now - prev.lastUpdateTs < this._updateThrottleMs) {
+            return true
+          }
+          return await this._patchOrPost(webhookUrl, project, entry, store)
+        }
       }
 
       if (PING_STATES.has(state)) {
@@ -483,10 +511,16 @@ export class DiscordWebhookSink extends NotificationSink {
     return true
   }
 
-  /** PATCH the existing message; self-heal on 404 / missing id by POSTing. */
-  async _patchOrPost(webhookUrl, project, entry, store) {
+  /**
+   * PATCH the existing message; self-heal on 404 / missing id by POSTing.
+   * `noPostOn404` (#5439 GAP D, port of bash no_post_on_404) suppresses the
+   * healing POST — used by the offline path, where re-creating a message
+   * that was deleted externally would just leave an orphan offline embed.
+   */
+  async _patchOrPost(webhookUrl, project, entry, store, { noPostOn404 = false } = {}) {
     const base = this._apiBase(webhookUrl)
     if (!entry.messageId) {
+      if (noPostOn404) return true
       return await this._post(base, project, entry, store)
     }
     const payload = this._buildPayload(project, entry)
@@ -496,8 +530,14 @@ export class DiscordWebhookSink extends NotificationSink {
       body: JSON.stringify(payload),
     })
     if (res.status === 404) {
-      // Message deleted externally — re-POST (parity with the bash self-heal).
+      // Message deleted externally — re-POST (parity with the bash self-heal)
+      // unless suppressed: then just drop the id so the next session POSTs.
       entry.messageId = null
+      if (noPostOn404) {
+        store.projects[project] = entry
+        this._persistState(store)
+        return true
+      }
       return await this._post(base, project, entry, store)
     }
     if (!res.ok) {
