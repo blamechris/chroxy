@@ -99,8 +99,10 @@ const CONFIG_SCHEMA = {
   // non-secret knobs: `botName` (string), `colors` (project → decimal
   // 24-bit RGB map for the embed sidebar), `defaultColor` /
   // `permissionColor` / `errorColor` (decimal RGB), `updateThrottleMs`
-  // (min interval between same-state routine embed updates) and
-  // `heartbeatIntervalMs` (elapsed-time refresh; 0 disables). The webhook
+  // (min interval between same-state routine embed updates),
+  // `heartbeatIntervalMs` (elapsed-time refresh; 0 disables) and
+  // `pruneAfterMs` (state-store entry retention, #5429/#5434; 0 disables
+  // pruning). The webhook
   // URL itself is a SECRET and deliberately NOT a config key — it lives in
   // CHROXY_DISCORD_WEBHOOK_URL or ~/.chroxy/credentials.json (0600); see
   // discord-credentials.js. Documented in CONFIG.md +
@@ -470,6 +472,15 @@ function validateDiscordNotificationsBlock(discord, warnings) {
       warnings.push(`Invalid value for 'notifications.discord.heartbeatIntervalMs': expected a number >= 0 (0 disables), got ${JSON.stringify(v)}`)
     } else if (v !== 0 && v < 10_000) {
       warnings.push(`Invalid value for 'notifications.discord.heartbeatIntervalMs': ${v} (minimum 10000 / 10s; set 0 to disable — the sink falls back to its default)`)
+    }
+  }
+
+  // #5429/#5434: state-store entry retention. 0 disables pruning; the sink
+  // falls back to its 24h default on invalid values.
+  if (Object.prototype.hasOwnProperty.call(discord, 'pruneAfterMs')) {
+    const v = discord.pruneAfterMs
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      warnings.push(`Invalid value for 'notifications.discord.pruneAfterMs': expected a number >= 0 (0 disables pruning), got ${JSON.stringify(v)}`)
     }
   }
 }
