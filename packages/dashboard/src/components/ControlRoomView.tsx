@@ -1,10 +1,11 @@
 /**
- * ControlRoomView (#5253) — the Control Room's top-level surface, a two-tab
- * shell over the existing Host/Repo Status table (`ControlRoomSection`) and the
- * new Self-hosted runners table (`RunnerStatusSection`).
+ * ControlRoomView (#5253) — the Control Room's top-level surface, a tab shell
+ * over the Host/Repo Status table (`ControlRoomSection`), the Self-hosted
+ * runners table (`RunnerStatusSection`), and the Integrations table
+ * (`IntegrationsSection`, #5499).
  *
  * Before #5253 the Control Room rendered `ControlRoomSection` directly; this
- * wrapper keeps that as the default tab and adds a sibling. The active sub-tab
+ * wrapper keeps that as the default tab and adds siblings. The active sub-tab
  * is persisted to localStorage so a reload returns to the operator's last view
  * (same try/catch-guarded posture as the Control Room's filter/sort persistence
  * — localStorage can throw in privacy mode and a dashboard panel must never
@@ -16,11 +17,12 @@
 import { useCallback, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
+import { IntegrationsSection } from './IntegrationsSection'
 
-export type ControlRoomTab = 'repos' | 'runners'
+export type ControlRoomTab = 'repos' | 'runners' | 'integrations'
 
 const CR_TAB_STORAGE_KEY = 'chroxy_cr_tab'
-const VALID_TABS: ReadonlySet<string> = new Set<ControlRoomTab>(['repos', 'runners'])
+const VALID_TABS: ReadonlySet<string> = new Set<ControlRoomTab>(['repos', 'runners', 'integrations'])
 
 function loadPersistedTab(): ControlRoomTab {
   try {
@@ -43,6 +45,7 @@ function persistTab(tab: ControlRoomTab): void {
 const TABS: ReadonlyArray<{ key: ControlRoomTab; label: string }> = [
   { key: 'repos', label: 'Project status' },
   { key: 'runners', label: 'Self-hosted runners' },
+  { key: 'integrations', label: 'Integrations' },
 ]
 
 export interface ControlRoomViewProps {
@@ -100,8 +103,10 @@ export function ControlRoomView({ onInvestigate, initialTab }: ControlRoomViewPr
       </div>
       {tab === 'repos' ? (
         <ControlRoomSection onInvestigate={onInvestigate} />
-      ) : (
+      ) : tab === 'runners' ? (
         <RunnerStatusSection />
+      ) : (
+        <IntegrationsSection />
       )}
     </div>
   )
