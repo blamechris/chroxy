@@ -187,7 +187,10 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
     try {
       parsed = new URL(baseUrl)
     } catch {
-      warnings.push(`Invalid URL format for '${path}.baseUrl': ${baseUrl}`)
+      // Don't echo the raw value: the user:pass@ rejection below only runs
+      // when parsing SUCCEEDS, so an unparseable URL carrying embedded
+      // credentials would otherwise leak them into the startup log.
+      warnings.push(`Invalid URL format for '${path}.baseUrl': expected an http(s) URL (value not shown — fix it in config.json)`)
       valid = false
     }
     if (parsed && parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -214,8 +217,12 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
       )
       valid = false
     } else {
+      // Never echo the rejected value: real API keys without a recognized
+      // prefix (e.g. AIza…-style or short vendor hex tokens) slip past the
+      // looksLikeInlineSecret heuristic, and these warnings land in the
+      // startup log twice (config validation + registration).
       warnings.push(
-        `Invalid value for '${path}.apiKeyEnv': expected an environment variable NAME (uppercase letters, digits, underscores), got ${JSON.stringify(raw.apiKeyEnv)}`,
+        `Invalid value for '${path}.apiKeyEnv': expected an environment variable NAME (uppercase letters, digits, underscores — e.g. "ZAI_API_KEY"); value not shown in case it is a secret`,
       )
       valid = false
     }
@@ -232,8 +239,9 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
       )
       valid = false
     } else {
+      // Never echo the rejected value — same rationale as apiKeyEnv above.
       warnings.push(
-        `Invalid value for '${path}.credentialsKey': expected a credentials.json field NAME (letters, digits, underscores), got ${JSON.stringify(raw.credentialsKey)}`,
+        `Invalid value for '${path}.credentialsKey': expected a credentials.json field NAME (letters, digits, underscores — e.g. "zaiApiKey"); value not shown in case it is a secret`,
       )
       valid = false
     }

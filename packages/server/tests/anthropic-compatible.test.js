@@ -189,6 +189,41 @@ describe('anthropic-compatible config validation', () => {
       assert.ok(warnings.some((w) => w.includes('apiKeyEnv') && /NAME/.test(w)))
     })
 
+    it('never echoes an apiKeyEnv value that evades the secret heuristic', () => {
+      // Real keys without a recognized prefix (AIza…-style, short vendor
+      // hex tokens) slip past looksLikeInlineSecret; the invalid-NAME
+      // warning must still not print the value.
+      const evading = 'AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY'
+      const { entries, warnings } = validateAnthropicCompatibleProviders([
+        makeEntry({ apiKeyEnv: evading }),
+      ])
+      assert.equal(entries.length, 0)
+      assert.ok(warnings.some((w) => w.includes('apiKeyEnv')))
+      assert.ok(!warnings.some((w) => w.includes(evading)), `warning must not echo the value: ${warnings}`)
+    })
+
+    it('never echoes a credentialsKey value that evades the secret heuristic', () => {
+      const evading = 'abc123-realsecret-456def'
+      const { entries, warnings } = validateAnthropicCompatibleProviders([
+        makeEntry({ credentialsKey: evading }),
+      ])
+      assert.equal(entries.length, 0)
+      assert.ok(warnings.some((w) => w.includes('credentialsKey')))
+      assert.ok(!warnings.some((w) => w.includes(evading)), `warning must not echo the value: ${warnings}`)
+    })
+
+    it('never echoes an unparseable baseUrl (it may carry embedded credentials)', () => {
+      // The user:pass@ check only runs when new URL() succeeds — a
+      // malformed URL with userinfo must not leak through the
+      // parse-failure warning either.
+      const { entries, warnings } = validateAnthropicCompatibleProviders([
+        makeEntry({ baseUrl: 'https://user:hunter2@bad host/x' }),
+      ])
+      assert.equal(entries.length, 0)
+      assert.ok(warnings.some((w) => w.includes('baseUrl')))
+      assert.ok(!warnings.some((w) => w.includes('hunter2')), `warning must not echo the URL: ${warnings}`)
+    })
+
     it('looksLikeInlineSecret heuristics', () => {
       assert.equal(looksLikeInlineSecret('sk-ant-api03-xyz'), true)
       assert.equal(looksLikeInlineSecret('eyJhbGciOiJI'), true)
