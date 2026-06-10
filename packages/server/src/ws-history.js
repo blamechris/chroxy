@@ -6,7 +6,7 @@
  */
 import { toShortModelId, getModels, getDefaultModelId, getRegistryForProvider } from './models.js'
 import { PERMISSION_MODES } from './handler-utils.js'
-import { listProviders } from './providers.js'
+import { listProviders, getProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
@@ -361,6 +361,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     const activeProvider = entry?.provider || null
     const activeRegistry = getRegistryForProvider(activeProvider)
     send(ws, { type: 'available_models', models: activeRegistry.getModels(), defaultModel: activeRegistry.getDefaultModelId(), provider: activeProvider })
+    // #5421: dynamic-discovery refresh (ollama /api/tags) is scheduled by
+    // sendSessionInfo above whenever a session is active — scheduling here
+    // too would join the same in-flight probe twice and double-push a
+    // changed list to this client. With no active session activeProvider
+    // is null and there is nothing to refresh.
     send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
     permissions.resendPendingPermissions(ws, client)
     return
@@ -394,6 +399,51 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 }
 
 /**
+ * #5421: fire-and-forget dynamic model discovery for providers that opt in
+ * via a static `refreshModels()` (currently ollama, which probes GET
+ * /api/tags for the locally installed tag list). Called right after an
+ * `available_models` snapshot goes out: when the refresh resolves with a
+ * CHANGED list (non-null), the registry has already been updated, so we
+ * re-push `available_models` to the same client. A null resolution means
+ * the snapshot already sent is still accurate (probe failed / no change /
+ * TTL-cached) and nothing further is emitted — Ollama being down costs one
+ * debug log line, never an error or a retry storm (the provider caches
+ * failures for its TTL window).
+ *
+ * Advisory only — this path feeds the picker; model VALIDATION for ollama
+ * stays unrestricted via getAllowedModels() returning null (a user can
+ * `ollama pull` mid-session or use an alias the tag list doesn't spell out).
+ */
+export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
+  if (!providerName) return
+  let ProviderClass = null
+  try {
+    ProviderClass = getProvider(providerName)
+  } catch {
+    return // unknown provider — nothing to refresh
+  }
+  if (typeof ProviderClass?.refreshModels !== 'function') return
+  Promise.resolve()
+    .then(() => ProviderClass.refreshModels())
+    .then((models) => {
+      if (!Array.isArray(models) || models.length === 0) return
+      if (ws.readyState !== undefined && ws.readyState !== 1) return // client gone
+      const registry = getRegistryForProvider(providerName)
+      ctx.send(ws, {
+        type: 'available_models',
+        models: registry.getModels(),
+        defaultModel: registry.getDefaultModelId(),
+        provider: providerName,
+      })
+    })
+    .catch((err) => {
+      // refreshModels contracts never to throw, but a provider bug must not
+      // become an unhandled rejection in the post-auth path.
+      log.debug(`model refresh for provider ${providerName} failed: ${err?.message || err}`)
+    })
+}
+
+/**
  * Send session-specific info (model, permission, ready status) to a client.
  */
 export function sendSessionInfo(ctx, ws, sessionId) {
@@ -420,6 +470,9 @@ export function sendSessionInfo(ctx, ws, sessionId) {
     defaultModel: activeRegistry.getDefaultModelId(),
     provider: activeProvider,
   })
+  // #5421: background dynamic-discovery refresh (ollama /api/tags); a
+  // changed list is re-pushed to this client when the probe lands.
+  scheduleProviderModelsRefresh(ctx, ws, activeProvider)
   send(ws, {
     type: 'model_changed',
     // #3687: prefer the user's explicit override (`model`) so a later

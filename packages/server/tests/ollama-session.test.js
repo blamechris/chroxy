@@ -104,13 +104,33 @@ describe('OllamaSession', () => {
       }
     })
 
-    it('getModelMetadata answers for seeded models, null otherwise', () => {
+    it('getModelMetadata answers for seeded models with curated labels', () => {
       const qwen = OllamaSession.getModelMetadata('qwen3-coder')
       assert.equal(qwen.id, 'qwen3-coder')
+      assert.equal(qwen.label, 'Qwen3 Coder')
       assert.equal(qwen.contextWindow, null)
-      assert.equal(OllamaSession.getModelMetadata('some-custom-pull'), null)
+    })
+
+    it('getModelMetadata treats any other non-empty id as a valid local tag (#5421)', () => {
+      // Discovered /api/tags entries (and user-typed aliases) get identity
+      // metadata with an explicitly-null contextWindow so the registry
+      // never substitutes a fabricated default window.
+      const custom = OllamaSession.getModelMetadata('llama3.2:7b')
+      assert.deepEqual(custom, { id: 'llama3.2:7b', label: 'llama3.2:7b', fullId: 'llama3.2:7b', contextWindow: null })
+      assert.ok('contextWindow' in custom, 'explicit null key is load-bearing for models.js null-preservation')
       assert.equal(OllamaSession.getModelMetadata(''), null)
       assert.equal(OllamaSession.getModelMetadata(null), null)
+    })
+
+    it('refreshModels delegates to the /api/tags discovery path (#5421)', async () => {
+      assert.equal(typeof OllamaSession.refreshModels, 'function')
+      // Unreachable port + tiny timeout: must resolve null (graceful
+      // failure), never reject — ws-history fires this fire-and-forget.
+      const result = await OllamaSession.refreshModels({
+        env: { CHROXY_OLLAMA_BASE_URL: 'http://127.0.0.1:1' },
+        timeoutMs: 200,
+      })
+      assert.equal(result, null)
     })
   })
 
