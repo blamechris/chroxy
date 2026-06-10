@@ -361,9 +361,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     const activeProvider = entry?.provider || null
     const activeRegistry = getRegistryForProvider(activeProvider)
     send(ws, { type: 'available_models', models: activeRegistry.getModels(), defaultModel: activeRegistry.getDefaultModelId(), provider: activeProvider })
-    // #5421: providers with dynamic discovery (ollama /api/tags) refresh in
-    // the background; a changed list is re-pushed to this client below.
-    scheduleProviderModelsRefresh(ctx, ws, activeProvider)
+    // #5421: dynamic-discovery refresh (ollama /api/tags) is scheduled by
+    // sendSessionInfo above whenever a session is active — scheduling here
+    // too would join the same in-flight probe twice and double-push a
+    // changed list to this client. With no active session activeProvider
+    // is null and there is nothing to refresh.
     send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
     permissions.resendPendingPermissions(ws, client)
     return
