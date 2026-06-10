@@ -82,7 +82,8 @@ import {
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
   handleSessionCostThresholdCrossed as sharedSessionCostThresholdCrossed,
-  handleNotificationPrefs as sharedNotificationPrefs,
+  // (no handleNotificationPrefs import — the app keeps notification_prefs
+  // inline; the #4542/#4544 source-shape tests pin that implementation)
   // #5454 — pure core of the #554 stream-split block (permission_request)
   resolvePermissionStreamSplit,
   handleDirectoryListing as sharedDirectoryListing,
