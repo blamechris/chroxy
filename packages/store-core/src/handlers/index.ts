@@ -27,6 +27,7 @@ import type {
   ModelInfo,
   PendingBackgroundShell,
   SearchResult,
+  TranscriptBackgroundTask,
   ServerError,
   SessionInfo,
   SessionIntervention,
@@ -239,12 +240,38 @@ export function handleConfirmPermissionMode(
  * sent another message after tapping Stop). This is purely additive for
  * sessions that were never stopped — both fields stay null end-to-end.
  */
-export function handleClaudeReady(): {
+export function handleClaudeReady(msg?: Record<string, unknown>): {
   claudeReady: true
   stoppedAt: null
   stoppedCode: null
+  transcriptBackgroundTasks?: TranscriptBackgroundTask[]
+  scheduledWakeup?: { at: number; reason: string } | null
 } {
-  return { claudeReady: true, stoppedAt: null, stoppedCode: null }
+  const patch: ReturnType<typeof handleClaudeReady> = {
+    claudeReady: true,
+    stoppedAt: null,
+    stoppedCode: null,
+  }
+  // #5431: enriched ready — `backgroundTasks` present (even as []) means the
+  // server computed a fresh transcript snapshot, so it is authoritative for
+  // BOTH fields: a snapshot with tasks but no wakeup means any previously
+  // stored wakeup has fired/been superseded. Absent means a pre-#5431 server
+  // or no transcript access — leave the stored fields untouched.
+  if (Array.isArray(msg?.backgroundTasks)) {
+    patch.transcriptBackgroundTasks = msg.backgroundTasks.filter(
+      (t): t is TranscriptBackgroundTask =>
+        !!t && typeof t === 'object' &&
+        typeof (t as TranscriptBackgroundTask).toolUseId === 'string' &&
+        typeof (t as TranscriptBackgroundTask).description === 'string' &&
+        typeof (t as TranscriptBackgroundTask).startedAt === 'number',
+    )
+    const wakeup = msg.scheduledWakeup as { at?: unknown; reason?: unknown } | undefined
+    patch.scheduledWakeup =
+      wakeup && typeof wakeup.at === 'number' && typeof wakeup.reason === 'string'
+        ? { at: wakeup.at, reason: wakeup.reason }
+        : null
+  }
+  return patch
 }
 
 // ---------------------------------------------------------------------------

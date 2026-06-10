@@ -372,6 +372,56 @@ describe('handleClaudeReady', () => {
       stoppedCode: null,
     })
   })
+
+  // #5431 — enriched ready: a present `backgroundTasks` array (even empty)
+  // is an authoritative transcript snapshot for BOTH new fields; absence
+  // leaves stored state untouched (pre-#5431 servers / no transcript).
+  it('projects transcript backgroundTasks + scheduledWakeup when present (#5431)', () => {
+    const task = { toolUseId: 'toolu_01', kind: 'bash', description: 'Wait for CI checks', startedAt: 1781068000000 }
+    expect(handleClaudeReady({
+      type: 'claude_ready',
+      backgroundTasks: [task],
+      scheduledWakeup: { at: 1781068600000, reason: 'watching CI' },
+    })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+      transcriptBackgroundTasks: [task],
+      scheduledWakeup: { at: 1781068600000, reason: 'watching CI' },
+    })
+  })
+
+  it('clears both fields on an explicit empty snapshot (#5431)', () => {
+    expect(handleClaudeReady({ type: 'claude_ready', backgroundTasks: [] })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+      transcriptBackgroundTasks: [],
+      scheduledWakeup: null,
+    })
+  })
+
+  it('leaves the fields absent on a plain ready (#5431 wire-compat)', () => {
+    expect(handleClaudeReady({ type: 'claude_ready' })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+    })
+  })
+
+  it('drops malformed task entries instead of throwing (#5431)', () => {
+    expect(handleClaudeReady({
+      type: 'claude_ready',
+      backgroundTasks: [null, 'junk', { toolUseId: 42 }, { toolUseId: 'toolu_02', kind: 'monitor', description: 'tail log', startedAt: 5 }],
+      scheduledWakeup: { at: 'soon' },
+    })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+      transcriptBackgroundTasks: [{ toolUseId: 'toolu_02', kind: 'monitor', description: 'tail log', startedAt: 5 }],
+      scheduledWakeup: null,
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

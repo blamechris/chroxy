@@ -89,6 +89,10 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     // session_list snapshot arrives; null would force every renderer to
     // .length-check against null, so an empty array is the safer default.
     pendingBackgroundShells: [],
+    // #5431: transcript-derived outstanding work — empty/null until an
+    // enriched claude_ready arrives.
+    transcriptBackgroundTasks: [],
+    scheduledWakeup: null,
     isPlanPending: false,
     planAllowedPrompts: [],
     primaryClientId: null,
