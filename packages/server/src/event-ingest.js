@@ -365,13 +365,27 @@ export function handleEventIngest(server, req, res) {
       // Discord embed's `data.subagents` field and the notification text can
       // use it. Lazily constructed like the rate limiters; tests can pre-seed
       // `_subagentCounter` for clock injection.
+      //
+      // #5463: the surfaced count is the PER-PROJECT total, not the event's
+      // own session count. The embed is keyed per project, and several
+      // sessions emit into one project (main session + worktree agents
+      // remapped to the parent by the hooks' GAP B filter) — stamping each
+      // event with its own session's count made the embed flip between
+      // unrelated numbers, and a zero from session B falsely fired session
+      // A's armed count→0 ready re-ping. `project` here is the post-remap
+      // name (explicit envelope project wins over cwd derivation), i.e. the
+      // same key _projectKey uses for the embed. Events without a project
+      // fall back to the per-session count — the embed key falls back to
+      // the sessionId in that case too, so the scopes still match.
       if (!server._subagentCounter) {
         server._subagentCounter = new SubagentCounter()
       }
-      const counted = server._subagentCounter.record(event.type, event.source, event.sessionId)
-      const activeSubagents = counted !== null
-        ? counted
-        : server._subagentCounter.getCount(event.source, event.sessionId)
+      const counted = server._subagentCounter.record(event.type, event.source, event.sessionId, project)
+      const activeSubagents = project
+        ? server._subagentCounter.getProjectTotal(project)
+        : (counted !== null
+          ? counted
+          : server._subagentCounter.getCount(event.source, event.sessionId))
 
       const title = typeof data.title === 'string' && data.title.length > 0 ? data.title : mapping.title
       let notifyBody = typeof data.message === 'string' && data.message.length > 0 ? data.message : mapping.body
