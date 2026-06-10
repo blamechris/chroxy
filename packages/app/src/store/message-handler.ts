@@ -77,6 +77,14 @@ import {
   handlePermissionExpired as sharedPermissionExpired,
   handlePermissionTimeout as sharedPermissionTimeout,
   handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  // #5454 — remaining both-sides duplicates extracted into store-core
+  handleRawOutput as sharedRawOutput,
+  handleTokenRotated as sharedTokenRotated,
+  handlePairFail as sharedPairFail,
+  handleSessionCostThresholdCrossed as sharedSessionCostThresholdCrossed,
+  handleNotificationPrefs as sharedNotificationPrefs,
+  // #5454 — pure core of the #554 stream-split block (permission_request)
+  resolvePermissionStreamSplit,
   handleDirectoryListing as sharedDirectoryListing,
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
@@ -1138,14 +1146,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       set({ socket: null });
       useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
       if (!ctx.silent) {
-        const reason = (msg.reason as string) || 'pairing_failed';
-        const pairMessages: Record<string, string> = {
-          expired: 'This QR code has expired. Scan the latest QR code from your server.',
-          already_used: 'This QR code has already been used. Scan the latest QR code from your server.',
-          invalid_pairing_id: 'Invalid pairing code. Scan the latest QR code from your server.',
-          rate_limited: 'Too many attempts. Please wait a moment and try again.',
-        };
-        Alert.alert('Pairing Failed', pairMessages[reason] || `Pairing failed: ${reason}`);
+        // Reason parse + friendly QR-flow copy shared via store-core (#5454).
+        const { alertMessage } = sharedPairFail(msg, 'pairing_failed');
+        Alert.alert('Pairing Failed', alertMessage);
       }
       break;
     }
@@ -1841,10 +1844,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'raw':
-      get().appendTerminalData(msg.data as string);
-      useTerminalStore.getState().appendTerminalData(msg.data as string);
+    case 'raw': {
+      const { data: rawData } = sharedRawOutput(msg);
+      get().appendTerminalData(rawData);
+      useTerminalStore.getState().appendTerminalData(rawData);
       break;
+    }
 
     case 'claude_ready': {
       const patch = sharedClaudeReady();
@@ -2016,10 +2021,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'raw_background':
-      get().appendTerminalData(msg.data as string);
-      useTerminalStore.getState().appendTerminalData(msg.data as string);
+    case 'raw_background': {
+      const { data: rawBgData } = sharedRawOutput(msg);
+      get().appendTerminalData(rawBgData);
+      useTerminalStore.getState().appendTerminalData(rawBgData);
       break;
+    }
 
     case 'permission_request': {
       const permPayload = sharedPermissionRequest(msg);
@@ -2027,24 +2034,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // this, we'd insert a prompt with `requestId === null` (the handler
       // contract) and the cast on the next line would mask the issue.
       if (!permPayload.requestId) break;
-      // Split streaming response at permission boundary (#554)
+      // Split streaming response at permission boundary (#554). The pure
+      // split/remap-resolution core is shared via store-core (#5454); the
+      // side effects below keep their original order.
       {
         const permTargetId = permPayload.sessionId || get().activeSessionId;
         const permSs = permTargetId ? get().sessionStates[permTargetId] : null;
         const currentStreamId = permSs ? permSs.streamingMessageId : null;
-        if (currentStreamId && currentStreamId !== 'pending') {
+        const split = resolvePermissionStreamSplit(currentStreamId, _ctx.deltaIdRemaps);
+        if (split) {
           if (_ctx.deltaFlushTimer) {
             clearTimeout(_ctx.deltaFlushTimer);
           }
           flushPendingDeltas();
-          let serverStreamId = currentStreamId;
-          for (const [origId, remappedId] of _ctx.deltaIdRemaps) {
-            if (remappedId === currentStreamId) {
-              serverStreamId = origId;
-              break;
-            }
-          }
-          _ctx.postPermissionSplits.add(serverStreamId);
+          _ctx.postPermissionSplits.add(split.serverStreamId);
           const clearTarget = permTargetId || get().activeSessionId;
           if (clearTarget && get().sessionStates[clearTarget]) {
             updateSession(clearTarget, () => ({ streamingMessageId: null }));
@@ -2611,14 +2614,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'session_cost_threshold_crossed': {
       // #4075: soft "you've spent $X" warning. Fires ONCE per session.
       // Mobile mirrors dashboard semantics: the server doesn't replay so
-      // a missed banner stays missed (no store-and-replay).
-      const sid = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      const costUsd = typeof msg.costUsd === 'number' && Number.isFinite(msg.costUsd) ? msg.costUsd : 0;
-      const thresholdUsd = typeof msg.thresholdUsd === 'number' && Number.isFinite(msg.thresholdUsd) ? msg.thresholdUsd : 0;
-      if (sid && get().sessionStates[sid]) {
-        updateSession(sid, () => ({
-          costThresholdWarning: { costUsd, thresholdUsd, dismissedAt: null },
-        }));
+      // a missed banner stays missed (no store-and-replay). Parse shared
+      // via store-core (#5454) — explicit sessionId only, no fallback.
+      const { sessionId: thresholdSid, patch: thresholdPatch } =
+        sharedSessionCostThresholdCrossed(msg);
+      if (thresholdSid && get().sessionStates[thresholdSid]) {
+        updateSession(thresholdSid, () => thresholdPatch);
       }
       break;
     }
@@ -2791,6 +2792,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // `notification_prefs_get` and broadcast after every
       // `notification_prefs_set` so multiple connected clients stay in
       // lockstep. Validated against the protocol Zod schema before storing.
+      // #5454: kept inline (store-core's handleNotificationPrefs has the
+      // same logic; the #4542/#4544 source-shape tests pin this impl).
       const parsed = ServerNotificationPrefsSchema.safeParse(msg);
       if (!parsed.success) {
         // eslint-disable-next-line no-console
@@ -2858,7 +2861,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'token_rotated': {
-      const newToken = typeof msg.token === 'string' ? msg.token : null;
+      // Token parse shared via store-core (#5454); persistence/re-auth side
+      // effects stay platform-specific.
+      const { token: newToken } = sharedTokenRotated(msg);
       if (newToken) {
         // Server sent the new token — update stored credentials seamlessly
         console.log('[ws] Server token rotated — updating stored token');

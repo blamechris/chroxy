@@ -45,7 +45,7 @@ import type { ErrorPartialCost } from '../cost-format'
 // Centralised client-side error-category detection (#3151).
 import { isRateLimitMessage } from '@chroxy/protocol'
 // Established Zod-handler pattern (#3138).
-import { ServerAvailableModelsEntrySchema } from '@chroxy/protocol'
+import { ServerAvailableModelsEntrySchema, ServerNotificationPrefsSchema } from '@chroxy/protocol'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -5184,4 +5184,255 @@ export function handleResultUsage(
     lastResultCost,
     lastResultDuration,
   }
+}
+
+// ---------------------------------------------------------------------------
+// raw / raw_background (#5454)
+//
+// Note on `pong`: it carries no payload and its only effect is module-level
+// heartbeat bookkeeping (`_onPong()` timer reset) on each client, so there is
+// nothing to extract — it intentionally has no shared handler.
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the terminal data chunk from a `raw` / `raw_background` message.
+ *
+ * Behaviour-preserving: both clients previously did
+ * `appendTerminalData(msg.data as string)` inline — the verbatim cast is kept
+ * here (no string validation) so a malformed payload behaves exactly as it
+ * did pre-extraction. Tightening would be a behaviour change beyond the scope
+ * of #5454.
+ */
+export function handleRawOutput(msg: Record<string, unknown>): { data: string } {
+  return { data: msg.data as string }
+}
+
+// ---------------------------------------------------------------------------
+// token_rotated
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the new bearer token from a `token_rotated` message.
+ *
+ * Returns the token verbatim when it is a string (including the empty
+ * string), else null. Both call sites gate the "seamless update" path on a
+ * truthy check — so `''` takes the legacy "re-authentication required" path
+ * exactly as it did with the prior inline
+ * `typeof msg.token === 'string' ? msg.token : null` guard.
+ *
+ * Side effects are platform-specific and stay at the call site: the app
+ * persists the token via `saveConnection` (or disconnects + alerts on the
+ * legacy path); the dashboard rewrites the `token` query param in the
+ * browser URL.
+ */
+export function handleTokenRotated(msg: Record<string, unknown>): { token: string | null } {
+  return { token: typeof msg.token === 'string' ? msg.token : null }
+}
+
+// ---------------------------------------------------------------------------
+// pair_fail
+// ---------------------------------------------------------------------------
+
+/**
+ * User-facing copy for the known `pair_fail` reasons. Worded for the QR-code
+ * pairing flow — the mobile app uses these verbatim. The dashboard's
+ * paste-a-pairing-URL flow (#5297) keeps its plain `Pairing failed: <reason>`
+ * template at the call site, since "Scan the latest QR code" does not match
+ * that surface's UX.
+ */
+export const PAIR_FAIL_MESSAGES: Record<string, string> = {
+  expired: 'This QR code has expired. Scan the latest QR code from your server.',
+  already_used: 'This QR code has already been used. Scan the latest QR code from your server.',
+  invalid_pairing_id: 'Invalid pairing code. Scan the latest QR code from your server.',
+  rate_limited: 'Too many attempts. Please wait a moment and try again.',
+}
+
+/** Parsed payload from a `pair_fail` message. */
+export interface PairFailPayload {
+  /** The server-sent reason, or `fallbackReason` when missing/empty/non-string. */
+  reason: string
+  /**
+   * QR-flow alert copy: the friendly message for known reasons, else
+   * `Pairing failed: <reason>`.
+   */
+  alertMessage: string
+}
+
+/**
+ * Parse a `pair_fail` message.
+ *
+ * `fallbackReason` is injected because the two clients historically used
+ * different fallbacks (app: `'pairing_failed'`, dashboard: `'unknown'`) and
+ * the alert copy renders the reason verbatim — changing either fallback would
+ * change user-visible text.
+ *
+ * Non-string and empty-string reasons both resolve to the fallback. (The
+ * app's prior inline guard was `(msg.reason as string) || fallback` — a
+ * truthy check — so this is byte-identical for it; the dashboard's prior
+ * guard passed `''` through, which only affected the cosmetic
+ * `Pairing failed: ` string.)
+ *
+ * Socket teardown, lifecycle-phase flips, and registry cleanup (#5281) are
+ * platform glue and stay at the call sites.
+ */
+export function handlePairFail(
+  msg: Record<string, unknown>,
+  fallbackReason: string,
+): PairFailPayload {
+  const reason =
+    typeof msg.reason === 'string' && msg.reason.length > 0 ? msg.reason : fallbackReason
+  return {
+    reason,
+    alertMessage: PAIR_FAIL_MESSAGES[reason] ?? `Pairing failed: ${reason}`,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// session_cost_threshold_crossed (#4075)
+// ---------------------------------------------------------------------------
+
+/** Parsed payload from a `session_cost_threshold_crossed` message. */
+export interface SessionCostThresholdCrossedPayload {
+  /**
+   * Explicit sessionId from the message, or null. There is deliberately NO
+   * active-session fallback (matches both prior inline impls): the soft
+   * "you've spent $X" warning fires once per session and must never be
+   * misattributed to whichever session happens to be active.
+   */
+  sessionId: string | null
+  /** Session-state patch that arms the dismissible warning banner. */
+  patch: { costThresholdWarning: { costUsd: number; thresholdUsd: number; dismissedAt: null } }
+}
+
+/**
+ * Parse a `session_cost_threshold_crossed` message into a session patch.
+ *
+ * `costUsd` / `thresholdUsd` fall back to `0` for missing / non-number /
+ * non-finite values — identical to the prior inline guards on both clients.
+ * The caller applies the patch only when the target session exists in its
+ * store (the server doesn't replay this event, so a missed banner stays
+ * missed by design).
+ */
+export function handleSessionCostThresholdCrossed(
+  msg: Record<string, unknown>,
+): SessionCostThresholdCrossedPayload {
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const costUsd =
+    typeof msg.costUsd === 'number' && Number.isFinite(msg.costUsd) ? msg.costUsd : 0
+  const thresholdUsd =
+    typeof msg.thresholdUsd === 'number' && Number.isFinite(msg.thresholdUsd)
+      ? msg.thresholdUsd
+      : 0
+  return {
+    sessionId,
+    patch: { costThresholdWarning: { costUsd, thresholdUsd, dismissedAt: null } },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// notification_prefs (#4542 / #4544)
+// ---------------------------------------------------------------------------
+
+/**
+ * Notification-prefs snapshot shape both clients store (mirrors the
+ * `notificationPrefs` state slice that existed verbatim on each side before
+ * this extraction).
+ */
+export interface NotificationPrefsState {
+  categories: Record<string, boolean>
+  devices: Record<
+    string,
+    {
+      categories?: Record<string, boolean>
+      quietHours?: { start: string; end: string; timezone: string } | null
+      bypassCategories?: string[]
+    }
+  >
+  quietHours: { start: string; end: string; timezone: string } | null
+  /**
+   * #4544: optional globally-applied bypass list (categories that fire even
+   * during quiet hours). Omitted entirely when the wire payload lacks it —
+   * clients fall back to the documented defaults (permission +
+   * activity_error).
+   */
+  bypassCategories?: string[]
+}
+
+/** Result of parsing a `notification_prefs` message. */
+export interface NotificationPrefsPayload {
+  /** Validated snapshot ready to store, or null when validation failed. */
+  notificationPrefs: NotificationPrefsState | null
+  /** Zod issues when validation failed, else null (for the call-site warn). */
+  issues: unknown[] | null
+}
+
+/**
+ * Validate and extract a `notification_prefs` snapshot.
+ *
+ * Emitted in response to `notification_prefs_get` and broadcast after every
+ * `notification_prefs_set` so multiple connected clients stay in lockstep.
+ * Validated against `ServerNotificationPrefsSchema` (the wire schema is
+ * permissive — `z.record(string, boolean)` for categories — so adding a
+ * category server-side does not require a client rebuild). On failure the
+ * caller logs `issues` and leaves existing state alone, exactly as both
+ * inline implementations did.
+ */
+export function handleNotificationPrefs(
+  msg: Record<string, unknown>,
+): NotificationPrefsPayload {
+  const parsed = ServerNotificationPrefsSchema.safeParse(msg)
+  if (!parsed.success) {
+    return { notificationPrefs: null, issues: parsed.error.issues }
+  }
+  const prefs = parsed.data.prefs
+  // #4544: wire snapshot carries an optional `bypassCategories`. Older
+  // servers omit it — spread-include only when it's a real array so the
+  // stored object matches the prior inline shape key-for-key.
+  const bypassCategories = (prefs as { bypassCategories?: string[] }).bypassCategories
+  return {
+    notificationPrefs: {
+      categories: prefs.categories,
+      devices: prefs.devices,
+      quietHours: prefs.quietHours,
+      ...(Array.isArray(bypassCategories) ? { bypassCategories } : {}),
+    },
+    issues: null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// permission_request — #554 stream-split resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the #554 "split streaming response at permission boundary" decision
+ * for a `permission_request` message.
+ *
+ * Both clients carried a near line-for-line copy of this block: when a
+ * permission prompt arrives mid-stream, the in-flight assistant message must
+ * be split so the prompt doesn't get visually fused onto it. The pure part —
+ * deciding whether a split applies and reverse-mapping the client-side stream
+ * id back to the server-origin id through the delta-remap table — lives here.
+ *
+ * Returns null when there is nothing to split: no current stream, or the
+ * `'pending'` placeholder id (stream_start not yet processed).
+ *
+ * Side effects stay at the call site, in this order (matching both prior
+ * inline copies): clear the pending delta-flush timer, flush pending deltas,
+ * add `serverStreamId` to the post-permission-splits set, and clear the
+ * target session's `streamingMessageId`.
+ */
+export function resolvePermissionStreamSplit(
+  currentStreamId: string | null,
+  deltaIdRemaps: ReadonlyMap<string, string>,
+): { serverStreamId: string } | null {
+  if (!currentStreamId || currentStreamId === 'pending') return null
+  let serverStreamId = currentStreamId
+  for (const [origId, remappedId] of deltaIdRemaps) {
+    if (remappedId === currentStreamId) {
+      serverStreamId = origId
+      break
+    }
+  }
+  return { serverStreamId }
 }
