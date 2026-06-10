@@ -165,8 +165,16 @@ export class Supervisor extends EventEmitter {
     // down") looks different from every other update. The statePath default
     // matches the child server's so both processes converge on the same
     // status message; the sink persists that state atomically (temp+rename).
+    //
+    // prefsPath mirrors server-cli.js too: without it the per-send manager
+    // falls back to default prefs, so supervisor-sent notifications would
+    // ignore the operator's category mutes / quiet hours (both sinks gate on
+    // prefs) while the child server honors them. Read-only here — the
+    // supervisor never calls setPrefs/registerToken — and fresh-per-send
+    // picks up prefs the child persisted after startup, same as the tokens.
     const push = new PushManager({
       storagePath: this._pushStoragePath,
+      prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
       discord: {
         statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
         ...(this.config.notifications?.discord || {}),

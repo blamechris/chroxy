@@ -100,6 +100,11 @@ if (typeof mock.module !== 'function') {
       // convergence keeps working (both processes edit the same embed).
       assert.equal(opts.discord?.statePath, join(homedir(), '.chroxy', 'discord-webhook-state.json'))
 
+      // prefsPath must mirror server-cli.js too — otherwise the per-send
+      // manager runs with default prefs and supervisor notifications ignore
+      // the operator's category mutes / quiet hours (both sinks gate on prefs).
+      assert.equal(opts.prefsPath, join(homedir(), '.chroxy', 'notification-prefs.json'))
+
       assert.deepEqual(sendCalls, [
         { category: 'activity_error', title: 'Chroxy server is down', body: 'body' },
       ])
