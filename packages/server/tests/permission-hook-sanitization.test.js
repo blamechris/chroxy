@@ -323,8 +323,9 @@ describe('Permission hook approve-mode curl passthrough (#2717)', () => {
     }
   })
 
-  it('falls back to ask when curl fails (server unreachable)', () => {
-    // No mock server — curl will fail. Hook must default to "ask".
+  it('fails closed (deny) when curl fails (server unreachable) — #5330', () => {
+    // No mock server — curl will fail. The user is on their phone, not at the
+    // PTY, so "ask" would wedge an unanswerable dialog; the hook must deny.
     const payload = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
     const { stdout, status } = spawnSync('/bin/bash', [hookPath], {
       input: payload,
@@ -339,7 +340,25 @@ describe('Permission hook approve-mode curl passthrough (#2717)', () => {
     })
     assert.equal(status, 0)
     const out = JSON.parse(stdout)
-    assert.equal(out.hookSpecificOutput.permissionDecision, 'ask')
+    assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+  })
+
+  it('CHROXY_HOOK_UNREACHABLE_DECISION=ask restores the legacy ask fallback — #5330', () => {
+    const payload = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+    const { stdout, status } = spawnSync('/bin/bash', [hookPath], {
+      input: payload,
+      encoding: 'utf-8',
+      timeout: 10000,
+      env: {
+        ...process.env,
+        CHROXY_PORT: '1',
+        CHROXY_HOOK_SECRET: 'secret',
+        CHROXY_PERMISSION_MODE: 'approve',
+        CHROXY_HOOK_UNREACHABLE_DECISION: 'ask',
+      },
+    })
+    assert.equal(status, 0)
+    assert.equal(JSON.parse(stdout).hookSpecificOutput.permissionDecision, 'ask')
   })
 })
 

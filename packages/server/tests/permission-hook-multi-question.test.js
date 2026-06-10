@@ -106,37 +106,45 @@ describe('permission-hook.sh — multi-question AskUserQuestion deny (#4648)', (
       'Bash in auto mode still allows — multi-q check is AskUserQuestion-only')
   })
 
-  it('does NOT deny on malformed payload (no tool_input) — falls through safely', async () => {
-    // python3 parse failure → empty QUESTION_COUNT → no deny → normal handling
-    // resumes (which in approve mode tries to route to phone and falls back to
-    // "ask" since no real server is reachable on the test port). This is the
-    // safe default: a broken hook payload must NOT cause us to deny every
-    // tool call across the board.
+  // These three assert the #4648 multi-question GUARD does not fire on
+  // odd-shaped payloads. They route to phone afterward; on the unreachable test
+  // port that now fails CLOSED with a #5330 transport deny (was "ask"), so we
+  // assert specifically that the guard's deny (reason "one question at a time")
+  // did NOT fire — not merely that the decision isn't "deny".
+  const firedMultiQuestionGuard = (decision) => {
+    const d = decision.hookSpecificOutput
+    return d.permissionDecision === 'deny' && /one question at a time/i.test(d.permissionDecisionReason || '')
+  }
+
+  it('does NOT trip the multi-question guard on malformed payload (no tool_input)', async () => {
+    // python3 parse failure → empty QUESTION_COUNT → guard doesn't fire →
+    // normal handling resumes. A broken hook payload must NOT cause the
+    // multi-question guard to deny every tool call across the board.
     const { stdout } = await runHook(JSON.stringify({ tool_name: 'AskUserQuestion' }))
     const decision = JSON.parse(stdout.trim())
-    assert.notEqual(decision.hookSpecificOutput.permissionDecision, 'deny',
-      'malformed payload must not deny — fall through to normal handling')
+    assert.equal(firedMultiQuestionGuard(decision), false,
+      'malformed payload must not trip the multi-question guard')
   })
 
-  it('does NOT deny on empty questions array — only count > 1 triggers deny', async () => {
+  it('does NOT trip the multi-question guard on empty questions array', async () => {
     const { stdout } = await runHook(
       JSON.stringify({ tool_name: 'AskUserQuestion', tool_input: { questions: [] } }),
     )
     const decision = JSON.parse(stdout.trim())
-    assert.notEqual(decision.hookSpecificOutput.permissionDecision, 'deny',
-      'empty questions array must not deny — > 1 is the gate, not >= 1')
+    assert.equal(firedMultiQuestionGuard(decision), false,
+      'empty questions array must not trip the guard — > 1 is the gate, not >= 1')
   })
 
-  it('does NOT deny on non-array questions value (defensive against shape drift)', async () => {
+  it('does NOT trip the multi-question guard on non-array questions value (shape drift)', async () => {
     // If Anthropic ever ships a payload where `questions` is an object map or
-    // a string, the python3 check returns 0 (not isinstance(list)), so we
-    // don't deny. Better to attempt the wedge (v0.9.23 watchdog catches it)
-    // than to deny something that wasn't actually multi-question.
+    // a string, the python3 check returns 0 (not isinstance(list)), so the
+    // guard doesn't fire. Better to attempt the wedge (v0.9.23 watchdog
+    // catches it) than to deny something that wasn't actually multi-question.
     const { stdout } = await runHook(
       JSON.stringify({ tool_name: 'AskUserQuestion', tool_input: { questions: 'not-a-list' } }),
     )
     const decision = JSON.parse(stdout.trim())
-    assert.notEqual(decision.hookSpecificOutput.permissionDecision, 'deny',
-      'non-array questions value must not deny — defensive against shape drift')
+    assert.equal(firedMultiQuestionGuard(decision), false,
+      'non-array questions value must not trip the guard — defensive against shape drift')
   })
 })
