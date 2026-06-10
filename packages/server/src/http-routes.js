@@ -8,6 +8,7 @@ import { metrics } from './metrics.js'
 import { buildDiagnosticsSnapshot } from './diagnostics.js'
 import { getRateLimitKey } from './rate-limiter.js'
 import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
+import { handleEventIngest } from './event-ingest.js'
 import { isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 
@@ -264,6 +265,18 @@ export function createHttpHandler(server) {
     // and returns them as a newest-first array. The dashboard polls this
     // on its SnapshotsPanel.
     const snapPath = (req.url ?? '').split('?')[0]
+
+    // External event ingest (#5413 Phase 3). Accepts ONLY the daemon-level
+    // ingest secret (never the primary token — see
+    // docs/security/bearer-token-authority.md §6); auth, body cap, schema
+    // validation, per-source rate limiting, and the pipeline dispatch all
+    // live in event-ingest.js. The handler registers its own body-stream
+    // callbacks and guards them per the #5313 pattern.
+    if (req.method === 'POST' && snapPath === '/api/events') {
+      handleEventIngest(server, req, res)
+      return
+    }
+
     if (req.method === 'GET' && snapPath === '/api/snapshots') {
       if (!server._validateBearerAuth(req, res)) return
       try {

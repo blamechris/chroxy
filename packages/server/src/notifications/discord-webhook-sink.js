@@ -69,6 +69,9 @@ const MAX_RETRY_AFTER_MS = 30_000
 const DEFAULT_PROJECT_COLOR = 5793266   // Discord blurple #5865F2
 const DEFAULT_PERMISSION_COLOR = 16753920 // orange #FFA500
 const DEFAULT_ERROR_COLOR = 15158332    // red #E74C3C
+// #5413 Phase 3 — session lifecycle states (bash CLAUDE_NOTIFY_*_COLOR defaults)
+const DEFAULT_ONLINE_COLOR = 3066993    // green #2ECC71
+const DEFAULT_OFFLINE_COLOR = 15158332  // red #E74C3C
 const MAX_COLOR = 16777215              // 24-bit RGB
 
 // Pipeline notification category → embed state. Phase 2 maps chroxy's own
@@ -83,6 +86,12 @@ const MAX_COLOR = 16777215              // 24-bit RGB
 //                error surface — deliberate addition, documented in the PR)
 //   stale      — inactivity warning: busy but silent for a long time
 //                (routine PATCH; replaces the bash "(stale?)" title suffix)
+//   online     — session started / working (#5413 Phase 3 ingest). The bash
+//                original's SessionStart: DELETE the previous message (incl.
+//                a lingering offline one) + POST fresh; session_activity
+//                events keep it fresh via routine PATCH.
+//   offline    — session ended (bash SessionEnd: routine PATCH in place;
+//                no-op when nothing is tracked or already offline)
 const STATE_FOR_CATEGORY = {
   activity_update: 'idle',
   result: 'idle',
@@ -90,6 +99,9 @@ const STATE_FOR_CATEGORY = {
   activity_waiting: 'permission',
   activity_error: 'error',
   inactivity_warning: 'stale',
+  session_online: 'online',
+  session_offline: 'offline',
+  session_activity: 'online',
 }
 
 // States that re-ping: DELETE the old message + POST a new one.
@@ -100,6 +112,8 @@ const STATE_TITLES = {
   permission: (project) => `\u{1F510} ${project} — Needs Approval`,
   error: (project) => `\u{2757} ${project} — Session Error`,
   stale: (project) => `\u{23F3} ${project} — Quiet for a while`,
+  online: (project) => `\u{1F7E2} ${project} — Session Online`,
+  offline: (project) => `\u{1F534} ${project} — Session Offline`,
 }
 
 /** Format seconds into a human-readable duration (port of format_duration). */
@@ -314,6 +328,24 @@ export class DiscordWebhookSink extends NotificationSink {
     }
 
     try {
+      // #5413 Phase 3 — session lifecycle (bash SessionStart/SessionEnd port).
+      if (notification.category === 'session_online') {
+        // Clean slate: DELETE whatever message lingers (typically the
+        // previous session's offline embed) + POST fresh, resetting the
+        // elapsed-time epoch and the subagent count — parity with the bash
+        // SessionStart's delete-old-message + clear_status_files.
+        entry.firstSeenTs = now
+        entry.lastStateChangeTs = now
+        entry.subagents = Number.isFinite(data.subagents) ? data.subagents : 0
+        return await this._repost(webhookUrl, project, entry, store, prev?.messageId)
+      }
+      if (state === 'offline') {
+        // SessionEnd PATCHes in place — and only when there is something to
+        // mark offline (bash: skip when state is empty or already offline).
+        if (!prev?.messageId || prev.state === 'offline') return true
+        return await this._patchOrPost(webhookUrl, project, entry, store)
+      }
+
       if (PING_STATES.has(state)) {
         // Parity: an embed already sitting in `idle` is NOT re-posted for
         // another idle event (`[ "$CURRENT_STATE" = "idle" ] && exit 0`) —
@@ -495,6 +527,8 @@ export class DiscordWebhookSink extends NotificationSink {
   _colorFor(project, state) {
     if (state === 'permission') return this._permissionColor
     if (state === 'error') return this._errorColor
+    if (state === 'online') return DEFAULT_ONLINE_COLOR
+    if (state === 'offline') return DEFAULT_OFFLINE_COLOR
     const override = this._colors[project]
     return isValidColor(override) ? override : this._defaultColor
   }

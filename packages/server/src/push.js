@@ -60,6 +60,13 @@ const RATE_LIMITS = {
   activity_error: 0,        // Immediate: session errors
   inactivity_warning: 0,    // #3899: immediate — naturally rate-limited by the soft warning window (default 30 min between fires per session)
   live_activity: 5_000,     // Live Activity updates: 5s throttle
+  // #5413 Phase 3: external-session lifecycle/activity categories fed by
+  // POST /api/events (event-ingest.js). Lifecycle transitions are rare and
+  // meaningful → immediate; activity is a heartbeat → throttled here AND
+  // per-source at the ingest route AND per-project in the Discord sink.
+  session_online: 0,
+  session_offline: 0,
+  session_activity: 30_000,
 }
 
 // Re-exported for existing importers/tests — the implementation moved to

@@ -125,12 +125,39 @@ project) persists in `~/.chroxy/discord-webhook-state.json`, written
 atomically. Deleting the file is safe — the next event posts a fresh status
 message.
 
+## External sessions via `POST /api/events`
+
+Claude Code sessions started **outside chroxy** can light up the embed too
+(Phase 3): POST normalized events to the daemon's `/api/events` route,
+authenticated with the daemon-level **ingest secret** that chroxy generates
+at `~/.chroxy/ingest-secret` (0600) on startup.
+
+```bash
+curl -s -X POST "http://localhost:8765/api/events" \
+  -H "Authorization: Bearer $(cat ~/.chroxy/ingest-secret)" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"my-hooks","type":"session_start","project":"my-repo","ts":'"$(date +%s)000"'}'
+```
+
+Envelope: `{ source, project?, sessionId?, type, data?, ts }` —
+`type` is one of `session_start` / `session_end` / `subagent_start` /
+`subagent_stop` / `notification` / `post_tool_use`; when `project` is
+absent the server derives it from `data.cwd` (git-root walk). Lifecycle
+events drive the green **Session Online** / red **Session Offline** embed
+states; `notification` re-pings as needs-approval. Requests are
+schema-validated and rate-limited per `source` (60/min). The secret grants
+nothing beyond feeding the notification pipeline — see
+[`docs/security/bearer-token-authority.md`](../security/bearer-token-authority.md) §6.
+
+Hand-rolling the POSTs is interim: the turnkey hook emitters
+(`packages/claude-hooks`, install once and forget) are Phase 4.
+
 ## Scope and roadmap
 
 Phase 2 reflects **chroxy-launched sessions** (the events chroxy's own
-notification pipeline emits). Claude Code sessions started outside chroxy
-flow in with the event-ingest endpoint (Phase 3) and the hooks package
-(Phase 4), which also moves subagent counting server-side. See epic #5413.
+notification pipeline emits). Phase 3 (above) adds the ingest endpoint for
+external sessions; the hooks package (Phase 4) makes emitting turnkey and
+moves subagent counting server-side. See epic #5413.
 
 ## Troubleshooting
 

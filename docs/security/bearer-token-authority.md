@@ -1,32 +1,34 @@
 # Bearer Token Authority Threat Model
 
-Chroxy's WebSocket and HTTP control surfaces accept three distinct token classes, each with a different authority scope. This document pins the design so future PRs that add HTTP endpoints, WebSocket message types, or new credential paths don't accidentally widen (or fail to narrow) the trust boundary.
+Chroxy's WebSocket and HTTP control surfaces accept four distinct token classes, each with a different authority scope. This document pins the design so future PRs that add HTTP endpoints, WebSocket message types, or new credential paths don't accidentally widen (or fail to narrow) the trust boundary.
 
 For the transport-layer story (key exchange, message encryption, nonce handling), see [`encryption-threat-model.md`](encryption-threat-model.md). This doc covers **authorization**, not confidentiality.
 
 ## 1. Trust Model in One Sentence
 
-> Any holder of the primary API token can do anything the owner of the server can do via Chroxy — read every session's history, send input to any session, switch models, change permission modes, and modify settings. Pairing-bound session tokens are scoped to one session. Per-session hook secrets are scoped to one session **and** to the CLI permission-hook callback endpoint (`POST /permission`) only — they are never accepted for user-facing permission-response handling.
+> Any holder of the primary API token can do anything the owner of the server can do via Chroxy — read every session's history, send input to any session, switch models, change permission modes, and modify settings. Pairing-bound session tokens are scoped to one session. Per-session hook secrets are scoped to one session **and** to the CLI permission-hook callback endpoint (`POST /permission`) only — they are never accepted for user-facing permission-response handling. The daemon-level ingest secret is scoped to a single endpoint (`POST /api/events`) whose only effect is feeding the notification pipeline.
 
 The server is the user's own machine (see [`encryption-threat-model.md` §2](encryption-threat-model.md#2-trust-boundaries)). The primary token is therefore deliberately equivalent to local access on that machine.
 
-## 2. The Three Token Classes
+## 2. The Four Token Classes
 
 | Token | Issued by | Stored where | Scope | Used on |
 |-------|-----------|--------------|-------|---------|
 | **Primary API token** | `chroxy init` (or rotation via `TokenManager`) | OS keychain when available (server auto-migrates out of `~/.chroxy/config.json` on first boot — `server-cli.js` ~line 321); falls back to `~/.chroxy/config.json` on systems without keychain support; `expo-secure-store` on the app | Full session authority — no session scoping | WS `auth` message, HTTP `Authorization: Bearer ...`, dashboard cookie/query |
 | **Pairing-bound session token** | `PairingManager.validatePairing()` on consumption of a one-shot pairing ID | In-memory only (server `_sessionTokens` map, 24h TTL); `expo-secure-store` on the app | Bound to exactly one `sessionId`; rejected by every session-scoped handler if the target session differs | Same wire paths as primary token; server distinguishes via `pairingManager.getSessionIdForToken()` |
 | **Per-session hook secret** | `CliSession` constructor — `randomBytes(32).toString('hex')` | In-process only; passed to the `claude` CLI via `CHROXY_HOOK_SECRET` env var | Single session **and** single endpoint (`POST /permission`) | Permission-hook callbacks from the spawned CLI subprocess only |
+| **Daemon-level ingest secret** (#5413) | Server startup — `randomBytes(32).toString('base64url')`, created once | `~/.chroxy/ingest-secret`, mode 0600 (`CHROXY_CONFIG_DIR` honored) — readable by same-user hook emitters | Single endpoint (`POST /api/events`); no session authority, no reads — its only effect is injecting events into the notification pipeline | External Claude Code hook emitters (sessions chroxy did NOT launch) |
 
 The implementation files are:
 
 - Primary token: [`packages/server/src/config.js`](../../packages/server/src/config.js), [`packages/server/src/token-manager.js`](../../packages/server/src/token-manager.js), [`packages/server/src/token-compare.js`](../../packages/server/src/token-compare.js)
 - Pairing tokens: [`packages/server/src/pairing.js`](../../packages/server/src/pairing.js), [`packages/server/src/ws-auth.js`](../../packages/server/src/ws-auth.js)
 - Hook secrets: [`packages/server/src/cli-session.js`](../../packages/server/src/cli-session.js) (creation), [`packages/server/src/ws-server.js`](../../packages/server/src/ws-server.js) (`_validateHookAuth`)
+- Ingest secret: [`packages/server/src/event-ingest.js`](../../packages/server/src/event-ingest.js) (creation + validation + route handler)
 
 ## 3. Primary API Token — Full Session Authority
 
-`_validateBearerAuth` (`ws-server.js`) and the WS auth handler (`ws-auth.js`) both call `_isTokenValid(token)`, which is a constant-time comparison against `this.apiToken` (plus any active rotation grace token, see §6). There is **no session scoping at this layer**. A request that presents a valid primary token can:
+`_validateBearerAuth` (`ws-server.js`) and the WS auth handler (`ws-auth.js`) both call `_isTokenValid(token)`, which is a constant-time comparison against `this.apiToken` (plus any active rotation grace token, see §7). There is **no session scoping at this layer**. A request that presents a valid primary token can:
 
 - Subscribe to events from any session (`subscribe_session` / `subscribedSessionIds`)
 - List and switch the active session (`set_active_session`)
@@ -78,7 +80,7 @@ Two host-level mutations are gated against bound tokens even though they arrive 
 - **Auto permission mode** (`set_permission_mode` with `mode: 'auto'`, [`settings-handlers.js`](../../packages/server/src/handlers/settings-handlers.js)) — flipping a session to auto-approve is a privilege escalation, so a bound token is rejected with `AUTO_MODE_FORBIDDEN_BOUND_CLIENT`. Only the primary token (and only when `allowAutoPermissionMode` is set in the local config) can enable it.
 - **Provider credential writes** (`set_credential` / `delete_credential` and the BYOK `byok_set_credentials` / `byok_clear_credentials`, [`settings-handlers.js`](../../packages/server/src/handlers/settings-handlers.js) — `rejectCredentialWriteIfBound`) — a bound token can READ masked, value-free status, but writing lets the caller swap in a key it controls (billing redirection) or clear keys (DoS). That integrity risk is distinct from "use the credentials a session already resolves", so writes are rejected with `CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT` (#5155). Reads stay open to any authenticated client.
 
-Both gates branch on `client.boundSessionId` and reject via `sendError` (a generic `error` message) — the canonical pattern for "this operation requires host-level authority" on the WS path. New credential-touching or config-mutating handlers should follow it (see §8).
+Both gates branch on `client.boundSessionId` and reject via `sendError` (a generic `error` message) — the canonical pattern for "this operation requires host-level authority" on the WS path. New credential-touching or config-mutating handlers should follow it (see §9).
 
 ## 5. Per-Session Hook Secrets
 
@@ -88,15 +90,30 @@ Each `CliSession` mints a 32-byte hex secret in its constructor ([`cli-session.j
 
 Hook secrets are in-process only. They are never persisted, never sent over the user-facing WebSocket, and never appear in QR codes.
 
-## 6. Token Lifecycle
+## 6. Daemon-Level Ingest Secret (`POST /api/events`, #5413)
 
-| | Primary | Pairing-bound | Hook secret |
-|---|---|---|---|
-| Generation | `randomBytes(32).toString('base64url')` at `chroxy init` ([`cli/init-cmd.js`](../../packages/server/src/cli/init-cmd.js) ~line 110); can be regenerated by re-running `chroxy init` or rotated via `TokenManager` | `randomBytes(32).toString('base64url')` per pairing | `randomBytes(32).toString('hex')` per session |
-| Persistence | OS keychain when available (preferred); otherwise `~/.chroxy/config.json`; `expo-secure-store` on the app | In-memory only (server `_sessionTokens`) | In-memory only |
-| Default TTL | None (static) | 24h after pairing (`DEFAULT_SESSION_TOKEN_TTL_MS`) | Session lifetime |
-| Rotation | Optional via the `tokenExpiry` config key or `CHROXY_TOKEN_EXPIRY` env var ([`config.js`](../../packages/server/src/config.js)), driven by `TokenManager`; old token honored for a grace period (`DEFAULT_GRACE_MS = 5m`) and a `token_rotated` event is emitted | None (re-pair to refresh) | New secret per session |
-| Revocation | Regenerate (via `chroxy init` or rotation); old token invalid after grace window | Server restart, `PairingManager.destroy()`, or 24h TTL | Session destroyed |
+External Claude Code sessions — ones chroxy did **not** launch — report lifecycle/activity events through `POST /api/events` ([`event-ingest.js`](../../packages/server/src/event-ingest.js), wired in [`http-routes.js`](../../packages/server/src/http-routes.js)). Neither of the two existing narrow classes fits this caller:
+
+- **Per-session hook secrets don't exist for these sessions** — they are minted by `CliSession` when chroxy spawns the CLI, and these sessions were spawned by something else.
+- **The primary token must NOT be handed to hook processes.** A hook emitter runs inside every external Claude Code session's hook environment; placing the primary token there would give full session authority (read all history, send input anywhere) to anything that can read a hook's env or the hook config.
+
+So the endpoint accepts exactly one credential: a dedicated daemon-level secret, generated once at server startup (`ensureIngestSecret()` in `server-cli.js`, lazily re-created by the route if missing) and persisted 0600 at `~/.chroxy/ingest-secret`, where same-user hook emitters (the Phase-4 `packages/claude-hooks` package) read it. Properties:
+
+- **Single endpoint, minimal authority.** The secret authorizes injecting schema-validated events (`IngestEventSchema` in `@chroxy/protocol` — strict envelope, bounded strings, capped `data` bag) into the notification pipeline. It cannot read anything, reach any session, or mutate any state beyond a notification being sent. A leaked ingest secret yields notification spam at worst — and three rate-limit layers (per-source at the route, per-category in `PushManager`, per-project throttle in the Discord sink) bound even that.
+- **Constant-time validation** via `safeTokenCompare`, like every other token path. The presented token is never logged.
+- **Fail closed.** Missing/invalid auth → `401` with an empty body (no detail about why). If the secret file cannot be read or created, every request is rejected.
+- **Tunnel exposure.** Like `POST /permission`, the route is reachable through the Cloudflare tunnel when one is up; possession of the bearer secret is the boundary, not network position. The secret never travels except as the `Authorization` header of ingest requests (loopback or tunnel-TLS).
+- **No primary-token fallback.** Unlike `_validateHookAuth`'s legacy branch, the ingest route never accepts the primary token — there is no deployment where the primary token is the right credential for a hook process.
+
+## 7. Token Lifecycle
+
+| | Primary | Pairing-bound | Hook secret | Ingest secret |
+|---|---|---|---|---|
+| Generation | `randomBytes(32).toString('base64url')` at `chroxy init` ([`cli/init-cmd.js`](../../packages/server/src/cli/init-cmd.js) ~line 110); can be regenerated by re-running `chroxy init` or rotated via `TokenManager` | `randomBytes(32).toString('base64url')` per pairing | `randomBytes(32).toString('hex')` per session | `randomBytes(32).toString('base64url')` once, at first server start (or first ingest request) |
+| Persistence | OS keychain when available (preferred); otherwise `~/.chroxy/config.json`; `expo-secure-store` on the app | In-memory only (server `_sessionTokens`) | In-memory only | `~/.chroxy/ingest-secret`, 0600, atomic write |
+| Default TTL | None (static) | 24h after pairing (`DEFAULT_SESSION_TOKEN_TTL_MS`) | Session lifetime | None (static) |
+| Rotation | Optional via the `tokenExpiry` config key or `CHROXY_TOKEN_EXPIRY` env var ([`config.js`](../../packages/server/src/config.js)), driven by `TokenManager`; old token honored for a grace period (`DEFAULT_GRACE_MS = 5m`) and a `token_rotated` event is emitted | None (re-pair to refresh) | New secret per session | Delete the file + restart the daemon (a fresh secret is generated; hook emitters pick it up on their next read) |
+| Revocation | Regenerate (via `chroxy init` or rotation); old token invalid after grace window | Server restart, `PairingManager.destroy()`, or 24h TTL | Session destroyed | Delete/replace the file + restart |
 
 **Implication of static-by-default primary token:** if it leaks, an attacker has full authority until the user manually regenerates and re-pairs. The mitigation surface is:
 
@@ -104,7 +121,7 @@ Hook secrets are in-process only. They are never persisted, never sent over the 
 - Exponential backoff rate limiting on auth failures (1s, 2s, 4s, ..., capped at 60s; `ws-auth.js`)
 - Optional rotation via the `tokenExpiry` config key or `CHROXY_TOKEN_EXPIRY` env var for environments that want bounded blast radius
 
-## 7. Audit Chain
+## 8. Audit Chain
 
 Each step here tightened a real bug. Read the PRs in order if extending any of these surfaces:
 
@@ -115,17 +132,17 @@ Each step here tightened a real bug. Read the PRs in order if extending any of t
 - **#4820** — P0 fix for cross-session `permission_response` hijack on the WS path; the review of that PR is what motivated this doc (issue #4830)
 - **#5155** — gated provider-credential WRITES (set/delete/clear, both the #3855 generalized and #4052 BYOK paths) behind host-level authority; bound tokens can read masked status but not overwrite or clear keys
 
-## 8. Adding a New Endpoint or Message Type — Checklist
+## 9. Adding a New Endpoint or Message Type — Checklist
 
 Before merging any PR that adds a new HTTP route or WebSocket message handler that touches session state:
 
-1. **Decide which token classes you accept.** Most HTTP endpoints accept the primary token only. `/permission` accepts hook secrets. WS handlers accept primary + pairing-bound.
+1. **Decide which token classes you accept.** Most HTTP endpoints accept the primary token only. `/permission` accepts hook secrets. `/api/events` accepts the daemon-level ingest secret only (never the primary token). WS handlers accept primary + pairing-bound.
 2. **If the operation is session-scoped**, branch on `client.boundSessionId` (WS) or call the equivalent of `pairingManager.getSessionIdForToken(token)` (HTTP) and reject mismatches with 403 + `buildSessionTokenMismatchPayload()`.
 3. **If the operation is global** (e.g. listing all sessions, changing config), explicitly reject bound tokens — do not let them silently see everything.
 4. **Never log raw tokens.** `maskToken()` exists for a reason.
 5. **Use `safeTokenCompare()`** for any byte-equality check against a token.
 
-## 9. Known Risks
+## 10. Known Risks
 
 - **Static primary token is the default.** The QR shown at startup encodes an ephemeral pairing URL (not the primary token), so the leak surface is the OS keychain entry, a fallback `~/.chroxy/config.json` on systems without keychain support, or any environment / launcher that surfaces the token in process listings. If any of those are exfiltrated, the attacker has full authority until the user rotates. Rotation is opt-in.
 - **No certificate pinning or out-of-band key verification.** See [`encryption-threat-model.md` §8 — Trust On First Use](encryption-threat-model.md#trust-on-first-use-tofu).
