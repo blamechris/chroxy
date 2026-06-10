@@ -1923,17 +1923,38 @@ export class ClaudeTuiSession extends BaseSession {
    * land in `_outputTail` when claude rejects a `--resume <id>` and exits
    * during warmup. `_outputTail` is reset at the top of every _spawnPty, so a
    * match always describes the MOST RECENT death, never a stale prior
-   * attempt. Whitespace is collapsed first (mirrors _scanOutputForAuthFailure
-   * — the TUI wraps/box-pads, so a pattern can straddle a rendered line
-   * break). Consulted by _scheduleRespawn at the respawn cap to decide
-   * retry-FRESH eligibility. The tail is only SCANNED here, never logged —
-   * every diagnostic surface keeps routing through the redaction helpers
-   * (_outputTailDiagnostic / _outputTailHexDump, #5322/#5358).
+   * attempt.
+   *
+   * Matching is PER LINE plus adjacent-line pairs — NOT one collapsed blob.
+   * CliSession's classifier tests each stderr line separately, which bounds
+   * the `.*` in the #4950 co-occurrence patterns (e.g.
+   * `/(fail|error|…).*resum(e|ing).*(session|conversation|\bid\b)/i`) to a
+   * single line. Collapsing the whole 4KB tail into one string would let
+   * those patterns match "error" + "resume" + "session" scattered across
+   * UNRELATED lines — and a `--resume` warmup re-renders the restored
+   * transcript into the tail, so ordinary conversation content (the exact
+   * large-but-present-conversation crash this gate exists to protect) could
+   * false-positive and abandon a real conversation id. Joining each adjacent
+   * line pair (whitespace-collapsed, mirroring _scanOutputForAuthFailure's
+   * normalization) still catches a rejection the TUI wrapped/box-padded
+   * across one rendered line break, while keeping the match window ≤ two
+   * lines instead of the whole tail. Consulted by _scheduleRespawn at the
+   * respawn cap to decide retry-FRESH eligibility. The tail is only SCANNED
+   * here, never logged — every diagnostic surface keeps routing through the
+   * redaction helpers (_outputTailDiagnostic / _outputTailHexDump,
+   * #5322/#5358).
    */
   _scanOutputForUnknownResume() {
     const tail = this._outputTail || ''
     if (!tail) return false
-    return stderrIndicatesUnknownResume([tail.replace(/\s+/g, ' ')])
+    const lines = tail
+      .split(/[\r\n]+/)
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+    if (lines.length === 0) return false
+    const candidates = lines.slice()
+    for (let i = 0; i + 1 < lines.length; i++) candidates.push(`${lines[i]} ${lines[i + 1]}`)
+    return stderrIndicatesUnknownResume(candidates)
   }
 
   async sendMessage(prompt, attachments, _options = {}) {

@@ -982,9 +982,10 @@ describe('ClaudeTuiSession', () => {
     })
 
     // #5417 — the classifier itself: shares CliSession's pinned
-    // RESUME_UNKNOWN_STDERR_PATTERNS, matched against the ANSI-stripped tail
-    // with whitespace collapsed (the TUI line-wraps and box-pads its output,
-    // so a pattern can straddle a rendered line break).
+    // RESUME_UNKNOWN_STDERR_PATTERNS, matched per ANSI-stripped tail line
+    // plus adjacent-line pairs (the TUI line-wraps and box-pads its output,
+    // so a pattern can straddle ONE rendered line break — but the `.*` in the
+    // #4950 co-occurrence patterns must never span unrelated lines).
     describe('_scanOutputForUnknownResume (#5417)', () => {
       it('matches claude\'s resume rejection through ANSI codes and line wrapping', () => {
         session = makeSession()
@@ -997,6 +998,24 @@ describe('ClaudeTuiSession', () => {
         assert.equal(session._scanOutputForUnknownResume(), false, 'empty tail never matches')
         session._appendToOutputTail('Segmentation fault (core dumped)\r\nnode exited with code 139\r\n')
         assert.equal(session._scanOutputForUnknownResume(), false, 'unrelated crash output never matches')
+      })
+
+      // The #4950 co-occurrence patterns carry `.*`, which CliSession bounds
+      // by testing each stderr LINE separately. The TUI tail must keep that
+      // boundedness: a `--resume` warmup re-renders the restored transcript
+      // into the tail, so "error" / "resume" / "session" scattered across
+      // UNRELATED conversation lines must never co-occur into a match (a
+      // false positive here would abandon a real conversation id — the exact
+      // amnesia this gate exists to prevent).
+      it('does not match pattern words scattered across distant transcript lines', () => {
+        session = makeSession()
+        session._appendToOutputTail(
+          '> the respawn loop hit an error during warmup yesterday\r\n' +
+          'I dug through the logs for details\r\n' +
+          'claude will resume automatically after the backoff\r\n' +
+          'check the session state file under ~/.chroxy\r\n',
+        )
+        assert.equal(session._scanOutputForUnknownResume(), false, 'cross-line co-occurrence never matches')
       })
     })
 
