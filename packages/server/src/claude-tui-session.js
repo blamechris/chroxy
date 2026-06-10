@@ -495,6 +495,8 @@ export class ClaudeTuiSession extends BaseSession {
     // listener can route them to the right bound client (#4787, #4793).
     this._log = null
     this._sinkDir = null     // created on start, removed on destroy
+    this._sinkRecoverErrLoggedMs = 0  // #5329: throttle the can't-recreate error log
+    this._sinkTransientWarnLoggedMs = 0  // #5329: throttle the dir-exists-but-readdir-failed warn
     this._term = null        // persistent PTY for the session's lifetime
     this._settingsPath = null
     // #4013: sidecar file containing the current permission mode. The
@@ -722,6 +724,65 @@ export class ClaudeTuiSession extends BaseSession {
   _clearAskUserQuestionLock() {
     if (!this._sinkDir) return
     try { rmSync(join(this._sinkDir, 'askuserquestion-active'), { recursive: true, force: true }) } catch {}
+  }
+
+  /**
+   * #5329 (IP-1): recover the hook sink dir after a readdir failure during the
+   * poll loop. The sink lives under /tmp, so a tmpwatch sweep / tmpfs clear /
+   * manual rm can delete it mid-turn — and claude's hook commands write to this
+   * exact path, so once the dir is gone every `cat > <sink>/…` also fails and
+   * the turn wedges silently until the hard timeout.
+   *
+   * Recreate the SAME path (claude's already-loaded hooks embed it) plus the
+   * owner.pid stamp and the permission-mode sidecar (so the hook reads the live
+   * mode rather than falling back to the stale spawn-time env var). If
+   * recreation itself fails (e.g. /tmp is full → ENOSPC), surface it loudly
+   * (throttled) instead of spinning silently.
+   *
+   * @param {Error} [cause] the readdir error that triggered recovery
+   * @returns {boolean} true if the sink is usable afterward
+   */
+  _recoverSinkDir(cause) {
+    if (!this._sinkDir) return false
+    const logger = this._log || log
+    // Distinguish three states by what's actually AT the sink path:
+    //   - a real directory → readdir failed transiently (EACCES/EMFILE); warn
+    //     (throttled) but don't thrash recreation.
+    //   - nothing → vanished (tmpwatch/rm); recreate.
+    //   - a non-directory (file/symlink squatting the path) → readdir would
+    //     throw ENOTDIR forever; rm the squatter, then recreate.
+    let isDir = false
+    try { isDir = statSync(this._sinkDir).isDirectory() } catch { /* missing or unstat-able */ }
+    if (isDir) {
+      const now = Date.now()
+      if (now - this._sinkTransientWarnLoggedMs >= 5000) {
+        this._sinkTransientWarnLoggedMs = now
+        logger.warn(`hook sink readdir failed though ${this._sinkDir} is a directory: ${cause?.message || cause}`)
+      }
+      return true
+    }
+    try {
+      // Clear a non-directory squatting the path (no-op if nothing is there)
+      // so mkdir can create a real directory.
+      try { rmSync(this._sinkDir, { recursive: true, force: true }) } catch { /* best effort */ }
+      mkdirSync(this._sinkDir, { recursive: true })
+      try { writeFileSync(join(this._sinkDir, 'owner.pid'), String(process.pid)) } catch { /* best effort */ }
+      if (this._permissionModeFile) {
+        try { this._writePermissionModeSidecarAtomic(this._permissionModeFile, this.permissionMode || 'approve') } catch { /* hook falls back to env var */ }
+      }
+      this._sinkRecoverErrLoggedMs = 0
+      logger.warn(`hook sink ${this._sinkDir} vanished mid-turn and was recreated — hook delivery restored (cause: ${cause?.message || cause})`)
+      return true
+    } catch (err) {
+      // Persistent failure (disk full, parent gone): throttle the error so a
+      // 150ms poll loop doesn't flood the log.
+      const now = Date.now()
+      if (now - this._sinkRecoverErrLoggedMs >= 5000) {
+        this._sinkRecoverErrLoggedMs = now
+        logger.error(`hook sink ${this._sinkDir} vanished and could NOT be recreated (${err.message}) — tool events for this turn may be lost (disk full?)`)
+      }
+      return false
+    }
   }
 
   // Tail length to keep + length to include in error diagnostics.
@@ -1755,7 +1816,18 @@ export class ClaudeTuiSession extends BaseSession {
 
     const drainHookFiles = () => {
       let entries
-      try { entries = readdirSync(this._sinkDir) } catch { return }
+      try {
+        entries = readdirSync(this._sinkDir)
+      } catch (err) {
+        // #5329 (IP-1): the sink lives under /tmp, which a tmpwatch sweep, a
+        // tmpfs clear, or a manual rm can delete mid-turn. A silent return here
+        // spins this poll loop to the hard timeout while every claude
+        // `cat > <sink>/…` hook write also fails — the turn wedges with no
+        // signal. Try to recover the sink (recreate the same path so hook
+        // delivery resumes); fail loud if recreation itself fails.
+        this._recoverSinkDir(err)
+        return
+      }
       // Per-drain progress counter — replaces the old `_consumedFiles.size`
       // delta, which no longer changes now that consumed files are unlinked +
       // pruned (#5323). Drives the first-output disarm + timer re-arm below.
