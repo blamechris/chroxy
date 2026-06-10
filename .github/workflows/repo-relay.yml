@@ -15,6 +15,12 @@ on:
 jobs:
   notify:
     runs-on: ubuntu-latest
+    # Least-privilege token: piggyback review detection reads the pulls and
+    # issues APIs; an explicit block zeroes every unlisted scope
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     # Skip bots (prevent cascades) and fork PRs (no secrets access)
     if: >-
       github.actor != 'github-actions[bot]' &&
