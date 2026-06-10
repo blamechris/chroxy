@@ -223,6 +223,42 @@ describe('worktreeParent (#5464 chroxy worktrees)', () => {
     assert.equal(worktreeParent(root, env), null, 'the base dir is not a worktree')
     assert.equal(worktreeParent(join(base, 'projects', 'coolproj'), env), null, 'sibling paths are untouched')
   })
+
+  // Ordering pin: the chroxy-root check must run BEFORE the /.claude/worktrees/
+  // marker split. An agent worktree nested INSIDE a chroxy worktree must
+  // resolve via the chroxy worktree's .git file to the real repo — the marker
+  // split alone would yield the opaque session id (basename of the segment
+  // before the marker). Reordering the checks regresses this silently.
+  it('resolves an agent worktree nested inside a chroxy worktree to the real repo, not the opaque id', () => {
+    const { root, id, wt } = chroxyWorktreeFixture()
+    const nested = join(wt, '.claude', 'worktrees', 'agent-deadbeef', 'src')
+    mkdirSync(nested, { recursive: true })
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
+    assert.equal(worktreeParent(nested, env), 'coolproj')
+    assert.notEqual(worktreeParent(nested, env), id, 'the marker split must not win over the chroxy gitdir parse')
+    assert.equal(deriveProject(nested, env), 'coolproj')
+  })
+
+  // #5470 lesson, pinned: an unusable override must FALL BACK to the $HOME
+  // default, not silently disable the chroxy-worktree handling.
+  it('falls back to the $HOME default when CHROXY_HOOKS_CHROXY_WORKTREES_ROOT is unusable', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hooks-chroxyhome-'))
+    const id = 'cafebabecafebabecafebabecafebabe'
+    const wt = join(home, '.chroxy', 'worktrees', id)
+    mkdirSync(wt, { recursive: true })
+    const repoRoot = join(home, 'projects', 'fallbackproj')
+    mkdirSync(join(repoRoot, '.git', 'worktrees', id), { recursive: true })
+    writeFileSync(join(wt, '.git'), `gitdir: ${join(repoRoot, '.git', 'worktrees', id)}\n`)
+    for (const bad of ['relative/junk', '   ', '/']) {
+      const env = { HOME: home, CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: bad }
+      assert.equal(worktreeParent(wt, env), 'fallbackproj', `override ${JSON.stringify(bad)} falls back to $HOME default`)
+      assert.equal(
+        classifyNonProjectCwd(wt, { ...env, CHROXY_HOOKS_TMP_PREFIXES: '/chroxy-nonexistent-tmp' }),
+        'worktree',
+        `classification survives unusable override ${JSON.stringify(bad)}`
+      )
+    }
+  })
 })
 
 describe('classifyNonProjectCwd (#5464 chroxy worktrees)', () => {
