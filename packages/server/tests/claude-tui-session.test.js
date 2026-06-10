@@ -706,6 +706,19 @@ describe('ClaudeTuiSession', () => {
       return s
     }
 
+    // #5417 — mimic the real _spawnPty tail lifecycle for a dying spawn: the
+    // real method resets both output tails at the top of every spawn, then the
+    // child's dying output (the PTY merges stdout+stderr, so claude's
+    // "No conversation found with session ID …" resume rejection lands here)
+    // accumulates via onData before _onPtyGone fires. Tests stub _spawnPty, so
+    // the stub has to reproduce that reset+append ordering itself.
+    function dieWithTail(self, text) {
+      self._outputTail = ''
+      self._outputTailRaw = Buffer.alloc(0)
+      if (text) self._appendToOutputTail(text)
+      self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+    }
+
     it('an unexpected PTY death schedules a respawn that re-invokes _spawnPty', async () => {
       let spawnCalls = 0
       session = makeSession(() => { spawnCalls++ })
@@ -772,16 +785,18 @@ describe('ClaudeTuiSession', () => {
       assert.equal(spawnCalls, 2, 'second death triggers a second respawn')
     })
 
-    it('after 5 attempts a RESTORED session emits a fatal error + respawn_exhausted and stops (no infinite loop)', async () => {
+    it('after 5 attempts a RESTORED session whose deaths carry NO resume-failure tail exhausts and stops (no infinite loop)', async () => {
       let spawnCalls = 0
       // Every respawn dies again during warmup → drives toward the cap. In
       // production the wired onExit/close handlers call _onPtyGone when the PTY
       // dies; the stub mimics that so the same scheduling path runs.
-      // #5348 — a session seeded from a persisted resume id must NOT fall back
-      // to a fresh conversation (that would silently discard real prior
-      // context): exhaustion after exactly 5 attempts is the honest outcome.
-      // Seed through the REAL ctor path (resumeSessionId opt) so the
-      // `_seededFromPersisted` wiring is what's under test, not a poked flag.
+      // #5348/#5417 — the deaths here leave NO resume-failure diagnostic in the
+      // PTY tail, so claude never confirmed the conversation id is unknown. A
+      // restored session must NOT fall back to a fresh conversation on an
+      // unconfirmed cause (the conversation may still exist — e.g. claude
+      // crashing while loading it): exhaustion after exactly 5 attempts is the
+      // honest outcome. Seed through the REAL ctor path (resumeSessionId opt)
+      // so the restore wiring is what's under test, not a poked flag.
       session = makeSession((self) => {
         spawnCalls++
         self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
@@ -818,11 +833,17 @@ describe('ClaudeTuiSession', () => {
     // (claude can't find it → exits during warmup). At the 5-attempt cap the
     // session gets ONE extra attempt with a brand-new --session-id before
     // giving up, instead of burning to exhaustion on a futile resume.
-    it('an originally-fresh session gets ONE retry-FRESH attempt at the cap (#5348)', async () => {
+    // #5417 — the fallback now additionally requires the dying PTY tail to
+    // CONFIRM the resume id is unknown (claude's own "No conversation found"
+    // rejection), so the doomed resumes here die with that diagnostic in the
+    // tail, exactly as the real claude TUI renders it before exiting.
+    it('an originally-fresh session gets ONE retry-FRESH attempt at the cap when the tail confirms resume_unknown (#5348/#5417)', async () => {
       const spawns = []
       session = makeSession((self) => {
         spawns.push({ resumed: self._resumedFromPersisted, id: self._sessionId })
-        self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+        dieWithTail(self, self._resumedFromPersisted
+          ? `No conversation found with session ID: ${self._sessionId}`
+          : null)
       })
       const errors = []
       const exhausted = []
@@ -857,11 +878,12 @@ describe('ClaudeTuiSession', () => {
 
     it('a retry-FRESH attempt that survives warmup re-emits ready with the new uuid and re-arms the latch (#5348)', async () => {
       let spawnCalls = 0
-      // First 5 spawns die during warmup (doomed resumes); the 6th — the fresh
-      // fallback — survives.
+      // First 5 spawns die during warmup (doomed resumes, each leaving claude's
+      // resume rejection in the tail, #5417); the 6th — the fresh fallback —
+      // survives.
       session = makeSession((self) => {
         spawnCalls++
-        if (spawnCalls <= 5) self._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+        if (spawnCalls <= 5) dieWithTail(self, `No conversation found with session ID: ${self._sessionId}`)
       })
       const readies = []
       session.on('ready', (d) => readies.push(d))
@@ -879,6 +901,103 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._respawnCount, 0, 'retry budget restored after the surviving warmup')
       assert.equal(session._didFallbackFromUnknownResume, false, 'one-shot latch re-armed on success (a FUTURE doomed-resume window may fall back again)')
       assert.equal(session._processReady, true)
+    })
+
+    // #5417 — the blunt "5 warmup deaths" trigger alone is NOT enough: a fresh
+    // session crash-looping for an unrelated cause (OOM, broken install,
+    // corrupted-but-present conversation file) never had its conversation
+    // confirmed missing, so abandoning the id would discard real context a
+    // fresh spawn may not even fix. No tail match → honest exhaustion.
+    it('an originally-fresh session whose deaths carry NO resume-failure tail exhausts WITHOUT the retry-FRESH fallback (#5417)', async () => {
+      let spawnCalls = 0
+      session = makeSession((self) => {
+        spawnCalls++
+        // Unrelated crash diagnostic — must not match the resume patterns.
+        dieWithTail(self, 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory')
+      })
+      const errors = []
+      const exhausted = []
+      session.on('error', (e) => errors.push(e))
+      session.on('respawn_exhausted', (d) => exhausted.push(d))
+
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      for (const d of [1000, 2000, 4000, 8000, 15000]) {
+        mock.timers.tick(d)
+        await new Promise((r) => setImmediate(r))
+      }
+      mock.timers.tick(15000)
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(spawnCalls, 5, 'exactly 5 respawn attempts — no extra fresh attempt without a confirming tail')
+      assert.equal(errors.some((e) => e.code === 'resume_unknown'), false, 'no resume_unknown fallback on an unconfirmed cause')
+      assert.ok(errors.some((e) => e.code === 'pty_respawn_exhausted'), 'plain exhaustion code (not resume_unknown_exhausted)')
+      assert.equal(exhausted.length, 1)
+      assert.equal(exhausted[0].reason, 'pty_respawn_exhausted')
+      assert.equal(session._sessionId, 'conv-uuid-1234', 'the conversation id is never abandoned without confirmation')
+      assert.equal(session._respawnScheduled, false, 'no further respawn after exhaustion')
+    })
+
+    // #5417 — CliSession parity for RESTORED sessions: when claude itself
+    // reports the persisted conversation id as unknown (wiped
+    // ~/.claude/projects/, state file copied from another machine), burning 5
+    // doomed resumes and destroying the session helps nobody. With the tail
+    // CONFIRMING the conversation is gone, the restored session now gets the
+    // same loud one-shot retry-FRESH fallback an originally-fresh session gets.
+    it('a RESTORED session falls back loudly when the tail confirms the conversation id is unknown (#5417)', async () => {
+      const spawns = []
+      session = makeSession((self) => {
+        spawns.push({ resumed: self._resumedFromPersisted, id: self._sessionId })
+        dieWithTail(self, self._resumedFromPersisted
+          ? `No conversation found with session ID: ${self._sessionId}`
+          : null)
+      }, { resumeSessionId: 'restored-uuid-9999' })
+      assert.equal(session._seededFromPersisted, true, 'ctor seeds _seededFromPersisted from resumeSessionId')
+      const errors = []
+      const exhausted = []
+      session.on('error', (e) => errors.push(e))
+      session.on('respawn_exhausted', (d) => exhausted.push(d))
+
+      session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+      // 5 doomed --resume attempts, then the fresh fallback (also 15s backoff).
+      for (const d of [1000, 2000, 4000, 8000, 15000, 15000]) {
+        mock.timers.tick(d)
+        await new Promise((r) => setImmediate(r))
+      }
+      mock.timers.tick(15000)
+      await new Promise((r) => setImmediate(r))
+
+      assert.equal(spawns.length, 6, '5 resume attempts + exactly one fresh fallback attempt')
+      assert.ok(spawns.slice(0, 5).every((s) => s.resumed && s.id === 'restored-uuid-9999'), 'first 5 attempts --resume the restored conversation')
+      assert.equal(spawns[5].resumed, false, 'the fallback attempt spawns FRESH (--session-id, not --resume)')
+      assert.notEqual(spawns[5].id, 'restored-uuid-9999', 'the fallback attempt mints a brand-new conversation uuid')
+      const resumeUnknown = errors.filter((e) => e.code === 'resume_unknown')
+      assert.equal(resumeUnknown.length, 1, 'one loud resume_unknown error so the dashboard can render "starting fresh"')
+      assert.equal(resumeUnknown[0].attemptedResumeId, 'restored-uuid-9999', 'the error carries the abandoned conversation id')
+      assert.equal(exhausted.length, 1, 'when the fresh attempt also dies, the session exhausts (one-shot latch, no loop)')
+      assert.equal(exhausted[0].reason, 'resume_unknown_exhausted')
+      const terminal = errors.find((e) => e.code === 'resume_unknown_exhausted')
+      assert.ok(terminal, 'terminal error carries the resume_unknown_exhausted code')
+      assert.equal(terminal.attemptedResumeId, 'restored-uuid-9999')
+      assert.equal(session._respawnScheduled, false, 'no further respawn after exhaustion')
+    })
+
+    // #5417 — the classifier itself: shares CliSession's pinned
+    // RESUME_UNKNOWN_STDERR_PATTERNS, matched against the ANSI-stripped tail
+    // with whitespace collapsed (the TUI line-wraps and box-pads its output,
+    // so a pattern can straddle a rendered line break).
+    describe('_scanOutputForUnknownResume (#5417)', () => {
+      it('matches claude\'s resume rejection through ANSI codes and line wrapping', () => {
+        session = makeSession()
+        session._appendToOutputTail('\x1b[1m\x1b[31mNo conversation\r\n    found with session ID: abc-123\x1b[0m\r\n')
+        assert.equal(session._scanOutputForUnknownResume(), true)
+      })
+
+      it('does not match unrelated crash output or an empty tail', () => {
+        session = makeSession()
+        assert.equal(session._scanOutputForUnknownResume(), false, 'empty tail never matches')
+        session._appendToOutputTail('Segmentation fault (core dumped)\r\nnode exited with code 139\r\n')
+        assert.equal(session._scanOutputForUnknownResume(), false, 'unrelated crash output never matches')
+      })
     })
 
     it('a flapping session (warmup keeps resetting _respawnCount) gives up via the rolling rate cap (#5349)', () => {
