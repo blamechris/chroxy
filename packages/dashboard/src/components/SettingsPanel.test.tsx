@@ -1307,14 +1307,19 @@ describe('SettingsPanel', () => {
     })
 
     it('gives every server category an order slot (renders ahead of unknown keys)', () => {
-      // Known keys render in NOTIFICATION_CATEGORY_ORDER first; unknowns
-      // append after. Seed a sentinel unknown key — any server category
-      // missing an order slot would land at or after it.
+      // Known keys render in NOTIFICATION_CATEGORY_ORDER first; unknown keys
+      // append after in *insertion order* (Object.keys is insertion-ordered
+      // for string keys — the zz_ prefix is cosmetic, nothing sorts). The
+      // sentinel therefore MUST be seeded FIRST: a server category missing
+      // its order slot falls into the unknown tail, and only a leading
+      // sentinel forces it to render after the sentinel. Seeded last, the
+      // missing category would render before the sentinel and this guard
+      // would pass vacuously (the #5032 lesson, again).
       setMockState({
         notificationPrefs: {
           categories: {
-            ...Object.fromEntries(allCategories.map((c) => [c, true])),
             zz_unknown_sentinel: true,
+            ...Object.fromEntries(allCategories.map((c) => [c, true])),
           },
           devices: {},
           quietHours: null,
