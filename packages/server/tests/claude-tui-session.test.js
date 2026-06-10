@@ -7230,3 +7230,82 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
     assert.equal(session._permissionModeFile, join(session._sinkDir, 'permission-mode'))
   })
 })
+
+// #5329 (IP-1): the hook sink lives under /tmp; a tmpwatch sweep / tmpfs clear
+// / manual rm can delete it mid-turn. The poll loop's readdir then fails and
+// (pre-fix) returned silently, spinning to the hard timeout while claude's hook
+// `cat > <sink>/…` writes also fail. _recoverSinkDir recreates the sink so hook
+// delivery resumes, and fails loud if recreation itself fails.
+describe('ClaudeTuiSession — hook-sink vanish recovery (#5329)', () => {
+  let dir, skillsDir, session, warnLines, errorLines
+  const logSpy = (entry) => {
+    if (entry.component !== 'claude-tui-session') return
+    if (entry.level === 'warn') warnLines.push(entry.message)
+    if (entry.level === 'error') errorLines.push(entry.message)
+  }
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-sink-recover-'))
+    skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-sink-recover-skills-'))
+    warnLines = []; errorLines = []
+    addLogListener(logSpy)
+  })
+  afterEach(async () => {
+    removeLogListener(logSpy)
+    if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(skillsDir, { recursive: true, force: true })
+  })
+  function makeSession() {
+    return new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir, repoSkillsDir: null })
+  }
+
+  it('recreates a vanished sink dir (+ owner.pid) and reports it', () => {
+    session = makeSession()
+    session._sinkDir = join(dir, 's-gone')
+    // dir does not exist yet — simulates a tmpwatch sweep mid-turn
+    const ok = session._recoverSinkDir(new Error('ENOENT: no such file or directory'))
+    assert.equal(ok, true, 'sink is usable after recovery')
+    assert.ok(existsSync(session._sinkDir), 'sink dir recreated')
+    assert.equal(readFileSync(join(session._sinkDir, 'owner.pid'), 'utf8'), String(process.pid))
+    assert.ok(warnLines.some((m) => /vanished mid-turn and was recreated/.test(m)), 'logs the recovery loudly')
+  })
+
+  it('restores the permission-mode sidecar so the hook reads the live mode', () => {
+    session = makeSession()
+    session._sinkDir = join(dir, 's-perm')
+    session._permissionModeFile = join(session._sinkDir, 'permission-mode')
+    session.permissionMode = 'plan'
+    session._recoverSinkDir(new Error('ENOENT'))
+    assert.equal(readFileSync(session._permissionModeFile, 'utf8'), 'plan',
+      'sidecar rewritten with the current mode (not the stale env fallback)')
+  })
+
+  it('fails LOUD (error) and returns false when the sink cannot be recreated', () => {
+    session = makeSession()
+    // Parent is a FILE, so mkdirSync(recursive) cannot create a child dir.
+    const filePath = join(dir, 'not-a-dir')
+    writeFileSync(filePath, 'x')
+    session._sinkDir = join(filePath, 's-blocked')
+    const ok = session._recoverSinkDir(new Error('ENOENT'))
+    assert.equal(ok, false, 'returns false when recovery is impossible')
+    assert.ok(errorLines.some((m) => /could NOT be recreated/.test(m)), 'surfaces a loud error, not a silent spin')
+  })
+
+  it('throttles the can-not-recreate error to avoid 150ms poll-loop spam', () => {
+    session = makeSession()
+    const filePath = join(dir, 'not-a-dir-2')
+    writeFileSync(filePath, 'x')
+    session._sinkDir = join(filePath, 's-blocked')
+    for (let i = 0; i < 5; i++) session._recoverSinkDir(new Error('ENOENT'))
+    assert.equal(errorLines.length, 1, 'only one error logged across rapid repeated failures')
+  })
+
+  it('does not thrash recreation when the dir exists but readdir failed transiently', () => {
+    session = makeSession()
+    session._sinkDir = join(dir, 's-exists')
+    mkdirSync(session._sinkDir, { recursive: true })
+    const ok = session._recoverSinkDir(new Error('EACCES: permission denied'))
+    assert.equal(ok, true)
+    assert.ok(warnLines.some((m) => /readdir failed though .* exists/.test(m)), 'warns about the transient error')
+  })
+})
