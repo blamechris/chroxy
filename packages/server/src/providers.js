@@ -116,6 +116,19 @@ export function registerProvider(name, ProviderClass, opts) {
 }
 
 /**
+ * List the names currently in the registry — built-ins plus anything
+ * registered since startup (docker providers, config-driven
+ * Anthropic-compatible endpoints, embedder providers). Includes hidden
+ * aliases: the caller (#5419 collision checking) needs the FULL claimed
+ * namespace, not just what the dashboard lists.
+ *
+ * @returns {string[]} Registered provider names
+ */
+export function getRegisteredProviderNames() {
+  return Object.keys(PROVIDERS)
+}
+
+/**
  * Get a registered provider class by name.
  * @param {string} name - Provider identifier
  * @returns {Function} Provider class

@@ -33,6 +33,7 @@ import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
 import { registerDockerProvider, resolveProviderLabel } from './providers.js'
+import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { loadModelsCache, getModels } from './models.js'
@@ -517,6 +518,14 @@ export async function startCliServer(config) {
 
   // Register optional providers (e.g. docker) based on config
   await registerDockerProvider(config)
+
+  // #5419: register config-driven Anthropic-compatible endpoints from
+  // `providers.anthropicCompatible` (Z.ai GLM, Moonshot Kimi, MiniMax,
+  // LM Studio, llama.cpp, vLLM, OpenRouter, custom). Registered before
+  // the default-provider resolution below so `--provider <id>` /
+  // `config.provider` can select one. Invalid entries are warned about
+  // and skipped; valid siblings still register.
+  registerAnthropicCompatibleProviders(config)
 
   const providerType = config.provider || 'claude-sdk'
 
