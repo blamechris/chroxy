@@ -968,4 +968,17 @@ describe('DiscordWebhookSink — stale-entry pruning (#5429 / #5434)', () => {
     const { sink: sink2 } = makeSink({ pruneAfterMs: 'soon' })
     assert.equal(sink2._pruneAfterMs, DAY_MS)
   })
+
+  it('a state file whose projects slot is an array is treated as corrupt (fresh map, tracking persists)', async () => {
+    // typeof [] === 'object', but JSON.stringify drops string-keyed entries
+    // assigned onto an array — accepting the array would wedge tracking
+    // (every persist silently loses the messageId).
+    const { sink, statePath } = makeSink()
+    writeFileSync(statePath, JSON.stringify({ version: 1, projects: [] }))
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(errored())
+    const { projects } = readState(statePath)
+    assert.ok(!Array.isArray(projects), 'projects persists as a map, not an array')
+    assert.equal(projects.alpha.messageId, 'm1', 'entry tracked despite the corrupt array slot')
+  })
 })

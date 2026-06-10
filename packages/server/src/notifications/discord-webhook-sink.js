@@ -259,7 +259,11 @@ export class DiscordWebhookSink extends NotificationSink {
     let store = { version: 1, projects: {} }
     try {
       const data = JSON.parse(readFileSync(this._resolvedStatePath(), 'utf-8'))
-      if (data && typeof data === 'object' && data.projects && typeof data.projects === 'object') {
+      // Arrays are rejected too: `typeof [] === 'object'`, but string-keyed
+      // entries assigned onto an array are silently dropped by
+      // JSON.stringify, so a corrupt `projects: []` would wedge tracking
+      // (every persist loses the messageId) — fall back to a fresh map.
+      if (data && typeof data === 'object' && data.projects && typeof data.projects === 'object' && !Array.isArray(data.projects)) {
         store = { version: 1, projects: data.projects }
       }
     } catch {
