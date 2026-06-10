@@ -5197,14 +5197,17 @@ export function handleResultUsage(
 /**
  * Extract the terminal data chunk from a `raw` / `raw_background` message.
  *
- * Behaviour-preserving: both clients previously did
- * `appendTerminalData(msg.data as string)` inline — the verbatim cast is kept
- * here (no string validation) so a malformed payload behaves exactly as it
- * did pre-extraction. Tightening would be a behaviour change beyond the scope
- * of #5454.
+ * Non-string / missing `data` falls back to `''` so the declared return type
+ * is honest. Both clients previously did `appendTerminalData(msg.data as
+ * string)` inline — a typed lie that let `undefined` flow into the
+ * dashboard's `stripAnsi(data)` (which throws on non-strings). The server's
+ * `raw` / `raw_background` payload is always a PTY string, so the fallback is
+ * unreachable from a well-behaved producer; for a malformed one, appending
+ * nothing beats crashing the message handler. Same tightening class as the
+ * other non-string fallbacks in this migration (#5454).
  */
 export function handleRawOutput(msg: Record<string, unknown>): { data: string } {
-  return { data: msg.data as string }
+  return { data: typeof msg.data === 'string' ? msg.data : '' }
 }
 
 // ---------------------------------------------------------------------------

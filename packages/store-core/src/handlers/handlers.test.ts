@@ -8314,10 +8314,14 @@ describe('handleRawOutput', () => {
     expect(handleRawOutput({ data: 'hello\x1b[0m' }).data).toBe('hello\x1b[0m')
   })
 
-  it('preserves the prior inline cast behaviour for missing data (no coercion)', () => {
-    // Both clients previously did `appendTerminalData(msg.data as string)` —
-    // the verbatim cast is the documented contract.
-    expect(handleRawOutput({}).data).toBeUndefined()
+  it('falls back to the empty string for missing or non-string data', () => {
+    // The declared `{ data: string }` type is honest: a malformed payload
+    // appends nothing rather than letting `undefined` flow into the
+    // dashboard's `stripAnsi(data)` (which throws on non-strings). The
+    // server's raw payload is always a PTY string, so this is unreachable
+    // from a well-behaved producer.
+    expect(handleRawOutput({}).data).toBe('')
+    expect(handleRawOutput({ data: 42 }).data).toBe('')
   })
 })
 
