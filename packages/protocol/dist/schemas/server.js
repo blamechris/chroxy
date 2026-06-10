@@ -1040,16 +1040,79 @@ export const RepoMemoryStatusSchema = z.object({
     reason: z.string().nullable(),
 });
 /**
+ * #5501 — one recent repo-relay workflow run, distilled from
+ * `gh run list --workflow=repo-relay.yml --json status,conclusion,event,createdAt,databaseId`.
+ * `databaseId` is GitHub's run id — #5502's rerun action consumes it, so it is
+ * carried verbatim. `conclusion` is null while the run is still in progress.
+ */
+export const RepoRelayRunSchema = z.object({
+    databaseId: z.number().int().nonnegative().finite(),
+    status: z.string().nullable(),
+    conclusion: z.string().nullable(),
+    event: z.string().nullable(),
+    createdAt: z.string().datetime().nullable(),
+});
+/**
+ * #5501 — per-repo repo-relay verdict, mirroring the runner tab's bucket
+ * style:
+ *
+ *   - 'failing'       — the latest CONCLUDED run failed (wins over drift:
+ *     a broken relay is more urgent than a stale pin).
+ *   - 'drifted'       — pinned version < latest release (sha pins resolve via
+ *     their `# vX.Y.Z` comment first).
+ *   - 'ok'            — latest concluded run succeeded and no drift.
+ *   - 'not_installed' — no `.github/workflows/repo-relay.yml` in the checkout.
+ *   - 'unknown'       — installed but unassessable (gh missing / rate-limited /
+ *     no GitHub remote / no concluded runs and no drift signal); the row's
+ *     `reason` explains why.
+ */
+export const RepoRelayVerdictSchema = z.enum(['ok', 'failing', 'drifted', 'not_installed', 'unknown']);
+/**
+ * #5501 — one repo's repo-relay status.
+ *
+ *   - `installed` — answered from the filesystem alone (the workflow file),
+ *     so it survives every gh/network degradation.
+ *   - `pinnedVersion` / `pinnedSha` — parsed from the workflow's
+ *     `uses: blamechris/repo-relay@<ref>` line. A tag pin fills
+ *     `pinnedVersion` only; a sha pin fills `pinnedSha` plus `pinnedVersion`
+ *     when a `# vX.Y.Z` comment resolves it.
+ *   - `driftUnknown` — installed but the pin couldn't be resolved to a
+ *     version (bare sha with no comment, branch pin, unparseable uses line)
+ *     so drift can't be assessed.
+ *   - `latestVersion` — `releases/latest` tag of blamechris/repo-relay,
+ *     fetched ONCE per snapshot (and cached briefly across snapshots).
+ *   - `runs` — most-recent-first; empty when unavailable (see `reason`).
+ *   - `failureStreak` — consecutive failed conclusions from the most recent
+ *     run backwards (in-progress runs are skipped, not streak-breaking).
+ *   - `workflowUrl` — Actions UI deep link, null without a GitHub remote.
+ *   - `reason` — per-repo degradation note (gh missing, rate limit, no
+ *     GitHub remote, …). Null when nothing degraded.
+ */
+export const RepoRelayStatusSchema = z.object({
+    installed: z.boolean(),
+    pinnedVersion: z.string().nullable(),
+    pinnedSha: z.string().nullable(),
+    latestVersion: z.string().nullable(),
+    runs: z.array(RepoRelayRunSchema),
+    failureStreak: z.number().int().nonnegative().finite(),
+    verdict: RepoRelayVerdictSchema,
+    driftUnknown: z.boolean(),
+    workflowUrl: z.string().nullable(),
+    reason: z.string().nullable(),
+});
+/**
  * One surveyed repo in the Integrations snapshot. `repoMemory` is nullable so
- * a future integration can appear without forcing a repo-memory block; a
- * sibling `repoRelay` block lands in the follow-up issue (#5501) as an
- * additive key — consumers must tolerate unknown extra keys per the usual Zod
- * non-strict object semantics.
+ * a future integration can appear without forcing a repo-memory block.
+ * `repoRelay` (#5501) is additive — optional so #5503-era producers/fixtures
+ * stay valid; the current survey always emits it (a repo without the workflow
+ * file gets a quiet `installed: false` block, same posture as unconfigured
+ * repo-memory).
  */
 export const IntegrationRepoSchema = z.object({
     name: z.string(),
     path: z.string(),
     repoMemory: RepoMemoryStatusSchema.nullable(),
+    repoRelay: RepoRelayStatusSchema.nullable().optional(),
 });
 /**
  * Aggregate repo-memory counts across the surveyed repos, carried alongside
@@ -1061,6 +1124,12 @@ export const IntegrationStatusSummarySchema = z.object({
     configured: z.number().int().nonnegative().finite(),
     notConfigured: z.number().int().nonnegative().finite(),
     degraded: z.number().int().nonnegative().finite(),
+    // #5501 (additive — optional so pre-relay snapshots stay valid): repo-relay
+    // tallies for the summary chips. `relayFailing` / `relayDrifted` count the
+    // verdict buckets; `relayInstalled` counts repos with the workflow file.
+    relayInstalled: z.number().int().nonnegative().finite().optional(),
+    relayFailing: z.number().int().nonnegative().finite().optional(),
+    relayDrifted: z.number().int().nonnegative().finite().optional(),
 });
 /**
  * Snapshot-level note about the `repo-memory` CLI binary, probed ONCE per
@@ -1091,6 +1160,10 @@ export const ServerIntegrationStatusSnapshotSchema = z.object({
     summary: IntegrationStatusSummarySchema,
     repos: z.array(IntegrationRepoSchema),
     repoMemoryCli: IntegrationCliStatusSchema.optional(),
+    // #5501: snapshot-level note about the `gh` CLI, probed ONCE per survey —
+    // when `found` is false every repo-relay run/release cell degrades and
+    // `note` explains why (each installed repo's `reason` repeats it).
+    ghCli: IntegrationCliStatusSchema.optional(),
     // Additive degraded-snapshot annotation — same posture as the host/runner
     // snapshots: on a forbidden/in-progress/failed survey the handler returns an
     // otherwise-valid empty snapshot plus this `error`.

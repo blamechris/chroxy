@@ -91,6 +91,10 @@ export type {
   RepoMemoryCache,
   RepoMemoryReport,
   RepoMemoryStatus,
+  // #5501: repo-relay observability block.
+  RepoRelayRun,
+  RepoRelayVerdict,
+  RepoRelayStatus,
   IntegrationRepo,
   IntegrationStatusSummary,
   IntegrationCliStatus,

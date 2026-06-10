@@ -34,7 +34,7 @@ export type { ServerErrorEnvelopeMessage } from './schemas/server.ts';
 export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, ServerCancelActivityAckMessage, } from './schemas/server.ts';
 export type { RepoVerdict, RepoTree, RepoStatus, HostStatusSummary, ServerHostStatusSnapshotMessage, } from './schemas/server.ts';
 export type { RunnerVerdict, RunnerServiceState, RunnerInfo, RepoRunners, RunnerStatusSummary, ServerRunnerStatusSnapshotMessage, } from './schemas/server.ts';
-export type { RepoMemoryCache, RepoMemoryReport, RepoMemoryStatus, IntegrationRepo, IntegrationStatusSummary, IntegrationCliStatus, ServerIntegrationStatusSnapshotMessage, } from './schemas/server.ts';
+export type { RepoMemoryCache, RepoMemoryReport, RepoMemoryStatus, RepoRelayRun, RepoRelayVerdict, RepoRelayStatus, IntegrationRepo, IntegrationStatusSummary, IntegrationCliStatus, ServerIntegrationStatusSnapshotMessage, } from './schemas/server.ts';
 export type { IntegrationActionCounts, ServerIntegrationActionAckMessage, } from './schemas/server.ts';
 export type { HostStatusRequestMessage } from './schemas/client.ts';
 export type { RunnerStatusRequestMessage } from './schemas/client.ts';
