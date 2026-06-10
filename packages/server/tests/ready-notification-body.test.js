@@ -74,6 +74,33 @@ describe('composeReadyNotificationBody — outstanding tasks', () => {
     })
     assert.equal(body, 'Ready for input — still watching: toolu_01')
   })
+
+  it('falls back to the toolUseId when the description is whitespace-only', () => {
+    const body = composeReadyNotificationBody({
+      backgroundTasks: [task({ description: ' \n\t ' })],
+      scheduledWakeup: null,
+    })
+    assert.equal(body, 'Ready for input — still watching: toolu_01')
+  })
+
+  it('collapses newlines and tabs in a multi-line description (Agent prompt fallback)', () => {
+    // TranscriptTaskScanner falls back to `prompt.slice(0, 80)` for Agent
+    // launches with no description — multi-line prompts are routine, and a
+    // raw newline would wrap the one-line push body / Discord Status field.
+    const body = composeReadyNotificationBody({
+      backgroundTasks: [task({ description: 'watch the deploy\n\nand report back\twhen done' })],
+      scheduledWakeup: null,
+    })
+    assert.equal(body, 'Ready for input — still watching: watch the deploy and report back when done')
+  })
+
+  it('strips ANSI escapes and control bytes from the description', () => {
+    const body = composeReadyNotificationBody({
+      backgroundTasks: [task({ description: '\u001b[31mred\u001b[0m alert\u0007 bell' })],
+      scheduledWakeup: null,
+    })
+    assert.equal(body, 'Ready for input — still watching: red alert bell')
+  })
 })
 
 describe('composeReadyNotificationBody — armed wakeup', () => {
@@ -91,6 +118,15 @@ describe('composeReadyNotificationBody — armed wakeup', () => {
     const body = composeReadyNotificationBody({
       backgroundTasks: [],
       scheduledWakeup: { at, reason: '' },
+    })
+    assert.equal(body, 'Ready for input — resumes at 23:59')
+  })
+
+  it('omits the reason segment when the reason is whitespace-only', () => {
+    const at = new Date(2026, 5, 10, 23, 59).getTime()
+    const body = composeReadyNotificationBody({
+      backgroundTasks: [],
+      scheduledWakeup: { at, reason: ' \n ' },
     })
     assert.equal(body, 'Ready for input — resumes at 23:59')
   })
@@ -135,6 +171,19 @@ describe('composeReadyNotificationBody — length clamp', () => {
     })
     assert.ok(body.length <= READY_BODY_MAX_LENGTH)
     assert.ok(body.endsWith('… +1 more'), `suffix survives the clamp (got: ${body.slice(-20)})`)
+  })
+
+  it('never splits a surrogate pair at the truncation point', () => {
+    // Build a description whose clamp budget lands exactly mid-emoji: if the
+    // cut split the pair, the body would carry a lone high surrogate into
+    // the push/Discord JSON payload.
+    const body = composeReadyNotificationBody({
+      backgroundTasks: [task({ description: '🚀'.repeat(200) })],
+      scheduledWakeup: null,
+    })
+    assert.ok(body.length <= READY_BODY_MAX_LENGTH)
+    assert.ok(!/[\uD800-\uDBFF]…/.test(body), 'no lone high surrogate before the ellipsis')
+    assert.ok(body.isWellFormed(), 'body is a well-formed unicode string')
   })
 
   it('truncates an oversized wakeup reason too', () => {

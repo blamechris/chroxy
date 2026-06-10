@@ -31,6 +31,22 @@ export const DEFAULT_READY_BODY = 'Ready for next message'
 // shared clamp is the binding one.
 export const READY_BODY_MAX_LENGTH = 140
 
+// Task descriptions and wakeup reasons come from the session transcript's
+// tool_use input — model-authored text, NOT raw PTY bytes. Newlines are
+// routine (the scanner's Agent fallback is `prompt.slice(0, 80)`, and
+// prompts are usually multi-line); embedded escape/control bytes are
+// implausible but cheap to defend against. Push trays and the Discord
+// Status field render the body as flowed text, so: drop ANSI CSI/ESC
+// sequences outright, turn remaining C0/C1 controls into spaces, then
+// collapse all whitespace to single spaces.
+function sanitizeDetail(text) {
+  return String(text)
+    .replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, '') // ANSI CSI sequences
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ') // remaining C0/C1 controls
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 /**
  * Clamp `detail` so `prefix + detail + suffix` fits READY_BODY_MAX_LENGTH.
  * The suffix (`+N more`) always survives — it carries the "there is more
@@ -39,7 +55,11 @@ export const READY_BODY_MAX_LENGTH = 140
 function clampDetail(prefix, detail, suffix = '') {
   const budget = READY_BODY_MAX_LENGTH - prefix.length - suffix.length
   if (detail.length > budget) {
-    detail = `${detail.slice(0, Math.max(0, budget - 1))}…`
+    let cut = detail.slice(0, Math.max(0, budget - 1))
+    // Never cut through a surrogate pair — a half emoji is an ill-formed
+    // string in the push/Discord JSON payload (renders as U+FFFD at best).
+    if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1)
+    detail = `${cut}…`
   }
   return `${prefix}${detail}${suffix}`
 }
@@ -65,7 +85,12 @@ export function composeReadyNotificationBody(snapshot) {
     for (let i = 1; i < tasks.length; i++) {
       if ((tasks[i]?.startedAt ?? 0) > (newest?.startedAt ?? 0)) newest = tasks[i]
     }
-    const detail = String(newest?.description || newest?.toolUseId || 'background task')
+    // Sanitize each candidate BEFORE the fallback chain so a whitespace-only
+    // description still falls through to the toolUseId.
+    const detail =
+      sanitizeDetail(newest?.description ?? '') ||
+      sanitizeDetail(newest?.toolUseId ?? '') ||
+      'background task'
     const suffix = tasks.length > 1 ? ` +${tasks.length - 1} more` : ''
     return clampDetail('Ready for input — still watching: ', detail, suffix)
   }
@@ -76,7 +101,7 @@ export function composeReadyNotificationBody(snapshot) {
     if (!Number.isFinite(at.getTime())) return DEFAULT_READY_BODY
     // Server-local HH:MM — same formatting as the dashboard's wakeup chip.
     const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
-    const reason = typeof wakeup.reason === 'string' ? wakeup.reason : ''
+    const reason = sanitizeDetail(typeof wakeup.reason === 'string' ? wakeup.reason : '')
     if (!reason) return `Ready for input — resumes at ${hhmm}`
     return clampDetail(`Ready for input — resumes at ${hhmm}: `, reason)
   }
