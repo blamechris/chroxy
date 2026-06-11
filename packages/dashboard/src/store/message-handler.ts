@@ -132,6 +132,8 @@ import {
   splitRtt,
   // #5516 (epic #5514): adaptive client delta-flush interval.
   resolveDeltaFlushMs,
+  // #5556 (epic #5514): shared stateful EWMA RTT smoother.
+  RttSmoother,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -498,10 +500,10 @@ export function clearTerminalWriteBatching(): void {
 let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
 let _lastPingSentAt = 0;
-let _ewmaRtt: number | null = null; // EWMA-smoothed RTT for stable quality display
+// #5556: EWMA-smoothed RTT for stable quality display (shared smoother).
+const _rttSmoother = new RttSmoother();
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
-const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
 
 // #5515 (epic #5514): latency instrumentation. `_deltaServerTs` records the
 // server-stamped serverTs (and local recv time) of the OLDEST un-rendered
@@ -519,7 +521,7 @@ export function stopHeartbeat(): void {
   if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
   if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
   _lastPingSentAt = 0;
-  _ewmaRtt = null; // Reset smoothed RTT on disconnect
+  _rttSmoother.reset(); // Reset smoothed RTT on disconnect
 }
 
 export function startHeartbeat(socket: WebSocket): void {
@@ -545,8 +547,7 @@ function _onPong(serverTs?: number): void {
     const pongRecvAt = Date.now();
     const rttMs = pongRecvAt - _lastPingSentAt;
     // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
-    _ewmaRtt = _ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ewmaRtt;
-    const smoothed = Math.round(_ewmaRtt);
+    const smoothed = Math.round(_rttSmoother.update(rttMs));
     const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
     getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
 
@@ -578,7 +579,7 @@ export function setDeltaFlushIntervalOverride(ms: number | null): void {
   _deltaFlushOverrideMs = ms;
 }
 function currentDeltaFlushMs(): number {
-  return _deltaFlushOverrideMs != null ? _deltaFlushOverrideMs : resolveDeltaFlushMs(_ewmaRtt);
+  return _deltaFlushOverrideMs != null ? _deltaFlushOverrideMs : resolveDeltaFlushMs(_rttSmoother.value);
 }
 
 function flushPendingDeltas(): void {

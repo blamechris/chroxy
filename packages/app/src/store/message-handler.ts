@@ -140,6 +140,8 @@ import {
   splitRtt,
   // #5516 (epic #5514): adaptive client delta-flush interval.
   resolveDeltaFlushMs,
+  // #5556 (epic #5514): shared stateful EWMA RTT smoother.
+  RttSmoother,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
@@ -262,7 +264,8 @@ interface MessageHandlerContext extends EncryptionContext {
   heartbeatInterval: ReturnType<typeof setInterval> | null;
   pongTimeout: ReturnType<typeof setTimeout> | null;
   lastPingSentAt: number;
-  ewmaRtt: number | null;
+  // #5556: EWMA-smoothed RTT (replaces the inlined `ewmaRtt` accumulator).
+  rttSmoother: RttSmoother;
 
   // Delta batching
   pendingDeltas: Map<string, { sessionId: string | null; delta: string }>;
@@ -295,7 +298,7 @@ function createDefaultContext(): MessageHandlerContext {
     heartbeatInterval: null,
     pongTimeout: null,
     lastPingSentAt: 0,
-    ewmaRtt: null,
+    rttSmoother: new RttSmoother(),
     pendingDeltas: new Map<string, { sessionId: string | null; delta: string }>(),
     deltaFlushTimer: null,
     deltaServerTs: new Map<string, { serverTs: number; recvAt: number }>(),
@@ -595,7 +598,6 @@ export function clearTerminalWriteBatching(): void {
 export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
-const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
 // #5515 (epic #5514): throttle the dev latency readout so a streaming turn
 // can't spam the console — one line every few seconds is enough to watch the
 // numbers move when flush intervals are tuned.
@@ -613,14 +615,14 @@ export function setDeltaFlushIntervalOverride(ms: number | null): void {
 function currentDeltaFlushMs(): number {
   return _deltaFlushOverrideMs != null
     ? _deltaFlushOverrideMs
-    : resolveDeltaFlushMs(_ctx.ewmaRtt);
+    : resolveDeltaFlushMs(_ctx.rttSmoother.value);
 }
 
 export function stopHeartbeat(): void {
   if (_ctx.heartbeatInterval) { clearInterval(_ctx.heartbeatInterval); _ctx.heartbeatInterval = null; }
   if (_ctx.pongTimeout) { clearTimeout(_ctx.pongTimeout); _ctx.pongTimeout = null; }
   _ctx.lastPingSentAt = 0;
-  _ctx.ewmaRtt = null; // Reset smoothed RTT on disconnect
+  _ctx.rttSmoother.reset(); // Reset smoothed RTT on disconnect
 }
 
 export function startHeartbeat(socket: WebSocket): void {
@@ -646,8 +648,7 @@ function _onPong(serverTs?: number): void {
     const pongRecvAt = Date.now();
     const rttMs = pongRecvAt - _ctx.lastPingSentAt;
     // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
-    _ctx.ewmaRtt = _ctx.ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ctx.ewmaRtt;
-    const smoothed = Math.round(_ctx.ewmaRtt);
+    const smoothed = Math.round(_ctx.rttSmoother.update(rttMs));
     const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
     useConnectionLifecycleStore.getState().setConnectionQuality(smoothed, quality);
 
