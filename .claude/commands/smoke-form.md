@@ -118,7 +118,7 @@ Result: X pass / Y fail / Z blocked / W skipped / U untested
 - [ ] **<Item title>** — (untested)
 ```
 
-  Use `navigator.clipboard.writeText` with a `document.execCommand('copy')
+  Use `navigator.clipboard.writeText` with a `document.execCommand('copy')`
   fallback (file:// clipboard quirks). Failed items list their notes verbatim —
   this paste goes straight into a bug report or release-gate comment.
 
