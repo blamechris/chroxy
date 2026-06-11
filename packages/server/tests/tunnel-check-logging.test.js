@@ -36,7 +36,9 @@ describe('waitForTunnel logging', () => {
   it('logs HTTP status code for non-ok responses', async () => {
     const logs = []
     mock.method(console, 'log', (msg) => logs.push(msg))
-    mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 502 }))
+    // #5489 — 502/530 now count as routable, so use a genuinely-failing status
+    // (404) to exercise the HTTP-status logging path.
+    mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 404 }))
 
     await assert.rejects(
       () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
@@ -45,7 +47,7 @@ describe('waitForTunnel logging', () => {
 
     const attemptLogs = logs.filter((l) => l.includes('Attempt'))
     assert.equal(attemptLogs.length, 2)
-    assert.ok(attemptLogs[0].includes('HTTP 502'))
+    assert.ok(attemptLogs[0].includes('HTTP 404'))
   })
 
   it('logs success with attempt number on verification pass', async () => {
