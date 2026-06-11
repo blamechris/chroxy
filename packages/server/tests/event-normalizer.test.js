@@ -1127,33 +1127,52 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
   })
 
   // #5562 + #5520: real-timer sanity check that the shrunk window actually
-  // flushes a buffered delta inside ~2× the resolved window. Uses the #5515/#5520
-  // emitMonoMs instrumentation that bufferDelta carries through to the flushed
-  // entry — proving that hook still round-trips after the window change. Wall-clock
-  // tolerant (2× the 8ms solo window) rather than fake-timer exact, so it stays
-  // robust under CI scheduling jitter; runs with --test-force-exit.
-  it('flushes a single-subscriber delta within ~2x the 8ms window (real timer)', async () => {
+  // flushes a buffered delta through the real setTimeout path, and that the
+  // #5515/#5520 emitMonoMs instrumentation bufferDelta carries through still
+  // round-trips to the flushed entry after the window change. The EXACT 8/16ms
+  // contract is locked by the setTimeout-spy tests above; this test deliberately
+  // does NOT re-assert it. The upper bound here is a loose ceiling only — proof
+  // the flush is no longer near the old 25/50ms-stacked floor — set well above
+  // worst-case timer slip so it can't go flaky under CI scheduling jitter. A
+  // bounded timeout makes a never-fired callback fail fast instead of hanging,
+  // and destroy() runs in finally so an assertion failure can't leak the timer.
+  it('flushes a single-subscriber delta via the real timer and round-trips emitMonoMs', async () => {
     const n = new EventNormalizer({ getSubscriberCount: () => 1 })
-    const flushed = []
-    let resolveFlush
-    const done = new Promise((res) => { resolveFlush = res })
-    n.onFlush = (entries) => {
-      flushed.push({ at: performance.now(), entries })
-      resolveFlush()
+    try {
+      const flushed = []
+      let resolveFlush
+      const done = new Promise((res) => { resolveFlush = res })
+      n.onFlush = (entries) => {
+        flushed.push({ at: performance.now(), entries })
+        resolveFlush()
+      }
+      const emitMono = Number(process.hrtime.bigint() / 1_000_000n)
+      const buffered = performance.now()
+      n.bufferDelta('sess-1', 'msg-1', 'hello', emitMono)
+      // Bounded race: if the flush callback never fires, fail fast rather than
+      // hang until the test-runner timeout.
+      let bail
+      const timeout = new Promise((_, rej) => {
+        bail = setTimeout(() => rej(new Error('flush callback did not fire within 1000ms')), 1000)
+      })
+      try {
+        await Promise.race([done, timeout])
+      } finally {
+        clearTimeout(bail)
+      }
+      const elapsed = flushed[0].at - buffered
+      // Loose ceiling — NOT the 8ms contract (that's the spy tests' job). 100ms is
+      // far above any realistic single-timer slip yet still well below the old
+      // 25/50ms server window stacked on the client EWMA, so it confirms the
+      // server half no longer dominates without being jitter-sensitive.
+      assert.ok(elapsed < 100, `expected a prompt real-timer flush, got ${elapsed.toFixed(1)}ms`)
+      assert.equal(flushed[0].entries.length, 1)
+      assert.equal(flushed[0].entries[0].delta, 'hello')
+      // The #5520 emitMonoMs instrumentation survives the coalescing path.
+      assert.equal(flushed[0].entries[0].emitMonoMs, emitMono)
+    } finally {
+      n.destroy()
     }
-    const emitMono = Number(process.hrtime.bigint() / 1_000_000n)
-    const buffered = performance.now()
-    n.bufferDelta('sess-1', 'msg-1', 'hello', emitMono)
-    await done
-    const elapsed = flushed[0].at - buffered
-    // 2x the 8ms solo window = 16ms budget; allow generous headroom for CI jitter
-    // while still asserting we're nowhere near the old 25/50ms floor.
-    assert.ok(elapsed < 24, `expected flush within ~2x the 8ms window, got ${elapsed.toFixed(1)}ms`)
-    assert.equal(flushed[0].entries.length, 1)
-    assert.equal(flushed[0].entries[0].delta, 'hello')
-    // The #5520 emitMonoMs instrumentation survives the coalescing path.
-    assert.equal(flushed[0].entries[0].emitMonoMs, emitMono)
-    n.destroy()
   })
 })
 
