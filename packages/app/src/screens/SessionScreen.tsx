@@ -56,10 +56,11 @@ import { Icon } from '../components/Icon';
 import { COLORS } from '../constants/colors';
 import { useLayout } from '../hooks/useLayout';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
+import { useDictationComposer } from '../hooks/useDictationComposer';
 import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
-import { shouldCollapsePaste, formatPasteMarker, expandPasteMarkers, detectPasteFromDiff } from '@chroxy/store-core';
+import { formatPasteMarker, expandPasteMarkers } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
 
 
@@ -369,11 +370,6 @@ export function SessionScreen() {
   const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition({
     mode: inputSettings.voiceInputMode,
   });
-  // Anchor index where the current dictation session began inserting. Seeded
-  // to 0 and reset in handleMicPress (and on manual edits during dictation)
-  // from the live draft length read off the InputBar ref (#5556).
-  const dictationStartRef = useRef(0);
-  const usedVoiceRef = useRef(false);
 
   // Surface speech recognition errors to the user
   useEffect(() => {
@@ -662,8 +658,7 @@ export function SessionScreen() {
 
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
     // CLI sessions: the server handles the full message directly (no CR needed).
-    const isVoice = usedVoiceRef.current;
-    usedVoiceRef.current = false;
+    const isVoice = consumeUsedVoice();
     const result = sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice, clientMessageId });
     if (result === 'queued') {
       const { addMessage } = useConnectionStore.getState();
@@ -825,9 +820,6 @@ export function SessionScreen() {
     inputRef.current?.focus();
   }, []);
 
-  // Track whether the latest draft change came from dictation (vs manual edit)
-  const isDictationUpdateRef = useRef(false);
-
   // Pasted-text-block storage for the composer (#3797). React Native
   // `TextInput` has no native paste event, so we detect large pastes by
   // diffing the previous and next text on each `onChangeText` — anything
@@ -839,37 +831,38 @@ export function SessionScreen() {
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null);
 
   // #5556 — InputBar owns the draft and has already applied the user's
-  // keystroke before calling this; we only react to it. `prev` is supplied by
-  // InputBar (the value before this change) so paste-diff no longer needs the
-  // draft in SessionScreen's render-scope state. On a collapse we push the
-  // marker-substituted value BACK into InputBar via the imperative setValue.
-  const handleChangeText = useCallback((text: string, prev: string) => {
-    if (!isDictationUpdateRef.current && isRecognizing) {
-      // User manually edited text during dictation — update anchor point
-      dictationStartRef.current = text.length;
-    }
-    isDictationUpdateRef.current = false;
+  // keystroke before calling this; we only react to the diff. On a paste
+  // collapse we assign the id, format the marker, record the original content,
+  // and push the marker-substituted value BACK into InputBar via setValue.
+  // The previous implementation short-circuited on a char-only fast-path which
+  // missed multi-line pastes that fell below 1500 chars but crossed the 20-line
+  // threshold (#3798 review, #3799); `detectPasteFromDiff` on every grow (inside
+  // the hook) keeps both clients honouring the same criteria.
+  const handlePasteCollapsed = useCallback((inserted: string, prefix: string, suffix: string) => {
+    const nextId = pastedTextNextIdRef.current + 1;
+    pastedTextNextIdRef.current = nextId;
+    const marker = formatPasteMarker(nextId, inserted);
+    setPastedTextBlocks(prevBlocks => [...prevBlocks, { id: nextId, content: inserted }]);
+    inputRef.current?.setValue(prefix + marker + suffix);
+  }, []);
 
-    // Paste detection — RN `TextInput` has no native paste event, so we
-    // detect by diffing prev→next on each `onChangeText` and feeding the
-    // inserted span through the shared `shouldCollapsePaste` predicate
-    // (covers both the char and the line thresholds). The previous
-    // implementation short-circuited on a char-only fast-path which
-    // missed multi-line pastes that fell below 1500 chars but crossed
-    // the 20-line threshold (#3798 review, #3799). Running
-    // `detectPasteFromDiff` on every grow keeps both clients honouring
-    // the same criteria.
-    if (text.length > prev.length) {
-      const diff = detectPasteFromDiff(prev, text);
-      if (diff && shouldCollapsePaste(diff.inserted)) {
-        const nextId = pastedTextNextIdRef.current + 1;
-        pastedTextNextIdRef.current = nextId;
-        const marker = formatPasteMarker(nextId, diff.inserted);
-        setPastedTextBlocks(prevBlocks => [...prevBlocks, { id: nextId, content: diff.inserted }]);
-        inputRef.current?.setValue(diff.prefix + marker + diff.suffix);
-      }
-    }
-  }, [isRecognizing]);
+  // #5567 — dictation + composer-change bookkeeping (the three voice refs, the
+  // change/mic handlers, and the transcript-merge effect) lives in a dedicated
+  // hook so the `isDictationUpdateRef` teardown contract is explicit. The hook
+  // clears that flag on mic-stop, speech error, the `isRecognizing → false`
+  // transition, and unmount — closing the wedge where a stale flag (set by a
+  // transcript write whose silent `setValue` never echoes through
+  // `onChangeText` since #5556) suppressed anchoring/paste-detection on the next
+  // genuine keystroke.
+  const { handleChangeText, handleMicPress, consumeUsedVoice } = useDictationComposer({
+    inputRef,
+    isRecognizing,
+    transcript,
+    speechError,
+    startListening,
+    stopListening,
+    onPasteCollapsed: handlePasteCollapsed,
+  });
 
   const handleRemovePastedText = useCallback((id: number) => {
     setPastedTextBlocks(prev => prev.filter(b => b.id !== id));
@@ -885,29 +878,6 @@ export function SessionScreen() {
   const handleInspectPastedText = useCallback((id: number) => {
     setInspectedPastedTextId(id);
   }, []);
-
-  // Voice input: toggle start/stop and merge transcript into input text.
-  // #5556 — anchor the dictation start at the live draft length read off the
-  // InputBar ref, and merge the transcript back through the ref.
-  const handleMicPress = useCallback(() => {
-    if (isRecognizing) {
-      stopListening();
-    } else {
-      dictationStartRef.current = (inputRef.current?.getValue() ?? '').length;
-      startListening();
-    }
-  }, [isRecognizing, startListening, stopListening]);
-
-  useEffect(() => {
-    if (isRecognizing && transcript) {
-      const current = inputRef.current?.getValue() ?? '';
-      const prefix = current.slice(0, dictationStartRef.current);
-      const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
-      isDictationUpdateRef.current = true;
-      usedVoiceRef.current = true;
-      inputRef.current?.setValue(prefix + separator + transcript);
-    }
-  }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
 
   // Check if Enter key should send based on current mode and settings
   const enterToSend = viewMode === 'terminal'
