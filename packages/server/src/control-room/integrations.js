@@ -338,6 +338,107 @@ export async function runRepoMemoryIndex(repoPath, opts = {}) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// #5502 — repo-relay Re-run action.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * #5502: timeout for `gh run rerun` — a single API mutation, so it gets a
+ * 30s bound (longer than the 20s survey probes to ride out a slow API,
+ * nowhere near the 120s index budget).
+ */
+export const RERUN_TIMEOUT_MS = 30000
+/** Shared exec options for the rerun mutation. */
+const RERUN_EXEC_OPTS = { timeout: RERUN_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
+
+/**
+ * #5502: build an Error carrying a stable machine `reason` alongside the
+ * human message. The WS handler echoes `reason` on the
+ * INTEGRATION_ACTION_FAILED session_error so the dashboard can branch
+ * without parsing message text.
+ */
+function rerunFailure(reason, message) {
+  const err = new Error(message)
+  err.reason = reason
+  return err
+}
+
+/**
+ * #5502: re-run a FAILED repo-relay workflow run via
+ * `gh run rerun <databaseId> -R <owner>/<repo>`.
+ *
+ * SECURITY — the client-supplied `runId` is a LOOKUP KEY, never a trusted
+ * exec target: before any mutation this re-fetches the same five-run window
+ * the observability snapshot (#5501) surfaced and requires the id to (a) be
+ * present in that fresh list and (b) have concluded `failure`. A stale,
+ * fabricated, or non-failed id is rejected with a legible reason — `gh run
+ * rerun` never sees an id the server didn't just observe. The owner/repo
+ * target likewise derives server-side from the repo's git remote (the same
+ * parseGithubOwnerRepo derivation the survey uses), never from the client.
+ *
+ * Throws with a machine `reason` (`gh-missing` / `no-github-remote` /
+ * `run-list-failed` / `unknown-run` / `run-not-failed` / `rerun-failed`) —
+ * the WS handler turns that into an INTEGRATION_ACTION_FAILED session_error.
+ *
+ * @param {string} repoPath - canonical repo root (the handler validates
+ *   membership in the surveyed repo set BEFORE calling this).
+ * @param {number} runId - the GitHub Actions run databaseId to re-run.
+ * @param {object} [opts]
+ * @param {Function} [opts._execFile] - promisified execFile seam.
+ * @returns {Promise<{ runId: number }>}
+ */
+export async function runRepoRelayRerun(repoPath, runId, opts = {}) {
+  const { _execFile = execFileAsync } = opts
+
+  const ghPath = await probeBinOnPath(_execFile, 'gh')
+  if (!ghPath) throw rerunFailure('gh-missing', GH_MISSING_NOTE)
+
+  // Server-side owner/repo derivation — same source as the survey (#5501).
+  let target = null
+  try {
+    const { stdout } = await _execFile('git', ['remote', 'get-url', 'origin'], { ...EXEC_OPTS, cwd: repoPath })
+    target = parseGithubOwnerRepo(typeof stdout === 'string' ? stdout : '')
+  } catch {
+    target = null
+  }
+  if (!target) {
+    throw rerunFailure('no-github-remote', `cannot re-run: ${NO_GITHUB_REMOTE_REASON} for ${repoPath}`)
+  }
+  const slug = `${target.owner}/${target.repo}`
+
+  // runId re-validation: fresh fetch of the window the snapshot showed.
+  let listStdout
+  try {
+    ;({ stdout: listStdout } = await _execFile(ghPath, [
+      'run', 'list', `--workflow=${RELAY_WORKFLOW_FILE}`, '-R', slug,
+      '--limit', '5', '--json', 'databaseId,conclusion,status',
+    ], EXEC_OPTS))
+  } catch (err) {
+    throw rerunFailure('run-list-failed', execFailureReason(err, 'gh run list'))
+  }
+  const runs = parseRelayRuns(typeof listStdout === 'string' ? listStdout : '')
+  if (runs === null) {
+    throw rerunFailure('run-list-failed', 'gh run list produced unparseable output')
+  }
+  const match = runs.find(r => r.databaseId === runId)
+  if (!match) {
+    throw rerunFailure('unknown-run',
+      `runId ${runId} is not among the last 5 repo-relay runs for ${slug} — refresh the survey and retry`)
+  }
+  if (match.conclusion !== 'failure') {
+    const state = match.conclusion ?? match.status ?? 'not concluded'
+    throw rerunFailure('run-not-failed',
+      `run ${runId} did not fail (${state}) — only failed runs can be re-run`)
+  }
+
+  try {
+    await _execFile(ghPath, ['run', 'rerun', String(runId), '-R', slug], RERUN_EXEC_OPTS)
+  } catch (err) {
+    throw rerunFailure('rerun-failed', execFailureReason(err, 'gh run rerun'))
+  }
+  return { runId }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // #5501 — repo-relay observability helpers.
 // ───────────────────────────────────────────────────────────────────────────
 

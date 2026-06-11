@@ -492,6 +492,19 @@ export interface ReindexResult {
   at: number;
 }
 
+/**
+ * #5502 — outcome of the last repo-relay Re-run action for one repo, kept
+ * for inline display in its Integrations row. A successful ack records
+ * `error: null` (the row shows "re-run requested" and invites a refresh —
+ * the new run appears as in_progress on the next survey); an
+ * INTEGRATION_ACTION_FAILED session_error records the message. `at` is the
+ * local receipt time (epoch ms).
+ */
+export interface RelayRerunResult {
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -623,6 +636,19 @@ export interface ConnectionState {
    * reindexed again.
    */
   reindexResults: Record<string, ReindexResult>;
+  /**
+   * #5502 — repo paths with an in-flight `integration_action` relay re-run:
+   * set when sendRepoRelayRerun is called, cleared on the
+   * `integration_action_ack` / INTEGRATION_ACTION_FAILED session_error. A
+   * separate bucket from `reindexingRepoPaths` so a rerun outcome can never
+   * clear (or be cleared by) a reindex on the same repo.
+   */
+  relayRerunningRepoPaths: Set<string>;
+  /**
+   * #5502 — last relay re-run outcome per repo path, for inline display in
+   * the Integrations row. Replaced when the repo is re-run again.
+   */
+  relayRerunResults: Record<string, RelayRerunResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1115,6 +1141,16 @@ export interface ConnectionState {
   // when the message actually went on the wire — an offline send returns
   // false without queuing, so the row can't strand "Reindexing…".
   sendRepoMemoryReindex: (repoPath: string) => boolean;
+
+  // #5502 (epic #5498): re-run a FAILED repo-relay workflow run for one
+  // surveyed repo. Dispatches an `integration_action` (action:
+  // repo_relay_rerun) carrying the runId the observability snapshot surfaced
+  // — the server re-validates it against a fresh `gh run list` before any
+  // exec. Same wire-or-nothing contract as sendRepoMemoryReindex: marks the
+  // repo in `relayRerunningRepoPaths` (and drops its stale
+  // `relayRerunResults` entry) ONLY when the message actually went on the
+  // wire; an offline send (or a non-integer runId) returns false.
+  sendRepoRelayRerun: (repoPath: string, runId: number) => boolean;
 
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the

@@ -2687,5 +2687,74 @@ describe('@chroxy/protocol schemas', () => {
         assert.ok(schemas.IntegrationActionCountsSchema)
       })
     })
+
+    describe('repo-relay rerun action (#5502)', () => {
+      it('IntegrationActionSchema accepts repo_relay_rerun with a runId + the client union takes it', async () => {
+        const { IntegrationActionSchema, ClientMessageSchema } = await import('../src/schemas/client.ts')
+        assert.ok(IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_relay_rerun',
+          repoPath: '/p/chroxy',
+          runId: 16523339621,
+          requestId: 'rr-1',
+        }).success)
+        const u = ClientMessageSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_relay_rerun',
+          repoPath: '/p/chroxy',
+          runId: 16523339621,
+        })
+        assert.ok(u.success, JSON.stringify(u.error?.issues))
+        assert.equal(u.data.type, 'integration_action')
+      })
+
+      it('runId stays optional at the schema layer (shared envelope — required-for-rerun is server-side)', async () => {
+        const { IntegrationActionSchema } = await import('../src/schemas/client.ts')
+        assert.ok(IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_relay_rerun',
+          repoPath: '/p/chroxy',
+        }).success, 'absence is a server-side rejection, not a wire-schema one')
+        assert.ok(IntegrationActionSchema.safeParse({
+          type: 'integration_action',
+          action: 'repo_memory_reindex',
+          repoPath: '/p/chroxy',
+        }).success, 'reindex keeps working without a runId')
+      })
+
+      it('rejects a negative / non-integer / non-numeric runId', async () => {
+        const { IntegrationActionSchema } = await import('../src/schemas/client.ts')
+        const base = { type: 'integration_action', action: 'repo_relay_rerun', repoPath: '/p/chroxy' }
+        assert.ok(!IntegrationActionSchema.safeParse({ ...base, runId: -1 }).success)
+        assert.ok(!IntegrationActionSchema.safeParse({ ...base, runId: 1.5 }).success)
+        assert.ok(!IntegrationActionSchema.safeParse({ ...base, runId: '9001' }).success)
+        assert.ok(!IntegrationActionSchema.safeParse({ ...base, runId: Infinity }).success)
+      })
+
+      it('ServerIntegrationActionAckSchema round-trips a rerun ack (runId echoed, counts null)', async () => {
+        const { ServerIntegrationActionAckSchema } = await import('../src/schemas/server.ts')
+        const result = ServerIntegrationActionAckSchema.safeParse({
+          type: 'integration_action_ack',
+          action: 'repo_relay_rerun',
+          repoPath: '/p/chroxy',
+          requestId: 'rr-1',
+          runId: 16523339621,
+          counts: null,
+        })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.runId, 16523339621)
+        assert.equal(result.data.counts, null)
+      })
+
+      it('a reindex ack without runId still validates (runId is additive)', async () => {
+        const { ServerIntegrationActionAckSchema } = await import('../src/schemas/server.ts')
+        assert.ok(ServerIntegrationActionAckSchema.safeParse({
+          type: 'integration_action_ack',
+          action: 'repo_memory_reindex',
+          repoPath: '/p/chroxy',
+          counts: null,
+        }).success)
+      })
+    })
   })
 })
