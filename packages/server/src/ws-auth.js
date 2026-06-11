@@ -379,7 +379,7 @@ export function handlePairRequestMessage(ctx, ws, msg) {
   if (msg.type !== 'pair_request') return false
 
   if (!pairingManager) {
-    send(ws, { type: 'pair_result', requestId: msg?.requestId ?? '', ok: false, reason: 'pairing_not_enabled' })
+    send(ws, { type: 'pair_result', requestId: typeof msg?.requestId === 'string' ? msg.requestId : '', ok: false, reason: 'pairing_not_enabled' })
     ws.close()
     return true
   }
@@ -430,7 +430,9 @@ export function handlePairRequestMessage(ctx, ws, msg) {
     expiresAt: result.expiresAt,
   })
 
-  log.info(`pair_request queued from ${source} (requestId ${data.requestId})`)
+  // requestId is pre-auth attacker-controlled (the schema permits newlines /
+  // control chars); JSON.stringify keeps it a single well-formed log record.
+  log.info(`pair_request queued from ${source} (requestId ${JSON.stringify(data.requestId)})`)
   return true
 }
 

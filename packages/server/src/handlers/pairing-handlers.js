@@ -62,7 +62,9 @@ async function handlePairApprove(ws, client, msg, ctx) {
   ctx.resolvePairRequester(requestId, { ok: true, token: result.token })
   // Retract the banner everywhere else.
   ctx.broadcastPairResolved(requestId, 'approved')
-  log.info(`pair_request ${requestId} approved by client ${client.id}`)
+  // requestId originated pre-auth (attacker-controlled); JSON.stringify keeps
+  // the log a single well-formed record (no newline/control-char injection).
+  log.info(`pair_request ${JSON.stringify(requestId)} approved by client ${client.id}`)
 }
 
 async function handlePairDeny(ws, client, msg, ctx) {
@@ -79,7 +81,8 @@ async function handlePairDeny(ws, client, msg, ctx) {
   // the banner on every host surface.
   ctx.resolvePairRequester(requestId, { ok: false, reason: 'denied' })
   ctx.broadcastPairResolved(requestId, 'denied')
-  log.info(`pair_request ${requestId} denied by client ${client.id}`)
+  // See handlePairApprove: requestId is pre-auth attacker-controlled.
+  log.info(`pair_request ${JSON.stringify(requestId)} denied by client ${client.id}`)
 }
 
 export const pairingHandlers = {

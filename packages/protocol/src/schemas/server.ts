@@ -132,8 +132,10 @@ export const ServerPairFailSchema = z.object({
 export const ServerPairRequestPendingSchema = z.object({
   type: z.literal('pair_request_pending'),
   requestId: z.string(),
-  // 6-digit human-comparable verification code (string to preserve leading zeros).
-  verifyCode: z.string(),
+  // 6-digit human-comparable verification code (string to preserve leading
+  // zeros). Constrained to exactly 6 digits so a server-side regression to a
+  // different alphabet/length is caught at the validation boundary.
+  verifyCode: z.string().regex(/^\d{6}$/),
 })
 
 // Fanned out to HOST-LEVEL (unbound) approval surfaces. deviceName is
@@ -142,7 +144,8 @@ export const ServerPairPendingSchema = z.object({
   type: z.literal('pair_pending'),
   requestId: z.string(),
   deviceName: z.string().max(64),
-  verifyCode: z.string(),
+  // Exactly 6 digits — see ServerPairRequestPendingSchema.
+  verifyCode: z.string().regex(/^\d{6}$/),
   // epoch ms when this request expires (lets the surface render a countdown
   // and drop the entry on TTL without a separate message).
   expiresAt: z.number().int().nonnegative().finite(),

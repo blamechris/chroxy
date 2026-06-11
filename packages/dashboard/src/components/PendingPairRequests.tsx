@@ -31,7 +31,9 @@ export function PendingPairRequests({ requests, onApprove, onDeny }: PendingPair
     <div
       className="pair-requests"
       data-testid="pair-requests"
-      role="alertdialog"
+      // role="log" (not "alertdialog") — this is a non-modal stacked banner
+      // with no focus management/containment, matching NotificationBanners.
+      role="log"
       aria-label="Pending device pairing requests"
     >
       {requests.map((r) => (
