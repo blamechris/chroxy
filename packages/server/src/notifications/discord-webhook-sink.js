@@ -462,15 +462,51 @@ export class DiscordWebhookSink extends NotificationSink {
       }
 
       // #5439 GAP C — subagent/idle interplay (port of claude-notify.sh
-      // :528-539 and :383-384). While the user is being waited on (idle /
-      // permission embed) with subagents still running, routine activity
-      // must NOT flip the embed back to 🟢 online: keep the waiting state
-      // and text, refreshing only the live fields (Subagents count, footer).
-      // And when the LAST subagent finishes while the embed sits idle,
-      // re-ping 🦀 "Ready for input" (the bash idle_busy → idle repost on
-      // count→0). Permission embeds with count→0 fall through to online —
-      // the row-20 intentional diff (approval cleared by the next activity).
-      if (state === 'online' && prev?.messageId && (prev.state === 'idle' || prev.state === 'permission')) {
+      // :528-539 and :383-384), rescoped by #5541 turn edges.
+      //
+      // The bash rule held the idle/permission embed while subagents ran on
+      // the assumption "idle + subagents = the user is still being waited on".
+      // That assumption is only correct BETWEEN turns: while a turn is in
+      // flight (UserPromptSubmit seen, no Stop yet) the MAIN agent is busy,
+      // and SubagentStart usually means it's actively working — so holding
+      // idle is wrong and the count→0 re-ping ("Ready for input") would
+      // falsely interrupt a turn the agent is still synthesizing.
+      //
+      // `turnInFlight` (server-side TurnTracker, #5541) is the per-project
+      // gate. It defaults to false — a missing flag (old pipeline, or the
+      // daemon restarting and losing its in-memory turn state) keeps today's
+      // GAP C behavior, which is the safe fallback.
+      //
+      //   turn in flight → online-mapped events flip idle→online normally;
+      //                    when subagents > 0 the Status line reads
+      //                    "Working — N subagents" (or the lone subagent's
+      //                    agentType when count is 1). No count→0 re-ping.
+      //   no turn        → the original hold-idle / count→0-reping behavior:
+      //                    keep the waiting state and text, refresh only the
+      //                    live fields; re-ping 🦀 "Ready for input" when the
+      //                    LAST subagent finishes while idle. Permission +
+      //                    count→0 falls through to online (row-20 diff).
+      //   The turnInFlight rescope applies ONLY to the `idle` hold. A
+      //   `permission` embed is an approval request the user must act on, and
+      //   permission prompts fire MID-turn (an agent hits a tool-approval gate
+      //   while working) — so turnInFlight is true with subagents running. If
+      //   the flip-to-online branch fired here it would hide the approval. The
+      //   `permission` hold therefore keeps its original pre-#5541 behavior
+      //   UNCONDITIONALLY: while subagents > 0 the permission state/text is
+      //   held (live fields refreshed); count→0 falls through to online (the
+      //   intentional row-20 "approval cleared by next activity" diff).
+      const turnInFlight = data.turnInFlight === true
+      if (state === 'online' && turnInFlight && entry.subagents > 0 && prev?.state !== 'permission') {
+        // Mid-turn with live subagents (and NOT a permission prompt): surface
+        // the work in the online embed (Status line) instead of holding idle.
+        // (Plain online with no subagents falls through to the routine path
+        // below, flipping to "Session Online".)
+        entry.body = this._workingDetail(entry.subagents, data.agentType)
+      } else if (
+        state === 'online' &&
+        prev?.messageId &&
+        ((prev.state === 'idle' && !turnInFlight) || prev.state === 'permission')
+      ) {
         const allDone = entry.subagents === 0 && Number.isFinite(prev.subagents) && prev.subagents > 0
         if (entry.subagents > 0 || (allDone && prev.state === 'idle')) {
           entry.state = prev.state
@@ -684,6 +720,19 @@ export class DiscordWebhookSink extends NotificationSink {
     if (state === 'offline') return DEFAULT_OFFLINE_COLOR
     const override = this._colors[project]
     return isValidColor(override) ? override : this._defaultColor
+  }
+
+  /**
+   * #5541: the "Working — …" Status line shown on the online embed while a
+   * turn is in flight with live subagents. Names the single subagent's
+   * agentType when count is 1 and one is available; otherwise a count
+   * ("Working — 2 subagents", singular for 1).
+   */
+  _workingDetail(subagents, agentType) {
+    if (subagents === 1 && typeof agentType === 'string' && agentType.length > 0) {
+      return `Working — ${agentType}`
+    }
+    return `Working — ${subagents} subagent${subagents === 1 ? '' : 's'}`
   }
 
   _buildPayload(project, entry) {

@@ -35,6 +35,7 @@ import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { SubagentCounter } from './subagent-counter.js'
+import { TurnTracker } from './turn-tracker.js'
 import { IngestEventSchema } from '@chroxy/protocol'
 
 const log = createLogger('ingest')
@@ -86,6 +87,16 @@ export const INGEST_CATEGORY_FOR_TYPE = {
   subagent_stop: { category: 'session_activity', title: 'Subagent finished', body: 'A subagent completed' },
   notification: { category: 'activity_waiting', title: 'Input needed', body: 'Claude is waiting' },
   post_tool_use: { category: 'session_activity', title: 'Tool activity', body: 'Tool use completed' },
+  // #5541 turn edges. user_prompt_submit is the authoritative turn START:
+  // session_activity (online embed) so the embed flips off "Ready for input"
+  // immediately, and it sets turn-in-flight for the (source, sessionId) so
+  // the sink's GAP C idle-hold no longer applies. stop is the authoritative
+  // turn END: activity_update (idle embed, 🦀 "Ready for input") — Stop fires
+  // immediately, where Claude Code's idle Notification only fires after ~60s,
+  // and it clears turn-in-flight. The existing idle→idle dedup in the sink
+  // absorbs the later idle Notification.
+  user_prompt_submit: { category: 'session_activity', title: 'Turn started', body: 'User submitted a prompt' },
+  stop: { category: 'activity_update', title: 'Ready for input', body: 'Claude is waiting for input' },
 }
 
 /**
@@ -387,6 +398,21 @@ export function handleEventIngest(server, req, res) {
           ? counted
           : server._subagentCounter.getCount(event.source, event.sessionId))
 
+      // #5541: turn-in-flight tracking, wired exactly like the subagent
+      // counter above. user_prompt_submit sets it, stop/session_end clear it;
+      // the per-project aggregate (anyTurnInFlight) rides every event as
+      // `data.turnInFlight` so the Discord sink can rescope its GAP C
+      // idle-hold (the embed must stay online while the main agent is busy,
+      // even when its subagents are still running). A daemon restart empties
+      // this in-memory map, so the flag defaults to false — today's behavior.
+      if (!server._turnTracker) {
+        server._turnTracker = new TurnTracker()
+      }
+      server._turnTracker.record(event.type, event.source, event.sessionId, project)
+      const turnInFlight = project
+        ? server._turnTracker.anyTurnInFlight(project)
+        : (event.sessionId ? server._turnTracker.isInFlight(event.source, event.sessionId) : false)
+
       const title = typeof data.title === 'string' && data.title.length > 0 ? data.title : mapping.title
       let notifyBody = typeof data.message === 'string' && data.message.length > 0 ? data.message : mapping.body
       if (event.sessionId) {
@@ -410,6 +436,9 @@ export function handleEventIngest(server, req, res) {
           // `subagents` is the key the Discord sink already renders
           // (discord-webhook-sink.js `data.subagents` → embed field).
           ...(event.sessionId ? { subagents: activeSubagents } : {}),
+          // #5541: per-project turn-in-flight flag — the Discord sink reads
+          // `data.turnInFlight` to decide whether GAP C's idle-hold applies.
+          turnInFlight,
           ts: event.ts,
         })
       ).then((ok) => {
