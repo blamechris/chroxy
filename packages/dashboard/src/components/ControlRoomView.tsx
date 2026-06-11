@@ -13,6 +13,29 @@
  *
  * App.tsx renders this in place of the old `ControlRoomSection` and forwards the
  * `onInvestigate` action through to the repo table unchanged.
+ *
+ * #5557 — tab registry. Adding a tab used to cost ~7 coordinated edits (a
+ * `ControlRoomTab` union member, a `SURVEY_TABS` entry, a `VALID_TABS` entry, a
+ * `TABS` render-list entry, a store status/loading pair, a copy-paste
+ * `requestXStatus` store method, and the WS handler wiring) with nothing tying
+ * them together — a `VALID_TABS`/`TABS` drift ships a tab you can deep-link to
+ * but not render. They now all DERIVE from the single `CONTROL_ROOM_TABS`
+ * descriptor array below: the `ControlRoomTab` union, the valid-tab set, the
+ * survey-tab set, the rendered tab strip, and the auto-fetch effect's
+ * snapshot/loading/request lookups. A `registry-derivation.test` asserts the
+ * derived sets stay consistent so the drift class can't reappear.
+ *
+ * Design choice (documented in PR #5557): the store keeps its existing,
+ * heavily-tested per-tab triples (`hostStatus`/`hostStatusLoading`/
+ * `requestHostStatus`, etc.) and the on-the-wire WS message types
+ * (`host_status_request` …) are untouched — this is a CLIENT-SIDE refactor. The
+ * descriptor MAPS each surveyed tab to those existing store keys (`snapshotKey`,
+ * `loadingKey`, `requestKey`) so the generic effect drives them through a single
+ * keyed lookup instead of a hand-maintained `tab === '…' ? … : …` ladder. That
+ * kills the view-side edits (union/sets/strip/effect) outright and removes the
+ * need for any new copy-paste request method when a future surveyed tab is
+ * added — the smallest refactor that eliminates the per-tab edit cost without
+ * churning the tested store internals or the protocol.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
@@ -20,20 +43,118 @@ import { RunnerStatusSection } from './RunnerStatusSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SettingsContent } from './SettingsPanel'
 import { useConnectionStore } from '../store/connection'
-
-// #5544: the Settings tab converges the scattered preference surfaces
-// (notification categories, appearance, session defaults, BYOK, Tauri
-// desktop options) into the Control Room. It embeds `SettingsContent` — the
-// same body the legacy slide-out modal renders — so there's a single home and
-// no duplicated controls.
-export type ControlRoomTab = 'repos' | 'runners' | 'integrations' | 'settings'
+import type { ConnectionState } from '../store/types'
 
 /**
- * #5544: the survey-backed tabs whose auto-fetch effect (#5543/#5546) shells
- * out to git/gh. The Settings tab is purely client/server-config driven and
- * must NOT trip the snapshot fetch, so the effect early-returns for it.
+ * #5557 — the keys of the store fields a surveyed tab drives. Each surveyed
+ * descriptor names exactly these three (the store keeps its tested per-tab
+ * triples — see the file header). Constrained to the matching store shape so a
+ * typo (or a renamed store field) fails `tsc` at the descriptor rather than
+ * silently no-op'ing the auto-fetch.
  */
-const SURVEY_TABS: ReadonlySet<ControlRoomTab> = new Set<ControlRoomTab>(['repos', 'runners', 'integrations'])
+type SnapshotKey = {
+  [K in keyof ConnectionState]: ConnectionState[K] extends { generatedAt?: string } | null ? K : never
+}[keyof ConnectionState]
+type LoadingKey = {
+  [K in keyof ConnectionState]: ConnectionState[K] extends boolean ? K : never
+}[keyof ConnectionState]
+type RequestKey = {
+  [K in keyof ConnectionState]: ConnectionState[K] extends () => boolean ? K : never
+}[keyof ConnectionState]
+
+/**
+ * #5557 — one descriptor per Control Room tab. The single source of truth from
+ * which the union, the sets, the strip, and the auto-fetch lookups all derive.
+ *
+ * - `survey: true` tabs auto-fetch on activation (#5543/#5546) and MUST supply
+ *   `requestType` (the WS message put on the wire), `snapshotKey`/`loadingKey`/
+ *   `requestKey` (the existing store fields the effect reads/calls). `tsc`
+ *   enforces the discriminant: a `survey: false` tab may not carry these, and a
+ *   `survey: true` tab may not omit them.
+ * - `survey: false` tabs (the #5544 Settings tab) are static (server/client
+ *   config only) and the effect early-returns for them — they never fetch.
+ */
+type SurveyTabDescriptor = {
+  readonly key: string
+  readonly label: string
+  readonly survey: true
+  /** The WS message type the request method puts on the wire (kept as-is). */
+  readonly requestType: string
+  /** Store field holding this tab's latest snapshot (staleness is judged here). */
+  readonly snapshotKey: SnapshotKey
+  /** Store boolean flipped while a request is in flight (the in-flight guard). */
+  readonly loadingKey: LoadingKey
+  /** Store action that dispatches the survey request. */
+  readonly requestKey: RequestKey
+}
+type StaticTabDescriptor = {
+  readonly key: string
+  readonly label: string
+  readonly survey: false
+}
+type ControlRoomTabDescriptor = SurveyTabDescriptor | StaticTabDescriptor
+
+export const CONTROL_ROOM_TABS = [
+  {
+    key: 'repos',
+    label: 'Project status',
+    survey: true,
+    requestType: 'host_status_request',
+    snapshotKey: 'hostStatus',
+    loadingKey: 'hostStatusLoading',
+    requestKey: 'requestHostStatus',
+  },
+  {
+    key: 'runners',
+    label: 'Self-hosted runners',
+    survey: true,
+    requestType: 'runner_status_request',
+    snapshotKey: 'runnerStatus',
+    loadingKey: 'runnerStatusLoading',
+    requestKey: 'requestRunnerStatus',
+  },
+  {
+    key: 'integrations',
+    label: 'Integrations',
+    survey: true,
+    requestType: 'integration_status_request',
+    snapshotKey: 'integrationStatus',
+    loadingKey: 'integrationStatusLoading',
+    requestKey: 'requestIntegrationStatus',
+  },
+  // #5544: the Settings tab converges the scattered preference surfaces
+  // (notification categories, appearance, session defaults, BYOK, Tauri desktop
+  // options) into the Control Room. It embeds `SettingsContent` — the same body
+  // the legacy slide-out modal renders — so there's a single home and no
+  // duplicated controls. It is `survey: false`: purely client/server-config
+  // driven, so the auto-fetch effect must NOT trip the snapshot fetch for it.
+  {
+    key: 'settings',
+    label: 'Settings',
+    survey: false,
+  },
+] as const satisfies ReadonlyArray<ControlRoomTabDescriptor>
+
+/** #5557 — the tab union, derived from the descriptor keys. */
+export type ControlRoomTab = (typeof CONTROL_ROOM_TABS)[number]['key']
+
+/** #5557 — survey-backed descriptors, narrowed for the auto-fetch effect. */
+type SurveyDescriptor = Extract<(typeof CONTROL_ROOM_TABS)[number], { survey: true }>
+
+/** #5557 — the set of valid deep-link / persisted tab keys, derived. */
+const VALID_TABS: ReadonlySet<string> = new Set(CONTROL_ROOM_TABS.map((t) => t.key))
+
+/**
+ * #5544/#5557: the survey-backed tabs whose auto-fetch effect (#5543/#5546)
+ * shells out to git/gh, keyed for O(1) lookup in the effect. The Settings tab is
+ * absent (it's `survey: false`), so the effect early-returns for it.
+ */
+const SURVEY_DESCRIPTORS: ReadonlyMap<ControlRoomTab, SurveyDescriptor> = new Map(
+  CONTROL_ROOM_TABS.filter((t): t is SurveyDescriptor => t.survey).map((t) => [t.key, t]),
+)
+
+/** #5557 — the survey-tab key set, derived from the descriptors (drift guard). */
+export const SURVEY_TABS: ReadonlySet<ControlRoomTab> = new Set(SURVEY_DESCRIPTORS.keys())
 
 /**
  * #5543: how old a tab's snapshot may be before opening/switching to that tab
@@ -46,7 +167,6 @@ const SURVEY_TABS: ReadonlySet<ControlRoomTab> = new Set<ControlRoomTab>(['repos
 export const CONTROL_ROOM_STALENESS_MS = 60_000
 
 const CR_TAB_STORAGE_KEY = 'chroxy_cr_tab'
-const VALID_TABS: ReadonlySet<string> = new Set<ControlRoomTab>(['repos', 'runners', 'integrations', 'settings'])
 
 function loadPersistedTab(): ControlRoomTab {
   try {
@@ -77,13 +197,6 @@ function isStale(generatedAt: string | undefined): boolean {
   if (Number.isNaN(ms)) return true
   return Date.now() - ms >= CONTROL_ROOM_STALENESS_MS
 }
-
-const TABS: ReadonlyArray<{ key: ControlRoomTab; label: string }> = [
-  { key: 'repos', label: 'Project status' },
-  { key: 'runners', label: 'Self-hosted runners' },
-  { key: 'integrations', label: 'Integrations' },
-  { key: 'settings', label: 'Settings' },
-]
 
 export interface ControlRoomViewProps {
   /** Forwarded to the repo table's actionable verdict tags (#5202). */
@@ -143,58 +256,44 @@ export function ControlRoomView({
     selectTab(forceTab)
   }, [forceTab, forceTabNonce, selectTab])
 
-  // #5543: auto-fetch the active tab's survey when the Control Room opens with a
-  // tab already active and on each tab switch, with a staleness guard. We only
-  // fire when the WS is up (the request actions no-op when the socket is closed,
-  // but gating here avoids churning the effect against a snapshot that will
-  // never arrive) and the tab isn't already loading (the server enforces a
+  // #5543/#5557: auto-fetch the active tab's survey when the Control Room opens
+  // with a tab already active and on each tab switch, with a staleness guard. We
+  // only fire when the WS is up (the request actions no-op when the socket is
+  // closed, but gating here avoids churning the effect against a snapshot that
+  // will never arrive) and the tab isn't already loading (the server enforces a
   // per-client in-flight guard — don't trip it). A snapshot newer than the
   // staleness window is left alone; the manual Refresh button still forces a
   // re-fetch regardless. No interval polling — fetch-on-activation only.
+  //
+  // #5557: the snapshot/loading/request triple is looked up via the active tab's
+  // descriptor (keyed store fields) rather than a `tab === '…' ? … : …` ladder,
+  // so a new surveyed tab needs no edit here — only a descriptor entry. We
+  // subscribe to exactly the active tab's snapshot + loading flag (keyed off the
+  // descriptor) so the effect re-runs on the same signals the old per-field
+  // selectors did — no over-subscription to unrelated store state.
   const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
-  const hostStatus = useConnectionStore((s) => s.hostStatus)
-  const runnerStatus = useConnectionStore((s) => s.runnerStatus)
-  const integrationStatus = useConnectionStore((s) => s.integrationStatus)
-  const hostStatusLoading = useConnectionStore((s) => s.hostStatusLoading)
-  const runnerStatusLoading = useConnectionStore((s) => s.runnerStatusLoading)
-  const integrationStatusLoading = useConnectionStore((s) => s.integrationStatusLoading)
-  const requestHostStatus = useConnectionStore((s) => s.requestHostStatus)
-  const requestRunnerStatus = useConnectionStore((s) => s.requestRunnerStatus)
-  const requestIntegrationStatus = useConnectionStore((s) => s.requestIntegrationStatus)
+  const descriptor = SURVEY_DESCRIPTORS.get(tab)
+  const snapshot = useConnectionStore((s) =>
+    descriptor ? (s[descriptor.snapshotKey] as { generatedAt?: string } | null) : null,
+  )
+  const loading = useConnectionStore((s) => (descriptor ? (s[descriptor.loadingKey] as boolean) : false))
+  const request = useConnectionStore((s) =>
+    descriptor ? (s[descriptor.requestKey] as () => boolean) : undefined,
+  )
 
   useEffect(() => {
     if (!connected) return
-    // #5544: the Settings tab is static (no survey) — never fetch for it.
-    if (!SURVEY_TABS.has(tab)) return
-
-    const snapshot = tab === 'repos' ? hostStatus : tab === 'runners' ? runnerStatus : integrationStatus
-    const loading =
-      tab === 'repos' ? hostStatusLoading : tab === 'runners' ? runnerStatusLoading : integrationStatusLoading
+    // #5544: the Settings tab is static (no survey descriptor) — never fetch.
+    if (!descriptor || !request) return
     if (loading) return
-
     if (!isStale(snapshot?.generatedAt)) return
-
-    const request =
-      tab === 'repos' ? requestHostStatus : tab === 'runners' ? requestRunnerStatus : requestIntegrationStatus
     request()
-  }, [
-    tab,
-    connected,
-    hostStatus,
-    runnerStatus,
-    integrationStatus,
-    hostStatusLoading,
-    runnerStatusLoading,
-    integrationStatusLoading,
-    requestHostStatus,
-    requestRunnerStatus,
-    requestIntegrationStatus,
-  ])
+  }, [connected, descriptor, request, loading, snapshot])
 
   return (
     <div className="cr-view" data-testid="control-room-view">
       <div className="cr-tabs" role="tablist" aria-label="Control Room sections" data-testid="cr-tabs">
-        {TABS.map((t, i) => {
+        {CONTROL_ROOM_TABS.map((t, i) => {
           const active = tab === t.key
           return (
             <button
@@ -214,9 +313,9 @@ export function ControlRoomView({
                 e.preventDefault()
                 const next =
                   e.key === 'ArrowRight'
-                    ? (i + 1) % TABS.length
-                    : (i - 1 + TABS.length) % TABS.length
-                const target = TABS[next]!
+                    ? (i + 1) % CONTROL_ROOM_TABS.length
+                    : (i - 1 + CONTROL_ROOM_TABS.length) % CONTROL_ROOM_TABS.length
+                const target = CONTROL_ROOM_TABS[next]!
                 selectTab(target.key)
                 const tabs = (e.currentTarget.parentElement as HTMLElement)?.querySelectorAll<HTMLElement>(
                   '[role="tab"]',
