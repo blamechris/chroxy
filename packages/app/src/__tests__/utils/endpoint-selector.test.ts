@@ -83,7 +83,9 @@ describe('selectConnectEndpoint', () => {
       lanUrl: 'ws://192.168.1.5:8765', lanVerified: true,
     };
     const res = await selectConnectEndpoint(saved);
-    expect(res).toEqual({ url: 'ws://192.168.1.5:8765', path: 'lan' });
+    expect(res).toMatchObject({ url: 'ws://192.168.1.5:8765', path: 'lan' });
+    // #5555 — a successful LAN probe surfaces a healthPrecheck for connect() to reuse.
+    expect(res.healthPrecheck).toEqual({ ts: expect.any(Number), status: 'ok' });
     expect(probeHealth).toHaveBeenCalledWith('ws://192.168.1.5:8765', expect.any(Number));
   });
 
@@ -122,7 +124,8 @@ describe('selectConnectEndpoint', () => {
       lanUrl: 'ws://192.168.1.5:8765', lanVerified: true,
     };
     const res = await selectConnectEndpoint(saved);
-    expect(res).toEqual({ url: 'ws://192.168.1.5:8765', path: 'lan' });
+    expect(res).toMatchObject({ url: 'ws://192.168.1.5:8765', path: 'lan' });
+    expect(res.healthPrecheck).toEqual({ ts: expect.any(Number), status: 'ok' });
   });
 
   it('falls back to url when LAN-only record loses its LAN endpoint', async () => {

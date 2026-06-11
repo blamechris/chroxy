@@ -219,9 +219,16 @@ let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
 let _cachedDeviceId: string | null = null;
+// #5555 — memoize the *in-flight* read, not just the resolved string. The #5555
+// prewarm kicks getDeviceId() off at connect() start and `socket.onopen` calls
+// it again; on a cold first launch (empty/unavailable storage) caching only the
+// resolved value would let the two overlapping calls each pass the empty-cache
+// check and generate *different* random IDs (a race onto inconsistent deviceIds
+// within one connection). Sharing the promise collapses concurrent callers onto
+// a single SecureStore read + single generated id.
+let _deviceIdPromise: Promise<string> | null = null;
 
-async function getDeviceId(): Promise<string> {
-  if (_cachedDeviceId) return _cachedDeviceId;
+async function readOrCreateDeviceId(): Promise<string> {
   try {
     const stored = await SecureStore.getItemAsync(STORAGE_KEY_DEVICE_ID);
     if (stored) {
@@ -240,6 +247,32 @@ async function getDeviceId(): Promise<string> {
     // Storage not available
   }
   return id;
+}
+
+function getDeviceId(): Promise<string> {
+  if (_cachedDeviceId) return Promise.resolve(_cachedDeviceId);
+  // Reuse an in-flight read so the prewarm and the onopen await share one result.
+  if (_deviceIdPromise) return _deviceIdPromise;
+  _deviceIdPromise = readOrCreateDeviceId();
+  // Drop the in-flight handle once settled; the resolved id is now in
+  // `_cachedDeviceId`, so the next caller short-circuits at the top. On
+  // rejection (it shouldn't — readOrCreateDeviceId never throws) clear it too so
+  // a later call can retry rather than replaying a poisoned promise.
+  void _deviceIdPromise.finally(() => {
+    _deviceIdPromise = null;
+  });
+  return _deviceIdPromise;
+}
+
+/**
+ * Test-only: clear the memoized device id (resolved value AND any in-flight
+ * read) so a test can exercise a *cold* SecureStore read (e.g. the #5555
+ * prewarm-ordering assertion). No-op / harmless in production — nothing calls it
+ * outside tests.
+ */
+export function __resetDeviceIdCacheForTests(): void {
+  _cachedDeviceId = null;
+  _deviceIdPromise = null;
 }
 
 function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'tablet' | 'desktop' | 'unknown'; platform: string } {
@@ -693,7 +726,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     ) {
       return;
     }
-    get().connect(selection.url, saved.token, { silent: options?.silent });
+    get().connect(selection.url, saved.token, {
+      silent: options?.silent,
+      // #5555 — the selector already ran a liveness probe (`/health`) against
+      // this exact URL (LAN path only). Thread the fresh result through so
+      // connect() doesn't re-check the same host before opening the WS.
+      healthPrecheck: selection.healthPrecheck,
+    });
   },
 
   // Initial connection uses bounded retries (MAX_RETRIES) with exponential backoff.
@@ -701,11 +740,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
   // aggressively after transient drops (tunnel blips, server restarts, etc.).
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => {
+  connect: (
+    url: string,
+    token: string,
+    options?: {
+      silent?: boolean;
+      _retryCount?: number;
+      // #5555 — a fresh `/health` result from connectAuto's endpoint selector.
+      // When recent (≤ HEALTH_PRECHECK_MAX_AGE_MS) and `status: 'ok'`, connect()
+      // skips its own redundant probe and opens the WS directly. Only ever
+      // carries 'ok' (the selector falls back to the tunnel for a restarting /
+      // unreachable box), so the restarting-detection path is never bypassed.
+      healthPrecheck?: { ts: number; status: 'ok' };
+    },
+  ) => {
     const _retryCount = options?._retryCount ?? 0;
     const silent = options?.silent ?? false;
     const MAX_RETRIES = 5;
     const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
+    // Honor a precheck only on the first attempt (retries must re-probe), and
+    // only when it's recent enough that the host's liveness hasn't gone stale.
+    const HEALTH_PRECHECK_MAX_AGE_MS = 2000;
+    const freshPrecheck =
+      _retryCount === 0 &&
+      options?.healthPrecheck?.status === 'ok' &&
+      Date.now() - options.healthPrecheck.ts <= HEALTH_PRECHECK_MAX_AGE_MS;
 
     // Detect if connecting to a different server — clear old session data + queue
     const currentUrl = useConnectionLifecycleStore.getState().wsUrl;
@@ -743,6 +802,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
+    }
+
+    // #5555 — prewarm the device ID off the critical path. The `auth` frame in
+    // `socket.onopen` awaits getDeviceId() (an async SecureStore read, memoized
+    // only after its first call). Kick it off here so the keychain read overlaps
+    // the health fetch + WS handshake; by the time onopen fires the cached value
+    // resolves instantly. `.catch` swallows — getDeviceId never rejects (it
+    // falls back to a generated id) but we keep this defensive so a stray
+    // rejection can't surface as an unhandled-promise warning.
+    void getDeviceId().catch(() => {});
+
+    // #5555 — fast path: connectAuto's selector already probed `/health` against
+    // this exact URL and the result is fresh + ok. Skip connect()'s own pre-WS
+    // liveness check below (the `fetch(httpUrl)` GET of the bare origin — the
+    // server answers both `/` and `/health`) and open the WS directly so one
+    // connect == one round-trip. (Retries and the manual paths carry no
+    // precheck, so they still run the full check below — including the
+    // `restarting` detection.)
+    if (freshPrecheck) {
+      if (myAttemptId !== connectionAttemptId) return;
+      console.log('[ws] Reusing endpoint-selector health probe, connecting WebSocket...');
+      _connectWebSocket();
+      return;
     }
 
     // HTTP health check before WebSocket — verify tunnel is up
@@ -833,9 +915,37 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     const socket = new WebSocket(url);
 
+    // #3624 (ported from dashboard) — shared reconnect scheduler for both
+    // onclose and onerror. A single transport drop fires `error` → `close` on
+    // most WebSocket implementations, so without dedupe we'd queue two
+    // setTimeouts for one underlying failure. Previously mobile only avoided the
+    // double-reconnect by accident: the staggered AUTO_RECONNECT_DELAY (1500ms)
+    // vs ERROR_RECONNECT_DELAY (2000ms) delays plus the connectionAttemptId
+    // bump on the first-firing timer cancelled the second — timing-dependent,
+    // not a design guarantee.
+    //
+    // A per-socket flag (not phase-only dedupe) is correct here: each new socket
+    // gets a fresh scheduler with `reconnectScheduled = false`, so a *new*
+    // socket's failure mid-reconnect (when the global phase is already
+    // 'reconnecting') can still arm its own retry timer. The flag is bounded to
+    // this socket's lifetime. Delay semantics are preserved by passing each
+    // handler's original delay; first-write-wins on the reconnecting phase.
+    let reconnectScheduled = false;
+    const scheduleReconnect = (delayMs: number): void => {
+      if (reconnectScheduled) return;
+      reconnectScheduled = true;
+      setTimeout(() => {
+        if (myAttemptId !== connectionAttemptId) return;
+        get().connect(url, token);
+      }, delayMs);
+    };
+
     socket.onopen = () => {
       // Include device info in auth for multi-client awareness
       const info = getDeviceInfo();
+      // #5555 — getDeviceId() is prewarmed at the top of connect(), so this
+      // await point resolves instantly (cached) and the auth frame is not gated
+      // on a cold SecureStore read. This `.then` stays as the await point.
       void getDeviceId().then((deviceId) => {
         if (socket.readyState === WebSocket.OPEN) {
           // Use pairing flow when pendingPairingId is set (from QR scan)
@@ -927,10 +1037,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         if (closeMsg !== null) {
           useConnectionLifecycleStore.getState().setConnectionError(closeMsg, 0);
         }
-        setTimeout(() => {
-          if (myAttemptId !== connectionAttemptId) return;
-          get().connect(url, token);
-        }, AUTO_RECONNECT_DELAY);
+        // #3624 — dedup via the per-socket guard so a paired error → close
+        // sequence arms exactly one retry. Preserves the AUTO_RECONNECT_DELAY.
+        scheduleReconnect(AUTO_RECONNECT_DELAY);
       } else {
         // Connection dropped before it ever reached "connected" state. Previously
         // we silently marked as disconnected, swallowing the real close reason
@@ -962,13 +1071,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
-        console.log(`[ws] WebSocket error (${detail || 'no detail'}), reconnecting...`);
-        useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
-        useConnectionLifecycleStore.getState().setConnectionError(errorMsg, 0);
-        setTimeout(() => {
-          if (myAttemptId !== connectionAttemptId) return;
-          get().connect(url, token);
-        }, ERROR_RECONNECT_DELAY);
+        // #3624 — if onclose already armed the retry for this same transport
+        // drop (error → close, or close → error), `scheduleReconnect` no-ops and
+        // we skip the phase/error writes too. That preserves first-write-wins on
+        // connectionError so a close-code-specific banner isn't clobbered by the
+        // generic error copy.
+        if (!reconnectScheduled) {
+          console.log(`[ws] WebSocket error (${detail || 'no detail'}), reconnecting...`);
+          useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
+          useConnectionLifecycleStore.getState().setConnectionError(errorMsg, 0);
+        }
+        scheduleReconnect(ERROR_RECONNECT_DELAY);
       }
     };
     } // end _connectWebSocket
