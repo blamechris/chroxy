@@ -1,20 +1,20 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { featureHandlers as environmentHandlers } from '../../src/handlers/feature-handlers.js'
-import { createSpy } from '../test-helpers.js'
+import { createSpy, nsCtx } from '../test-helpers.js'
 
 function makeCtx(overrides = {}) {
   const sent = []
   const broadcasts = []
 
-  return {
+  return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     environmentManager: null,
     _sent: sent,
     _broadcasts: broadcasts,
     ...overrides,
-  }
+  })
 }
 
 function makeWs() { return {} }

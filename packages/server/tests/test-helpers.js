@@ -1,27 +1,95 @@
 import { EventEmitter } from 'node:events'
 import { WsClientManager } from '../src/ws-client-manager.js'
+import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 
 // Re-export GIT from the source module so test files can import it from here
 export { GIT } from '../src/git.js'
 
+// Re-export the ctx-shape assert so handler tests can guard their mocks.
+export { assertCtxShape } from '../src/ws-handler-context.js'
+
+// Reverse index: flat field name -> namespace it belongs to. Derived from the
+// single source of truth (CTX_NAMESPACES) so the test mock builder can't drift.
+const FIELD_TO_NS = {}
+for (const ns of CTX_NAMESPACE_NAMES) {
+  for (const key of CTX_NAMESPACES[ns]) FIELD_TO_NS[key] = ns
+}
+
 /**
- * #5563: build the index-maintaining ctx fields backed by a real
- * WsClientManager so handler tests exercise the production sessionId→clients
- * reverse-index path. Returns `{ clientManager, clients, subscribeClient,
- * unsubscribeClient, setActiveSession }`. Spread the returned object into a
- * handler ctx; `clients` IS the manager's Map, so clients inserted directly
- * into it are visible to the index and to `verifyIndexIntegrity()`.
+ * Build a namespaced handler ctx (#5558) from a FLAT bag of fields.
  *
- * @returns {{clientManager: WsClientManager, clients: Map, subscribeClient: Function, unsubscribeClient: Function, setActiveSession: Function}}
+ * Handler tests historically built a flat `{ send, broadcast, sessionManager,
+ * … }` ctx. The production ctx is now role-scoped into `ctx.transport` /
+ * `ctx.sessions` / `ctx.permissions` / `ctx.services` / `ctx.runtime`. Rather
+ * than hand-bucket every field in every test, wrap the existing flat literal:
+ *
+ *   const ctx = nsCtx({ send, broadcast, sessionManager, fileOps, … })
+ *
+ * Each known production field is routed into its namespace. Unknown keys —
+ * including the optional DI seams handlers read with `ctx?.X ?? defaultX`
+ * (`evaluateDraft`, `summarizeSession`, `scanConversations`, `resolveRepoSet`,
+ * `surveyRunners`, `realpath`, `_pendingEvaluatorAwaits`, `correlationId`, …)
+ * and the legacy `clientManager` handle from makeSessionIndexCtx — are left at
+ * the top level, exactly where the handlers and tests expect them.
+ *
+ * A `transport` / `sessions` / … key in the flat bag whose VALUE is already an
+ * object is treated as a pre-built namespace and MERGED (so callers can spread
+ * `makeSessionIndexCtx()`'s namespaced output straight in).
+ *
+ * Every namespace bucket is always created (even if empty) so a handler that
+ * reads `ctx.transport.send` never trips over an undefined bucket. Pass
+ * `{ assert: true }` (2nd arg) to additionally run `assertCtxShape(ctx, { deep })`.
+ *
+ * @param {Record<string, any>} [flat={}] - Flat field bag (may also carry pre-built namespace objects).
+ * @param {{assert?: boolean, deep?: boolean}} [options]
+ * @returns {object} a namespaced ctx.
+ */
+export function nsCtx(flat = {}, { assert = false, deep = false } = {}) {
+  const ctx = {}
+  for (const ns of CTX_NAMESPACE_NAMES) ctx[ns] = {}
+  for (const [key, value] of Object.entries(flat)) {
+    // A key that names a namespace AND is NOT itself a field (i.e. not the
+    // `permissions` collision — there is both a `permissions` namespace and a
+    // `permissions` field) and whose value is an object is a pre-built
+    // namespace bag, e.g. makeSessionIndexCtx()'s `transport`. Merge it.
+    if (CTX_NAMESPACE_NAMES.includes(key) && !(key in FIELD_TO_NS) && value && typeof value === 'object') {
+      Object.assign(ctx[key], value)
+      continue
+    }
+    const ns = FIELD_TO_NS[key]
+    if (ns) ctx[ns][key] = value
+    else ctx[key] = value // test-injection seam / unknown — keep flat
+  }
+  if (assert) assertCtxShape(ctx, { deep })
+  return ctx
+}
+
+/**
+ * #5563/#5558: build the index-maintaining transport ctx fields backed by a
+ * real WsClientManager so handler tests exercise the production
+ * sessionId→clients reverse-index path. Returns the fields already bucketed
+ * under a `transport` namespace plus a top-level `clientManager` handle:
+ *
+ *   { clientManager, transport: { clients, subscribeClient, unsubscribeClient, setActiveSession } }
+ *
+ * Spread the returned object into a flat bag passed to `nsCtx` (which merges a
+ * pre-built `transport` bag) — `clients` IS the manager's Map, so clients
+ * inserted directly into it are visible to the index and to
+ * `verifyIndexIntegrity()`. `clientManager` stays top-level because tests call
+ * its methods directly (it is not a handler-ctx field).
+ *
+ * @returns {{clientManager: WsClientManager, transport: {clients: Map, subscribeClient: Function, unsubscribeClient: Function, setActiveSession: Function}}}
  */
 export function makeSessionIndexCtx() {
   const clientManager = new WsClientManager()
   return {
     clientManager,
-    clients: clientManager.clients,
-    subscribeClient: (client, sid) => clientManager.subscribe(client, sid),
-    unsubscribeClient: (client, sid) => clientManager.unsubscribe(client, sid),
-    setActiveSession: (client, sid) => clientManager.setActiveSession(client, sid),
+    transport: {
+      clients: clientManager.clients,
+      subscribeClient: (client, sid) => clientManager.subscribe(client, sid),
+      unsubscribeClient: (client, sid) => clientManager.unsubscribe(client, sid),
+      setActiveSession: (client, sid) => clientManager.setActiveSession(client, sid),
+    },
   }
 }
 

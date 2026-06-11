@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { handleSessionMessage, handleCliMessage } from '../src/ws-message-handlers.js'
-import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSession, createMockSessionManager, nsCtx } from './test-helpers.js'
 
 /**
  * Tests for cross-device input conflict resolution (#1119).
@@ -13,7 +13,7 @@ function createMockCtx(sessionManager, opts = {}) {
   const broadcastSpy = createSpy()
   const sendSpy = createSpy()
   const updatePrimarySpy = createSpy()
-  return {
+  return nsCtx({
     sessionManager,
     broadcast: broadcastSpy,
     send: sendSpy,
@@ -21,7 +21,7 @@ function createMockCtx(sessionManager, opts = {}) {
     checkpointManager: { createCheckpoint: async () => {} },
     ...opts,
     _spies: { broadcast: broadcastSpy, send: sendSpy, updatePrimary: updatePrimarySpy },
-  }
+  })
 }
 
 describe('cross-device input echo (#1119)', () => {

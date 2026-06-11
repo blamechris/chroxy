@@ -115,7 +115,7 @@ function activeSessionCwds(sessionManager) {
 async function handleHostStatusRequest(ws, client, msg, ctx) {
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
 
-  const config = ctx?.config || {}
+  const config = ctx?.services?.config || {}
   // Effective discovery root: the configured root, else resolveRepoSet's own
   // default (~/Projects). Resolve it HERE — not as an undefined passed down —
   // so the snapshot's `root` reports the directory we actually scanned rather
@@ -128,7 +128,7 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
   // Authority gate: host-wide survey is for host-level (unbound) clients only.
   // A pairing-bound (share-a-session) token is scoped to one session.
   if (client?.boundSessionId) {
-    ctx.send(ws, errorSnapshot(root, requestId, {
+    ctx.transport.send(ws, errorSnapshot(root, requestId, {
       code: 'FORBIDDEN',
       message: 'host_status_request requires host-level authority (a session-bound token cannot survey the host)',
     }))
@@ -137,7 +137,7 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
 
   // In-flight guard: one survey per client at a time.
   if (inFlight.has(client)) {
-    ctx.send(ws, errorSnapshot(root, requestId, {
+    ctx.transport.send(ws, errorSnapshot(root, requestId, {
       code: 'SURVEY_IN_PROGRESS',
       message: 'A host status survey is already in progress for this client',
     }))
@@ -154,11 +154,11 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
   try {
     const repoSet = resolveFn({ repos, root })
     const snapshot = await surveyFn(repoSet, {
-      activeSessionCwds: activeSessionCwds(ctx?.sessionManager),
+      activeSessionCwds: activeSessionCwds(ctx?.sessions?.sessionManager),
       root,
     })
 
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'host_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -168,7 +168,7 @@ async function handleHostStatusRequest(ws, client, msg, ctx) {
     })
   } catch (err) {
     log.warn(`host_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.send(ws, errorSnapshot(root, requestId, {
+    ctx.transport.send(ws, errorSnapshot(root, requestId, {
       code: 'SURVEY_FAILED',
       message: err && err.message ? err.message : 'host status survey failed',
     }))
@@ -195,14 +195,14 @@ function runnerErrorSnapshot(root, requestId, error) {
 async function handleRunnerStatusRequest(ws, client, msg, ctx) {
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
 
-  const config = ctx?.config || {}
+  const config = ctx?.services?.config || {}
   const root = typeof config.controlRoomRunnerRoot === 'string' && config.controlRoomRunnerRoot.length > 0
     ? config.controlRoomRunnerRoot
     : DEFAULT_RUNNER_ROOT
 
   // Authority gate: a host-wide runner survey is for host-level clients only.
   if (client?.boundSessionId) {
-    ctx.send(ws, runnerErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, runnerErrorSnapshot(root, requestId, {
       code: 'FORBIDDEN',
       message: 'runner_status_request requires host-level authority (a session-bound token cannot survey the host)',
     }))
@@ -210,7 +210,7 @@ async function handleRunnerStatusRequest(ws, client, msg, ctx) {
   }
 
   if (runnerInFlight.has(client)) {
-    ctx.send(ws, runnerErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, runnerErrorSnapshot(root, requestId, {
       code: 'SURVEY_IN_PROGRESS',
       message: 'A runner status survey is already in progress for this client',
     }))
@@ -228,7 +228,7 @@ async function handleRunnerStatusRequest(ws, client, msg, ctx) {
   runnerInFlight.add(client)
   try {
     const snapshot = await surveyFn({ root, includeGithub })
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'runner_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -238,7 +238,7 @@ async function handleRunnerStatusRequest(ws, client, msg, ctx) {
     })
   } catch (err) {
     log.warn(`runner_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.send(ws, runnerErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, runnerErrorSnapshot(root, requestId, {
       code: 'SURVEY_FAILED',
       message: err && err.message ? err.message : 'runner status survey failed',
     }))
@@ -267,7 +267,7 @@ function integrationErrorSnapshot(root, requestId, error) {
 async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
 
-  const config = ctx?.config || {}
+  const config = ctx?.services?.config || {}
   const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
     ? config.controlRoomRoot
     : DEFAULT_CONTROL_ROOM_ROOT
@@ -275,7 +275,7 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
 
   // Authority gate: a host-wide integrations survey is for host-level clients only.
   if (client?.boundSessionId) {
-    ctx.send(ws, integrationErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, integrationErrorSnapshot(root, requestId, {
       code: 'FORBIDDEN',
       message: 'integration_status_request requires host-level authority (a session-bound token cannot survey the host)',
     }))
@@ -283,7 +283,7 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
   }
 
   if (integrationInFlight.has(client)) {
-    ctx.send(ws, integrationErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, integrationErrorSnapshot(root, requestId, {
       code: 'SURVEY_IN_PROGRESS',
       message: 'An integration status survey is already in progress for this client',
     }))
@@ -305,7 +305,7 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
   try {
     const repoSet = resolveFn({ repos, root })
     const snapshot = await surveyFn(repoSet, { root, bin })
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'integration_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -318,7 +318,7 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
     })
   } catch (err) {
     log.warn(`integration_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.send(ws, integrationErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, integrationErrorSnapshot(root, requestId, {
       code: 'SURVEY_FAILED',
       message: err && err.message ? err.message : 'integration status survey failed',
     }))
@@ -369,7 +369,7 @@ function skillsInventoryErrorSnapshot(root, requestId, error) {
 async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
 
-  const config = ctx?.config || {}
+  const config = ctx?.services?.config || {}
   const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
     ? config.controlRoomRoot
     : DEFAULT_CONTROL_ROOM_ROOT
@@ -377,7 +377,7 @@ async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
 
   // Authority gate: a host-wide skills inventory is for host-level clients only.
   if (client?.boundSessionId) {
-    ctx.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
       code: 'FORBIDDEN',
       message: 'skills_inventory_request requires host-level authority (a session-bound token cannot survey the host)',
     }))
@@ -385,7 +385,7 @@ async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
   }
 
   if (skillsInventoryInFlight.has(client)) {
-    ctx.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
       code: 'SURVEY_IN_PROGRESS',
       message: 'A skills inventory survey is already in progress for this client',
     }))
@@ -399,7 +399,7 @@ async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
 
   // Per-skill usage aggregates from the recorder (when the daemon wired one).
   // Absent → the inventory simply reports zeroed usage.
-  const recorder = ctx?.skillsUsageRecorder
+  const recorder = ctx?.services?.skillsUsageRecorder
   const usage = recorder && typeof recorder.aggregatesByName === 'function'
     ? recorder.aggregatesByName()
     : null
@@ -408,7 +408,7 @@ async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
   try {
     const repoSet = resolveFn({ repos, root })
     const snapshot = await surveyFn(repoSet, { root, usage })
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'skills_inventory_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -419,7 +419,7 @@ async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
     })
   } catch (err) {
     log.warn(`skills_inventory_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
+    ctx.transport.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
       code: 'SURVEY_FAILED',
       message: err && err.message ? err.message : 'skills inventory survey failed',
     }))
@@ -465,7 +465,7 @@ export const MAX_CONCURRENT_INTEGRATION_ACTIONS = 2
  * exact row's pending state.
  */
 function integrationActionError(ws, ctx, msg, reason, message) {
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'session_error',
     code: 'INTEGRATION_ACTION_FAILED',
     message,
@@ -571,7 +571,7 @@ const integrationActions = {
  * rejected, not queued (see the `actionInFlight` note on the shared bucket).
  */
 async function handleIntegrationAction(ws, client, msg, ctx) {
-  const config = ctx?.config || {}
+  const config = ctx?.services?.config || {}
 
   // Authority gate (#1 above): host-level (unbound) clients only.
   if (client?.boundSessionId) {
@@ -674,7 +674,7 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
     // Exec against the canonical realpath — never the raw client string.
     const ackFields = await actionEntry.run({ msg, ctx, config, targetKey })
     log.info(`integration_action ${action} completed for ${targetKey} (client=${client?.id})`)
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'integration_action_ack',
       action,
       // Echo the CLIENT-supplied path so the dashboard's pending state

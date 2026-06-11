@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import { settingsHandlers, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../src/handlers/settings-handlers.js'
 import { sendSessionInfo } from '../src/ws-history.js'
 import { PermissionAuditLog } from '../src/permission-audit.js'
+import { nsCtx } from './test-helpers.js'
 
 // ---- Fixtures ----
 
@@ -37,7 +38,7 @@ function makeCtx(sessionEntry = null, overrides = {}) {
   if (sessionEntry) {
     sessionMap.set('sess-1', sessionEntry)
   }
-  return {
+  return nsCtx({
     sessionManager: {
       getSession: mock.fn((id) => sessionMap.get(id) ?? null),
     },
@@ -47,14 +48,14 @@ function makeCtx(sessionEntry = null, overrides = {}) {
     permissionAudit: new PermissionAuditLog(),
     _sessions: sessionMap,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {
   return { id: 'client-1', activeSessionId: 'sess-1', ...overrides }
 }
 
-const WS = {}  // Opaque ws handle — handlers only pass it through ctx.send
+const WS = {}  // Opaque ws handle — handlers only pass it through ctx.transport.send
 
 const handler = settingsHandlers['set_permission_rules']
 
@@ -82,8 +83,8 @@ describe('handleSetPermissionRules — valid rules', () => {
     const rules = [{ tool: 'Write', decision: 'allow' }, { tool: 'Glob', decision: 'deny' }]
     handler(WS, client, { type: 'set_permission_rules', rules }, ctx)
 
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 1)
-    const [sessionId, msg] = ctx.broadcastToSession.mock.calls[0].arguments
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 1)
+    const [sessionId, msg] = ctx.transport.broadcastToSession.mock.calls[0].arguments
     assert.equal(sessionId, 'sess-1')
     assert.equal(msg.type, 'permission_rules_updated')
     assert.deepEqual(msg.rules, rules)
@@ -95,14 +96,14 @@ describe('handleSetPermissionRules — valid rules', () => {
 
     assert.equal(session.setPermissionRules.mock.callCount(), 1)
     assert.deepEqual(session.setPermissionRules.mock.calls[0].arguments[0], [])
-    assert.equal(ctx.send.mock.callCount(), 0, 'no session_error for empty rules')
+    assert.equal(ctx.transport.send.mock.callCount(), 0, 'no session_error for empty rules')
   })
 
   it('records a whitelist_change entry in the audit log', () => {
     const rules = [{ tool: 'Read', decision: 'allow' }]
     handler(WS, client, { type: 'set_permission_rules', rules }, ctx)
 
-    const entries = ctx.permissionAudit.query({ type: 'whitelist_change' })
+    const entries = ctx.permissions.permissionAudit.query({ type: 'whitelist_change' })
     assert.equal(entries.length, 1)
     assert.equal(entries[0].type, 'whitelist_change')
     assert.equal(entries[0].clientId, 'client-1')
@@ -123,11 +124,11 @@ describe('handleSetPermissionRules — valid rules', () => {
   })
 
   it('does not log audit entry when permissionAudit is absent', () => {
-    ctx.permissionAudit = null
+    ctx.permissions.permissionAudit = null
     const rules = [{ tool: 'Read', decision: 'allow' }]
     // Should not throw
     handler(WS, client, { type: 'set_permission_rules', rules }, ctx)
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 1)
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 1)
   })
 })
 
@@ -144,7 +145,7 @@ describe('handleSetPermissionRules — validation failures', () => {
   it('rejects when rules is not an array', () => {
     handler(WS, client, { type: 'set_permission_rules', rules: 'bad' }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
     assert.ok(errMsg?.message.includes('array'))
     assert.equal(session.setPermissionRules.mock.callCount(), 0)
@@ -153,7 +154,7 @@ describe('handleSetPermissionRules — validation failures', () => {
   it('rejects when rules is missing (undefined)', () => {
     handler(WS, client, { type: 'set_permission_rules' }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
     assert.equal(session.setPermissionRules.mock.callCount(), 0)
   })
@@ -161,7 +162,7 @@ describe('handleSetPermissionRules — validation failures', () => {
   it('rejects when a rule has no tool field', () => {
     handler(WS, client, { type: 'set_permission_rules', rules: [{ decision: 'allow' }] }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
     assert.ok(errMsg?.message.includes('tool name'))
   })
@@ -169,7 +170,7 @@ describe('handleSetPermissionRules — validation failures', () => {
   it('rejects when a rule has an invalid decision', () => {
     handler(WS, client, { type: 'set_permission_rules', rules: [{ tool: 'Read', decision: 'maybe' }] }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
     assert.ok(errMsg?.message.includes('decision'))
   })
@@ -177,7 +178,7 @@ describe('handleSetPermissionRules — validation failures', () => {
   it('rejects when a rule is not an object', () => {
     handler(WS, client, { type: 'set_permission_rules', rules: ['Read'] }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
   })
 
@@ -187,7 +188,7 @@ describe('handleSetPermissionRules — validation failures', () => {
       localCtx._sessions.set('sess-1', { session, cwd: '/tmp', name: 'test' })
       handler(WS, client, { type: 'set_permission_rules', rules: [{ tool, decision: 'allow' }] }, localCtx)
 
-      const errMsg = localCtx.send.mock.calls[0]?.arguments[1]
+      const errMsg = localCtx.transport.send.mock.calls[0]?.arguments[1]
       assert.equal(errMsg?.type, 'session_error', `expected session_error for NEVER_AUTO_ALLOW tool: ${tool}`)
       assert.ok(errMsg?.message.includes('cannot be auto-allowed') || errMsg?.message.includes(tool),
         `expected error message to mention the tool or reason for: ${tool}`)
@@ -197,7 +198,7 @@ describe('handleSetPermissionRules — validation failures', () => {
   it('rejects tools not in ELIGIBLE_TOOLS', () => {
     handler(WS, client, { type: 'set_permission_rules', rules: [{ tool: 'UnknownTool', decision: 'allow' }] }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
     assert.ok(errMsg?.message.includes('not eligible'))
   })
@@ -210,7 +211,7 @@ describe('handleSetPermissionRules — validation failures', () => {
       localCtx._sessions.set('sess-1', { session: localSession, cwd: '/tmp', name: 'test' })
       handler(WS, client, { type: 'set_permission_rules', rules: [{ tool, decision: 'allow' }] }, localCtx)
 
-      assert.equal(localCtx.send.mock.callCount(), 0, `expected no error for ELIGIBLE_TOOLS: ${tool}`)
+      assert.equal(localCtx.transport.send.mock.callCount(), 0, `expected no error for ELIGIBLE_TOOLS: ${tool}`)
       assert.equal(localSession.setPermissionRules.mock.callCount(), 1)
     }
   })
@@ -223,7 +224,7 @@ describe('handleSetPermissionRules — missing session / unsupported provider', 
 
     handler(WS, client, { type: 'set_permission_rules', rules: [] }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
     assert.ok(errMsg?.message.includes('No active session'))
   })
@@ -238,7 +239,7 @@ describe('handleSetPermissionRules — missing session / unsupported provider', 
 
     handler(WS, client, { type: 'set_permission_rules', rules: [] }, ctx)
 
-    const errMsg = ctx.send.mock.calls[0]?.arguments[1]
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(errMsg?.type, 'session_error')
     assert.ok(errMsg?.message.includes('does not support'))
   })

@@ -10,7 +10,7 @@ import {
   ALLOWED_PERMISSION_MODE_IDS,
   MAX_ATTACHMENT_COUNT,
 } from '../src/handler-utils.js'
-import { createMockSession } from './test-helpers.js'
+import { createMockSession, nsCtx } from './test-helpers.js'
 
 /**
  * ws-message-handlers.js unit tests (#1727)
@@ -31,7 +31,7 @@ function makeSession(overrides = {}) {
 function makeCtx(overrides = {}) {
   const sessionMap = new Map()
   const { sessionManager: smOverrides, ...restOverrides } = overrides
-  return {
+  return nsCtx({
     sessionManager: {
       getSession: mock.fn((id) => sessionMap.get(id) ?? null),
       isBudgetPaused: mock.fn(() => false),
@@ -64,7 +64,7 @@ function makeCtx(overrides = {}) {
     clients: new Map(),
     _sessions: sessionMap,  // Helper to add sessions directly
     ...restOverrides,
-  }
+  })
 }
 
 function addSession(ctx, id, entry = null) {
@@ -77,7 +77,7 @@ function makeClient(overrides = {}) {
   return { id: 'client-1', activeSessionId: null, ...overrides }
 }
 
-const WS = {}  // Opaque ws handle — handlers only pass it through ctx.send
+const WS = {}  // Opaque ws handle — handlers only pass it through ctx.transport.send
 
 // ---- Tests ----
 
@@ -144,7 +144,7 @@ describe('handleSessionMessage', () => {
       const ctx = makeCtx()
       const client = makeClient()
       await handleSessionMessage(WS, client, { type: 'input', data: 'hello' }, ctx)
-      const sent = ctx.send.mock.calls[0].arguments[1]
+      const sent = ctx.transport.send.mock.calls[0].arguments[1]
       assert.equal(sent.type, 'session_error')
     })
 
@@ -163,7 +163,7 @@ describe('handleSessionMessage', () => {
       addSession(ctx, 'sess-1')
       await handleSessionMessage(WS, client, { type: 'input', data: '  ' }, ctx)
       // Empty input — sendMessage not called
-      assert.equal(ctx.send.mock.calls.length, 0)
+      assert.equal(ctx.transport.send.mock.calls.length, 0)
     })
 
     it('sends session_error when budget is paused', async () => {
@@ -171,7 +171,7 @@ describe('handleSessionMessage', () => {
       const client = makeClient({ activeSessionId: 'sess-1' })
       addSession(ctx, 'sess-1')
       await handleSessionMessage(WS, client, { type: 'input', data: 'hi' }, ctx)
-      const sent = ctx.send.mock.calls[0].arguments[1]
+      const sent = ctx.transport.send.mock.calls[0].arguments[1]
       assert.equal(sent.type, 'session_error')
       assert.ok(sent.message.includes('budget'))
     })
@@ -191,7 +191,7 @@ describe('handleSessionMessage', () => {
       const client = makeClient()
       await handleSessionMessage(WS, client, { type: 'interrupt' }, ctx)
       // No error sent — silently ignored
-      assert.equal(ctx.send.mock.calls.length, 0)
+      assert.equal(ctx.transport.send.mock.calls.length, 0)
     })
   })
 
@@ -227,7 +227,7 @@ describe('handleSessionMessage', () => {
       await handleSessionMessage(WS, client, { type: 'set_model', model: 'my-custom-finetune:7b' }, ctx)
       assert.equal(entry.session.setModel.callCount, 1)
       assert.equal(entry.session.setModel.lastCall[0], 'my-custom-finetune:7b')
-      const broadcast = ctx.broadcastToSession.mock.calls.at(-1)?.arguments[1]
+      const broadcast = ctx.transport.broadcastToSession.mock.calls.at(-1)?.arguments[1]
       assert.equal(broadcast?.type, 'model_changed')
       assert.equal(broadcast?.model, 'my-custom-finetune:7b', 'opaque local ids broadcast verbatim')
     })
@@ -236,7 +236,7 @@ describe('handleSessionMessage', () => {
       const ctx = makeCtx()
       const client = makeClient({ activeSessionId: 'sess-1' })
       const entry = addSession(ctx, 'sess-1', makeSession({ provider: 'ollama' }))
-      // sendError writes to the ws handle directly (not ctx.send), so a
+      // sendError writes to the ws handle directly (not ctx.transport.send), so a
       // live fake is needed to observe the rejection envelope.
       const ws = { readyState: 1, send: mock.fn() }
       await handleSessionMessage(ws, client, { type: 'set_model', model: '   ' }, ctx)
@@ -375,7 +375,7 @@ describe('handleSessionMessage', () => {
       // of the 616aeaf62/2c0ac7d2d session-binding enforcement claim.
       const ctx = makeCtx()
       // Mapping says this request belongs to session-B
-      ctx.permissionSessionMap.set('cross-req', 'session-B')
+      ctx.permissions.permissionSessionMap.set('cross-req', 'session-B')
       const entryB = addSession(ctx, 'session-B')
       // Client is bound to session-A
       const boundClient = makeClient({
@@ -391,7 +391,7 @@ describe('handleSessionMessage', () => {
       assert.equal(entryB.session.respondToPermission.callCount, 0,
         'bound client must not be able to resolve cross-session permissions')
       // Mapping must NOT have been consumed so the legit bound client can still respond
-      assert.ok(ctx.permissionSessionMap.has('cross-req'),
+      assert.ok(ctx.permissions.permissionSessionMap.has('cross-req'),
         'permissionSessionMap entry must be preserved for the legit client')
       // (We can't assert on the SESSION_TOKEN_MISMATCH error reaching the
       // client here: sendError writes directly to ws.send, and the WS mock
@@ -402,7 +402,7 @@ describe('handleSessionMessage', () => {
 
     it('allows bound client to respond to permission for its own bound session', async () => {
       const ctx = makeCtx()
-      ctx.permissionSessionMap.set('own-req', 'session-A')
+      ctx.permissions.permissionSessionMap.set('own-req', 'session-A')
       const entryA = addSession(ctx, 'session-A')
       const boundClient = makeClient({
         activeSessionId: 'session-A',
@@ -419,7 +419,7 @@ describe('handleSessionMessage', () => {
 
     it('rejects bound client resolving a legacy pendingPermissions entry with no session mapping (2026-04-11 audit blocker 5 — agent-review residual bypass)', async () => {
       // Before the follow-up fix: a bound client could send a permission_response
-      // with a requestId that was in the legacy ctx.pendingPermissions map but
+      // with a requestId that was in the legacy ctx.permissions.pendingPermissions map but
       // NOT in permissionSessionMap. In that case, originSessionId fell back to
       // client.activeSessionId (which for a bound client equals boundSessionId),
       // the binding check passed trivially, and execution fell through to the
@@ -428,7 +428,7 @@ describe('handleSessionMessage', () => {
       const ctx = makeCtx()
       // NO permissionSessionMap entry; legacy pendingPermissions has the id
       const legacyResolve = mock.fn()
-      ctx.pendingPermissions.set('legacy-req', { resolve: legacyResolve, timer: null })
+      ctx.permissions.pendingPermissions.set('legacy-req', { resolve: legacyResolve, timer: null })
       const boundClient = makeClient({
         activeSessionId: 'session-A',
         boundSessionId: 'session-A',
@@ -438,17 +438,17 @@ describe('handleSessionMessage', () => {
         requestId: 'legacy-req',
         decision: 'allow',
       }, ctx)
-      assert.equal(ctx.permissions.resolvePermission.mock?.calls?.length ?? 0, 0,
+      assert.equal(ctx.permissions.permissions.resolvePermission.mock?.calls?.length ?? 0, 0,
         'bound client must not resolve legacy permissions with no session mapping')
       assert.equal(legacyResolve.mock.calls.length, 0,
         'legacy resolve callback must not be invoked by bound client fallthrough')
-      assert.ok(ctx.pendingPermissions.has('legacy-req'),
+      assert.ok(ctx.permissions.pendingPermissions.has('legacy-req'),
         'pendingPermissions entry must be preserved for a legitimate unbound client')
     })
 
     it('allows unbound client to respond to any session (primary-token mode)', async () => {
       const ctx = makeCtx()
-      ctx.permissionSessionMap.set('any-req', 'session-X')
+      ctx.permissions.permissionSessionMap.set('any-req', 'session-X')
       const entryX = addSession(ctx, 'session-X')
       const unboundClient = makeClient({ activeSessionId: 'session-X' })  // no boundSessionId
       await handleSessionMessage(WS, unboundClient, {
@@ -465,10 +465,10 @@ describe('handleSessionMessage', () => {
     // session_event → EventNormalizer → broadcast). The handler no longer
     // broadcasts inline for SDK requests — it just calls respondToPermission
     // and lets the pipeline fan out. Verify by asserting respondToPermission
-    // is invoked and ctx.broadcast is NOT called.
+    // is invoked and ctx.transport.broadcast is NOT called.
     it('routes SDK resolution through respondToPermission (no inline broadcast — unified pipeline owns it, #3048)', async () => {
       const ctx = makeCtx()
-      ctx.permissionSessionMap.set('req-broadcast', 'sess-1')
+      ctx.permissions.permissionSessionMap.set('req-broadcast', 'sess-1')
       const entry = addSession(ctx, 'sess-1')
       const responder = makeClient({ id: 'responder', activeSessionId: 'sess-1' })
       await handleSessionMessage(WS, responder, {
@@ -478,26 +478,26 @@ describe('handleSessionMessage', () => {
       }, ctx)
       assert.equal(entry.session.respondToPermission.callCount, 1)
       assert.deepStrictEqual(entry.session.respondToPermission.lastCall, ['req-broadcast', 'allow'])
-      assert.equal(ctx.broadcast.mock.calls.length, 0,
+      assert.equal(ctx.transport.broadcast.mock.calls.length, 0,
         'SDK path must NOT broadcast inline — the unified pipeline handles it (#3048)')
     })
 
-    // #3048: legacy non-SDK sessions resolved via ctx.permissions.resolvePermission
+    // #3048: legacy non-SDK sessions resolved via ctx.permissions.permissions.resolvePermission
     // have no PermissionManager to wire through, so the handler still broadcasts
     // inline for that branch. Verify the filter excludes the responder.
     it('broadcasts inline for legacy non-SDK resolutions (#3048)', async () => {
       const ctx = makeCtx()
       // No permissionSessionMap entry → originSessionId is null → legacy branch
-      ctx.pendingPermissions.set('legacy-req', { resolve: () => {}, timer: null })
+      ctx.permissions.pendingPermissions.set('legacy-req', { resolve: () => {}, timer: null })
       const responder = makeClient({ id: 'responder' })  // unbound client
       await handleSessionMessage(WS, responder, {
         type: 'permission_response',
         requestId: 'legacy-req',
         decision: 'deny',
       }, ctx)
-      assert.equal(ctx.broadcast.mock.calls.length, 1,
+      assert.equal(ctx.transport.broadcast.mock.calls.length, 1,
         'legacy branch must still broadcast inline (no PermissionManager pipeline available)')
-      const [msg, filter] = ctx.broadcast.mock.calls[0].arguments
+      const [msg, filter] = ctx.transport.broadcast.mock.calls[0].arguments
       assert.equal(msg.type, 'permission_resolved')
       assert.equal(msg.requestId, 'legacy-req')
       assert.equal(msg.decision, 'deny')
@@ -551,7 +551,7 @@ describe('handleSessionMessage', () => {
       const client = makeClient({ activeSessionId: 'sess-1' })
       addSession(ctx, 'sess-1')
       await handleSessionMessage(WS, client, { type: 'destroy_session', sessionId: 'sess-1' }, ctx)
-      assert.equal(ctx.sessionManager.destroySession.mock.calls.length, 1)
+      assert.equal(ctx.sessions.sessionManager.destroySession.mock.calls.length, 1)
     })
   })
 
@@ -565,7 +565,7 @@ describe('handleSessionMessage', () => {
         sessionId: 'sess-1',
         name: 'My Session',
       }, ctx)
-      assert.equal(ctx.sessionManager.renameSession.mock.calls.length, 1)
+      assert.equal(ctx.sessions.sessionManager.renameSession.mock.calls.length, 1)
     })
 
     it('catches rejection and sends session_error (#1918)', async () => {
@@ -582,7 +582,7 @@ describe('handleSessionMessage', () => {
         name: 'New Name',
       }, ctx)
       // Should send session_error, not throw unhandled rejection
-      const sendCalls = ctx.send.mock.calls
+      const sendCalls = ctx.transport.send.mock.calls
       const errorMsg = sendCalls.find(c => c.arguments[1]?.type === 'session_error')
       assert.ok(errorMsg, 'should send session_error on rename failure')
       assert.ok(errorMsg.arguments[1].message.includes('session destroyed concurrently'))
@@ -651,7 +651,7 @@ describe('registerMessageHandler', () => {
     await handleSessionMessage(WS, client, { type: 'ctx_capture_test' }, ctx)
 
     assert.ok(capturedCtx !== null)
-    assert.ok(typeof capturedCtx.send === 'function' || capturedCtx.send?.mock)
+    assert.ok(typeof capturedCtx.transport.send === 'function' || capturedCtx.transport.send?.mock)
   })
 
   it('overwrites a previously registered handler for the same type', async () => {

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, realpathSync } from '
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { repoHandlers } from '../src/handlers/repo-handlers.js'
+import { nsCtx } from './test-helpers.js'
 
 /**
  * #5553 — repo-handlers per-repo preset surface: host-authority gate, the
@@ -22,12 +23,16 @@ function makeWs() {
 
 function makeCtx(overrides = {}) {
   const sent = []
-  return {
+  // #5558: handlers read the role-scoped ctx (ctx.transport.send /
+  // ctx.sessions.sessionManager / ctx.services.config); nsCtx buckets the flat
+  // fields. `_sent` and the `writeSessionPresetOverrideToConfig` DI seam are
+  // unknown keys and stay top-level, where the assertions + handler expect them.
+  return nsCtx({
     send: (_ws, msg) => sent.push(msg),
     config: {},
     _sent: sent,
     ...overrides,
-  }
+  })
 }
 
 describe('repo-handlers session preset', () => {

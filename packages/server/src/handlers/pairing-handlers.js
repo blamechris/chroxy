@@ -39,7 +39,7 @@ function rejectIfBound(ws, client, msg) {
 
 async function handlePairApprove(ws, client, msg, ctx) {
   if (rejectIfBound(ws, client, msg)) return
-  const pairingManager = ctx?.pairingManager
+  const pairingManager = ctx?.services?.pairingManager
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
   if (!pairingManager || !requestId) {
     sendError(ws, requestId, 'PAIR_APPROVE_FAILED', 'pairing is not enabled or requestId is missing')
@@ -52,16 +52,16 @@ async function handlePairApprove(ws, client, msg, ctx) {
     // dashboard can drop its banner. Never logs a token.
     sendError(ws, requestId, 'PAIR_APPROVE_FAILED', `cannot approve request: ${result.reason}`, { reason: result.reason })
     // Retract the banner on every host surface for a stale request.
-    if (result.reason !== 'not_found') ctx.broadcastPairResolved(requestId, result.reason)
+    if (result.reason !== 'not_found') ctx.services.broadcastPairResolved(requestId, result.reason)
     return
   }
 
   // Deliver the token to the requester EXACTLY once over its open connection.
   // If the requester disconnected, the token is simply dropped (the entry is
   // still consumed — no second approve can mint another).
-  ctx.resolvePairRequester(requestId, { ok: true, token: result.token })
+  ctx.services.resolvePairRequester(requestId, { ok: true, token: result.token })
   // Retract the banner everywhere else.
-  ctx.broadcastPairResolved(requestId, 'approved')
+  ctx.services.broadcastPairResolved(requestId, 'approved')
   // requestId originated pre-auth (attacker-controlled); JSON.stringify keeps
   // the log a single well-formed record (no newline/control-char injection).
   log.info(`pair_request ${JSON.stringify(requestId)} approved by client ${client.id}`)
@@ -69,7 +69,7 @@ async function handlePairApprove(ws, client, msg, ctx) {
 
 async function handlePairDeny(ws, client, msg, ctx) {
   if (rejectIfBound(ws, client, msg)) return
-  const pairingManager = ctx?.pairingManager
+  const pairingManager = ctx?.services?.pairingManager
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
   if (!pairingManager || !requestId) {
     sendError(ws, requestId, 'PAIR_DENY_FAILED', 'pairing is not enabled or requestId is missing')
@@ -79,8 +79,8 @@ async function handlePairDeny(ws, client, msg, ctx) {
   pairingManager.denyPendingRequest(requestId)
   // Tell the requester (idempotent — harmless if already resolved) and retract
   // the banner on every host surface.
-  ctx.resolvePairRequester(requestId, { ok: false, reason: 'denied' })
-  ctx.broadcastPairResolved(requestId, 'denied')
+  ctx.services.resolvePairRequester(requestId, { ok: false, reason: 'denied' })
+  ctx.services.broadcastPairResolved(requestId, 'denied')
   // See handlePairApprove: requestId is pre-auth attacker-controlled.
   log.info(`pair_request ${JSON.stringify(requestId)} denied by client ${client.id}`)
 }

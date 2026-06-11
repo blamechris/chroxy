@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { summarizeHandlers } from '../src/handlers/summarize-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
-import { createSpy, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
 import { ClientMessageSchema, ServerSummarizeSessionResultSchema } from '@chroxy/protocol'
 
 /**
@@ -27,18 +27,18 @@ function makeCtx(overrides = {}) {
   sessionsMap.get('sess-1').session.model = 'claude-session-model'
   manager.getHistory = (id) => (id === 'sess-1' ? HISTORY : [])
 
-  return {
+  return nsCtx({
     send: sendSpy,
     sessionManager: manager,
     config: {},
     summarizeSession: createSpy(async () => ({ summary: 'CONTINUATION BRIEF', truncated: false })),
     ...overrides,
     _send: sendSpy,
-  }
+  })
 }
 
 function lastSent(ctx) {
-  const calls = ctx.send.calls
+  const calls = ctx.transport.send.calls
   return calls.length ? calls[calls.length - 1][1] : null
 }
 
@@ -193,7 +193,7 @@ describe('summarize_session handler', () => {
 
     it('does not echo a raw getHistory error into the message', async () => {
       ctx = makeCtx()
-      ctx.sessionManager.getHistory = () => {
+      ctx.sessions.sessionManager.getHistory = () => {
         throw new Error('ENOENT: /home/secret/.chroxy/session-state.json missing')
       }
       await summarizeHandlers.summarize_session(ws, client, {

@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
-import { createSpy, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
 import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema } from '@chroxy/protocol'
 
 /**
@@ -60,7 +60,7 @@ function makeCtx(overrides = {}) {
   const { manager } = createMockSessionManager([
     { id: 'sess-1', name: 'Work', cwd: '/home/user/Projects/chroxy' },
   ])
-  return {
+  return nsCtx({
     send: sendSpy,
     sessionManager: manager,
     config: { repos: [], controlRoomRoot: '/home/user/Projects' },
@@ -68,7 +68,7 @@ function makeCtx(overrides = {}) {
     resolveRepoSet: createSpy(() => SAMPLE_SNAPSHOT.repos.map(r => ({ name: r.name, path: r.path }))),
     ...overrides,
     _send: sendSpy,
-  }
+  })
 }
 
 describe('host_status_request handler', () => {
@@ -264,13 +264,13 @@ const SAMPLE_RUNNER_SNAPSHOT = {
 
 function makeRunnerCtx(overrides = {}) {
   const sendSpy = createSpy()
-  return {
+  return nsCtx({
     send: sendSpy,
     config: { controlRoomRunnerRoot: '/home/user/github-runners' },
     surveyRunners: createSpy(async () => SAMPLE_RUNNER_SNAPSHOT),
     ...overrides,
     _send: sendSpy,
-  }
+  })
 }
 
 describe('runner_status_request handler (#5253)', () => {
@@ -435,14 +435,14 @@ const SAMPLE_INTEGRATION_SNAPSHOT = {
 
 function makeIntegrationCtx(overrides = {}) {
   const sendSpy = createSpy()
-  return {
+  return nsCtx({
     send: sendSpy,
     config: { repos: [], controlRoomRoot: '/home/user/Projects' },
     surveyIntegrations: createSpy(async () => SAMPLE_INTEGRATION_SNAPSHOT),
     resolveRepoSet: createSpy(() => SAMPLE_INTEGRATION_SNAPSHOT.repos.map(r => ({ name: r.name, path: r.path }))),
     ...overrides,
     _send: sendSpy,
-  }
+  })
 }
 
 describe('integration_status_request handler (#5499)', () => {

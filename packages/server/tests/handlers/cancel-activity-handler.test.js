@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { inputHandlers } from '../../src/handlers/input-handlers.js'
-import { createSpy } from '../test-helpers.js'
+import { createSpy, nsCtx } from '../test-helpers.js'
 
 /**
  * #5271 (Control Room Phase 2a): cancel_activity WS handler.
@@ -15,7 +15,7 @@ import { createSpy } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
-  return {
+  return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy(),
     broadcastToSession: createSpy(),
@@ -24,7 +24,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     },
     _sent: sent,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {

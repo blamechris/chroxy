@@ -1,20 +1,20 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { conversationHandlers } from '../../src/handlers/conversation-handlers.js'
-import { createSpy, createMockSession, makeSessionIndexCtx } from '../test-helpers.js'
+import { createSpy, createMockSession, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
 import { CliSession, buildClaudeCliArgs } from '../../src/cli-session.js'
 import { SdkSession } from '../../src/sdk-session.js'
 import { CodexSession } from '../../src/codex-session.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
-  return {
+  return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy(),
     broadcastToSession: createSpy(),
     broadcastSessionList: createSpy(),
     // #5563: index-maintaining helpers backed by a real WsClientManager.
-    // autoSubscribeOtherClients (handler-utils.js) iterates ctx.clients; the
+    // autoSubscribeOtherClients (handler-utils.js) iterates ctx.transport.clients; the
     // manager's empty Map is sufficient where no other clients exist.
     ...makeSessionIndexCtx(),
     sendSessionInfo: createSpy(),
@@ -36,7 +36,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     },
     _sent: sent,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {
@@ -114,7 +114,7 @@ describe('conversation-handlers', () => {
     it('passes projectsDirs from ctx to the scanner (#2965)', async () => {
       const projectsDirs = ['/tmp/claude/projects', '/tmp/codex/projects']
       const ctx = makeCtx()
-      ctx.projectsDirs = projectsDirs
+      ctx.runtime.projectsDirs = projectsDirs
       let capturedOpts
       ctx.scanConversations = createSpy(async (opts) => { capturedOpts = opts; return [] })
 
@@ -202,14 +202,14 @@ describe('conversation-handlers', () => {
       session.resumeSessionId = '00000000-0000-0000-0000-000000000001'
       sessions.set('new-id', { session, name: 'Resumed', cwd: '/home/user' })
       const ctx = makeCtx(sessions)
-      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
       const client = makeClient()
 
       await conversationHandlers.resume_conversation(makeWs(), client, {
         conversationId: '00000000-0000-0000-0000-000000000001',
       }, ctx)
 
-      assert.equal(ctx.sessionManager.createSession.callCount, 1)
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1)
       const switched = ctx._sent.find(m => m.type === 'session_switched')
       assert.ok(switched, 'session_switched not sent')
     })
@@ -298,7 +298,7 @@ describe('conversation-handlers', () => {
         sessions.set('new-id', { session: newSession, name: 'Resumed', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
         const client = makeClient({ activeSessionId: 'active-cli' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
@@ -310,7 +310,7 @@ describe('conversation-handlers', () => {
         assert.deepEqual(errors, [],
           'CLI active session must NOT trigger the capability-gate rejection (#4928 enabled this path)')
         // createSession was actually called — handler proceeded past the gate.
-        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1,
           'handler must invoke createSession when the capability check passes')
       })
 
@@ -329,7 +329,7 @@ describe('conversation-handlers', () => {
 
         const ctx = makeCtx(sessions)
         const captured = []
-        ctx.sessionManager.createSession = createSpy((opts) => { captured.push(opts); return 'new-id' })
+        ctx.sessions.sessionManager.createSession = createSpy((opts) => { captured.push(opts); return 'new-id' })
         const client = makeClient({ activeSessionId: 'active-cli' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
@@ -403,7 +403,7 @@ describe('conversation-handlers', () => {
         sessions.set('new-id', { session: resumed, name: 'Resumed CLI', cwd: '/home/dev' })
 
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
         const client = makeClient({ activeSessionId: 'active-cli' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
@@ -430,7 +430,7 @@ describe('conversation-handlers', () => {
         sessions.set('new-id', { session: createMockSession(), name: 'New', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
         const client = makeClient({ activeSessionId: 'prior-cli' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
@@ -465,7 +465,7 @@ describe('conversation-handlers', () => {
 
         const ctx = makeCtx(sessions)
         const createSessionErr = new Error('Stale conversation: no transcript found for 00000000-0000-0000-0000-0000000dead0')
-        ctx.sessionManager.createSession = createSpy(() => {
+        ctx.sessions.sessionManager.createSession = createSpy(() => {
           throw createSessionErr
         })
         const client = makeClient({ activeSessionId: 'active-cli' })
@@ -478,7 +478,7 @@ describe('conversation-handlers', () => {
         // future regression that re-introduces an early-return above
         // createSession (e.g. a new gate) would silently make this test
         // vacuous again.
-        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1,
           'createSession must have been called so the catch-block path is exercised')
         const sessionErrors = ctx._sent.filter(m => m.type === 'session_error')
         assert.equal(sessionErrors.length, 1,
@@ -501,14 +501,14 @@ describe('conversation-handlers', () => {
         sessions.set('new-id', { session: createMockSession(), name: 'Resumed', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
         const client = makeClient({ activeSessionId: 'active-sdk' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
           conversationId: '00000000-0000-0000-0000-000000000123',
         }, ctx)
 
-        assert.equal(ctx.sessionManager.createSession.callCount, 1)
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1)
         const errors = ctx._sent.filter(m => m.type === 'session_error')
         assert.deepEqual(errors, [], 'SDK active session must also proceed past the capability gate')
       })
@@ -526,14 +526,14 @@ describe('conversation-handlers', () => {
         sessions.set('active-codex', { session: activeSession, name: 'Codex', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.createSession = createSpy(() => 'should-not-be-called')
+        ctx.sessions.sessionManager.createSession = createSpy(() => 'should-not-be-called')
         const client = makeClient({ activeSessionId: 'active-codex' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
           conversationId: '00000000-0000-0000-0000-000000000456',
         }, ctx)
 
-        assert.equal(ctx.sessionManager.createSession.callCount, 0,
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0,
           'createSession must NOT be called when the active provider declares resume: false')
         const errors = ctx._sent.filter(m => m.type === 'session_error')
         assert.equal(errors.length, 1)
@@ -554,14 +554,14 @@ describe('conversation-handlers', () => {
         sessions.set('new-id', { session: newSession, name: 'Resumed', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
         const client = makeClient({ activeSessionId: null })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
           conversationId: '00000000-0000-0000-0000-0000000000aa',
         }, ctx)
 
-        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1,
           'with no active session, the capability gate is bypassed and createSession runs')
         const switched = ctx._sent.find(m => m.type === 'session_switched')
         assert.ok(switched, 'session_switched must still be emitted')
@@ -578,14 +578,14 @@ describe('conversation-handlers', () => {
         sessions.set('new-id', { session: createMockSession(), name: 'Resumed', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.createSession = createSpy(() => 'new-id')
+        ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
         const client = makeClient({ activeSessionId: 'ghost-session' })
 
         await conversationHandlers.resume_conversation(makeWs(), client, {
           conversationId: '00000000-0000-0000-0000-0000000000bb',
         }, ctx)
 
-        assert.equal(ctx.sessionManager.createSession.callCount, 1,
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1,
           'stale activeSessionId must not block resume — gate skips when entry is missing')
         const errors = ctx._sent.filter(m => m.type === 'session_error')
         assert.deepEqual(errors, [])
@@ -608,7 +608,7 @@ describe('conversation-handlers', () => {
       const sessions = new Map()
       sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.sessionManager.getFullHistoryAsync = createSpy(async () => [
+      ctx.sessions.sessionManager.getFullHistoryAsync = createSpy(async () => [
         { type: 'user_input', content: 'hello', timestamp: 1 },
       ])
       const client = makeClient({ activeSessionId: 's1' })
@@ -634,7 +634,7 @@ describe('conversation-handlers', () => {
 
     it('sends session_context when context found', async () => {
       const ctx = makeCtx()
-      ctx.sessionManager.getSessionContext = createSpy(async () => ({
+      ctx.sessions.sessionManager.getSessionContext = createSpy(async () => ({
         sessionId: 's1', model: 'sonnet',
       }))
       const client = makeClient({ activeSessionId: 's1' })
@@ -667,14 +667,14 @@ describe('conversation-handlers', () => {
   describe('request_cost_summary', () => {
     it('sends cost_summary with totals', () => {
       const ctx = makeCtx()
-      ctx.sessionManager.listSessions = createSpy(() => [
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [
         { sessionId: 's1', name: 'S1' },
       ])
-      ctx.sessionManager.getSessionCost = createSpy(() => 0.05)
-      ctx.sessionManager.getTotalCost = createSpy(() => 0.05)
-      ctx.sessionManager.getCostBudget = createSpy(() => 1.0)
-      ctx.sessionManager.getCostByModel = createSpy(() => ({ sonnet: 0.05 }))
-      ctx.sessionManager.getSpendRate = createSpy(() => 0.01)
+      ctx.sessions.sessionManager.getSessionCost = createSpy(() => 0.05)
+      ctx.sessions.sessionManager.getTotalCost = createSpy(() => 0.05)
+      ctx.sessions.sessionManager.getCostBudget = createSpy(() => 1.0)
+      ctx.sessions.sessionManager.getCostByModel = createSpy(() => ({ sonnet: 0.05 }))
+      ctx.sessions.sessionManager.getSpendRate = createSpy(() => 0.01)
 
       conversationHandlers.request_cost_summary(makeWs(), makeClient(), {}, ctx)
 

@@ -44,7 +44,7 @@ const summarizeInFlight = new Set()
  * token/key material — `message` is a curated, provider-agnostic string.
  */
 function summarizeError(ws, ctx, sessionId, requestId, reason, message) {
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'session_error',
     code: 'SUMMARIZE_FAILED',
     message,
@@ -74,7 +74,7 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
     return
   }
 
-  const entry = ctx.sessionManager?.getSession?.(sessionId)
+  const entry = ctx.sessions.sessionManager?.getSession?.(sessionId)
   if (!entry) {
     summarizeError(ws, ctx, sessionId, requestId, 'unknown-session',
       `Session not found: ${sessionId}`)
@@ -93,7 +93,7 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
   // is gone. getHistory is the synchronous ring-buffer read.
   let history
   try {
-    history = ctx.sessionManager.getHistory(sessionId)
+    history = ctx.sessions.sessionManager.getHistory(sessionId)
   } catch (err) {
     // Curated, fixed message — never echo the raw error onto the wire. The raw
     // text is logged server-side only (a thrown history-read error could carry
@@ -109,7 +109,7 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
   // model. `summarize.provider` is accepted in config for forward-compat but
   // the one-shot path runs through the SDK provider regardless; only the model
   // id is threaded through here.
-  const config = ctx?.config || {}
+  const config = ctx?.services?.config || {}
   const summarizeCfg = config.summarize && typeof config.summarize === 'object' ? config.summarize : {}
   const overrideModel = typeof summarizeCfg.model === 'string' && summarizeCfg.model.length > 0
     ? summarizeCfg.model
@@ -130,7 +130,7 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
       sessionName: entry.name,
     })
     log.info(`summarize_session completed for ${sessionId} (client=${client?.id}, truncated=${truncated})`)
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'summarize_session_result',
       sessionId,
       summary,

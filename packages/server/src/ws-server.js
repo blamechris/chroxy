@@ -28,6 +28,7 @@ import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { getProviderDataDirs } from './providers.js'
+import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
 import { isLocalOrLanPeer } from './connection-locality.js'
 
@@ -634,74 +635,92 @@ export class WsServer {
       // via getter because _permissionAudit is constructed after this call.
       getPermissionAudit: () => self._permissionAudit,
     })
-    // Handler context: late-bound via getters for test compat (tests may reassign properties)
+    // Handler context (#5558): role-scoped namespaces, not a flat god-context.
+    // Each bucket declares what a handler couples to — transport (send/
+    // broadcast/subscribe), sessions (the session managers), permissions
+    // (audit + routing maps), services (managers + config + fileOps), runtime
+    // (drain flag, provider dirs, evaluator counters). Late-bound via getters
+    // for test compat (tests may reassign the underlying server properties).
+    // The single source of truth for the shape is ws-handler-context.js.
     this._handlerCtx = {
-      send: sendFn,
-      broadcast: broadcastFn,
-      broadcastToSession: (sid, msg, filter) => self._broadcastToSession(sid, msg, filter),
-      broadcastSessionList: () => {
-        const allSessions = self.sessionManager.listSessions()
-        for (const [ws, c] of self.clients) {
-          if (c.authenticated && ws.readyState === 1) {
-            const sessions = c.boundSessionId
-              ? allSessions.filter(s => s.sessionId === c.boundSessionId)
-              : allSessions
-            sendFn(ws, { type: 'session_list', sessions })
+      transport: {
+        send: sendFn,
+        broadcast: broadcastFn,
+        broadcastToSession: (sid, msg, filter) => self._broadcastToSession(sid, msg, filter),
+        broadcastSessionList: () => {
+          const allSessions = self.sessionManager.listSessions()
+          for (const [ws, c] of self.clients) {
+            if (c.authenticated && ws.readyState === 1) {
+              const sessions = c.boundSessionId
+                ? allSessions.filter(s => s.sessionId === c.boundSessionId)
+                : allSessions
+              sendFn(ws, { type: 'session_list', sessions })
+            }
           }
-        }
+        },
+        // #5563: index-maintaining mutators for client subscription / active
+        // session. Handlers MUST route subscription + active-session changes
+        // through these (NOT bare `client.subscribedSessionIds.add()` /
+        // `client.activeSessionId = x`) so the sessionId→clients reverse index
+        // can never drift from the per-client Sets.
+        subscribeClient: (client, sid) => self._clientManager.subscribe(client, sid),
+        unsubscribeClient: (client, sid) => self._clientManager.unsubscribe(client, sid),
+        setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
+        updatePrimary: (sid, cid) => self._updatePrimary(sid, cid),
+        sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
+        replayHistory: (ws, sid) => self._replayHistory(ws, sid),
+        primaryClients: this._primaryClients,
+        get clients() { return self.clients },
       },
-      get sessionManager() { return self.sessionManager },
-      get cliSession() { return self.cliSession },
-      get pushManager() { return self.pushManager },
-      // #5554: the per-skill usage recorder lives on the SessionManager (it
-      // records activations at session creation); the Skills inventory handler
-      // reads its aggregates to join lastUsed / count / repos onto the snapshot.
-      get skillsUsageRecorder() { return self.sessionManager?.skillsUsageRecorder ?? null },
-      // #5510: pairing-approval primitive — host-level approve/deny handlers.
-      get pairingManager() { return self._pairingManager },
-      resolvePairRequester: (requestId, result) => self._resolvePairRequester(requestId, result),
-      broadcastPairResolved: (requestId, reason) => self._broadcastPairResolved(requestId, reason),
-      get checkpointManager() { return self._checkpointManager },
-      get devPreview() { return self._devPreview },
-      get webTaskManager() { return self._webTaskManager },
-      primaryClients: this._primaryClients,
-      get clients() { return self.clients },
-      // #5563: index-maintaining mutators for client subscription / active
-      // session. Handlers MUST route subscription + active-session changes
-      // through these (NOT bare `client.subscribedSessionIds.add()` /
-      // `client.activeSessionId = x`) so the sessionId→clients reverse index
-      // can never drift from the per-client Sets.
-      subscribeClient: (client, sid) => self._clientManager.subscribe(client, sid),
-      unsubscribeClient: (client, sid) => self._clientManager.unsubscribe(client, sid),
-      setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
-      permissionSessionMap: this._permissionSessionMap,
-      questionSessionMap: this._questionSessionMap,
-      // #3637: stable per-session auto-evaluator iteration counter (#3186).
-      // See WsServer constructor for the lifecycle rationale.
-      _evaluatorIterations: this._evaluatorIterations,
-      pendingPermissions: this._pendingPermissions,
-      fileOps: this._fileOps,
-      permissions: this._permissions,
-      get permissionAudit() { return self._permissionAudit },
-      updatePrimary: (sid, cid) => self._updatePrimary(sid, cid),
-      sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
-      replayHistory: (ws, sid) => self._replayHistory(ws, sid),
-      get draining() { return self._draining },
-      get environmentManager() { return self.environmentManager },
-      // Runtime config exposed to handlers so validators (e.g.
-      // validateCwdAllowed) can consult workspaceRoots, feature flags,
-      // etc. Late-bound so test harnesses that mutate this.config after
-      // construction still see the updated value.
-      get config() { return self.config },
-      // Multi-provider data dirs (#2965): computed fresh each access so new
-      // provider registrations are reflected without restarting the server.
-      get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
-      get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
-      // #4835: per-device active-session memory. handleSwitchSession writes
-      // here after every successful switch so the next reconnect can
-      // restore the same session.
-      get devicePreferences() { return self._devicePreferences },
+      sessions: {
+        get sessionManager() { return self.sessionManager },
+        get cliSession() { return self.cliSession },
+      },
+      permissions: {
+        permissions: this._permissions,
+        get permissionAudit() { return self._permissionAudit },
+        pendingPermissions: this._pendingPermissions,
+        permissionSessionMap: this._permissionSessionMap,
+        questionSessionMap: this._questionSessionMap,
+      },
+      services: {
+        get pushManager() { return self.pushManager },
+        // #5510: pairing-approval primitive — host-level approve/deny handlers.
+        get pairingManager() { return self._pairingManager },
+        get checkpointManager() { return self._checkpointManager },
+        get devPreview() { return self._devPreview },
+        get webTaskManager() { return self._webTaskManager },
+        get environmentManager() { return self.environmentManager },
+        // #4835: per-device active-session memory. handleSwitchSession writes
+        // here after every successful switch so the next reconnect can
+        // restore the same session.
+        get devicePreferences() { return self._devicePreferences },
+        fileOps: this._fileOps,
+        // Runtime config exposed to handlers so validators (e.g.
+        // validateCwdAllowed) can consult workspaceRoots, feature flags,
+        // etc. Late-bound so test harnesses that mutate this.config after
+        // construction still see the updated value.
+        get config() { return self.config },
+        // #5554: the per-skill usage recorder lives on the SessionManager (it
+        // records activations at session creation); the Skills inventory handler
+        // reads its aggregates to join lastUsed / count / repos onto the snapshot.
+        get skillsUsageRecorder() { return self.sessionManager?.skillsUsageRecorder ?? null },
+        resolvePairRequester: (requestId, result) => self._resolvePairRequester(requestId, result),
+        broadcastPairResolved: (requestId, reason) => self._broadcastPairResolved(requestId, reason),
+      },
+      runtime: {
+        get draining() { return self._draining },
+        // Multi-provider data dirs (#2965): computed fresh each access so new
+        // provider registrations are reflected without restarting the server.
+        get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
+        get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+        // #3637: stable per-session auto-evaluator iteration counter (#3186).
+        // See WsServer constructor for the lifecycle rationale.
+        evaluatorIterations: this._evaluatorIterations,
+      },
     }
+    // Fail loudly if the production ctx ever drifts from the declared shape.
+    assertCtxShape(this._handlerCtx)
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)
     this._historyCtx = {
@@ -1522,7 +1541,7 @@ export class WsServer {
       registerPermissionRoute: (requestId, sessionId) => this._registerPermissionRoute(requestId, sessionId),
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
-      broadcastSessionList: () => this._handlerCtx.broadcastSessionList(),
+      broadcastSessionList: () => this._handlerCtx.transport.broadcastSessionList(),
     })
 
     // Ping all authenticated clients every 30s to keep connections alive through

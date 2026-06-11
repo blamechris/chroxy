@@ -74,15 +74,16 @@ export function registerMessageHandler(type, handlerFn) {
 /**
  * Handle messages in multi-session mode.
  *
- * ctx shape: {
- *   send, broadcast, broadcastToSession, broadcastSessionList,
- *   sessionManager, checkpointManager, devPreview, webTaskManager,
- *   pushManager, primaryClients, clients,
- *   permissionSessionMap, questionSessionMap, pendingPermissions,
- *   fileOps, permissions,
- *   updatePrimary, sendSessionInfo, replayHistory,
- *   draining,
- * }
+ * The `ctx` is role-scoped into namespaces (#5558) — `ctx.transport`,
+ * `ctx.sessions`, `ctx.permissions`, `ctx.services`, `ctx.runtime`. The shape
+ * is defined ONCE in ws-handler-context.js (the `WsHandlerContext` typedef +
+ * `CTX_NAMESPACES` + `assertCtxShape`) so this doc can't drift from the real
+ * object; see that module for the per-field breakdown.
+ *
+ * @param {WebSocket} ws
+ * @param {object} client
+ * @param {object} msg
+ * @param {import('./ws-handler-context.js').WsHandlerContext} ctx
  */
 export async function handleSessionMessage(ws, client, msg, ctx) {
   const handler = handlerRegistry.get(msg.type)
@@ -140,11 +141,20 @@ function createCliSessionAdapter(cliSession) {
 
 /** Handle messages in legacy single CLI mode — delegates to handleSessionMessage via adapter */
 export function handleCliMessage(ws, client, msg, ctx) {
+  // Override only the affected namespace buckets, preserving the others by
+  // reference. The CLI adapter masquerades as a SessionManager and collapses
+  // per-session broadcasts onto the single connection (#5558: namespaced ctx).
   const adaptedCtx = {
     ...ctx,
-    sessionManager: createCliSessionAdapter(ctx.cliSession),
-    broadcastToSession: (_sid, message, filter) => ctx.broadcast(message, filter),
-    broadcastSessionList: () => {},
+    sessions: {
+      ...ctx.sessions,
+      sessionManager: createCliSessionAdapter(ctx.sessions.cliSession),
+    },
+    transport: {
+      ...ctx.transport,
+      broadcastToSession: (_sid, message, filter) => ctx.transport.broadcast(message, filter),
+      broadcastSessionList: () => {},
+    },
   }
 
   return handleSessionMessage(ws, client, msg, adaptedCtx)

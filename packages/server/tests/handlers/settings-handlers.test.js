@@ -5,14 +5,14 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
   const broadcasts = []
   const sessionBroadcasts = []
 
-  return {
+  return nsCtx({
     send: createSpy((_ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastToSession: createSpy((sessionId, msg) => { sessionBroadcasts.push({ sessionId, msg }) }),
@@ -27,7 +27,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     _broadcasts: broadcasts,
     _sessionBroadcasts: sessionBroadcasts,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {
@@ -72,8 +72,8 @@ describe('settings-handlers', () => {
 
       settingsHandlers.set_model(makeWs(), client, { model: 'sonnet' }, ctx)
 
-      assert.equal(ctx.broadcastToSession.callCount, 1)
-      const [, msg] = ctx.broadcastToSession.lastCall
+      assert.equal(ctx.transport.broadcastToSession.callCount, 1)
+      const [, msg] = ctx.transport.broadcastToSession.lastCall
       assert.equal(msg.type, 'model_changed')
     })
 
@@ -87,7 +87,7 @@ describe('settings-handlers', () => {
       settingsHandlers.set_model(makeWs(), client, { model: 'gpt-4' }, ctx)
 
       assert.equal(session.setModel.callCount, 0)
-      assert.equal(ctx.send.callCount, 0)
+      assert.equal(ctx.transport.send.callCount, 0)
     })
 
     // #2946 — set_model must consult the session's provider, not a global
@@ -125,7 +125,7 @@ describe('settings-handlers', () => {
 
         assert.equal(session.setModel.callCount, 1)
         assert.equal(session.setModel.lastCall[0], 'gemini-2.5-pro')
-        assert.equal(ctx.broadcastToSession.callCount, 1)
+        assert.equal(ctx.transport.broadcastToSession.callCount, 1)
       })
 
       it('rejects a Gemini model on a Codex session', () => {
@@ -365,7 +365,7 @@ describe('settings-handlers', () => {
 
     it('queries permissionAudit when available', () => {
       const ctx = makeCtx()
-      ctx.permissionAudit = {
+      ctx.permissions.permissionAudit = {
         query: createSpy(() => [{ id: 1 }]),
       }
 
@@ -394,7 +394,7 @@ describe('settings-handlers', () => {
       session._pendingPermissions = new Map([['req-1', true]])
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.permissionSessionMap.set('req-1', 's1')
+      ctx.permissions.permissionSessionMap.set('req-1', 's1')
       const client = makeClient({ activeSessionId: 's1' })
 
       settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-1', decision: 'allow' }, ctx)
@@ -414,7 +414,7 @@ describe('settings-handlers', () => {
         ['bound-1', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' }],
       ])
       const ctx = makeCtx(sessions)
-      ctx.permissionSessionMap.set('req-mismatch', 'other-session')
+      ctx.permissions.permissionSessionMap.set('req-mismatch', 'other-session')
       const client = makeClient({
         id: 'client-1',
         activeSessionId: 'bound-1',
@@ -464,7 +464,7 @@ describe('settings-handlers', () => {
         sessions.set('s-other', { session, name: 'O', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.permissionSessionMap.set('req-mismatch', 's-other')
+        ctx.permissions.permissionSessionMap.set('req-mismatch', 's-other')
 
         const client = makeClient({
           id: 'client-android',
@@ -553,7 +553,7 @@ describe('settings-handlers', () => {
         sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
         const ctx = makeCtx(sessions)
         // The leaked requestId belongs to session s1.
-        ctx.permissionSessionMap.set('perm-leak', 's1')
+        ctx.permissions.permissionSessionMap.set('perm-leak', 's1')
         // Attacker tab: unbound, actively viewing s2, NOT subscribed to s1.
         const attacker = makeClient({
           id: 'attacker',
@@ -571,7 +571,7 @@ describe('settings-handlers', () => {
           'unbound client without subscription/active match must NOT route the decision')
         assert.equal(sessionB.respondToPermission.callCount, 0,
           'and must not bleed onto the attacker\'s own session either')
-        assert.equal(ctx.permissionSessionMap.get('perm-leak'), 's1',
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-leak'), 's1',
           'mapping must stay intact so the legitimate client can still respond')
       })
 
@@ -581,7 +581,7 @@ describe('settings-handlers', () => {
         sessionA._pendingPermissions = new Map([['perm-ok-active', true]])
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         const ctx = makeCtx(sessions)
-        ctx.permissionSessionMap.set('perm-ok-active', 's1')
+        ctx.permissions.permissionSessionMap.set('perm-ok-active', 's1')
         const client = makeClient({
           id: 'legit-active',
           boundSessionId: null,
@@ -597,7 +597,7 @@ describe('settings-handlers', () => {
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'unbound client with matching activeSessionId must route normally')
         assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow'])
-        assert.equal(ctx.permissionSessionMap.has('perm-ok-active'), false,
+        assert.equal(ctx.permissions.permissionSessionMap.has('perm-ok-active'), false,
           'mapping must be consumed when the decision is routed')
       })
 
@@ -609,7 +609,7 @@ describe('settings-handlers', () => {
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
         const ctx = makeCtx(sessions)
-        ctx.permissionSessionMap.set('perm-ok-sub', 's1')
+        ctx.permissions.permissionSessionMap.set('perm-ok-sub', 's1')
         // Multi-session dashboard pattern: active tab is s2, but s1 is
         // subscribed (sidebar / background tab keeping the wire open).
         const client = makeClient({
@@ -638,7 +638,7 @@ describe('settings-handlers', () => {
         sessionA._pendingPermissions = new Map([['perm-x', true]])
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         const ctx = makeCtx(sessions)
-        ctx.permissionSessionMap.set('perm-x', 's1')
+        ctx.permissions.permissionSessionMap.set('perm-x', 's1')
         const boundElsewhere = makeClient({
           id: 'bound-other',
           boundSessionId: 's2',
@@ -653,7 +653,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 0,
           'bound-client guard takes precedence — boundSessionId mismatch always wins')
-        assert.equal(ctx.permissionSessionMap.get('perm-x'), 's1',
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-x'), 's1',
           'mapping preserved when the bound-elsewhere client is rejected')
       })
 
@@ -674,7 +674,7 @@ describe('settings-handlers', () => {
         // Production: when the permission for s1 dispatched, the WsServer-side
         // helper called permissionSessionMap.set('perm-after-switch', 's1')
         // AND subscribedSessionIds.add('s1') for this client.
-        ctx.permissionSessionMap.set('perm-after-switch', 's1')
+        ctx.permissions.permissionSessionMap.set('perm-after-switch', 's1')
         // The user then tapped "switch to session B" — session-handlers.js
         // adds 's2' to subscribedSessionIds and sets activeSessionId='s2',
         // but leaves the prior 's1' subscription intact.
@@ -695,7 +695,7 @@ describe('settings-handlers', () => {
         assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow'])
         assert.equal(sessionB.respondToPermission.callCount, 0,
           'must not bleed onto the now-active session B')
-        assert.equal(ctx.permissionSessionMap.has('perm-after-switch'), false,
+        assert.equal(ctx.permissions.permissionSessionMap.has('perm-after-switch'), false,
           'mapping consumed on successful route')
       })
 
@@ -708,7 +708,7 @@ describe('settings-handlers', () => {
         sessionA._pendingPermissions = new Map([['perm-y', true]])
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         const ctx = makeCtx(sessions)
-        ctx.permissionSessionMap.set('perm-y', 's1')
+        ctx.permissions.permissionSessionMap.set('perm-y', 's1')
         const client = makeClient({
           id: 'no-subscribed-set',
           boundSessionId: null,
@@ -724,19 +724,19 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 0,
           'undefined subscribedSessionIds + non-matching active must drop')
-        assert.equal(ctx.permissionSessionMap.get('perm-y'), 's1',
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-y'), 's1',
           'mapping preserved on guard rejection')
       })
 
       it('drops legacy pendingPermissions path too when unbound client is not subscribed', () => {
-        // The handler falls through to ctx.pendingPermissions when the SDK
+        // The handler falls through to ctx.permissions.pendingPermissions when the SDK
         // path doesn't resolve. The subscription guard must apply BEFORE
         // that fallback so the legacy path can't be used to bypass the
         // session check.
         const ctx = makeCtx()
-        ctx.pendingPermissions = new Map([['perm-legacy-leak', { resolve: () => {} }]])
-        ctx.permissions = { resolvePermission: createSpy() }
-        ctx.permissionSessionMap.set('perm-legacy-leak', 's1')
+        ctx.permissions.pendingPermissions = new Map([['perm-legacy-leak', { resolve: () => {} }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy() }
+        ctx.permissions.permissionSessionMap.set('perm-legacy-leak', 's1')
 
         const attacker = makeClient({
           id: 'attacker-legacy',
@@ -750,9 +750,9 @@ describe('settings-handlers', () => {
           decision: 'allow',
         }, ctx)
 
-        assert.equal(ctx.permissions.resolvePermission.callCount, 0,
+        assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 0,
           'legacy pendingPermissions resolver must not be invoked on the hijack path')
-        assert.equal(ctx.permissionSessionMap.get('perm-legacy-leak'), 's1',
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-legacy-leak'), 's1',
           'mapping preserved on guard rejection — legitimate client can still respond')
       })
     })
@@ -1271,7 +1271,7 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
       // sendError() writes directly to ws.send() rather than going via
-      // ctx.send(). The mock captures the JSON-parsed payload on
+      // ctx.transport.send(). The mock captures the JSON-parsed payload on
       // ws._messages so we can assert on the wire shape.
       const ws = makeWs()
 
@@ -1589,7 +1589,7 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(new Map())
       const ws = makeWs()
       settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: null }), { skillName: 'foo', author: 'alice' }, ctx)
-      // session_error goes through ctx.send, not ws.send directly
+      // session_error goes through ctx.transport.send, not ws.send directly
       const err = ctx._sent.find(m => m.type === 'session_error')
       assert.ok(err, 'expected session_error for missing session')
     })
@@ -1919,7 +1919,7 @@ describe('settings-handlers', () => {
         assert.equal(ctx._sessionBroadcasts[0].msg.skillName, 'foo')
         assert.equal(ctx._sessionBroadcasts[0].msg.author, 'alice')
 
-        // ack goes through ctx.send
+        // ack goes through ctx.transport.send
         const ack = ctx._sent.find(m => m.type === 'skill_trust_grant_ok')
         assert.ok(ack, 'expected skill_trust_grant_ok ack')
         assert.equal(ack.skillName, 'foo')

@@ -20,7 +20,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 if (typeof mock.module !== 'function') {
   describe('_scanCommunityForSkillName deterministic order (#3549)', () => {
@@ -75,7 +75,7 @@ if (typeof mock.module !== 'function') {
 
   function makeCtx(sessions = new Map()) {
     const sent = []
-    return {
+    return nsCtx({
       send: createSpy((_ws, msg) => { sent.push(msg) }),
       broadcast: createSpy(() => {}),
       broadcastToSession: createSpy(() => {}),
@@ -85,7 +85,7 @@ if (typeof mock.module !== 'function') {
       pendingPermissions: new Map(),
       permissions: null,
       _sent: sent,
-    }
+    })
   }
 
   function makeClient(overrides = {}) {

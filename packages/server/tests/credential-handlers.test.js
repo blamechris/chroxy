@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { getStoredCredential, setStoredCredential } from '../src/credential-store.js'
+import { nsCtx } from './test-helpers.js'
 
 /**
  * #3855: WS handler tests for the Provider Credentials messages.
@@ -23,24 +24,24 @@ import { getStoredCredential, setStoredCredential } from '../src/credential-stor
 const CRED_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'GEMINI_API_KEY', 'OPENAI_API_KEY']
 
 // sendError() writes directly to ws.send (JSON string), while success replies
-// go via ctx.send (object). Capture both so a helper can return the latest of
+// go via ctx.transport.send (object). Capture both so a helper can return the latest of
 // either path.
 function makeWs() {
   return { readyState: 1, send: mock.fn() }
 }
 
 function makeCtx() {
-  return { send: mock.fn(), broadcast: mock.fn() }
+  return nsCtx({ send: mock.fn(), broadcast: mock.fn() })
 }
 
-// The handlers send exactly one reply: success via ctx.send (object), error
+// The handlers send exactly one reply: success via ctx.transport.send (object), error
 // via ws.send (JSON string). Return whichever fired.
 function lastReply(ws, ctx) {
   if (ws.send.mock.callCount() > 0) {
     return JSON.parse(ws.send.mock.calls[ws.send.mock.calls.length - 1].arguments[0])
   }
-  if (ctx.send.mock.callCount() > 0) {
-    return ctx.send.mock.calls[ctx.send.mock.calls.length - 1].arguments[1]
+  if (ctx.transport.send.mock.callCount() > 0) {
+    return ctx.transport.send.mock.calls[ctx.transport.send.mock.calls.length - 1].arguments[1]
   }
   return null
 }
@@ -107,7 +108,7 @@ describe('credential WS handlers (#3855)', () => {
       // #3855: credentials are admin state — sent ONLY to the requester, never
       // broadcast (would leak configured-provider + masked previews to other
       // authenticated clients).
-      assert.equal(ctx.broadcast.mock.callCount(), 0)
+      assert.equal(ctx.transport.broadcast.mock.callCount(), 0)
       assert.equal(JSON.stringify(reply).includes('sk-openai-abc'), false)
     })
 
@@ -150,7 +151,7 @@ describe('credential WS handlers (#3855)', () => {
       assert.equal(getStoredCredential('GEMINI_API_KEY'), null)
       const reply = lastReply(ws, ctx)
       assert.equal(reply.type, 'credentials_status')
-      assert.equal(ctx.broadcast.mock.callCount(), 0)
+      assert.equal(ctx.transport.broadcast.mock.callCount(), 0)
     })
 
     it('rejects an unknown key', () => {
@@ -202,7 +203,7 @@ describe('credential WS handlers (#3855)', () => {
       assert.equal(reply.requestId, 'rb1')
       // The write must NOT have happened.
       assert.equal(getStoredCredential('OPENAI_API_KEY'), null)
-      assert.equal(ctx.broadcast.mock.callCount(), 0)
+      assert.equal(ctx.transport.broadcast.mock.callCount(), 0)
     })
 
     it('rejects delete_credential from a pairing-bound client and leaves the value intact', () => {

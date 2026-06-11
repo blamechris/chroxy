@@ -27,7 +27,7 @@ const log = createLogger('ws')
 const MAX_EVALUATOR_ITERATIONS = 3
 
 // Per-session iteration counter. Owned by WsServer at runtime
-// (`this._evaluatorIterations`, exposed on `ctx._evaluatorIterations`)
+// (`this._evaluatorIterations`, exposed on `ctx.runtime.evaluatorIterations`)
 // because handler ctx is spread fresh on every dispatch — without a
 // stable home the counter would reset on every message and the cap
 // would never fire in production. Cleaned up by `_sessionDestroyedHandler`
@@ -38,8 +38,8 @@ const MAX_EVALUATOR_ITERATIONS = 3
 // Reset to 0 once the cap fires so a subsequent send starts fresh — see
 // test "force-forwards original draft after 3 consecutive clarify verdicts".
 function _getEvaluatorIterations(ctx) {
-  if (!ctx._evaluatorIterations) ctx._evaluatorIterations = new Map()
-  return ctx._evaluatorIterations
+  if (!ctx.runtime.evaluatorIterations) ctx.runtime.evaluatorIterations = new Map()
+  return ctx.runtime.evaluatorIterations
 }
 
 // #3636 — per-session evaluator-await lock. Without this, two messages
@@ -74,18 +74,18 @@ export function buildHistoryText(text, attCount) {
 
 // #3639 — build the minimal config object passed into shouldSkipEvaluator.
 // The per-session promptEvaluatorSkipPattern (string source) takes precedence;
-// the server-wide ctx.config.promptEvaluatorSkipPattern (#3187) is the
+// the server-wide ctx.services.config.promptEvaluatorSkipPattern (#3187) is the
 // fallback so existing global-config deployments keep working unchanged.
 // shouldSkipEvaluator only reads `config.promptEvaluatorSkipPattern` (verified
 // in prompt-evaluator.js), so we return a single-key object rather than
-// spreading the whole ctx.config — this runs on the user_input hot path and
+// spreading the whole ctx.services.config — this runs on the user_input hot path and
 // the spread was unnecessary allocation/copy work.
 function _resolveSkipConfig(entry, ctx) {
   const sessionSource = entry?.session?.promptEvaluatorSkipPattern
   const sessionPattern = typeof sessionSource === 'string' && sessionSource.length > 0
     ? sessionSource
     : null
-  const globalSource = ctx?.config?.promptEvaluatorSkipPattern
+  const globalSource = ctx?.services?.config?.promptEvaluatorSkipPattern
   const globalPattern = typeof globalSource === 'string' && globalSource.length > 0
     ? globalSource
     : null
@@ -185,10 +185,10 @@ async function handleInput(ws, client, msg, ctx) {
     // unified shape across all call sites via buildSessionTokenMismatchPayload).
     if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
       log.info(`input rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
-      ctx.send(ws, {
+      ctx.transport.send(ws, {
         type: 'session_error',
         ...buildSessionTokenMismatchPayload({
-          sessionManager: ctx.sessionManager,
+          sessionManager: ctx.sessions.sessionManager,
           boundSessionId: client.boundSessionId,
         }),
       })
@@ -196,7 +196,7 @@ async function handleInput(ws, client, msg, ctx) {
     }
     if (msg.sessionId) {
       log.info(`input dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
-      ctx.send(ws, {
+      ctx.transport.send(ws, {
         type: 'session_error',
         code: 'SESSION_NOT_FOUND',
         message: `Session not found: ${msg.sessionId}`,
@@ -283,16 +283,16 @@ async function handleInput(ws, client, msg, ctx) {
     log.info(`input wire-fingerprint (client=${client.id} session=${targetSessionId} bytes=${bytes} codePoints=${codePoints} wsTotal=${whitespaceTotal} wsRuns=${whitespaceRuns} maxWordLen=${maxWordLen}) (#4733)`)
   }
 
-  if (ctx.sessionManager.isBudgetPaused(targetSessionId)) {
+  if (ctx.sessions.sessionManager.isBudgetPaused(targetSessionId)) {
     sendSessionError(ws, ctx, 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.')
     return
   }
 
   // Input conflict: reject if session is already processing input from a different client
   if (entry.session.isRunning) {
-    const primaryClientId = ctx.primaryClients.get(targetSessionId)
+    const primaryClientId = ctx.transport.primaryClients.get(targetSessionId)
     if (primaryClientId && primaryClientId !== client.id) {
-      ctx.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
+      ctx.transport.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
       return
     }
   }
@@ -308,7 +308,7 @@ async function handleInput(ws, client, msg, ctx) {
   // matches the #3636 design.
   const _pendingAwaits = _getEvaluatorAwaits(ctx)
   if (_pendingAwaits.has(targetSessionId)) {
-    ctx.send(ws, buildInputConflictError(
+    ctx.transport.send(ws, buildInputConflictError(
       targetSessionId,
       msg.clientMessageId,
       'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
@@ -317,12 +317,12 @@ async function handleInput(ws, client, msg, ctx) {
   }
 
   if (entry.session.resumeSessionId) {
-    ctx.checkpointManager.createCheckpoint({
+    ctx.services.checkpointManager.createCheckpoint({
       sessionId: targetSessionId,
       resumeSessionId: entry.session.resumeSessionId,
       cwd: entry.cwd,
       description: trimmed.slice(0, 100),
-      messageCount: ctx.sessionManager.getHistoryCount(targetSessionId),
+      messageCount: ctx.sessions.sessionManager.getHistoryCount(targetSessionId),
     }).catch((err) => log.warn(`Auto-checkpoint failed: ${err.message}`))
   }
   // Adopt the sender's clientMessageId if present and well-formed; otherwise
@@ -356,8 +356,8 @@ async function handleInput(ws, client, msg, ctx) {
   function recordHistoryEntry(text) {
     if (_historyRecorded) return
     _historyRecorded = true
-    ctx.sessionManager.recordUserInput(targetSessionId, buildHistoryText(text, attCount), messageId)
-    ctx.sessionManager.touchActivity(targetSessionId)
+    ctx.sessions.sessionManager.recordUserInput(targetSessionId, buildHistoryText(text, attCount), messageId)
+    ctx.sessions.sessionManager.touchActivity(targetSessionId)
   }
 
   // #3186 — auto-evaluation hook. Gates message forwarding on a per-session
@@ -372,7 +372,7 @@ async function handleInput(ws, client, msg, ctx) {
   // forwarded so a key-missing or upstream outage never blocks the user.
   //
   // #3639: per-session promptEvaluatorSkipPattern overrides the server-wide
-  // `ctx.config.promptEvaluatorSkipPattern` when set, falling back to the
+  // `ctx.services.config.promptEvaluatorSkipPattern` when set, falling back to the
   // global default (#3187) when null. Mirrors how `entry.session.promptEvaluator`
   // (the toggle) is also per-session — the skip pattern shouldn't be the
   // odd one out forced through global config.
@@ -427,9 +427,9 @@ async function handleInput(ws, client, msg, ctx) {
       // session). Without this, the rewritten/forward draft would race
       // ahead of the now-busy session and produce out-of-order sends.
       if (entry.session.isRunning) {
-        const primaryClientId = ctx.primaryClients.get(targetSessionId)
+        const primaryClientId = ctx.transport.primaryClients.get(targetSessionId)
         if (primaryClientId && primaryClientId !== client.id) {
-          ctx.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
+          ctx.transport.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
           return
         }
       }
@@ -437,7 +437,7 @@ async function handleInput(ws, client, msg, ctx) {
       if (result?.verdict === 'rewrite' && typeof result.rewritten === 'string' && result.rewritten.trim()) {
         counters.delete(targetSessionId)
         const evaluatorIterationId = randomUUID()
-        ctx.broadcastToSession(targetSessionId, {
+        ctx.transport.broadcastToSession(targetSessionId, {
           type: 'evaluator_rewrite',
           sessionId: targetSessionId,
           originalDraft: trimmed,
@@ -459,7 +459,7 @@ async function handleInput(ws, client, msg, ctx) {
         // dashboard renders the clarify card alongside what the user
         // typed, so the user's intent IS reflected by `trimmed`.
         recordHistoryEntry(trimmed)
-        ctx.broadcastToSession(targetSessionId, {
+        ctx.transport.broadcastToSession(targetSessionId, {
           type: 'evaluator_clarify',
           sessionId: targetSessionId,
           originalDraft: trimmed,
@@ -475,8 +475,8 @@ async function handleInput(ws, client, msg, ctx) {
         // and primary-changed bookkeeping that downstream clients depend
         // on should reflect that. Without this, two paired clients can
         // both have stale "you're primary" views during a clarify cycle.
-        ctx.updatePrimary(targetSessionId, client.id)
-        ctx.broadcast(
+        ctx.transport.updatePrimary(targetSessionId, client.id)
+        ctx.transport.broadcast(
           { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
           (c) => c.id !== client.id,
         )
@@ -514,13 +514,13 @@ async function handleInput(ws, client, msg, ctx) {
     })
   }
 
-  ctx.updatePrimary(targetSessionId, client.id)
+  ctx.transport.updatePrimary(targetSessionId, client.id)
 
   // Echo user_input to other clients so they see what was sent (#1119).
   // The echo carries `trimmed` (the user's original text) so paired
   // clients can dedup their optimistic copy of what the user typed —
   // the rewritten text is signalled separately via evaluator_rewrite.
-  ctx.broadcast(
+  ctx.transport.broadcast(
     { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
     (c) => c.id !== client.id
   )
@@ -546,10 +546,10 @@ function handleInterrupt(ws, client, msg, ctx) {
   // as a stale-ID drop.
   if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
     log.info(`interrupt rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
@@ -557,7 +557,7 @@ function handleInterrupt(ws, client, msg, ctx) {
   }
   if (msg.sessionId) {
     log.info(`interrupt dropped: session not found sessionId=${msg.sessionId} client=${client.id} (likely stale ID after daemon restart — see #4935)`)
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       code: 'SESSION_NOT_FOUND',
       message: `Session not found: ${msg.sessionId}`,
@@ -590,10 +590,10 @@ async function handleCancelActivity(ws, client, msg, ctx) {
     // drop.
     if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
       log.info(`cancel_activity rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
-      ctx.send(ws, {
+      ctx.transport.send(ws, {
         type: 'session_error',
         ...buildSessionTokenMismatchPayload({
-          sessionManager: ctx.sessionManager,
+          sessionManager: ctx.sessions.sessionManager,
           boundSessionId: client.boundSessionId,
         }),
       })
@@ -609,7 +609,7 @@ async function handleCancelActivity(ws, client, msg, ctx) {
       return
     }
     log.info(`cancel_activity dropped: session not found sessionId=${sid} client=${client.id}`)
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       code: 'SESSION_NOT_FOUND',
       message: `Session not found: ${sid}`,
@@ -622,7 +622,7 @@ async function handleCancelActivity(ws, client, msg, ctx) {
   if (typeof session.cancelActivity !== 'function') {
     // Defensive: every BaseSession defines it (defaulting to not-supported),
     // but guard so a provider that somehow lacks it can't crash the handler.
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       code: 'CANCEL_ACTIVITY_FAILED',
       message: 'This session does not support cancelling activity',
@@ -638,7 +638,7 @@ async function handleCancelActivity(ws, client, msg, ctx) {
   if (!result || result.ok !== true) {
     const reason = (result && result.reason) || 'unknown'
     log.info(`cancel_activity ${msg.activityId} not actioned (${reason}) client=${client.id}`)
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       code: 'CANCEL_ACTIVITY_FAILED',
       message: `Could not cancel activity: ${reason}`,
@@ -655,7 +655,7 @@ async function handleCancelActivity(ws, client, msg, ctx) {
   // specific cancel click to its outcome — the delta alone is uncorrelated and
   // may lag or drop.
   log.info(`cancel_activity ${msg.activityId} actioned by ${client.id}`)
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'cancel_activity_ack',
     activityId: msg.activityId,
     sessionId: msg.sessionId,
@@ -669,15 +669,15 @@ function handleResumeBudget(ws, client, msg, ctx) {
     sendSessionError(ws, ctx, 'No valid session for budget resume')
     return
   }
-  if (ctx.sessionManager.isBudgetPaused(budgetSessionId)) {
-    ctx.sessionManager.resumeBudget(budgetSessionId)
-    ctx.broadcastToSession(budgetSessionId, { type: 'budget_resumed', sessionId: budgetSessionId })
+  if (ctx.sessions.sessionManager.isBudgetPaused(budgetSessionId)) {
+    ctx.sessions.sessionManager.resumeBudget(budgetSessionId)
+    ctx.transport.broadcastToSession(budgetSessionId, { type: 'budget_resumed', sessionId: budgetSessionId })
     log.info(`Budget resumed for session ${budgetSessionId} by ${client.id}`)
   }
 }
 
 function handleRegisterPushToken(ws, client, msg, ctx) {
-  if (!ctx.pushManager || typeof msg.token !== 'string') return
+  if (!ctx.services.pushManager || typeof msg.token !== 'string') return
 
   // Pass the client's stable ID as the token owner so PushManager can
   // ref-count ownership for multi-connection scenarios (2026-04-11
@@ -686,9 +686,9 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
   // is actually pruned from the registry. Without ref-counting, the
   // first disconnect would strip the token from the second client's
   // active session.
-  const ok = ctx.pushManager.registerToken(msg.token, client.id)
+  const ok = ctx.services.pushManager.registerToken(msg.token, client.id)
   if (!ok) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'push_token_error',
       // Keep the wording close to the actual validator: minimum length
       // plus a blacklist of obvious garbage characters. The check is a
@@ -713,7 +713,7 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
   // (if one exists) so the per-device list UI reflects last-connect time
   // rather than last-pref-change time. NO-OPs on devices that have never
   // muted anything — touchDevice deliberately won't create empty entries.
-  ctx.pushManager.touchDevice(msg.token, client.deviceInfo?.platform || null)
+  ctx.services.pushManager.touchDevice(msg.token, client.deviceInfo?.platform || null)
 }
 
 /**
@@ -733,19 +733,19 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
  * existing WS auth gate is sufficient.
  */
 function handleNotificationPrefsGet(ws, client, msg, ctx) {
-  if (!ctx.pushManager) {
+  if (!ctx.services.pushManager) {
     sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)')
     return
   }
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'notification_prefs',
     requestId: msg?.requestId,
-    prefs: ctx.pushManager.getPrefs(),
+    prefs: ctx.services.pushManager.getPrefs(),
   })
 }
 
 function handleNotificationPrefsSet(ws, client, msg, ctx) {
-  if (!ctx.pushManager) {
+  if (!ctx.services.pushManager) {
     sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)')
     return
   }
@@ -787,7 +787,7 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
     // tagged with ios/android/desktop/web without the client having to
     // include it in every patch. A patch-supplied `platform` (future
     // client carrying richer info) still wins inside setPrefs.
-    next = ctx.pushManager.setPrefs(patch, { platform: client.deviceInfo?.platform || null })
+    next = ctx.services.pushManager.setPrefs(patch, { platform: client.deviceInfo?.platform || null })
   } catch (err) {
     log.warn(`notification_prefs_set persist failed: ${err?.message}`)
     sendError(ws, msg?.requestId, 'NOTIFICATION_PREFS_WRITE_FAILED', err?.message || 'write failed')
@@ -795,17 +795,17 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
   }
   // Reply to the originating client with the requestId so promise-style
   // callers can resolve.
-  ctx.send(ws, { type: 'notification_prefs', requestId: msg?.requestId, prefs: next })
+  ctx.transport.send(ws, { type: 'notification_prefs', requestId: msg?.requestId, prefs: next })
   // Broadcast without requestId so other dashboards / clients update too.
   // Without this, a second dashboard would keep showing stale state until
   // the user re-opened Settings.
-  if (typeof ctx.broadcast === 'function') {
-    ctx.broadcast({ type: 'notification_prefs', prefs: next })
+  if (typeof ctx.transport.broadcast === 'function') {
+    ctx.transport.broadcast({ type: 'notification_prefs', prefs: next })
   }
 }
 
 function handleUserQuestionResponse(ws, client, msg, ctx) {
-  const questionSessionId = (msg.toolUseId && ctx.questionSessionMap.get(msg.toolUseId))
+  const questionSessionId = (msg.toolUseId && ctx.permissions.questionSessionMap.get(msg.toolUseId))
     || client.activeSessionId
 
   // Enforce session binding before consuming the mapping — if the client
@@ -828,9 +828,9 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     if (!subscribed) return
   }
 
-  if (msg.toolUseId) ctx.questionSessionMap.delete(msg.toolUseId)
+  if (msg.toolUseId) ctx.permissions.questionSessionMap.delete(msg.toolUseId)
 
-  const entry = ctx.sessionManager.getSession(questionSessionId)
+  const entry = ctx.sessions.sessionManager.getSession(questionSessionId)
   if (entry && typeof entry.session.respondToQuestion === 'function' && typeof msg.answer === 'string') {
     // #4604: log the incoming response shape so a multi-question form
     // wedge is correlatable from chroxy.log alone (toolUseId + map-key

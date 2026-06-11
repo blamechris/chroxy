@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { evaluatorHandlers } from '../../src/handlers/evaluator-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 /**
  * The handler is a thin shim: validate input, resolve cwd from active session,
@@ -12,12 +12,12 @@ import { createSpy, createMockSession } from '../test-helpers.js'
 
 function makeCtx({ sessions = new Map(), evaluator } = {}) {
   const sent = []
-  return {
+  return nsCtx({
     send: createSpy((_ws, msg) => { sent.push(msg) }),
     sessionManager: { getSession: createSpy((id) => sessions.get(id)) },
     evaluateDraft: evaluator,
     _sent: sent,
-  }
+  })
 }
 
 function makeWs() {

@@ -141,7 +141,7 @@ function handleSetModel(ws, client, msg, ctx) {
       }
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${model}`)
       entry.session.setModel(model)
-      ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(model) })
+      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(model) })
       return
     }
     if (providerAllowed) {
@@ -167,7 +167,7 @@ function handleSetModel(ws, client, msg, ctx) {
       // broadcast them verbatim. toShortModelId() is a Claude-specific
       // alias collapse (claude-sonnet-4-6 → sonnet) and returns the input
       // unchanged for non-Claude IDs, so applying it uniformly is safe.
-      ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
       return
     }
     // Fall through to the legacy global allowlist when the provider hasn't
@@ -179,7 +179,7 @@ function handleSetModel(ws, client, msg, ctx) {
       // #4828: session-scoped (single-session fallback).
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
       entry.session.setModel(msg.model)
-      ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
     return
   }
@@ -259,7 +259,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
             'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.')
           return
         }
-        if (ctx.config?.allowAutoPermissionMode !== true) {
+        if (ctx.services.config?.allowAutoPermissionMode !== true) {
           // #4828: session-scoped (single-session fallback).
           ;sessionLogger(permModeSessionId).warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_DISABLED_BY_CONFIG',
@@ -270,7 +270,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       if (msg.mode === 'auto' && !msg.confirmed) {
         // #4828: session-scoped (single-session fallback).
         ;sessionLogger(permModeSessionId).info(`Auto mode requested by ${client.id}, awaiting confirmation`)
-        ctx.send(ws, {
+        ctx.transport.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',
           warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
@@ -305,15 +305,15 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
             `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`)
           return
         }
-        if (ctx.permissionAudit) {
-          ctx.permissionAudit.logModeChange({
+        if (ctx.permissions.permissionAudit) {
+          ctx.permissions.permissionAudit.logModeChange({
             clientId: client.id,
             sessionId: permModeSessionId,
             previousMode,
             newMode: msg.mode,
           })
         }
-        ctx.broadcastToSession(permModeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
+        ctx.transport.broadcastToSession(permModeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
       }
     }
   } else {
@@ -339,7 +339,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // legacy `client.activeSessionId` fallback. That fallback is passed to the
   // resolver as `dispatchFallbackSessionId` (used ONLY to pick the dispatch
   // session, NEVER for the binding check — invariant B / the #2806 residual).
-  const mappedSessionId = ctx.permissionSessionMap.get(requestId)
+  const mappedSessionId = ctx.permissions.permissionSessionMap.get(requestId)
   const originSessionId = mappedSessionId || client.activeSessionId
 
   // #4798 (audit P0 symmetry with #4788): for UNBOUND clients, require the
@@ -362,11 +362,11 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   }
 
   const resolver = createPermissionResolver({
-    permissionSessionMap: ctx.permissionSessionMap,
-    pendingPermissions: ctx.pendingPermissions,
-    getSessionManager: () => ctx.sessionManager,
-    resolveLegacyPermission: (rid, dec) => ctx.permissions.resolvePermission(rid, dec),
-    getPermissionAudit: () => ctx.permissionAudit,
+    permissionSessionMap: ctx.permissions.permissionSessionMap,
+    pendingPermissions: ctx.permissions.pendingPermissions,
+    getSessionManager: () => ctx.sessions.sessionManager,
+    resolveLegacyPermission: (rid, dec) => ctx.permissions.permissions.resolvePermission(rid, dec),
+    getPermissionAudit: () => ctx.permissions.permissionAudit,
   })
   const result = resolver.resolve(requestId, decision, client.boundSessionId, {
     clientId: client.id,
@@ -376,9 +376,9 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   if (result.kind === 'binding_mismatch') {
     // Correlate with the [session-binding-create] log at the same requestId to
     // recover the original creating client's bound session + createdAt (#2832).
-    const permData = (mappedSessionId && ctx.sessionManager)
-      ? ctx.sessionManager.getSession(mappedSessionId)?.session?._lastPermissionData?.get(requestId)
-      : ctx.pendingPermissions?.get(requestId)?.data
+    const permData = (mappedSessionId && ctx.sessions.sessionManager)
+      ? ctx.sessions.sessionManager.getSession(mappedSessionId)?.session?._lastPermissionData?.get(requestId)
+      : ctx.permissions.pendingPermissions?.get(requestId)?.data
     const createdAt = permData?.createdAt ?? null
     const ageMs = createdAt ? Date.now() - createdAt : null
     const clientConnectedAt = client.authTime ?? null
@@ -403,11 +403,11 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     // The resolver does NOT consume the map entry on a mismatch — the
     // legitimate client can still respond. Issue #2912: payload shape matches
     // every other SESSION_TOKEN_MISMATCH emit site.
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'error',
       requestId: requestId ?? null,
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: result.boundSessionId,
         message: 'Not authorized to respond to this permission request',
       }),
@@ -416,7 +416,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   }
 
   if (result.kind === 'expired' || result.kind === 'not_found') {
-    ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
+    ctx.transport.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
     return
   }
 
@@ -426,7 +426,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // broadcast). Legacy non-SDK sessions (no PermissionManager) keep an inline
   // broadcast for the unmapped case only — mirrors the prior `!originSessionId`.
   if (!result.sessionId) {
-    ctx.broadcast(
+    ctx.transport.broadcast(
       { type: 'permission_resolved', requestId, decision },
       (c) => c.id !== client.id
     )
@@ -434,21 +434,21 @@ function handlePermissionResponse(ws, client, msg, ctx) {
 }
 
 function handleQueryPermissionAudit(ws, client, msg, ctx) {
-  if (ctx.permissionAudit) {
-    const entries = ctx.permissionAudit.query({
+  if (ctx.permissions.permissionAudit) {
+    const entries = ctx.permissions.permissionAudit.query({
       sessionId: msg.sessionId,
       type: msg.auditType,
       since: msg.since,
       limit: msg.limit,
     })
-    ctx.send(ws, { type: 'permission_audit_result', entries })
+    ctx.transport.send(ws, { type: 'permission_audit_result', entries })
   } else {
-    ctx.send(ws, { type: 'permission_audit_result', entries: [] })
+    ctx.transport.send(ws, { type: 'permission_audit_result', entries: [] })
   }
 }
 
 function handleListProviders(ws, client, msg, ctx) {
-  ctx.send(ws, { type: 'provider_list', providers: listProviders() })
+  ctx.transport.send(ws, { type: 'provider_list', providers: listProviders() })
 }
 
 /**
@@ -495,7 +495,7 @@ function rejectCredentialWriteIfBound(ws, client, msg) {
  */
 function handleByokGetCredentialsStatus(ws, client, msg, ctx) {
   const status = getAnthropicApiKeyStatus()
-  ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
+  ctx.transport.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
 }
 
 function handleByokSetCredentials(ws, client, msg, ctx) {
@@ -525,12 +525,12 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
   }
   const status = getAnthropicApiKeyStatus()
   // Reply to the originating client with the requestId for await-resolution.
-  ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
+  ctx.transport.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
   // Broadcast without requestId so other dashboards / clients update too.
   // Without this, a second dashboard would keep showing stale state until
   // the user re-opened Settings.
-  if (typeof ctx.broadcast === 'function') {
-    ctx.broadcast({ type: 'byok_credentials_status', ...status })
+  if (typeof ctx.transport.broadcast === 'function') {
+    ctx.transport.broadcast({ type: 'byok_credentials_status', ...status })
   }
 }
 
@@ -543,9 +543,9 @@ function handleByokClearCredentials(ws, client, msg, ctx) {
     return
   }
   const status = getAnthropicApiKeyStatus()
-  ctx.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
-  if (typeof ctx.broadcast === 'function') {
-    ctx.broadcast({ type: 'byok_credentials_status', ...status })
+  ctx.transport.send(ws, { type: 'byok_credentials_status', requestId: msg?.requestId, ...status })
+  if (typeof ctx.transport.broadcast === 'function') {
+    ctx.transport.broadcast({ type: 'byok_credentials_status', ...status })
   }
 }
 
@@ -581,7 +581,7 @@ const CREDENTIAL_OAUTH_HELPERS = Object.freeze({
 // their own view on open via get_credentials_status instead.
 function _sendCredentialsStatus(ctx, ws, requestId) {
   const status = getCredentialsStatus(CREDENTIAL_OAUTH_HELPERS)
-  ctx.send(ws, { type: 'credentials_status', requestId: requestId ?? null, ...status })
+  ctx.transport.send(ws, { type: 'credentials_status', requestId: requestId ?? null, ...status })
 }
 
 function handleGetCredentialsStatus(ws, client, msg, ctx) {
@@ -643,7 +643,7 @@ async function handleTestCredential(ws, client, msg, ctx) {
     log.warn(`test_credential threw for ${key}: ${err?.message}`)
     result = { ok: false, error: 'Credential test failed unexpectedly.' }
   }
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'credential_test_result',
     requestId: msg?.requestId ?? null,
     key,
@@ -791,7 +791,7 @@ function handleListSkills(ws, client, msg, ctx) {
     return out
   })
 
-  ctx.send(ws, { type: 'skills_list', skills })
+  ctx.transport.send(ws, { type: 'skills_list', skills })
 }
 
 /**
@@ -833,7 +833,7 @@ function handleSkillActivate(ws, client, msg, ctx) {
   const changed = entry.session.activateSkill(msg.skillName)
   if (!changed) return // already active or invalid name — no-op, no broadcast
 
-  ctx.broadcastToSession(sessionId, {
+  ctx.transport.broadcastToSession(sessionId, {
     type: 'skill_activated',
     sessionId,
     skillName: msg.skillName,
@@ -871,7 +871,7 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
   const changed = entry.session.deactivateSkill(msg.skillName)
   if (!changed) return // wasn't active — no-op, no broadcast
 
-  ctx.broadcastToSession(sessionId, {
+  ctx.transport.broadcastToSession(sessionId, {
     type: 'skill_deactivated',
     sessionId,
     skillName: msg.skillName,
@@ -998,7 +998,7 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
     }
   }
 
-  ctx.broadcastToSession(sessionId, {
+  ctx.transport.broadcastToSession(sessionId, {
     type: 'skill_trust_accepted',
     sessionId,
     skillName: msg.skillName,
@@ -1242,14 +1242,14 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
     entry.session._loadSkills()
   }
 
-  ctx.broadcastToSession(sessionId, {
+  ctx.transport.broadcastToSession(sessionId, {
     type: 'skill_trust_granted',
     sessionId,
     skillName: msg.skillName,
     author: msg.author,
   })
 
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'skill_trust_grant_ok',
     requestId: msg?.requestId ?? null,
     sessionId,
@@ -1277,7 +1277,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
 
   try {
     await entry.session.setThinkingLevel(level)
-    ctx.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
+    ctx.transport.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
   } catch (err) {
     sendSessionError(ws, ctx, `Failed to set thinking level: ${err.message}`)
   }
@@ -1338,7 +1338,7 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // The setter normalises empty string → null. Surface the stored value
   // (not the raw payload) so subscribed clients see a stable shape.
   const storedValue = entry.session.promptEvaluatorSkipPattern
-  ctx.broadcastToSession(sessionId, {
+  ctx.transport.broadcastToSession(sessionId, {
     type: 'prompt_evaluator_skip_pattern_changed',
     sessionId,
     value: storedValue,
@@ -1348,7 +1348,7 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // pattern updates are rare operator actions and the sync flush avoids
   // losing the change to a crash inside the debounce window.
   try {
-    ctx.sessionManager?.serializeState?.()
+    ctx.sessions.sessionManager?.serializeState?.()
   } catch (err) {
     // #4828: session-scoped.
     loggerForSession('ws', sessionId).warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
@@ -1401,8 +1401,8 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   entry.session.setPermissionRules(rules)
 
   // Audit the whitelist change
-  if (ctx.permissionAudit) {
-    ctx.permissionAudit.logWhitelistChange({
+  if (ctx.permissions.permissionAudit) {
+    ctx.permissions.permissionAudit.logWhitelistChange({
       clientId: client.id,
       sessionId,
       rules,
@@ -1411,7 +1411,7 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
 
   // Broadcast updated rules to all session clients
   const currentRules = entry.session.getPermissionRules ? entry.session.getPermissionRules() : rules
-  ctx.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
+  ctx.transport.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
   // #4828: session-scoped.
   loggerForSession('ws', sessionId).info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
 }

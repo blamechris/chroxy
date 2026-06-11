@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
-import { createSpy } from './test-helpers.js'
+import { createSpy, nsCtx } from './test-helpers.js'
 import {
   parseRepoMemoryIndexCounts,
   runRepoMemoryIndex,
@@ -136,7 +136,7 @@ const COUNTS = { scanned: 412, summarized: 12, fresh: 398, skipped: 2 }
 
 function makeActionCtx(overrides = {}) {
   const sendSpy = createSpy()
-  return {
+  return nsCtx({
     send: sendSpy,
     config: { repos: [], controlRoomRoot: '/home/user/Projects' },
     resolveRepoSet: createSpy(() => REPO_SET.map(r => ({ ...r }))),
@@ -146,7 +146,7 @@ function makeActionCtx(overrides = {}) {
     realpath: createSpy(p => p),
     ...overrides,
     _send: sendSpy,
-  }
+  })
 }
 
 function reindexMsg(over = {}) {
