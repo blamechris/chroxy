@@ -481,8 +481,8 @@ describe('ServerPicker', () => {
       expect(screen.getByTestId('request-pair-panel')).toBeTruthy()
       expect(mockRequestPairing).toHaveBeenCalledTimes(1)
       expect(lastPairArgs?.wsUrl).toBe('ws://192.168.1.9:8765/ws')
-      // The daemon name is forwarded as the device label / stored name.
-      expect(lastPairArgs?.deviceName).toBe('devbox')
+      // deviceName always identifies the requester, never the target daemon.
+      expect(lastPairArgs?.deviceName).toBe('Desktop Browser')
     })
 
     it('shows the requesting state then the verify code (code-shown)', async () => {
@@ -573,7 +573,7 @@ describe('ServerPicker', () => {
       fireEvent.click(screen.getByTestId('server-request-pair'))
       expect(screen.getByTestId('request-pair-panel')).toBeTruthy()
       expect(lastPairArgs?.wsUrl).toBe('wss://host/ws')
-      expect(lastPairArgs?.deviceName).toBe('Studio Mac')
+      expect(lastPairArgs?.deviceName).toBe('Desktop Browser')
     })
 
     it('stores the issued token + connects on approval (manual host parity)', () => {

@@ -202,7 +202,10 @@ function RequestPairPanel({ wsUrl, name, onApproved, onCancel }: RequestPairPane
   onApprovedRef.current = onApproved
 
   useEffect(() => {
-    const handle = requestPairing(wsUrl, name || 'Desktop Browser', (s) => {
+    // deviceName identifies the REQUESTER on the approver's surface — always
+    // this dashboard, never the target daemon's name (`name` only labels the
+    // saved server entry on approval).
+    const handle = requestPairing(wsUrl, 'Desktop Browser', (s) => {
       setState(s)
       if (s.phase === 'approved' && s.token) {
         onApprovedRef.current(name, wsUrl, s.token)
