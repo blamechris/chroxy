@@ -256,8 +256,11 @@ export function ToolGroup({ messages, isActive, isTail = false }: ToolGroupProps
     }
     if (!wasActiveRef.current && isActive) { setExpanded(true); persistGroupExpanded(true) }
     wasActiveRef.current = isActive
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- persistGroupExpanded is stable; isActive is the intended trigger (matches the pre-#5561 dep list)
-  }, [isActive])
+    // persistGroupExpanded is now genuinely stable (memoized in
+    // useInitialExpanded on the registry ref + key), so it can be listed
+    // honestly — its identity never changes for this group, so adding it does
+    // not re-fire the effect. isActive remains the real trigger.
+  }, [isActive, persistGroupExpanded])
 
   // #4279: per-entry expansion state lives here so multiple entries can be
   // open simultaneously and the parent group's expand/collapse logic doesn't

@@ -25,10 +25,17 @@ afterEach(cleanup)
 
 const ROW_HEIGHT = 80
 const VIEWPORT = 400
-// ChatView folds the `.chat-messages` gap (12px) into each row's windowing
-// height, so a windowed-out row reserves ROW_HEIGHT + ROW_GAP of spacer.
+// ChatView folds the `.chat-messages` gap into each row's windowing height. In
+// jsdom getComputedStyle().rowGap is unavailable, so ChatView falls back to the
+// CHAT_MESSAGES_ROW_GAP constant (12px) — that is the gap the windowing math
+// uses here. A flex column of N rows is `N*ROW_HEIGHT + (N-1)*ROW_GAP` tall: the
+// inter-row gap renders N-1 times, NOT N. The spacers reserve the skipped rows'
+// heights minus one boundary gap each (the spacer↔row seam gap is rendered by
+// the DOM), so windowed scrollHeight matches a non-windowed render exactly.
 const ROW_GAP = 12
 const ROW_SLOT = ROW_HEIGHT + ROW_GAP
+// Total height of an un-windowed flex column of `n` uniform rows.
+const unwindowedHeight = (n: number) => n * ROW_HEIGHT + (n - 1) * ROW_GAP
 
 /**
  * Stub layout geometry. Every element reports ROW_HEIGHT as offsetHeight (rows
@@ -116,10 +123,18 @@ describe('ChatView virtualization (#5561)', () => {
       const topPx = parseInt(topSpacer.style.height, 10)
       const bottomPx = parseInt(bottomSpacer.style.height, 10)
       const renderedCount = screen.getAllByTestId(/^msg-msg-\d+$/).length
-      // Reserved + rendered slots ≈ total list slots (row + gap each).
-      expect(topPx + renderedCount * ROW_SLOT + bottomPx).toBe(200 * ROW_SLOT)
-      // Top spacer is an exact multiple of the windowed-out leading row slots.
-      expect(topPx % ROW_SLOT).toBe(0)
+      // Total windowed scrollHeight === a non-windowed render of all 200 rows.
+      // Children: [topSpacer] r[s]…r[e-1] [bottomSpacer], with the column gap
+      // rendered between every adjacent pair — including the two spacer↔row
+      // seams. The visible block of `renderedCount` rows is itself a flex column
+      // (renderedCount-1 internal gaps); the two boundary gaps wrap it.
+      const visibleBlock = renderedCount * ROW_HEIGHT + (renderedCount - 1) * ROW_GAP
+      const windowedTotal = topPx + ROW_GAP + visibleBlock + ROW_GAP + bottomPx
+      expect(windowedTotal).toBe(unwindowedHeight(200))
+      // Top spacer reserves the leading rows minus one boundary gap, i.e.
+      // startIndex*ROW_HEIGHT + (startIndex-1)*ROW_GAP === startIndex*ROW_SLOT −
+      // ROW_GAP. So (topPx + ROW_GAP) is an exact multiple of ROW_SLOT.
+      expect((topPx + ROW_GAP) % ROW_SLOT).toBe(0)
       // We scrolled down, so there is meaningful leading reserved space.
       expect(topPx).toBeGreaterThan(0)
     } finally {

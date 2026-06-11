@@ -148,11 +148,28 @@ const TYPE_CLASS: Record<string, string> = {
 const SCROLL_THRESHOLD = 60
 
 /**
- * #5561 — the `gap` between rows in `.chat-messages` (theme/components.css).
+ * #5561 — fallback `gap` between rows in `.chat-messages` (theme/components.css).
  * Folded into the windowing height math so the spacer heights match the real
- * scroll geometry. Keep in sync with the CSS.
+ * scroll geometry. The live value is read from `getComputedStyle().rowGap` at
+ * runtime (it drops to 8px under the narrow-viewport media query in
+ * components.css), so this constant is only the fallback used when computed
+ * style is unavailable (jsdom) or unparseable. Keep in sync with the CSS base
+ * rule (`.chat-messages { gap: 12px }`).
  */
 const CHAT_MESSAGES_ROW_GAP = 12
+
+/**
+ * Read the live row gap (px) from the scroll container's computed style so the
+ * windowing math tracks the responsive `.chat-messages` gap (12px desktop / 8px
+ * narrow). Falls back to {@link CHAT_MESSAGES_ROW_GAP} when computed style is
+ * unavailable (jsdom returns `''`) or yields a non-finite value.
+ */
+function readRowGap(el: HTMLElement | null): number {
+  if (!el || typeof getComputedStyle !== 'function') return CHAT_MESSAGES_ROW_GAP
+  const raw = getComputedStyle(el).rowGap
+  const parsed = parseFloat(raw)
+  return Number.isFinite(parsed) ? parsed : CHAT_MESSAGES_ROW_GAP
+}
 
 function formatTime(ts: number): string {
   const d = new Date(ts)
@@ -258,6 +275,10 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
   // range. Seeded to 0 and synced on mount + every scroll/resize.
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(0)
+  // #5561 — live row gap from the container's computed style, re-read on resize
+  // (the same geometry sync that tracks viewport height) so the windowing math
+  // follows the responsive `.chat-messages` gap instead of a hard-coded 12px.
+  const [rowGap, setRowGap] = useState(CHAT_MESSAGES_ROW_GAP)
 
   // Deduplicate by id — keep first occurrence
   const dedupedMessages = useMemo(() => {
@@ -299,10 +320,10 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
     itemCount: dedupedMessages.length,
     scrollTop,
     viewportHeight,
-    // Matches `.chat-messages { gap: 12px }` in theme/components.css so the
-    // windowing spacers reserve the same total height the real flex column
-    // occupies (rows + inter-row gaps).
-    rowGap: CHAT_MESSAGES_ROW_GAP,
+    // Live `.chat-messages` row gap (12px desktop / 8px narrow), re-read on
+    // resize via syncGeometry, so the windowing spacers reserve the same total
+    // height the real responsive flex column occupies (rows + inter-row gaps).
+    rowGap,
     keyAt,
   })
 
@@ -315,6 +336,11 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
     // contract (renderMessage invoked exactly once on first mount) intact.
     setScrollTop(prev => (prev === el.scrollTop ? prev : el.scrollTop))
     setViewportHeight(prev => (prev === el.clientHeight ? prev : el.clientHeight))
+    // Re-read the responsive row gap from computed style — a viewport resize can
+    // cross the narrow-viewport media query and flip 12px↔8px. Same bail-when-
+    // unchanged pattern so a no-op sync doesn't churn a re-render.
+    const liveGap = readRowGap(el)
+    setRowGap(prev => (prev === liveGap ? prev : liveGap))
   }, [])
 
   const handleScroll = useCallback(() => {

@@ -72,9 +72,18 @@ export interface WindowedRange {
   startIndex: number
   /** One past the last row index to render (exclusive). */
   endIndex: number
-  /** Spacer height above the rendered slice (px). */
+  /**
+   * Spacer height above the rendered slice (px). Reserves the skipped leading
+   * rows' heights MINUS one `rowGap` — the column gap at the spacer↔first-row
+   * seam is rendered by the DOM, so folding it into the spacer too would
+   * double-count it. Zero when no leading rows are skipped.
+   */
   topSpacer: number
-  /** Spacer height below the rendered slice (px). */
+  /**
+   * Spacer height below the rendered slice (px). Same boundary-gap correction
+   * as `topSpacer`: skipped trailing rows' heights minus one `rowGap` for the
+   * last-row↔spacer seam. Zero when no trailing rows are skipped.
+   */
   bottomSpacer: number
   /** True when windowing is active (itemCount > threshold). */
   virtualized: boolean
@@ -234,10 +243,24 @@ export function useWindowedRange({
     const endIndex = Math.min(itemCount, lastVisible + 1 + overscan)
 
     // Convert the trimmed leading/trailing rows back into spacer heights.
+    //
+    // GAP MATH: each spacer is itself a flex child, so the column `gap` (rowGap)
+    // ALSO renders between the spacer and the adjacent rendered row (spacer↔r[s]
+    // and r[e-1]↔spacer). `heightAt(k)` folds one rowGap into every row, so
+    // naively summing it over the skipped rows over-counts by exactly one rowGap
+    // per spacer — the boundary gap is double-counted (once in the spacer sum,
+    // once rendered by the DOM at the spacer/row seam). Subtract that single
+    // rowGap so the windowed `scrollHeight` matches a non-windowed render
+    // exactly: full height = Σ heightAt(i) − rowGap (n−1 gaps, not n).
+    //
+    // N=0 edge cases: a spacer with no skipped rows is 0 (no boundary gap to
+    // render either), so guard each sum on its row count being > 0.
     let leadingHeight = 0
     for (let k = 0; k < startIndex; k++) leadingHeight += heightAt(k)
+    if (startIndex > 0) leadingHeight -= rowGap
     let trailingHeight = 0
     for (let k = endIndex; k < itemCount; k++) trailingHeight += heightAt(k)
+    if (endIndex < itemCount) trailingHeight -= rowGap
 
     return {
       startIndex,
@@ -256,6 +279,7 @@ export function useWindowedRange({
     viewportHeight,
     virtualizing,
     overscan,
+    rowGap,
     heightAt,
     offsetAt,
     measureRow,

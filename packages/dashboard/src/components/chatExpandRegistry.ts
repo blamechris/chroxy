@@ -32,7 +32,7 @@
  *   a different surface) the context falls back to a no-op registry, so the
  *   component keeps its pre-#5561 row-local behaviour unchanged.
  */
-import { createContext, useContext } from 'react'
+import { createContext, useCallback, useContext } from 'react'
 
 export interface ChatExpandRegistry {
   /**
@@ -68,9 +68,19 @@ export function useInitialExpanded(key: string, fallback: boolean): {
 } {
   const registry = useContext(ChatExpandContext)
   const stored = registry.get(key)
+  // Memoize `persist` on its only inputs (the registry — a stable map ref held
+  // in a ChatView `useRef` — and the row key) so consumers can list it in effect
+  // dep arrays honestly. ChatView's registry identity is stable for the
+  // component's lifetime, so this returns the SAME function across renders for a
+  // given key; without it the closure was fresh every render and ToolGroup had
+  // to silence react-hooks/exhaustive-deps with a (misleading) "stable" comment.
+  const persist = useCallback(
+    (expanded: boolean) => registry.set(key, expanded),
+    [registry, key],
+  )
   return {
     initial: stored ?? fallback,
-    persist: (expanded: boolean) => registry.set(key, expanded),
+    persist,
   }
 }
 
