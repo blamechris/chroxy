@@ -104,4 +104,82 @@ describe('useWindowedRange (#5561)', () => {
     // Bottom spacer reflects the measured tall rows + estimated tail.
     expect(result.current.bottomSpacer).toBe(9 * 1000 + (200 - 10) * 80)
   })
+
+  it('reports the first-visible anchor index and its content-space offset', () => {
+    // 200 rows × 80px, viewport 400px scrolled to 4000px: the first row whose
+    // bottom edge passes 4000 is row 50 (its top edge is exactly 50×80 = 4000).
+    const { result } = renderHook(() =>
+      useWindowedRange({
+        itemCount: 200,
+        scrollTop: 4000,
+        viewportHeight: 400,
+        threshold: 40,
+        overscan: 2,
+        estimatedRowHeight: 80,
+        keyAt,
+      }),
+    )
+    expect(result.current.firstVisibleIndex).toBe(50)
+    // The anchor's top edge in content space = cumulative height of rows 0..49.
+    expect(result.current.firstVisibleOffset).toBe(50 * 80)
+  })
+
+  it('shifts the anchor when an above-viewport row re-measures, and the +delta scrollTop restores it (WKWebView compensation loop)', () => {
+    // Scrolled-up reader: viewport sits over rows ~50+. A row ABOVE the anchor
+    // (row 10) corrects from its 80px estimate to 180px (+100px). Without moving
+    // scrollTop, the content above the fixed scrollTop now occupies 100px more,
+    // so the SAME pixel offset now intersects an EARLIER row — the anchor index
+    // drifts down. That drift is the WKWebView jump (no native scroll
+    // anchoring). ChatView corrects it by adding the +100 delta to scrollTop,
+    // which restores the original anchor row at its new (+100) offset.
+    let scrollTop = 4000
+    const { result, rerender } = renderHook(
+      (props: { scrollTop: number }) =>
+        useWindowedRange({
+          itemCount: 200,
+          scrollTop: props.scrollTop,
+          viewportHeight: 400,
+          threshold: 40,
+          overscan: 0,
+          estimatedRowHeight: 80,
+          keyAt,
+        }),
+      { initialProps: { scrollTop } },
+    )
+
+    expect(result.current.firstVisibleIndex).toBe(50)
+    expect(result.current.firstVisibleOffset).toBe(50 * 80)
+
+    act(() => {
+      result.current.measureRow('row-10', 180) // 80 → 180, +100px above the anchor
+    })
+
+    // At the unchanged scrollTop the anchor row index drifted earlier (the jump).
+    expect(result.current.firstVisibleIndex).toBeLessThan(50)
+    const drift = result.current.firstVisibleIndex
+
+    // Apply the compensation ChatView performs: bump scrollTop by exactly the
+    // above-viewport height delta (+100). The original anchor row 50 is restored,
+    // now sitting 100px lower in content space.
+    scrollTop = 4100
+    rerender({ scrollTop })
+    expect(result.current.firstVisibleIndex).toBe(50)
+    expect(result.current.firstVisibleOffset).toBe(50 * 80 + 100)
+    expect(drift).toBeLessThan(50) // the uncompensated drift was real
+  })
+
+  it('reports a zero-offset anchor below the threshold (no compensation needed)', () => {
+    const { result } = renderHook(() =>
+      useWindowedRange({
+        itemCount: 10,
+        scrollTop: 0,
+        viewportHeight: 500,
+        threshold: 40,
+        keyAt,
+      }),
+    )
+    expect(result.current.virtualized).toBe(false)
+    expect(result.current.firstVisibleIndex).toBe(0)
+    expect(result.current.firstVisibleOffset).toBe(0)
+  })
 })

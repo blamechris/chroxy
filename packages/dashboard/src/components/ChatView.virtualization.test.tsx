@@ -233,6 +233,130 @@ describe('ChatView virtualization (#5561)', () => {
     }
   })
 
+  it('compensates scrollTop when an above-viewport row re-measures taller (WKWebView has no native scroll anchoring)', async () => {
+    // jsdom has no ResizeObserver, so install a controllable one: it records the
+    // (element, callback) pairs and lets the test fire a re-measure for a chosen
+    // row — the production path by which a tool bubble / streaming markdown grows
+    // an already-mounted row's height. We give each row a per-id height (the
+    // anchor row keeps its estimate; an above-viewport row in the overscan band
+    // corrects taller), then fire its observer and assert the layout effect added
+    // exactly the height delta back into scrollTop so the anchor stays pinned.
+    type Entry = { el: HTMLElement; cb: ResizeObserverCallback }
+    const observers: Entry[] = []
+    class MockRO {
+      cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe(el: Element) { observers.push({ el: el as HTMLElement, cb: this.cb }) }
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver
+    ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
+      MockRO as unknown as typeof ResizeObserver
+
+    // Per-row height store, keyed by the `data-row-key` MeasuredRow stamps on its
+    // element. Defaults to ROW_HEIGHT; we mutate a single row to grow it.
+    const rowHeights = new Map<string, number>()
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      const key = this.getAttribute('data-row-key')
+      if (key && rowHeights.has(key)) return rowHeights.get(key) as number
+      return ROW_HEIGHT
+    })
+    const clientHeight = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(VIEWPORT)
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(200 * ROW_HEIGHT)
+    try {
+      render(<ChatView messages={makeMessages(200)} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+
+      // Land mid-history scrolled up. Anchor ≈ row 50 (scrollTop / ROW_SLOT).
+      setScrollTop(container, 50 * ROW_SLOT)
+      await act(async () => {
+        fireEvent.scroll(container)
+      })
+      expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+      const scrollTopBefore = container.scrollTop
+
+      // Pick a mounted row ABOVE the anchor (in the overscan band) and grow it by
+      // +60px, then fire its ResizeObserver — the real reflow path.
+      const aboveRow = observers.find((o) => {
+        const key = o.el.getAttribute('data-row-key')
+        if (!key) return false
+        const idx = Number(key.replace('msg-msg-', '').replace('msg-', ''))
+        return idx < 50 && idx >= 44 // overscan band above the anchor
+      })
+      expect(aboveRow).toBeTruthy()
+      const grownKey = aboveRow!.el.getAttribute('data-row-key') as string
+      rowHeights.set(grownKey, ROW_HEIGHT + 60)
+      await act(async () => {
+        aboveRow!.cb([], aboveRow as unknown as ResizeObserver)
+      })
+
+      // Compensation added the +60 above-viewport delta back into scrollTop so the
+      // anchor row stays under the same pixel (WKWebView would have left it at
+      // scrollTopBefore and jumped the content up by 60px).
+      expect(container.scrollTop).toBe(scrollTopBefore + 60)
+      // Still scrolled up — compensation must not flip us to pinned/bottom.
+      expect(screen.queryByTestId('scroll-to-bottom')).toBeInTheDocument()
+    } finally {
+      offsetHeight.mockRestore()
+      clientHeight.mockRestore()
+      scrollHeight.mockRestore()
+      ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = origRO
+    }
+  })
+
+  it('does not compensate (or jump) while pinned to the bottom', async () => {
+    // At the bottom the dedicated streaming/count-change effects own scrollTop;
+    // the compensation effect must stay out of their way even when an
+    // above-viewport row re-measures.
+    type Entry = { el: HTMLElement; cb: ResizeObserverCallback }
+    const observers: Entry[] = []
+    class MockRO {
+      cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe(el: Element) { observers.push({ el: el as HTMLElement, cb: this.cb }) }
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver
+    ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
+      MockRO as unknown as typeof ResizeObserver
+    const rowHeights = new Map<string, number>()
+    const offsetHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      const key = this.getAttribute('data-row-key')
+      if (key && rowHeights.has(key)) return rowHeights.get(key) as number
+      return ROW_HEIGHT
+    })
+    const clientHeight = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(VIEWPORT)
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(200 * ROW_HEIGHT)
+    try {
+      render(<ChatView messages={makeMessages(200)} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+      // Pin to the bottom.
+      setScrollTop(container, 200 * ROW_HEIGHT - VIEWPORT)
+      await act(async () => {
+        fireEvent.scroll(container)
+      })
+      expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+      const before = container.scrollTop
+      const anyRow = observers.find((o) => o.el.getAttribute('data-row-key'))
+      if (anyRow) {
+        const key = anyRow.el.getAttribute('data-row-key') as string
+        rowHeights.set(key, ROW_HEIGHT + 60)
+        await act(async () => {
+          anyRow.cb([], anyRow as unknown as ResizeObserver)
+        })
+      }
+      // Compensation stayed out of the pinned path — no jump from the layout effect.
+      expect(container.scrollTop).toBe(before)
+    } finally {
+      offsetHeight.mockRestore()
+      clientHeight.mockRestore()
+      scrollHeight.mockRestore()
+      ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = origRO
+    }
+  })
+
   it('resets expand state when ChatView remounts (registry is per-instance)', async () => {
     // Sanity guard: the registry is scoped to a ChatView instance, so a fresh
     // ChatView starts every bubble collapsed. (A new session unmounts/remounts.)

@@ -16,7 +16,7 @@
  * scrolled up, and an id-keyed expand registry so tool-bubble expand state
  * survives a row scrolling out of and back into the window.
  */
-import { memo, useRef, useState, useCallback, useEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
+import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { bumpRenderCount } from '@chroxy/store-core'
 import { ThinkingDots } from './ThinkingDots'
 import { renderMarkdown } from '../lib/markdown'
@@ -235,6 +235,24 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
 
+  // #5561 — scroll-anchor compensation state. WKWebView (the Tauri desktop's
+  // engine, and the dashboard's PRIMARY consumer) does NOT implement default
+  // CSS scroll anchoring (no `overflow-anchor` support), so when a height-cache
+  // correction changes the height of content ABOVE the viewport, the browser
+  // does NOT keep the visible rows pinned the way Blink/Gecko would — the
+  // content visibly jumps. We compensate by hand: track the windowing anchor
+  // (the first visible row + its content-space top offset) and, when that
+  // offset shifts for the SAME anchor row, add the delta back to `scrollTop`
+  // before paint (useLayoutEffect). See the compensation effect below.
+  const anchorRef = useRef<{ index: number; offset: number } | null>(null)
+  // The scrollTop value we just wrote during compensation. The resulting
+  // `scroll` event must NOT be treated as a user scroll (it would otherwise
+  // re-seed `scrollTop` state with a value the next render's anchor math has
+  // already accounted for, and could flip `userScrolledUp`). The handler clears
+  // this once it sees the matching offset — an expected-scrollTop guard against
+  // a compensation→scroll→recompute feedback loop.
+  const expectedScrollTopRef = useRef<number | null>(null)
+
   // #5561 — scroll/viewport geometry that drives the windowing hook. Kept in
   // state (not just the DOM) so a scroll or resize recomputes the visible
   // range. Seeded to 0 and synced on mount + every scroll/resize.
@@ -302,6 +320,17 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
   const handleScroll = useCallback(() => {
     const el = containerRef.current
     if (!el) return
+    // #5561 — ignore the synthetic `scroll` event our own compensation write
+    // produced. `el.scrollTop` already equals the value the layout effect set,
+    // and the anchor math that produced it is consistent with the current
+    // `scrollTop` state, so re-seeding state (or re-evaluating `userScrolledUp`)
+    // here would either be a no-op churn or, worse, feed the delta back in.
+    if (expectedScrollTopRef.current !== null && Math.abs(el.scrollTop - expectedScrollTopRef.current) < 1) {
+      expectedScrollTopRef.current = null
+      return
+    }
+    // A real user scroll invalidates any pending expected value.
+    expectedScrollTopRef.current = null
     // #5561 — feed the windowing hook the live scroll offset so the visible
     // slice tracks the viewport. clientHeight is stable per scroll but cheap
     // to read here, keeping the range correct if a scroll coincides with a
@@ -348,6 +377,76 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
     ro.observe(el)
     return () => ro.disconnect()
   }, [syncGeometry])
+
+  // #5561 — engine-independent scroll-position compensation.
+  //
+  // WHY: Browsers with CSS scroll anchoring (Blink/Gecko) automatically keep
+  // the visible content fixed when above-viewport content changes height — the
+  // approve rationale for #5561 relied on that. But the Tauri desktop, the
+  // dashboard's PRIMARY consumer, renders in WKWebView (Safari's engine), which
+  // ships NO default scroll anchoring and does not honour `overflow-anchor`.
+  // There, scrolling UP through history — where freshly-mounted top rows
+  // re-measure away from their estimated heights and the top spacer is
+  // recalculated — would visibly jump/jitter. We restore the missing behaviour
+  // by hand for ALL engines (cheap and idempotent where anchoring already
+  // works, since the offset delta is 0 once heights are correct).
+  //
+  // HOW: each render we remember the first-visible row (`firstVisibleIndex`) and
+  // its content-space top offset (`firstVisibleOffset`). On the NEXT render we
+  // re-read that SAME row's offset via `range.offsetAt(prevIndex)` — anchoring on
+  // the fixed row identity, not on "whatever is first-visible now", because a
+  // remeasure above the viewport shifts which row is first-visible at a fixed
+  // scrollTop. The change in that fixed row's offset is exactly how far the
+  // content under the viewport moved; we add it to `scrollTop` synchronously
+  // (useLayoutEffect → before paint) so the anchor row stays under the same
+  // pixel. The pinned-to-bottom path is left alone — the streaming /
+  // count-change effects already force it to the bottom, and compensating there
+  // would fight them.
+  useLayoutEffect(() => {
+    const el = containerRef.current
+    const prev = anchorRef.current
+    // The anchor we remember for NEXT render is the current first-visible row.
+    const next = { index: range.firstVisibleIndex, offset: range.firstVisibleOffset }
+
+    if (!el || !range.virtualized) {
+      anchorRef.current = next
+      return
+    }
+    // Only compensate while the user is reading history. When pinned to bottom
+    // (and especially while streaming) the dedicated effects own scrollTop.
+    if (!userScrolledUp || programmaticScrollRef.current || !prev) {
+      anchorRef.current = next
+      return
+    }
+
+    // KEY POINT: a re-measure of a row ABOVE the viewport shifts which row is
+    // first-visible *at a fixed scrollTop* (more content above the same pixel),
+    // so we must NOT compare first-visible-row to first-visible-row. Instead we
+    // re-read the offset of the SAME anchor row we recorded last render (its
+    // index is stable — the row did not move in the array). If that fixed row's
+    // content-space top edge moved, the delta is exactly how far the content
+    // under the viewport shifted, and we add it back to scrollTop so the anchor
+    // stays under the same pixel. WKWebView (the Tauri desktop's engine) has no
+    // native scroll anchoring, so without this the content visibly jumps.
+    const prevAnchorNowOffset = range.offsetAt(prev.index)
+    const delta = prevAnchorNowOffset - prev.offset
+    if (delta === 0) {
+      anchorRef.current = next
+      return
+    }
+    const target = el.scrollTop + delta
+    // Record the value we're about to write so the synthetic scroll event the
+    // assignment fires is recognised and ignored (feedback-loop guard).
+    expectedScrollTopRef.current = target
+    el.scrollTop = target
+    // Keep `scrollTop` state consistent with the DOM so the next windowing
+    // recompute starts from the compensated position rather than re-deriving the
+    // pre-shift one (which would re-introduce the jump on the following render).
+    // The settling render restores the original anchor row as first-visible at
+    // its new offset, so store THAT as the anchor for the next round.
+    anchorRef.current = { index: prev.index, offset: prevAnchorNowOffset }
+    setScrollTop(target)
+  }, [range, userScrolledUp])
 
   // #4652: previously a separate streaming-end effect reset
   // `userScrolledUp` to false — that snapped the user back to the

@@ -80,6 +80,30 @@ export interface WindowedRange {
   virtualized: boolean
   /** Record a measured row height. Stable identity. */
   measureRow: (key: string, height: number) => void
+  /**
+   * Index of the first row whose bottom edge is past the top of the viewport —
+   * i.e. the topmost row the user is actually looking at. Used as the scroll
+   * anchor for engine-independent scroll compensation (see ChatView).
+   */
+  firstVisibleIndex: number
+  /**
+   * Cumulative height (px) of every row strictly above `firstVisibleIndex` —
+   * the content-space offset of that row's top edge. When a height-cache
+   * correction above the viewport changes this value, the delta is the amount
+   * the viewport content shifted and must be added back to `scrollTop` so the
+   * anchor row stays put (WKWebView has no native scroll anchoring).
+   */
+  firstVisibleOffset: number
+  /**
+   * Content-space top edge (px) of the row at `index` — the cumulative height of
+   * every row above it given the CURRENT height cache. ChatView anchors scroll
+   * compensation on a *fixed* row index across renders (the row identity does
+   * not move in the array between re-measures), so it reads this for the
+   * remembered anchor index even after a remeasure shifts which row is
+   * first-visible. Recomputes a prefix sum on each call (O(index)); only invoked
+   * once per render for the anchor, so cheap for a chat list.
+   */
+  offsetAt: (index: number) => number
 }
 
 const DEFAULT_ESTIMATED_ROW_HEIGHT = 80
@@ -135,6 +159,20 @@ export function useWindowedRange({
     [keyAt, estimatedRowHeight, rowGap],
   )
 
+  // Cumulative height of all rows above `index` from the live cache — the
+  // content-space top edge of that row. Re-created when `heightAt` changes; the
+  // caller (ChatView) reads it inside the same render the windowed range is
+  // computed, so it always reflects the current measureTick.
+  const offsetAt = useCallback(
+    (index: number): number => {
+      const clamped = Math.max(0, Math.min(index, itemCount))
+      let sum = 0
+      for (let k = 0; k < clamped; k++) sum += heightAt(k)
+      return sum
+    },
+    [heightAt, itemCount],
+  )
+
   return useMemo<WindowedRange>(() => {
     // Touch measureTick so the memo recomputes when a row is (re)measured.
     void measureTick
@@ -147,6 +185,9 @@ export function useWindowedRange({
         bottomSpacer: 0,
         virtualized: false,
         measureRow,
+        firstVisibleIndex: 0,
+        firstVisibleOffset: 0,
+        offsetAt,
       }
     }
 
@@ -173,6 +214,10 @@ export function useWindowedRange({
       // Scrolled past the end (can happen mid-resize) — clamp to the last row.
       firstVisible = itemCount - 1
     }
+    // `offset` here is the content-space top edge of `firstVisible` — the
+    // cumulative height of every row above it. Capture it as the scroll anchor
+    // before the visible-row walk mutates `offset` further.
+    const firstVisibleOffset = offset
 
     // `offset` is the top edge of `firstVisible`. A row is visible while its
     // top edge is above the viewport bottom; once a row starts at/below
@@ -201,6 +246,9 @@ export function useWindowedRange({
       bottomSpacer: trailingHeight,
       virtualized: true,
       measureRow,
+      firstVisibleIndex: firstVisible,
+      firstVisibleOffset,
+      offsetAt,
     }
   }, [
     itemCount,
@@ -209,6 +257,7 @@ export function useWindowedRange({
     virtualizing,
     overscan,
     heightAt,
+    offsetAt,
     measureRow,
     measureTick,
   ])
