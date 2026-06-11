@@ -15,7 +15,7 @@
  * `onInvestigate` action through to the repo table unchanged.
  */
 import { useCallback, useState } from 'react'
-import { ControlRoomSection, type RepoInvestigateRequest } from './ControlRoomSection'
+import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { IntegrationsSection } from './IntegrationsSection'
 
@@ -51,11 +51,13 @@ const TABS: ReadonlyArray<{ key: ControlRoomTab; label: string }> = [
 export interface ControlRoomViewProps {
   /** Forwarded to the repo table's actionable verdict tags (#5202). */
   onInvestigate?: (req: RepoInvestigateRequest) => void
+  /** Forwarded to the repo table's per-row "Open session" action (#5507). */
+  onOpenSession?: (req: RepoOpenSessionRequest) => void
   /** Optional initial tab override (defaults to the persisted tab). For tests. */
   initialTab?: ControlRoomTab
 }
 
-export function ControlRoomView({ onInvestigate, initialTab }: ControlRoomViewProps = {}) {
+export function ControlRoomView({ onInvestigate, onOpenSession, initialTab }: ControlRoomViewProps = {}) {
   const [tab, setTab] = useState<ControlRoomTab>(() => initialTab ?? loadPersistedTab())
 
   const selectTab = useCallback((next: ControlRoomTab) => {
@@ -102,7 +104,7 @@ export function ControlRoomView({ onInvestigate, initialTab }: ControlRoomViewPr
         })}
       </div>
       {tab === 'repos' ? (
-        <ControlRoomSection onInvestigate={onInvestigate} />
+        <ControlRoomSection onInvestigate={onInvestigate} onOpenSession={onOpenSession} />
       ) : tab === 'runners' ? (
         <RunnerStatusSection />
       ) : (

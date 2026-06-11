@@ -253,6 +253,22 @@ export interface RepoInvestigateRequest {
 }
 
 /**
+ * #5507 — payload emitted when an operator clicks a repo's "Open session" row
+ * action. The host wires this to the create-session flow exactly like
+ * `onInvestigate` (see `:243`), minus the investigate-specific composer seeding:
+ * it opens the picker pre-filled with `cwd`, and the modal's existing logic
+ * suggests + dedupes a session name from the repo's basename (`name` is the
+ * suggested label / contract hint). Available on every repo row, regardless of
+ * verdict — unlike Investigate, this is not gated on an actionable verdict.
+ */
+export interface RepoOpenSessionRequest {
+  /** Absolute path of the repo — becomes the new session's cwd. */
+  cwd: string
+  /** Repo display name, the suggested session name (modal dedupes collisions). */
+  name: string
+}
+
+/**
  * #5202 — which verdicts are clickable "control actions". Start with
  * `investigate` only; extend this map per-verdict as more actions land (e.g.
  * `abandoned` → review-and-clean) so the click wiring grows in one place.
@@ -576,8 +592,11 @@ function AttributionCell({ attribution }: { attribution: boolean | null }) {
  * the absolute repo path to the clipboard). Both are side-effect-free from the
  * server's perspective — no local command execution — so they behave identically
  * in the web dashboard and the desktop app.
+ *
+ * #5507 — adds an "Open session" action (shown on every row when `onOpenSession`
+ * is wired) that opens the create-session modal pre-filled with this repo's cwd.
  */
-function RowActions({ repo }: { repo: RepoStatus }) {
+function RowActions({ repo, onOpenSession }: { repo: RepoStatus; onOpenSession?: (req: RepoOpenSessionRequest) => void }) {
   const [copied, setCopied] = useState(false)
   const copyPath = useCallback(() => {
     // Route through the shared clipboard helper, which uses the Tauri plugin
@@ -614,6 +633,26 @@ function RowActions({ repo }: { repo: RepoStatus }) {
       >
         {copied ? 'Copied' : 'Copy path'}
       </button>
+      {onOpenSession && (
+        <button
+          type="button"
+          className="cr-action"
+          data-testid={`cr-action-open-${repo.name}`}
+          // #5507 — the visible label is just "Open session", identical on every
+          // row; give screen readers a per-row accessible name (the title tooltip
+          // is not a reliable accessible-name source). The hint flags that opening
+          // a session in a live repo runs alongside the existing one.
+          aria-label={`Open a session in ${repo.name} (${repo.path})`}
+          title={
+            repo.live
+              ? `Open another session in ${repo.path} (a live session is already running here)`
+              : `Open a session in ${repo.path}`
+          }
+          onClick={() => onOpenSession({ cwd: repo.path, name: repo.name })}
+        >
+          Open session
+        </button>
+      )}
     </td>
   )
 }
@@ -632,6 +671,8 @@ interface RepoRowsProps {
   now?: () => number
   /** #5202 — investigate action, forwarded to the verdict tag. */
   onInvestigate?: (req: RepoInvestigateRequest) => void
+  /** #5507 — open-session action, forwarded to the row actions cell. */
+  onOpenSession?: (req: RepoOpenSessionRequest) => void
   /** #5272 — cancel a subagent in this repo's session (bound to its sessionId). */
   onCancelActivity?: (activityId: string, sessionId: string) => void
   /** #5272 — interrupt this repo's session (heading "Interrupt turn"). */
@@ -640,7 +681,7 @@ interface RepoRowsProps {
   cancellingActivityIds?: ReadonlySet<string>
 }
 
-function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate, onCancelActivity, onInterruptSession, cancellingActivityIds }: RepoRowsProps) {
+function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate, onOpenSession, onCancelActivity, onInterruptSession, cancellingActivityIds }: RepoRowsProps) {
   // Map repo → its active chroxy session (by cwd). When a session is found the
   // name cell becomes a disclosure toggle that reveals that session's live
   // activity tree (subagents / shells / tools — the retired v1 panel's view).
@@ -703,7 +744,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
         <PrCell repo={repo} />
         <AttributionCell attribution={repo.attribution} />
         <td className="cr-dim cr-last">{relativeLast(repo.lastTouched)}</td>
-        <RowActions repo={repo} />
+        <RowActions repo={repo} onOpenSession={onOpenSession} />
       </tr>
       {repo.note && (
         <tr className="cr-act" data-testid={`cr-note-row-${repo.name}`}>
@@ -812,6 +853,13 @@ export interface ControlRoomSectionProps {
    */
   onInvestigate?: (req: RepoInvestigateRequest) => void
   /**
+   * #5507 — invoked when an operator clicks a repo's "Open session" row action.
+   * The host opens the create-session picker pre-filled with the repo cwd (same
+   * plumbing as `onInvestigate`, minus the composer seeding). Available on every
+   * repo row regardless of verdict.
+   */
+  onOpenSession?: (req: RepoOpenSessionRequest) => void
+  /**
    * #5272 — cancel a subagent node in a drill-down's session. Defaults to the
    * store's `sendCancelActivity`. Injectable for tests.
    */
@@ -837,6 +885,7 @@ export function ControlRoomSection({
   sessions: sessionsProp,
   now = Date.now,
   onInvestigate,
+  onOpenSession,
   onCancelActivity: onCancelActivityProp,
   onInterruptSession: onInterruptSessionProp,
 }: ControlRoomSectionProps = {}) {
@@ -1081,6 +1130,7 @@ export function ControlRoomSection({
                       onToggleExpand={handleToggleRepo}
                       now={now}
                       onInvestigate={onInvestigate}
+                      onOpenSession={onOpenSession}
                       onCancelActivity={onCancelActivity}
                       onInterruptSession={onInterruptSession}
                       cancellingActivityIds={cancellingActivityIds}
