@@ -7,6 +7,7 @@
  * - Deduplicates messages by id for reconnect replay
  */
 import { memo, useRef, useState, useCallback, useEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
+import { bumpRenderCount } from '@chroxy/store-core'
 import { ThinkingDots } from './ThinkingDots'
 import { renderMarkdown } from '../lib/markdown'
 
@@ -142,6 +143,70 @@ function formatTime(ts: number): string {
   return `${h}:${m} ${ampm}`
 }
 
+const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV)
+
+/**
+ * #5516 (epic #5514): the default (non-renderMessage) message row, extracted
+ * into a memoized component so a streaming delta flush only re-runs the
+ * markdown parse (`renderMarkdown`) for the ONE message whose content changed.
+ *
+ * Before #5516 every store update re-ran the whole `dedupedMessages.map`,
+ * calling `renderMarkdown(msg.content)` inline for EVERY response/tool_use row
+ * — an O(conversation) markdown re-parse ~10×/sec while streaming. By keying
+ * the memo on the render-affecting scalars (id/type/content/timestamp), only
+ * the tail bubble (whose content is appended each flush) re-parses; the rest of
+ * the transcript is skipped entirely. The store hands each row a fresh object
+ * per render, so a shallow scalar compare — not reference equality — is what
+ * makes the skip fire.
+ */
+/** Row container class for a message type (was computed inline in the map). */
+function rowClassFor(type: string, hasIcon: boolean): string {
+  if (type === 'user_input') return 'msg-row msg-row-user'
+  if (type === 'system') return 'msg-row msg-row-system'
+  return hasIcon ? 'msg-row' : ''
+}
+
+const DefaultMessageRow = memo(function DefaultMessageRow({
+  id,
+  type,
+  content,
+  timestamp,
+  isStreaming,
+}: {
+  id: string
+  type: ChatViewMessage['type']
+  content: string
+  timestamp: number
+  isStreaming?: boolean
+}) {
+  // Dev-only render tally — proves (in the memoization test + ad-hoc
+  // profiling) non-tail rows don't re-render on a delta flush. Never read on
+  // the hot path.
+  if (IS_DEV) bumpRenderCount(`ChatMessageRow:${id}`)
+
+  // Derive icon + row class from `type` INSIDE the memo. Computing them in the
+  // parent map would hand the memo a fresh `icon` JSX element identity every
+  // render and defeat the skip — every prop must be a stable scalar.
+  const icon = senderIconFor(type)
+  const rowClass = rowClassFor(type, icon !== null)
+
+  const body =
+    type === 'response' || type === 'tool_use'
+      ? <div dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+      : content
+
+  return (
+    <div data-testid={`msg-${id}`} className={rowClass}>
+      {type !== 'user_input' && icon}
+      <div className={`msg ${TYPE_CLASS[type] || 'assistant'}${isStreaming ? ' streaming' : ''}`}>
+        {body}
+        {timestamp > 0 && <span className="msg-timestamp">{formatTime(timestamp)}</span>}
+      </div>
+      {type === 'user_input' && icon}
+    </div>
+  )
+})
+
 function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
@@ -265,26 +330,14 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
             )
           }
           return (
-            <div
+            <DefaultMessageRow
               key={msg.id}
-              data-testid={`msg-${msg.id}`}
-              className={rowClass}
-            >
-              {msg.type !== 'user_input' && icon}
-              <div
-                className={`msg ${TYPE_CLASS[msg.type] || 'assistant'}${msg.isStreaming ? ' streaming' : ''}`}
-              >
-                {(msg.type === 'response' || msg.type === 'tool_use') ? (
-                  <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
-                ) : (
-                  msg.content
-                )}
-                {msg.timestamp > 0 && (
-                  <span className="msg-timestamp">{formatTime(msg.timestamp)}</span>
-                )}
-              </div>
-              {msg.type === 'user_input' && icon}
-            </div>
+              id={msg.id}
+              type={msg.type}
+              content={msg.content}
+              timestamp={msg.timestamp}
+              isStreaming={msg.isStreaming}
+            />
           )
         })}
         {(isStreaming || isBusy) && <ThinkingDots />}

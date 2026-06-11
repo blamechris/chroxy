@@ -531,3 +531,13 @@ export {
 // measure token-to-render and uplink/downlink identically.
 export { RollingPercentiles, splitRtt } from './latency-stats'
 export type { RttSplit, RttSplitInput } from './latency-stats'
+
+// #5516 (epic #5514): dev-only render counter — a process-global tally used by
+// the bubble-memoization tests to prove non-tail bubbles don't re-render (and
+// re-parse markdown) on a streaming delta flush. Never read on the hot path.
+export {
+  bumpRenderCount,
+  getRenderCount,
+  resetRenderCounts,
+  renderCountSnapshot,
+} from './render-counter'
