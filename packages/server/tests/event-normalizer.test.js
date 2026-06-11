@@ -821,6 +821,32 @@ describe('EventNormalizer', () => {
       assert.equal(entries.length, 2)
     })
 
+    // #5515 (epic #5514): the buffer carries the FIRST emit monotonic time per
+    // key so ws-forwarding can measure emit→broadcast (server-side coalescing).
+    it('carries the first emitMonoMs per key through flushSession (#5515)', () => {
+      normalizer.bufferDelta('sess-1', 'msg-1', 'Hello', 1000)
+      normalizer.bufferDelta('sess-1', 'msg-1', ' World', 1005)
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries.length, 1)
+      // First-write-wins: the oldest token's emit time, not the latest.
+      assert.equal(entries[0].emitMonoMs, 1000)
+    })
+
+    it('emitMonoMs is undefined when not supplied (additive, #5515)', () => {
+      normalizer.bufferDelta('sess-1', 'msg-1', 'Hello')
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries[0].emitMonoMs, undefined)
+    })
+
+    it('does not leak emitMonoMs across flush windows for the same key (#5515)', () => {
+      normalizer.bufferDelta('sess-1', 'msg-1', 'A', 1000)
+      normalizer.flushSession('sess-1')
+      // New window for the same key: a fresh emit time should win.
+      normalizer.bufferDelta('sess-1', 'msg-1', 'B', 2000)
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries[0].emitMonoMs, 2000)
+    })
+
     it('fires onFlush callback on timer', async () => {
       let flushed = null
       normalizer.onFlush = (entries) => { flushed = entries }

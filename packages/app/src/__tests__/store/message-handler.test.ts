@@ -1882,6 +1882,30 @@ describe('stream_delta handler', () => {
     expect(msg?.content).toBe('Hello world');
   });
 
+  // #5515 (epic #5514): the latency instrumentation reads the optional
+  // serverTs off the delta and a serverTs off the pong; neither may perturb the
+  // existing hot path. Content must still accumulate and render exactly, and a
+  // stamped pong must be consumed without throwing.
+  it('renders delta content unchanged when serverTs is present (#5515)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1', serverTs: 1_700_000_000_000 });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Hello', serverTs: 1_700_000_000_010 });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: ' world', serverTs: 1_700_000_000_020 });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.messages.find((m) => m.id === 'msg-1')?.content).toBe('Hello world');
+    // A stamped pong must not throw (RTT split is best-effort, dev-log only).
+    expect(() => _testMessageHandler.handle({ type: 'pong', serverTs: 1_700_000_000_030 })).not.toThrow();
+  });
+
   it('ID collision: routes deltas to suffixed response ID', () => {
     const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 };
     const store = createMockStore({

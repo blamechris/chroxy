@@ -3,6 +3,49 @@ import { getDefaultModelId, getRegistryForProvider } from './models.js'
 
 const log = createLogger('ws-forwarding')
 
+// #5515 (epic #5514): the stream message types we stamp with a broadcast-time
+// wall-clock serverTs so clients can measure token-to-render latency.
+const STREAM_TS_TYPES = new Set(['stream_start', 'stream_delta', 'stream_end'])
+
+// #5515: stamp a wall-clock (ms epoch) serverTs on a stream message at the
+// moment it is handed to broadcast. Wall-clock — not the #5414 monotonic
+// watchdog clock — because the field crosses machines; clients treat it as
+// skew-prone and derive one-way numbers from the RTT split, not raw
+// subtraction. Returns a new object so we never mutate a caller's message
+// (the normalizer/flush callers build fresh literals, but this keeps the
+// helper safe regardless). No-op for non-stream messages.
+function withServerTs(msg) {
+  if (!msg || !STREAM_TS_TYPES.has(msg.type)) return msg
+  return { ...msg, serverTs: Date.now() }
+}
+
+// #5515 — emit→broadcast instrumentation. The provider (sdk-session) stamps the
+// monotonic time it emitted a delta onto the event (`_emitMonoMs`); we compute
+// the time spent inside the server (coalescing buffer + forwarding) here and
+// log a throttled p50/p95 summary so the coalescing buffer can be confirmed as
+// the only meaningful server-side cost. Monotonic both ends (same process), so
+// this is a true elapsed duration — unlike the cross-machine serverTs field.
+const _emitToBroadcastSamples = []
+const EMIT_BROADCAST_RING = 200
+let _lastEmitBroadcastLogMs = 0
+const EMIT_BROADCAST_LOG_INTERVAL_MS = 5000
+
+function recordEmitToBroadcast(emitMonoMs) {
+  if (typeof emitMonoMs !== 'number') return
+  const elapsed = Number(process.hrtime.bigint() / 1_000_000n) - emitMonoMs
+  if (!Number.isFinite(elapsed) || elapsed < 0) return
+  _emitToBroadcastSamples.push(elapsed)
+  if (_emitToBroadcastSamples.length > EMIT_BROADCAST_RING) _emitToBroadcastSamples.shift()
+  const now = Date.now()
+  if (now - _lastEmitBroadcastLogMs < EMIT_BROADCAST_LOG_INTERVAL_MS) return
+  _lastEmitBroadcastLogMs = now
+  const sorted = [..._emitToBroadcastSamples].sort((a, b) => a - b)
+  // Standard nearest-rank: ceil(q*n) - 1, clamped to [0, n-1]. floor(q*n)
+  // biases one position high and makes p95 the max for small n (#5520 review).
+  const p = (q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]
+  log.debug(`[latency] emit→broadcast n=${sorted.length} p50=${Math.round(p(0.5))}ms p95=${Math.round(p(0.95))}ms`)
+}
+
 // #5313 (WP-1.3) — wrap a forwarding listener so a throw in its body (almost
 // always a broadcast to a torn-down client, or a downstream devPreview call)
 // can't unwind the EventEmitter's emit() in the emitting code (session-manager /
@@ -44,11 +87,12 @@ export function setupForwarding(ctx) {
 
   // Wire the normalizer's timer-based delta flush to broadcast
   normalizer.onFlush = (entries) => {
-    for (const { sessionId, messageId, delta } of entries) {
+    for (const { sessionId, messageId, delta, emitMonoMs } of entries) {
+      recordEmitToBroadcast(emitMonoMs)
       if (sessionId) {
-        broadcastToSession(sessionId, { type: 'stream_delta', messageId, delta })
+        broadcastToSession(sessionId, withServerTs({ type: 'stream_delta', messageId, delta }))
       } else {
-        broadcast({ type: 'stream_delta', messageId, delta })
+        broadcast(withServerTs({ type: 'stream_delta', messageId, delta }))
       }
     }
   }
@@ -114,7 +158,7 @@ function setupSessionForwarding(normalizer, ctx) {
 
     // Handle delta buffering
     if (result.buffer) {
-      normalizer.bufferDelta(sessionId, data.messageId, data.delta)
+      normalizer.bufferDelta(sessionId, data.messageId, data.delta, data._emitMonoMs)
       return
     }
 
@@ -124,10 +168,11 @@ function setupSessionForwarding(normalizer, ctx) {
 
     // Broadcast messages
     for (const { msg, filter } of result.messages) {
+      const stamped = withServerTs(msg)
       if (filter) {
-        broadcastToSession(sessionId, msg, filter)
+        broadcastToSession(sessionId, stamped, filter)
       } else {
-        broadcastToSession(sessionId, msg)
+        broadcastToSession(sessionId, stamped)
       }
     }
     } catch (err) {
@@ -205,7 +250,7 @@ function setupCliForwarding(normalizer, ctx) {
         if (!result) return
 
         if (result.buffer) {
-          normalizer.bufferDelta(null, data.messageId, data.delta)
+          normalizer.bufferDelta(null, data.messageId, data.delta, data._emitMonoMs)
           return
         }
 
@@ -213,10 +258,11 @@ function setupCliForwarding(normalizer, ctx) {
         executeRegistrations(result.registrations, null, ctx)
 
         for (const { msg, filter } of result.messages) {
+          const stamped = withServerTs(msg)
           if (filter) {
-            broadcast(msg, filter)
+            broadcast(stamped, filter)
           } else {
-            broadcast(msg)
+            broadcast(stamped)
           }
         }
       } catch (err) {
@@ -286,11 +332,12 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
       case 'flush_deltas': {
         const sid = effect.sessionId ?? sessionId
         const entries = normalizer.flushSession(sid)
-        for (const { sessionId: eSid, messageId, delta } of entries) {
+        for (const { sessionId: eSid, messageId, delta, emitMonoMs } of entries) {
+          recordEmitToBroadcast(emitMonoMs)
           if (eSid) {
-            broadcastToSession(eSid, { type: 'stream_delta', messageId, delta })
+            broadcastToSession(eSid, withServerTs({ type: 'stream_delta', messageId, delta }))
           } else {
-            broadcast({ type: 'stream_delta', messageId, delta })
+            broadcast(withServerTs({ type: 'stream_delta', messageId, delta }))
           }
         }
         break

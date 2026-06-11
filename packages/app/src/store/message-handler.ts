@@ -135,6 +135,9 @@ import {
   // toast uses, so the mobile Alert and the dashboard sub-line can't
   // drift apart on copy/format.
   formatPartialCostLine,
+  // #5515 (epic #5514): latency instrumentation primitives.
+  RollingPercentiles,
+  splitRtt,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
@@ -262,6 +265,16 @@ interface MessageHandlerContext extends EncryptionContext {
   pendingDeltas: Map<string, { sessionId: string | null; delta: string }>;
   deltaFlushTimer: ReturnType<typeof setTimeout> | null;
 
+  // #5515 (epic #5514): latency instrumentation. `deltaServerTs` records the
+  // server-stamped serverTs (and local recv time) of the OLDEST un-rendered
+  // delta per messageId; on flush we measure serverTs→render (token-to-render)
+  // and recv→render (client-side render cost) into the rolling buffers. See
+  // store-core/latency-stats for the clock discipline.
+  deltaServerTs: Map<string, { serverTs: number; recvAt: number }>;
+  tokenToRender: RollingPercentiles;
+  clientRender: RollingPercentiles;
+  lastLatencyLogAt: number;
+
   // Message queue
   messageQueue: QueuedMessage[];
 }
@@ -282,6 +295,10 @@ function createDefaultContext(): MessageHandlerContext {
     ewmaRtt: null,
     pendingDeltas: new Map<string, { sessionId: string | null; delta: string }>(),
     deltaFlushTimer: null,
+    deltaServerTs: new Map<string, { serverTs: number; recvAt: number }>(),
+    tokenToRender: new RollingPercentiles(200),
+    clientRender: new RollingPercentiles(200),
+    lastLatencyLogAt: 0,
     messageQueue: [],
   };
 }
@@ -576,6 +593,10 @@ export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
+// #5515 (epic #5514): throttle the dev latency readout so a streaming turn
+// can't spam the console — one line every few seconds is enough to watch the
+// numbers move when flush intervals are tuned.
+const LATENCY_LOG_INTERVAL_MS = 3_000;
 
 export function stopHeartbeat(): void {
   if (_ctx.heartbeatInterval) { clearInterval(_ctx.heartbeatInterval); _ctx.heartbeatInterval = null; }
@@ -600,17 +621,29 @@ export function startHeartbeat(socket: WebSocket): void {
   }, HEARTBEAT_INTERVAL_MS);
 }
 
-function _onPong(): void {
+function _onPong(serverTs?: number): void {
   if (_ctx.pongTimeout) { clearTimeout(_ctx.pongTimeout); _ctx.pongTimeout = null; }
   // Measure RTT and update connection quality using EWMA for stability
   if (_ctx.lastPingSentAt > 0) {
-    const rttMs = Date.now() - _ctx.lastPingSentAt;
-    _ctx.lastPingSentAt = 0;
+    const pongRecvAt = Date.now();
+    const rttMs = pongRecvAt - _ctx.lastPingSentAt;
     // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
     _ctx.ewmaRtt = _ctx.ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ctx.ewmaRtt;
     const smoothed = Math.round(_ctx.ewmaRtt);
     const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
     useConnectionLifecycleStore.getState().setConnectionQuality(smoothed, quality);
+
+    // #5515 (epic #5514): split this RTT into approximate uplink/downlink
+    // halves using the server-stamped serverTs. The split is positioned within
+    // the locally-measured [ping,pong] interval (skew-clamped), so it stays
+    // sane even with clock skew — see store-core/latency-stats. Dev-only log,
+    // throttled by the same window as token-to-render.
+    const split = splitRtt({ pingSentAt: _ctx.lastPingSentAt, pongRecvAt, serverTs });
+    if (split.uplinkMs !== null && pongRecvAt - _ctx.lastLatencyLogAt >= LATENCY_LOG_INTERVAL_MS) {
+      _ctx.lastLatencyLogAt = pongRecvAt;
+      console.log(`[latency] rtt=${split.rttMs}ms split≈ up ${split.uplinkMs}ms / down ${split.downlinkMs}ms (approx, clock-skew)`);
+    }
+    _ctx.lastPingSentAt = 0;
   }
 }
 
@@ -692,6 +725,45 @@ function flushPendingDeltas(): void {
   if (!flatUpdated) {
     getStore().setState({ sessionStates: newSessionStates });
   }
+
+  // #5515 (epic #5514): the store write above is the render trigger; sample
+  // latency for the message ids we just flushed. serverTs→render is the
+  // headline token-to-render number (wall-clock both ends but measured as one
+  // delta against the local recv, see below); recv→render is the pure client
+  // cost. Each id's stamp is consumed once so the next flush window restamps.
+  recordLatencySamples(updates.keys());
+}
+
+// #5515: measure token-to-render for the flushed message ids and feed the
+// rolling p50/p95 buffers, emitting a throttled dev log. Pulled out of
+// flushPendingDeltas so the hot path stays readable and it can be unit-tested.
+//
+// Clock note: `serverTs` is the server's wall-clock stamp and `now`/`recvAt`
+// are the client's. A raw serverTs→now subtraction is skew-prone, so we report
+// it as APPROXIMATE token-to-render and pair it with recv→render (same client
+// clock, skew-free) as the trustworthy client-render cost. We do NOT derive
+// one-way transport numbers from this subtraction — those come from the
+// RTT-split path in _onPong.
+function recordLatencySamples(messageIds: Iterable<string>): void {
+  const now = Date.now();
+  let sampled = false;
+  for (const id of messageIds) {
+    const stamp = _ctx.deltaServerTs.get(id);
+    if (!stamp) continue;
+    _ctx.deltaServerTs.delete(id);
+    _ctx.tokenToRender.add(now - stamp.serverTs);
+    _ctx.clientRender.add(now - stamp.recvAt);
+    sampled = true;
+  }
+  if (!sampled) return;
+  if (now - _ctx.lastLatencyLogAt < LATENCY_LOG_INTERVAL_MS) return;
+  _ctx.lastLatencyLogAt = now;
+  const ttr = _ctx.tokenToRender.summary();
+  const cr = _ctx.clientRender.summary();
+  console.log(
+    `[latency] token→render(~approx, wall-clock) n=${ttr.count} p50=${ttr.p50}ms p95=${ttr.p95}ms | ` +
+    `client-render n=${cr.count} p50=${cr.p50}ms p95=${cr.p95}ms`
+  );
 }
 
 export function clearDeltaBuffers(): void {
@@ -700,6 +772,9 @@ export function clearDeltaBuffers(): void {
     _ctx.deltaFlushTimer = null;
   }
   _ctx.pendingDeltas.clear();
+  // #5515: drop any un-flushed latency stamps so they can't survive a reset
+  // and pollute the next session's token-to-render window.
+  _ctx.deltaServerTs.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -991,7 +1066,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
   switch (msg.type) {
     case 'pong':
-      _onPong();
+      _onPong(typeof msg.serverTs === 'number' ? msg.serverTs : undefined);
       return;
 
     case 'auth_ok': {
@@ -1570,6 +1645,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'stream_delta': {
+      // #5515 (epic #5514): record the server-stamped serverTs and the local
+      // recv time of the OLDEST un-rendered delta for this messageId, so
+      // flushPendingDeltas can measure token-to-render. First-write-wins until
+      // the next flush clears it (mirrors the server's per-flush emit stamp).
+      if (typeof msg.messageId === 'string') {
+        const sTs = typeof msg.serverTs === 'number' ? msg.serverTs : null;
+        if (sTs !== null && !_ctx.deltaServerTs.has(msg.messageId)) {
+          _ctx.deltaServerTs.set(msg.messageId, { serverTs: sTs, recvAt: Date.now() });
+        }
+      }
       // #4981 — thin wrapper over `sharedStreamDelta`. The platform-neutral
       // hot path (post-permission split, single-hop defensive remap, post-tool
       // continuation split with the #4999/#5014 sentence gate and #4975

@@ -148,18 +148,29 @@ export const ServerClaudeReadySchema = z.object({
         reason: z.string(),
     }).optional(),
 });
+// #5515 (epic #5514): optional, additive wall-clock (ms epoch) timestamp
+// stamped on stream messages and the pong reply at broadcast time. Clients use
+// it to measure server→render latency (token-to-render) and to split RTT into
+// uplink/downlink. Wall-clock (not monotonic) because it crosses machines;
+// consumers MUST treat raw cross-machine subtraction as skew-prone and derive
+// one-way numbers from the RTT-split method instead (see app/dashboard
+// latency-stats). Always optional so older servers/clients interop unchanged.
+const ServerTsSchema = z.number().int().nonnegative().finite().optional();
 export const ServerStreamStartSchema = z.object({
     type: z.literal('stream_start'),
     messageId: z.string(),
+    serverTs: ServerTsSchema,
 });
 export const ServerStreamDeltaSchema = z.object({
     type: z.literal('stream_delta'),
     messageId: z.string(),
     delta: z.string(),
+    serverTs: ServerTsSchema,
 });
 export const ServerStreamEndSchema = z.object({
     type: z.literal('stream_end'),
     messageId: z.string(),
+    serverTs: ServerTsSchema,
 });
 export const ServerMessageSchema = z.object({
     type: z.literal('message'),
@@ -1760,6 +1771,10 @@ export const ServerShutdownSchema = z.object({
 });
 export const ServerPongSchema = z.object({
     type: z.literal('pong'),
+    // #5515: optional wall-clock stamp so clients can split the ping/pong RTT
+    // into uplink (ping send → serverTs) and downlink (serverTs → pong recv)
+    // halves. See ServerStreamDeltaSchema for the wall-clock/skew caveat.
+    serverTs: z.number().int().nonnegative().finite().optional(),
 });
 export const ServerCostUpdateSchema = z.object({
     type: z.literal('cost_update'),

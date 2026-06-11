@@ -525,3 +525,9 @@ export {
   getWsCloseMessage,
   getHealthCheckErrorMessage,
 } from './ws-errors'
+
+// #5515 (epic #5514): latency instrumentation primitives — a bounded p50/p95
+// ring buffer and the skew-safe RTT splitter, shared so the app and dashboard
+// measure token-to-render and uplink/downlink identically.
+export { RollingPercentiles, splitRtt } from './latency-stats'
+export type { RttSplit, RttSplitInput } from './latency-stats'
