@@ -18,6 +18,7 @@ import { repoHandlers } from './handlers/repo-handlers.js'
 import { featureHandlers } from './handlers/feature-handlers.js'
 import { evaluatorHandlers } from './handlers/evaluator-handlers.js'
 import { controlRoomHandlers } from './handlers/control-room-handlers.js'
+import { summarizeHandlers } from './handlers/summarize-handlers.js'
 import { pairingHandlers } from './handlers/pairing-handlers.js'
 
 const log = createLogger('ws')
@@ -34,6 +35,7 @@ const handlerRegistry = new Map([
   ...Object.entries(featureHandlers),
   ...Object.entries(evaluatorHandlers),
   ...Object.entries(controlRoomHandlers),
+  ...Object.entries(summarizeHandlers),
   ...Object.entries(pairingHandlers),
 ])
 

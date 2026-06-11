@@ -1368,6 +1368,23 @@ export declare const ServerIntegrationActionAckSchema: z.ZodObject<{
         skipped: z.ZodNumber;
     }, z.core.$strip>>;
 }, z.core.$loose>;
+/**
+ * #5547: reply to a `summarize_session` request — the model-written
+ * continuation brief built from the session's persisted history. Sent only to
+ * the requesting client. `summary` is the editable brief the dashboard seeds
+ * into the create-session composer; `truncated` flags that the history was
+ * windowed before summarization (the brief's header also notes this).
+ * `sessionId` echoes the source session, `requestId` correlates the click.
+ * Failures surface separately as a `SUMMARIZE_FAILED` session_error echoing
+ * `sessionId` / `requestId`.
+ */
+export declare const ServerSummarizeSessionResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"summarize_session_result">;
+    sessionId: z.ZodString;
+    summary: z.ZodString;
+    truncated: z.ZodOptional<z.ZodBoolean>;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, z.core.$loose>;
 export declare const ServerClientFocusChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_focus_changed">;
     clientId: z.ZodString;
@@ -2010,3 +2027,4 @@ export type IntegrationCliStatus = z.infer<typeof IntegrationCliStatusSchema>;
 export type ServerIntegrationStatusSnapshotMessage = z.infer<typeof ServerIntegrationStatusSnapshotSchema>;
 export type IntegrationActionCounts = z.infer<typeof IntegrationActionCountsSchema>;
 export type ServerIntegrationActionAckMessage = z.infer<typeof ServerIntegrationActionAckSchema>;
+export type ServerSummarizeSessionResultMessage = z.infer<typeof ServerSummarizeSessionResultSchema>;

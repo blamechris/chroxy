@@ -603,6 +603,11 @@ export declare const IntegrationActionSchema: z.ZodObject<{
     runId: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
+export declare const SummarizeSessionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"summarize_session">;
+    sessionId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const EncryptedEnvelopeSchema: z.ZodObject<{
     type: z.ZodLiteral<"encrypted">;
     d: z.ZodString;
@@ -971,6 +976,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     runId: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"summarize_session">;
+    sessionId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"pair_approve">;
     requestId: z.ZodString;
 }, z.core.$loose>, z.ZodObject<{
@@ -994,5 +1003,6 @@ export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>;
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>;
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
+export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>;
