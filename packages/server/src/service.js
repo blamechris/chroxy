@@ -1,12 +1,24 @@
 import { homedir, platform } from 'os'
 import { join, dirname } from 'path'
-import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, writeFileSync, chmodSync } from 'fs'
 import { writeFileRestricted } from './platform.js'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
 
 const SERVICE_LABEL = 'com.chroxy.server'
 const DEFAULT_CONFIG_DIR = join(homedir(), '.chroxy')
+const WRAPPER_NAME = 'service-wrapper.sh'
+
+// Keychain coordinates for secrets resolved by the service wrapper at spawn
+// time. The api-token pair mirrors keychain.js (service 'chroxy', account
+// 'api-token'); the webhook pair mirrors the deployed workaround for #5490
+// (service 'chroxy-discord-webhook', account 'webhook-url').
+const KEYCHAIN_API_TOKEN = { service: 'chroxy', account: 'api-token', env: 'API_TOKEN' }
+const KEYCHAIN_DISCORD_WEBHOOK = {
+  service: 'chroxy-discord-webhook',
+  account: 'webhook-url',
+  env: 'CHROXY_DISCORD_WEBHOOK_URL',
+}
 
 /**
  * Escape XML special characters in a string.
@@ -60,13 +72,24 @@ export function generateLaunchdPlist(config) {
   const {
     nodePath,
     chroxyBin,
+    claudeBin,
+    wrapperPath,
     cwd = homedir(),
     startAtLogin = false,
     logDir = join(homedir(), '.chroxy', 'logs'),
   } = config
 
-  const nodeBinDir = dirname(nodePath)
-  const pathValue = `${nodeBinDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`
+  // Bake a PATH that includes the node and claude bin dirs so the daemon's
+  // preflight finds both under launchd's bare default PATH (#5491).
+  const pathValue = buildServicePath({ nodePath, claudeBin })
+
+  // When a wrapper is provided, exec it so keychain secrets reach the daemon
+  // (#5491). Otherwise exec node+chroxy directly (legacy / no-wrapper path).
+  const programArgs = wrapperPath
+    ? `    <string>${escapeXml(wrapperPath)}</string>`
+    : `    <string>${escapeXml(nodePath)}</string>
+    <string>${escapeXml(chroxyBin)}</string>
+    <string>start</string>`
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -76,9 +99,7 @@ export function generateLaunchdPlist(config) {
   <string>${SERVICE_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${escapeXml(nodePath)}</string>
-    <string>${escapeXml(chroxyBin)}</string>
-    <string>start</string>
+${programArgs}
   </array>
   <key>RunAtLoad</key>
   ${startAtLogin ? '<true/>' : '<false/>'}
@@ -109,12 +130,20 @@ export function generateSystemdUnit(config) {
   const {
     nodePath,
     chroxyBin,
+    claudeBin,
+    wrapperPath,
     cwd = homedir(),
     logDir = join(homedir(), '.chroxy', 'logs'),
   } = config
 
-  const nodeBinDir = dirname(nodePath)
-  const pathValue = `${nodeBinDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`
+  // Bake a PATH that includes the node and claude bin dirs for parity with the
+  // launchd plist (#5491).
+  const pathValue = buildServicePath({ nodePath, claudeBin })
+
+  // Prefer the wrapper (resolves keychain secrets) when provided.
+  const execStart = wrapperPath
+    ? `ExecStart=${wrapperPath}`
+    : `ExecStart="${nodePath}" "${chroxyBin}" start`
 
   return `[Unit]
 Description=Chroxy remote terminal daemon
@@ -122,7 +151,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart="${nodePath}" "${chroxyBin}" start
+${execStart}
 WorkingDirectory=${cwd}
 Restart=on-failure
 RestartSec=5
@@ -253,6 +282,116 @@ export function resolveChroxyBin() {
 }
 
 /**
+ * Resolve the `claude` CLI binary from the installer's environment.
+ *
+ * The Agent SDK requires the Claude Code CLI on PATH. launchd/systemd run the
+ * daemon with a bare PATH (`/usr/bin:/bin:...`), so `claude` (commonly under
+ * `~/.local/bin`) is invisible and preflight fails (#5491). We capture the
+ * resolved location at install time via `which` so it can be baked into the
+ * service's PATH.
+ *
+ * Throws with an actionable message if `claude` cannot be resolved — install
+ * MUST fail loudly rather than register a job that crash-loops on preflight.
+ *
+ * @param {object} [options]
+ * @param {(cmd: string, args: string[], opts: object) => string} [options._which]
+ *   Injectable exec for testing (defaults to execFileSync).
+ * @returns {string} Absolute path to the `claude` binary.
+ */
+export function resolveClaudeBin(options = {}) {
+  const which = options._which || execFileSync
+  try {
+    const resolved = which('which', ['claude'], { encoding: 'utf-8' }).trim()
+    if (resolved && existsSync(resolved)) {
+      return resolved
+    }
+  } catch {
+    // fall through to the actionable error below
+  }
+
+  throw new Error(
+    "Could not find the 'claude' CLI (required by the Agent SDK).\n" +
+    'Install Claude Code (https://claude.ai/code) and ensure `claude` is on your PATH,\n' +
+    'then re-run `chroxy service install`. The resolved location is baked into the\n' +
+    'service so the daemon can find it under launchd/systemd.'
+  )
+}
+
+/**
+ * Build the PATH value baked into the service definition.
+ *
+ * Includes the directories holding the resolved `node` and `claude` binaries
+ * (deduplicated, in that priority order) ahead of the standard system dirs,
+ * so the daemon's preflight finds both even under a bare launchd/systemd PATH.
+ *
+ * @param {object} args
+ * @param {string} args.nodePath - Resolved node binary path.
+ * @param {string} [args.claudeBin] - Resolved claude binary path.
+ * @returns {string} Colon-separated PATH.
+ */
+export function buildServicePath({ nodePath, claudeBin }) {
+  const dirs = []
+  const push = (p) => {
+    if (!p) return
+    const d = dirname(p)
+    if (!dirs.includes(d)) dirs.push(d)
+  }
+  push(nodePath)
+  push(claudeBin)
+  for (const sys of ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']) {
+    if (!dirs.includes(sys)) dirs.push(sys)
+  }
+  return dirs.join(':')
+}
+
+/**
+ * Generate the service wrapper script the service definition execs.
+ *
+ * launchd resolves keychain items in a context where the daemon's own
+ * `getToken()` fails even though `security find-generic-password` succeeds in a
+ * shell spawned by the same job (#5491). This wrapper resolves the secrets via
+ * `/usr/bin/security` at spawn time, exports them, and execs the server.
+ *
+ * Secret resolution is graceful: a failed/empty keychain read leaves the env
+ * var unset so config-file / `--no-auth` setups still work. The token itself is
+ * NEVER written into the plist — only this 0700 wrapper reads it.
+ *
+ * @param {object} config
+ * @param {string} config.nodePath - Resolved node binary path.
+ * @param {string} config.chroxyBin - Resolved chroxy CLI entry point.
+ * @param {string} config.pathValue - PATH to export (from buildServicePath).
+ * @param {string} [config.cwd] - Working directory (informational; the service
+ *   definition sets the actual cwd).
+ * @returns {string} POSIX sh script.
+ */
+export function generateServiceWrapper(config) {
+  const { nodePath, chroxyBin, pathValue } = config
+
+  const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+  const keychainBlock = ({ service, account, env }) => `
+# ${env} — resolve from the keychain at spawn time (graceful: skip on failure)
+if _val="$(/usr/bin/security find-generic-password -s ${sh(service)} -a ${sh(account)} -w 2>/dev/null)"; then
+  if [ -n "$_val" ]; then
+    export ${env}="$_val"
+  fi
+fi`
+
+  return `#!/bin/sh
+# Chroxy service wrapper — generated by \`chroxy service install\` (#5491).
+# Resolves keychain secrets unavailable to the launchd/systemd daemon context
+# and execs the server. Regenerated on every \`service install\`; edits are lost.
+set -e
+
+export PATH=${sh(pathValue)}
+export CHROXY_DAEMON=1
+${keychainBlock(KEYCHAIN_API_TOKEN)}
+${keychainBlock(KEYCHAIN_DISCORD_WEBHOOK)}
+
+exec ${sh(nodePath)} ${sh(chroxyBin)} start
+`
+}
+
+/**
  * Load service state from the config directory.
  * @param {string} [configDir] - Override config directory (for testing)
  * @returns {object|null}
@@ -283,17 +422,42 @@ export function saveServiceState(state, configDir = DEFAULT_CONFIG_DIR) {
 }
 
 /**
+ * Write the service wrapper script to disk with 0700 perms (owner rwx only).
+ *
+ * The wrapper resolves keychain secrets at spawn time (#5491); it is owner-only
+ * executable because it is what the service execs and it reads secrets.
+ *
+ * @param {string} wrapperPath - Absolute path to write the wrapper to.
+ * @param {string} content - Wrapper script body (from generateServiceWrapper).
+ * @returns {string} The wrapper path written.
+ */
+export function writeServiceWrapper(wrapperPath, content) {
+  const dir = dirname(wrapperPath)
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  // 0600 first (no world/group bits during the write window), then 0700 so the
+  // service can exec it. The script holds no secret itself — only the security
+  // invocations that read them — but owner-only is defense in depth.
+  writeFileSync(wrapperPath, content, { mode: 0o600 })
+  chmodSync(wrapperPath, 0o700)
+  return wrapperPath
+}
+
+/**
  * Install Chroxy as a system daemon.
  * Generates the appropriate service file, writes it, and optionally registers it.
  *
  * @param {object} config
  * @param {string} config.nodePath - Path to Node 22 binary
  * @param {string} config.chroxyBin - Path to chroxy CLI entry point
+ * @param {string} [config.claudeBin] - Path to the claude CLI (baked into PATH)
  * @param {string} [config.cwd] - Working directory for sessions
  * @param {boolean} [config.startAtLogin] - Start on login
  * @param {string} [config._servicePath] - Override service file path (testing)
  * @param {string} [config._logDir] - Override log directory (testing)
  * @param {string} [config._stateDir] - Override state directory (testing)
+ * @param {string} [config._wrapperPath] - Override wrapper script path (testing)
  * @param {boolean} [config._skipRegister] - Skip launchctl/systemctl registration (testing)
  * @param {string} [config._platform] - Override platform (testing)
  */
@@ -313,11 +477,30 @@ export function installService(config) {
   const servicePath = config._servicePath || (plat === 'darwin' ? paths.plistPath : paths.unitPath)
   const logDir = config._logDir || paths.logDir
   const stateDir = config._stateDir || DEFAULT_CONFIG_DIR
+  const wrapperPath = config._wrapperPath || join(stateDir, WRAPPER_NAME)
+
+  // Bake the resolved binary locations into the service PATH so the daemon's
+  // preflight finds node + claude under the bare launchd/systemd PATH (#5491).
+  const pathValue = buildServicePath({
+    nodePath: config.nodePath,
+    claudeBin: config.claudeBin,
+  })
+
+  // Write the wrapper that resolves keychain secrets at spawn time (#5491).
+  const wrapperContent = generateServiceWrapper({
+    nodePath: config.nodePath,
+    chroxyBin: config.chroxyBin,
+    pathValue,
+    cwd: config.cwd || homedir(),
+  })
+  writeServiceWrapper(wrapperPath, wrapperContent)
 
   // Generate service file content
   const genConfig = {
     nodePath: config.nodePath,
     chroxyBin: config.chroxyBin,
+    claudeBin: config.claudeBin,
+    wrapperPath,
     cwd: config.cwd || homedir(),
     startAtLogin: config.startAtLogin || false,
     logDir,
@@ -360,6 +543,8 @@ export function installService(config) {
     servicePath,
     nodePath: config.nodePath,
     chroxyBin: config.chroxyBin,
+    claudeBin: config.claudeBin,
+    wrapperPath,
     cwd: genConfig.cwd,
     startAtLogin: genConfig.startAtLogin,
   }, stateDir)
@@ -399,6 +584,12 @@ export function uninstallService(options = {}) {
     unlinkSync(state.servicePath)
   }
 
+  // Remove the generated wrapper script (#5491)
+  const wrapperPath = state.wrapperPath || join(stateDir, WRAPPER_NAME)
+  if (existsSync(wrapperPath)) {
+    unlinkSync(wrapperPath)
+  }
+
   // Remove state file
   const statePath = join(stateDir, 'service.json')
   if (existsSync(statePath)) {
@@ -412,12 +603,15 @@ export function uninstallService(options = {}) {
  * @param {string} [options._platform] - Override platform for testing
  * @param {string} [options._stateDir] - Override state directory (for testing)
  * @param {boolean} [options._skipExec] - Skip actual launchctl/systemctl calls (for testing)
+ * @param {(cmd: string, args: string[], opts: object) => void} [options._exec]
+ *   Injectable exec for testing (defaults to execFileSync).
  * @returns {{ started: boolean, message: string }}
  */
 export function startService(options = {}) {
   const plat = options._platform || platform()
   const paths = getServicePaths(plat)
   const stateDir = options._stateDir || DEFAULT_CONFIG_DIR
+  const exec = options._exec || execFileSync
 
   if (plat === 'win32') {
     return {
@@ -430,6 +624,7 @@ export function startService(options = {}) {
   if (!options._skipExec) {
     if (paths.type === 'launchd') {
       const state = loadServiceState(stateDir)
+      let plistPath
       if (state?.servicePath) {
         if (!existsSync(state.servicePath)) {
           throw new Error(
@@ -437,24 +632,64 @@ export function startService(options = {}) {
             "The service state is stale. Run 'chroxy service install' to reinstall."
           )
         }
-        execFileSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, state.servicePath], { stdio: 'pipe' })
+        plistPath = state.servicePath
+      } else if (existsSync(paths.plistPath)) {
+        // Service file exists but state is missing/stale — use the default path
+        plistPath = paths.plistPath
       } else {
-        // No servicePath in state — check if the plist exists at the default location
-        if (existsSync(paths.plistPath)) {
-          // Service file exists but state is missing/stale — use the default path
-          execFileSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, paths.plistPath], { stdio: 'pipe' })
-        } else {
-          throw new Error(
-            "Service not installed. Run 'chroxy service install' first."
-          )
-        }
+        throw new Error(
+          "Service not installed. Run 'chroxy service install' first."
+        )
       }
+      bootstrapLaunchd(plistPath, exec)
     } else {
-      execFileSync('systemctl', ['--user', 'start', 'chroxy.service'], { stdio: 'pipe' })
+      exec('systemctl', ['--user', 'start', 'chroxy.service'], { stdio: 'pipe' })
     }
   }
 
   return { started: true, message: 'Service started' }
+}
+
+/**
+ * Idempotently (re)start a launchd job: bootout any existing instance of the
+ * label first, then bootstrap (#5491).
+ *
+ * launchd refuses to bootstrap a label that is already registered. A stale
+ * label left from a prior run makes the first `service start` fail with the
+ * opaque `Bootstrap failed: 5: Input/output error`. Booting out first makes
+ * start idempotent; if bootstrap still fails with EIO we translate it into an
+ * actionable hint instead of surfacing the raw launchd error.
+ *
+ * @param {string} plistPath - Path to the plist to bootstrap.
+ * @param {(cmd: string, args: string[], opts: object) => void} exec - exec impl.
+ */
+function bootstrapLaunchd(plistPath, exec) {
+  const domain = `gui/${process.getuid()}`
+
+  // Bootout a stale label first — failure is fine (label may not be loaded).
+  try {
+    exec('launchctl', ['bootout', `${domain}/${SERVICE_LABEL}`], { stdio: 'pipe' })
+  } catch {
+    // Not currently loaded — nothing to bootout.
+  }
+
+  try {
+    exec('launchctl', ['bootstrap', domain, plistPath], { stdio: 'pipe' })
+  } catch (err) {
+    const detail = String(err?.stderr || err?.message || '')
+    // `Bootstrap failed: 5: Input/output error` — usually a stale/duplicate
+    // label or a job still shutting down. Surface an actionable hint (#5491).
+    if (/Input\/output error|: 5:/.test(detail)) {
+      throw new Error(
+        'launchd could not bootstrap the Chroxy service (Bootstrap failed: 5: Input/output error).\n' +
+        'This usually means a previous instance is still registered or shutting down. Try:\n' +
+        `  launchctl bootout ${domain}/${SERVICE_LABEL}\n` +
+        '  chroxy service start\n' +
+        "If it persists, reinstall with 'chroxy service uninstall && chroxy service install'."
+      )
+    }
+    throw err
+  }
 }
 
 /**
