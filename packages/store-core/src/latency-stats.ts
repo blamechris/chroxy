@@ -57,7 +57,11 @@ export class RollingPercentiles {
   summary(): { count: number; p50: number | null; p95: number | null } {
     if (this.size === 0) return { count: 0, p50: null, p95: null }
     const sorted = this.buf.slice(0, this.size).sort((a, b) => a - b)
-    const pick = (q: number): number => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]!
+    // Standard nearest-rank: rank = ceil(q*n), 0-based index = rank - 1,
+    // clamped to [0, n-1]. (Using floor(q*n) biases one position high and
+    // makes p95 the max for small n — #5520 review.)
+    const pick = (q: number): number =>
+      sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]!
     return { count: this.size, p50: pick(0.5), p95: pick(0.95) }
   }
 }

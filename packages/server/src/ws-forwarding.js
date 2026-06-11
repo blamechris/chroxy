@@ -40,7 +40,9 @@ function recordEmitToBroadcast(emitMonoMs) {
   if (now - _lastEmitBroadcastLogMs < EMIT_BROADCAST_LOG_INTERVAL_MS) return
   _lastEmitBroadcastLogMs = now
   const sorted = [..._emitToBroadcastSamples].sort((a, b) => a - b)
-  const p = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]
+  // Standard nearest-rank: ceil(q*n) - 1, clamped to [0, n-1]. floor(q*n)
+  // biases one position high and makes p95 the max for small n (#5520 review).
+  const p = (q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))]
   log.debug(`[latency] emit→broadcast n=${sorted.length} p50=${Math.round(p(0.5))}ms p95=${Math.round(p(0.95))}ms`)
 }
 
