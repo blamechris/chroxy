@@ -152,6 +152,33 @@ function truncate(text, max = 1000) {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text
 }
 
+/**
+ * Escape Discord markdown metacharacters so free-text user/transcript content
+ * (task descriptions, ScheduleWakeup reasons, session names) renders literally
+ * in an embed field instead of being styled or swallowed (#5475).
+ *
+ * Example: a task described as `watch dist/*_test.js` would otherwise render
+ * with the `*…*`/`_…_` runs interpreted as italics, eating characters.
+ *
+ * The sink is webhook-based and intentionally dependency-free, so this is a
+ * local 5-liner rather than pulling in discord.js's escapeMarkdown. We escape
+ * the inline-format set (`\\ * _ ~ \` |`) plus a leading `>` (blockquote — only
+ * meaningful at line start; we escape every `>` for simplicity, which is
+ * harmless mid-line). Backslash is escaped FIRST so we don't double-escape the
+ * escapes we then insert.
+ *
+ * Applied AFTER truncation deliberately: escaping first could push an escape
+ * pair across the 1000-char cut and leave a dangling `\` (or split a `\X` into
+ * `…\` + `X`). Escaping the already-truncated string keeps every inserted `\X`
+ * pair intact; the result can exceed 1000 chars, but Discord's embed-field
+ * limit is 1024, and the worst case here (≈2000 from all-metachar input) is
+ * not a realistic free-text body — the truncate cap is the binding hygiene.
+ */
+function escapeMarkdown(text) {
+  if (typeof text !== 'string') return ''
+  return text.replace(/[\\*_~`|>]/g, '\\$&')
+}
+
 export class DiscordWebhookSink extends NotificationSink {
   /**
    * @param {object} [opts]
@@ -638,14 +665,17 @@ export class DiscordWebhookSink extends NotificationSink {
   _buildPayload(project, entry) {
     const titleFor = STATE_TITLES[entry.state] || STATE_TITLES.idle
     const fields = []
+    // Free-text user/transcript fields (#5475): escape markdown so a body like
+    // `watch dist/*_test.js` renders literally. Escape AFTER truncate so an
+    // escape pair can't be split across the cut (see escapeMarkdown).
     if (entry.body) {
-      fields.push({ name: 'Status', value: truncate(entry.body), inline: false })
+      fields.push({ name: 'Status', value: escapeMarkdown(truncate(entry.body)), inline: false })
     }
     if (entry.detail) {
-      fields.push({ name: 'Detail', value: truncate(entry.detail), inline: false })
+      fields.push({ name: 'Detail', value: escapeMarkdown(truncate(entry.detail)), inline: false })
     }
     if (entry.sessionName) {
-      fields.push({ name: 'Session', value: truncate(entry.sessionName, 100), inline: true })
+      fields.push({ name: 'Session', value: escapeMarkdown(truncate(entry.sessionName, 100)), inline: true })
     }
     if (Number.isFinite(entry.subagents) && entry.subagents > 0) {
       fields.push({ name: 'Subagents', value: String(entry.subagents), inline: true })

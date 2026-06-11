@@ -419,6 +419,45 @@ describe('DiscordWebhookSink — status-message state machine', () => {
     assert.ok(embed.fields.some((f) => f.name === 'Status' && f.value === enriched))
   })
 
+  it('escapes Discord markdown metacharacters in free-text fields (#5475)', async () => {
+    // A transcript task description like `watch dist/*_test.js` would otherwise
+    // render with the *…* / _…_ runs styled as italics, swallowing characters.
+    // Body (Status), detail (Detail), and sessionName (Session) are all
+    // free-text and must surface literally.
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send({
+      ...idle({
+        detail: 'tool ~strike~ and `code`',
+        sessionName: 'proj_*beta*',
+      }),
+      body: 'watch dist/*_test.js | grep ~done~ > log',
+    })
+    const embed = JSON.parse(calls[0].body).embeds[0]
+
+    const status = embed.fields.find((f) => f.name === 'Status').value
+    assert.equal(status, 'watch dist/\\*\\_test.js \\| grep \\~done\\~ \\> log')
+    // Every metacharacter is backslash-escaped — none survive un-escaped.
+    assert.ok(!/(^|[^\\])[*_~`|>]/.test(status), 'no un-escaped metachar in Status')
+
+    const detail = embed.fields.find((f) => f.name === 'Detail').value
+    assert.equal(detail, 'tool \\~strike\\~ and \\`code\\`')
+
+    const session = embed.fields.find((f) => f.name === 'Session').value
+    assert.equal(session, 'proj\\_\\*beta\\*')
+  })
+
+  it('escapes a literal backslash before inserting markdown escapes (#5475)', async () => {
+    // Backslash must be escaped first so a body of `a\*b` becomes `a\\\*b`
+    // (escaped backslash + escaped star), not `a\\*b` (which Discord would
+    // read as an escaped backslash followed by an un-escaped star).
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send({ ...idle(), body: 'a\\*b' })
+    const status = JSON.parse(calls[0].body).embeds[0].fields.find((f) => f.name === 'Status').value
+    assert.equal(status, 'a\\\\\\*b')
+  })
+
   it('uses the permission color for needs-approval regardless of project overrides', async () => {
     const calls = scriptFetch()
     const { sink } = makeSink({ colors: { alpha: 1752220 } })
