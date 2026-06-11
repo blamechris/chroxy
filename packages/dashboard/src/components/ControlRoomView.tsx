@@ -14,12 +14,23 @@
  * App.tsx renders this in place of the old `ControlRoomSection` and forwards the
  * `onInvestigate` action through to the repo table unchanged.
  */
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { IntegrationsSection } from './IntegrationsSection'
+import { useConnectionStore } from '../store/connection'
 
 export type ControlRoomTab = 'repos' | 'runners' | 'integrations'
+
+/**
+ * #5543: how old a tab's snapshot may be before opening/switching to that tab
+ * re-fetches it. Judged against the snapshot's `generatedAt`. The surveys shell
+ * out to git/gh per repo (the runner/integration ones are expensive), so this
+ * deliberately favours showing a slightly-stale snapshot over re-running a
+ * survey on every flick between tabs — and there is no interval polling, only
+ * fetch-on-activation plus the manual Refresh force.
+ */
+export const CONTROL_ROOM_STALENESS_MS = 60_000
 
 const CR_TAB_STORAGE_KEY = 'chroxy_cr_tab'
 const VALID_TABS: ReadonlySet<string> = new Set<ControlRoomTab>(['repos', 'runners', 'integrations'])
@@ -40,6 +51,18 @@ function persistTab(tab: ControlRoomTab): void {
   } catch {
     /* noop — storage unavailable */
   }
+}
+
+/**
+ * #5543: true when a tab's snapshot warrants a re-fetch — null/absent snapshot,
+ * an unparseable `generatedAt`, or one older than the staleness window. A fresh
+ * snapshot (within the window) returns false so we skip the survey.
+ */
+function isStale(generatedAt: string | undefined): boolean {
+  if (!generatedAt) return true
+  const ms = Date.parse(generatedAt)
+  if (Number.isNaN(ms)) return true
+  return Date.now() - ms >= CONTROL_ROOM_STALENESS_MS
 }
 
 const TABS: ReadonlyArray<{ key: ControlRoomTab; label: string }> = [
@@ -64,6 +87,52 @@ export function ControlRoomView({ onInvestigate, onOpenSession, initialTab }: Co
     setTab(next)
     persistTab(next)
   }, [])
+
+  // #5543: auto-fetch the active tab's survey when the Control Room opens with a
+  // tab already active and on each tab switch, with a staleness guard. We only
+  // fire when the WS is up (the request actions no-op when the socket is closed,
+  // but gating here avoids churning the effect against a snapshot that will
+  // never arrive) and the tab isn't already loading (the server enforces a
+  // per-client in-flight guard — don't trip it). A snapshot newer than the
+  // staleness window is left alone; the manual Refresh button still forces a
+  // re-fetch regardless. No interval polling — fetch-on-activation only.
+  const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
+  const hostStatus = useConnectionStore((s) => s.hostStatus)
+  const runnerStatus = useConnectionStore((s) => s.runnerStatus)
+  const integrationStatus = useConnectionStore((s) => s.integrationStatus)
+  const hostStatusLoading = useConnectionStore((s) => s.hostStatusLoading)
+  const runnerStatusLoading = useConnectionStore((s) => s.runnerStatusLoading)
+  const integrationStatusLoading = useConnectionStore((s) => s.integrationStatusLoading)
+  const requestHostStatus = useConnectionStore((s) => s.requestHostStatus)
+  const requestRunnerStatus = useConnectionStore((s) => s.requestRunnerStatus)
+  const requestIntegrationStatus = useConnectionStore((s) => s.requestIntegrationStatus)
+
+  useEffect(() => {
+    if (!connected) return
+
+    const snapshot = tab === 'repos' ? hostStatus : tab === 'runners' ? runnerStatus : integrationStatus
+    const loading =
+      tab === 'repos' ? hostStatusLoading : tab === 'runners' ? runnerStatusLoading : integrationStatusLoading
+    if (loading) return
+
+    if (!isStale(snapshot?.generatedAt)) return
+
+    const request =
+      tab === 'repos' ? requestHostStatus : tab === 'runners' ? requestRunnerStatus : requestIntegrationStatus
+    request()
+  }, [
+    tab,
+    connected,
+    hostStatus,
+    runnerStatus,
+    integrationStatus,
+    hostStatusLoading,
+    runnerStatusLoading,
+    integrationStatusLoading,
+    requestHostStatus,
+    requestRunnerStatus,
+    requestIntegrationStatus,
+  ])
 
   return (
     <div className="cr-view" data-testid="control-room-view">
