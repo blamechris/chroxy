@@ -35,6 +35,7 @@ import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-
 import { surveyRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
+import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
 const log = createLogger('ws')
 
@@ -47,6 +48,8 @@ const inFlight = new WeakSet()
 const runnerInFlight = new WeakSet()
 // #5499: same again for the integrations survey — independent of both above.
 const integrationInFlight = new WeakSet()
+// #5554: same again for the skills inventory survey — independent of all above.
+const skillsInventoryInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -325,6 +328,107 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// #5554 (epic #5159) — Skills inventory survey handler.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * #5554 — `skills_inventory_snapshot` error reply. The skills snapshot has a
+ * different shape from the host/runner/integration trio (global/repos tiers,
+ * no `summary`), so it gets its own degraded-snapshot builder rather than
+ * reusing `buildSurveyErrorSnapshot`. Same posture though: a schema-valid empty
+ * snapshot (empty global + repos, the real root, a fresh timestamp) plus an
+ * additive `error` the dashboard branches on, with the request's `requestId`
+ * echoed.
+ */
+function skillsInventoryErrorSnapshot(root, requestId, error) {
+  return {
+    type: 'skills_inventory_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    root,
+    global: [],
+    globalError: null,
+    repos: [],
+    error,
+  }
+}
+
+/**
+ * #5554 — Skills inventory survey handler. Same authority + in-flight +
+ * degraded-reply contract as the sibling surveys: the inventory exposes
+ * host-wide skill metadata (the global tier + every surveyed repo's overlay),
+ * so it is served only to host-level (unbound) clients, one survey per client
+ * at a time. The repo set is the same one the host survey resolves
+ * (config.repos ∪ auto-discovered under controlRoomRoot).
+ *
+ * Scan-on-request only — the global + per-repo overlay scans are NOT part of
+ * the periodic survey. SECURITY: skill BODIES never leave the server; the
+ * survey carries names / descriptions / metadata only (see
+ * control-room/skills-inventory.js).
+ */
+async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+
+  const config = ctx?.config || {}
+  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+    ? config.controlRoomRoot
+    : DEFAULT_CONTROL_ROOM_ROOT
+  const repos = Array.isArray(config.repos) ? config.repos : []
+
+  // Authority gate: a host-wide skills inventory is for host-level clients only.
+  if (client?.boundSessionId) {
+    ctx.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
+      code: 'FORBIDDEN',
+      message: 'skills_inventory_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+
+  if (skillsInventoryInFlight.has(client)) {
+    ctx.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A skills inventory survey is already in progress for this client',
+    }))
+    return
+  }
+
+  // Tests inject `ctx.resolveRepoSet` / `ctx.surveySkillsInventory` to stub the
+  // fs scans without patching modules.
+  const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
+  const surveyFn = typeof ctx?.surveySkillsInventory === 'function' ? ctx.surveySkillsInventory : surveySkillsInventory
+
+  // Per-skill usage aggregates from the recorder (when the daemon wired one).
+  // Absent → the inventory simply reports zeroed usage.
+  const recorder = ctx?.skillsUsageRecorder
+  const usage = recorder && typeof recorder.aggregatesByName === 'function'
+    ? recorder.aggregatesByName()
+    : null
+
+  skillsInventoryInFlight.add(client)
+  try {
+    const repoSet = resolveFn({ repos, root })
+    const snapshot = await surveyFn(repoSet, { root, usage })
+    ctx.send(ws, {
+      type: 'skills_inventory_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      root: snapshot.root,
+      global: snapshot.global,
+      globalError: snapshot.globalError ?? null,
+      repos: snapshot.repos,
+    })
+  } catch (err) {
+    log.warn(`skills_inventory_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'skills inventory survey failed',
+    }))
+  } finally {
+    skillsInventoryInFlight.delete(client)
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // #5500/#5502 (epic #5498) — integration_action: repo-memory Reindex and
 // repo-relay Re-run
 // ───────────────────────────────────────────────────────────────────────────
@@ -595,5 +699,6 @@ export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
   integration_status_request: handleIntegrationStatusRequest,
+  skills_inventory_request: handleSkillsInventoryRequest,
   integration_action: handleIntegrationAction,
 }

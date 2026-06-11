@@ -36,8 +36,10 @@ export type { RepoVerdict, RepoTree, RepoStatus, HostStatusSummary, ServerHostSt
 export type { RunnerVerdict, RunnerServiceState, RunnerInfo, RepoRunners, RunnerStatusSummary, ServerRunnerStatusSnapshotMessage, } from './schemas/server.ts';
 export type { RepoMemoryCache, RepoMemoryReport, RepoMemoryStatus, RepoRelayRun, RepoRelayVerdict, RepoRelayStatus, IntegrationRepo, IntegrationStatusSummary, IntegrationCliStatus, ServerIntegrationStatusSnapshotMessage, } from './schemas/server.ts';
 export type { IntegrationActionCounts, ServerIntegrationActionAckMessage, } from './schemas/server.ts';
+export type { SkillInventoryEntry, SkillInventoryRepo, ServerSkillsInventorySnapshotMessage, } from './schemas/server.ts';
 export type { HostStatusRequestMessage } from './schemas/client.ts';
 export type { RunnerStatusRequestMessage } from './schemas/client.ts';
 export type { IntegrationStatusRequestMessage } from './schemas/client.ts';
 export type { IntegrationActionMessage } from './schemas/client.ts';
+export type { SkillsInventoryRequestMessage } from './schemas/client.ts';
 export * from './error-categories.ts';
