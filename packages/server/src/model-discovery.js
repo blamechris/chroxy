@@ -258,7 +258,18 @@ export async function refreshDiscoveredModels(opts = {}) {
           log.debug(`discovery: applyCatalog for ${id} threw: ${err?.message || err}`)
         }
       }
-      const key = JSON.stringify(catalog.models.map((m) => m.id))
+      // Change-detection key: order-insensitive (a reorder of the same set
+      // isn't a change) and metadata-aware (a label / context-window update on
+      // an existing id IS a change the registry must pick up — updateModels()
+      // feeds those into the picker). Sort so upstream ordering can't trigger a
+      // spurious rebroadcast; include label + window so a metadata-only update
+      // still re-pushes. (Pricing already refreshes unconditionally via the
+      // applyCatalog call above, so it stays out of the key.)
+      const key = JSON.stringify(
+        catalog.models
+          .map((m) => [m.id, m.label ?? '', m.contextWindow ?? null])
+          .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+      )
       if (key === slot.lastAppliedKey) return null
       const registry = opts.registry
       if (!registry || typeof registry.updateModels !== 'function') return null
