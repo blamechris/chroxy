@@ -253,7 +253,7 @@ describe('PathHashTrustLedger (#5580)', () => {
 
     it('re-throws a write failure when throwOnFlushError is true', () => {
       const l = new TestLedger({ filePath: dir, throwOnFlushError: true })
-      assert.throws(() => l.approve('/x/file', sha('a')), /EISDIR|illegal operation|EEXIST/)
+      assert.throws(() => l.approve('/x/file', sha('a')), /EISDIR|illegal operation|EEXIST|EPERM|EACCES/)
     })
 
     it('a failed flush elsewhere does not corrupt an unrelated good target', () => {

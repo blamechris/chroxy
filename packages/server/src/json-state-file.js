@@ -76,7 +76,10 @@ export function loadJsonState(filePath, fallback, opts = {}) {
   try {
     parsed = JSON.parse(raw)
   } catch (err) {
-    log.warn?.(`State file is malformed JSON (${err && err.message ? err.message : err}); starting fresh`)
+    // Deliberately do NOT echo err.message — JSON.parse errors can quote the
+    // offending input bytes, and this seam is reused for secret-adjacent state
+    // files (mirrors the session-preset.js leak-guard convention).
+    log.warn?.(`State file is malformed JSON (${(err && err.name) || 'SyntaxError'}); starting fresh`)
     onError?.('parse', err)
     return fallback()
   }

@@ -139,7 +139,11 @@ export function loadUsageStore(filePath = defaultSkillsUsagePath()) {
   // unparseable file degrades to an empty store (best-effort telemetry, never
   // load-bearing). `requireObject: false` so normalizeStore — not the loader —
   // owns the "non-object → empty" coercion, preserving the prior tolerant shape.
-  const parsed = loadJsonState(filePath, () => null, { requireObject: false, log })
+  // Telemetry corruption is expected/benign — keep the prior debug-level
+  // logging by shimming warn→debug for this call site (the shared seam warns
+  // by default, which is right for load-bearing stores but noisy here).
+  const usageLog = { ...log, warn: (...args) => log.debug?.(...args) }
+  const parsed = loadJsonState(filePath, () => null, { requireObject: false, log: usageLog })
   return normalizeStore(parsed)
 }
 
