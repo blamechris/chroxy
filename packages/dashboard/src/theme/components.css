@@ -8957,6 +8957,25 @@ button.sidebar-token-view-session-row:hover {
   border-bottom: 1px solid var(--bg-card);
 }
 
+/* #5544 — Control Room Settings tab. Embeds the same `SettingsContent` body
+   the slide-out modal renders, so the modal's `.settings-section` /
+   `.settings-field` typography carries over unchanged. The wrapper just owns
+   the scroll + a centred, comfortable reading width (the survey tables run
+   full-bleed; a long preferences form reads better constrained). #5530's
+   read-only repo-config surface will sit in its own section here later,
+   visually distinct from these user options. */
+.cr-settings-tab {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.cr-settings-tab .settings-body {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px 28px 40px;
+}
+
 /* #5253 — runner table: per-project group header row + the GitHub deep link. */
 .runner-repo-row td {
   padding-top: 16px;

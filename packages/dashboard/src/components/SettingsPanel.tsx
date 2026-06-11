@@ -151,14 +151,36 @@ function getQuietHoursTimezoneOptions(): { value: string; label: string }[] {
   }))
 }
 
-export interface SettingsPanelProps {
-  isOpen: boolean
-  onClose: () => void
+/**
+ * #5544: the preference body shared between the legacy slide-out modal
+ * (`SettingsPanel`) and the Control Room Settings tab (`SettingsContent`
+ * embedded). `SettingsPanel` wraps this in the modal chrome; the Control
+ * Room renders it directly inside its tab. Persistence per setting is
+ * unchanged — this is UI convergence, not a storage migration.
+ */
+export interface SettingsContentProps {
+  /**
+   * Whether the content is currently visible. Gates the on-open effects
+   * (refresh notification prefs, BYOK status, Tauri tunnel/hotkey load) so
+   * they fire once the surface becomes active and re-fire on re-activation.
+   * In the modal this tracks `isOpen`; in the Control Room tab it's true
+   * while the Settings tab is the active sub-tab.
+   */
+  active: boolean
   showConsoleTab?: boolean
   onToggleConsoleTab?: (show: boolean) => void
   // #4891 — audible intervention ping enable/mute. Optional so existing
   // call sites / tests that don't wire it stay valid; the row only renders
   // when the handler is provided.
+  interventionPingEnabled?: boolean
+  onToggleInterventionPing?: (enabled: boolean) => void
+}
+
+export interface SettingsPanelProps {
+  isOpen: boolean
+  onClose: () => void
+  showConsoleTab?: boolean
+  onToggleConsoleTab?: (show: boolean) => void
   interventionPingEnabled?: boolean
   onToggleInterventionPing?: (enabled: boolean) => void
 }
@@ -622,8 +644,11 @@ function ThemeSwatches({ theme }: { theme: ThemeDefinition }) {
   )
 }
 
-export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing }: SettingsPanelProps) {
-  const backdropRef = useRef<HTMLDivElement>(null)
+export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing }: SettingsContentProps) {
+  // #5544: alias retained so the body's many `isOpen` reads (effect gates,
+  // refresh-on-open) keep their original meaning — true while this surface
+  // is the visible one (modal open, or Control Room Settings tab active).
+  const isOpen = active
   const activeTheme = useConnectionStore(s => s.activeTheme)
   const setTheme = useConnectionStore(s => s.setTheme)
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
@@ -1073,35 +1098,16 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
     }
   }, [updateInputSettings])
 
-  useEffect(() => {
-    if (!isOpen) return
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        const overlays = document.querySelectorAll('[data-modal-overlay]')
-        if (overlays.length > 0 && overlays[overlays.length - 1] === backdropRef.current) {
-          e.preventDefault()
-          onClose()
-        }
-      }
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [isOpen, onClose])
-
+  // #5544: both hosts unmount this content when it's hidden — the modal
+  // wrapper on close, and the Control Room Settings tab whenever another
+  // sub-tab is focused (ControlRoomView renders tab bodies conditionally) —
+  // so `isOpen` is effectively always true today. The guard stays as a cheap
+  // safety net for any future host that keeps the content mounted while
+  // hidden.
   if (!isOpen) return null
 
   return (
-    <>
-      <div ref={backdropRef} className="settings-backdrop" data-modal-overlay onClick={onClose} />
-      <div className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div className="settings-header">
-          <h2 id="settings-title">Settings</h2>
-          <button className="settings-close" onClick={onClose} aria-label="Close settings" type="button">
-            &times;
-          </button>
-        </div>
-
-        <div className="settings-body">
+    <div className="settings-body" data-testid="settings-content">
           <section className="settings-section">
             <h3>Appearance</h3>
             <div className="theme-grid">
@@ -1930,7 +1936,53 @@ export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsole
               </div>
             </section>
           )}
+    </div>
+  )
+}
+
+/**
+ * #5544: legacy slide-out modal. Kept as a thin wrapper around
+ * `SettingsContent` so the `settings=1` URL param and any external callers
+ * still open a dismissable panel. The primary entry points (gear / Cmd+,)
+ * now redirect to the Control Room Settings tab instead — see App.tsx.
+ */
+export function SettingsPanel({ isOpen, onClose, showConsoleTab, onToggleConsoleTab, interventionPingEnabled, onToggleInterventionPing }: SettingsPanelProps) {
+  const backdropRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        const overlays = document.querySelectorAll('[data-modal-overlay]')
+        if (overlays.length > 0 && overlays[overlays.length - 1] === backdropRef.current) {
+          e.preventDefault()
+          onClose()
+        }
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [isOpen, onClose])
+
+  if (!isOpen) return null
+
+  return (
+    <>
+      <div ref={backdropRef} className="settings-backdrop" data-modal-overlay onClick={onClose} />
+      <div className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div className="settings-header">
+          <h2 id="settings-title">Settings</h2>
+          <button className="settings-close" onClick={onClose} aria-label="Close settings" type="button">
+            &times;
+          </button>
         </div>
+        <SettingsContent
+          active={isOpen}
+          showConsoleTab={showConsoleTab}
+          onToggleConsoleTab={onToggleConsoleTab}
+          interventionPingEnabled={interventionPingEnabled}
+          onToggleInterventionPing={onToggleInterventionPing}
+        />
       </div>
     </>
   )
