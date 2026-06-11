@@ -306,6 +306,11 @@ export function App() {
   const dismissExposureBanner = useConnectionStore(s => s.dismissExposureBanner)
   const serverStartupLogs = useConnectionStore(s => s.serverStartupLogs)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
+  // #5556 — restart-countdown parity with mobile: feed the ETA/anchor/reason
+  // through to ReconnectBanner so it can render a live ~M:SS countdown.
+  const shutdownReason = useConnectionStore(s => s.shutdownReason)
+  const restartEtaMs = useConnectionStore(s => s.restartEtaMs)
+  const restartingSince = useConnectionStore(s => s.restartingSince)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
   // #5510 (epic #5509): pairing-approval primitive — host-surface pending queue.
@@ -2259,6 +2264,9 @@ export function App() {
         attempt={connectionRetryCount}
         maxAttempts={5}
         message={connectionPhase === 'server_restarting' ? 'Server restarting...' : undefined}
+        restartEtaMs={connectionPhase === 'server_restarting' ? restartEtaMs : null}
+        restartingSince={connectionPhase === 'server_restarting' ? restartingSince : null}
+        shutdownReason={connectionPhase === 'server_restarting' ? shutdownReason : null}
         onRetry={handleRetry}
         onStartServer={isTauri() ? handleStartServer : undefined}
       />
