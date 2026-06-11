@@ -428,6 +428,36 @@ export function getStoredCredential(key) {
 }
 
 /**
+ * #5490 — read a single string field out of the credentials store, going
+ * through the SAME cipher-aware reader (`readStore`) the API-key resolvers use:
+ * 0600 mode enforcement, encrypted-envelope decryption, and the
+ * keychain-unavailable / corrupt-envelope distinctions all apply identically.
+ *
+ * Exposed for credential consumers whose field is NOT a `KNOWN_CREDENTIALS`
+ * env-var key — e.g. the Discord webhook URL (`discordWebhookUrl`), which lives
+ * in the same file but routes to the notification sink rather than a spawned
+ * provider. Returns the read metadata verbatim so the caller can build its own
+ * `reason` strings WITHOUT this module ever logging or echoing the value.
+ *
+ * The raw `value` is returned ONLY to the caller (never logged here). On any
+ * read error `value` is null and `error` carries a value-free reason. The
+ * `keychainUnavailable` flag marks the RECOVERABLE encrypted-but-locked case so
+ * callers can phrase a distinct (still value-free) reason.
+ *
+ * @param {string} field - the JSON field name to read (e.g. 'discordWebhookUrl')
+ * @returns {{ value: string | null, fileExists: boolean, error: string | null, keychainUnavailable: boolean }}
+ */
+export function readStoredField(field) {
+  const { data, fileExists, error, keychainUnavailable } = readStore()
+  if (error) {
+    return { value: null, fileExists, error, keychainUnavailable: Boolean(keychainUnavailable) }
+  }
+  const raw = data[field]
+  const value = typeof raw === 'string' && raw.length > 0 ? raw : null
+  return { value, fileExists, error: null, keychainUnavailable: false }
+}
+
+/**
  * Resolution order: process.env > store > unset.
  *
  * Used by spawn-env.js to inject stored credentials into a spawned child's
