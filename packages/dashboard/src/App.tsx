@@ -661,20 +661,20 @@ export function App() {
   const [settingsRedirectNonce, setSettingsRedirectNonce] = useState(0)
   const [controlRoomInitialTab, setControlRoomInitialTab] = useState<ControlRoomTab | undefined>(undefined)
   const openSettings = useCallback(() => {
-    setControlRoomActive((wasActive) => {
-      if (!wasActive) {
-        // CR is opening fresh — seed the initial tab so the mount lands on
-        // Settings. (openControlRoom below also flips this true; doing it
-        // here lets us read the prior value for the nonce-vs-initial choice.)
-        setControlRoomInitialTab('settings')
-      } else {
-        // CR already visible — drive the redirect via the nonce instead.
-        setSettingsRedirectNonce((n) => n + 1)
-      }
-      return wasActive
-    })
+    // The redirect must also dismiss the legacy modal (the `?settings=1`
+    // deep-link can leave it open) — otherwise the tab switch happens behind
+    // the overlay and the shortcut appears dead.
+    setSettingsOpen(false)
+    if (controlRoomActive) {
+      // CR already visible — drive the redirect via the nonce instead.
+      setSettingsRedirectNonce((n) => n + 1)
+    } else {
+      // CR is opening fresh — seed the initial tab so the mount lands on
+      // Settings without a flash of another tab.
+      setControlRoomInitialTab('settings')
+    }
     openControlRoom()
-  }, [openControlRoom])
+  }, [controlRoomActive, openControlRoom])
   // #5544 — clear the one-shot initial-tab seed after the Control Room has
   // mounted with it. ControlRoomView only reads `initialTab` in its mount
   // initializer, so clearing it now is invisible to the live view but ensures

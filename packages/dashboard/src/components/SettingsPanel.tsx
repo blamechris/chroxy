@@ -1098,10 +1098,12 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     }
   }, [updateInputSettings])
 
-  // #5544: the embedded Control Room tab keeps the content mounted but
-  // inactive while another sub-tab is focused; render nothing then so the
-  // on-open effects don't churn against a hidden surface. The modal wrapper
-  // already unmounts on close, so this is also its `!isOpen` guard.
+  // #5544: both hosts unmount this content when it's hidden — the modal
+  // wrapper on close, and the Control Room Settings tab whenever another
+  // sub-tab is focused (ControlRoomView renders tab bodies conditionally) —
+  // so `isOpen` is effectively always true today. The guard stays as a cheap
+  // safety net for any future host that keeps the content mounted while
+  // hidden.
   if (!isOpen) return null
 
   return (
