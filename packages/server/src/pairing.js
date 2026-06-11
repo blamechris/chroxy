@@ -10,6 +10,53 @@
 import { EventEmitter } from 'events'
 import { randomBytes, timingSafeEqual } from 'crypto'
 
+// -- Typeable short pairing code (#5512, epic #5509) --
+//
+// Pairing ids double as a human-typable code read off the host's own screen (the
+// TV-app pattern: display-on-host = physical presence, so no extra approval — same
+// trust as a scanned QR). The QR carries the SAME id, so this is one mechanism, not
+// two. Codes delivered via any OTHER channel must use the #5510 approval primitive
+// instead — possession of a code is only sufficient when it was read off the host.
+//
+// Alphabet: uppercase, ambiguity-free (no 0/O, 1/I/L). 8 chars over a 31-symbol
+// alphabet ≈ 31^8 ≈ 8.5e11 combinations — paired with a 60s single-use TTL this is
+// not brute-forceable. Entry is case-insensitive and tolerant of spaces/dashes;
+// inputs are normalized (uppercased, separators stripped) before lookup.
+export const TYPEABLE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+const TYPEABLE_CODE_LENGTH = 8
+
+/**
+ * Generate a crypto-random typeable pairing code. Rejection-samples bytes so the
+ * alphabet is unbiased (no modulo skew toward the first 256 % N symbols).
+ * @returns {string}
+ */
+function generateTypeableCode() {
+  const n = TYPEABLE_ALPHABET.length
+  const max = Math.floor(256 / n) * n // largest multiple of n ≤ 256 (rejection bound)
+  let out = ''
+  while (out.length < TYPEABLE_CODE_LENGTH) {
+    const buf = randomBytes(TYPEABLE_CODE_LENGTH)
+    for (let i = 0; i < buf.length && out.length < TYPEABLE_CODE_LENGTH; i++) {
+      const b = buf[i]
+      if (b >= max) continue // reject to keep the distribution uniform
+      out += TYPEABLE_ALPHABET[b % n]
+    }
+  }
+  return out
+}
+
+/**
+ * Normalize a user-typed pairing code: uppercase, strip whitespace and dashes.
+ * Makes entry case-insensitive and tolerant of the spaces/dashes people add when
+ * reading a code aloud. Returns '' for non-string / nullish input.
+ * @param {string} raw
+ * @returns {string}
+ */
+export function normalizePairingCode(raw) {
+  if (typeof raw !== 'string') return ''
+  return raw.replace(/[\s-]+/g, '').toUpperCase()
+}
+
 const DEFAULT_TTL_MS = 60_000
 const DEFAULT_GRACE_PERIOD_MS = 3 * 60_000 // 3 minutes after first QR display
 const DEFAULT_SESSION_TOKEN_TTL_MS = 24 * 60 * 60_000 // 24 hours
@@ -66,6 +113,23 @@ export class PairingManager extends EventEmitter {
   }
 
   /**
+   * Snapshot of the current linking-mode pairing code for host display surfaces
+   * (#5512): the typeable code, its chroxy:// URL (QR carries the same id), and the
+   * absolute expiry so a CLI/dashboard can render "expires in NNs". Null when
+   * destroyed or no pairing exists.
+   * @returns {{ code: string, url: string|null, expiresAtMs: number, ttlMs: number }|null}
+   */
+  get currentPairingCode() {
+    if (this._destroyed || !this._current) return null
+    return {
+      code: this._current.id,
+      url: this.currentPairingUrl,
+      expiresAtMs: this._current.expiresAt,
+      ttlMs: this._ttlMs,
+    }
+  }
+
+  /**
    * Generate a NEW pairing ID bound at creation time to a specific session
    * (#3070). Unlike `_generatePairing()`, this does NOT replace `_current`
    * (the linking-mode QR keeps auto-refreshing for general device pairing);
@@ -107,7 +171,7 @@ export class PairingManager extends EventEmitter {
       this._activePairings.delete(victim ?? this._activePairings.keys().next().value)
     }
 
-    const id = randomBytes(12).toString('base64url')
+    const id = generateTypeableCode()
     const expiresAt = Date.now() + this._ttlMs
     this._activePairings.set(id, { expiresAt, used: false, boundSessionId: sessionId })
 
@@ -131,6 +195,11 @@ export class PairingManager extends EventEmitter {
    * @returns {{ valid: boolean, sessionToken?: string, reason?: string }}
    */
   validatePairing(pairingId, sessionId = null) {
+    // Normalize typed/scanned input so a code read off the host screen validates
+    // regardless of case or the spaces/dashes a user adds (#5512). Stored keys are
+    // already canonical (uppercase, separator-free) so this is a no-op for QR ids.
+    pairingId = normalizePairingCode(pairingId)
+
     // Look up in active pairings (includes current + grace period entries)
     const entry = this._activePairings.get(pairingId)
     if (!entry) {
@@ -521,7 +590,7 @@ export class PairingManager extends EventEmitter {
       this._activePairings.delete(oldest)
     }
 
-    const id = randomBytes(12).toString('base64url')
+    const id = generateTypeableCode()
     const expiresAt = now + this._ttlMs
     this._current = { id, createdAt: now, expiresAt }
     this._activePairings.set(id, { expiresAt, used: false })

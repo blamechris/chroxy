@@ -174,7 +174,7 @@ export function createHttpHandler(server) {
   const dispatch = async (req, res) => {
     // CORS preflight
     if (req.method === 'OPTIONS') {
-      const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect')
+      const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect') || req.url?.startsWith('/pairing-code')
       const corsOrigin = isRestricted
         ? matchAllowedOrigin(req.headers['origin'])
         : '*'
@@ -454,6 +454,43 @@ export function createHttpHandler(server) {
       }
       res.writeHead(200, connectHeaders)
       res.end(JSON.stringify(connInfo))
+      return
+    }
+
+    // Typeable pairing-code endpoint (#5512): GET /pairing-code returns the
+    // current linking-mode pairing code as JSON so the dashboard/CLI can DISPLAY
+    // it beside the QR (the QR encodes the same id — one mechanism). Same bearer
+    // auth + grace-extension as /qr; camera-less devices enter this code by hand.
+    if (req.method === 'GET' && req.url?.split('?')[0] === '/pairing-code') {
+      if (!server._validateBearerAuth(req, res)) return
+      const codeCors = matchAllowedOrigin(req.headers['origin'])
+      const codeHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+      if (codeCors) {
+        codeHeaders['Access-Control-Allow-Origin'] = codeCors
+        codeHeaders['Vary'] = 'Origin'
+      }
+      if (!server._pairingManager) {
+        res.writeHead(503, codeHeaders)
+        res.end(JSON.stringify({ error: 'Pairing not available' }))
+        return
+      }
+      // Someone is actively viewing the code — extend the grace period so it
+      // survives long enough to be typed on the other device (mirrors /qr).
+      server._pairingManager.extendCurrentId()
+      const snap = server._pairingManager.currentPairingCode
+      if (!snap) {
+        res.writeHead(503, codeHeaders)
+        res.end(JSON.stringify({ error: 'Pairing code not available yet' }))
+        return
+      }
+      const expiresInMs = Math.max(0, snap.expiresAtMs - Date.now())
+      res.writeHead(200, codeHeaders)
+      res.end(JSON.stringify({
+        code: snap.code,
+        url: snap.url,
+        expiresAtMs: snap.expiresAtMs,
+        expiresInSeconds: Math.round(expiresInMs / 1000),
+      }))
       return
     }
 

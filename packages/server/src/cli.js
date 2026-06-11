@@ -19,6 +19,7 @@ import { registerSessionCommands } from './cli/session-cmd.js'
 import { registerServiceCommand } from './cli/service-cmd.js'
 import { registerUpdateCommand } from './cli/update-cmd.js'
 import { registerStatusCommand } from './cli/status-cmd.js'
+import { registerPairCodeCommand } from './cli/pair-code-cmd.js'
 import { registerWorktreeCommand } from './cli/worktree-gc-cmd.js'
 import { registerCredentialsCommand } from './cli/credentials-cmd.js'
 
@@ -42,6 +43,7 @@ registerSessionCommands(program)
 registerServiceCommand(program)
 registerUpdateCommand(program)
 registerStatusCommand(program)
+registerPairCodeCommand(program)
 registerWorktreeCommand(program)
 registerCredentialsCommand(program)
 
