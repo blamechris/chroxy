@@ -47,6 +47,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
+  'pair_request_pending', // #5510 pairing-approval primitive — consumed by the dedicated requester panel (dashboard utils/request-pairing.ts, its own short-lived WS onmessage), NOT the main message-handler dispatch the extractor scans. Mobile requester side is an explicit out-of-scope fast-follow per epic #5509.
+  'pair_result',          // #5510 pairing-approval primitive — same as pair_request_pending: terminal result for the requester, handled by utils/request-pairing.ts, not the main dispatch. Mobile requester side deferred per epic #5509.
   // 'activity_snapshot' / 'activity_delta' removed — the dashboard now handles
   // them (Control Room panel #5163); they moved to PLATFORM_SPECIFIC as
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5159.
@@ -84,6 +86,8 @@ const PLATFORM_SPECIFIC = {
 
   // Dashboard only
   'pairing_refreshed': 'dashboard',  // QR display and auto-refresh is dashboard-only (#2916)
+  'pair_pending': 'dashboard',       // #5510 pairing-approval primitive — host-level approval banner fan-out is dashboard-only for v1 (the mobile app has no approve surface yet); mobile/desktop-tray approve is an explicit out-of-scope fast-follow per epic #5509
+  'pair_resolved': 'dashboard',      // #5510 pairing-approval primitive — banner retraction pairs with pair_pending; dashboard-only for v1, mobile parity deferred per epic #5509
   'log_entry': 'dashboard',          // console page is dashboard-only
   'file_list': 'dashboard',          // file explorer sidebar is dashboard-only
   'environment_created': 'dashboard', // environment panel is dashboard-only

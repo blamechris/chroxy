@@ -23,7 +23,9 @@ export interface PendingPairRequestsProps {
 }
 
 export function PendingPairRequests({ requests, onApprove, onDeny }: PendingPairRequestsProps) {
-  if (requests.length === 0) return null
+  // Defensive: a missing/undefined store slice must not white-screen the whole
+  // dashboard — render nothing rather than throw on `.length`/`.map`.
+  if (!requests || requests.length === 0) return null
 
   return (
     <div

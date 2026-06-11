@@ -385,6 +385,10 @@ function _isSecureRequest(req) {
  *   { type: 'discovered_sessions', sessions }           — discovered local Claude sessions
  *   { type: 'pair_fail', reason }                       — pairing failed
  *   { type: 'pairing_refreshed' }                       — pairing ID consumed; clients should re-fetch /qr (#2916)
+ *   { type: 'pair_request_pending', requestId, verifyCode } — pairing-approval primitive (#5510, epic #5509): ack to the camera-less requester carrying the 6-digit code to DISPLAY. Sent only over the requester's own pre-auth connection; the code travels server→requester only and is never echoed back.
+ *   { type: 'pair_pending', requestId, deviceName, verifyCode, expiresAt } — pairing-approval fan-out (#5510) to HOST-LEVEL (unbound) surfaces only; carries the verify code to COMPARE and the attacker-controlled (schema-capped, plain-text) deviceName. Bound/session-scoped clients never receive it.
+ *   { type: 'pair_result', requestId, ok, token?, reason? } — pairing-approval terminal result (#5510) to the requester over its still-open connection. On approve `ok: true` + the unbound (host-authority) session token, delivered exactly once and never logged; on deny/expire/disconnect `ok: false` + reason.
+ *   { type: 'pair_resolved', requestId, reason } — pairing-approval retraction (#5510) to host-level surfaces so every banner drops a request that was approved/denied/expired/disconnected elsewhere.
  *   { type: 'rate_limited', message }                   — client rate-limited
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed

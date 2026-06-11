@@ -39,21 +39,33 @@ describe('requestPairing (#5510)', () => {
   })
   afterEach(() => { vi.unstubAllGlobals() })
 
-  function run(deviceName = 'Desktop') {
+  function run(deviceName = 'Desktop'): FakeWebSocket {
     requestPairing('wss://host/ws', deviceName, (s) => states.push(s))
-    return FakeWebSocket.instances[0]
+    const ws = FakeWebSocket.instances[0]
+    if (!ws) throw new Error('requestPairing did not open a WebSocket')
+    return ws
+  }
+
+  // Last emitted state — asserts the harness actually pushed one (narrows the
+  // `noUncheckedIndexedAccess` `T | undefined` away for the call sites).
+  function lastState(): PairRequestState {
+    const s = states[states.length - 1]
+    if (!s) throw new Error('no PairRequestState was emitted')
+    return s
   }
 
   it('sends pair_request on open and surfaces the verify code', () => {
     const ws = run('Pixel 8')
     ws.open()
-    const sent = JSON.parse(ws.sent[0])
+    const firstSent = ws.sent[0]
+    if (!firstSent) throw new Error('no frame was sent')
+    const sent = JSON.parse(firstSent)
     expect(sent.type).toBe('pair_request')
     expect(sent.requestId).toBe('fixed-req-id')
     expect(sent.deviceName).toBe('Pixel 8')
 
     ws.recv({ type: 'pair_request_pending', requestId: 'fixed-req-id', verifyCode: '424242' })
-    const last = states[states.length - 1]
+    const last = lastState()
     expect(last.phase).toBe('code-shown')
     expect(last.verifyCode).toBe('424242')
   })
@@ -63,7 +75,7 @@ describe('requestPairing (#5510)', () => {
     ws.open()
     ws.recv({ type: 'pair_request_pending', requestId: 'fixed-req-id', verifyCode: '000000' })
     ws.recv({ type: 'pair_result', requestId: 'fixed-req-id', ok: true, token: 'sess-tok-xyz' })
-    const last = states[states.length - 1]
+    const last = lastState()
     expect(last.phase).toBe('approved')
     expect(last.token).toBe('sess-tok-xyz')
     expect(ws.readyState).toBe(3) // closed after terminal state
@@ -73,21 +85,21 @@ describe('requestPairing (#5510)', () => {
     const ws = run()
     ws.open()
     ws.recv({ type: 'pair_result', requestId: 'fixed-req-id', ok: false, reason: 'denied' })
-    expect(states[states.length - 1].phase).toBe('denied')
+    expect(lastState().phase).toBe('denied')
   })
 
   it('maps an expired result to the expired phase', () => {
     const ws = run()
     ws.open()
     ws.recv({ type: 'pair_result', requestId: 'fixed-req-id', ok: false, reason: 'expired' })
-    expect(states[states.length - 1].phase).toBe('expired')
+    expect(lastState().phase).toBe('expired')
   })
 
   it('ignores frames addressed to a different requestId', () => {
     const ws = run()
     ws.open()
     ws.recv({ type: 'pair_request_pending', requestId: 'someone-else', verifyCode: '999999' })
-    expect(states[states.length - 1].verifyCode).toBeNull()
+    expect(lastState().verifyCode).toBeNull()
   })
 
   it('never echoes the verify code back to the server', () => {
@@ -103,6 +115,6 @@ describe('requestPairing (#5510)', () => {
     const ws = run()
     ws.open()
     ws.onclose?.()
-    expect(states[states.length - 1].phase).toBe('error')
+    expect(lastState().phase).toBe('error')
   })
 })

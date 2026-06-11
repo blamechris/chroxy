@@ -21,7 +21,7 @@ vi.mock('./crypto', () => ({
 
 interface Sent { type: string; requestId?: string; [k: string]: unknown }
 
-function seedState(useConnectionStore: typeof import('./connection').useConnectionStore, readyState = WebSocket.OPEN) {
+function seedState(useConnectionStore: typeof import('./connection').useConnectionStore, readyState: number = WebSocket.OPEN) {
   const sent: Sent[] = []
   const socket = {
     send: vi.fn((raw: string) => { try { sent.push(JSON.parse(raw)) } catch { /* noop */ } }),

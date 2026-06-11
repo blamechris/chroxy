@@ -86,9 +86,11 @@ describe('pairing-approval dispatch (#5510)', () => {
     handleMessage(pending('r1', 'iPhone', '000111') as never, ctx() as never)
     const s = store.getState()
     expect(s.pendingPairRequests).toHaveLength(1)
-    expect(s.pendingPairRequests[0].requestId).toBe('r1')
-    expect(s.pendingPairRequests[0].deviceName).toBe('iPhone')
-    expect(s.pendingPairRequests[0].verifyCode).toBe('000111')
+    const first = s.pendingPairRequests[0]
+    if (!first) throw new Error('expected one pending pair request')
+    expect(first.requestId).toBe('r1')
+    expect(first.deviceName).toBe('iPhone')
+    expect(first.verifyCode).toBe('000111')
   })
 
   it('dedupes by requestId on a replay', () => {
