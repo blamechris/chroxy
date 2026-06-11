@@ -138,11 +138,13 @@ import {
   // #5515 (epic #5514): latency instrumentation primitives.
   RollingPercentiles,
   splitRtt,
-  // #5516 (epic #5514): adaptive client delta-flush interval.
-  resolveDeltaFlushMs,
   // #5556 (epic #5514): shared stateful EWMA RTT smoother.
   RttSmoother,
+  // #5556 (epic #5514): shared delta-flusher wiring (accumulator + timer +
+  // override) — the client supplies only its `applyDeltas` store mutation.
+  createDeltaFlusher,
 } from '@chroxy/store-core';
+import type { DeltaFlusher } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
 import { hapticSuccess } from '../utils/haptics';
@@ -267,9 +269,11 @@ interface MessageHandlerContext extends EncryptionContext {
   // #5556: EWMA-smoothed RTT (replaces the inlined `ewmaRtt` accumulator).
   rttSmoother: RttSmoother;
 
-  // Delta batching
-  pendingDeltas: Map<string, { sessionId: string | null; delta: string }>;
-  deltaFlushTimer: ReturnType<typeof setTimeout> | null;
+  // Delta batching (#5556): the accumulator map + coalescing timer + adaptive
+  // window now live inside the shared `createDeltaFlusher`. The hot path writes
+  // into `deltaFlusher.pendingDeltas`; `applyDeltas` (the store mutation) is
+  // the only platform-specific piece — see `createDefaultContext`.
+  deltaFlusher: DeltaFlusher;
 
   // #5515 (epic #5514): latency instrumentation. `deltaServerTs` records the
   // server-stamped serverTs (and local recv time) of the OLDEST un-rendered
@@ -286,7 +290,8 @@ interface MessageHandlerContext extends EncryptionContext {
 }
 
 function createDefaultContext(): MessageHandlerContext {
-  return {
+  const rttSmoother = new RttSmoother();
+  const ctx: MessageHandlerContext = {
     ...INITIAL_ENCRYPTION_CONTEXT,
     replayingSessions: new Set<string>(),
     isSessionSwitchReplay: false,
@@ -298,15 +303,21 @@ function createDefaultContext(): MessageHandlerContext {
     heartbeatInterval: null,
     pongTimeout: null,
     lastPingSentAt: 0,
-    rttSmoother: new RttSmoother(),
-    pendingDeltas: new Map<string, { sessionId: string | null; delta: string }>(),
-    deltaFlushTimer: null,
+    rttSmoother,
+    // #5556: the flusher owns the accumulator + coalescing timer + adaptive
+    // window, sizing it off this context's own RttSmoother. `applyDeltas` is
+    // the app's session-only store mutation (no flat-`messages` fallback).
+    deltaFlusher: createDeltaFlusher({
+      getEwmaRtt: () => rttSmoother.value,
+      applyDeltas: applyDeltaBatch,
+    }),
     deltaServerTs: new Map<string, { serverTs: number; recvAt: number }>(),
     tokenToRender: new RollingPercentiles(200),
     clientRender: new RollingPercentiles(200),
     lastLatencyLogAt: 0,
     messageQueue: [],
   };
+  return ctx;
 }
 
 let _ctx: MessageHandlerContext = createDefaultContext();
@@ -321,7 +332,7 @@ export function resetAllHandlerState(): void {
   if (_ctx.terminalWriteTimer) clearTimeout(_ctx.terminalWriteTimer);
   if (_ctx.heartbeatInterval) clearInterval(_ctx.heartbeatInterval);
   if (_ctx.pongTimeout) clearTimeout(_ctx.pongTimeout);
-  if (_ctx.deltaFlushTimer) clearTimeout(_ctx.deltaFlushTimer);
+  _ctx.deltaFlusher.dispose();
   _ctx = createDefaultContext();
   _pendingPermissionModeRequests.clear();
   // Reset connection-attempt tracking (kept as export let for live-binding semantics)
@@ -624,17 +635,11 @@ const LATENCY_LOG_INTERVAL_MS = 3_000;
 
 // #5516 (epic #5514): adaptive delta-flush interval. Production reads the
 // current EWMA RTT and adapts (16-33ms cheap → 100ms poor) via
-// `resolveDeltaFlushMs`. Tests pin it to a constant by calling
-// `setDeltaFlushIntervalOverride(N)`; `null` (the default) restores adaptive
-// behavior. Kept testable per the issue's "constant override testable" ask.
-let _deltaFlushOverrideMs: number | null = null;
+// `resolveDeltaFlushMs` inside the shared flusher. Tests pin it to a constant by
+// calling `setDeltaFlushIntervalOverride(N)`; `null` (the default) restores
+// adaptive behavior. #5556: now delegates to the flusher's own override.
 export function setDeltaFlushIntervalOverride(ms: number | null): void {
-  _deltaFlushOverrideMs = ms;
-}
-function currentDeltaFlushMs(): number {
-  return _deltaFlushOverrideMs != null
-    ? _deltaFlushOverrideMs
-    : resolveDeltaFlushMs(_ctx.rttSmoother.value);
+  _ctx.deltaFlusher.setIntervalOverride(ms);
 }
 
 export function stopHeartbeat(): void {
@@ -688,12 +693,11 @@ function _onPong(serverTs?: number): void {
 // ---------------------------------------------------------------------------
 // Delta batching
 // ---------------------------------------------------------------------------
-function flushPendingDeltas(): void {
-  _ctx.deltaFlushTimer = null;
-  if (_ctx.pendingDeltas.size === 0) return;
-  const updates = new Map(_ctx.pendingDeltas);
-  _ctx.pendingDeltas.clear();
-
+// #5556: the store-mutation half of the old `flushPendingDeltas`. The shared
+// flusher owns the accumulator/timer and snapshots+clears `pendingDeltas`, then
+// hands us the batch. App-side this writes session state only (no flat-
+// `messages` fallback). `flushNow()`/`schedule()` invoke this via the flusher.
+function applyDeltaBatch(updates: Map<string, { sessionId: string | null; delta: string }>): void {
   const state = getStore().getState();
 
   const bySession = new Map<string | null, Map<string, string>>();
@@ -805,11 +809,9 @@ function recordLatencySamples(messageIds: Iterable<string>): void {
 }
 
 export function clearDeltaBuffers(): void {
-  if (_ctx.deltaFlushTimer) {
-    clearTimeout(_ctx.deltaFlushTimer);
-    _ctx.deltaFlushTimer = null;
-  }
-  _ctx.pendingDeltas.clear();
+  // #5556: the flusher cancels its timer and drops the accumulator (teardown,
+  // not flush — these deltas belong to a connection that's going away).
+  _ctx.deltaFlusher.clear();
   // #5515: drop any un-flushed latency stamps so they can't survive a reset
   // and pollute the next session's token-to-render window.
   _ctx.deltaServerTs.clear();
@@ -1805,7 +1807,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // context hooks are no-ops / session-only here.
       sharedStreamDelta(msg, {
         activeSessionId: get().activeSessionId,
-        pendingDeltas: _ctx.pendingDeltas,
+        pendingDeltas: _ctx.deltaFlusher.pendingDeltas,
         deltaIdRemaps: _ctx.deltaIdRemaps,
         postPermissionSplits: _ctx.postPermissionSplits,
         replayingSessions: _ctx.replayingSessions,
@@ -1859,12 +1861,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           }));
         },
 
+        // #5556 — arm the shared coalescing window (adaptive interval; was a
+        // fixed 100ms). Memoized bubbles (step 1) make the tighter flush cheap:
+        // only the tail re-renders. First-arm-wins inside the flusher.
         scheduleFlush: () => {
-          if (!_ctx.deltaFlushTimer) {
-            // #5516 — adaptive interval (was a fixed 100ms). Memoized bubbles
-            // (step 1) make the tighter flush cheap: only the tail re-renders.
-            _ctx.deltaFlushTimer = setTimeout(flushPendingDeltas, currentDeltaFlushMs());
-          }
+          _ctx.deltaFlusher.schedule();
         },
       });
       break;
@@ -1872,10 +1873,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'stream_end':
       // Flush any buffered deltas immediately before clearing streaming state
-      if (_ctx.deltaFlushTimer) {
-        clearTimeout(_ctx.deltaFlushTimer);
-      }
-      flushPendingDeltas();
+      _ctx.deltaFlusher.flushNow();
       {
         const out = sharedStreamEnd(msg, get().activeSessionId);
         // Clean up permission boundary split tracking. messageId is null for
@@ -1980,10 +1978,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'result': {
       hapticSuccess();
       // Flush any buffered deltas before clearing streaming state
-      if (_ctx.deltaFlushTimer) {
-        clearTimeout(_ctx.deltaFlushTimer);
-      }
-      flushPendingDeltas();
+      _ctx.deltaFlusher.flushNow();
       // Clean up permission boundary split tracking
       _ctx.postPermissionSplits.clear();
       _ctx.deltaIdRemaps.clear();
@@ -2272,10 +2267,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const currentStreamId = permSs ? permSs.streamingMessageId : null;
         const split = resolvePermissionStreamSplit(currentStreamId, _ctx.deltaIdRemaps);
         if (split) {
-          if (_ctx.deltaFlushTimer) {
-            clearTimeout(_ctx.deltaFlushTimer);
-          }
-          flushPendingDeltas();
+          _ctx.deltaFlusher.flushNow();
           _ctx.postPermissionSplits.add(split.serverStreamId);
           const clearTarget = permTargetId || get().activeSessionId;
           if (clearTarget && get().sessionStates[clearTarget]) {

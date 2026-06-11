@@ -130,10 +130,12 @@ import {
   // #5515 (epic #5514): latency instrumentation primitives.
   RollingPercentiles,
   splitRtt,
-  // #5516 (epic #5514): adaptive client delta-flush interval.
-  resolveDeltaFlushMs,
   // #5556 (epic #5514): shared stateful EWMA RTT smoother.
   RttSmoother,
+  // #5556 (epic #5514): shared delta-flusher wiring (accumulator + timer +
+  // override) — the dashboard supplies only its `applyDeltas` store mutation.
+  createDeltaFlusher,
+  type DeltaFlusher,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -586,27 +588,31 @@ function _onPong(serverTs?: number): void {
 // ---------------------------------------------------------------------------
 // Delta batching
 // ---------------------------------------------------------------------------
-const pendingDeltas = new Map<string, { sessionId: string | null; delta: string }>();
-let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+// #5556 (epic #5514): the accumulator map + coalescing timer + adaptive window
+// now live inside the shared `createDeltaFlusher`, sized off `_rttSmoother`. The
+// dashboard supplies `applyDeltaBatch` — its store mutation, which (unlike the
+// app) keeps a flat-`messages` fallback. The hot path writes into
+// `deltaFlusher.pendingDeltas`; teardown goes through `deltaFlusher.clear()`.
+const deltaFlusher: DeltaFlusher = createDeltaFlusher({
+  getEwmaRtt: () => _rttSmoother.value,
+  applyDeltas: applyDeltaBatch,
+});
+const pendingDeltas = deltaFlusher.pendingDeltas;
 
 // #5516 (epic #5514): adaptive delta-flush interval (was a fixed 100ms).
 // Production adapts to the current EWMA RTT via `resolveDeltaFlushMs`
 // (16-33ms cheap → 100ms poor). Tests pin it with
 // `setDeltaFlushIntervalOverride(N)`; `null` restores adaptive behavior.
-let _deltaFlushOverrideMs: number | null = null;
+// #5556: delegates to the flusher's own override.
 export function setDeltaFlushIntervalOverride(ms: number | null): void {
-  _deltaFlushOverrideMs = ms;
-}
-function currentDeltaFlushMs(): number {
-  return _deltaFlushOverrideMs != null ? _deltaFlushOverrideMs : resolveDeltaFlushMs(_rttSmoother.value);
+  deltaFlusher.setIntervalOverride(ms);
 }
 
-function flushPendingDeltas(): void {
-  deltaFlushTimer = null;
-  if (pendingDeltas.size === 0) return;
-  const updates = new Map(pendingDeltas);
-  pendingDeltas.clear();
-
+// #5556: the store-mutation half of the old `flushPendingDeltas`. The shared
+// flusher owns the accumulator/timer, snapshots+clears `pendingDeltas`, then
+// hands us the batch. Dashboard-side this writes session state AND a flat-
+// `messages` fallback (the app has only the former).
+function applyDeltaBatch(updates: Map<string, { sessionId: string | null; delta: string }>): void {
   const state = getStore().getState();
 
   const bySession = new Map<string | null, Map<string, string>>();
@@ -702,11 +708,9 @@ function recordLatencySamples(messageIds: Iterable<string>): void {
 }
 
 export function clearDeltaBuffers(): void {
-  if (deltaFlushTimer) {
-    clearTimeout(deltaFlushTimer);
-    deltaFlushTimer = null;
-  }
-  pendingDeltas.clear();
+  // #5556: the flusher cancels its timer and drops the accumulator (teardown,
+  // not flush — these deltas belong to a connection that's going away).
+  deltaFlusher.clear();
   // #5515: drop un-flushed latency stamps so they can't survive a reset.
   _deltaServerTs.clear();
 }
@@ -1587,22 +1591,18 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
       }
     },
 
+    // #5556 — arm the shared coalescing window (adaptive interval; was a fixed
+    // 100ms). Memoized rows (step 1) make the tighter flush cheap: only the tail
+    // re-renders. First-arm-wins inside the flusher.
     scheduleFlush: () => {
-      if (!deltaFlushTimer) {
-        // #5516 — adaptive interval (was a fixed 100ms). Memoized rows
-        // (step 1) make the tighter flush cheap: only the tail re-renders.
-        deltaFlushTimer = setTimeout(flushPendingDeltas, currentDeltaFlushMs());
-      }
+      deltaFlusher.schedule();
     },
   });
 }
 
 function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   // Flush any buffered deltas immediately before clearing streaming state
-  if (deltaFlushTimer) {
-    clearTimeout(deltaFlushTimer);
-  }
-  flushPendingDeltas();
+  deltaFlusher.flushNow();
   // Add newline separator after response ends for Output view readability
   get().appendTerminalData('\r\n');
   const out = sharedStreamEnd(msg, get().activeSessionId);
@@ -1756,10 +1756,7 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       : get().streamingMessageId;
     const split = resolvePermissionStreamSplit(currentStreamId, _deltaIdRemaps);
     if (split) {
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-      }
-      flushPendingDeltas();
+      deltaFlusher.flushNow();
       _postPermissionSplits.add(split.serverStreamId);
       if (permTargetId && get().sessionStates[permTargetId]) {
         updateSession(permTargetId, () => ({ streamingMessageId: null }));
@@ -3164,10 +3161,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'result': {
       // Flush any buffered deltas before clearing streaming state
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-      }
-      flushPendingDeltas();
+      deltaFlusher.flushNow();
       // Clean up permission boundary split tracking
       _postPermissionSplits.clear();
       _deltaIdRemaps.clear();

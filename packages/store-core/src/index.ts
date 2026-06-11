@@ -558,4 +558,14 @@ export {
   // accumulators with identical first-sample/α-weighting/reset semantics.
   RttSmoother,
   DEFAULT_RTT_EWMA_ALPHA,
+  // #5556 (epic #5514): shared delta-flusher wiring — owns the `pendingDeltas`
+  // accumulator + coalescing timer + test override, leaving each client only
+  // its `applyDeltas` store-mutation closure. Replaces the hand-copied
+  // accumulator/timer/scheduleFlush glue in both message-handlers.
+  createDeltaFlusher,
+} from './delta-flush'
+export type {
+  DeltaFlusher,
+  CreateDeltaFlusherOptions,
+  DeltaFlushScheduler,
 } from './delta-flush'
