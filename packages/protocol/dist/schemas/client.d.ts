@@ -533,6 +533,11 @@ export declare const ClientVisibleSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;
 }, z.core.$strip>;
+export declare const ClaimPrimarySchema: z.ZodObject<{
+    type: z.ZodLiteral<"claim_primary">;
+    sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;
 export declare const ListProvidersSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_providers">;
 }, z.core.$strip>;
@@ -915,6 +920,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"claim_primary">;
+    sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_providers">;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"byok_get_credentials_status">;
@@ -1064,5 +1073,6 @@ export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;
 export type SessionPresetApproveMessage = z.infer<typeof SessionPresetApproveSchema>;
 export type SessionPresetRevokeMessage = z.infer<typeof SessionPresetRevokeSchema>;
+export type ClaimPrimaryMessage = z.infer<typeof ClaimPrimarySchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>;

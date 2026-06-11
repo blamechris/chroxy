@@ -526,4 +526,113 @@ describe('WsClientManager', () => {
       }
     })
   })
+
+  // #5563: explicit primary-ownership semantics. First-to-claim wins; later
+  // claimants are rejected unless they force a hand-off; clearing vacates the
+  // slot (nobody-until-claim). Designed for N>2 observers on one session.
+  describe('primary ownership (#5563)', () => {
+    it('starts unclaimed — getPrimary is undefined, isPrimary is false', () => {
+      assert.strictEqual(manager.getPrimary('s1'), undefined)
+      assert.strictEqual(manager.isPrimary('s1', 'c1'), false)
+    })
+
+    it('first claim on an unclaimed session succeeds', () => {
+      const res = manager.claimPrimary('s1', 'c1')
+      assert.strictEqual(res.changed, true)
+      assert.strictEqual(res.primaryClientId, 'c1')
+      assert.strictEqual(manager.getPrimary('s1'), 'c1')
+      assert.strictEqual(manager.isPrimary('s1', 'c1'), true)
+    })
+
+    it('re-claim by the current primary is a no-op (changed:false, not rejected)', () => {
+      manager.claimPrimary('s1', 'c1')
+      const res = manager.claimPrimary('s1', 'c1')
+      assert.strictEqual(res.changed, false)
+      assert.strictEqual(res.rejected, undefined)
+      assert.strictEqual(res.primaryClientId, 'c1')
+    })
+
+    it('claim by a second client is REJECTED while another owns it (observe-only)', () => {
+      manager.claimPrimary('s1', 'c1')
+      const res = manager.claimPrimary('s1', 'c2')
+      assert.strictEqual(res.changed, false)
+      assert.strictEqual(res.rejected, true)
+      assert.strictEqual(res.primaryClientId, 'c1')
+      // Owner unchanged.
+      assert.strictEqual(manager.getPrimary('s1'), 'c1')
+    })
+
+    it('force claim overrides the current owner (explicit hand-off)', () => {
+      manager.claimPrimary('s1', 'c1')
+      const res = manager.claimPrimary('s1', 'c2', { force: true })
+      assert.strictEqual(res.changed, true)
+      assert.strictEqual(res.primaryClientId, 'c2')
+      assert.strictEqual(manager.getPrimary('s1'), 'c2')
+      assert.strictEqual(manager.isPrimary('s1', 'c1'), false)
+    })
+
+    it('N-client scenario: only the first of many claimants holds primary', () => {
+      assert.strictEqual(manager.claimPrimary('s1', 'a').changed, true)
+      for (const id of ['b', 'c', 'd', 'e', 'f', 'g', 'h']) {
+        const res = manager.claimPrimary('s1', id)
+        assert.strictEqual(res.rejected, true, `${id} should be rejected`)
+      }
+      assert.strictEqual(manager.getPrimary('s1'), 'a')
+    })
+
+    it('claimPrimary ignores empty sessionId / clientId', () => {
+      assert.strictEqual(manager.claimPrimary('', 'c1').changed, false)
+      assert.strictEqual(manager.claimPrimary('s1', '').changed, false)
+      assert.strictEqual(manager.getPrimary('s1'), undefined)
+    })
+
+    it('clearPrimary vacates the slot and returns the previous owner', () => {
+      manager.claimPrimary('s1', 'c1')
+      assert.strictEqual(manager.clearPrimary('s1'), 'c1')
+      assert.strictEqual(manager.getPrimary('s1'), undefined)
+      // After clearing, a fresh client can claim (nobody-until-claim).
+      assert.strictEqual(manager.claimPrimary('s1', 'c2').changed, true)
+      assert.strictEqual(manager.getPrimary('s1'), 'c2')
+    })
+
+    it('clearPrimary on an unclaimed session returns undefined', () => {
+      assert.strictEqual(manager.clearPrimary('s1'), undefined)
+    })
+
+    it('clearPrimaryForClient vacates every session a client owned', () => {
+      manager.claimPrimary('s1', 'c1')
+      manager.claimPrimary('s2', 'c1')
+      manager.claimPrimary('s3', 'c2')
+      const vacated = manager.clearPrimaryForClient('c1').sort()
+      assert.deepStrictEqual(vacated, ['s1', 's2'])
+      assert.strictEqual(manager.getPrimary('s1'), undefined)
+      assert.strictEqual(manager.getPrimary('s2'), undefined)
+      // c2's session is untouched.
+      assert.strictEqual(manager.getPrimary('s3'), 'c2')
+    })
+
+    it('clearPrimaryForClient returns [] when the client owned nothing', () => {
+      manager.claimPrimary('s1', 'c1')
+      assert.deepStrictEqual(manager.clearPrimaryForClient('c2'), [])
+      assert.strictEqual(manager.getPrimary('s1'), 'c1')
+    })
+
+    it('clearAllPrimary vacates every slot (shutdown path)', () => {
+      manager.claimPrimary('s1', 'c1')
+      manager.claimPrimary('s2', 'c2')
+      manager.clearAllPrimary()
+      assert.strictEqual(manager.getPrimary('s1'), undefined)
+      assert.strictEqual(manager.getPrimary('s2'), undefined)
+    })
+
+    it('disconnect-promotion policy is nobody-until-claim: an observer is not auto-promoted', () => {
+      manager.claimPrimary('s1', 'primary')
+      // Observers exist but are not tracked as candidates — vacating clears.
+      manager.clearPrimaryForClient('primary')
+      assert.strictEqual(manager.getPrimary('s1'), undefined)
+      // The observer must explicitly claim to become primary.
+      assert.strictEqual(manager.claimPrimary('s1', 'observer').changed, true)
+      assert.strictEqual(manager.getPrimary('s1'), 'observer')
+    })
+  })
 })

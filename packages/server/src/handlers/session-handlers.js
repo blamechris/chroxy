@@ -217,7 +217,7 @@ async function handleDestroySession(ws, client, msg, ctx) {
   } else {
     ctx.sessions.sessionManager.destroySession(targetId)
   }
-  ctx.transport.primaryClients.delete(targetId)
+  ctx.transport.clearPrimary(targetId)
 
   const firstId = ctx.sessions.sessionManager.firstSessionId
   for (const [clientWs, c] of ctx.transport.clients) {
@@ -326,6 +326,71 @@ function handleClientVisible(ws, client, msg) {
   client.visible = msg.visible !== false
 }
 
+// #5563 (blocker for #5281 shared-session join): explicit primary claim /
+// hand-off. v1 ownership semantics:
+//   - First client to claim an UNCLAIMED session becomes its primary; every
+//     other subscriber stays an observer (read-only — the input_conflict gate
+//     rejects observer input while the session is running).
+//   - A claim against a session ANOTHER client already owns is REJECTED unless
+//     `force: true` — an explicit operator-driven hand-off / take-over. This is
+//     the observe-only guarantee that lets N>2 clients share a session safely.
+//   - On the primary disconnecting, the slot is cleared (nobody-until-claim) by
+//     the departure path, NOT auto-promoted to an observer.
+// The actual mutation + role broadcast (`session_role` + legacy
+// `primary_changed`) happens in ws-server's _claimPrimary; this handler only
+// validates binding and turns a rejection into a client-facing error.
+function handleClaimPrimary(ws, client, msg, ctx) {
+  const targetId = msg.sessionId
+  if (!targetId) {
+    sendSessionError(ws, ctx, 'sessionId is required')
+    return
+  }
+
+  // Bound clients (paired to a single session) may only claim that session.
+  if (client.boundSessionId && client.boundSessionId !== targetId) {
+    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} attempted to claim primary on session ${targetId} but is bound to ${client.boundSessionId}`)
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessions.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
+    return
+  }
+
+  if (!ctx.sessions.sessionManager.getSession(targetId)) {
+    sendSessionError(ws, ctx, `Session not found: ${targetId}`)
+    return
+  }
+
+  const force = msg.force === true
+  const res = ctx.transport.claimPrimary(targetId, client.id, { force })
+  if (res.rejected) {
+    // Another client owns the session and this was not a forced hand-off.
+    // Surface as an input_conflict so existing dashboards render the same
+    // calm "another device is driving" notice they already show for the
+    // in-flight cross-device send conflict (#5281 ①.3).
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      category: 'input_conflict',
+      sessionId: targetId,
+      message: 'Another device is the primary for this session. Request a hand-off or wait for it to release.',
+      code: 'PRIMARY_HELD',
+      primaryClientId: res.primaryClientId,
+    })
+    return
+  }
+  // Success (claimed/handed-off) or no-op (already primary). In both cases tell
+  // THIS client its authoritative role so a no-op claim still resolves any
+  // optimistic local "am I primary?" state.
+  ctx.transport.send(ws, {
+    type: 'session_role',
+    sessionId: targetId,
+    primaryClientId: ctx.transport.getPrimary(targetId) ?? null,
+  })
+}
+
 export const sessionHandlers = {
   list_sessions: handleListSessions,
   switch_session: handleSwitchSession,
@@ -335,4 +400,5 @@ export const sessionHandlers = {
   subscribe_sessions: handleSubscribeSessions,
   unsubscribe_sessions: handleUnsubscribeSessions,
   client_visible: handleClientVisible,
+  claim_primary: handleClaimPrimary,
 }

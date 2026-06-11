@@ -56,9 +56,9 @@ function createMockCtx(sessionManager, opts = {}) {
     checkpointManager,
     devPreview,
     webTaskManager,
-    primaryClients: new Map(),
-    // #5563: index-maintaining helpers + clients Map backed by a real
-    // WsClientManager so create/destroy/switch handlers can route through them.
+    // #5563: index-maintaining helpers + clients Map + the primary-ownership
+    // surface (getPrimary / claimPrimary / clearPrimary), all backed by a real
+    // WsClientManager so create/destroy/switch handlers route through them.
     ...makeSessionIndexCtx(),
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),

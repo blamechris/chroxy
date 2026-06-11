@@ -664,6 +664,19 @@ export const ClientVisibleSchema = z.object({
     type: z.literal('client_visible'),
     visible: z.boolean(),
 });
+// #5563 (blocker for #5281 shared-session join): explicit primary-ownership
+// claim / hand-off. Without `force`, the claim succeeds only if the session is
+// unclaimed (or the client is already primary) — a claim against a session
+// another client owns is rejected (observe-only). With `force: true` it is an
+// operator-driven hand-off / take-over that overrides the current owner. The
+// server replies with `session_role` (granted) or a `session_error` of
+// category `input_conflict` (rejected). Additive: a client that never sends
+// this keeps today's first-input-adopts-primary behaviour.
+export const ClaimPrimarySchema = z.object({
+    type: z.literal('claim_primary'),
+    sessionId: z.string().max(256),
+    force: z.boolean().optional(),
+});
 // -- Repo management schemas --
 export const ListProvidersSchema = z.object({
     type: z.literal('list_providers'),
@@ -936,6 +949,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SubscribeSessionsSchema,
     UnsubscribeSessionsSchema,
     ClientVisibleSchema,
+    ClaimPrimarySchema,
     ListProvidersSchema,
     ByokGetCredentialsStatusSchema,
     ByokSetCredentialsSchema,
