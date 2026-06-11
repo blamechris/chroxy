@@ -788,16 +788,24 @@ export class EventNormalizer {
    */
   bufferDelta(sessionId, messageId, delta, emitMonoMs) {
     const key = sessionId ? `${sessionId}:${messageId}` : messageId
+    // #5555: coerce a non-string delta to its string form ONCE and use that for
+    // both the buffer concat AND the byte count. A bare `existing + delta` would
+    // string-coerce a non-string into the buffer (real residency) while a
+    // `typeof delta === 'string'` byte guard scored it as 0 — the caps would
+    // under-count actual residency and could miss the OOM ceiling this fix
+    // exists to enforce. Coercing once keeps the accounting equal to what's
+    // stored. (Providers always emit strings; this is purely defensive.)
+    const text = typeof delta === 'string' ? delta : String(delta ?? '')
     const existing = this._deltaBuffer.get(key) || ''
-    this._deltaBuffer.set(key, existing + delta)
+    this._deltaBuffer.set(key, existing + text)
     if (typeof emitMonoMs === 'number' && !this._deltaEmitMono.has(key)) {
       this._deltaEmitMono.set(key, emitMonoMs)
     }
     // #5555: maintain byte-size counters incrementally (UTF-8) — no
-    // re-serialization on the hot path. `delta` is the only new text, so its
+    // re-serialization on the hot path. `text` is the only new content, so its
     // byte length is the per-call growth for both the key total and the global
-    // total. typeof guard tolerates a non-string delta defensively.
-    const addedBytes = typeof delta === 'string' ? Buffer.byteLength(delta) : 0
+    // total, and it matches exactly what was concatenated above.
+    const addedBytes = Buffer.byteLength(text)
     const keyBytes = (this._deltaKeyBytes.get(key) || 0) + addedBytes
     this._deltaKeyBytes.set(key, keyBytes)
     this._deltaTotalBytes += addedBytes
