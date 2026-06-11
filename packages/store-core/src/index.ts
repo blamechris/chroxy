@@ -553,4 +553,9 @@ export {
   DELTA_FLUSH_MAX_MS,
   DELTA_FLUSH_CHEAP_RTT_MS,
   DELTA_FLUSH_POOR_RTT_MS,
+  // #5556 (epic #5514): shared stateful EWMA RTT smoother — one implementation
+  // for the app/dashboard heartbeat handlers, replacing two hand-copied
+  // accumulators with identical first-sample/α-weighting/reset semantics.
+  RttSmoother,
+  DEFAULT_RTT_EWMA_ALPHA,
 } from './delta-flush'

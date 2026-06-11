@@ -61,3 +61,53 @@ export function resolveDeltaFlushMs(ewmaRtt: number | null | undefined): number 
   const t = (ewmaRtt - DELTA_FLUSH_CHEAP_RTT_MS) / (DELTA_FLUSH_POOR_RTT_MS - DELTA_FLUSH_CHEAP_RTT_MS)
   return Math.round(DELTA_FLUSH_FLOOR_MS + t * (DELTA_FLUSH_MAX_MS - DELTA_FLUSH_FLOOR_MS))
 }
+
+/** Default EWMA weight for a new RTT sample (higher = more responsive). */
+export const DEFAULT_RTT_EWMA_ALPHA = 0.3
+
+/**
+ * Stateful EWMA (exponentially-weighted moving average) smoother for round-trip
+ * time. Extracted from the app/dashboard heartbeat handlers (#5556, epic #5514)
+ * so both clients share one implementation instead of hand-copied accumulators.
+ *
+ * Behavior (bit-for-bit identical to the prior inlined copies):
+ *   - The first sample bootstraps the average to its raw value.
+ *   - Each later sample folds in as `α·rtt + (1-α)·prev`.
+ *   - `value` is `null` until the first sample, matching the
+ *     `ewmaRtt: number | null` field both clients fed into
+ *     `resolveDeltaFlushMs` (null → flush floor).
+ *   - `reset()` returns to the un-sampled (`null`) state — the clients call
+ *     this on disconnect (in `stopHeartbeat`), so a reconnect re-bootstraps.
+ */
+export class RttSmoother {
+  private _value: number | null = null
+  private readonly _alpha: number
+
+  /**
+   * @param alpha - EWMA weight for new samples in (0, 1]. Defaults to
+   *   {@link DEFAULT_RTT_EWMA_ALPHA} (0.3).
+   */
+  constructor(alpha: number = DEFAULT_RTT_EWMA_ALPHA) {
+    this._alpha = alpha
+  }
+
+  /** The current smoothed RTT in ms, or `null` if no sample has arrived yet. */
+  get value(): number | null {
+    return this._value
+  }
+
+  /**
+   * Fold a new RTT measurement into the average and return the updated value.
+   * The first call initializes the average to `rttMs` exactly.
+   */
+  update(rttMs: number): number {
+    this._value =
+      this._value === null ? rttMs : this._alpha * rttMs + (1 - this._alpha) * this._value
+    return this._value
+  }
+
+  /** Clear the average back to the un-sampled (`null`) state. */
+  reset(): void {
+    this._value = null
+  }
+}
