@@ -57,6 +57,18 @@ describe('pair-discord CLI (#5513)', () => {
     assert.equal(result.reason, 'not_configured')
   })
 
+  it('maps a 403 { error: primary_token_required } body through as the reason', async () => {
+    // Auth failures from the daemon use the { error: ... } shape, not
+    // { reason: ... } — postPairDiscord must read both so a scoped-token
+    // rejection stays legible instead of degrading to http_403.
+    const result = await postPairDiscord({
+      readConnectionInfo: () => ({ pid: 1, httpUrl: 'http://127.0.0.1:8765', apiToken: 'tok' }),
+      fetchFn: async () => mockResponse(403, { error: 'primary_token_required' }),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'primary_token_required')
+  })
+
   it('maps a 502 post_failed into a legible reason', async () => {
     const result = await postPairDiscord({
       readConnectionInfo: () => ({ pid: 1, httpUrl: 'http://127.0.0.1:8765', apiToken: 'tok' }),

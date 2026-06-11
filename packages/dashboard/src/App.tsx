@@ -1590,7 +1590,7 @@ export function App() {
     try {
       const res = await fetch('/pair-discord', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
       })
       const body = await res.json().catch(() => null)
       if (res.ok && body?.posted) {

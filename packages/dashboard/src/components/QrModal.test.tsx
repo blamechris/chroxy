@@ -98,6 +98,24 @@ describe('QrModal', () => {
     expect(await screen.findByTestId('qr-post-discord-status')).toHaveTextContent(/webhook|configur/i)
   })
 
+  it('shows legible copy for a primary_token_required rejection', async () => {
+    // The endpoint is primary-token gated: a dashboard authenticated with a
+    // pairing-issued session token gets 403 { error: 'primary_token_required' }.
+    const svg = '<svg><rect/></svg>'
+    const onPost = vi.fn().mockResolvedValue({ posted: false, reason: 'primary_token_required' })
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} pairingCode="ABCD2345" onPostToDiscord={onPost} />)
+    fireEvent.click(screen.getByTestId('qr-post-discord-btn'))
+    expect(await screen.findByTestId('qr-post-discord-status')).toHaveTextContent(/primary device/i)
+  })
+
+  it('shows legible copy for an unauthorized rejection', async () => {
+    const svg = '<svg><rect/></svg>'
+    const onPost = vi.fn().mockResolvedValue({ posted: false, reason: 'unauthorized' })
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} pairingCode="ABCD2345" onPostToDiscord={onPost} />)
+    fireEvent.click(screen.getByTestId('qr-post-discord-btn'))
+    expect(await screen.findByTestId('qr-post-discord-status')).toHaveTextContent(/not authorized/i)
+  })
+
   it('closes on Escape key (#1549)', () => {
     const onClose = vi.fn()
     render(<QrModal open={true} onClose={onClose} qrSvg={null} loading={false} />)
