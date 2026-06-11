@@ -4,6 +4,19 @@ import { createLogger } from './logger.js'
 
 const log = createLogger('event-normalizer')
 
+// #5555: caps on the delta coalescing buffer's un-flushed residency.
+//   - MAX_DELTA_KEY_BYTES: per-stream ceiling. One message buffering more than
+//     this between flushes forces an immediate flush of THAT key, preserving
+//     order (it is flushed and re-buffered fresh on the next delta).
+//   - MAX_DELTA_TOTAL_BYTES: aggregate ceiling across all streams. Crossing it
+//     forces a full flush. Guards the many-small-streams case that no per-key
+//     cap catches.
+// Chosen so a normal stream (sub-second flush windows of a few KB) never trips
+// them, while a runaway provider is bounded to ~2MB of residency instead of
+// growing the heap until V8 OOMs. Forced flush, never truncation — no data loss.
+const MAX_DELTA_KEY_BYTES = 256 * 1024 // 256 KB per stream
+const MAX_DELTA_TOTAL_BYTES = 2 * 1024 * 1024 // 2 MB across all streams
+
 /**
  * Declarative event-to-WS-message mapping.
  *
@@ -674,10 +687,23 @@ export class EventNormalizer {
    *   unknown (e.g. legacy single-session mode). When the count is exactly 1 the
    *   single-client window is used; otherwise (0, ≥2, or null) the default.
    */
-  constructor({ flushIntervalMs = 50, singleClientFlushIntervalMs = 25, getSubscriberCount = null } = {}) {
+  constructor({ flushIntervalMs = 50, singleClientFlushIntervalMs = 25, getSubscriberCount = null, maxKeyBytes = MAX_DELTA_KEY_BYTES, maxTotalBytes = MAX_DELTA_TOTAL_BYTES } = {}) {
     this._flushIntervalMs = flushIntervalMs
     this._singleClientFlushIntervalMs = singleClientFlushIntervalMs
     this._getSubscriberCount = typeof getSubscriberCount === 'function' ? getSubscriberCount : null
+    // #5555: residency caps for the coalescing buffer. A runaway provider (huge
+    // tool output, model repetition loop) can grow this Map between flushes
+    // faster than ws-broadcaster's socket backpressure can react — the data
+    // hasn't reached a socket yet, so backpressure never trips and V8 OOMs the
+    // daemon. We bound RESIDENCY (not content): exceeding a cap forces an
+    // immediate ordered flush of the affected key / whole buffer. No truncation,
+    // no data loss — the cap just shortens how long bytes live un-flushed.
+    this._maxKeyBytes = maxKeyBytes
+    this._maxTotalBytes = maxTotalBytes
+    // Byte sizes tracked incrementally (UTF-8) so the hot path never
+    // re-serializes the buffer to measure it.
+    this._deltaKeyBytes = new Map() // key -> byte length of its accumulated text
+    this._deltaTotalBytes = 0 // sum of _deltaKeyBytes values
     // Delta buffer: key -> accumulated text
     // In multi-session mode key = `${sessionId}:${messageId}`, otherwise just messageId
     this._deltaBuffer = new Map()
@@ -767,6 +793,36 @@ export class EventNormalizer {
     if (typeof emitMonoMs === 'number' && !this._deltaEmitMono.has(key)) {
       this._deltaEmitMono.set(key, emitMonoMs)
     }
+    // #5555: maintain byte-size counters incrementally (UTF-8) — no
+    // re-serialization on the hot path. `delta` is the only new text, so its
+    // byte length is the per-call growth for both the key total and the global
+    // total. typeof guard tolerates a non-string delta defensively.
+    const addedBytes = typeof delta === 'string' ? Buffer.byteLength(delta) : 0
+    const keyBytes = (this._deltaKeyBytes.get(key) || 0) + addedBytes
+    this._deltaKeyBytes.set(key, keyBytes)
+    this._deltaTotalBytes += addedBytes
+
+    // #5555: residency caps. Order matters — flush the over-cap KEY first
+    // (bounded, targeted), then re-check the global total. A forced flush
+    // emits via the same onFlush path the timer uses, so coalescing order is
+    // preserved: the over-cap key goes out now, fresh deltas re-buffer behind
+    // it. We flush BEFORE arming/keeping the timer below so a tripped cap
+    // doesn't also leave a redundant timer pointing at an empty key.
+    if (keyBytes >= this._maxKeyBytes) {
+      this._forceFlushKey(key)
+    }
+    if (this._deltaTotalBytes >= this._maxTotalBytes) {
+      this._flushDeltas()
+    }
+    if (this._deltaBuffer.size === 0) {
+      // Everything just got force-flushed — no timer needed.
+      if (this._deltaFlushTimer) {
+        clearTimeout(this._deltaFlushTimer)
+        this._deltaFlushTimer = null
+        this._deltaFlushDeadline = 0
+      }
+      return
+    }
     // #5516 (epic #5514): adaptive coalescing window — tighter (25ms) when this
     // session has a single subscriber, default (50ms) otherwise. The flush
     // timer is shared across all buffered sessions, so a single-client session
@@ -787,6 +843,38 @@ export class EventNormalizer {
   }
 
   /**
+   * #5555: force an immediate flush of a SINGLE over-cap key via the onFlush
+   * path, preserving coalescing order. The key is removed from all buffer maps;
+   * subsequent deltas for it re-buffer fresh behind whatever just went out.
+   * No-op (but still drops the key's accounting) when no onFlush is wired.
+   * @param {string} key
+   */
+  _forceFlushKey(key) {
+    if (!this._deltaBuffer.has(key)) return
+    const delta = this._deltaBuffer.get(key)
+    const emitMonoMs = this._deltaEmitMono.get(key)
+    this._deltaBuffer.delete(key)
+    this._deltaEmitMono.delete(key)
+    this._deltaTotalBytes -= this._deltaKeyBytes.get(key) || 0
+    this._deltaKeyBytes.delete(key)
+    if (this._deltaTotalBytes < 0) this._deltaTotalBytes = 0
+    if (this._onFlush) {
+      const sepIdx = key.indexOf(':')
+      const entry = sepIdx !== -1
+        ? { key, sessionId: key.slice(0, sepIdx), messageId: key.slice(sepIdx + 1), delta, emitMonoMs }
+        : { key, sessionId: null, messageId: key, delta, emitMonoMs }
+      // Mirror _flushDeltas' containment: a throwing broadcast must not escape
+      // the buffer hot path (which runs under the provider's event emit).
+      try {
+        this._onFlush([entry])
+      } catch (err) {
+        const message = err?.message || String(err)
+        log.error(`Delta force-flush onFlush callback threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
+      }
+    }
+  }
+
+  /**
    * Flush all buffered deltas for a specific session (called before stream_end).
    * Returns the flushed entries so the caller can broadcast them.
    * @param {string|null} sessionId - Session to flush (null = flush all)
@@ -802,8 +890,12 @@ export class EventNormalizer {
           entries.push({ key, sessionId, messageId, delta, emitMonoMs: this._deltaEmitMono.get(key) })
           this._deltaBuffer.delete(key)
           this._deltaEmitMono.delete(key)
+          // #5555: keep residency counters in sync as keys leave the buffer.
+          this._deltaTotalBytes -= this._deltaKeyBytes.get(key) || 0
+          this._deltaKeyBytes.delete(key)
         }
       }
+      if (this._deltaTotalBytes < 0) this._deltaTotalBytes = 0
     } else {
       // Legacy mode: flush everything
       for (const [key, delta] of this._deltaBuffer) {
@@ -811,6 +903,8 @@ export class EventNormalizer {
       }
       this._deltaBuffer.clear()
       this._deltaEmitMono.clear()
+      this._deltaKeyBytes.clear()
+      this._deltaTotalBytes = 0
     }
     // If buffer is now empty, cancel the pending timer
     if (this._deltaBuffer.size === 0 && this._deltaFlushTimer) {
@@ -853,11 +947,15 @@ export class EventNormalizer {
       } finally {
         this._deltaBuffer.clear()
         this._deltaEmitMono.clear()
+        this._deltaKeyBytes.clear()
+        this._deltaTotalBytes = 0
       }
       return
     }
     this._deltaBuffer.clear()
     this._deltaEmitMono.clear()
+    this._deltaKeyBytes.clear()
+    this._deltaTotalBytes = 0
   }
 
   /**
@@ -871,6 +969,8 @@ export class EventNormalizer {
     this._deltaFlushDeadline = 0
     this._deltaBuffer.clear()
     this._deltaEmitMono.clear()
+    this._deltaKeyBytes.clear()
+    this._deltaTotalBytes = 0
   }
 }
 

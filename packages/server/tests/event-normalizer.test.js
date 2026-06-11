@@ -903,6 +903,105 @@ describe('EventNormalizer', () => {
       assert.equal(lastFlushed[0].delta, 'second')
     })
 
+    // ---- #5555: residency caps (per-key + total) ----
+    //
+    // A runaway provider can grow the un-flushed buffer faster than socket
+    // backpressure can react (data hasn't reached a socket yet). The caps force
+    // an immediate ORDERED flush — never truncation — bounding heap residency.
+    describe('residency caps (#5555)', () => {
+      it('forces an immediate flush of a key that exceeds the per-key byte cap', () => {
+        const flushed = []
+        // Tiny caps so the test stays cheap; the production defaults are 256KB/2MB.
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'msg-1', 'a'.repeat(60)) // under cap, buffered
+          assert.equal(flushed.length, 0, 'no flush before the cap is crossed')
+          n.bufferDelta('sess-1', 'msg-1', 'b'.repeat(50)) // 110 >= 100 → force flush
+          assert.equal(flushed.length, 1, 'crossing the per-key cap forces one flush')
+          // Content preserved in order, nothing truncated.
+          assert.equal(flushed[0].delta, 'a'.repeat(60) + 'b'.repeat(50))
+          assert.equal(flushed[0].sessionId, 'sess-1')
+          assert.equal(flushed[0].messageId, 'msg-1')
+          // Key was flushed out of the buffer; counters reset for it.
+          assert.equal(n._deltaBuffer.has('sess-1:msg-1'), false)
+          assert.equal(n._deltaTotalBytes, 0)
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('preserves order: post-flush deltas re-buffer behind the flushed chunk', () => {
+        const flushed = []
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'msg-1', 'x'.repeat(120)) // force-flush chunk 1
+          n.bufferDelta('sess-1', 'msg-1', 'tail') // re-buffers fresh behind it
+          const rest = n.flushSession('sess-1')
+          assert.equal(flushed.length, 1)
+          assert.equal(flushed[0].delta, 'x'.repeat(120))
+          assert.equal(rest.length, 1)
+          assert.equal(rest[0].delta, 'tail', 'later delta lands after the force-flushed chunk, in order')
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('only one key under the per-key cap does not flush others', () => {
+        const flushed = []
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'big', 'z'.repeat(120)) // force-flush this key
+          n.bufferDelta('sess-1', 'small', 'tiny') // stays buffered
+          assert.equal(flushed.length, 1)
+          assert.equal(flushed[0].messageId, 'big')
+          assert.equal(n._deltaBuffer.has('sess-1:small'), true, 'under-cap key is untouched')
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('forces a full flush when the aggregate total cap is exceeded', () => {
+        const flushed = []
+        // Per-key cap high enough that no single key trips it; total cap small
+        // so the many-small-streams case is what forces the flush.
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 10_000, maxTotalBytes: 250 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'm1', 'p'.repeat(100))
+          n.bufferDelta('sess-1', 'm2', 'q'.repeat(100))
+          assert.equal(flushed.length, 0, 'still under the total cap')
+          n.bufferDelta('sess-1', 'm3', 'r'.repeat(100)) // 300 >= 250 → full flush
+          // All three keys flushed in one pass; content intact.
+          assert.equal(flushed.length, 3)
+          const byKey = Object.fromEntries(flushed.map(e => [e.messageId, e.delta]))
+          assert.equal(byKey.m1, 'p'.repeat(100))
+          assert.equal(byKey.m2, 'q'.repeat(100))
+          assert.equal(byKey.m3, 'r'.repeat(100))
+          assert.equal(n._deltaBuffer.size, 0)
+          assert.equal(n._deltaTotalBytes, 0)
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('measures bytes (UTF-8), not chars — multibyte content trips the cap sooner', () => {
+        const flushed = []
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          // '😀' is 4 UTF-8 bytes. 30 of them = 120 bytes (only 60 UTF-16 units).
+          n.bufferDelta('sess-1', 'emoji', '😀'.repeat(30))
+          assert.equal(flushed.length, 1, 'byte-counted cap trips on multibyte payload')
+          assert.equal(flushed[0].delta, '😀'.repeat(30), 'no truncation of multibyte content')
+        } finally {
+          n.destroy()
+        }
+      })
+    })
+
     it('cancels timer when buffer emptied by flushSession', () => {
       normalizer.bufferDelta('sess-1', 'msg-1', 'x')
       normalizer.flushSession('sess-1')
