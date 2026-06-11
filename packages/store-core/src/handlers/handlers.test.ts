@@ -1455,6 +1455,7 @@ describe('handleAuthOk', () => {
       clientId: 'client-1',
       webFeatures: { available: true, remote: false, teleport: true },
       capabilities: { notificationPrefs: true, somethingElse: false },
+      serverPublicKey: 'srv-pub-key',
     })
     expect(result).toEqual({
       serverMode: 'cli',
@@ -1471,7 +1472,22 @@ describe('handleAuthOk', () => {
       myClientId: 'client-1',
       webFeatures: { available: true, remote: false, teleport: true },
       serverCapabilities: { notificationPrefs: true, somethingElse: false },
+      serverPublicKey: 'srv-pub-key',
     })
+  })
+
+  // #5555 (eager key exchange) — serverPublicKey carries the server's
+  // ephemeral X25519 key on the eager path; null means "fall back to the
+  // discrete key_exchange handshake".
+  it('extracts serverPublicKey when the server honoured the eager path', () => {
+    expect(handleAuthOk({ serverPublicKey: 'abc123' }).serverPublicKey).toBe('abc123')
+  })
+
+  it('returns null serverPublicKey when absent, empty, or non-string (discrete fallback)', () => {
+    expect(handleAuthOk({}).serverPublicKey).toBeNull()
+    expect(handleAuthOk({ serverPublicKey: '' }).serverPublicKey).toBeNull()
+    expect(handleAuthOk({ serverPublicKey: 42 }).serverPublicKey).toBeNull()
+    expect(handleAuthOk({ serverPublicKey: null }).serverPublicKey).toBeNull()
   })
 
   it('rejects unknown serverMode values', () => {
@@ -1691,6 +1707,7 @@ describe('handleAuthOk', () => {
       myClientId: null,
       webFeatures: { available: false, remote: false, teleport: false },
       serverCapabilities: {},
+      serverPublicKey: null,
     })
   })
 })

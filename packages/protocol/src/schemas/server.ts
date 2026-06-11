@@ -108,6 +108,16 @@ export const ServerAuthOkSchema = z.object({
     bindHost: z.string().nullable(),
     quickTunnel: z.boolean(),
   }).optional(),
+  // #5555 (eager key exchange) — the server's ephemeral X25519 public key,
+  // present ONLY when the client supplied a valid `eagerPublicKey` + `eagerSalt`
+  // in its `auth` message AND encryption is required. When present, the client
+  // derives the shared key immediately from this and the post-auth queue is
+  // already un-gated server-side, so the discrete `key_exchange` round trip is
+  // skipped. Field shape mirrors `key_exchange_ok`'s `publicKey`. Absent when:
+  // the client sent no eager fields (old client), encryption is disabled, or
+  // the server predates #5555 (old server) — in every absent case the client
+  // falls back to the discrete `key_exchange` handshake. No flag day.
+  serverPublicKey: z.string().max(512).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({

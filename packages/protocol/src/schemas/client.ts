@@ -47,6 +47,18 @@ export const AuthSchema = z.object({
   protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
   capabilities: z.array(z.string()).optional().catch([]).default([]),
+  // #5555 (eager key exchange) — optional ephemeral X25519 public key + salt
+  // sent WITH the auth message so the server can derive the shared key and
+  // return its public key in auth_ok, collapsing the discrete `key_exchange`
+  // round trip. Field shapes mirror KeyExchangeSchema's `publicKey` / `salt`
+  // (same base64 size cap, same per-connection salt semantics) — the eager
+  // path is cryptographically identical to the discrete one, only the
+  // transport timing differs. Both fields are optional and only honoured
+  // together: old clients omit them and the server falls back to the discrete
+  // `key_exchange`; a new client talking to an old server gets no
+  // `serverPublicKey` in auth_ok and falls back the same way. No flag day.
+  eagerPublicKey: z.string().max(512).optional(),
+  eagerSalt: z.string().max(512).optional(),
 }).passthrough()
 
 export const PairSchema = z.object({

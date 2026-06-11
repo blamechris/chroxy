@@ -13,6 +13,13 @@ import {
 } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { clearAllCallbacks, getCallback } from '../../store/imperative-callbacks';
+import {
+  prepareEagerKeyExchange,
+  setPendingKeyPair,
+  getEncryptionState,
+  setEncryptionState,
+} from '../../store/message-handler';
+import { createKeyPair } from '@chroxy/store-core';
 
 // Reset store between tests
 beforeEach(() => {
@@ -928,6 +935,62 @@ describe('WS message handler (direct)', () => {
       const state = useConnectionStore.getState();
       expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
       expect(state.connectedClients).toEqual([]);
+    });
+
+    // #5555 (eager key exchange) — onopen prepares the keypair eagerly and
+    // sends pubkey+salt with auth; if auth_ok carries serverPublicKey the
+    // client derives the shared key inline and sends the burst immediately,
+    // skipping the discrete key_exchange RTT. Uses real store-core crypto.
+    describe('eager key exchange (#5555)', () => {
+      afterEach(() => {
+        setEncryptionState(null);
+        setPendingKeyPair(null);
+      });
+
+      it('derives encryption inline and sends the burst when serverPublicKey is present', () => {
+        // Simulate onopen having generated + sent the eager keypair.
+        prepareEagerKeyExchange();
+        const serverKp = createKeyPair();
+        (mockSocket.send as jest.Mock).mockClear();
+
+        _testMessageHandler.handle({
+          type: 'auth_ok',
+          clientId: 'me-123',
+          serverMode: 'cli',
+          encryption: 'required',
+          serverPublicKey: serverKp.publicKey,
+        });
+
+        // Shared key established without a discrete key_exchange round trip.
+        expect(getEncryptionState()).not.toBeNull();
+        const sentTypes = (mockSocket.send as jest.Mock).mock.calls
+          .map((c) => JSON.parse(c[0] as string).type);
+        expect(sentTypes).not.toContain('key_exchange');
+        // Burst sends are encrypted envelopes (encryptionState is active).
+        expect(sentTypes).toContain('encrypted');
+      });
+
+      it('falls back to the discrete key_exchange when serverPublicKey is absent (old server)', () => {
+        prepareEagerKeyExchange();
+        (mockSocket.send as jest.Mock).mockClear();
+
+        _testMessageHandler.handle({
+          type: 'auth_ok',
+          clientId: 'me-123',
+          serverMode: 'cli',
+          encryption: 'required',
+          // no serverPublicKey → old server
+        });
+
+        // No shared key yet — waiting on key_exchange_ok.
+        expect(getEncryptionState()).toBeNull();
+        const sent = (mockSocket.send as jest.Mock).mock.calls
+          .map((c) => JSON.parse(c[0] as string));
+        const ke = sent.find((m) => m.type === 'key_exchange');
+        expect(ke).toBeTruthy();
+        expect(typeof ke.publicKey).toBe('string');
+        expect(typeof ke.salt).toBe('string');
+      });
     });
   });
 

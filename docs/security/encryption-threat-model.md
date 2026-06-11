@@ -41,6 +41,14 @@ Chroxy uses the TweetNaCl library (`tweetnacl`) on both the server and mobile ap
 
 5. **Timeout enforcement**: If the client does not send a `key_exchange` message within the configured timeout (default 10 seconds), the server disconnects the client. The server never downgrades to plaintext -- if encryption is enabled, any non-`key_exchange` message during the pending phase causes immediate disconnection.
 
+### Eager Key Exchange (#5555)
+
+As a latency optimisation, the client may fold its half of the handshake into the `auth` message: it generates the ephemeral keypair + salt up front and sends `eagerPublicKey` + `eagerSalt` alongside the token. When the server honours this (encryption required, both fields present and well-formed), it derives the shared key inline and returns its own ephemeral public key as `serverPublicKey` in the **plaintext** `auth_ok` frame, then activates encryption for every subsequent frame. This collapses the two-round-trip handshake into one — replay starts a full RTT earlier.
+
+**The eager path is cryptographically identical to the discrete `key_exchange`.** It uses the same `nacl.box` Curve25519 DH (step 3) and the same per-connection salt sub-key derivation; only the transport timing of the two public keys changes (one frame instead of two). It is fully backward compatible in both directions: an old client that omits the eager fields, or a new client talking to an old server that omits `serverPublicKey`, falls back to the discrete `key_exchange` with no behavioural change. The server still refuses to downgrade to plaintext, still queues nothing-until-keyed on the discrete fallback, and still enforces the key-exchange timeout when the eager path was not taken.
+
+**Interaction with TOFU (#5536).** The eager path does **not** change the trust model. As with the discrete handshake, the server's ephemeral public key travels in the clear over the (TLS-protected) tunnel and is accepted on first use without out-of-band pinning — see "Trust On First Use" below. Moving that key one frame earlier (into `auth_ok`) does not widen the MITM window: an attacker who could relay the discrete `key_exchange_ok` could equally relay the `serverPublicKey` field of `auth_ok`. No server-identity assurance is gained or lost; #5536 is neither improved nor worsened by eager key exchange.
+
 ### Key Properties
 
 - **Ephemeral keys**: New keypairs are generated for every connection. The server creates a fresh keypair per client session; the app resets encryption state on every new WebSocket connection.

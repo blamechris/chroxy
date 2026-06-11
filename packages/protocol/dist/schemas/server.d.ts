@@ -64,6 +64,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
         bindHost: z.ZodNullable<z.ZodString>;
         quickTunnel: z.ZodBoolean;
     }, z.core.$strip>>;
+    serverPublicKey: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;

@@ -118,6 +118,7 @@ import {
   setConnectionContext,
   clearDeltaBuffers,
   stopHeartbeat,
+  resetAllHandlerState,
 } from '../src/store/message-handler';
 import type { ConnectionState } from '../src/store/types';
 import { hapticSuccess } from '../src/utils/haptics';
@@ -181,6 +182,11 @@ describe('auth_ok handler', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     clearDeltaBuffers();
+    // #5555: reset module-level handler state (notably _ctx.pendingKeyPair) so
+    // the eager-key-exchange fallback's `if (!_ctx.pendingKeyPair)` guard sees a
+    // clean slate. Without this, a pendingKeyPair leaked from a prior test makes
+    // the fallback skip createKeyPair() and the call-count assertion fails.
+    resetAllHandlerState();
 
     mockSocket = createMockSocket();
     store = createMockStore({

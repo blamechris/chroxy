@@ -171,6 +171,20 @@ export function handleAuthMessage(ctx, ws, msg) {
 
     client.clientCapabilities = new Set(authData.capabilities ?? [])
 
+    // #5555 (eager key exchange) — stash the client's ephemeral public key +
+    // salt if it supplied BOTH in the auth message. sendPostAuthInfo (called
+    // from onAuthSuccess) consumes these to derive the shared key inline and
+    // returns the server's public key in auth_ok, skipping the discrete
+    // `key_exchange` round trip. Both fields are required together; a client
+    // that sends only one (or empty strings) is treated as not-eager and falls
+    // through to the discrete handshake. The derivation is identical to the
+    // discrete path (deriveSharedKey → deriveConnectionKey with the same salt
+    // semantics) — only the transport timing changes.
+    if (typeof authData.eagerPublicKey === 'string' && authData.eagerPublicKey &&
+        typeof authData.eagerSalt === 'string' && authData.eagerSalt) {
+      client.eagerKeyExchange = { publicKey: authData.eagerPublicKey, salt: authData.eagerSalt }
+    }
+
     onAuthSuccess(ws, client)
     log.info(`Client ${client.id} authenticated`)
     return true

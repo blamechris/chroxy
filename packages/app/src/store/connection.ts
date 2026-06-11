@@ -96,6 +96,7 @@ import {
   setConnectionContext,
   setEncryptionState,
   setPendingKeyPair,
+  prepareEagerKeyExchange,
   getEncryptionState,
   getPendingKeyPair,
   connectionAttemptId,
@@ -959,12 +960,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               deviceInfo: { deviceId, ...info },
             }));
           } else {
+            // #5555 (eager key exchange) — generate this connection's ephemeral
+            // keypair + salt now and send them WITH auth. If the server honours
+            // the eager path it returns serverPublicKey in auth_ok and the
+            // discrete key_exchange RTT is skipped; otherwise (old server /
+            // encryption disabled) the fields are ignored and the auth_ok
+            // handler falls back to the discrete handshake using the same
+            // stashed keypair. Generating eagerly is cheap and harmless even
+            // when the server ends up not requiring encryption.
+            const eager = prepareEagerKeyExchange();
             socket.send(JSON.stringify({
               type: 'auth',
               token,
               protocolVersion: CLIENT_PROTOCOL_VERSION,
               deviceInfo: { deviceId, ...info },
               capabilities: CLIENT_CAPABILITIES.mobile,
+              eagerPublicKey: eager.publicKey,
+              eagerSalt: eager.salt,
             }));
           }
         }
