@@ -1327,9 +1327,13 @@ export class WsServer {
         ip,
         socketIp,
         rateLimitKey,
-        // #5578: true when this socket negotiated permessage-deflate (tunnel /
-        // remote peer); false for LAN/loopback peers whose extension header was
-        // stripped at upgrade. Drives the deflate-aware delta-coalescing window
+        // #5578: true for a non-LAN peer (tunnel / remote) that kept the
+        // server-level permessage-deflate; false for LAN/loopback peers whose
+        // extension header was stripped at upgrade. This is the upgrade-time
+        // LOCALITY decision, not the actual negotiated extension — a remote
+        // client that declines deflate in its handshake still reads true, which
+        // is the intended (and safe) direction: those links pay the same WAN
+        // per-frame cost. Drives the deflate-aware delta-coalescing window
         // — see EventNormalizer._resolveFlushIntervalMs. Set from the
         // unspoofable upgrade-time locality decision (req._chroxyUsesDeflate).
         usesDeflate: req._chroxyUsesDeflate === true,
