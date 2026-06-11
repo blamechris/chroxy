@@ -5,7 +5,9 @@
 //   - absent snapshot (null/undefined) → today's plain body, unchanged
 //   - explicit empty snapshot ([], no wakeup) → plain body too
 //   - outstanding tasks → 'Ready for input — still watching: <desc>' (+N more)
-//   - armed wakeup → 'Ready for input — resumes at HH:MM: <reason>'
+//   - armed wakeup → 'Ready for input — resumes in <rel>: <reason>' (#5474:
+//     relative offset, timezone-proof — `now` is injected so the offset is
+//     pinned against a fixed `at` without freezing the global clock)
 //   - tasks win over a wakeup when both exist (dashboard chip priority)
 //   - the composed body is clamped to ~140 chars (push payload hygiene)
 
@@ -103,39 +105,150 @@ describe('composeReadyNotificationBody — outstanding tasks', () => {
   })
 })
 
-describe('composeReadyNotificationBody — armed wakeup', () => {
-  it('formats the wakeup in server-local HH:MM with the reason', () => {
-    const at = new Date(2026, 5, 10, 9, 5).getTime() // 09:05 local
-    const body = composeReadyNotificationBody({
-      backgroundTasks: [],
-      scheduledWakeup: { at, reason: 'poll CI for the release build' },
-    })
-    assert.equal(body, 'Ready for input — resumes at 09:05: poll CI for the release build')
+describe('composeReadyNotificationBody — armed wakeup (relative, #5474)', () => {
+  // Fixed reference instant so the relative offset is deterministic without
+  // freezing the global clock — `now` is the second composer argument.
+  const NOW = new Date(2026, 5, 10, 9, 0).getTime()
+
+  it('formats the wakeup as a relative minute offset with the reason', () => {
+    const at = NOW + 12 * 60_000 // resumes in 12 minutes
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: 'poll CI for the release build' } },
+      NOW
+    )
+    assert.equal(body, 'Ready for input — resumes in 12m: poll CI for the release build')
+  })
+
+  it('renders "<1m" for a sub-minute offset', () => {
+    const at = NOW + 30_000 // 30 seconds out
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: 'check again' } },
+      NOW
+    )
+    assert.equal(body, 'Ready for input — resumes in <1m: check again')
+  })
+
+  // Boundary regression (#5522): thresholds compare raw deltaMs and the minute
+  // conversion floors — a near-boundary delta must NOT round across a branch.
+  it('keeps a 59.4s offset as "<1m"', () => {
+    const at = NOW + 59_400 // 59.4s — must not round up to a minute
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in <1m'
+    )
+  })
+
+  it('keeps a 59.6s offset as "<1m" (no round-up to "1m")', () => {
+    const at = NOW + 59_600 // 59.6s — Math.round would have produced "1m"
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in <1m'
+    )
+  })
+
+  it('renders a just-shy-of-1m offset as "<1m" right up to the 60s mark', () => {
+    const at = NOW + 59_999 // 59.999s
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in <1m'
+    )
+  })
+
+  it('keeps an 89.5m offset in the minutes branch (no early switch to hours)', () => {
+    const at = NOW + 89.5 * 60_000 // 89.5m — Math.round would have switched to "1h30m"
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 89m'
+    )
+  })
+
+  it('switches to the hours branch only at the true 90m mark (89.999m → "89m")', () => {
+    const at = NOW + 89.999 * 60_000
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 89m'
+    )
+  })
+
+  it('keeps the h+m branch self-consistent for a near-hour-boundary delta (1h59m30s → "1h59m")', () => {
+    const at = NOW + 119.5 * 60_000 // 1h59m30s — floor must not roll over to "1h60m"/"2h0m"
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 1h59m'
+    )
+  })
+
+  it('renders 119.7m as "1h59m" without rounding minutes up to 60', () => {
+    const at = NOW + 119.7 * 60_000
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 1h59m'
+    )
+  })
+
+  it('renders bare minutes up to 89m, then switches to hours', () => {
+    const at89 = NOW + 89 * 60_000
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at: at89, reason: '' } }, NOW),
+      'Ready for input — resumes in 89m'
+    )
+    const at90 = NOW + 90 * 60_000
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at: at90, reason: '' } }, NOW),
+      'Ready for input — resumes in 1h30m'
+    )
+  })
+
+  it('renders a whole-hour offset without a minutes component', () => {
+    const at = NOW + 2 * 60 * 60_000 // exactly 2 hours
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: '' } },
+      NOW
+    )
+    assert.equal(body, 'Ready for input — resumes in 2h')
+  })
+
+  it('zero-pads the trailing minutes in an hours+minutes offset', () => {
+    const at = NOW + (2 * 60 + 5) * 60_000 // 2h05m
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: '' } },
+      NOW
+    )
+    assert.equal(body, 'Ready for input — resumes in 2h05m')
   })
 
   it('omits the reason segment when the reason is empty', () => {
-    const at = new Date(2026, 5, 10, 23, 59).getTime()
-    const body = composeReadyNotificationBody({
-      backgroundTasks: [],
-      scheduledWakeup: { at, reason: '' },
-    })
-    assert.equal(body, 'Ready for input — resumes at 23:59')
+    const at = NOW + 12 * 60_000
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: '' } },
+      NOW
+    )
+    assert.equal(body, 'Ready for input — resumes in 12m')
   })
 
   it('omits the reason segment when the reason is whitespace-only', () => {
-    const at = new Date(2026, 5, 10, 23, 59).getTime()
-    const body = composeReadyNotificationBody({
-      backgroundTasks: [],
-      scheduledWakeup: { at, reason: ' \n ' },
-    })
-    assert.equal(body, 'Ready for input — resumes at 23:59')
+    const at = NOW + 12 * 60_000
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: ' \n ' } },
+      NOW
+    )
+    assert.equal(body, 'Ready for input — resumes in 12m')
   })
 
   it('degrades to the plain body when the wakeup time is unparsable', () => {
-    const body = composeReadyNotificationBody({
-      backgroundTasks: [],
-      scheduledWakeup: { at: NaN, reason: 'whatever' },
-    })
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at: NaN, reason: 'whatever' } },
+      NOW
+    )
+    assert.equal(body, DEFAULT_READY_BODY)
+  })
+
+  it('degrades to the plain body when the wakeup time is already in the past', () => {
+    const at = NOW - 60_000 // a minute ago
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: 'stale wakeup' } },
+      NOW
+    )
     assert.equal(body, DEFAULT_READY_BODY)
   })
 })
@@ -187,13 +300,14 @@ describe('composeReadyNotificationBody — length clamp', () => {
   })
 
   it('truncates an oversized wakeup reason too', () => {
-    const at = new Date(2026, 5, 10, 12, 0).getTime()
-    const body = composeReadyNotificationBody({
-      backgroundTasks: [],
-      scheduledWakeup: { at, reason: 'z'.repeat(500) },
-    })
+    const now = new Date(2026, 5, 10, 12, 0).getTime()
+    const at = now + 12 * 60_000
+    const body = composeReadyNotificationBody(
+      { backgroundTasks: [], scheduledWakeup: { at, reason: 'z'.repeat(500) } },
+      now
+    )
     assert.ok(body.length <= READY_BODY_MAX_LENGTH)
-    assert.ok(body.startsWith('Ready for input — resumes at 12:00: z'))
+    assert.ok(body.startsWith('Ready for input — resumes in 12m: z'))
     assert.ok(body.endsWith('…'))
   })
 })

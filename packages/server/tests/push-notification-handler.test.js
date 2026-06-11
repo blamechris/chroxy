@@ -273,8 +273,12 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
     assert.equal(fakes.sends[0].data.state, 'idle')
   })
 
-  it('enriches the body with an armed wakeup (local HH:MM + reason)', () => {
-    const at = new Date(2026, 5, 10, 7, 30).getTime()
+  it('enriches the body with an armed wakeup (relative offset + reason)', () => {
+    // The handler composes without an explicit `now`, so the body is rendered
+    // against Date.now() at test runtime (#5474). Pin `at` 12 minutes out and
+    // assert with a tolerant regex so a few ms of runtime drift across the
+    // round-to-minute boundary can't flake the assertion.
+    const at = Date.now() + 12 * 60_000
     const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
     wireSession(fakes, {
       name: 'n',
@@ -284,7 +288,7 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
       }),
     })
     emitResult(fakes)
-    assert.equal(fakes.sends[0].body, 'Ready for input — resumes at 07:30: poll the release build')
+    assert.match(fakes.sends[0].body, /^Ready for input — resumes in 1[12]m: poll the release build$/)
   })
 
   it('a throwing snapshot read degrades to the plain body (push still fires)', () => {
