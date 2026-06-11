@@ -313,6 +313,9 @@ describe('event-ingest', () => {
         subagent_stop: 'session_activity',
         notification: 'activity_waiting',
         post_tool_use: 'session_activity',
+        // #5541 turn edges
+        user_prompt_submit: 'session_activity',
+        stop: 'activity_update',
       }
       for (const [type, category] of Object.entries(expected)) {
         const res = await post(validEvent({ type, source: `src-${type}` }))
@@ -383,6 +386,54 @@ describe('event-ingest', () => {
       const call = mockServer.pushManager.calls[0]
       assert.equal(call.title, 'Custom title')
       assert.equal(call.body, 'Claude needs permission to run Bash')
+    })
+
+    // #5541 turn edges — authoritative turn START / END.
+    it('user_prompt_submit → session_activity (online) and sets turnInFlight on the dispatch', async () => {
+      await startWith(createMockServer())
+      const res = await post(validEvent({
+        type: 'user_prompt_submit',
+        sessionId: 'ext-turn',
+        data: { cwd: '/x' },
+      }))
+      assert.equal(res.status, 200)
+      assert.equal((await res.json()).category, 'session_activity')
+      const call = mockServer.pushManager.calls[0]
+      assert.equal(call.category, 'session_activity')
+      assert.equal(call.data.turnInFlight, true, 'turn-in-flight flag plumbed to the sink')
+      assert.equal(call.data.project, 'myproject')
+    })
+
+    it('stop → activity_update (idle, "Ready for input") and clears turnInFlight', async () => {
+      await startWith(createMockServer())
+      // Start a turn first, then stop it.
+      await post(validEvent({ type: 'user_prompt_submit', sessionId: 'ext-turn', data: { cwd: '/x' } }))
+      const res = await post(validEvent({ type: 'stop', sessionId: 'ext-turn', data: { cwd: '/x' } }))
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.equal(body.category, 'activity_update')
+      const stopCall = mockServer.pushManager.calls[1]
+      assert.equal(stopCall.category, 'activity_update')
+      assert.equal(stopCall.title, 'Ready for input')
+      assert.equal(stopCall.data.turnInFlight, false, 'stop clears the turn-in-flight flag')
+    })
+
+    it('turnInFlight is per project — a subagent event mid-turn reports the project busy', async () => {
+      await startWith(createMockServer())
+      await post(validEvent({ type: 'user_prompt_submit', sessionId: 'main', project: 'p', data: { cwd: '/x' } }))
+      const res = await post(validEvent({ type: 'subagent_start', sessionId: 'main', project: 'p', data: { cwd: '/x' } }))
+      assert.equal(res.status, 200)
+      const call = mockServer.pushManager.calls[mockServer.pushManager.calls.length - 1]
+      assert.equal(call.data.turnInFlight, true, 'subagent_start while a turn is in flight reports turnInFlight')
+      assert.equal(call.data.subagents, 1)
+    })
+
+    it('no turn in flight → turnInFlight is false (daemon-restart / steady-state default)', async () => {
+      await startWith(createMockServer())
+      const res = await post(validEvent({ type: 'subagent_start', sessionId: 's', project: 'p', data: { cwd: '/x' } }))
+      assert.equal(res.status, 200)
+      const call = mockServer.pushManager.calls[0]
+      assert.equal(call.data.turnInFlight, false)
     })
 
     it('503 when no pushManager is wired', async () => {

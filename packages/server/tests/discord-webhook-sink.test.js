@@ -1221,6 +1221,122 @@ describe('DiscordWebhookSink — subagent/idle interplay (#5439 GAP C)', () => {
   })
 })
 
+// #5541 — GAP C rescope for turn edges. The bash GAP C rule ("idle +
+// subagents = still being waited on, hold the idle embed") is only correct
+// when NO turn is in flight. While a turn IS in flight (UserPromptSubmit seen,
+// no Stop yet) the main agent is BUSY, so an online-mapped event must flip the
+// embed idle→online showing "Working — N subagents", and the count→0 "Ready
+// for input" re-ping must be suppressed. A daemon restart loses the in-memory
+// turn state, so a missing data.turnInFlight defaults to "no turn in flight"
+// (today's GAP C behavior, exercised by the #5439 block above).
+describe('DiscordWebhookSink — GAP C rescope for turn edges (#5541)', () => {
+  const online = (data = {}) => ({
+    category: 'session_online',
+    title: 'Session online',
+    body: 'External session started',
+    data: { project: 'proj1', ...data },
+  })
+  const activity = (data = {}) => ({
+    category: 'session_activity',
+    title: 'Subagent started',
+    body: 'A subagent is running',
+    data: { project: 'proj1', ...data },
+  })
+  const ready = (data = {}) => ({
+    category: 'activity_update',
+    title: 'Ready for input',
+    body: 'Claude is waiting for input',
+    data: { project: 'proj1', ...data },
+  })
+
+  /** online (m1) → idle embed with running subagents (DELETE m1 + POST m2). */
+  async function seedIdleWithSubagents(sink, advance) {
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(16_000)
+    scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
+    await sink.send(ready({ subagents: 2 }))
+    advance(16_000)
+  }
+
+  it('stale-idle bug fixed: idle + turn-in-flight + subagent activity flips to online "Working — N subagents"', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedIdleWithSubagents(sink, advance)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 2, turnInFlight: true })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH', 'flips in place — not a re-ping')
+    const embed = JSON.parse(calls[0].body).embeds[0]
+    assert.match(embed.title, /Session Online/, 'embed flips to online while the turn is in flight')
+    assert.ok(
+      embed.fields.some((f) => f.name === 'Status' && /Working — 2 subagents/.test(f.value)),
+      'detail line reads "Working — 2 subagents"'
+    )
+    assert.equal(readState(statePath).projects.proj1.state, 'online', 'stored state flips to online')
+  })
+
+  it('uses the single subagent agentType when count is 1 ("Working — <agentType>")', async () => {
+    const { sink, advance } = makeSink()
+    await seedIdleWithSubagents(sink, advance)
+    const calls = scriptFetch([{ status: 200 }])
+    await sink.send(activity({ subagents: 1, turnInFlight: true, agentType: 'code-reviewer' }))
+    const embed = JSON.parse(calls[0].body).embeds[0]
+    assert.ok(
+      embed.fields.some((f) => f.name === 'Status' && /Working — code-reviewer/.test(f.value)),
+      'single-subagent detail names the agentType'
+    )
+  })
+
+  it('falls back to "Working — 1 subagent" mid-turn when no agentType is available', async () => {
+    const { sink, advance } = makeSink()
+    await seedIdleWithSubagents(sink, advance)
+    const calls = scriptFetch([{ status: 200 }])
+    await sink.send(activity({ subagents: 1, turnInFlight: true }))
+    const embed = JSON.parse(calls[0].body).embeds[0]
+    assert.ok(
+      embed.fields.some((f) => f.name === 'Status' && /Working — 1 subagent\b/.test(f.value)),
+      'singular subagent wording'
+    )
+  })
+
+  it('count→0 re-ping is SUPPRESSED while a turn is in flight (main agent still synthesizing)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedIdleWithSubagents(sink, advance)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 0, turnInFlight: true })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH', 'no DELETE+POST re-ping mid-turn')
+    assert.notDeepEqual(calls.map((c) => c.method), ['DELETE', 'POST'])
+    assert.match(JSON.parse(calls[0].body).embeds[0].title, /Session Online/, 'flips to online, not a Ready re-ping')
+    assert.equal(readState(statePath).projects.proj1.state, 'online')
+  })
+
+  it('GAP C is preserved when no turn is in flight: idle + subagents holds idle (PATCH, no flip)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedIdleWithSubagents(sink, advance)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 2, turnInFlight: false })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH')
+    assert.match(JSON.parse(calls[0].body).embeds[0].title, /Ready for input/, 'holds idle when no turn in flight')
+    assert.equal(readState(statePath).projects.proj1.state, 'idle')
+  })
+
+  it('restart fallback: a missing turnInFlight flag behaves like no turn in flight (count→0 re-pings)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedIdleWithSubagents(sink, advance)
+    const calls = scriptFetch([
+      { status: 204 },                     // DELETE m2
+      { status: 200, body: { id: 'm3' } }, // fresh POST re-pings
+    ])
+    // No turnInFlight key at all — the daemon-restart / old-pipeline default.
+    assert.equal(await sink.send(activity({ subagents: 0 })), true)
+    assert.deepEqual(calls.map((c) => c.method), ['DELETE', 'POST'], 'count→0 re-ping preserved without the flag')
+    assert.match(JSON.parse(calls[1].body).embeds[0].title, /Ready for input/)
+    assert.equal(readState(statePath).projects.proj1.state, 'idle')
+  })
+})
+
 // #5439 GAP D — SessionEnd 404 orphan (port of bash no_post_on_404). When
 // the tracked message was deleted externally, marking the session offline
 // must NOT POST a fresh offline embed — drop the messageId and move on.
