@@ -55,7 +55,7 @@ function makeCtx(overrides = {}) {
     broadcastToSession: mock.fn(),
     broadcastSessionList: mock.fn(),
     sendSessionInfo: mock.fn(),
-    updatePrimary: mock.fn((sid, cid) => { if (!primaryMap.has(sid)) primaryMap.set(sid, cid) }),
+    updatePrimary: mock.fn((sid, cid) => { primaryMap.set(sid, cid) }),
     claimPrimary: mock.fn((sid, cid, o = {}) => {
       const current = primaryMap.get(sid)
       if (current === cid) return { changed: false, primaryClientId: current }

@@ -51,13 +51,17 @@ export class WsClientManager extends EventEmitter {
     this._sessionIndex = new Map()
     // #5563: explicit primary-ownership for shared sessions. Replaces the old
     // last-writer-wins `_primaryClients` map that lived on WsServer. A session's
-    // primary is the one client allowed to DRIVE it (send input); every other
-    // subscriber is an OBSERVER (read-only). v1 semantics:
-    //   - First client to claim a session (implicitly on first input, or
-    //     explicitly via claim_primary) becomes primary.
-    //   - While a session HAS a primary, ownership transfers ONLY by explicit
-    //     hand-off (claim_primary from another client is rejected unless the
-    //     session is unclaimed) — NOT by whoever sent input last.
+    // primary is the client currently DRIVING it; every other subscriber is an
+    // OBSERVER. v1 semantics:
+    //   - First client to claim a session becomes primary.
+    //   - The explicit `claim_primary` wire path is STICKY: a claim against an
+    //     owned session is rejected unless `force: true` (hand-off).
+    //   - Input that passed the input_conflict gate adopts primary with force
+    //     (see WsServer._updatePrimary): the server can't tell "same user,
+    //     second device" from "shared-session observer" without identity, so
+    //     accepted input keeps today's seamless device hand-off; true
+    //     observe-only enforcement is #5281 client-role work built on the
+    //     sticky claim path.
     //   - On primary disconnect the slot is CLEARED (nobody-until-claim) so a
     //     backgrounded observer is never silently promoted; the next claimant
     //     (or first input) takes over. This matches the pre-#5563 disconnect

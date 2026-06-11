@@ -93,7 +93,7 @@ export function makeSessionIndexCtx() {
       // tests exercise the production claim/observe gate. These do NOT broadcast
       // (the full ws-server announces session_role/primary_changed) — they only
       // mutate the manager's primary map so getPrimary/isPrimary read correctly.
-      updatePrimary: (sid, cid) => clientManager.claimPrimary(sid, cid),
+      updatePrimary: (sid, cid) => clientManager.claimPrimary(sid, cid, { force: true }),
       claimPrimary: (sid, cid, opts) => clientManager.claimPrimary(sid, cid, opts),
       getPrimary: (sid) => clientManager.getPrimary(sid),
       isPrimary: (sid, cid) => clientManager.isPrimary(sid, cid),

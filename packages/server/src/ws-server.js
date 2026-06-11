@@ -1938,17 +1938,21 @@ export class WsServer {
   }
 
   /**
-   * First-input adoption path (#5563). A client that sends input to a session
-   * with NO primary becomes primary (claims it). If the session already has a
-   * DIFFERENT primary, the claim is rejected without side effects — the caller
-   * (input-handlers) has already enforced the input_conflict gate, so this is a
-   * belt-and-suspenders no-op rather than a silent last-writer-wins steal. If
-   * the client is already primary it is a no-op. Broadcasts `primary_changed`
-   * (legacy) + `session_role` (new) only on an actual change.
+   * Input adoption path (#5563). Called only for input that already PASSED the
+   * input_conflict gate — i.e. the session was idle, or the sender is already
+   * primary. Accepted input adopts primary (`force: true`): the server cannot
+   * distinguish "same user, second device" from "shared-session observer"
+   * without identity, and blocking adoption here strands a solo user's second
+   * device behind input_conflict for the rest of the run it just started. The
+   * mid-run steal is still prevented by the conflict gate itself; true
+   * observe-only enforcement is client-role work (#5281) built on the explicit
+   * `claim_primary` path below, which IS sticky (rejects without `force`).
+   * Broadcasts `primary_changed` (legacy) + `session_role` (new) only on an
+   * actual change.
    */
   _updatePrimary(sessionId, clientId) {
     if (!sessionId) return
-    const res = this._clientManager.claimPrimary(sessionId, clientId)
+    const res = this._clientManager.claimPrimary(sessionId, clientId, { force: true })
     if (res.changed) this._announcePrimary(sessionId, clientId)
   }
 

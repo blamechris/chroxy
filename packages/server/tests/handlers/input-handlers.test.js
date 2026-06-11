@@ -13,7 +13,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
   // { force: true })`. `updatePrimary` stays a spy (asserted by clarify-path
   // tests) while still mutating the Map for any post-adoption read.
   const primaryClients = new Map()
-  const updatePrimary = createSpy((sid, cid) => { if (!primaryClients.has(sid)) primaryClients.set(sid, cid) })
+  const updatePrimary = createSpy((sid, cid) => { primaryClients.set(sid, cid) })
 
   return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
@@ -226,9 +226,11 @@ describe('input-handlers', () => {
 
     // #5563: the cross-client input_conflict gate only bites while the session
     // is RUNNING (mirrors the pre-#5563 behaviour). An idle session accepts a
-    // second client's input — that send simply does not steal primary (the
-    // first-writer adoption is a no-op when already owned).
-    it('non-primary input on an IDLE session is accepted and does not steal primary', () => {
+    // second client's input AND that input adopts primary (same-user device
+    // hand-off: the desktop typing into a session the phone drove must own the
+    // run it starts, or its mid-run follow-ups hit input_conflict). Sticky
+    // ownership applies only to the explicit claim_primary wire path.
+    it('non-primary input on an IDLE session is accepted and adopts primary', () => {
       const sessions = new Map()
       const session = createMockSession()
       session.isRunning = false
@@ -240,8 +242,9 @@ describe('input-handlers', () => {
       inputHandlers.input(makeWs(), other, { data: 'hello' }, ctx)
 
       assert.equal(ctx._sent.filter(m => m.type === 'session_error').length, 0)
-      // Owner unchanged — observer's input did not steal primary.
-      assert.equal(ctx.transport.getPrimary('s1'), 'owner')
+      // Accepted idle input adopts primary, so the sender can follow up
+      // mid-run without tripping the conflict gate on its own turn.
+      assert.equal(ctx.transport.getPrimary('s1'), 'observer')
     })
 
     it('skips empty input without sending error', () => {
