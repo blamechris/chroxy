@@ -6711,10 +6711,41 @@ button.sidebar-token-view-session-row:hover {
 .summon-hotkey-row input {
   flex: 1 1 auto;
   min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.summon-hotkey-row input::placeholder {
+  color: var(--text-disabled);
+}
+
+.summon-hotkey-row input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
 }
 
 .summon-hotkey-row button {
   flex: 0 0 auto;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.summon-hotkey-row button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.summon-hotkey-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .tunnel-restart-btn {
