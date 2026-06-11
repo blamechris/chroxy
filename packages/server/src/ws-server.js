@@ -28,6 +28,7 @@ import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { getProviderDataDirs } from './providers.js'
 import { isLoopbackHost } from './bind-host.js'
+import { isLocalOrLanPeer } from './connection-locality.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -1150,6 +1151,13 @@ export class WsServer {
     this.wss = new WebSocketServer({
       noServer: true,
       maxPayload: this._maxPayload,
+      // #5516 (epic #5514): permessage-deflate is enabled here for ALL
+      // connections (tunnel bandwidth saving). It is then SKIPPED per-connection
+      // for local/LAN peers in the 'upgrade' handler below (strip the client's
+      // Sec-WebSocket-Extensions header before handleUpgrade) — local links
+      // aren't bandwidth-bound, so compressing every frame just adds CPU
+      // latency. Choosing skip-on-local over a blanket higher threshold keeps
+      // tunnel behavior byte-for-byte unchanged.
       perMessageDeflate: {
         zlibDeflateOptions: { level: 6 },
         zlibInflateOptions: { chunkSize: 16 * 1024 },
@@ -1165,6 +1173,20 @@ export class WsServer {
         log.warn(`Pre-auth connection limit reached (${pendingCount}/${this._maxPendingConnections}), rejecting upgrade`)
         socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
+      }
+      // #5516 (epic #5514): skip permessage-deflate for local/LAN peers. On a
+      // fast local link compressing every message buys nothing (the link isn't
+      // the bottleneck) and just adds CPU latency on the dev machine. Tunnel
+      // connections KEEP deflate — that's where the WAN bandwidth saving is
+      // real. `ws` negotiates permessage-deflate from the client's
+      // Sec-WebSocket-Extensions request header, so deleting it for a local
+      // peer makes `handleUpgrade` complete WITHOUT compression for THIS socket
+      // only — the server-level config still applies to tunnel connections.
+      // Security: isLocalOrLanPeer keys off the unspoofable socket peer; a
+      // forged proxy header can only KEEP deflate (the safe default), never
+      // remove it. See connection-locality.js.
+      if (isLocalOrLanPeer(req)) {
+        delete req.headers['sec-websocket-extensions']
       }
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit('connection', ws, req)
