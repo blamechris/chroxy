@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, IntegrationActionCounts } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -584,6 +584,17 @@ export interface ConnectionState {
    * empty/loading state). Replaced wholesale on each snapshot — the survey is a
    * full picture, not a delta stream.
    */
+  /**
+   * #5510 (epic #5509) — pairing-approval primitive: outstanding pending
+   * pair requests fanned out to this host-level surface via `pair_pending`.
+   * Each entry carries the requesting device's name, the 6-digit verify code to
+   * compare against the new device's screen, and its expiry. Entries are added
+   * on `pair_pending`, removed on `pair_resolved` (approved/denied/expired
+   * elsewhere) or after the local Approve/Deny action. `deviceName` is
+   * attacker-controlled and rendered as plain text (React escapes).
+   */
+  pendingPairRequests: ServerPairPendingMessage[];
+
   hostStatus: ServerHostStatusSnapshotMessage | null;
   /**
    * #5175 — true between dispatching a `host_status_request` and the matching
@@ -1118,6 +1129,15 @@ export interface ConnectionState {
   // button surfaces a "not connected" state). Sets `hostStatusLoading` while in
   // flight so the button can show a spinner.
   requestHostStatus: () => boolean;
+
+  // #5510 (epic #5509): approve a pending pair request, sending `pair_approve`.
+  // Optimistically drops the request from `pendingPairRequests` (the server also
+  // retracts it via `pair_resolved`). Returns whether the message went on the
+  // wire (false = socket closed).
+  approvePairRequest: (requestId: string) => boolean;
+  // #5510: deny a pending pair request, sending `pair_deny`. Same optimistic
+  // drop + wire-result contract as approvePairRequest.
+  denyPairRequest: (requestId: string) => boolean;
 
   // #5253: request a self-hosted runner survey. Dispatches a
   // `runner_status_request`; the server replies with a single

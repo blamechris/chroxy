@@ -1,0 +1,120 @@
+/**
+ * request-pairing — requester side of the pairing-approval primitive (#5510).
+ *
+ * Drives a fake WebSocket through the round-trip and asserts the phase
+ * transitions: requesting → code-shown → approved/denied/expired/error. The
+ * verify code is only ever DISPLAYED (received on pair_request_pending), never
+ * sent back, so a mismatch is impossible by construction.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { requestPairing, type PairRequestState } from './request-pairing'
+
+class FakeWebSocket {
+  static instances: FakeWebSocket[] = []
+  url: string
+  readyState = 0
+  sent: string[] = []
+  onopen: (() => void) | null = null
+  onmessage: ((ev: { data: string }) => void) | null = null
+  onerror: (() => void) | null = null
+  onclose: (() => void) | null = null
+  constructor(url: string) {
+    this.url = url
+    FakeWebSocket.instances.push(this)
+  }
+  send(data: string) { this.sent.push(data) }
+  close() { this.readyState = 3 }
+  // test helpers
+  open() { this.readyState = 1; this.onopen?.() }
+  recv(obj: unknown) { this.onmessage?.({ data: JSON.stringify(obj) }) }
+}
+
+describe('requestPairing (#5510)', () => {
+  let states: PairRequestState[]
+  beforeEach(() => {
+    FakeWebSocket.instances = []
+    states = []
+    vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket)
+    vi.stubGlobal('crypto', { randomUUID: () => 'fixed-req-id' })
+  })
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  function run(deviceName = 'Desktop'): FakeWebSocket {
+    requestPairing('wss://host/ws', deviceName, (s) => states.push(s))
+    const ws = FakeWebSocket.instances[0]
+    if (!ws) throw new Error('requestPairing did not open a WebSocket')
+    return ws
+  }
+
+  // Last emitted state — asserts the harness actually pushed one (narrows the
+  // `noUncheckedIndexedAccess` `T | undefined` away for the call sites).
+  function lastState(): PairRequestState {
+    const s = states[states.length - 1]
+    if (!s) throw new Error('no PairRequestState was emitted')
+    return s
+  }
+
+  it('sends pair_request on open and surfaces the verify code', () => {
+    const ws = run('Pixel 8')
+    ws.open()
+    const firstSent = ws.sent[0]
+    if (!firstSent) throw new Error('no frame was sent')
+    const sent = JSON.parse(firstSent)
+    expect(sent.type).toBe('pair_request')
+    expect(sent.requestId).toBe('fixed-req-id')
+    expect(sent.deviceName).toBe('Pixel 8')
+
+    ws.recv({ type: 'pair_request_pending', requestId: 'fixed-req-id', verifyCode: '424242' })
+    const last = lastState()
+    expect(last.phase).toBe('code-shown')
+    expect(last.verifyCode).toBe('424242')
+  })
+
+  it('reaches approved with the token on a successful pair_result', () => {
+    const ws = run()
+    ws.open()
+    ws.recv({ type: 'pair_request_pending', requestId: 'fixed-req-id', verifyCode: '000000' })
+    ws.recv({ type: 'pair_result', requestId: 'fixed-req-id', ok: true, token: 'sess-tok-xyz' })
+    const last = lastState()
+    expect(last.phase).toBe('approved')
+    expect(last.token).toBe('sess-tok-xyz')
+    expect(ws.readyState).toBe(3) // closed after terminal state
+  })
+
+  it('maps a denied result to the denied phase', () => {
+    const ws = run()
+    ws.open()
+    ws.recv({ type: 'pair_result', requestId: 'fixed-req-id', ok: false, reason: 'denied' })
+    expect(lastState().phase).toBe('denied')
+  })
+
+  it('maps an expired result to the expired phase', () => {
+    const ws = run()
+    ws.open()
+    ws.recv({ type: 'pair_result', requestId: 'fixed-req-id', ok: false, reason: 'expired' })
+    expect(lastState().phase).toBe('expired')
+  })
+
+  it('ignores frames addressed to a different requestId', () => {
+    const ws = run()
+    ws.open()
+    ws.recv({ type: 'pair_request_pending', requestId: 'someone-else', verifyCode: '999999' })
+    expect(lastState().verifyCode).toBeNull()
+  })
+
+  it('never echoes the verify code back to the server', () => {
+    const ws = run()
+    ws.open()
+    ws.recv({ type: 'pair_request_pending', requestId: 'fixed-req-id', verifyCode: '424242' })
+    // Only the initial pair_request was ever sent — no follow-up carries the code.
+    expect(ws.sent).toHaveLength(1)
+    expect(JSON.stringify(ws.sent)).not.toContain('424242')
+  })
+
+  it('surfaces an error if the socket closes before a terminal result', () => {
+    const ws = run()
+    ws.open()
+    ws.onclose?.()
+    expect(lastState().phase).toBe('error')
+  })
+})

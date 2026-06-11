@@ -5,7 +5,7 @@
  * concerns from message routing.
  */
 import { createKeyPair, deriveSharedKey, deriveConnectionKey } from '@chroxy/store-core/crypto'
-import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
+import { AuthSchema, KeyExchangeSchema, PairSchema, PairRequestSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 
@@ -344,6 +344,95 @@ export function handlePairMessage(ctx, ws, msg) {
   log.info(`Pair failure from ${rateLimitKey}: ${result.reason} (benign — not counted toward strict rate limit)`)
   send(ws, { type: 'pair_fail', reason: result.reason })
   ws.close()
+  return true
+}
+
+/**
+ * Handle a `pair_request` from an UNAUTHENTICATED client (#5510, epic #5509).
+ *
+ * Same exposure class as `handlePairMessage`: pre-auth, rate-limited (the
+ * PairingManager queue enforces a global cap + per-request TTL + per-source rate
+ * limit), and the connection is kept OPEN so the requester can later receive its
+ * terminal `pair_result`.
+ *
+ * The verify code is generated SERVER-SIDE inside enqueuePendingRequest and only
+ * ever travels server→requester (display) and server→host surfaces (compare).
+ * The requester never echoes it back, so a mismatch is impossible by
+ * construction. deviceName is attacker-controlled — capped at the schema and
+ * relayed as plain text (never interpolated into a log format).
+ *
+ * Returns true if the message was consumed.
+ *
+ * @param {object} ctx - Server context (pairingManager, registerPairRequester,
+ *   broadcastPairPending, send)
+ * @param {WebSocket} ws
+ * @param {object} msg
+ * @returns {boolean}
+ */
+export function handlePairRequestMessage(ctx, ws, msg) {
+  const {
+    clients, pairingManager, send,
+    registerPairRequester, broadcastPairPending,
+  } = ctx
+  const client = clients.get(ws)
+  if (!client || client.authenticated) return false
+  if (msg.type !== 'pair_request') return false
+
+  if (!pairingManager) {
+    send(ws, { type: 'pair_result', requestId: typeof msg?.requestId === 'string' ? msg.requestId : '', ok: false, reason: 'pairing_not_enabled' })
+    ws.close()
+    return true
+  }
+
+  // Validate shape.
+  const parsed = PairRequestSchema.safeParse(msg)
+  if (!parsed.success) {
+    send(ws, { type: 'pair_result', requestId: typeof msg?.requestId === 'string' ? msg.requestId : '', ok: false, reason: 'invalid_message' })
+    ws.close()
+    return true
+  }
+  const data = parsed.data
+
+  // Rate-limit key: CF-Connecting-IP behind the tunnel, else socket ip (same
+  // rationale as handlePairMessage — keying off socketIp behind cloudflared lets
+  // one source lock out everyone).
+  const source = client.rateLimitKey || client.socketIp || ''
+
+  const result = pairingManager.enqueuePendingRequest({
+    requestId: data.requestId,
+    deviceName: data.deviceName || '',
+    source,
+  })
+
+  if (!result.ok) {
+    // Bounded rejection (rate_limited / queue_full / duplicate_request). Do NOT
+    // log deviceName (attacker-controlled). The connection closes — the
+    // requester can retry with backoff / a fresh requestId.
+    log.warn(`pair_request rejected for ${source}: ${result.reason}`)
+    send(ws, { type: 'pair_result', requestId: data.requestId, ok: false, reason: result.reason })
+    ws.close()
+    return true
+  }
+
+  // Track the requester's open connection so approve/deny/expire can reach it.
+  registerPairRequester(data.requestId, ws)
+
+  // Tell the requester its code to display.
+  send(ws, { type: 'pair_request_pending', requestId: data.requestId, verifyCode: result.verifyCode })
+
+  // Fan the request out to host-level approval surfaces. deviceName relayed
+  // verbatim (plain text); never logged.
+  broadcastPairPending({
+    type: 'pair_pending',
+    requestId: data.requestId,
+    deviceName: data.deviceName ? String(data.deviceName).slice(0, 64) : '',
+    verifyCode: result.verifyCode,
+    expiresAt: result.expiresAt,
+  })
+
+  // requestId is pre-auth attacker-controlled (the schema permits newlines /
+  // control chars); JSON.stringify keeps it a single well-formed log record.
+  log.info(`pair_request queued from ${source} (requestId ${JSON.stringify(data.requestId)})`)
   return true
 }
 

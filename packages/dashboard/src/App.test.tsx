@@ -210,6 +210,12 @@ vi.mock('./store/connection', () => {
     fetchConversationHistory: vi.fn(),
     resumeConversation: vi.fn(),
     connectedClients: [],
+    // #5510 — pairing-approval primitive: host-level pending pair-request banner
+    // slice + actions. Mirror the real store defaults so App renders the
+    // (empty) PendingPairRequests banner without crashing on `.length`.
+    pendingPairRequests: [],
+    approvePairRequest: vi.fn(),
+    denyPairRequest: vi.fn(),
     serverRegistry: [],
     activeServerId: null,
     addServer: vi.fn(),
