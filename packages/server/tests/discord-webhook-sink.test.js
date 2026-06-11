@@ -579,6 +579,82 @@ describe('DiscordWebhookSink — status-message state machine', () => {
     assert.ok(embed.fields.some((f) => f.name === 'Status' && f.value === enriched))
   })
 
+  it('escapes Discord markdown metacharacters in free-text fields (#5475)', async () => {
+    // A transcript task description like `watch dist/*_test.js` would otherwise
+    // render with the *…* / _…_ runs styled as italics, swallowing characters.
+    // Body (Status), detail (Detail), and sessionName (Session) are all
+    // free-text and must surface literally.
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send({
+      ...idle({
+        detail: 'tool ~strike~ and `code`',
+        sessionName: 'proj_*beta*',
+      }),
+      body: 'watch dist/*_test.js | grep ~done~ > log',
+    })
+    const embed = JSON.parse(calls[0].body).embeds[0]
+
+    const status = embed.fields.find((f) => f.name === 'Status').value
+    assert.equal(status, 'watch dist/\\*\\_test.js \\| grep \\~done\\~ \\> log')
+    // Every metacharacter is backslash-escaped — none survive un-escaped.
+    assert.ok(!/(^|[^\\])[*_~`|>]/.test(status), 'no un-escaped metachar in Status')
+
+    const detail = embed.fields.find((f) => f.name === 'Detail').value
+    assert.equal(detail, 'tool \\~strike\\~ and \\`code\\`')
+
+    const session = embed.fields.find((f) => f.name === 'Session').value
+    assert.equal(session, 'proj\\_\\*beta\\*')
+  })
+
+  it('escapes a literal backslash before inserting markdown escapes (#5475)', async () => {
+    // Backslash must be escaped first so a body of `a\*b` becomes `a\\\*b`
+    // (escaped backslash + escaped star), not `a\\*b` (which Discord would
+    // read as an escaped backslash followed by an un-escaped star).
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send({ ...idle(), body: 'a\\*b' })
+    const status = JSON.parse(calls[0].body).embeds[0].fields.find((f) => f.name === 'Status').value
+    assert.equal(status, 'a\\\\\\*b')
+  })
+
+  it('caps the FINAL escaped field at the truncate limit for all-metachar input (#5475)', async () => {
+    // Escaping after truncation can ~double the length (each metachar → `\X`).
+    // An all-metachar body must NOT push the escaped value past Discord's
+    // 1024-char field limit, or the webhook PATCH/POST is rejected with a 400.
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send({
+      ...idle({
+        detail: '*'.repeat(1500),
+        sessionName: '~'.repeat(500),
+      }),
+      body: '*'.repeat(2000),
+    })
+    const embed = JSON.parse(calls[0].body).embeds[0]
+
+    for (const [name, cap] of [['Status', 1000], ['Detail', 1000], ['Session', 100]]) {
+      const value = embed.fields.find((f) => f.name === name).value
+      assert.ok(value.length <= cap, `${name} (${value.length}) within ${cap}-char cap`)
+      // Well-formed: never ends on a lone (odd-run) escape backslash.
+      const trailing = value.length - value.replace(/\\+$/, '').length
+      assert.equal(trailing % 2, 0, `${name} must not end in a dangling escape backslash`)
+      // And the body really was all-metachar → every kept char is part of a
+      // `\X` pair, so the escaped value is purely backslashes + metachars.
+      assert.ok(/^(\\[*~])+$/.test(value), `${name} is well-formed escaped metachars`)
+    }
+  })
+
+  it('does not re-truncate a normal-length metachar body (#5475)', async () => {
+    // A realistic free-text body stays under the cap even after escaping, so
+    // escapeAndCap is a no-op clamp and the escaping is byte-for-byte correct.
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send({ ...idle(), body: 'watch dist/*_test.js | grep ~done~ > log' })
+    const status = JSON.parse(calls[0].body).embeds[0].fields.find((f) => f.name === 'Status').value
+    assert.equal(status, 'watch dist/\\*\\_test.js \\| grep \\~done\\~ \\> log')
+  })
+
   it('uses the permission color for needs-approval regardless of project overrides', async () => {
     const calls = scriptFetch()
     const { sink } = makeSink({ colors: { alpha: 1752220 } })
