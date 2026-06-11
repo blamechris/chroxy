@@ -1,13 +1,13 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { checkpointHandlers } from '../../src/handlers/checkpoint-handlers.js'
-import { createSpy, createMockSession, makeSessionIndexCtx } from '../test-helpers.js'
+import { createSpy, createMockSession, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
   const broadcasts = []
 
-  return {
+  return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastSessionList: createSpy(),
@@ -39,7 +39,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     _sent: sent,
     _broadcasts: broadcasts,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {
@@ -97,7 +97,7 @@ describe('checkpoint-handlers', () => {
       session.resumeSessionId = 'conv-1'
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.checkpointManager.createCheckpoint = createSpy(async () => { throw new Error('disk error') })
+      ctx.services.checkpointManager.createCheckpoint = createSpy(async () => { throw new Error('disk error') })
       const client = makeClient({ activeSessionId: 's1' })
 
       await checkpointHandlers.create_checkpoint(makeWs(), client, {}, ctx)
@@ -118,7 +118,7 @@ describe('checkpoint-handlers', () => {
 
     it('sends checkpoint_list for active session', () => {
       const ctx = makeCtx()
-      ctx.checkpointManager.listCheckpoints = createSpy(() => [{ id: 'cp-1' }])
+      ctx.services.checkpointManager.listCheckpoints = createSpy(() => [{ id: 'cp-1' }])
       const client = makeClient({ activeSessionId: 's1' })
 
       checkpointHandlers.list_checkpoints(makeWs(), client, {}, ctx)
@@ -157,7 +157,7 @@ describe('checkpoint-handlers', () => {
       const restoredSession = createMockSession()
       sessions.set('restored-session-id', { session: restoredSession, name: 'Rewind: Checkpoint 1', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+      ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
       const client = makeClient({ activeSessionId: 's1' })
 
       await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
@@ -172,17 +172,17 @@ describe('checkpoint-handlers', () => {
     it('does nothing when no active session', () => {
       const ctx = makeCtx()
       checkpointHandlers.delete_checkpoint(makeWs(), makeClient(), { checkpointId: 'cp-1' }, ctx)
-      assert.equal(ctx.checkpointManager.deleteCheckpoint.callCount, 0)
+      assert.equal(ctx.services.checkpointManager.deleteCheckpoint.callCount, 0)
     })
 
     it('deletes checkpoint and sends updated list', () => {
       const ctx = makeCtx()
-      ctx.checkpointManager.listCheckpoints = createSpy(() => [])
+      ctx.services.checkpointManager.listCheckpoints = createSpy(() => [])
       const client = makeClient({ activeSessionId: 's1' })
 
       checkpointHandlers.delete_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
 
-      assert.equal(ctx.checkpointManager.deleteCheckpoint.callCount, 1)
+      assert.equal(ctx.services.checkpointManager.deleteCheckpoint.callCount, 1)
       assert.equal(ctx._sent[0].type, 'checkpoint_list')
     })
   })

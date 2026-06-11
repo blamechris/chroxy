@@ -21,7 +21,7 @@ async function buildRepoList(ctx = {}) {
   const readRepos = ctx.readReposFromConfig || defaultReadRepos
   // Pass provider-driven projectsDirs when available (#2965); falls back to
   // the scanner's default (~/.claude/projects) when not set.
-  const scanOpts = ctx.projectsDirs ? { projectsDirs: ctx.projectsDirs } : {}
+  const scanOpts = ctx.runtime.projectsDirs ? { projectsDirs: ctx.runtime.projectsDirs } : {}
   const conversations = await scan(scanOpts)
   const autoRepos = groupConversationsByRepo(conversations)
   const manualRepos = readRepos()
@@ -49,15 +49,15 @@ async function buildRepoList(ctx = {}) {
 async function handleListRepos(ws, client, msg, ctx) {
   try {
     const repos = await buildRepoList(ctx)
-    ctx.send(ws, { type: 'repo_list', repos })
+    ctx.transport.send(ws, { type: 'repo_list', repos })
   } catch (err) {
-    ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
+    ctx.transport.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
   }
 }
 
 async function handleAddRepo(ws, client, msg, ctx) {
   const repoPath = msg.path
-  const cwdError = validateCwdAllowed(repoPath, ctx.config)
+  const cwdError = validateCwdAllowed(repoPath, ctx.services.config)
   if (cwdError) {
     sendSessionError(ws, ctx, cwdError)
     return
@@ -73,7 +73,7 @@ async function handleAddRepo(ws, client, msg, ctx) {
       writeRepos(existing)
     }
     const repos = await buildRepoList(ctx)
-    ctx.send(ws, { type: 'repo_list', repos })
+    ctx.transport.send(ws, { type: 'repo_list', repos })
   } catch (err) {
     sendSessionError(ws, ctx, `Failed to add repo: ${err.message}`)
   }
@@ -90,9 +90,9 @@ async function handleRemoveRepo(ws, client, msg, ctx) {
 
   try {
     const repos = await buildRepoList(ctx)
-    ctx.send(ws, { type: 'repo_list', repos })
+    ctx.transport.send(ws, { type: 'repo_list', repos })
   } catch (err) {
-    ctx.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
+    ctx.transport.send(ws, { type: 'server_error', message: `Failed to list repos: ${err.message}`, recoverable: true })
   }
 }
 

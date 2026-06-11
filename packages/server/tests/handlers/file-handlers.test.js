@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileHandlers } from '../../src/handlers/file-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 function makeFileOps(overrides = {}) {
   return {
@@ -24,13 +24,13 @@ function makeFileOps(overrides = {}) {
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const fileOps = makeFileOps(overrides.fileOps)
-  return {
+  return nsCtx({
     fileOps,
     sessionManager: {
       getSession: createSpy((id) => sessions.get(id)),
     },
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {
@@ -53,8 +53,8 @@ describe('file-handlers', () => {
 
       fileHandlers.list_directory(ws, makeClient(), { path: '/some/dir' }, ctx)
 
-      assert.equal(ctx.fileOps.listDirectory.callCount, 1)
-      const [callWs, callPath] = ctx.fileOps.listDirectory.lastCall
+      assert.equal(ctx.services.fileOps.listDirectory.callCount, 1)
+      const [callWs, callPath] = ctx.services.fileOps.listDirectory.lastCall
       assert.equal(callWs, ws)
       assert.equal(callPath, '/some/dir')
     })
@@ -70,7 +70,7 @@ describe('file-handlers', () => {
 
       fileHandlers.browse_files(makeWs(), client, { path: 'src' }, ctx)
 
-      const [, callPath, callCwd] = ctx.fileOps.browseFiles.lastCall
+      const [, callPath, callCwd] = ctx.services.fileOps.browseFiles.lastCall
       assert.equal(callPath, 'src')
       assert.equal(callCwd, '/project')
     })
@@ -80,7 +80,7 @@ describe('file-handlers', () => {
 
       fileHandlers.browse_files(makeWs(), makeClient(), { path: 'src' }, ctx)
 
-      const [, , callCwd] = ctx.fileOps.browseFiles.lastCall
+      const [, , callCwd] = ctx.services.fileOps.browseFiles.lastCall
       assert.equal(callCwd, null)
     })
   })
@@ -94,7 +94,7 @@ describe('file-handlers', () => {
 
       fileHandlers.list_files(makeWs(), client, { query: 'README', sessionId: 's1' }, ctx)
 
-      const [, callCwd, callQuery] = ctx.fileOps.listFiles.lastCall
+      const [, callCwd, callQuery] = ctx.services.fileOps.listFiles.lastCall
       assert.equal(callCwd, '/app')
       assert.equal(callQuery, 'README')
     })
@@ -103,7 +103,7 @@ describe('file-handlers', () => {
       const ctx = makeCtx()
       fileHandlers.list_files(makeWs(), makeClient(), {}, ctx)
 
-      const [, callCwd] = ctx.fileOps.listFiles.lastCall
+      const [, callCwd] = ctx.services.fileOps.listFiles.lastCall
       assert.equal(callCwd, null)
     })
   })
@@ -117,7 +117,7 @@ describe('file-handlers', () => {
 
       fileHandlers.read_file(makeWs(), client, { path: 'package.json' }, ctx)
 
-      const [, callPath, callCwd] = ctx.fileOps.readFile.lastCall
+      const [, callPath, callCwd] = ctx.services.fileOps.readFile.lastCall
       assert.equal(callPath, 'package.json')
       assert.equal(callCwd, '/proj')
     })
@@ -132,7 +132,7 @@ describe('file-handlers', () => {
 
       fileHandlers.write_file(makeWs(), client, { path: 'README.md', content: '# Hi' }, ctx)
 
-      const [, callPath, callContent, callCwd] = ctx.fileOps.writeFile.lastCall
+      const [, callPath, callContent, callCwd] = ctx.services.fileOps.writeFile.lastCall
       assert.equal(callPath, 'README.md')
       assert.equal(callContent, '# Hi')
       assert.equal(callCwd, '/proj')
@@ -148,7 +148,7 @@ describe('file-handlers', () => {
 
       fileHandlers.git_status(makeWs(), client, {}, ctx)
 
-      const [, callCwd] = ctx.fileOps.gitStatus.lastCall
+      const [, callCwd] = ctx.services.fileOps.gitStatus.lastCall
       assert.equal(callCwd, '/repo')
     })
 
@@ -160,7 +160,7 @@ describe('file-handlers', () => {
 
       fileHandlers.git_branches(makeWs(), client, {}, ctx)
 
-      const [, callCwd] = ctx.fileOps.gitBranches.lastCall
+      const [, callCwd] = ctx.services.fileOps.gitBranches.lastCall
       assert.equal(callCwd, '/repo')
     })
 
@@ -172,7 +172,7 @@ describe('file-handlers', () => {
 
       fileHandlers.git_stage(makeWs(), client, { files: ['a.js', 'b.js'] }, ctx)
 
-      const [, callFiles, callCwd] = ctx.fileOps.gitStage.lastCall
+      const [, callFiles, callCwd] = ctx.services.fileOps.gitStage.lastCall
       assert.deepEqual(callFiles, ['a.js', 'b.js'])
       assert.equal(callCwd, '/repo')
     })
@@ -185,7 +185,7 @@ describe('file-handlers', () => {
 
       fileHandlers.git_commit(makeWs(), client, { message: 'fix: bug' }, ctx)
 
-      const [, callMessage, callCwd] = ctx.fileOps.gitCommit.lastCall
+      const [, callMessage, callCwd] = ctx.services.fileOps.gitCommit.lastCall
       assert.equal(callMessage, 'fix: bug')
       assert.equal(callCwd, '/repo')
     })
@@ -200,7 +200,7 @@ describe('file-handlers', () => {
 
       fileHandlers.list_slash_commands(makeWs(), client, { sessionId: 's1' }, ctx)
 
-      const [, callCwd, callSid] = ctx.fileOps.listSlashCommands.lastCall
+      const [, callCwd, callSid] = ctx.services.fileOps.listSlashCommands.lastCall
       assert.equal(callCwd, '/proj')
       assert.equal(callSid, 's1')
     })
@@ -218,7 +218,7 @@ describe('file-handlers', () => {
 
       fileHandlers.list_slash_commands(makeWs(), client, { sessionId: 's1' }, ctx)
 
-      const [, , , callProvider] = ctx.fileOps.listSlashCommands.lastCall
+      const [, , , callProvider] = ctx.services.fileOps.listSlashCommands.lastCall
       assert.equal(callProvider, 'claude-sdk')
     })
 
@@ -231,7 +231,7 @@ describe('file-handlers', () => {
 
       fileHandlers.list_slash_commands(makeWs(), client, {}, ctx)
 
-      const [, , , callProvider] = ctx.fileOps.listSlashCommands.lastCall
+      const [, , , callProvider] = ctx.services.fileOps.listSlashCommands.lastCall
       assert.equal(callProvider, null)
     })
 
@@ -243,7 +243,7 @@ describe('file-handlers', () => {
 
       fileHandlers.list_agents(makeWs(), client, { sessionId: 's1' }, ctx)
 
-      const [, callCwd, callSid] = ctx.fileOps.listAgents.lastCall
+      const [, callCwd, callSid] = ctx.services.fileOps.listAgents.lastCall
       assert.equal(callCwd, '/proj')
       assert.equal(callSid, 's1')
     })
@@ -257,7 +257,7 @@ describe('file-handlers', () => {
 
       fileHandlers.list_agents(makeWs(), client, { sessionId: 's1' }, ctx)
 
-      const [, , , callOpts] = ctx.fileOps.listAgents.lastCall
+      const [, , , callOpts] = ctx.services.fileOps.listAgents.lastCall
       assert.ok(callOpts, 'opts argument must be passed')
       assert.deepEqual(callOpts.userAgentsDirs, userAgentsDirs)
     })
@@ -266,7 +266,7 @@ describe('file-handlers', () => {
       const ctx = makeCtx()
       fileHandlers.list_agents(makeWs(), makeClient(), {}, ctx)
 
-      const [, , , callOpts] = ctx.fileOps.listAgents.lastCall
+      const [, , , callOpts] = ctx.services.fileOps.listAgents.lastCall
       assert.ok(callOpts, 'opts argument must be passed')
       assert.ok(!callOpts.userAgentsDirs, 'userAgentsDirs must not be set when ctx lacks it')
     })

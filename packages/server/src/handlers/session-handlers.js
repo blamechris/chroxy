@@ -11,11 +11,11 @@ import { createLogger, loggerForSession } from '../logger.js'
 const log = createLogger('ws')
 
 function handleListSessions(ws, client, _msg, ctx) {
-  let sessions = ctx.sessionManager.listSessions()
+  let sessions = ctx.sessions.sessionManager.listSessions()
   if (client.boundSessionId) {
     sessions = sessions.filter(s => s.sessionId === client.boundSessionId)
   }
-  ctx.send(ws, { type: 'session_list', sessions })
+  ctx.transport.send(ws, { type: 'session_list', sessions })
 }
 
 function handleSwitchSession(ws, client, msg, ctx) {
@@ -33,25 +33,25 @@ function handleSwitchSession(ws, client, msg, ctx) {
     // #4828: session-scoped to the bound session — the binding-mismatch
     // warn belongs to the OWNER of `boundSessionId`, not the request target.
     loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} attempted to switch to session ${targetId} but is bound to ${client.boundSessionId}`)
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
     return
   }
 
-  const entry = ctx.sessionManager.getSession(targetId)
+  const entry = ctx.sessions.sessionManager.getSession(targetId)
   if (!entry) {
     sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
   // #5563: route active-session + subscription through the index-maintaining
   // helpers so the sessionId→clients reverse index stays in sync.
-  ctx.setActiveSession(client, targetId)
-  ctx.subscribeClient(client, targetId)
+  ctx.transport.setActiveSession(client, targetId)
+  ctx.transport.subscribeClient(client, targetId)
   // #4835: persist the chosen session for this device so the next reconnect
   // restores it instead of snapping back to defaultSessionId. Bound
   // clients are excluded — their activeSessionId is locked to
@@ -59,20 +59,20 @@ function handleSwitchSession(ws, client, msg, ctx) {
   // affecting behaviour. devicePreferences is optional on ctx so tests
   // that don't wire it through (and pre-#4835 callers in general)
   // continue to work.
-  if (ctx.devicePreferences && !client.boundSessionId && client.deviceInfo?.deviceId) {
-    ctx.devicePreferences.setActiveSessionId(client.deviceInfo.deviceId, targetId)
+  if (ctx.services.devicePreferences && !client.boundSessionId && client.deviceInfo?.deviceId) {
+    ctx.services.devicePreferences.setActiveSessionId(client.deviceInfo.deviceId, targetId)
   }
   // #4828: session-scoped — the switch is into `targetId`.
   loggerForSession('ws', targetId).info(`Client ${client.id} switched to session ${targetId}`)
-  ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-  ctx.sendSessionInfo(ws, targetId)
-  ctx.replayHistory(ws, targetId)
+  ctx.transport.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+  ctx.transport.sendSessionInfo(ws, targetId)
+  ctx.transport.replayHistory(ws, targetId)
   // Re-send provider-scoped available_models so clients that switch from a
   // Claude session to a Codex/Gemini session (or vice-versa) update their
   // model dropdown immediately (#2956).
   const switchProvider = entry.provider || null
   const switchRegistry = getRegistryForProvider(switchProvider)
-  ctx.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchProvider })
+  ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchProvider })
   broadcastFocusChanged(client, targetId, ctx)
 }
 
@@ -85,10 +85,10 @@ function handleCreateSession(ws, client, msg, ctx) {
     // call sites via buildSessionTokenMismatchPayload — every send site produces
     // `{code, message, boundSessionId, boundSessionName}` so clients never see
     // divergent shapes while branching on the code.
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
         message: 'Not authorized: client is bound to a specific session',
       }),
@@ -123,7 +123,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   if (cwd) {
-    const cwdError = validateCwdAllowed(cwd, ctx.config)
+    const cwdError = validateCwdAllowed(cwd, ctx.services.config)
     if (cwdError) {
       sendSessionError(ws, ctx, cwdError)
       return
@@ -133,12 +133,12 @@ function handleCreateSession(ws, client, msg, ctx) {
   // Resolve environment container details if environmentId is specified
   let envOpts = {}
   if (environmentId) {
-    if (!ctx.environmentManager) {
+    if (!ctx.services.environmentManager) {
       sendSessionError(ws, ctx, 'Environment management is not enabled')
       return
     }
     try {
-      const info = ctx.environmentManager.getContainerInfo(environmentId)
+      const info = ctx.services.environmentManager.getContainerInfo(environmentId)
       envOpts = {
         provider: 'docker-sdk',
         containerId: info.containerId,
@@ -152,14 +152,14 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   try {
-    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, ...envOpts })
+    const sessionId = ctx.sessions.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, ...envOpts })
     // #5563: index-maintaining helpers.
-    ctx.setActiveSession(client, sessionId)
-    ctx.subscribeClient(client, sessionId)
-    const entry = ctx.sessionManager.getSession(sessionId)
-    ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-    ctx.sendSessionInfo(ws, sessionId)
-    ctx.broadcastSessionList()
+    ctx.transport.setActiveSession(client, sessionId)
+    ctx.transport.subscribeClient(client, sessionId)
+    const entry = ctx.sessions.sessionManager.getSession(sessionId)
+    ctx.transport.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+    ctx.transport.sendSessionInfo(ws, sessionId)
+    ctx.transport.broadcastSessionList()
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
@@ -168,7 +168,7 @@ function handleCreateSession(ws, client, msg, ctx) {
     // hint instead of an opaque message. See #2962.
     const payload = { type: 'session_error', message: err.message }
     if (err.code) payload.code = err.code
-    ctx.send(ws, payload)
+    ctx.transport.send(ws, payload)
   }
 }
 
@@ -176,67 +176,67 @@ async function handleDestroySession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
     return
   }
 
-  if (!ctx.sessionManager.getSession(targetId)) {
+  if (!ctx.sessions.sessionManager.getSession(targetId)) {
     sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
 
-  if (ctx.sessionManager.listSessions().length <= 1) {
+  if (ctx.sessions.sessionManager.listSessions().length <= 1) {
     sendSessionError(ws, ctx, 'Cannot destroy the last session')
     return
   }
 
-  if (ctx.sessionManager.isSessionLocked?.(targetId)) {
+  if (ctx.sessions.sessionManager.isSessionLocked?.(targetId)) {
     sendSessionError(ws, ctx, 'Session is being modified by another operation')
     return
   }
 
-  if (typeof ctx.sessionManager.destroySessionLocked === 'function') {
-    await ctx.sessionManager.destroySessionLocked(targetId)
+  if (typeof ctx.sessions.sessionManager.destroySessionLocked === 'function') {
+    await ctx.sessions.sessionManager.destroySessionLocked(targetId)
   } else {
-    ctx.sessionManager.destroySession(targetId)
+    ctx.sessions.sessionManager.destroySession(targetId)
   }
-  ctx.primaryClients.delete(targetId)
+  ctx.transport.primaryClients.delete(targetId)
 
-  const firstId = ctx.sessionManager.firstSessionId
-  for (const [clientWs, c] of ctx.clients) {
+  const firstId = ctx.sessions.sessionManager.firstSessionId
+  for (const [clientWs, c] of ctx.transport.clients) {
     // #5563: index-maintaining helpers — unsubscribe every client from the
     // destroyed session, and re-home any client that was actively viewing it.
-    ctx.unsubscribeClient(c, targetId)
+    ctx.transport.unsubscribeClient(c, targetId)
     if (c.authenticated && c.activeSessionId === targetId) {
-      ctx.setActiveSession(c, firstId)
-      const entry = ctx.sessionManager.getSession(firstId)
+      ctx.transport.setActiveSession(c, firstId)
+      const entry = ctx.sessions.sessionManager.getSession(firstId)
       if (entry) {
-        ctx.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-        ctx.sendSessionInfo(clientWs, firstId)
-        ctx.replayHistory(clientWs, firstId)
+        ctx.transport.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+        ctx.transport.sendSessionInfo(clientWs, firstId)
+        ctx.transport.replayHistory(clientWs, firstId)
       }
       broadcastFocusChanged(c, firstId, ctx)
     }
   }
 
-  ctx.broadcast({ type: 'session_destroyed', sessionId: targetId })
-  ctx.broadcastSessionList()
+  ctx.transport.broadcast({ type: 'session_destroyed', sessionId: targetId })
+  ctx.transport.broadcastSessionList()
 }
 
 function handleRenameSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
@@ -248,18 +248,18 @@ function handleRenameSession(ws, client, msg, ctx) {
     sendSessionError(ws, ctx, 'Name is required')
     return
   }
-  if (ctx.sessionManager.isSessionLocked?.(targetId)) {
+  if (ctx.sessions.sessionManager.isSessionLocked?.(targetId)) {
     sendSessionError(ws, ctx, 'Session is being modified by another operation')
     return
   }
 
-  const doRename = typeof ctx.sessionManager.renameSessionLocked === 'function'
-    ? () => ctx.sessionManager.renameSessionLocked(targetId, newName)
-    : async () => ctx.sessionManager.renameSession(targetId, newName)
+  const doRename = typeof ctx.sessions.sessionManager.renameSessionLocked === 'function'
+    ? () => ctx.sessions.sessionManager.renameSessionLocked(targetId, newName)
+    : async () => ctx.sessions.sessionManager.renameSession(targetId, newName)
 
   doRename().then(success => {
     if (success) {
-      ctx.broadcastSessionList()
+      ctx.transport.broadcastSessionList()
     } else {
       sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     }
@@ -273,21 +273,21 @@ function handleSubscribeSessions(ws, client, msg, ctx) {
   for (const sid of msg.sessionIds) {
     // Bound clients can only subscribe to their bound session
     if (client.boundSessionId && client.boundSessionId !== sid) continue
-    if (ctx.sessionManager.getSession(sid)) {
+    if (ctx.sessions.sessionManager.getSession(sid)) {
       if (!client.subscribedSessionIds.has(sid)) {
         newlySubscribed.push(sid)
       }
       // #5563: index-maintaining helper.
-      ctx.subscribeClient(client, sid)
+      ctx.transport.subscribeClient(client, sid)
     }
   }
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'subscriptions_updated',
     subscribedSessionIds: [...client.subscribedSessionIds],
   })
   for (const sid of newlySubscribed) {
-    ctx.sendSessionInfo(ws, sid)
-    ctx.replayHistory(ws, sid)
+    ctx.transport.sendSessionInfo(ws, sid)
+    ctx.transport.replayHistory(ws, sid)
   }
 }
 
@@ -297,10 +297,10 @@ function handleUnsubscribeSessions(ws, client, msg, ctx) {
       // #5563: index-maintaining helper. (The guard keeps the active session
       // subscribed; the helper would also keep it indexed via activeSessionId,
       // but preserving the explicit subscription matches prior behaviour.)
-      ctx.unsubscribeClient(client, sid)
+      ctx.transport.unsubscribeClient(client, sid)
     }
   }
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'subscriptions_updated',
     subscribedSessionIds: [...client.subscribedSessionIds],
   })

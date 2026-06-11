@@ -39,7 +39,7 @@ export function scopeConversationsToClient(conversations, client, ctx) {
   if (!Array.isArray(conversations)) return []
   // Unbound clients: full token, full visibility.
   if (!client?.boundSessionId) return conversations
-  const entry = ctx?.sessionManager?.getSession?.(client.boundSessionId)
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(client.boundSessionId)
   const allowedCwd = entry?.cwd
   // Bound-but-cwd-missing: fail closed. A bound client should not see
   // *any* conversation if we can't confidently scope the result.

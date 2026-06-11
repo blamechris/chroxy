@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 /**
  * #4663 — Multi-client broadcast coverage for per-session setting handlers.
@@ -11,7 +11,7 @@ import { createSpy, createMockSession } from '../test-helpers.js'
  * promptEvaluator, #3805 chroxyContextHint, #4660 sessionPreamble).
  *
  * The pre-existing settings-handlers.test.js suite mocked
- * `ctx.broadcastToSession` as a simple recording spy, which proved the
+ * `ctx.transport.broadcastToSession` as a simple recording spy, which proved the
  * handler called it with the right payload — but did NOT prove the
  * `*_changed` event would actually land at a SECOND client subscribed to
  * the same session. The bug class hidden by that gap is real: any future
@@ -60,7 +60,7 @@ function makeMultiClientCtx(clients, sessions = new Map()) {
     if (!c.subscribedSessionIds) c.subscribedSessionIds = new Set()
   }
 
-  const ctx = {
+  const ctx = nsCtx({
     send: createSpy((_ws, msg) => {
       // Single-client send path — used for session_error. For multi-client
       // tests we only care about broadcast routing, so leave this as a
@@ -87,7 +87,7 @@ function makeMultiClientCtx(clients, sessions = new Map()) {
     pendingPermissions: new Map(),
     permissions: null,
     _sent: [],
-  }
+  })
   return { ctx, perClientMessages }
 }
 

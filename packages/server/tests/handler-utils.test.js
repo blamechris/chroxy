@@ -13,6 +13,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
+import { nsCtx } from './test-helpers.js'
 import {
   validateAttachments,
   resolveFileRefAttachments,
@@ -919,13 +920,13 @@ describe('handler-utils constants', () => {
 // ============================================================
 
 describe('broadcastFocusChanged', () => {
-  it('calls ctx.broadcast with correct message shape', () => {
+  it('calls ctx.transport.broadcast with correct message shape', () => {
     let capturedMsg = null
-    const ctx = {
+    const ctx = nsCtx({
       broadcast(msg) {
         capturedMsg = msg
       }
-    }
+    })
     const client = { id: 'client-1' }
     broadcastFocusChanged(client, 'session-42', ctx)
 
@@ -937,9 +938,9 @@ describe('broadcastFocusChanged', () => {
 
   it('filter excludes the sending client', () => {
     let capturedFilter = null
-    const ctx = {
+    const ctx = nsCtx({
       broadcast(_msg, filter) { capturedFilter = filter }
-    }
+    })
     broadcastFocusChanged({ id: 'client-A' }, 'sess', ctx)
 
     assert.ok(capturedFilter({ id: 'client-B' }), 'other client should pass filter')
@@ -1071,32 +1072,32 @@ describe('sendError', () => {
 describe('resolveSession', () => {
   it('returns session by msg.sessionId', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, {})
     assert.deepStrictEqual(result, session)
   })
 
   it('falls back to client.activeSessionId', () => {
     const session = { id: 'sess-2', name: 'fallback' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-2' ? session : null }
       }
-    }
+    })
     const result = resolveSession(ctx, {}, { activeSessionId: 'sess-2' })
     assert.deepStrictEqual(result, session)
   })
 
   it('prefers msg.sessionId over client.activeSessionId', () => {
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return { id, picked: true } }
       }
-    }
+    })
     const result = resolveSession(
       ctx,
       { sessionId: 'from-msg' },
@@ -1106,11 +1107,11 @@ describe('resolveSession', () => {
   })
 
   it('returns null when session not found', () => {
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession() { return undefined }
       }
-    }
+    })
     const result = resolveSession(ctx, { sessionId: 'nonexistent' }, {})
     assert.strictEqual(result, null)
   })
@@ -1121,22 +1122,22 @@ describe('resolveSession', () => {
   })
 
   it('returns null when client is null', () => {
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession() { return undefined }
       }
-    }
+    })
     const result = resolveSession(ctx, {}, null)
     assert.strictEqual(result, null)
   })
 
   it('returns null when client is bound to a different session', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const client = { activeSessionId: 'sess-1', boundSessionId: 'sess-other' }
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
     assert.strictEqual(result, null)
@@ -1144,11 +1145,11 @@ describe('resolveSession', () => {
 
   it('returns session when client is bound to the same session', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const client = { activeSessionId: 'sess-1', boundSessionId: 'sess-1' }
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
     assert.deepStrictEqual(result, session)
@@ -1156,11 +1157,11 @@ describe('resolveSession', () => {
 
   it('returns session when client has no bound session', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const client = { activeSessionId: 'sess-1', boundSessionId: null }
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
     assert.deepStrictEqual(result, session)
@@ -1237,17 +1238,17 @@ describe('buildSessionTokenMismatchPayload', () => {
 // sendSessionError — issue #4773
 // ============================================================
 //
-// Thin wrapper around ctx.send that emits the canonical `session_error`
+// Thin wrapper around ctx.transport.send that emits the canonical `session_error`
 // envelope used across handlers. Centralising the shape here means the
-// 50+ inline `ctx.send(ws, { type: 'session_error', message })` sites can
+// 50+ inline `ctx.transport.send(ws, { type: 'session_error', message })` sites can
 // collapse to a one-liner and any future schema tweak (adding `code`,
 // `recoverable`, etc.) happens in one place.
 
 describe('sendSessionError (#4773)', () => {
-  it('routes the session_error envelope through ctx.send', () => {
+  it('routes the session_error envelope through ctx.transport.send', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
     sendSessionError(ws, ctx, 'No active session')
     assert.strictEqual(sent.length, 1)
     assert.strictEqual(sent[0].ws, ws)
@@ -1256,7 +1257,7 @@ describe('sendSessionError (#4773)', () => {
   })
 
   it('does nothing when ws is null or undefined', () => {
-    const ctx = { send: () => assert.fail('should not be called') }
+    const ctx = nsCtx({ send: () => assert.fail('should not be called') })
     assert.doesNotThrow(() => sendSessionError(null, ctx, 'oops'))
     assert.doesNotThrow(() => sendSessionError(undefined, ctx, 'oops'))
   })
@@ -1275,7 +1276,7 @@ describe('sendSessionError (#4773)', () => {
 // Wraps resolveSession so the 13 hot sites that do:
 //   const entry = resolveSession(ctx, msg, client)
 //   if (!entry) {
-//     ctx.send(ws, { type: 'session_error', message: 'No active session' })
+//     ctx.transport.send(ws, { type: 'session_error', message: 'No active session' })
 //     return
 //   }
 // collapse to:
@@ -1290,10 +1291,10 @@ describe('resolveSessionOrError (#4773)', () => {
     const session = { id: 'sess-1', name: 'test' }
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = {
+    const ctx = nsCtx({
       send: (ws_, msg) => sent.push({ ws: ws_, msg }),
       sessionManager: { getSession: (id) => (id === 'sess-1' ? session : null) },
-    }
+    })
     const result = resolveSessionOrError(ws, ctx, { sessionId: 'sess-1' }, {})
     assert.deepStrictEqual(result, session)
     assert.strictEqual(sent.length, 0)
@@ -1302,10 +1303,10 @@ describe('resolveSessionOrError (#4773)', () => {
   it('returns null on miss and emits a session_error', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = {
+    const ctx = nsCtx({
       send: (ws_, msg) => sent.push({ ws: ws_, msg }),
       sessionManager: { getSession: () => null },
-    }
+    })
     const result = resolveSessionOrError(ws, ctx, { sessionId: 'nope' }, {})
     assert.strictEqual(result, null)
     assert.strictEqual(sent.length, 1)
@@ -1317,10 +1318,10 @@ describe('resolveSessionOrError (#4773)', () => {
     const session = { id: 'sess-2', name: 'fallback' }
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = {
+    const ctx = nsCtx({
       send: (ws_, msg) => sent.push({ ws: ws_, msg }),
       sessionManager: { getSession: (id) => (id === 'sess-2' ? session : null) },
-    }
+    })
     const result = resolveSessionOrError(ws, ctx, {}, { activeSessionId: 'sess-2' })
     assert.deepStrictEqual(result, session)
     assert.strictEqual(sent.length, 0)
@@ -1329,7 +1330,7 @@ describe('resolveSessionOrError (#4773)', () => {
   it('emits the canonical "No active session" message even when sessionManager is missing', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
     const result = resolveSessionOrError(ws, ctx, { sessionId: 'any' }, {})
     assert.strictEqual(result, null)
     assert.strictEqual(sent[0].msg.type, 'session_error')
@@ -1340,10 +1341,10 @@ describe('resolveSessionOrError (#4773)', () => {
     // Binding violation: do not leak that the session exists.
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = {
+    const ctx = nsCtx({
       send: (ws_, msg) => sent.push({ ws: ws_, msg }),
       sessionManager: { getSession: () => ({ id: 'sess-1' }) },
-    }
+    })
     const result = resolveSessionOrError(
       ws,
       ctx,
@@ -1361,7 +1362,7 @@ describe('resolveSessionOrError (#4773)', () => {
 //
 // Wraps the "capability gate" pattern (6 occurrences across handlers):
 //   if (typeof entry.session.setX !== 'function') {
-//     ctx.send(ws, { type: 'session_error', message: 'This provider does
+//     ctx.transport.send(ws, { type: 'session_error', message: 'This provider does
 //       not support X' })
 //     return
 //   }
@@ -1372,7 +1373,7 @@ describe('requireSessionMethod (#4773)', () => {
   it('returns true and emits nothing when the method exists', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
     const entry = { session: { setX() {} } }
     const ok = requireSessionMethod(ws, ctx, entry, 'setX', 'unsupported')
     assert.strictEqual(ok, true)
@@ -1382,7 +1383,7 @@ describe('requireSessionMethod (#4773)', () => {
   it('returns false and emits a session_error when the method is missing', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
     const entry = { session: {} }
     const ok = requireSessionMethod(
       ws, ctx, entry, 'setX', 'This provider does not support X'
@@ -1396,7 +1397,7 @@ describe('requireSessionMethod (#4773)', () => {
   it('returns false when entry is null', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
     const ok = requireSessionMethod(ws, ctx, null, 'setX', 'nope')
     assert.strictEqual(ok, false)
     assert.strictEqual(sent.length, 1)
@@ -1406,7 +1407,7 @@ describe('requireSessionMethod (#4773)', () => {
   it('returns false when entry.session is missing', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
     const ok = requireSessionMethod(ws, ctx, {}, 'setX', 'nope')
     assert.strictEqual(ok, false)
     assert.strictEqual(sent.length, 1)
@@ -1415,7 +1416,7 @@ describe('requireSessionMethod (#4773)', () => {
   it('returns false when the property exists but is not a function', () => {
     const sent = []
     const ws = { readyState: 1, send: () => {} }
-    const ctx = { send: (ws_, msg) => sent.push({ ws: ws_, msg }) }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
     const entry = { session: { setX: 'not-a-function' } }
     const ok = requireSessionMethod(ws, ctx, entry, 'setX', 'nope')
     assert.strictEqual(ok, false)

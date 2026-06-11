@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { sessionHandlers } from '../../src/handlers/session-handlers.js'
-import { createSpy, createMockSession, waitFor, makeSessionIndexCtx } from '../test-helpers.js'
+import { createSpy, createMockSession, waitFor, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
 
 function makeSent() {
   const sent = []
@@ -16,10 +16,9 @@ function makeCtx(overrides = {}) {
   // helpers exercise the production reverse-index path. The clients Map IS the
   // manager's Map, so directly-inserted test clients are visible to the index.
   const indexCtx = makeSessionIndexCtx()
-  const clients = indexCtx.clients
   const primaryClients = new Map()
 
-  const ctx = {
+  const ctx = nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastToSession: createSpy(),
@@ -47,7 +46,7 @@ function makeCtx(overrides = {}) {
     _broadcasts: broadcasts,
     _sessions: sessions,
     ...overrides,
-  }
+  })
   return ctx
 }
 
@@ -70,7 +69,7 @@ describe('session-handlers', () => {
   describe('list_sessions', () => {
     it('sends session_list with sessions from manager', () => {
       const ctx = makeCtx()
-      ctx.sessionManager.listSessions = createSpy(() => [
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [
         { sessionId: 'abc', name: 'Test', cwd: '/tmp', isBusy: false },
       ])
       const ws = makeWs()
@@ -78,8 +77,8 @@ describe('session-handlers', () => {
 
       sessionHandlers.list_sessions(ws, client, {}, ctx)
 
-      assert.equal(ctx.send.callCount, 1)
-      const [, sent] = ctx.send.lastCall
+      assert.equal(ctx.transport.send.callCount, 1)
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_list')
       assert.equal(sent.sessions.length, 1)
       assert.equal(sent.sessions[0].sessionId, 'abc')
@@ -91,7 +90,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.list_sessions(ws, makeClient(), {}, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_list')
       assert.deepEqual(sent.sessions, [])
     })
@@ -120,7 +119,7 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'missing' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.match(sent.message, /not found/)
     })
@@ -131,7 +130,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-b' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
     })
@@ -147,7 +146,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.switch_session(makeWs(), client, { sessionId: 'sess-b' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(sent.boundSessionId, 'sess-a')
       assert.equal(sent.boundSessionName, 'BoundOne')
@@ -211,7 +210,7 @@ describe('session-handlers', () => {
           'bound clients must not pollute the per-device store')
       })
 
-      it('does NOT throw when ctx.devicePreferences is absent (backward compat)', () => {
+      it('does NOT throw when ctx.services.devicePreferences is absent (backward compat)', () => {
         const ctx = makeCtx() // no devicePreferences
         ctx._sessions.set('sess-target', { session: createMockSession(), name: 'T', cwd: '/t' })
 
@@ -229,7 +228,7 @@ describe('session-handlers', () => {
     it('creates a session and sends session_switched', () => {
       const ctx = makeCtx()
       const session = createMockSession()
-      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
       ctx._sessions.set('new-id', { session, name: 'New', cwd: '/tmp' })
 
       const client = makeClient()
@@ -245,7 +244,7 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       sessionHandlers.create_session(makeWs(), makeClient(), { worktree: true }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.match(sent.message, /Worktree requires/)
     })
@@ -254,17 +253,17 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       sessionHandlers.create_session(makeWs(), makeClient(), { environmentId: 'env-1' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.match(sent.message, /not enabled/)
     })
 
     it('sends session_error when sessionManager.createSession throws', () => {
       const ctx = makeCtx()
-      ctx.sessionManager.createSession = createSpy(() => { throw new Error('disk full') })
+      ctx.sessions.sessionManager.createSession = createSpy(() => { throw new Error('disk full') })
       sessionHandlers.create_session(makeWs(), makeClient(), {}, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.match(sent.message, /disk full/)
     })
@@ -277,12 +276,12 @@ describe('session-handlers', () => {
     it('forwards skipPermissions=true from WS payload to SessionManager.createSession', () => {
       const ctx = makeCtx()
       const session = createMockSession()
-      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
       ctx._sessions.set('new-id', { session, name: 'TUI', cwd: '/tmp' })
 
       sessionHandlers.create_session(makeWs(), makeClient(), { name: 'TUI', skipPermissions: true }, ctx)
 
-      const [createArgs] = ctx.sessionManager.createSession.lastCall
+      const [createArgs] = ctx.sessions.sessionManager.createSession.lastCall
       assert.equal(createArgs.skipPermissions, true,
         'explicit true must reach SessionManager so TUI spawns with --dangerously-skip-permissions')
     })
@@ -290,12 +289,12 @@ describe('session-handlers', () => {
     it('forwards skipPermissions=false from WS payload to SessionManager.createSession', () => {
       const ctx = makeCtx()
       const session = createMockSession()
-      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
       ctx._sessions.set('new-id', { session, name: 'TUI', cwd: '/tmp' })
 
       sessionHandlers.create_session(makeWs(), makeClient(), { name: 'TUI', skipPermissions: false }, ctx)
 
-      const [createArgs] = ctx.sessionManager.createSession.lastCall
+      const [createArgs] = ctx.sessions.sessionManager.createSession.lastCall
       // CRITICAL: an explicit `false` must NOT be coerced to undefined here.
       // Otherwise a dashboard user can't un-tick the box on a server launched
       // with `chroxy start --dangerously-skip-permissions` — SessionManager
@@ -307,7 +306,7 @@ describe('session-handlers', () => {
     it('omits skipPermissions when payload field is non-boolean (defensive coercion)', () => {
       const ctx = makeCtx()
       const session = createMockSession()
-      ctx.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
       ctx._sessions.set('new-id', { session, name: 'TUI', cwd: '/tmp' })
 
       // A hand-crafted client / older protocol could send a string. The
@@ -315,7 +314,7 @@ describe('session-handlers', () => {
       // default still applies — never coerce a truthy non-boolean.
       sessionHandlers.create_session(makeWs(), makeClient(), { name: 'TUI', skipPermissions: 'yes' }, ctx)
 
-      const [createArgs] = ctx.sessionManager.createSession.lastCall
+      const [createArgs] = ctx.sessions.sessionManager.createSession.lastCall
       assert.equal(createArgs.skipPermissions, undefined,
         'non-boolean values must NOT propagate — keep "field absent" semantics for fall-through to server default')
     })
@@ -325,14 +324,14 @@ describe('session-handlers', () => {
       // render an actionable hint (e.g. "install Codex CLI") instead of just
       // the message.
       const ctx = makeCtx()
-      ctx.sessionManager.createSession = createSpy(() => {
+      ctx.sessions.sessionManager.createSession = createSpy(() => {
         const err = new Error('Codex: required binary "codex" not found. install Codex CLI.')
         err.code = 'PROVIDER_BINARY_NOT_FOUND'
         throw err
       })
       sessionHandlers.create_session(makeWs(), makeClient(), { provider: 'codex' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.equal(sent.code, 'PROVIDER_BINARY_NOT_FOUND')
       assert.match(sent.message, /codex/)
@@ -344,17 +343,17 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       ctx._sessions.set('sess-a', { session: createMockSession(), name: 'A', cwd: '/tmp' })
       ctx._sessions.set('sess-b', { session: createMockSession(), name: 'B', cwd: '/tmp' })
-      ctx.sessionManager.listSessions = createSpy(() => [
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [
         { sessionId: 'sess-a' }, { sessionId: 'sess-b' },
       ])
       const client = makeClient({ boundSessionId: 'sess-a' })
 
       await sessionHandlers.destroy_session(makeWs(), client, { sessionId: 'sess-b' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
-      assert.equal(ctx.sessionManager.destroySession.callCount, 0)
+      assert.equal(ctx.sessions.sessionManager.destroySession.callCount, 0)
     })
 
     // Issue #2912: destroy_session rejection must carry the same unified
@@ -366,7 +365,7 @@ describe('session-handlers', () => {
 
       await sessionHandlers.destroy_session(makeWs(), client, { sessionId: 'sess-b' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.boundSessionId, 'sess-a')
       assert.equal(sent.boundSessionName, 'BoundOne')
     })
@@ -380,14 +379,14 @@ describe('session-handlers', () => {
       sessionHandlers.rename_session(makeWs(), client, { sessionId: 'sess-b', name: 'NewName' }, ctx)
       await new Promise(r => setTimeout(r, 10))
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
     })
 
     // Issue #2912: rename_session rejection must carry the same unified
     // SESSION_TOKEN_MISMATCH shape as every other emit site. The bound-client
-    // mismatch path in handleRenameSession calls ctx.send synchronously and
+    // mismatch path in handleRenameSession calls ctx.transport.send synchronously and
     // returns before doRename() — no await is needed.
     it('includes boundSessionId and boundSessionName in the rejection payload', () => {
       const ctx = makeCtx()
@@ -396,7 +395,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.rename_session(makeWs(), client, { sessionId: 'sess-b', name: 'NewName' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.boundSessionId, 'sess-a')
       assert.equal(sent.boundSessionName, 'BoundOne')
     })
@@ -405,7 +404,7 @@ describe('session-handlers', () => {
   describe('list_sessions — boundSessionId filtering', () => {
     it('filters session list for bound clients', () => {
       const ctx = makeCtx()
-      ctx.sessionManager.listSessions = createSpy(() => [
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [
         { sessionId: 'sess-a', name: 'A' },
         { sessionId: 'sess-b', name: 'B' },
         { sessionId: 'sess-c', name: 'C' },
@@ -414,7 +413,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.list_sessions(makeWs(), client, {}, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_list')
       assert.equal(sent.sessions.length, 1)
       assert.equal(sent.sessions[0].sessionId, 'sess-b')
@@ -422,7 +421,7 @@ describe('session-handlers', () => {
 
     it('returns all sessions for unbound clients', () => {
       const ctx = makeCtx()
-      ctx.sessionManager.listSessions = createSpy(() => [
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [
         { sessionId: 'sess-a', name: 'A' },
         { sessionId: 'sess-b', name: 'B' },
       ])
@@ -430,7 +429,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.list_sessions(makeWs(), client, {}, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_list')
       assert.equal(sent.sessions.length, 2)
     })
@@ -443,10 +442,10 @@ describe('session-handlers', () => {
 
       sessionHandlers.create_session(makeWs(), client, { name: 'New' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
-      assert.equal(ctx.sessionManager.createSession.callCount, 0)
+      assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
     })
 
     // Issue #2904: include the bound session id + name so clients can render
@@ -459,7 +458,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.create_session(makeWs(), client, { name: 'New' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(sent.boundSessionId, 'sess-a')
       assert.equal(sent.boundSessionName, 'MarchBorne')
@@ -472,7 +471,7 @@ describe('session-handlers', () => {
 
       sessionHandlers.create_session(makeWs(), client, { name: 'New' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.code, 'SESSION_TOKEN_MISMATCH')
       assert.equal(sent.boundSessionId, 'sess-gone')
       assert.equal(sent.boundSessionName, null)
@@ -496,26 +495,26 @@ describe('session-handlers', () => {
   describe('destroy_session', () => {
     it('sends session_error when session not found', async () => {
       const ctx = makeCtx()
-      ctx.sessionManager.listSessions = createSpy(() => [
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [
         { sessionId: 'other', name: 'Other' },
         { sessionId: 'another', name: 'Another' },
       ])
 
       await sessionHandlers.destroy_session(makeWs(), makeClient({ activeSessionId: 'other' }), { sessionId: 'missing' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.match(sent.message, /not found/)
     })
 
     it('refuses to destroy the last session', async () => {
       const ctx = makeCtx()
-      ctx.sessionManager.listSessions = createSpy(() => [{ sessionId: 'only' }])
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [{ sessionId: 'only' }])
       ctx._sessions.set('only', { session: createMockSession(), name: 'Only', cwd: '/tmp' })
 
       await sessionHandlers.destroy_session(makeWs(), makeClient(), { sessionId: 'only' }, ctx)
 
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'session_error')
       assert.match(sent.message, /last session/)
     })
@@ -526,18 +525,18 @@ describe('session-handlers', () => {
       const session2 = createMockSession()
       ctx._sessions.set('sess-1', { session: session1, name: 'S1', cwd: '/tmp' })
       ctx._sessions.set('sess-2', { session: session2, name: 'S2', cwd: '/tmp' })
-      ctx.sessionManager.listSessions = createSpy(() => [
+      ctx.sessions.sessionManager.listSessions = createSpy(() => [
         { sessionId: 'sess-1' },
         { sessionId: 'sess-2' },
       ])
-      ctx.sessionManager.firstSessionId = 'sess-2'
-      ctx.sessionManager.destroySession = createSpy(() => {
+      ctx.sessions.sessionManager.firstSessionId = 'sess-2'
+      ctx.sessions.sessionManager.destroySession = createSpy(() => {
         ctx._sessions.delete('sess-1')
       })
 
       await sessionHandlers.destroy_session(makeWs(), makeClient({ activeSessionId: 'sess-2' }), { sessionId: 'sess-1' }, ctx)
 
-      assert.equal(ctx.sessionManager.destroySession.callCount, 1)
+      assert.equal(ctx.sessions.sessionManager.destroySession.callCount, 1)
       const destroyed = ctx._broadcasts.find(m => m.type === 'session_destroyed')
       assert.ok(destroyed, 'session_destroyed not broadcast')
       assert.equal(destroyed.sessionId, 'sess-1')
@@ -558,13 +557,13 @@ describe('session-handlers', () => {
 
     it('broadcasts session_list on successful rename', async () => {
       const ctx = makeCtx()
-      ctx.sessionManager.renameSession = createSpy(async () => true)
+      ctx.sessions.sessionManager.renameSession = createSpy(async () => true)
       sessionHandlers.rename_session(makeWs(), makeClient(), { sessionId: 'x', name: 'NewName' }, ctx)
       await waitFor(
-        () => ctx.broadcastSessionList.callCount > 0,
+        () => ctx.transport.broadcastSessionList.callCount > 0,
         { label: 'broadcastSessionList after rename' }
       )
-      assert.ok(ctx.broadcastSessionList.callCount > 0, 'broadcastSessionList not called after rename')
+      assert.ok(ctx.transport.broadcastSessionList.callCount > 0, 'broadcastSessionList not called after rename')
     })
   })
 
@@ -578,7 +577,7 @@ describe('session-handlers', () => {
 
       assert.ok(client.subscribedSessionIds.has('s1'))
       assert.ok(!client.subscribedSessionIds.has('missing'))
-      const [, sent] = ctx.send.lastCall
+      const [, sent] = ctx.transport.send.lastCall
       assert.equal(sent.type, 'subscriptions_updated')
     })
 
@@ -613,8 +612,8 @@ describe('session-handlers', () => {
       const ctx = makeCtx()
       const client = makeClient({ visible: true })
       sessionHandlers.client_visible(makeWs(), client, { visible: false }, ctx)
-      assert.equal(ctx.send.callCount, 0)
-      assert.equal(ctx.broadcast.callCount, 0)
+      assert.equal(ctx.transport.send.callCount, 0)
+      assert.equal(ctx.transport.broadcast.callCount, 0)
     })
   })
 })

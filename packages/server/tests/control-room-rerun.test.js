@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
-import { createSpy } from './test-helpers.js'
+import { createSpy, nsCtx } from './test-helpers.js'
 import {
   runRepoRelayRerun,
   RERUN_TIMEOUT_MS,
@@ -162,7 +162,7 @@ const REPO_SET = [
 
 function makeActionCtx(overrides = {}) {
   const sendSpy = createSpy()
-  return {
+  return nsCtx({
     send: sendSpy,
     config: { repos: [], controlRoomRoot: '/home/user/Projects' },
     resolveRepoSet: createSpy(() => REPO_SET.map(r => ({ ...r }))),
@@ -171,7 +171,7 @@ function makeActionCtx(overrides = {}) {
     realpath: createSpy(p => p),
     ...overrides,
     _send: sendSpy,
-  }
+  })
 }
 
 function rerunMsg(over = {}) {

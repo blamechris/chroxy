@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, statSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
-import { createSpy } from '../test-helpers.js'
+import { createSpy, nsCtx } from '../test-helpers.js'
 
 /**
  * Tests for the BYOK credentials WS handlers (#4052):
@@ -18,11 +18,11 @@ import { createSpy } from '../test-helpers.js'
 
 function makeCtx() {
   const sent = []
-  return {
+  return nsCtx({
     send: createSpy((_ws, msg) => { sent.push(msg) }),
     broadcast: createSpy(() => {}),
     _sent: sent,
-  }
+  })
 }
 
 function makeWs() {
@@ -150,7 +150,7 @@ describe('byok credentials handlers (#4052)', () => {
       const longKey = 'sk-ant-api03-' + 'g'.repeat(95)
       const broadcasts = []
       const ctx = makeCtx()
-      ctx.broadcast = (msg) => { broadcasts.push(msg) }
+      ctx.transport.broadcast = (msg) => { broadcasts.push(msg) }
       settingsHandlers.byok_set_credentials(
         makeWs(),
         { id: 'c1' },
@@ -170,7 +170,7 @@ describe('byok credentials handlers (#4052)', () => {
 
       const broadcasts = []
       const ctx = makeCtx()
-      ctx.broadcast = (msg) => { broadcasts.push(msg) }
+      ctx.transport.broadcast = (msg) => { broadcasts.push(msg) }
       settingsHandlers.byok_clear_credentials(makeWs(), { id: 'c1' }, { requestId: 'r2' }, ctx)
       assert.equal(broadcasts.length, 1)
       assert.equal(broadcasts[0].status, 'missing')
@@ -241,7 +241,7 @@ describe('byok credentials handlers (#4052)', () => {
       assert.equal(reply.code, 'CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT')
       assert.equal(reply.requestId, 'rb1')
       assert.equal(existsSync(credPath()), false, 'no credentials file written')
-      assert.equal(ctx.broadcast.calls.length, 0)
+      assert.equal(ctx.transport.broadcast.calls.length, 0)
     })
 
     it('rejects byok_clear_credentials from a pairing-bound client and leaves the file intact', () => {

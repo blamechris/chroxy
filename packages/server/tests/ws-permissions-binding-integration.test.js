@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 
 import { createPermissionHandler } from '../src/ws-permissions.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
+import { nsCtx } from './test-helpers.js'
 
 /**
  * Integration test for #3029 — paired-client permission round-trip.
@@ -32,7 +33,7 @@ import { settingsHandlers } from '../src/handlers/settings-handlers.js'
  *
  * The owner session fake intentionally omits `respondToPermission` because
  * the production CliSession does not implement it — only SdkSession does.
- * Legacy hook permissions resolve through `ctx.permissions.resolvePermission`
+ * Legacy hook permissions resolve through `ctx.permissions.permissions.resolvePermission`
  * (the shared pendingPermissions store), so wiring the fake any other way
  * would let the test pass via the SDK branch even if the legacy branch
  * regressed (raised by Copilot review on PR #3035).
@@ -87,7 +88,7 @@ function makeWs() {
  * does NOT resolve permissions through `session.respondToPermission()` —
  * CliSession does not implement that method (only SdkSession does). Legacy
  * hook permissions are resolved through the shared `pendingPermissions`
- * store via `ctx.permissions.resolvePermission()`, which closes the HTTP
+ * store via `ctx.permissions.permissions.resolvePermission()`, which closes the HTTP
  * response with `{decision}`.
  *
  * Deliberately omit `respondToPermission` and `_pendingPermissions` here so
@@ -142,13 +143,13 @@ function buildPermissionHandler({ ownerSessionId, ownerSession, hookSecret, sess
  * up boundSessionName for the rejection payload).
  *
  * `permissions` is the real createPermissionHandler return value — the
- * legacy HTTP hook path calls `ctx.permissions.resolvePermission(requestId,
+ * legacy HTTP hook path calls `ctx.permissions.permissions.resolvePermission(requestId,
  * decision)` to end the original HTTP response with `{decision}`.
  */
 function buildResponseCtx({ sessionManager, permissionSessionMap, pendingPermissions, permissions }) {
   const sent = []
   const broadcasts = []
-  return {
+  return nsCtx({
     send: (_ws, msg) => { sent.push(msg) },
     broadcast: (msg) => { broadcasts.push(msg) },
     broadcastToSession: () => {},
@@ -159,7 +160,7 @@ function buildResponseCtx({ sessionManager, permissionSessionMap, pendingPermiss
     permissionAudit: null,
     _sent: sent,
     _broadcasts: broadcasts,
-  }
+  })
 }
 
 // -- Tests ------------------------------------------------------------------
@@ -272,7 +273,7 @@ describe('Integration: paired-client legacy CLI permission round-trip (#3029)', 
     //  - NO SESSION_TOKEN_MISMATCH error was emitted (binding check passed)
     //  - the legacy HTTP response ended with {decision: 'allow'} — proves
     //    the handler actually traversed the legacy resolver branch via
-    //    ctx.permissions.resolvePermission()
+    //    ctx.permissions.permissions.resolvePermission()
     //  - the pendingPermissions entry was consumed
     //  - the permissionSessionMap entry was consumed
     const errorMessages = ws._messages.filter((m) => m.type === 'error')

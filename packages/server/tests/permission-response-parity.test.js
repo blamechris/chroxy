@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 
 import { createPermissionHandler } from '../src/ws-permissions.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
+import { nsCtx } from './test-helpers.js'
 
 /**
  * #5373 (TEST-FIRST): cross-transport parity for permission-response.
@@ -126,7 +127,7 @@ function runWs({ requestId, decision, boundSessionId, activeSessionId, subscribe
   const sent = []
   const broadcasts = []
   const audited = []
-  const ctx = {
+  const ctx = nsCtx({
     send: (_ws, m) => sent.push(m),
     broadcast: (m) => broadcasts.push(m),
     sessionManager,
@@ -134,7 +135,7 @@ function runWs({ requestId, decision, boundSessionId, activeSessionId, subscribe
     pendingPermissions,
     permissions: { resolvePermission: mock.fn() },
     permissionAudit: { logDecision: (e) => audited.push(e) },
-  }
+  })
   const ws = makeWs()
   const client = {
     id: 'client-1',

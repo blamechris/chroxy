@@ -1,19 +1,19 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { featureHandlers as extensionHandlers } from '../../src/handlers/feature-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
 
-  return {
+  return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     sessionManager: {
       getSession: createSpy((id) => sessions.get(id)),
     },
     _sent: sent,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {

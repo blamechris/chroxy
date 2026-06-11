@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { repoHandlers } from '../../src/handlers/repo-handlers.js'
-import { createSpy } from '../test-helpers.js'
+import { createSpy, nsCtx } from '../test-helpers.js'
 
 /**
  * Build a ctx with stubbed scanConversations / readReposFromConfig / writeReposToConfig
@@ -10,7 +10,7 @@ import { createSpy } from '../test-helpers.js'
 function makeCtx(overrides = {}) {
   const sent = []
   const repoStore = []
-  const ctx = {
+  const ctx = nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     scanConversations: createSpy(async () => []),
     readReposFromConfig: createSpy(() => repoStore.slice()),
@@ -21,7 +21,7 @@ function makeCtx(overrides = {}) {
     _sent: sent,
     _repoStore: repoStore,
     ...overrides,
-  }
+  })
   return ctx
 }
 

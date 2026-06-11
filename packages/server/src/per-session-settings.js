@@ -326,7 +326,7 @@ export function buildPerSessionSettingHandler(settingDef) {
     // Use the same resolveSessionOrError path every other settings handler
     // uses — it enforces session-token binding for bound clients and falls
     // back to `client.activeSessionId` otherwise. Calling
-    // `ctx.sessionManager.getSession(sessionId)` directly here would
+    // `ctx.sessions.sessionManager.getSession(sessionId)` directly here would
     // bypass that gate.
     const entry = resolveSessionOrError(ws, ctx, msg, client)
     if (!entry) return
@@ -350,14 +350,14 @@ export function buildPerSessionSettingHandler(settingDef) {
     // Surface the STORED value (BaseSession coerces trim + cap), not the
     // raw payload, so subscribed clients see a stable shape.
     const storedValue = entry.session[settingDef.id]
-    ctx.broadcastToSession(sessionId, {
+    ctx.transport.broadcastToSession(sessionId, {
       type: settingDef.broadcastType,
       sessionId,
       value: storedValue,
     })
 
     try {
-      ctx.sessionManager?.serializeState?.()
+      ctx.sessions.sessionManager?.serializeState?.()
     } catch (err) {
       log.warn(`Failed to persist ${settingDef.id} for ${sessionId}: ${err?.message || err}`)
     }

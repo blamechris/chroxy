@@ -6,7 +6,7 @@ import { join } from 'path'
 import { inputHandlers } from '../../src/handlers/input-handlers.js'
 import { PushManager } from '../../src/push.js'
 import { CATEGORY_DEFAULTS } from '../../src/notification-prefs.js'
-import { createSpy } from '../test-helpers.js'
+import { createSpy, nsCtx } from '../test-helpers.js'
 
 /**
  * Tests for the notification preferences WS handlers (#4541):
@@ -21,13 +21,13 @@ import { createSpy } from '../test-helpers.js'
 function makeCtx(pushManager) {
   const sent = []
   const broadcast = []
-  return {
+  return nsCtx({
     pushManager,
     send: createSpy((_ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcast.push(msg) }),
     _sent: sent,
     _broadcast: broadcast,
-  }
+  })
 }
 
 function makeWs() {
@@ -76,8 +76,8 @@ describe('notification prefs handlers (#4541)', () => {
     })
 
     it('emits NOT_AVAILABLE when pushManager is missing from ctx', () => {
-      const ctx = { send: createSpy(() => {}), _sent: [] }
-      ctx.send = createSpy((_ws, msg) => { ctx._sent.push(msg) })
+      const ctx = nsCtx({ _sent: [] })
+      ctx.transport.send = createSpy((_ws, msg) => { ctx._sent.push(msg) })
       const ws = makeWs()
       inputHandlers.notification_prefs_get(ws, { id: 'c1' }, { requestId: 'r1' }, ctx)
       const err = ws._messages.find((m) => m.type === 'error')
@@ -166,8 +166,8 @@ describe('notification prefs handlers (#4541)', () => {
     })
 
     it('emits NOT_AVAILABLE when pushManager is missing from ctx', () => {
-      const ctx = { send: createSpy(() => {}), _sent: [] }
-      ctx.send = createSpy((_ws, msg) => { ctx._sent.push(msg) })
+      const ctx = nsCtx({ _sent: [] })
+      ctx.transport.send = createSpy((_ws, msg) => { ctx._sent.push(msg) })
       const ws = makeWs()
       inputHandlers.notification_prefs_set(
         ws, { id: 'c1' },

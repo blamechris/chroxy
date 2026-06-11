@@ -1,7 +1,7 @@
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
-import { createMockSession } from './test-helpers.js'
+import { createMockSession, nsCtx } from './test-helpers.js'
 
 /**
  * extension_message handler tests (#2404)
@@ -24,7 +24,7 @@ function makeSession(overrides = {}) {
 function makeCtx(overrides = {}) {
   const sessionMap = new Map()
   const { sessionManager: smOverrides, ...restOverrides } = overrides
-  return {
+  return nsCtx({
     sessionManager: {
       getSession: mock.fn((id) => sessionMap.get(id) ?? null),
       isBudgetPaused: mock.fn(() => false),
@@ -47,7 +47,7 @@ function makeCtx(overrides = {}) {
     clients: new Map(),
     _sessions: sessionMap,
     ...restOverrides,
-  }
+  })
 }
 
 function addSession(ctx, id, entry = null) {
@@ -70,7 +70,7 @@ describe('handleSessionMessage — extension_message', () => {
     const client = makeClient({ activeSessionId: 'sess-1' })
     addSession(ctx, 'sess-1')
     await handleSessionMessage(WS, client, { type: 'extension_message', subtype: 'ping', data: {} }, ctx)
-    const sent = ctx.send.mock.calls[0]?.arguments[1]
+    const sent = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.ok(sent, 'expected a message to be sent')
     assert.equal(sent.type, 'session_error')
     assert.ok(sent.message.includes('provider'))
@@ -81,7 +81,7 @@ describe('handleSessionMessage — extension_message', () => {
     const client = makeClient({ activeSessionId: 'sess-1' })
     addSession(ctx, 'sess-1')
     await handleSessionMessage(WS, client, { type: 'extension_message', provider: '', subtype: 'ping', data: {} }, ctx)
-    const sent = ctx.send.mock.calls[0]?.arguments[1]
+    const sent = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(sent?.type, 'session_error')
     assert.ok(sent.message.includes('provider'))
   })
@@ -91,7 +91,7 @@ describe('handleSessionMessage — extension_message', () => {
     const client = makeClient({ activeSessionId: 'sess-1' })
     addSession(ctx, 'sess-1')
     await handleSessionMessage(WS, client, { type: 'extension_message', provider: 'acme', data: {} }, ctx)
-    const sent = ctx.send.mock.calls[0]?.arguments[1]
+    const sent = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.ok(sent, 'expected a message to be sent')
     assert.equal(sent.type, 'session_error')
     assert.ok(sent.message.includes('subtype'))
@@ -102,7 +102,7 @@ describe('handleSessionMessage — extension_message', () => {
     const client = makeClient({ activeSessionId: 'sess-1' })
     addSession(ctx, 'sess-1')
     await handleSessionMessage(WS, client, { type: 'extension_message', provider: 'acme', subtype: '', data: {} }, ctx)
-    const sent = ctx.send.mock.calls[0]?.arguments[1]
+    const sent = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(sent?.type, 'session_error')
     assert.ok(sent.message.includes('subtype'))
   })
@@ -111,7 +111,7 @@ describe('handleSessionMessage — extension_message', () => {
     const ctx = makeCtx()
     const client = makeClient() // no activeSessionId
     await handleSessionMessage(WS, client, { type: 'extension_message', provider: 'acme', subtype: 'ping', data: null }, ctx)
-    const sent = ctx.send.mock.calls[0]?.arguments[1]
+    const sent = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(sent?.type, 'session_error')
     assert.ok(sent.message.includes('No active session'))
   })
@@ -126,7 +126,7 @@ describe('handleSessionMessage — extension_message', () => {
       data: null,
       sessionId: 'ghost-session',
     }, ctx)
-    const sent = ctx.send.mock.calls[0]?.arguments[1]
+    const sent = ctx.transport.send.mock.calls[0]?.arguments[1]
     assert.equal(sent?.type, 'session_error')
     assert.ok(sent.message.includes('ghost-session'))
   })
@@ -139,7 +139,7 @@ describe('handleSessionMessage — extension_message', () => {
     assert.equal(typeof entry.session.handleExtensionMessage, 'undefined')
     // Should not throw and should not send an error
     await handleSessionMessage(WS, client, { type: 'extension_message', provider: 'acme', subtype: 'ping', data: {} }, ctx)
-    assert.equal(ctx.send.mock.calls.length, 0)
+    assert.equal(ctx.transport.send.mock.calls.length, 0)
   })
 
   it('calls session.handleExtensionMessage with correct payload', async () => {
@@ -185,6 +185,6 @@ describe('handleSessionMessage — extension_message', () => {
       cwd: '/tmp',
     })
     await handleSessionMessage(WS, client, { type: 'extension_message', provider: 'acme', subtype: 'ping', data: 42 }, ctx)
-    assert.equal(ctx.send.mock.calls.length, 0)
+    assert.equal(ctx.transport.send.mock.calls.length, 0)
   })
 })

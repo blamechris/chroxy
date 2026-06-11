@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { handlePairRequestMessage } from '../src/ws-auth.js'
 import { pairingHandlers } from '../src/handlers/pairing-handlers.js'
 import { PairingManager } from '../src/pairing.js'
+import { nsCtx } from './test-helpers.js'
 
 function makeMockWs() {
   const sentRaw = []
@@ -114,11 +115,11 @@ describe('pair_approve / pair_deny (#5510 host-level)', () => {
   function makeApproveCtx() {
     const resolved = []
     const broadcasts = []
-    const ctx = {
+    const ctx = nsCtx({
       pairingManager: pm,
       resolvePairRequester: (requestId, result) => resolved.push({ requestId, result }),
       broadcastPairResolved: (requestId, reason) => broadcasts.push({ requestId, reason }),
-    }
+    })
     return { ctx, resolved, broadcasts }
   }
 

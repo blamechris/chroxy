@@ -26,6 +26,7 @@ import {
   restorePerSessionSettings,
   buildPerSessionSettingHandler,
 } from '../src/per-session-settings.js'
+import { nsCtx } from './test-helpers.js'
 
 // ---- definePerSessionSetting ------------------------------------------------
 
@@ -239,7 +240,7 @@ describe('buildPerSessionSettingHandler', () => {
   function makeCtx(session, overrides = {}) {
     const sessionMap = new Map()
     if (session) sessionMap.set('sess-1', { session, name: 'test' })
-    return {
+    return nsCtx({
       sessionManager: {
         getSession: (id) => sessionMap.get(id) ?? null,
         serializeState: mock.fn(() => null),
@@ -249,7 +250,7 @@ describe('buildPerSessionSettingHandler', () => {
       broadcastToSession: mock.fn(),
       _sessions: sessionMap,
       ...overrides,
-    }
+    })
   }
 
   const client = { id: 'c1', activeSessionId: 'sess-1' }
@@ -260,10 +261,10 @@ describe('buildPerSessionSettingHandler', () => {
     const handler = buildPerSessionSettingHandler(booleanDef)
     handler({}, client, { type: 'set_foo_flag', value: 'not-a-bool' }, ctx)
 
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 0)
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 0)
     assert.equal(session.setFooFlag.mock.callCount(), 0)
-    assert.equal(ctx.send.mock.callCount(), 1)
-    const reply = ctx.send.mock.calls[0].arguments[1]
+    assert.equal(ctx.transport.send.mock.callCount(), 1)
+    const reply = ctx.transport.send.mock.calls[0].arguments[1]
     assert.equal(reply.type, 'session_error')
     assert.match(reply.message, /boolean.*value/i)
   })
@@ -273,9 +274,9 @@ describe('buildPerSessionSettingHandler', () => {
     const handler = buildPerSessionSettingHandler(booleanDef)
     handler({}, { id: 'c1', activeSessionId: 'sess-missing' }, { type: 'set_foo_flag', value: true }, ctx)
 
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 0)
-    assert.equal(ctx.send.mock.callCount(), 1)
-    assert.equal(ctx.send.mock.calls[0].arguments[1].type, 'session_error')
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 0)
+    assert.equal(ctx.transport.send.mock.callCount(), 1)
+    assert.equal(ctx.transport.send.mock.calls[0].arguments[1].type, 'session_error')
   })
 
   it('sends session_error when session lacks the setter (defensive)', () => {
@@ -285,9 +286,9 @@ describe('buildPerSessionSettingHandler', () => {
     const handler = buildPerSessionSettingHandler(booleanDef)
     handler({}, client, { type: 'set_foo_flag', value: true }, ctx)
 
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 0)
-    assert.equal(ctx.send.mock.callCount(), 1)
-    assert.match(ctx.send.mock.calls[0].arguments[1].message, /does not support/i)
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 0)
+    assert.equal(ctx.transport.send.mock.callCount(), 1)
+    assert.match(ctx.transport.send.mock.calls[0].arguments[1].message, /does not support/i)
   })
 
   it('broadcasts when the setter returns true (state actually changed)', () => {
@@ -298,14 +299,14 @@ describe('buildPerSessionSettingHandler', () => {
 
     assert.equal(session.setFooFlag.mock.callCount(), 1)
     assert.equal(session.setFooFlag.mock.calls[0].arguments[0], true)
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 1)
-    const [sessionId, broadcast] = ctx.broadcastToSession.mock.calls[0].arguments
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 1)
+    const [sessionId, broadcast] = ctx.transport.broadcastToSession.mock.calls[0].arguments
     assert.equal(sessionId, 'sess-1')
     assert.equal(broadcast.type, 'foo_flag_changed')
     assert.equal(broadcast.value, true)
     // Immediate persist — toggles are rare operator actions; matches the
     // existing per-knob behaviour.
-    assert.equal(ctx.sessionManager.serializeState.mock.callCount(), 1)
+    assert.equal(ctx.sessions.sessionManager.serializeState.mock.callCount(), 1)
   })
 
   it('skips broadcast + persist when the setter reports a no-op (false)', () => {
@@ -315,9 +316,9 @@ describe('buildPerSessionSettingHandler', () => {
     handler({}, client, { type: 'set_foo_flag', value: false }, ctx)
 
     assert.equal(session.setFooFlag.mock.callCount(), 1)
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 0)
-    assert.equal(ctx.sessionManager.serializeState.mock.callCount(), 0)
-    assert.equal(ctx.send.mock.callCount(), 0)
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 0)
+    assert.equal(ctx.sessions.sessionManager.serializeState.mock.callCount(), 0)
+    assert.equal(ctx.transport.send.mock.callCount(), 0)
   })
 
   it('does not throw when persist itself fails (best-effort)', () => {
@@ -334,6 +335,6 @@ describe('buildPerSessionSettingHandler', () => {
     assert.doesNotThrow(() => {
       handler({}, client, { type: 'set_foo_flag', value: true }, ctx)
     })
-    assert.equal(ctx.broadcastToSession.mock.callCount(), 1)
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 1)
   })
 })

@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createSpy, createMockSession, createMockSessionManager, withEnv } from './test-helpers.js'
+import { createSpy, createMockSession, createMockSessionManager, withEnv, nsCtx, makeSessionIndexCtx, assertCtxShape } from './test-helpers.js'
+import { CTX_NAMESPACE_NAMES, CTX_NAMESPACES } from '../src/ws-handler-context.js'
 import { EventEmitter } from 'node:events'
 
 describe('createSpy', () => {
@@ -267,5 +268,84 @@ describe('withEnv', () => {
       /async boom/,
     )
     assert.equal(process.env[TEST_KEY], undefined)
+  })
+})
+
+// #5558: namespaced handler-ctx builder + shape assert
+describe('nsCtx', () => {
+  it('creates all five namespace buckets even when empty', () => {
+    const ctx = nsCtx()
+    for (const ns of CTX_NAMESPACE_NAMES) {
+      assert.ok(ctx[ns] && typeof ctx[ns] === 'object', `missing namespace ${ns}`)
+    }
+  })
+
+  it('routes each known field into its declared namespace', () => {
+    const send = () => {}
+    const sm = { getSession: () => null }
+    const cfg = { foo: 1 }
+    const ctx = nsCtx({ send, sessionManager: sm, config: cfg, draining: true })
+    assert.equal(ctx.transport.send, send)
+    assert.equal(ctx.sessions.sessionManager, sm)
+    assert.equal(ctx.services.config, cfg)
+    assert.equal(ctx.runtime.draining, true)
+    // none of these should leak to the top level
+    assert.equal(ctx.send, undefined)
+    assert.equal(ctx.sessionManager, undefined)
+    assert.equal(ctx.config, undefined)
+  })
+
+  it('keeps unknown keys (test-injection seams + debug fields) at the top level', () => {
+    const ctx = nsCtx({ evaluateDraft: () => 'x', _sent: [], scanConversations: () => [] })
+    assert.equal(typeof ctx.evaluateDraft, 'function')
+    assert.ok(Array.isArray(ctx._sent))
+    assert.equal(typeof ctx.scanConversations, 'function')
+  })
+
+  it('merges a pre-built transport bag from makeSessionIndexCtx', () => {
+    const ctx = nsCtx({ send: () => {}, ...makeSessionIndexCtx() })
+    assert.ok(ctx.transport.clients instanceof Map)
+    assert.equal(typeof ctx.transport.subscribeClient, 'function')
+    assert.equal(typeof ctx.transport.send, 'function')
+    // clientManager is not a ctx field — stays top-level
+    assert.ok(ctx.clientManager)
+  })
+
+  it('treats `permissions` as a field, not a namespace, even when its value is an object', () => {
+    const perm = { resolvePermission: () => {} }
+    const ctx = nsCtx({ permissions: perm })
+    // must land at ctx.permissions.permissions (the handler), not be merged
+    assert.equal(ctx.permissions.permissions, perm)
+    assert.equal(ctx.permissions.resolvePermission, undefined)
+  })
+
+  it('a fully-populated nsCtx passes deep assertCtxShape', () => {
+    const flat = {}
+    for (const ns of CTX_NAMESPACE_NAMES) {
+      for (const key of CTX_NAMESPACES[ns]) flat[key] = null
+    }
+    const ctx = nsCtx(flat)
+    assert.doesNotThrow(() => assertCtxShape(ctx, { deep: true }))
+  })
+})
+
+describe('assertCtxShape', () => {
+  it('throws naming a missing namespace (shallow)', () => {
+    assert.throws(() => assertCtxShape({ transport: {}, sessions: {}, permissions: {}, services: {} }),
+      /missing the 'runtime' namespace/)
+  })
+
+  it('throws when given a non-object', () => {
+    assert.throws(() => assertCtxShape(null), /expected a ctx object/)
+  })
+
+  it('deep mode throws naming a missing key inside a namespace', () => {
+    const ctx = nsCtx({ send: () => {} })  // transport.send present, rest of transport empty
+    assert.throws(() => assertCtxShape(ctx, { deep: true }), /ctx\.transport is missing required key/)
+  })
+
+  it('returns the ctx for chaining', () => {
+    const ctx = nsCtx()
+    assert.equal(assertCtxShape(ctx), ctx)
   })
 })

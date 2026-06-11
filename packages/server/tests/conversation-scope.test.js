@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { scopeConversationsToClient } from '../src/conversation-scope.js'
+import { nsCtx } from './test-helpers.js'
 
 /**
  * Unit tests for conversation-scope — Adversary A8 fix (2026-04-11
@@ -10,14 +11,14 @@ import { scopeConversationsToClient } from '../src/conversation-scope.js'
  */
 
 function makeCtx(sessionsByCwd) {
-  return {
+  return nsCtx({
     sessionManager: {
       getSession(id) {
         if (!id || !(id in sessionsByCwd)) return null
         return { cwd: sessionsByCwd[id] }
       },
     },
-  }
+  })
 }
 
 describe('scopeConversationsToClient', () => {
@@ -61,11 +62,11 @@ describe('scopeConversationsToClient', () => {
 
   it('fails closed when bound session cwd is not a string', () => {
     const client = { boundSessionId: 's1' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession: () => ({ cwd: undefined }),
       },
-    }
+    })
     const result = scopeConversationsToClient(conversations, client, ctx)
     assert.deepEqual(result, [])
   })

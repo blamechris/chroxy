@@ -352,7 +352,7 @@ export function clientHasCapability(ws, capability) {
 
 /** Broadcast client_focus_changed to other clients when a client's active session changes */
 export function broadcastFocusChanged(client, sessionId, ctx) {
-  ctx.broadcast(
+  ctx.transport.broadcast(
     { type: 'client_focus_changed', clientId: client.id, sessionId, timestamp: Date.now() },
     (c) => c.id !== client.id
   )
@@ -364,13 +364,13 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
  * (dashboard, other mobile clients, etc.) without requiring explicit subscribe_sessions.
  */
 export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
-  for (const [clientWs, c] of ctx.clients) {
+  for (const [clientWs, c] of ctx.transport.clients) {
     if (c.authenticated && clientWs !== excludeWs) {
       // #5563: route through the index-maintaining helper so the
       // sessionId→clients reverse index stays in sync. Falls back to a bare
       // add for fixtures whose ctx predates the helper.
-      if (typeof ctx.subscribeClient === 'function') {
-        ctx.subscribeClient(c, sessionId)
+      if (typeof ctx.transport.subscribeClient === 'function') {
+        ctx.transport.subscribeClient(c, sessionId)
       } else {
         c.subscribedSessionIds.add(sessionId)
       }
@@ -402,13 +402,13 @@ export function resolveSession(ctx, msg, client) {
 
   // Delegate to sessionManager — its getSession handles null/undefined sid
   // (real SessionManager returns null, cliSession adapter returns default entry).
-  return ctx.sessionManager?.getSession(sid) ?? null
+  return ctx.sessions?.sessionManager?.getSession(sid) ?? null
 }
 
 /**
  * Send a `session_error` envelope to a WebSocket client (#4773, #4809).
  *
- * All `ctx.send(ws, { type: 'session_error', message })` sites across the
+ * All `ctx.transport.send(ws, { type: 'session_error', message })` sites across the
  * handler modules build the same two-field payload by hand. Centralising the
  * shape here means a future schema tweak (adding `code`, `recoverable`,
  * `sessionId`, etc.) lands in one place instead of being scattered across
@@ -418,8 +418,8 @@ export function resolveSession(ctx, msg, client) {
  * `buildSessionTokenMismatchPayload` spread, or the create-session `code`
  * field) so they cannot use this helper without extending its signature.
  *
- * Routed through `ctx.send` rather than `ws.send` so it stays compatible
- * with the existing handler tests (which monkey-patch `ctx.send` and
+ * Routed through `ctx.transport.send` rather than `ws.send` so it stays compatible
+ * with the existing handler tests (which monkey-patch `ctx.transport.send` and
  * inspect the captured payloads). In production both surfaces ultimately
  * call `ws.send(JSON.stringify(msg))` via WsServer._send, so behaviour is
  * identical.
@@ -429,8 +429,8 @@ export function resolveSession(ctx, msg, client) {
  * @param {string} message - Human-readable, user-facing error message
  */
 export function sendSessionError(ws, ctx, message) {
-  if (!ws || !ctx || typeof ctx.send !== 'function') return
-  ctx.send(ws, { type: 'session_error', message })
+  if (!ws || !ctx || typeof ctx.transport?.send !== 'function') return
+  ctx.transport.send(ws, { type: 'session_error', message })
 }
 
 /**
@@ -440,7 +440,7 @@ export function sendSessionError(ws, ctx, message) {
  *
  *   const entry = resolveSession(ctx, msg, client)
  *   if (!entry) {
- *     ctx.send(ws, { type: 'session_error', message: 'No active session' })
+ *     ctx.transport.send(ws, { type: 'session_error', message: 'No active session' })
  *     return
  *   }
  *
@@ -472,7 +472,7 @@ export function resolveSessionOrError(ws, ctx, msg, client) {
  * Wraps the 6-times-repeated handler pattern:
  *
  *   if (typeof entry.session.setX !== 'function') {
- *     ctx.send(ws, { type: 'session_error',
+ *     ctx.transport.send(ws, { type: 'session_error',
  *       message: 'This provider does not support X' })
  *     return
  *   }

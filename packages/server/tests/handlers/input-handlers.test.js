@@ -1,13 +1,13 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { inputHandlers, buildHistoryText } from '../../src/handlers/input-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
   const broadcasts = []
 
-  return {
+  return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastToSession: createSpy(),
@@ -29,7 +29,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     _sent: sent,
     _broadcasts: broadcasts,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {
@@ -162,7 +162,7 @@ describe('input-handlers', () => {
       const session = createMockSession()
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.sessionManager.isBudgetPaused = createSpy(() => true)
+      ctx.sessions.sessionManager.isBudgetPaused = createSpy(() => true)
       const client = makeClient({ activeSessionId: 's1' })
 
       inputHandlers.input(makeWs(), client, { data: 'hello' }, ctx)
@@ -177,7 +177,7 @@ describe('input-handlers', () => {
       session.isRunning = true
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.primaryClients.set('s1', 'other-client')
+      ctx.transport.primaryClients.set('s1', 'other-client')
       const client = makeClient({ activeSessionId: 's1' })
 
       inputHandlers.input(makeWs(), client, { data: 'hello' }, ctx)
@@ -210,8 +210,8 @@ describe('input-handlers', () => {
 
       inputHandlers.input(makeWs(), client, { data: 'hi', clientMessageId: 'user-42-1700000000000' }, ctx)
 
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
-      const [sid, text, id] = ctx.sessionManager.recordUserInput.lastCall
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 1)
+      const [sid, text, id] = ctx.sessions.sessionManager.recordUserInput.lastCall
       assert.equal(sid, 's1')
       assert.equal(text, 'hi')
       assert.equal(id, 'user-42-1700000000000', 'recordUserInput must receive the client id')
@@ -236,10 +236,10 @@ describe('input-handlers', () => {
       // Case 4: too long
       inputHandlers.input(makeWs(), client, { data: 'four', clientMessageId: 'x'.repeat(200) }, ctx)
 
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 4)
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 4)
       assert.equal(ctx._broadcasts.length, 4)
       for (let i = 0; i < 4; i++) {
-        const [,, id] = ctx.sessionManager.recordUserInput.calls[i]
+        const [,, id] = ctx.sessions.sessionManager.recordUserInput.calls[i]
         assert.ok(typeof id === 'string' && id.length > 0,
           `recordUserInput call #${i} should receive a server-generated messageId`)
         assert.match(id, /^uin-\d+-\d+$/,
@@ -374,7 +374,7 @@ describe('input-handlers', () => {
     // side-effect of #4928. Before #4928 (PR that wired claude CLI --resume),
     // `CliSession.resumeSessionId` was always undefined, so the
     //
-    //   if (entry.session.resumeSessionId) { ctx.checkpointManager.createCheckpoint(...) }
+    //   if (entry.session.resumeSessionId) { ctx.services.checkpointManager.createCheckpoint(...) }
     //
     // branch at input-handlers.js:244 was a permanent no-op for the
     // claude-cli provider — only SDK sessions ever auto-checkpointed.
@@ -426,7 +426,7 @@ describe('input-handlers', () => {
 
         inputHandlers.input(makeWs(), client, { data: 'first message ever on this session' }, ctx)
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 0,
           'no resume id yet → MUST skip checkpoint (would otherwise snapshot with undefined conversation id)')
         assert.equal(session.sendMessage.callCount, 1,
           'message still forwards — checkpoint gate is independent of message delivery')
@@ -441,14 +441,14 @@ describe('input-handlers', () => {
         session.resumeSessionId = 'cli-init-abc-123'
         sessions.set('s1', { session, name: 'S', cwd: '/work' })
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.getHistoryCount = createSpy(() => 4)
+        ctx.sessions.sessionManager.getHistoryCount = createSpy(() => 4)
         const client = makeClient({ activeSessionId: 's1' })
 
         inputHandlers.input(makeWs(), client, { data: 'second message after init' }, ctx)
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 1,
           'post-init message MUST auto-checkpoint — this is the #4930 side-effect')
-        const [args] = ctx.checkpointManager.createCheckpoint.lastCall
+        const [args] = ctx.services.checkpointManager.createCheckpoint.lastCall
         assert.equal(args.sessionId, 's1', 'sessionId must be the chroxy session id (not the resume id)')
         assert.equal(args.resumeSessionId, 'cli-init-abc-123',
           'resumeSessionId must be threaded into the checkpoint so rewind can re-attach to this conversation')
@@ -470,8 +470,8 @@ describe('input-handlers', () => {
         const longText = 'A'.repeat(250)
         inputHandlers.input(makeWs(), client, { data: longText }, ctx)
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1)
-        const [args] = ctx.checkpointManager.createCheckpoint.lastCall
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 1)
+        const [args] = ctx.services.checkpointManager.createCheckpoint.lastCall
         assert.equal(args.description.length, 100,
           'description MUST be capped at 100 chars — the rewind UI label has a fixed width')
         assert.equal(args.description, 'A'.repeat(100))
@@ -495,13 +495,13 @@ describe('input-handlers', () => {
           inputHandlers.input(makeWs(), client, { data: `message #${i + 1}` }, ctx)
         }
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 5,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 5,
           'exactly one checkpoint per user message — change this only if throttling is intentionally added')
         // Each call uses the same resume id (the conversation id is stable
         // across the session's lifetime) — the cumulative message count is
         // what advances.
         for (let i = 0; i < 5; i++) {
-          assert.equal(ctx.checkpointManager.createCheckpoint.calls[i][0].resumeSessionId, 'cli-init-multi-msg',
+          assert.equal(ctx.services.checkpointManager.createCheckpoint.calls[i][0].resumeSessionId, 'cli-init-multi-msg',
             `call #${i + 1} must carry the same resume id — branching only happens on rewind`)
         }
       })
@@ -526,13 +526,13 @@ describe('input-handlers', () => {
         inputHandlers.input(makeWs(), cliClient, { data: 'hi from cli' }, ctx)
         inputHandlers.input(makeWs(), sdkClient, { data: 'hi from sdk' }, ctx)
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 2,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 2,
           'both providers must take the same auto-checkpoint branch')
-        assert.equal(ctx.checkpointManager.createCheckpoint.calls[0][0].resumeSessionId, 'cli-conv-uuid')
-        assert.equal(ctx.checkpointManager.createCheckpoint.calls[0][0].cwd, '/work/cli',
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.calls[0][0].resumeSessionId, 'cli-conv-uuid')
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.calls[0][0].cwd, '/work/cli',
           'CLI session checkpoint carries its own cwd')
-        assert.equal(ctx.checkpointManager.createCheckpoint.calls[1][0].resumeSessionId, 'sdk-conv-uuid')
-        assert.equal(ctx.checkpointManager.createCheckpoint.calls[1][0].cwd, '/work/sdk',
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.calls[1][0].resumeSessionId, 'sdk-conv-uuid')
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.calls[1][0].cwd, '/work/sdk',
           'SDK session checkpoint carries its own cwd')
       })
 
@@ -547,7 +547,7 @@ describe('input-handlers', () => {
         session.resumeSessionId = 'cli-init-failing-cp'
         sessions.set('s1', { session, name: 'S', cwd: '/work' })
         const ctx = makeCtx(sessions)
-        ctx.checkpointManager.createCheckpoint = createSpy(async () => {
+        ctx.services.checkpointManager.createCheckpoint = createSpy(async () => {
           throw new Error('simulated git snapshot failure')
         })
         const client = makeClient({ activeSessionId: 's1' })
@@ -557,7 +557,7 @@ describe('input-handlers', () => {
         // Let the .catch() handler run.
         await new Promise((r) => setImmediate(r))
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 1,
           'checkpoint MUST be attempted even though it will reject')
         assert.equal(session.sendMessage.callCount, 1,
           'message MUST still reach the session — checkpoint failure is non-blocking')
@@ -577,7 +577,7 @@ describe('input-handlers', () => {
         inputHandlers.input(makeWs(), client, { data: '   ' }, ctx)
         inputHandlers.input(makeWs(), client, { data: '' }, ctx)
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 0,
           'empty/whitespace-only input returns early — must not churn a checkpoint per stray keystroke')
         assert.equal(session.sendMessage.callCount, 0,
           'sanity: message itself did not forward')
@@ -589,12 +589,12 @@ describe('input-handlers', () => {
         session.resumeSessionId = 'cli-init-budget-paused'
         sessions.set('s1', { session, name: 'S', cwd: '/work' })
         const ctx = makeCtx(sessions)
-        ctx.sessionManager.isBudgetPaused = createSpy(() => true)
+        ctx.sessions.sessionManager.isBudgetPaused = createSpy(() => true)
         const client = makeClient({ activeSessionId: 's1' })
 
         inputHandlers.input(makeWs(), client, { data: 'message hits budget pause' }, ctx)
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 0,
           'budget-paused session must skip checkpoint — the message will not reach the model so no snapshot point is meaningful')
         const errors = ctx._sent.filter((m) => m.type === 'session_error')
         assert.equal(errors.length, 1, 'sanity: budget-exceeded error still surfaced')
@@ -607,12 +607,12 @@ describe('input-handlers', () => {
         session.isRunning = true
         sessions.set('s1', { session, name: 'S', cwd: '/work' })
         const ctx = makeCtx(sessions)
-        ctx.primaryClients.set('s1', 'other-client')
+        ctx.transport.primaryClients.set('s1', 'other-client')
         const client = makeClient({ activeSessionId: 's1' })
 
         inputHandlers.input(makeWs(), client, { data: 'cross-client conflict draft' }, ctx)
 
-        assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 0,
+        assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 0,
           'rejected-by-input-conflict message must NOT churn a checkpoint — the message never reaches the session')
         const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
         assert.equal(conflicts.length, 1, 'sanity: the input_conflict error path fired')
@@ -631,7 +631,7 @@ describe('input-handlers', () => {
         session.sendMessage = createSpy(() => { order.push('sendMessage') })
         sessions.set('s1', { session, name: 'S', cwd: '/work' })
         const ctx = makeCtx(sessions)
-        ctx.checkpointManager.createCheckpoint = createSpy(async () => { order.push('createCheckpoint') })
+        ctx.services.checkpointManager.createCheckpoint = createSpy(async () => { order.push('createCheckpoint') })
         const client = makeClient({ activeSessionId: 's1' })
 
         inputHandlers.input(makeWs(), client, { data: 'turn boundary test' }, ctx)
@@ -718,31 +718,31 @@ describe('input-handlers', () => {
       const session = createMockSession()
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.sessionManager.isBudgetPaused = createSpy(() => true)
-      ctx.sessionManager.resumeBudget = createSpy()
+      ctx.sessions.sessionManager.isBudgetPaused = createSpy(() => true)
+      ctx.sessions.sessionManager.resumeBudget = createSpy()
       const client = makeClient({ activeSessionId: 's1' })
 
       inputHandlers.resume_budget(makeWs(), client, {}, ctx)
 
-      assert.equal(ctx.sessionManager.resumeBudget.callCount, 1)
-      assert.equal(ctx.broadcastToSession.callCount, 1)
+      assert.equal(ctx.sessions.sessionManager.resumeBudget.callCount, 1)
+      assert.equal(ctx.transport.broadcastToSession.callCount, 1)
     })
   })
 
   describe('register_push_token', () => {
     it('calls pushManager.registerToken when present', () => {
       const ctx = makeCtx()
-      ctx.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
+      ctx.services.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
 
       inputHandlers.register_push_token(makeWs(), makeClient(), { token: 'expo-tok-123' }, ctx)
 
-      assert.equal(ctx.pushManager.registerToken.callCount, 1)
-      assert.equal(ctx.pushManager.registerToken.lastCall[0], 'expo-tok-123')
+      assert.equal(ctx.services.pushManager.registerToken.callCount, 1)
+      assert.equal(ctx.services.pushManager.registerToken.lastCall[0], 'expo-tok-123')
     })
 
     it('sends push_token_error when registerToken returns false', () => {
       const ctx = makeCtx()
-      ctx.pushManager = { registerToken: createSpy(() => false), touchDevice: createSpy() }
+      ctx.services.pushManager = { registerToken: createSpy(() => false), touchDevice: createSpy() }
 
       inputHandlers.register_push_token(makeWs(), makeClient(), { token: 'bad' }, ctx)
 
@@ -763,23 +763,23 @@ describe('input-handlers', () => {
     // with `null` and break the dashboard label.
     it('calls touchDevice with the auth-derived platform from client.deviceInfo (#4587)', () => {
       const ctx = makeCtx()
-      ctx.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
+      ctx.services.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
       const client = makeClient({ deviceInfo: { platform: 'ios' } })
 
       inputHandlers.register_push_token(makeWs(), client, { token: 'expo-tok-xyz' }, ctx)
 
-      assert.equal(ctx.pushManager.touchDevice.callCount, 1)
-      assert.equal(ctx.pushManager.touchDevice.lastCall[0], 'expo-tok-xyz')
-      assert.equal(ctx.pushManager.touchDevice.lastCall[1], 'ios')
+      assert.equal(ctx.services.pushManager.touchDevice.callCount, 1)
+      assert.equal(ctx.services.pushManager.touchDevice.lastCall[0], 'expo-tok-xyz')
+      assert.equal(ctx.services.pushManager.touchDevice.lastCall[1], 'ios')
     })
 
     it('passes null to touchDevice when client lacks deviceInfo.platform (#4587)', () => {
       const ctx = makeCtx()
-      ctx.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
+      ctx.services.pushManager = { registerToken: createSpy(() => true), touchDevice: createSpy() }
       // Default makeClient() has no deviceInfo — platform falls back to null
       // so touchDevice still no-ops correctly on the existing-entry check.
       inputHandlers.register_push_token(makeWs(), makeClient(), { token: 'expo-tok-xyz' }, ctx)
-      assert.equal(ctx.pushManager.touchDevice.lastCall[1], null)
+      assert.equal(ctx.services.pushManager.touchDevice.lastCall[1], null)
     })
   })
 
@@ -854,7 +854,7 @@ describe('input-handlers', () => {
         sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
         const ctx = makeCtx(sessions)
         // The leaked toolUseId belongs to session s1.
-        ctx.questionSessionMap.set('tool-leak', 's1')
+        ctx.permissions.questionSessionMap.set('tool-leak', 's1')
         // Attacker tab: unbound, actively viewing s2, NOT subscribed to s1.
         const attacker = makeClient({
           id: 'attacker',
@@ -872,7 +872,7 @@ describe('input-handlers', () => {
           'unbound client without subscription/active match must NOT route the answer')
         assert.equal(sessionB.respondToQuestion.callCount, 0,
           'and must not bleed onto the attacker\'s own session either')
-        assert.equal(ctx.questionSessionMap.get('tool-leak'), 's1',
+        assert.equal(ctx.permissions.questionSessionMap.get('tool-leak'), 's1',
           'mapping must stay intact so the legitimate client can still respond')
       })
 
@@ -881,7 +881,7 @@ describe('input-handlers', () => {
         const sessionA = createMockSession()
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         const ctx = makeCtx(sessions)
-        ctx.questionSessionMap.set('tool-ok-active', 's1')
+        ctx.permissions.questionSessionMap.set('tool-ok-active', 's1')
         const client = makeClient({
           id: 'legit-active',
           boundSessionId: null,
@@ -897,7 +897,7 @@ describe('input-handlers', () => {
         assert.equal(sessionA.respondToQuestion.callCount, 1,
           'unbound client with matching activeSessionId must route normally')
         assert.equal(sessionA.respondToQuestion.lastCall[0], 'yes')
-        assert.equal(ctx.questionSessionMap.has('tool-ok-active'), false,
+        assert.equal(ctx.permissions.questionSessionMap.has('tool-ok-active'), false,
           'mapping must be consumed when the answer is routed')
       })
 
@@ -908,7 +908,7 @@ describe('input-handlers', () => {
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
         const ctx = makeCtx(sessions)
-        ctx.questionSessionMap.set('tool-ok-subscribed', 's1')
+        ctx.permissions.questionSessionMap.set('tool-ok-subscribed', 's1')
         // Multi-session dashboard pattern: active tab is s2, but s1 is
         // subscribed (sidebar / background tab keeping the wire open).
         const client = makeClient({
@@ -936,7 +936,7 @@ describe('input-handlers', () => {
         const sessionA = createMockSession()
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         const ctx = makeCtx(sessions)
-        ctx.questionSessionMap.set('tool-x', 's1')
+        ctx.permissions.questionSessionMap.set('tool-x', 's1')
         const boundElsewhere = makeClient({
           id: 'bound-other',
           boundSessionId: 's2',
@@ -951,7 +951,7 @@ describe('input-handlers', () => {
 
         assert.equal(sessionA.respondToQuestion.callCount, 0,
           'bound-client guard takes precedence — boundSessionId mismatch always wins')
-        assert.equal(ctx.questionSessionMap.get('tool-x'), 's1',
+        assert.equal(ctx.permissions.questionSessionMap.get('tool-x'), 's1',
           'mapping preserved when the bound-elsewhere client is rejected')
       })
 
@@ -979,7 +979,7 @@ describe('input-handlers', () => {
         // Production: when the question for s1 dispatched, the WsServer-side
         // helper called questionSessionMap.set('tool-after-switch', 's1')
         // AND subscribedSessionIds.add('s1') for this client.
-        ctx.questionSessionMap.set('tool-after-switch', 's1')
+        ctx.permissions.questionSessionMap.set('tool-after-switch', 's1')
         // The user then tapped "switch to session B" — session-handlers.js
         // adds 's2' to subscribedSessionIds and sets activeSessionId='s2',
         // but leaves the prior 's1' subscription intact (only unsubscribe
@@ -1001,7 +1001,7 @@ describe('input-handlers', () => {
         assert.equal(sessionA.respondToQuestion.lastCall[0], 'approve-after-switch')
         assert.equal(sessionB.respondToQuestion.callCount, 0,
           'must not bleed onto the now-active session B')
-        assert.equal(ctx.questionSessionMap.has('tool-after-switch'), false,
+        assert.equal(ctx.permissions.questionSessionMap.has('tool-after-switch'), false,
           'mapping consumed on successful route')
       })
 
@@ -1013,7 +1013,7 @@ describe('input-handlers', () => {
         const sessionA = createMockSession()
         sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
         const ctx = makeCtx(sessions)
-        ctx.questionSessionMap.set('tool-y', 's1')
+        ctx.permissions.questionSessionMap.set('tool-y', 's1')
         const client = makeClient({
           id: 'no-subscribed-set',
           boundSessionId: null,
@@ -1116,9 +1116,9 @@ describe('input-handlers', () => {
 
       // Issue #3635: history must record the rewritten text so what was
       // forwarded to the session matches what an operator sees on replay.
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 1)
       assert.equal(
-        ctx.sessionManager.recordUserInput.lastCall[1],
+        ctx.sessions.sessionManager.recordUserInput.lastCall[1],
         'Profile auth_handler() and propose 2 specific optimisations.',
         'history must record the rewritten text on rewrite verdict (parity with sendMessage)',
       )
@@ -1145,8 +1145,8 @@ describe('input-handlers', () => {
         ctx,
       )
 
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
-      const [sid, recordedText, recordedId] = ctx.sessionManager.recordUserInput.lastCall
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 1)
+      const [sid, recordedText, recordedId] = ctx.sessions.sessionManager.recordUserInput.lastCall
       assert.equal(sid, 's1')
       assert.equal(
         recordedText,
@@ -1187,9 +1187,9 @@ describe('input-handlers', () => {
       await inputHandlers.input(makeWs(), client, { data: 'remove it from the function' }, ctx)
 
       assert.equal(session.sendMessage.callCount, 0, 'clarify never forwards to session')
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 1)
       assert.equal(
-        ctx.sessionManager.recordUserInput.lastCall[1],
+        ctx.sessions.sessionManager.recordUserInput.lastCall[1],
         'remove it from the function',
         'clarify path must keep the original draft in history (the dashboard pairs it with the clarify card)',
       )
@@ -1222,8 +1222,8 @@ describe('input-handlers', () => {
       // Primary must be updated even on the clarify path so input-conflict
       // and primary-changed bookkeeping reflects the user's intent — see
       // Copilot review on PR #3634.
-      assert.equal(ctx.updatePrimary.callCount, 1, 'updatePrimary must be called even on clarify path')
-      assert.deepEqual(ctx.updatePrimary.lastCall, ['s1', client.id])
+      assert.equal(ctx.transport.updatePrimary.callCount, 1, 'updatePrimary must be called even on clarify path')
+      assert.deepEqual(ctx.transport.updatePrimary.lastCall, ['s1', client.id])
     })
 
     it('force-forwards original draft after 3 consecutive clarify verdicts (max iteration cap)', async () => {
@@ -1388,11 +1388,11 @@ describe('input-handlers', () => {
       const client = makeClient({ activeSessionId: 's1' })
 
       await inputHandlers.input(makeWs(), client, { data: 'first ambiguous draft for clarification' }, ctx)
-      assert.equal(ctx._evaluatorIterations?.get('s1'), 1, 'counter advanced to 1 after first clarify')
+      assert.equal(ctx.runtime.evaluatorIterations?.get('s1'), 1, 'counter advanced to 1 after first clarify')
 
       // Simulate WsServer._sessionDestroyedHandler for s1.
-      ctx._evaluatorIterations.delete('s1')
-      assert.equal(ctx._evaluatorIterations.has('s1'), false, 'counter entry removed for destroyed session')
+      ctx.runtime.evaluatorIterations.delete('s1')
+      assert.equal(ctx.runtime.evaluatorIterations.has('s1'), false, 'counter entry removed for destroyed session')
     })
   })
 
@@ -1430,7 +1430,7 @@ describe('input-handlers', () => {
       const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
       assert.equal(conflicts.length, 1, 'exactly one input_conflict session_error must be sent for the rejected second draft')
 
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 0,
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 0,
         'rejected second draft must NOT be recorded in session history')
       const userInputEchos = ctx._broadcasts.filter((b) => b?.type === 'user_input')
       assert.equal(userInputEchos.length, 0,
@@ -1439,7 +1439,7 @@ describe('input-handlers', () => {
       resolveFirst()
       await firstInFlight
       assert.equal(session.sendMessage.callCount, 1, 'first draft must still forward to the session after evaluator resolves')
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1,
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 1,
         'first (forwarded) draft must be recorded exactly once')
     })
 
@@ -1502,7 +1502,7 @@ describe('input-handlers', () => {
       await new Promise((r) => setImmediate(r))
 
       session.isRunning = true
-      ctx.primaryClients.set('s1', 'other-client')
+      ctx.transport.primaryClients.set('s1', 'other-client')
 
       resolveEval()
       await inFlight
@@ -1511,7 +1511,7 @@ describe('input-handlers', () => {
       assert.equal(session.sendMessage.callCount, 0, 'must NOT forward when conflict re-emerges after the await')
       const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
       assert.equal(conflicts.length, 1, 'must emit a single input_conflict session_error after the await re-check')
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 0,
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 0,
         'post-await rejected draft must NOT be recorded in session history')
       const userInputEchos = ctx._broadcasts.filter((b) => b?.type === 'user_input')
       assert.equal(userInputEchos.length, 0,
@@ -1520,7 +1520,7 @@ describe('input-handlers', () => {
   })
 
   // #3639: per-session promptEvaluatorSkipPattern. When the session has a
-  // pattern set, it takes precedence over the server-wide ctx.config one.
+  // pattern set, it takes precedence over the server-wide ctx.services.config one.
   // When the session has no pattern, the server-wide config still applies
   // (backward compat with #3187). When neither is set, default rules only.
   describe('input (per-session promptEvaluatorSkipPattern #3639)', () => {
@@ -1539,23 +1539,23 @@ describe('input-handlers', () => {
       assert.equal(evals.length, 0, 'no evaluator_* broadcast on skip')
     })
 
-    it('per-session pattern absent → falls back to ctx.config.promptEvaluatorSkipPattern', async () => {
+    it('per-session pattern absent → falls back to ctx.services.config.promptEvaluatorSkipPattern', async () => {
       const evaluator = createSpy(async () => ({ verdict: 'rewrite', rewritten: 'X', clarification: null, reasoning: '' }))
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
-      ctx.config = { promptEvaluatorSkipPattern: '^server wide ack pattern$' }
+      ctx.services.config = { promptEvaluatorSkipPattern: '^server wide ack pattern$' }
       const client = makeClient({ activeSessionId: 's1' })
 
       await inputHandlers.input(makeWs(), client, { data: 'server wide ack pattern' }, ctx)
 
-      assert.equal(evaluator.callCount, 0, 'fallback to ctx.config pattern preserves #3187 behaviour')
+      assert.equal(evaluator.callCount, 0, 'fallback to ctx.services.config pattern preserves #3187 behaviour')
       assert.equal(session.sendMessage.callCount, 1)
     })
 
-    it('per-session pattern overrides a different ctx.config pattern (precedence)', async () => {
+    it('per-session pattern overrides a different ctx.services.config pattern (precedence)', async () => {
       const evaluator = createSpy(async () => ({ verdict: 'rewrite', rewritten: 'rw', clarification: null, reasoning: '' }))
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
       session.promptEvaluatorSkipPattern = '^per session ack phrase$'
-      ctx.config = { promptEvaluatorSkipPattern: '^something completely else$' }
+      ctx.services.config = { promptEvaluatorSkipPattern: '^something completely else$' }
       const client = makeClient({ activeSessionId: 's1' })
 
       await inputHandlers.input(makeWs(), client, { data: 'per session ack phrase' }, ctx)
@@ -1567,7 +1567,7 @@ describe('input-handlers', () => {
     it('neither pattern set → only default skip rules apply (no fallthrough crash)', async () => {
       const evaluator = createSpy(async () => ({ verdict: 'forward', rewritten: null, clarification: null, reasoning: '' }))
       const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
-      ctx.config = undefined
+      ctx.services.config = undefined
       const client = makeClient({ activeSessionId: 's1' })
 
       await inputHandlers.input(makeWs(), client, { data: 'a substantial message worth evaluating' }, ctx)
@@ -1618,9 +1618,9 @@ describe('input-handlers', () => {
 
       await inputHandlers.input(makeWs(), client, { data: 'redo this attached screenshot please', attachments }, ctx)
 
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1)
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 1)
       assert.equal(
-        ctx.sessionManager.recordUserInput.lastCall[1],
+        ctx.sessions.sessionManager.recordUserInput.lastCall[1],
         'Cleaned-up draft text [1 file(s) attached]',
         'rewrite-path trailing newline must be normalized before the attachment marker',
       )
@@ -1656,12 +1656,12 @@ describe('input-handlers', () => {
       const conflicts = ctx._sent.filter((m) => m.type === 'session_error' && m.category === 'input_conflict')
       assert.equal(conflicts.length, 1, 'trivial-skip message must reject with input_conflict during an in-flight evaluator')
       assert.equal(session.sendMessage.callCount, 0, 'rejected trivial draft must NOT be forwarded')
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 0, 'rejected trivial draft must NOT be recorded in history')
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 0, 'rejected trivial draft must NOT be recorded in history')
 
       resolveFirst()
       await firstInFlight
       assert.equal(session.sendMessage.callCount, 1, 'first draft must still forward after evaluator resolves')
-      assert.equal(ctx.sessionManager.recordUserInput.callCount, 1, 'first draft recorded exactly once')
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 1, 'first draft recorded exactly once')
     })
 
     it('does not reject trivial-skip messages on a DIFFERENT session (lock remains per-session)', async () => {
@@ -1746,7 +1746,7 @@ describe('input-handlers', () => {
       await inputHandlers.input(makeWs(), client, { data: 'a substantive message that forwards' }, ctx)
       await new Promise((r) => setImmediate(r))
 
-      assert.equal(ctx.updatePrimary.callCount, 1, 'primary still updated despite send rejection')
+      assert.equal(ctx.transport.updatePrimary.callCount, 1, 'primary still updated despite send rejection')
       const echoed = ctx._broadcasts.find((m) => m.type === 'user_input')
       assert.ok(echoed, 'user_input echo still broadcast despite send rejection')
     })
@@ -1766,7 +1766,7 @@ describe('input-handlers', () => {
 
       await inputHandlers.input(makeWs(), client, { data: 'a substantive message that forwards' }, ctx)
       assert.equal(session.sendMessage.callCount, 1)
-      assert.equal(ctx.updatePrimary.callCount, 1)
+      assert.equal(ctx.transport.updatePrimary.callCount, 1)
     })
   })
 })

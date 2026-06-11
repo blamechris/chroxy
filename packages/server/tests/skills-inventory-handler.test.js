@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { registeredMessageTypes } from '../src/ws-message-handlers.js'
-import { createSpy, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
 import { ServerSkillsInventorySnapshotSchema } from '@chroxy/protocol'
 
 /**
@@ -46,7 +46,7 @@ function makeCtx(overrides = {}) {
   const { manager } = createMockSessionManager([
     { id: 'sess-1', name: 'Work', cwd: '/home/user/Projects/chroxy' },
   ])
-  return {
+  return nsCtx({
     send: sendSpy,
     sessionManager: manager,
     config: { repos: [], controlRoomRoot: '/home/user/Projects' },
@@ -54,7 +54,7 @@ function makeCtx(overrides = {}) {
     resolveRepoSet: createSpy(() => SAMPLE_SNAPSHOT.repos.map(r => ({ name: r.name, path: r.path }))),
     ...overrides,
     _send: sendSpy,
-  }
+  })
 }
 
 describe('skills_inventory_request handler (#5554)', () => {
