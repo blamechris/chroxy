@@ -50,6 +50,17 @@ export interface EndpointSelection {
   url: string;
   /** Whether the chosen URL is the direct LAN path or the tunnel fallback. */
   path: ConnectionPath;
+  /**
+   * #5555 — when this selection came from a *fresh, successful* `/health` probe
+   * against the chosen `url` (only the LAN path probes today), this carries the
+   * probe outcome + the timestamp it completed. `connect()` threads this in as
+   * a `healthPrecheck` so it can skip its own redundant `/health` GET when the
+   * probe is recent (one connect = one probe). It is only ever set for a
+   * `status: 'ok'` result — the selector returns the tunnel fallback for a
+   * `restarting`/unreachable box — so `connect()`'s restarting detection is
+   * never short-circuited by it.
+   */
+  healthPrecheck?: { ts: number; status: 'ok' };
 }
 
 export interface SelectOptions {
@@ -160,7 +171,8 @@ export async function selectConnectEndpoint(
   const timeout = opts.probeTimeoutMs ?? LAN_PROBE_TIMEOUT_MS;
   const health = await probeHealth(lanUrl, timeout);
   if (health) {
-    return { url: lanUrl, path: 'lan' };
+    // #5555 — surface the fresh probe so connect() can skip its own /health GET.
+    return { url: lanUrl, path: 'lan', healthPrecheck: { ts: Date.now(), status: 'ok' } };
   }
   return fallback;
 }
