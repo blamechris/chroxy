@@ -596,7 +596,7 @@ function AttributionCell({ attribution }: { attribution: boolean | null }) {
  * #5507 — adds an "Open session" action (shown on every row when `onOpenSession`
  * is wired) that opens the create-session modal pre-filled with this repo's cwd.
  */
-function RowActions({ repo, onOpenSession }: { repo: RepoStatus; onOpenSession?: (req: RepoOpenSessionRequest) => void }) {
+function RowActions({ repo, onOpenSession, onConfigureRepo }: { repo: RepoStatus; onOpenSession?: (req: RepoOpenSessionRequest) => void; onConfigureRepo?: (req: { path: string; name: string }) => void }) {
   const [copied, setCopied] = useState(false)
   const copyPath = useCallback(() => {
     // Route through the shared clipboard helper, which uses the Tauri plugin
@@ -653,6 +653,21 @@ function RowActions({ repo, onOpenSession }: { repo: RepoStatus; onOpenSession?:
           Open session
         </button>
       )}
+      {onConfigureRepo && (
+        // #5553 — gear affordance opening the per-repo settings drawer (first
+        // occupant: the session preset editor). The visible label is a gear
+        // glyph; screen readers get a per-row accessible name.
+        <button
+          type="button"
+          className="cr-action cr-action-gear"
+          data-testid={`cr-action-configure-${repo.name}`}
+          aria-label={`Configure ${repo.name} (${repo.path})`}
+          title={`Per-repo settings for ${repo.path}`}
+          onClick={() => onConfigureRepo({ path: repo.path, name: repo.name })}
+        >
+          &#9881;
+        </button>
+      )}
     </td>
   )
 }
@@ -673,6 +688,8 @@ interface RepoRowsProps {
   onInvestigate?: (req: RepoInvestigateRequest) => void
   /** #5507 — open-session action, forwarded to the row actions cell. */
   onOpenSession?: (req: RepoOpenSessionRequest) => void
+  /** #5553 — open the per-repo settings drawer (gear), forwarded to the actions cell. */
+  onConfigureRepo?: (req: { path: string; name: string }) => void
   /** #5272 — cancel a subagent in this repo's session (bound to its sessionId). */
   onCancelActivity?: (activityId: string, sessionId: string) => void
   /** #5272 — interrupt this repo's session (heading "Interrupt turn"). */
@@ -681,7 +698,7 @@ interface RepoRowsProps {
   cancellingActivityIds?: ReadonlySet<string>
 }
 
-function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate, onOpenSession, onCancelActivity, onInterruptSession, cancellingActivityIds }: RepoRowsProps) {
+function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onInvestigate, onOpenSession, onConfigureRepo, onCancelActivity, onInterruptSession, cancellingActivityIds }: RepoRowsProps) {
   // Map repo → its active chroxy session (by cwd). When a session is found the
   // name cell becomes a disclosure toggle that reveals that session's live
   // activity tree (subagents / shells / tools — the retired v1 panel's view).
@@ -744,7 +761,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
         <PrCell repo={repo} />
         <AttributionCell attribution={repo.attribution} />
         <td className="cr-dim cr-last">{relativeLast(repo.lastTouched)}</td>
-        <RowActions repo={repo} onOpenSession={onOpenSession} />
+        <RowActions repo={repo} onOpenSession={onOpenSession} onConfigureRepo={onConfigureRepo} />
       </tr>
       {repo.note && (
         <tr className="cr-act" data-testid={`cr-note-row-${repo.name}`}>
@@ -860,6 +877,11 @@ export interface ControlRoomSectionProps {
    */
   onOpenSession?: (req: RepoOpenSessionRequest) => void
   /**
+   * #5553 — invoked when an operator clicks a repo row's gear. Opens the
+   * per-repo settings drawer (first occupant: the session preset editor).
+   */
+  onConfigureRepo?: (req: { path: string; name: string }) => void
+  /**
    * #5272 — cancel a subagent node in a drill-down's session. Defaults to the
    * store's `sendCancelActivity`. Injectable for tests.
    */
@@ -886,6 +908,7 @@ export function ControlRoomSection({
   now = Date.now,
   onInvestigate,
   onOpenSession,
+  onConfigureRepo,
   onCancelActivity: onCancelActivityProp,
   onInterruptSession: onInterruptSessionProp,
 }: ControlRoomSectionProps = {}) {
@@ -1131,6 +1154,7 @@ export function ControlRoomSection({
                       now={now}
                       onInvestigate={onInvestigate}
                       onOpenSession={onOpenSession}
+                      onConfigureRepo={onConfigureRepo}
                       onCancelActivity={onCancelActivity}
                       onInterruptSession={onInterruptSession}
                       cancellingActivityIds={cancellingActivityIds}

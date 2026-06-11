@@ -218,6 +218,8 @@ export interface ControlRoomViewProps {
   onInvestigate?: (req: RepoInvestigateRequest) => void
   /** Forwarded to the repo table's per-row "Open session" action (#5507). */
   onOpenSession?: (req: RepoOpenSessionRequest) => void
+  /** Forwarded to the repo table's per-row gear action — opens the preset drawer (#5553). */
+  onConfigureRepo?: (req: { path: string; name: string }) => void
   /** Optional initial tab override (defaults to the persisted tab). For tests. */
   initialTab?: ControlRoomTab
   /**
@@ -242,6 +244,7 @@ export interface ControlRoomViewProps {
 export function ControlRoomView({
   onInvestigate,
   onOpenSession,
+  onConfigureRepo,
   initialTab,
   forceTab,
   forceTabNonce,
@@ -344,7 +347,7 @@ export function ControlRoomView({
         })}
       </div>
       {tab === 'repos' ? (
-        <ControlRoomSection onInvestigate={onInvestigate} onOpenSession={onOpenSession} />
+        <ControlRoomSection onInvestigate={onInvestigate} onOpenSession={onOpenSession} onConfigureRepo={onConfigureRepo} />
       ) : tab === 'runners' ? (
         <RunnerStatusSection />
       ) : tab === 'integrations' ? (

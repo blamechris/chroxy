@@ -785,6 +785,64 @@ export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
         note: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+export declare const ServerSessionPresetDisclosureSchema: z.ZodObject<{
+    source: z.ZodEnum<{
+        daemon: "daemon";
+        repo: "repo";
+    }>;
+    active: z.ZodBoolean;
+    trustState: z.ZodEnum<{
+        pending: "pending";
+        trusted: "trusted";
+    }>;
+    enabled: z.ZodBoolean;
+    seed: z.ZodString;
+    preambleLength: z.ZodNumber;
+    seedLength: z.ZodNumber;
+    capped: z.ZodBoolean;
+    repoPath: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerSessionPresetFullSchema: z.ZodObject<{
+    source: z.ZodEnum<{
+        daemon: "daemon";
+        repo: "repo";
+    }>;
+    active: z.ZodBoolean;
+    trustState: z.ZodEnum<{
+        pending: "pending";
+        trusted: "trusted";
+    }>;
+    enabled: z.ZodBoolean;
+    preamble: z.ZodString;
+    seed: z.ZodString;
+    preambleLength: z.ZodNumber;
+    seedLength: z.ZodNumber;
+    capped: z.ZodBoolean;
+    repoPath: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerSessionPresetSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_snapshot">;
+    cwd: z.ZodNullable<z.ZodString>;
+    preset: z.ZodNullable<z.ZodObject<{
+        source: z.ZodEnum<{
+            daemon: "daemon";
+            repo: "repo";
+        }>;
+        active: z.ZodBoolean;
+        trustState: z.ZodEnum<{
+            pending: "pending";
+            trusted: "trusted";
+        }>;
+        enabled: z.ZodBoolean;
+        preamble: z.ZodString;
+        seed: z.ZodString;
+        preambleLength: z.ZodNumber;
+        seedLength: z.ZodNumber;
+        capped: z.ZodBoolean;
+        repoPath: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 /**
  * Per-runner verdict — the survey's roll-up of "is this runner healthy" from
  * the LOCAL service state and (when available) GitHub's view. Drives the
@@ -2176,6 +2234,9 @@ export type RepoTree = z.infer<typeof RepoTreeSchema>;
 export type RepoStatus = z.infer<typeof RepoStatusSchema>;
 export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>;
 export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>;
+export type ServerSessionPresetDisclosure = z.infer<typeof ServerSessionPresetDisclosureSchema>;
+export type ServerSessionPresetFull = z.infer<typeof ServerSessionPresetFullSchema>;
+export type ServerSessionPresetSnapshotMessage = z.infer<typeof ServerSessionPresetSnapshotSchema>;
 export type RunnerVerdict = z.infer<typeof RunnerVerdictSchema>;
 export type RunnerServiceState = z.infer<typeof RunnerServiceStateSchema>;
 export type RunnerInfo = z.infer<typeof RunnerInfoSchema>;

@@ -400,6 +400,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // host_status_snapshot handler. Null until the first survey lands.
   hostStatus: null,
   hostStatusLoading: false,
+  // #5553: per-repo session presets keyed by cwd, fed by session_preset_snapshot.
+  sessionPresetSnapshots: {},
+  // #5553: server-provided composer seeds keyed by sessionId (drained by App).
+  pendingServerSeed: {},
   // #5253: Control Room self-hosted runner snapshot, fed by the
   // runner_status_snapshot handler. Null until the first survey lands.
   runnerStatus: null,
@@ -696,6 +700,44 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return true;
     }
     return false;
+  },
+
+  // #5553 — per-repo session preset surface. Each dispatches the matching
+  // host-authority message; the server replies with a `session_preset_snapshot`
+  // that lands in `sessionPresetSnapshots[cwd]`. Returns whether the message
+  // went on the wire (false = socket closed).
+  requestSessionPreset: (cwd: string): boolean => {
+    const { socket } = get();
+    if (!cwd || !socket || socket.readyState !== WebSocket.OPEN) return false;
+    wsSend(socket, { type: 'session_preset_get', cwd });
+    return true;
+  },
+  setSessionPresetOverride: (cwd, preset): boolean => {
+    const { socket } = get();
+    if (!cwd || !socket || socket.readyState !== WebSocket.OPEN) return false;
+    wsSend(socket, { type: 'session_preset_set', cwd, preset });
+    return true;
+  },
+  approveSessionPreset: (cwd: string): boolean => {
+    const { socket } = get();
+    if (!cwd || !socket || socket.readyState !== WebSocket.OPEN) return false;
+    wsSend(socket, { type: 'session_preset_approve', cwd });
+    return true;
+  },
+  revokeSessionPreset: (cwd: string): boolean => {
+    const { socket } = get();
+    if (!cwd || !socket || socket.readyState !== WebSocket.OPEN) return false;
+    wsSend(socket, { type: 'session_preset_revoke', cwd });
+    return true;
+  },
+  takePendingServerSeed: (sessionId: string): string | null => {
+    const map = get().pendingServerSeed;
+    const seed = map[sessionId];
+    if (typeof seed !== 'string' || seed.length === 0) return null;
+    const next = { ...map };
+    delete next[sessionId];
+    set({ pendingServerSeed: next });
+    return seed;
   },
 
   // #5510 (epic #5509): approve a pending pair request. Sends `pair_approve`

@@ -157,7 +157,18 @@ function handleCreateSession(ws, client, msg, ctx) {
     ctx.transport.setActiveSession(client, sessionId)
     ctx.transport.subscribeClient(client, sessionId)
     const entry = ctx.sessions.sessionManager.getSession(sessionId)
-    ctx.transport.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+    // #5553: disclose the resolved per-repo session preset on the create
+    // confirmation so the client can (a) show the "repo preset applied" badge
+    // and (b) stage the seed EDITABLE into the new session's composer (never
+    // auto-sent). The preamble TEXT is never sent — it's already folded into
+    // the prompt server-side; only its length + the seed + trust metadata
+    // cross the wire. Omitted entirely when the session has no preset.
+    const sessionSwitched = { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null }
+    const preset = typeof ctx.sessions.sessionManager.getSessionPreset === 'function'
+      ? ctx.sessions.sessionManager.getSessionPreset(sessionId)
+      : null
+    if (preset) sessionSwitched.sessionPreset = preset
+    ctx.transport.send(ws, sessionSwitched)
     ctx.transport.sendSessionInfo(ws, sessionId)
     ctx.transport.broadcastSessionList()
     autoSubscribeOtherClients(sessionId, ws, ctx)
