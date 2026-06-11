@@ -1,7 +1,8 @@
 // #5413 Phase 4: installer pins.
 //
-//   - fresh install registers all six hook events (Notification carries
-//     the idle_prompt + permission_prompt matchers)
+//   - fresh install registers all eight hook events (Notification carries
+//     the idle_prompt + permission_prompt matchers; UserPromptSubmit and
+//     Stop are the #5541 matcher-less turn edges)
 //   - IDEMPOTENT: re-running converges (deep-equal settings, no dupes)
 //   - never clobbers unrelated hooks: foreign commands in our events,
 //     foreign matcher groups, and foreign event keys all survive
@@ -27,6 +28,7 @@ import {
   buildHookCommand,
   defaultSettingsPath,
   HOOK_EVENTS,
+  TYPE_FOR_HOOK_EVENT,
   COMMAND_MARKER,
 } from '../src/installer.js'
 
@@ -62,7 +64,7 @@ describe('buildHookCommand', () => {
 })
 
 describe('installHooks', () => {
-  it('creates settings.json with all six events on fresh install', () => {
+  it('creates settings.json with all eight events on fresh install', () => {
     const path = tempSettingsPath()
     installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
     const settings = read(path)
@@ -86,6 +88,42 @@ describe('installHooks', () => {
     installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
     installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
     assert.deepEqual(read(path), first)
+  })
+
+  it('upgrades a legacy 6-event install to 8 events idempotently (#5541)', () => {
+    // Simulate a settings.json written by a PRE-#5541 installer: the old six
+    // events registered with our exact command shape, no UserPromptSubmit/Stop.
+    const LEGACY_EVENTS = ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop', 'Notification', 'PostToolUse']
+    const legacyHooks = {}
+    for (const event of LEGACY_EVENTS) {
+      const entry = { type: 'command', command: `'${NODE}' '${BIN}' emit ${TYPE_FOR_HOOK_EVENT[event]}` }
+      legacyHooks[event] = event === 'Notification'
+        ? [{ matcher: 'idle_prompt', hooks: [entry] }, { matcher: 'permission_prompt', hooks: [entry] }]
+        : [{ hooks: [entry] }]
+    }
+    const path = tempSettingsPath(JSON.stringify({ hooks: legacyHooks }))
+
+    installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
+    const upgraded = read(path)
+
+    // The two new turn edges are now present, matcher-less, exactly once each.
+    for (const event of ['UserPromptSubmit', 'Stop']) {
+      const entries = ourEntries(upgraded, event)
+      assert.equal(entries.length, 1, `${event} should be registered once`)
+      assert.ok(upgraded.hooks[event][0].matcher === undefined, `${event} must be matcher-less`)
+      assert.ok(entries[0].command.endsWith(`emit ${TYPE_FOR_HOOK_EVENT[event]}`), entries[0].command)
+    }
+    // The legacy six did not duplicate.
+    for (const event of LEGACY_EVENTS) {
+      assert.equal(ourEntries(upgraded, event).length, event === 'Notification' ? 2 : 1, `${event} duplicated on upgrade`)
+    }
+    // All eight present.
+    for (const event of HOOK_EVENTS) {
+      assert.ok(event in upgraded.hooks, `missing ${event} after upgrade`)
+    }
+    // Re-running on the upgraded file is a no-op (idempotent).
+    installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
+    assert.deepEqual(read(path), upgraded)
   })
 
   it('preserves unrelated hooks in shared and foreign events', () => {
@@ -251,7 +289,7 @@ describe('uninstallHooks', () => {
       { matcher: 'Bash', hooks: [{ type: 'command', command: '/Users/x/guard.sh' }] },
     ])
     // Events that only contained our entries are gone entirely
-    for (const event of ['SessionEnd', 'SubagentStart', 'SubagentStop', 'Notification', 'PostToolUse']) {
+    for (const event of ['SessionEnd', 'SubagentStart', 'SubagentStop', 'Notification', 'PostToolUse', 'UserPromptSubmit', 'Stop']) {
       assert.equal(event in settings.hooks, false, `${event} should be removed`)
     }
   })

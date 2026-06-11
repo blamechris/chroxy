@@ -15,9 +15,10 @@ node packages/claude-hooks/bin/chroxy-hooks.js install
 ```
 
 Registers `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`, `Notification`
-(`idle_prompt` + `permission_prompt` matchers), and `PostToolUse` hooks in
-`~/.claude/settings.json`. The registered command embeds the absolute node binary and
-script path, so hooks don't depend on the hook environment's PATH and skip npx resolution.
+(`idle_prompt` + `permission_prompt` matchers), `PostToolUse`, `UserPromptSubmit`, and
+`Stop` hooks in `~/.claude/settings.json`. The registered command embeds the absolute node
+binary and script path, so hooks don't depend on the hook environment's PATH and skip npx
+resolution.
 
 - **Idempotent** — safe to re-run; converges to exactly one entry per event and migrates
   entries from a previous checkout path.
@@ -57,6 +58,12 @@ from "needs approval".
 Subagent counting is server-side: the daemon aggregates `subagent_start` / `subagent_stop`
 per (source, sessionId) and surfaces active counts in notification text — emitters carry
 no state.
+
+Turn edges (#5541): `UserPromptSubmit` emits `user_prompt_submit` (authoritative turn
+start) and `Stop` emits `stop` (authoritative turn end). The server uses these to flip the
+embed online while subagents run and to ping "Ready for input" the moment a turn ends. The
+`user_prompt_submit` data bag carries the `cwd` ONLY — the raw prompt text is NEVER
+forwarded (privacy).
 
 ## Tests
 

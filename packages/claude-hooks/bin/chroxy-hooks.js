@@ -69,7 +69,7 @@ async function main() {
     try {
       const path = installHooks({ settingsPath: defaultSettingsPath() })
       process.stdout.write(`chroxy-hooks: hooks registered in ${path}\n`)
-      process.stdout.write('Events: SessionStart, SessionEnd, SubagentStart, SubagentStop, Notification, PostToolUse\n')
+      process.stdout.write('Events: SessionStart, SessionEnd, SubagentStart, SubagentStop, Notification, PostToolUse, UserPromptSubmit, Stop\n')
       process.stdout.write('Re-run any time (idempotent). Remove with: chroxy-hooks uninstall\n')
       process.exit(0)
     } catch (err) {
