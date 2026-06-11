@@ -34,37 +34,35 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
     };
   }, []);
 
-  const injectWrite = useCallback((data: string) => {
-    if (!webViewRef.current) return;
-    // Escape for safe injection into JS string literal
-    const escaped = JSON.stringify(data);
-    webViewRef.current.injectJavaScript(
-      `try{handleMsg({data:JSON.stringify({type:'write',data:${escaped}})})}catch(e){};true;`
-    );
+  // Deliver a write to the embedded xterm page via postMessage. The page's
+  // `message` listener (see xterm-html.ts handleMsg) parses the payload with
+  // JSON.parse(e.data), so JSON.stringify here makes the data round-trip
+  // byte-identical — quotes, backticks, backslashes, ANSI escapes and
+  // emoji/UTF-16 surrogate pairs survive without the string-eval escaping
+  // hazards of injectJavaScript (#5519).
+  const postWrite = useCallback((data: string) => {
+    webViewRef.current?.postMessage(JSON.stringify({ type: 'write', data }));
   }, []);
 
-  const injectClear = useCallback(() => {
-    if (!webViewRef.current) return;
-    webViewRef.current.injectJavaScript(
-      `try{handleMsg({data:JSON.stringify({type:'clear'})})}catch(e){};true;`
-    );
+  const postClear = useCallback(() => {
+    webViewRef.current?.postMessage(JSON.stringify({ type: 'clear' }));
   }, []);
 
   useImperativeHandle(ref, () => ({
     write(data: string) {
       if (readyRef.current) {
-        injectWrite(data);
+        postWrite(data);
       } else {
         pendingWritesRef.current.push(data);
       }
     },
     clear() {
       if (readyRef.current) {
-        injectClear();
+        postClear();
       }
       pendingWritesRef.current = [];
     },
-  }), [injectWrite, injectClear]);
+  }), [postWrite, postClear]);
 
   const handleMessage = useCallback((event: WebViewMessageEvent) => {
     try {
@@ -80,7 +78,7 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         const pending = pendingWritesRef.current;
         pendingWritesRef.current = [];
         if (pending.length > 0) {
-          injectWrite(pending.join(''));
+          postWrite(pending.join(''));
         }
         onReady?.();
         // Forward initial dimensions so the PTY is sized correctly on mount/reload
@@ -93,7 +91,7 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
     } catch {
       // Ignore malformed messages
     }
-  }, [injectWrite, onReady, onResize]);
+  }, [postWrite, onReady, onResize]);
 
   // Crash recovery: reload WebView when the OS kills the content process
   const handleWebViewCrash = useCallback(() => {

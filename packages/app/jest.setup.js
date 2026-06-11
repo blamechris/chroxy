@@ -65,14 +65,37 @@ jest.mock('@expo/vector-icons', () => {
   };
 });
 
-// Mock react-native-webview (native module not available in Jest)
+// Mock react-native-webview (native module not available in Jest).
+// The imperative handle exposes stable jest.fn()s (postMessage/injectJavaScript)
+// and the latest instance is published on global.__lastWebViewInstance so render
+// tests can inspect the messages RN sent into the WebView and simulate the
+// WebView -> RN bridge by invoking the onMessage prop.
 jest.mock('react-native-webview', () => {
   const React = require('react');
   const { View } = require('react-native');
   const WebView = React.forwardRef((props, ref) => {
-    React.useImperativeHandle(ref, () => ({
-      injectJavaScript: jest.fn(),
-    }));
+    const instanceRef = React.useRef(null);
+    if (!instanceRef.current) {
+      instanceRef.current = {
+        postMessage: jest.fn(),
+        injectJavaScript: jest.fn(),
+        reload: jest.fn(),
+        // Captured onMessage prop so tests can drive the WebView -> RN bridge.
+        emitMessage: (data) => {
+          if (props.onMessage) {
+            props.onMessage({ nativeEvent: { data } });
+          }
+        },
+      };
+    }
+    // Keep emitMessage bound to the current onMessage prop.
+    instanceRef.current.emitMessage = (data) => {
+      if (props.onMessage) {
+        props.onMessage({ nativeEvent: { data } });
+      }
+    };
+    React.useImperativeHandle(ref, () => instanceRef.current);
+    global.__lastWebViewInstance = instanceRef.current;
     return React.createElement(View, { testID: 'webview', ...props });
   });
   WebView.displayName = 'WebView';
