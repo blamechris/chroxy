@@ -887,7 +887,15 @@ export class WsServer {
     }
 
     this.serverMode = 'cli'
-    this._normalizer = new EventNormalizer()
+    // #5516 (epic #5514): hand the normalizer a subscriber-count resolver so it
+    // can tighten the delta-coalescing window (50→25ms) when a session has a
+    // single subscriber — the common phone-on-LAN / single-dashboard case.
+    // Multi-client sessions keep the 50ms window (fan-out amortization). Legacy
+    // single-session mode (sessionId === null) reports 0 → default window.
+    this._normalizer = new EventNormalizer({
+      getSubscriberCount: (sessionId) =>
+        sessionId == null ? null : this._broadcaster._countSessionSubscribers(sessionId),
+    })
     this._gitInfo = getGitInfo()
     this._startedAt = Date.now()
     this._draining = false

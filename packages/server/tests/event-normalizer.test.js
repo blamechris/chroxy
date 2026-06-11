@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
 import { ServerSkillChangedSchema } from '@chroxy/protocol'
@@ -916,6 +916,112 @@ describe('EventNormalizer', () => {
       assert.equal(normalizer._deltaBuffer.size, 0)
       assert.equal(normalizer._deltaFlushTimer, null)
     })
+  })
+})
+
+// ---- #5516 (epic #5514): adaptive single-client coalescing window ----
+
+describe('EventNormalizer adaptive flush window (#5516)', () => {
+  // Capture the delay each bufferDelta schedules its flush timer with, without
+  // depending on real wall-clock timing. We spy on global.setTimeout, record
+  // the requested delay, and return a dummy handle so the timer never actually
+  // fires during the assertion.
+  function withSetTimeoutSpy(fn) {
+    const delays = []
+    const orig = global.setTimeout
+    mock.method(global, 'setTimeout', (cb, ms, ...rest) => {
+      delays.push(ms)
+      // Real handle so clearTimeout works in the reschedule path; we never let
+      // it fire (orig with a huge delay would, so use a no-op handle instead).
+      return orig(() => {}, 1_000_000, ...rest)
+    })
+    try { fn(delays) } finally { mock.restoreAll() }
+  }
+
+  it('uses the 25ms window when a session has exactly one subscriber', () => {
+    const n = new EventNormalizer({ getSubscriberCount: () => 1 })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 25)
+    })
+    n.destroy()
+  })
+
+  it('uses the default 50ms window when 2+ clients are subscribed', () => {
+    const n = new EventNormalizer({ getSubscriberCount: () => 2 })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 50)
+    })
+    n.destroy()
+  })
+
+  it('uses the default window when 0 clients (or unknown count) are subscribed', () => {
+    const nZero = new EventNormalizer({ getSubscriberCount: () => 0 })
+    withSetTimeoutSpy((delays) => {
+      nZero.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 50)
+    })
+    nZero.destroy()
+
+    const nNull = new EventNormalizer({ getSubscriberCount: () => null })
+    withSetTimeoutSpy((delays) => {
+      nNull.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 50)
+    })
+    nNull.destroy()
+  })
+
+  it('keeps the default window when no subscriber-count resolver is wired (legacy)', () => {
+    const n = new EventNormalizer()
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 50)
+    })
+    n.destroy()
+  })
+
+  it('honors custom interval overrides', () => {
+    const n = new EventNormalizer({
+      flushIntervalMs: 80,
+      singleClientFlushIntervalMs: 12,
+      getSubscriberCount: () => 1,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 12)
+    })
+    n.destroy()
+  })
+
+  it('a single-client buffer pulls in an already-armed default-window deadline', () => {
+    // Per-session subscriber counts: sess-multi has 3 clients, sess-solo has 1.
+    const counts = { 'sess-multi': 3, 'sess-solo': 1 }
+    const n = new EventNormalizer({ getSubscriberCount: (s) => counts[s] ?? 0 })
+    withSetTimeoutSpy((delays) => {
+      // Multi-client session arms the 50ms timer first.
+      n.bufferDelta('sess-multi', 'm', 'a')
+      assert.equal(delays[0], 50)
+      // A solo session buffered immediately after must SHORTEN the deadline:
+      // the reschedule clears the old timer and arms a sooner one (~25ms).
+      n.bufferDelta('sess-solo', 's', 'b')
+      assert.equal(delays.length, 2, 'a reschedule must have occurred')
+      assert.ok(delays[1] <= 25, `expected reschedule <=25ms, got ${delays[1]}`)
+    })
+    n.destroy()
+  })
+
+  it('does NOT push the deadline out when a multi-client session buffers after a solo one', () => {
+    const counts = { 'sess-multi': 3, 'sess-solo': 1 }
+    const n = new EventNormalizer({ getSubscriberCount: (s) => counts[s] ?? 0 })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-solo', 's', 'a')      // arms ~25ms
+      assert.equal(delays[0], 25)
+      n.bufferDelta('sess-multi', 'm', 'b')     // wants 50ms — but 25ms deadline is sooner
+      // No reschedule: the existing sooner deadline stands.
+      assert.equal(delays.length, 1, 'must not reschedule to a later deadline')
+    })
+    n.destroy()
   })
 })
 

@@ -139,6 +139,28 @@ export class WsBroadcaster {
     }
   }
 
+  /**
+   * #5516 (epic #5514): count authenticated clients subscribed to a session.
+   * Mirrors `_broadcastToSession`'s default recipient filter (activeSessionId
+   * match OR explicit subscribedSessionIds membership) so the count reflects
+   * exactly who would receive a session-scoped broadcast. Used by the
+   * EventNormalizer to pick a tighter delta-coalescing window when exactly one
+   * client is watching.
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  _countSessionSubscribers(sessionId) {
+    let count = 0
+    for (const [ws, client] of this._clients) {
+      if (!client.authenticated || ws.readyState !== 1) continue
+      if (client.activeSessionId === sessionId ||
+          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))) {
+        count++
+      }
+    }
+    return count
+  }
+
   /** Broadcast client_joined to all OTHER authenticated clients */
   _broadcastClientJoined(newClient, excludeWs) {
     const info = newClient.deviceInfo || {}
