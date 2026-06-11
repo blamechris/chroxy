@@ -62,6 +62,13 @@ const DEFAULT_GRACE_PERIOD_MS = 3 * 60_000 // 3 minutes after first QR display
 const DEFAULT_SESSION_TOKEN_TTL_MS = 24 * 60 * 60_000 // 24 hours
 const SESSION_TOKEN_BYTES = 32
 const MAX_SESSION_TOKENS = 100
+// #5555: cadence for the background session-token TTL sweep. Mirrors the
+// _pendingRequests sweep so expired tokens are reaped even when no lookup or
+// new issuance touches them — without this they linger to the cap and trigger
+// eviction of a still-valid (longest-paired) token, silently logging out a
+// device. Hourly is ample against a 24h TTL; unref'd so it never holds the
+// process open.
+const SESSION_TOKEN_SWEEP_INTERVAL_MS = 60 * 60_000 // 1 hour
 const MAX_ACTIVE_PAIRINGS = 10
 
 // -- Pairing-approval primitive (#5510, epic #5509) --
@@ -89,6 +96,9 @@ export class PairingManager extends EventEmitter {
     this._activePairings = new Map() // id → { expiresAt, used }
     this._sessionTokens = new Map() // sessionToken → { createdAt }
     this._refreshTimer = null
+    // #5555: background TTL sweep for _sessionTokens (started lazily on first
+    // token issuance, cleared on destroy — no leaked timer).
+    this._sessionTokenSweepTimer = null
     this._destroyed = false
 
     // -- Pairing-approval primitive (#5510) --
@@ -282,11 +292,7 @@ export class PairingManager extends EventEmitter {
     // pairings that didn't fix a binding at creation time.
     const effectiveSessionId = entry.boundSessionId || sessionId || null
     const sessionToken = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
-    if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
-      const oldest = this._sessionTokens.keys().next().value
-      this._sessionTokens.delete(oldest)
-    }
-    this._sessionTokens.set(sessionToken, { createdAt: Date.now(), sessionId: effectiveSessionId })
+    this._storeSessionToken(sessionToken, { createdAt: Date.now(), sessionId: effectiveSessionId })
 
     // Auto-regenerate so the dashboard always shows a fresh QR (#2916), but
     // only when the just-consumed ID was the linking-mode `_current`. Bound
@@ -352,6 +358,58 @@ export class PairingManager extends EventEmitter {
       }
     }
     return null
+  }
+
+  /**
+   * #5555: drop every expired session token. Used both before cap-eviction
+   * (so we never evict a still-valid token while expired ones occupy slots)
+   * and by the background sweep timer. Constant-key iteration, no allocation.
+   * @returns {number} count of tokens removed
+   */
+  _sweepSessionTokens() {
+    if (this._destroyed) return 0
+    const now = Date.now()
+    let removed = 0
+    for (const [stored, meta] of this._sessionTokens) {
+      if (now - meta.createdAt > this._sessionTokenTtlMs) {
+        this._sessionTokens.delete(stored)
+        removed++
+      }
+    }
+    // Stop the timer once the map is empty — re-armed on the next issuance.
+    if (this._sessionTokens.size === 0 && this._sessionTokenSweepTimer) {
+      clearInterval(this._sessionTokenSweepTimer)
+      this._sessionTokenSweepTimer = null
+    }
+    return removed
+  }
+
+  _ensureSessionTokenSweepTimer() {
+    if (this._destroyed || this._sessionTokenSweepTimer) return
+    this._sessionTokenSweepTimer = setInterval(() => this._sweepSessionTokens(), SESSION_TOKEN_SWEEP_INTERVAL_MS)
+    this._sessionTokenSweepTimer.unref?.()
+  }
+
+  /**
+   * #5555: issue a new session token under the cap, sweeping expired tokens
+   * BEFORE evicting any still-valid one. The pre-fix path evicted the oldest
+   * Map entry by insertion order — the longest-paired (and likely still-valid)
+   * device — even when expired tokens were sitting in the map ready to be
+   * reaped. Only after the sweep, if still at cap, do we evict the oldest
+   * remaining (now guaranteed all-valid) token.
+   * @param {string} token
+   * @param {object} meta - token metadata ({ createdAt, sessionId })
+   */
+  _storeSessionToken(token, meta) {
+    if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
+      this._sweepSessionTokens()
+      if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
+        const oldest = this._sessionTokens.keys().next().value
+        this._sessionTokens.delete(oldest)
+      }
+    }
+    this._sessionTokens.set(token, meta)
+    this._ensureSessionTokenSweepTimer()
   }
 
   /**
@@ -530,12 +588,8 @@ export class PairingManager extends EventEmitter {
     entry.resolved = true
 
     const token = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
-    if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
-      const oldest = this._sessionTokens.keys().next().value
-      this._sessionTokens.delete(oldest)
-    }
     // Unbound (host-authority) token — sessionId: null, like linking-mode QR.
-    this._sessionTokens.set(token, { createdAt: Date.now(), sessionId: null })
+    this._storeSessionToken(token, { createdAt: Date.now(), sessionId: null })
     return { ok: true, token }
   }
 
@@ -631,6 +685,10 @@ export class PairingManager extends EventEmitter {
     if (this._sweepTimer) {
       clearInterval(this._sweepTimer)
       this._sweepTimer = null
+    }
+    if (this._sessionTokenSweepTimer) {
+      clearInterval(this._sessionTokenSweepTimer)
+      this._sessionTokenSweepTimer = null
     }
     this.removeAllListeners()
   }
