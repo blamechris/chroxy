@@ -161,7 +161,7 @@ export function assertCtxShape(ctx, { deep = false } = {}) {
     if (!bucket || typeof bucket !== 'object') {
       throw new TypeError(
         `assertCtxShape: handler ctx is missing the '${ns}' namespace `
-        + `(expected ctx.${ns} to be an object). Build it via test-helpers' makeHandlerCtx().`
+        + `(expected ctx.${ns} to be an object). Build it via test-helpers' nsCtx().`
       )
     }
     if (deep) {

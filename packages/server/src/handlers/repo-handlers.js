@@ -21,7 +21,7 @@ async function buildRepoList(ctx = {}) {
   const readRepos = ctx.readReposFromConfig || defaultReadRepos
   // Pass provider-driven projectsDirs when available (#2965); falls back to
   // the scanner's default (~/.claude/projects) when not set.
-  const scanOpts = ctx.runtime.projectsDirs ? { projectsDirs: ctx.runtime.projectsDirs } : {}
+  const scanOpts = ctx.runtime?.projectsDirs ? { projectsDirs: ctx.runtime.projectsDirs } : {}
   const conversations = await scan(scanOpts)
   const autoRepos = groupConversationsByRepo(conversations)
   const manualRepos = readRepos()
