@@ -193,7 +193,13 @@ export function ActivityGroup({
   getInitialExpanded?: (id: string) => boolean;
   onExpandedChange?: (id: string, expanded: boolean) => void;
 }) {
-  const registryKey = groupKey ?? activityMessages[0]?.id ?? '';
+  // #5517: the group's registry key must stay in the `activity-<id>`
+  // namespace so it never collides with an entry's bare `message.id` (entries
+  // register under their own id). ChatView always passes `group.key`; the
+  // fallback mirrors its `activity-<firstId>` shape so a caller that omits
+  // groupKey can't bleed the group's expand flag onto its first entry.
+  const registryKey = groupKey
+    ?? (activityMessages[0]?.id ? `activity-${activityMessages[0].id}` : '');
   const [expanded, setExpanded] = useState(() => getInitialExpanded?.(registryKey) ?? false);
   const setExpandedTracked = (next: boolean) => {
     setExpanded(next);

@@ -472,10 +472,18 @@ export function ChatView({
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
         // #5517: search match scroll uses scrollToIndex; rows are variable-
-        // height and unmeasured until laid out, so swallow the failure and
-        // retry after the list reports content-size. Without this RN throws
-        // when scrolling to an off-screen index.
+        // height and unmeasured until laid out, so RN throws when the target
+        // is past `highestMeasuredFrameIndex`. Recover with the RN-recommended
+        // two-step: first `scrollToOffset` to the target's *estimated* offset
+        // (`index * averageItemLength`) — this mounts/measures the rows in
+        // between — then retry `scrollToIndex` on the next frame to land
+        // precisely. Bare-retrying scrollToIndex (the old path) could re-throw
+        // repeatedly when the row is still far off-screen.
         onScrollToIndexFailed={(info) => {
+          scrollViewRef.current?.scrollToOffset({
+            offset: info.index * info.averageItemLength,
+            animated: true,
+          });
           setTimeout(() => {
             scrollViewRef.current?.scrollToIndex({
               index: info.index,
