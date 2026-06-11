@@ -32,6 +32,7 @@ import {
 import type { ChildAgentEvent, ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
 import { ChildAgentEventList } from './ChildAgentEventList'
+import { useInitialExpanded } from './chatExpandRegistry'
 
 export interface ToolBubbleProps {
   toolName: string
@@ -113,7 +114,19 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // #4313 — tail bubbles mount expanded so the singleton trailing-tool
   // case matches the #4309 tail-group behavior. Initial-state only via
   // the lazy `useState` initializer.
-  const [expanded, setExpanded] = useState(isTail)
+  //
+  // #5561 — under ChatView virtualization an off-screen bubble unmounts and
+  // remounts as the user scrolls. The id-keyed expand registry (mobile #5534
+  // parity) persists the toggle OUTSIDE this row: `useInitialExpanded` seeds
+  // from the registry on mount (falling back to `isTail` the first time the
+  // bubble is ever seen) so a recycled bubble reopens to the user's last
+  // choice instead of snapping shut. Outside a ChatExpandContext provider the
+  // registry is a no-op and behaviour is unchanged from pre-#5561.
+  const { initial: initialExpanded, persist: persistExpanded } = useInitialExpanded(
+    `tool:${toolUseId}`,
+    isTail,
+  )
+  const [expanded, setExpanded] = useState(initialExpanded)
   // #4317: a tool that resolved with images-only (no text) still leaves
   // `result === undefined`. Treat that as resolved so the pulse marker
   // hides — same shape as ToolGroup's `hasResult` and
@@ -186,7 +199,13 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
     return { text: inputPartial, parsed: false }
   }, [expanded, hasResult, inputPartial, suppressRawInput])
 
-  const toggle = () => setExpanded(prev => !prev)
+  const toggle = () => setExpanded(prev => {
+    const next = !prev
+    // #5561 — write through to the id-keyed registry so the choice survives a
+    // window-recycle remount.
+    persistExpanded(next)
+    return next
+  })
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {

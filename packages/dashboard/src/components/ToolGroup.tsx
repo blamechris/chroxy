@@ -8,7 +8,7 @@
  * Default state: collapsed when the run is done, expanded while it is
  * still active so users see progress as tools fire.
  */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useContext } from 'react'
 import type { ChatMessage } from '@chroxy/store-core'
 import {
   summarizeToolCounts,
@@ -18,6 +18,7 @@ import {
   getInputSummary,
 } from '@chroxy/store-core'
 import { ChildAgentEventList } from './ChildAgentEventList'
+import { ChatExpandContext, useInitialExpanded } from './chatExpandRegistry'
 
 export interface ToolGroupProps {
   messages: ChatMessage[]
@@ -213,12 +214,26 @@ function ToolGroupEntry({
 }
 
 export function ToolGroup({ messages, isActive, isTail = false }: ToolGroupProps) {
+  // #5561 — id-keyed expand registry (mobile #5534 parity). The group is keyed
+  // by its first message id; under ChatView virtualization the whole group can
+  // unmount when scrolled out, so the group-level toggle AND each entry's
+  // toggle persist here and re-seed on remount. Outside a provider the registry
+  // is a no-op (pre-#5561 behaviour).
+  const groupKey = `group:${messages[0]?.id ?? 'empty'}`
+  const expandRegistry = useContext(ChatExpandContext)
   // Auto-collapse on completion: expand while active, collapse when the
   // run ends. Subsequent expand state lives in component state so a user
   // who toggled stays toggled until the run lifecycle flips again.
   // #4305 — tail groups (no follow-up summary) start expanded and skip
   // the on-completion collapse, so trailing tools remain visible.
-  const [expanded, setExpanded] = useState(isActive || isTail)
+  // #5561 — seed from the registry first so a recycled group reopens to the
+  // user's last choice; fall back to the lifecycle default the first time the
+  // group is ever seen.
+  const { initial: initialExpanded, persist: persistGroupExpanded } = useInitialExpanded(
+    groupKey,
+    isActive || isTail,
+  )
+  const [expanded, setExpanded] = useState(initialExpanded)
   const wasActiveRef = useRef(isActive)
   // Latch isTail while the group is still active so the on-completion
   // collapse path reads the *pre-flip* tail status. #4314 — if a single
@@ -233,23 +248,36 @@ export function ToolGroup({ messages, isActive, isTail = false }: ToolGroupProps
   const wasTailRef = useRef(isTail)
   if (isActive) wasTailRef.current = isTail
   useEffect(() => {
+    // #5561 — mirror lifecycle-driven group expand flips into the registry so a
+    // remount during the same run re-seeds the correct (current) state, not the
+    // first-seen default.
     if (wasActiveRef.current && !isActive) {
-      if (!wasTailRef.current) setExpanded(false)
+      if (!wasTailRef.current) { setExpanded(false); persistGroupExpanded(false) }
     }
-    if (!wasActiveRef.current && isActive) setExpanded(true)
+    if (!wasActiveRef.current && isActive) { setExpanded(true); persistGroupExpanded(true) }
     wasActiveRef.current = isActive
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- persistGroupExpanded is stable; isActive is the intended trigger (matches the pre-#5561 dep list)
   }, [isActive])
 
   // #4279: per-entry expansion state lives here so multiple entries can be
   // open simultaneously and the parent group's expand/collapse logic doesn't
   // touch entry state. We track open entries in a Set keyed by message id —
   // toggling an entry flips its membership.
-  const [expandedEntryIds, setExpandedEntryIds] = useState<Set<string>>(() => new Set())
+  // #5561 — seed the open-entry set from the registry on mount so a recycled
+  // group reopens the same entries the user had open. Entry flags are
+  // namespaced `entry:<id>` so they never collide with a sibling row's own id.
+  const [expandedEntryIds, setExpandedEntryIds] = useState<Set<string>>(() => {
+    const seeded = new Set<string>()
+    for (const m of messages) {
+      if (expandRegistry.get(`entry:${m.id}`)) seeded.add(m.id)
+    }
+    return seeded
+  })
   const toggleEntry = (id: string) => {
     setExpandedEntryIds((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(id)) { next.delete(id); expandRegistry.set(`entry:${id}`, false) }
+      else { next.add(id); expandRegistry.set(`entry:${id}`, true) }
       return next
     })
   }
@@ -261,7 +289,11 @@ export function ToolGroup({ messages, isActive, isTail = false }: ToolGroupProps
     : `${toolCount} tool${toolCount !== 1 ? 's' : ''} used`
   const summary = breakdown ? `${baseSummary} — ${breakdown}` : baseSummary
 
-  const toggle = () => setExpanded((prev) => !prev)
+  const toggle = () => setExpanded((prev) => {
+    const next = !prev
+    persistGroupExpanded(next)
+    return next
+  })
 
   // #4282: the outer container is a plain non-interactive <div>. The
   // group's expand/collapse toggle lives on a real <button> header, and

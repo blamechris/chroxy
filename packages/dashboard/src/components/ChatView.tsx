@@ -5,11 +5,24 @@
  * - Detects user scroll-up, pauses auto-scroll
  * - Shows scroll-to-bottom button when scrolled up
  * - Deduplicates messages by id for reconnect replay
+ *
+ * #5561 — the message list is windowed (virtualized) above a row-count
+ * threshold. Long sessions previously mapped the ENTIRE deduped array to the
+ * DOM (the responsiveness wall the issue names); now only the rows intersecting
+ * the viewport (plus a small overscan) mount, with top/bottom spacer divs
+ * preserving scroll geometry. Below the threshold every row renders exactly as
+ * before — no behaviour change for short histories. Mirrors the mobile #5534
+ * patterns: pinned-to-bottom while streaming, scroll position preserved when
+ * scrolled up, and an id-keyed expand registry so tool-bubble expand state
+ * survives a row scrolling out of and back into the window.
  */
 import { memo, useRef, useState, useCallback, useEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { bumpRenderCount } from '@chroxy/store-core'
 import { ThinkingDots } from './ThinkingDots'
 import { renderMarkdown } from '../lib/markdown'
+import { MessageRowShell } from './MeasuredRow'
+import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
+import { useWindowedRange } from './useWindowedRange'
 
 /* ---- Sender Icons ---- */
 
@@ -134,6 +147,13 @@ const TYPE_CLASS: Record<string, string> = {
 
 const SCROLL_THRESHOLD = 60
 
+/**
+ * #5561 — the `gap` between rows in `.chat-messages` (theme/components.css).
+ * Folded into the windowing height math so the spacer heights match the real
+ * scroll geometry. Keep in sync with the CSS.
+ */
+const CHAT_MESSAGES_ROW_GAP = 12
+
 function formatTime(ts: number): string {
   const d = new Date(ts)
   let h = d.getHours()
@@ -184,11 +204,14 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   // the hot path.
   if (IS_DEV) bumpRenderCount(`ChatMessageRow:${id}`)
 
-  // Derive icon + row class from `type` INSIDE the memo. Computing them in the
-  // parent map would hand the memo a fresh `icon` JSX element identity every
-  // render and defeat the skip — every prop must be a stable scalar.
+  // Derive icon from `type` INSIDE the memo. Computing it in the parent map
+  // would hand the memo a fresh `icon` JSX element identity every render and
+  // defeat the skip — every prop must be a stable scalar. The outer `.msg-row`
+  // container (class + data-testid) is now rendered by ChatView's row shell
+  // (`MessageRowShell`, #5561) so the measurement ResizeObserver can attach to
+  // the same element that carries the flex layout; this memo renders only the
+  // inner content.
   const icon = senderIconFor(type)
-  const rowClass = rowClassFor(type, icon !== null)
 
   const body =
     type === 'response' || type === 'tool_use'
@@ -196,14 +219,14 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
       : content
 
   return (
-    <div data-testid={`msg-${id}`} className={rowClass}>
+    <>
       {type !== 'user_input' && icon}
       <div className={`msg ${TYPE_CLASS[type] || 'assistant'}${isStreaming ? ' streaming' : ''}`}>
         {body}
         {timestamp > 0 && <span className="msg-timestamp">{formatTime(timestamp)}</span>}
       </div>
       {type === 'user_input' && icon}
-    </div>
+    </>
   )
 })
 
@@ -211,6 +234,12 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
+
+  // #5561 — scroll/viewport geometry that drives the windowing hook. Kept in
+  // state (not just the DOM) so a scroll or resize recomputes the visible
+  // range. Seeded to 0 and synced on mount + every scroll/resize.
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
 
   // Deduplicate by id — keep first occurrence
   const dedupedMessages = useMemo(() => {
@@ -222,9 +251,63 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
     })
   }, [messages])
 
+  // #5561 — id-keyed expand-state registry (mirror of mobile #5534). Lives in a
+  // ref so a tool bubble persisting its expand flag never re-renders ChatView;
+  // a row that scrolled out and back re-reads its flag on remount via
+  // `useInitialExpanded`. The Provider value is memoized so the context
+  // identity is stable across renders.
+  const expandedStateRef = useRef<Map<string, boolean>>(new Map())
+  const expandRegistry = useMemo<ChatExpandRegistry>(
+    () => ({
+      get: (key) => expandedStateRef.current.get(key),
+      set: (key, expanded) => {
+        if (expanded) expandedStateRef.current.set(key, true)
+        else expandedStateRef.current.delete(key)
+      },
+    }),
+    [],
+  )
+
+  // #5561 — stable per-row key lookup for the height cache. Rows key by message
+  // id (the dedup pass already guarantees uniqueness), matching the React
+  // `key` used in the map so a row's measured height tracks the row, not its
+  // index, across windowing churn.
+  const keyAt = useCallback(
+    (index: number) => dedupedMessages[index]?.id ?? `__row_${index}`,
+    [dedupedMessages],
+  )
+
+  const range = useWindowedRange({
+    itemCount: dedupedMessages.length,
+    scrollTop,
+    viewportHeight,
+    // Matches `.chat-messages { gap: 12px }` in theme/components.css so the
+    // windowing spacers reserve the same total height the real flex column
+    // occupies (rows + inter-row gaps).
+    rowGap: CHAT_MESSAGES_ROW_GAP,
+    keyAt,
+  })
+
+  const syncGeometry = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    // Functional updates that bail when unchanged — a no-op sync (e.g. the
+    // mount sync in jsdom where scrollTop/clientHeight are both 0) must not
+    // schedule a spurious re-render. This keeps the #4398 hidden-memoization
+    // contract (renderMessage invoked exactly once on first mount) intact.
+    setScrollTop(prev => (prev === el.scrollTop ? prev : el.scrollTop))
+    setViewportHeight(prev => (prev === el.clientHeight ? prev : el.clientHeight))
+  }, [])
+
   const handleScroll = useCallback(() => {
     const el = containerRef.current
     if (!el) return
+    // #5561 — feed the windowing hook the live scroll offset so the visible
+    // slice tracks the viewport. clientHeight is stable per scroll but cheap
+    // to read here, keeping the range correct if a scroll coincides with a
+    // layout change.
+    setScrollTop(el.scrollTop)
+    setViewportHeight(el.clientHeight)
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
     // During programmatic scrolls, only update if we're at bottom (don't falsely set scrolledUp)
     if (programmaticScrollRef.current && atBottom) return
@@ -250,8 +333,21 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
     if (!el) return
     programmaticScrollRef.current = true
     el.scrollTop = el.scrollHeight
+    // #5561 — seed the windowing geometry from the real container size on mount
+    // so the first render after layout has an accurate viewport height.
+    syncGeometry()
     requestAnimationFrame(() => { programmaticScrollRef.current = false })
-  }, [])
+  }, [syncGeometry])
+
+  // #5561 — keep the windowed range correct when the container resizes (panel
+  // split drag, window resize, sidebar toggle) without a scroll event firing.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => syncGeometry())
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [syncGeometry])
 
   // #4652: previously a separate streaming-end effect reset
   // `userScrolledUp` to false — that snapped the user back to the
@@ -302,46 +398,80 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
     return () => cancelAnimationFrame(rafId)
   }, [isStreaming, userScrolledUp])
 
+  // #5561 — the windowed slice. Only rows in [startIndex, endIndex) mount; the
+  // top/bottom spacers reserve the height of the skipped rows so the scrollbar
+  // geometry (and therefore scroll position when content appends above the
+  // viewport) is preserved. Below the threshold `range` covers the whole list
+  // and both spacers are 0, so short conversations render exactly as before.
+  const visible = dedupedMessages.slice(range.startIndex, range.endIndex)
+
   return (
     <div className="chat-view" data-testid="chat-view">
-      <div
-        ref={containerRef}
-        className="chat-messages"
-        data-testid="chat-messages"
-        onScroll={handleScroll}
-      >
-        {dedupedMessages.map(msg => {
-          const icon = senderIconFor(msg.type)
-          const rowClass = msg.type === 'user_input' ? 'msg-row msg-row-user'
-            : msg.type === 'system' ? 'msg-row msg-row-system'
-            : icon ? 'msg-row' : ''
-          const custom = renderMessage?.(msg)
-          if (custom !== undefined && custom !== null) {
-            return (
-              <div
-                key={msg.id}
-                data-testid={`msg-${msg.id}`}
-                className={rowClass}
-              >
-                {msg.type !== 'user_input' && icon}
-                <div style={{ display: 'contents' }}>{custom}</div>
-                {msg.type === 'user_input' && icon}
-              </div>
-            )
-          }
-          return (
-            <DefaultMessageRow
-              key={msg.id}
-              id={msg.id}
-              type={msg.type}
-              content={msg.content}
-              timestamp={msg.timestamp}
-              isStreaming={msg.isStreaming}
+      <ChatExpandContext.Provider value={expandRegistry}>
+        <div
+          ref={containerRef}
+          className="chat-messages"
+          data-testid="chat-messages"
+          onScroll={handleScroll}
+        >
+          {/* Top spacer — reserves the height of windowed-out leading rows. The
+              `flex: 0 0 auto` style keeps it from being squeezed by the flex
+              column the way a normal flex child would be. */}
+          {range.topSpacer > 0 && (
+            <div
+              aria-hidden="true"
+              data-testid="chat-window-top-spacer"
+              style={{ flex: '0 0 auto', height: range.topSpacer }}
             />
-          )
-        })}
-        {(isStreaming || isBusy) && <ThinkingDots />}
-      </div>
+          )}
+          {visible.map(msg => {
+            const icon = senderIconFor(msg.type)
+            const rowClass = rowClassFor(msg.type, icon !== null)
+            const custom = renderMessage?.(msg)
+            if (custom !== undefined && custom !== null) {
+              return (
+                <MessageRowShell
+                  key={msg.id}
+                  rowKey={msg.id}
+                  measureRow={range.measureRow}
+                  className={rowClass}
+                  testId={`msg-${msg.id}`}
+                >
+                  {msg.type !== 'user_input' && icon}
+                  <div style={{ display: 'contents' }}>{custom}</div>
+                  {msg.type === 'user_input' && icon}
+                </MessageRowShell>
+              )
+            }
+            return (
+              <MessageRowShell
+                key={msg.id}
+                rowKey={msg.id}
+                measureRow={range.measureRow}
+                className={rowClass}
+                testId={`msg-${msg.id}`}
+              >
+                <DefaultMessageRow
+                  id={msg.id}
+                  type={msg.type}
+                  content={msg.content}
+                  timestamp={msg.timestamp}
+                  isStreaming={msg.isStreaming}
+                />
+              </MessageRowShell>
+            )
+          })}
+          {/* Bottom spacer — reserves the height of windowed-out trailing rows. */}
+          {range.bottomSpacer > 0 && (
+            <div
+              aria-hidden="true"
+              data-testid="chat-window-bottom-spacer"
+              style={{ flex: '0 0 auto', height: range.bottomSpacer }}
+            />
+          )}
+          {(isStreaming || isBusy) && <ThinkingDots />}
+        </div>
+      </ChatExpandContext.Provider>
 
       {userScrolledUp && (
         <button
