@@ -224,6 +224,45 @@ export class WsBroadcaster {
     return count
   }
 
+  /**
+   * #5578: does ANY authenticated, connected subscriber of this session sit on a
+   * deflate-negotiated socket (i.e. tunnel/cellular, NOT a LAN/loopback peer for
+   * which deflate was stripped at upgrade — ws-server.js)? Used by the
+   * EventNormalizer to widen the delta-coalescing window on links where each
+   * sub-threshold (<1024B) stream_delta ships UNCOMPRESSED and the per-frame
+   * small-packet cost dominates. Mirrors `_countSessionSubscribers`'s recipient
+   * filter so it reflects exactly who would receive a session-scoped broadcast.
+   *
+   * O(subscribers): iterates only the reverse-index Set (members already satisfy
+   * the active-or-subscribed predicate), short-circuiting on the first deflate
+   * peer — never an O(all-clients) scan on the per-token hot path. `usesDeflate`
+   * is a per-client flag stamped once at connection setup from the unspoofable
+   * socket-locality decision, so this is a cheap boolean read per member.
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  _hasDeflateSubscriber(sessionId) {
+    if (this._clientManager) {
+      for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
+        if (!client.authenticated) continue
+        const sock = client._ws
+        if (!sock || sock.readyState !== 1) continue
+        if (client.usesDeflate) return true
+      }
+      return false
+    }
+    // Full-scan fallback for fixtures constructed without a clientManager.
+    for (const [ws, client] of this._clients) {
+      if (!client.authenticated || ws.readyState !== 1) continue
+      if (!client.usesDeflate) continue
+      if (client.activeSessionId === sessionId ||
+          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))) {
+        return true
+      }
+    }
+    return false
+  }
+
   /** Broadcast client_joined to all OTHER authenticated clients */
   _broadcastClientJoined(newClient, excludeWs) {
     const info = newClient.deviceInfo || {}

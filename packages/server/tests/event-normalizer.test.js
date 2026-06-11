@@ -1176,6 +1176,152 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
   })
 })
 
+describe('EventNormalizer deflate-aware flush window (#5578)', () => {
+  // Same setTimeout spy as the #5516 block: record the scheduled flush delay
+  // without letting the timer fire.
+  function withSetTimeoutSpy(fn) {
+    const delays = []
+    const orig = global.setTimeout
+    mock.method(global, 'setTimeout', (cb, ms, ...rest) => {
+      delays.push(ms)
+      return orig(() => {}, 1_000_000, ...rest)
+    })
+    try { fn(delays) } finally { mock.restoreAll() }
+  }
+
+  // Policy table (#5578):
+  //   subscribers      | all-LAN | any-deflate
+  //   ---------------- | ------- | -----------
+  //   single (count 1) |   8ms   |    16ms
+  //   multi  (count≥2) |  16ms   |    25ms
+  // "any-deflate" = at least one subscriber on a deflate-negotiated
+  // (tunnel/cellular) socket, where each sub-1024B stream_delta ships
+  // uncompressed and the LAN floors triple the small-packet count.
+
+  it('keeps the 8ms LAN floor for a single all-LAN subscriber', () => {
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 1,
+      getHasDeflateSubscriber: () => false,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 8)
+    })
+    n.destroy()
+  })
+
+  it('keeps the 16ms LAN floor for multiple all-LAN subscribers', () => {
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 3,
+      getHasDeflateSubscriber: () => false,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('widens to 16ms when the sole subscriber is on a deflate socket', () => {
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 1,
+      getHasDeflateSubscriber: () => true,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('widens to 25ms when a multi-client session has any deflate subscriber (mixed)', () => {
+    // 3 subscribers, at least one on a deflate socket → the widened multi window.
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 3,
+      getHasDeflateSubscriber: () => true,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 25)
+    })
+    n.destroy()
+  })
+
+  it('re-resolves the window when subscribers join/leave mid-session', () => {
+    // The predicates are read live on every bufferDelta, so a join (LAN→deflate)
+    // or a leave (deflate→LAN) flips the window without any cached state.
+    const state = { count: 1, deflate: false }
+    const n = new EventNormalizer({
+      getSubscriberCount: () => state.count,
+      getHasDeflateSubscriber: () => state.deflate,
+    })
+    withSetTimeoutSpy((delays) => {
+      // 1 LAN viewer → 8ms.
+      n.bufferDelta('sess-1', 'm1', 'a')
+      assert.equal(delays.at(-1), 8)
+      // A phone on cellular joins (now a deflate subscriber present, still single
+      // would be 16, but it's now 2 clients) → widened multi window 25ms. The
+      // delta buffers into the SAME pending window, which only shortens, so to
+      // observe the new resolve we flush first.
+      n.flushSession('sess-1')
+      state.count = 2
+      state.deflate = true
+      n.bufferDelta('sess-1', 'm2', 'b')
+      assert.equal(delays.at(-1), 25)
+      // The cellular peer leaves; back to a single LAN viewer → 8ms floor.
+      n.flushSession('sess-1')
+      state.count = 1
+      state.deflate = false
+      n.bufferDelta('sess-1', 'm3', 'c')
+      assert.equal(delays.at(-1), 8)
+    })
+    n.destroy()
+  })
+
+  it('honors custom deflate interval overrides', () => {
+    const n = new EventNormalizer({
+      deflateFlushIntervalMs: 40,
+      deflateSingleClientFlushIntervalMs: 20,
+      getSubscriberCount: () => 1,
+      getHasDeflateSubscriber: () => true,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 20)
+    })
+    n.destroy()
+  })
+
+  it('ignores the deflate predicate when no subscriber-count resolver is wired (legacy)', () => {
+    // Legacy single-session mode has no way to resolve subscribers; the LAN
+    // default stands regardless of the deflate predicate.
+    const n = new EventNormalizer({ getHasDeflateSubscriber: () => true })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('does NOT re-scan all clients — resolves via the wired O(subscribers) predicates only', () => {
+    // Guard against a regression that reintroduces an O(all-clients) scan on the
+    // per-token hot path: bufferDelta must consult ONLY the injected resolvers,
+    // once each per call, never iterate a client collection itself.
+    let countCalls = 0
+    let deflateCalls = 0
+    const n = new EventNormalizer({
+      getSubscriberCount: () => { countCalls++; return 1 },
+      getHasDeflateSubscriber: () => { deflateCalls++; return true },
+    })
+    withSetTimeoutSpy(() => {
+      n.bufferDelta('sess-1', 'm1', 'a')
+    })
+    assert.equal(countCalls, 1, 'subscriber count resolved exactly once per buffered delta')
+    assert.equal(deflateCalls, 1, 'deflate predicate resolved exactly once per buffered delta')
+    n.destroy()
+  })
+})
+
 // ---- registerEventType() ----
 
 describe('registerEventType()', () => {

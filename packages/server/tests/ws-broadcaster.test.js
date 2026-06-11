@@ -271,6 +271,52 @@ describe('WsBroadcaster', () => {
     })
   })
 
+  // #5578: does any subscriber sit on a deflate-negotiated (tunnel/cellular)
+  // socket? Drives the deflate-aware delta-coalescing window. Mirrors the
+  // _countSessionSubscribers recipient filter; short-circuits on first match.
+  // These exercise the full-scan FALLBACK path (no clientManager wired).
+  describe('_hasDeflateSubscriber() — full-scan fallback', () => {
+    function lan(id, opts) { return createFakeClient({ id, ...opts }) } // usesDeflate undefined → falsey
+    function tunnel(id, opts) { const c = createFakeClient({ id, ...opts }); c.usesDeflate = true; return c }
+
+    it('false when every subscriber is on a LAN socket', () => {
+      clients.set(createFakeWs(), lan('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), lan('c2', { activeSessionId: 'other', subscribedSessionIds: new Set(['sess-1']) }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
+
+    it('true when at least one subscriber is on a deflate socket (mixed)', () => {
+      clients.set(createFakeWs(), lan('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), tunnel('c2', { activeSessionId: 'sess-1' }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), true)
+    })
+
+    it('true when every subscriber is on a deflate socket', () => {
+      clients.set(createFakeWs(), tunnel('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), tunnel('c2', { activeSessionId: 'other', subscribedSessionIds: new Set(['sess-1']) }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), true)
+    })
+
+    it('ignores a deflate client subscribed to a DIFFERENT session', () => {
+      clients.set(createFakeWs(), lan('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), tunnel('c2', { activeSessionId: 'sess-2' }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
+
+    it('excludes unauthenticated and non-OPEN deflate clients', () => {
+      clients.set(createFakeWs({ readyState: 1 }), tunnel('c1', { activeSessionId: 'sess-1', authenticated: false }))
+      clients.set(createFakeWs({ readyState: 3 }), tunnel('c2', { activeSessionId: 'sess-1' }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
+
+    it('does not throw when a client lacks subscribedSessionIds (#4799 parity)', () => {
+      const c = tunnel('c1', { activeSessionId: 'other' })
+      c.subscribedSessionIds = undefined
+      clients.set(createFakeWs(), c)
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
+  })
+
   describe('_broadcastClientJoined()', () => {
     it('sends client_joined to all except the joining client ws', () => {
       const wsNew = createFakeWs()
@@ -589,13 +635,14 @@ describe('WsBroadcaster', () => {
     let idxBroadcaster
 
     /** Register an authenticated client with its ws back-ref (like ws-server addClient). */
-    function reg(id, { activeSessionId = null, subscribe = [], authenticated = true, readyState = 1 } = {}) {
+    function reg(id, { activeSessionId = null, subscribe = [], authenticated = true, readyState = 1, usesDeflate = false } = {}) {
       const ws = createFakeWs({ readyState })
       // Start with activeSessionId null (like a fresh client) so the helper
       // performs a real transition and updates the index — passing it directly
       // to createFakeClient would make setActiveSession a no-op (prev === new).
       const client = createFakeClient({ id, authenticated })
       client._ws = ws
+      client.usesDeflate = usesDeflate
       manager.addClient(ws, client)
       if (activeSessionId) manager.setActiveSession(client, activeSessionId)
       for (const sid of subscribe) manager.subscribe(client, sid)
@@ -678,6 +725,48 @@ describe('WsBroadcaster', () => {
     it('returns 1 for a single-viewer session (the hot-path motivation)', () => {
       reg('solo', { activeSessionId: 'solo-sess' })
       assert.equal(idxBroadcaster._countSessionSubscribers('solo-sess'), 1)
+    })
+
+    // #5578: deflate-subscriber detection over the same reverse index.
+    it('_hasDeflateSubscriber resolves from the index (all-LAN / mixed / all-tunnel)', () => {
+      // all-LAN
+      reg('a', { activeSessionId: 'lan-sess' })
+      reg('b', { activeSessionId: 'other', subscribe: ['lan-sess'] })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('lan-sess'), false)
+      // mixed: one tunnel peer among LAN
+      reg('c', { activeSessionId: 'mixed-sess' })
+      reg('d', { activeSessionId: 'mixed-sess', usesDeflate: true })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('mixed-sess'), true)
+      // all-tunnel
+      reg('e', { activeSessionId: 'tun-sess', usesDeflate: true })
+      reg('f', { activeSessionId: 'other2', subscribe: ['tun-sess'], usesDeflate: true })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('tun-sess'), true)
+      // unknown session
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('ghost'), false)
+    })
+
+    it('_hasDeflateSubscriber excludes unauthenticated + non-OPEN deflate members', () => {
+      reg('a', { activeSessionId: 'sess-1', usesDeflate: true, authenticated: false })
+      reg('b', { activeSessionId: 'sess-1', usesDeflate: true, readyState: 3 })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), false)
+      // A healthy deflate member flips it true.
+      reg('c', { activeSessionId: 'sess-1', usesDeflate: true })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), true)
+    })
+
+    it('_hasDeflateSubscriber re-resolves when a deflate subscriber joins/leaves', () => {
+      const lanViewer = reg('lan', { activeSessionId: 'sess-1' })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), false)
+      // A phone on cellular subscribes → now true.
+      const phone = reg('phone', { usesDeflate: true })
+      manager.subscribe(phone.client, 'sess-1')
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), true)
+      // The phone unsubscribes → back to all-LAN.
+      manager.unsubscribe(phone.client, 'sess-1')
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), false)
+      // Sanity: the LAN viewer is still indexed.
+      assert.equal(idxBroadcaster._countSessionSubscribers('sess-1'), 1)
+      assert.ok(lanViewer)
     })
 
     // The decisive test: over a randomized op sequence, the index broadcaster's
