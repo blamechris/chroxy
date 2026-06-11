@@ -167,16 +167,40 @@ function truncate(text, max = 1000) {
  * harmless mid-line). Backslash is escaped FIRST so we don't double-escape the
  * escapes we then insert.
  *
- * Applied AFTER truncation deliberately: escaping first could push an escape
- * pair across the 1000-char cut and leave a dangling `\` (or split a `\X` into
- * `…\` + `X`). Escaping the already-truncated string keeps every inserted `\X`
- * pair intact; the result can exceed 1000 chars, but Discord's embed-field
- * limit is 1024, and the worst case here (≈2000 from all-metachar input) is
- * not a realistic free-text body — the truncate cap is the binding hygiene.
+ * Escaping the already-truncated string keeps every inserted `\X` pair intact
+ * (escaping first could split a `\X` across the cut and leave a dangling `\`),
+ * so callers truncate FIRST and escape SECOND — see escapeAndCap.
  */
 function escapeMarkdown(text) {
   if (typeof text !== 'string') return ''
   return text.replace(/[\\*_~`|>]/g, '\\$&')
+}
+
+/**
+ * Truncate a free-text field, escape its markdown, and clamp the FINAL escaped
+ * string to `max` chars — the value that actually goes on the wire (#5475).
+ *
+ * Escaping after truncation can up to double the length (all-metachar input →
+ * ~2×). Discord's embed-field hard limit is 1024, so an un-clamped escaped
+ * value could exceed it and get the whole webhook PATCH/POST rejected with a
+ * 400. We re-truncate the escaped result to `max`; if the cut lands on a lone
+ * `\` inserted by escaping (i.e. the escape backslash without its metachar),
+ * we drop it so the field never ends in a dangling backslash.
+ *
+ * The inner truncate() appends a plain `...` marker (no metacharacters), so it
+ * is neither escaped nor split by the re-truncate.
+ */
+function escapeAndCap(text, max = 1000) {
+  const escaped = escapeMarkdown(truncate(text, max))
+  if (escaped.length <= max) return escaped
+  const cut = escaped.slice(0, max)
+  // escapeMarkdown emits `\` only immediately before a metacharacter, so every
+  // backslash in `escaped` belongs to a `\X` pair. A run of trailing backslashes
+  // of ODD length means the final `\` is a lone escape whose metachar fell past
+  // the cut; drop it so the field never ends in a dangling escape. An EVEN run
+  // is whole `\\` pairs (escaped literal backslashes) and stays intact.
+  const trailing = cut.length - cut.replace(/\\+$/, '').length
+  return trailing % 2 === 1 ? cut.slice(0, -1) : cut
 }
 
 export class DiscordWebhookSink extends NotificationSink {
@@ -666,16 +690,17 @@ export class DiscordWebhookSink extends NotificationSink {
     const titleFor = STATE_TITLES[entry.state] || STATE_TITLES.idle
     const fields = []
     // Free-text user/transcript fields (#5475): escape markdown so a body like
-    // `watch dist/*_test.js` renders literally. Escape AFTER truncate so an
-    // escape pair can't be split across the cut (see escapeMarkdown).
+    // `watch dist/*_test.js` renders literally. escapeAndCap truncates first,
+    // escapes, then clamps the FINAL escaped string so it can't blow past
+    // Discord's 1024-char field limit (see escapeAndCap).
     if (entry.body) {
-      fields.push({ name: 'Status', value: escapeMarkdown(truncate(entry.body)), inline: false })
+      fields.push({ name: 'Status', value: escapeAndCap(entry.body), inline: false })
     }
     if (entry.detail) {
-      fields.push({ name: 'Detail', value: escapeMarkdown(truncate(entry.detail)), inline: false })
+      fields.push({ name: 'Detail', value: escapeAndCap(entry.detail), inline: false })
     }
     if (entry.sessionName) {
-      fields.push({ name: 'Session', value: escapeMarkdown(truncate(entry.sessionName, 100)), inline: true })
+      fields.push({ name: 'Session', value: escapeAndCap(entry.sessionName, 100), inline: true })
     }
     if (Number.isFinite(entry.subagents) && entry.subagents > 0) {
       fields.push({ name: 'Subagents', value: String(entry.subagents), inline: true })
