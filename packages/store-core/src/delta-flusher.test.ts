@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   createDeltaFlusher,
   DELTA_FLUSH_MIN_MS,
@@ -344,18 +344,26 @@ describe('createDeltaFlusher', () => {
     })
   })
 
-  it('defaults to the global timer surface when no scheduler is injected', async () => {
-    const f = createDeltaFlusher({
-      getEwmaRtt: () => null,
-      applyDeltas: (updates) => {
-        applied.push(updates)
-      },
-    })
-    f.setIntervalOverride(1)
-    f.pendingDeltas.set('m1', { sessionId: null, delta: 'a' })
-    f.schedule()
-    await new Promise((r) => setTimeout(r, 15))
-    expect(applied).toHaveLength(1)
-    f.dispose()
+  it('defaults to the global timer surface when no scheduler is injected', () => {
+    // Fake timers patch the global setTimeout/clearTimeout, so advancing the
+    // clock only fires the flush if the flusher really armed a GLOBAL timer —
+    // deterministic, no real sleep.
+    vi.useFakeTimers()
+    try {
+      const f = createDeltaFlusher({
+        getEwmaRtt: () => null,
+        applyDeltas: (updates) => {
+          applied.push(updates)
+        },
+      })
+      f.setIntervalOverride(1)
+      f.pendingDeltas.set('m1', { sessionId: null, delta: 'a' })
+      f.schedule()
+      vi.advanceTimersByTime(1)
+      expect(applied).toHaveLength(1)
+      f.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
