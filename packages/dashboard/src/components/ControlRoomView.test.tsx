@@ -63,6 +63,16 @@ vi.mock('./RunnerStatusSection', () => ({
 vi.mock('./IntegrationsSection', () => ({
   IntegrationsSection: () => <div data-testid="stub-integrations">integrations</div>,
 }))
+// #5544: the Settings tab embeds the (heavy, store-backed) SettingsContent.
+// Stub it so the tab-shell tests stay focused on routing/auto-fetch behaviour
+// and surface the `active` prop the embed threads through.
+vi.mock('./SettingsPanel', () => ({
+  SettingsContent: ({ active }: { active?: boolean }) => (
+    <div data-testid="stub-settings" data-active={active ? 'yes' : 'no'}>
+      settings
+    </div>
+  ),
+}))
 
 import { ControlRoomView, CONTROL_ROOM_STALENESS_MS } from './ControlRoomView'
 
@@ -85,9 +95,12 @@ describe('ControlRoomView', () => {
     expect(screen.getByTestId('cr-tab-repos')).toBeTruthy()
     expect(screen.getByTestId('cr-tab-runners')).toBeTruthy()
     expect(screen.getByTestId('cr-tab-integrations')).toBeTruthy()
+    // #5544: the converged Settings tab.
+    expect(screen.getByTestId('cr-tab-settings')).toBeTruthy()
     expect(screen.getByTestId('stub-repos')).toBeTruthy()
     expect(screen.queryByTestId('stub-runners')).toBeNull()
     expect(screen.queryByTestId('stub-integrations')).toBeNull()
+    expect(screen.queryByTestId('stub-settings')).toBeNull()
     expect(screen.getByTestId('cr-tab-repos').getAttribute('aria-selected')).toBe('true')
   })
 
@@ -141,6 +154,65 @@ describe('ControlRoomView', () => {
   it('honours an explicit initialTab override', () => {
     render(<ControlRoomView initialTab="runners" />)
     expect(screen.getByTestId('stub-runners')).toBeTruthy()
+  })
+})
+
+describe('ControlRoomView Settings tab (#5544)', () => {
+  it('renders the embedded SettingsContent when the Settings tab is clicked, as active', () => {
+    render(<ControlRoomView />)
+    fireEvent.click(screen.getByTestId('cr-tab-settings'))
+    const settings = screen.getByTestId('stub-settings')
+    expect(settings).toBeTruthy()
+    expect(settings.getAttribute('data-active')).toBe('yes')
+    expect(screen.queryByTestId('stub-repos')).toBeNull()
+    expect(screen.getByTestId('cr-tab-settings').getAttribute('aria-selected')).toBe('true')
+    expect(localStorage.getItem(KEY)).toBe('settings')
+  })
+
+  it('restores a persisted settings tab on the next mount', () => {
+    localStorage.setItem(KEY, 'settings')
+    render(<ControlRoomView />)
+    expect(screen.getByTestId('stub-settings')).toBeTruthy()
+  })
+
+  it('does NOT trigger any survey fetch when the Settings tab is the active one', () => {
+    localStorage.setItem(KEY, 'settings')
+    render(<ControlRoomView />)
+    expect(requestHostStatusMock).not.toHaveBeenCalled()
+    expect(requestRunnerStatusMock).not.toHaveBeenCalled()
+    expect(requestIntegrationStatusMock).not.toHaveBeenCalled()
+  })
+
+  it('does NOT trigger a survey fetch when switching from repos to the Settings tab', () => {
+    // Seed a fresh repos snapshot so the initial repos activation does not
+    // itself fetch — isolating the assertion to the Settings switch.
+    resetStore({ hostStatus: snapshotAt(CONTROL_ROOM_STALENESS_MS / 2) })
+    render(<ControlRoomView initialTab="repos" />)
+    requestHostStatusMock.mockClear()
+    fireEvent.click(screen.getByTestId('cr-tab-settings'))
+    expect(requestHostStatusMock).not.toHaveBeenCalled()
+    expect(requestRunnerStatusMock).not.toHaveBeenCalled()
+    expect(requestIntegrationStatusMock).not.toHaveBeenCalled()
+  })
+
+  it('redirects to the Settings tab when forceTabNonce bumps while mounted', () => {
+    const { rerender } = render(
+      <ControlRoomView forceTab="settings" forceTabNonce={0} initialTab="repos" />,
+    )
+    // Mount does not redirect — seeded from the incoming nonce.
+    expect(screen.getByTestId('stub-repos')).toBeTruthy()
+    rerender(<ControlRoomView forceTab="settings" forceTabNonce={1} initialTab="repos" />)
+    expect(screen.getByTestId('stub-settings')).toBeTruthy()
+    expect(screen.queryByTestId('stub-repos')).toBeNull()
+  })
+
+  it('does not redirect on mount even when an initial non-zero nonce is supplied', () => {
+    // Models App reopening the CR via the sidebar after a prior gear click left
+    // the nonce non-zero: the closed→open path uses initialTab, not the nonce,
+    // so a stale nonce must not hijack a plain reopen.
+    render(<ControlRoomView forceTab="settings" forceTabNonce={3} initialTab="runners" />)
+    expect(screen.getByTestId('stub-runners')).toBeTruthy()
+    expect(screen.queryByTestId('stub-settings')).toBeNull()
   })
 })
 

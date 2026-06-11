@@ -14,13 +14,26 @@
  * App.tsx renders this in place of the old `ControlRoomSection` and forwards the
  * `onInvestigate` action through to the repo table unchanged.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { IntegrationsSection } from './IntegrationsSection'
+import { SettingsContent } from './SettingsPanel'
 import { useConnectionStore } from '../store/connection'
 
-export type ControlRoomTab = 'repos' | 'runners' | 'integrations'
+// #5544: the Settings tab converges the scattered preference surfaces
+// (notification categories, appearance, session defaults, BYOK, Tauri
+// desktop options) into the Control Room. It embeds `SettingsContent` — the
+// same body the legacy slide-out modal renders — so there's a single home and
+// no duplicated controls.
+export type ControlRoomTab = 'repos' | 'runners' | 'integrations' | 'settings'
+
+/**
+ * #5544: the survey-backed tabs whose auto-fetch effect (#5543/#5546) shells
+ * out to git/gh. The Settings tab is purely client/server-config driven and
+ * must NOT trip the snapshot fetch, so the effect early-returns for it.
+ */
+const SURVEY_TABS: ReadonlySet<ControlRoomTab> = new Set<ControlRoomTab>(['repos', 'runners', 'integrations'])
 
 /**
  * #5543: how old a tab's snapshot may be before opening/switching to that tab
@@ -33,7 +46,7 @@ export type ControlRoomTab = 'repos' | 'runners' | 'integrations'
 export const CONTROL_ROOM_STALENESS_MS = 60_000
 
 const CR_TAB_STORAGE_KEY = 'chroxy_cr_tab'
-const VALID_TABS: ReadonlySet<string> = new Set<ControlRoomTab>(['repos', 'runners', 'integrations'])
+const VALID_TABS: ReadonlySet<string> = new Set<ControlRoomTab>(['repos', 'runners', 'integrations', 'settings'])
 
 function loadPersistedTab(): ControlRoomTab {
   try {
@@ -69,6 +82,7 @@ const TABS: ReadonlyArray<{ key: ControlRoomTab; label: string }> = [
   { key: 'repos', label: 'Project status' },
   { key: 'runners', label: 'Self-hosted runners' },
   { key: 'integrations', label: 'Integrations' },
+  { key: 'settings', label: 'Settings' },
 ]
 
 export interface ControlRoomViewProps {
@@ -78,15 +92,56 @@ export interface ControlRoomViewProps {
   onOpenSession?: (req: RepoOpenSessionRequest) => void
   /** Optional initial tab override (defaults to the persisted tab). For tests. */
   initialTab?: ControlRoomTab
+  /**
+   * #5544: imperative tab redirect. When this value changes to a non-null
+   * tab, the view switches to it (and persists the choice). App.tsx bumps
+   * the paired nonce when the gear / Cmd+, entry points fire so they land on
+   * the Settings tab even if the Control Room is already open on another tab.
+   */
+  forceTab?: ControlRoomTab | null
+  /** Monotonic nonce that re-triggers `forceTab` even when the tab is unchanged. */
+  forceTabNonce?: number
+  // #5544: the Settings tab's dashboard-scoped toggles (Console tab + audible
+  // intervention ping) are App-owned localStorage prefs, threaded through here
+  // exactly as they were to the legacy SettingsPanel modal. Optional so the
+  // tab still renders (without those two rows) when a caller doesn't wire them.
+  showConsoleTab?: boolean
+  onToggleConsoleTab?: (show: boolean) => void
+  interventionPingEnabled?: boolean
+  onToggleInterventionPing?: (enabled: boolean) => void
 }
 
-export function ControlRoomView({ onInvestigate, onOpenSession, initialTab }: ControlRoomViewProps = {}) {
+export function ControlRoomView({
+  onInvestigate,
+  onOpenSession,
+  initialTab,
+  forceTab,
+  forceTabNonce,
+  showConsoleTab,
+  onToggleConsoleTab,
+  interventionPingEnabled,
+  onToggleInterventionPing,
+}: ControlRoomViewProps = {}) {
   const [tab, setTab] = useState<ControlRoomTab>(() => initialTab ?? loadPersistedTab())
 
   const selectTab = useCallback((next: ControlRoomTab) => {
     setTab(next)
     persistTab(next)
   }, [])
+
+  // #5544: honour an imperative redirect while the Control Room is already
+  // mounted. The nonce is seeded from the incoming prop so the *mount* never
+  // redirects (the closed→open path is handled by App seeding `initialTab`
+  // instead) — only a subsequent bump, i.e. an explicit gear / Cmd+, / menu
+  // click while the CR is open, switches to `forceTab` (Settings), even if the
+  // user had navigated to another tab in between.
+  const lastForceNonce = useRef(forceTabNonce)
+  useEffect(() => {
+    if (forceTabNonce === lastForceNonce.current) return
+    lastForceNonce.current = forceTabNonce
+    if (!forceTab) return
+    selectTab(forceTab)
+  }, [forceTab, forceTabNonce, selectTab])
 
   // #5543: auto-fetch the active tab's survey when the Control Room opens with a
   // tab already active and on each tab switch, with a staleness guard. We only
@@ -109,6 +164,8 @@ export function ControlRoomView({ onInvestigate, onOpenSession, initialTab }: Co
 
   useEffect(() => {
     if (!connected) return
+    // #5544: the Settings tab is static (no survey) — never fetch for it.
+    if (!SURVEY_TABS.has(tab)) return
 
     const snapshot = tab === 'repos' ? hostStatus : tab === 'runners' ? runnerStatus : integrationStatus
     const loading =
@@ -176,8 +233,23 @@ export function ControlRoomView({ onInvestigate, onOpenSession, initialTab }: Co
         <ControlRoomSection onInvestigate={onInvestigate} onOpenSession={onOpenSession} />
       ) : tab === 'runners' ? (
         <RunnerStatusSection />
-      ) : (
+      ) : tab === 'integrations' ? (
         <IntegrationsSection />
+      ) : (
+        // #5544: scrollable wrapper so the (often long) settings body scrolls
+        // inside the tab panel rather than the whole Control Room view. The
+        // `cr-settings-tab` class reuses the modal's `.settings-section`
+        // typography (h3 section headers) which #5530's read-only repo-config
+        // surface will sit beside, visually distinct, later.
+        <div className="cr-settings-tab" data-testid="cr-settings-tab">
+          <SettingsContent
+            active={tab === 'settings'}
+            showConsoleTab={showConsoleTab}
+            onToggleConsoleTab={onToggleConsoleTab}
+            interventionPingEnabled={interventionPingEnabled}
+            onToggleInterventionPing={onToggleInterventionPing}
+          />
+        </div>
       )}
     </div>
   )

@@ -92,7 +92,7 @@ import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
-import { ControlRoomView } from './components/ControlRoomView'
+import { ControlRoomView, type ControlRoomTab } from './components/ControlRoomView'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -648,6 +648,42 @@ export function App() {
     setSplitMode(null)
     persistSplitMode(null)
   }, [])
+  // #5544 — the Control Room Settings tab is now the single home for the
+  // preference surfaces that used to live in the slide-out SettingsPanel
+  // modal. Two redirect paths converge on the Settings tab:
+  //   - Control Room already open: bump `settingsRedirectNonce`, which
+  //     ControlRoomView watches to switch tabs (even from another tab).
+  //   - Control Room closed: mount ControlRoomView with `initialTab='settings'`
+  //     so it opens straight onto Settings without a flash of another tab.
+  // `controlRoomInitialTab` is a one-shot: cleared back to undefined right
+  // after the open so a later sidebar "Control Room" click lands on the
+  // operator's persisted tab, not Settings.
+  const [settingsRedirectNonce, setSettingsRedirectNonce] = useState(0)
+  const [controlRoomInitialTab, setControlRoomInitialTab] = useState<ControlRoomTab | undefined>(undefined)
+  const openSettings = useCallback(() => {
+    setControlRoomActive((wasActive) => {
+      if (!wasActive) {
+        // CR is opening fresh — seed the initial tab so the mount lands on
+        // Settings. (openControlRoom below also flips this true; doing it
+        // here lets us read the prior value for the nonce-vs-initial choice.)
+        setControlRoomInitialTab('settings')
+      } else {
+        // CR already visible — drive the redirect via the nonce instead.
+        setSettingsRedirectNonce((n) => n + 1)
+      }
+      return wasActive
+    })
+    openControlRoom()
+  }, [openControlRoom])
+  // #5544 — clear the one-shot initial-tab seed after the Control Room has
+  // mounted with it. ControlRoomView only reads `initialTab` in its mount
+  // initializer, so clearing it now is invisible to the live view but ensures
+  // a later reopen (e.g. sidebar "Control Room") starts on the persisted tab.
+  useEffect(() => {
+    if (controlRoomActive && controlRoomInitialTab !== undefined) {
+      setControlRoomInitialTab(undefined)
+    }
+  }, [controlRoomActive, controlRoomInitialTab])
   const closeControlRoom = useCallback(() => {
     // Closing is non-destructive: the tab disappears and we fall back to the
     // prior session (activeSessionId is untouched). The store-held snapshot
@@ -896,6 +932,8 @@ export function App() {
     setPaletteOpen,
     setSidebarOpen,
     setSettingsOpen,
+    // #5544 — Cmd+, redirects to the Control Room Settings tab.
+    openSettings,
     setShowCreateSession,
     setShortcutHelpOpen,
     handleSwitchSession,
@@ -1641,8 +1679,9 @@ export function App() {
     // The dashboard's existing "connect to a different server" surface
     // is the Settings panel's Server Registry section. The menu item
     // opens Settings; the user picks a registry entry there.
-    setSettingsOpen(true)
-  }, [])
+    // #5544 — Settings now lives in the Control Room Settings tab.
+    openSettings()
+  }, [openSettings])
   const menuDisconnect = useCallback(() => {
     useConnectionStore.getState().disconnect()
   }, [])
@@ -1661,8 +1700,9 @@ export function App() {
     window.location.reload()
   }, [])
   const menuOpenSettings = useCallback(() => {
-    setSettingsOpen(true)
-  }, [])
+    // #5544 — redirect to the Control Room Settings tab (the single home).
+    openSettings()
+  }, [openSettings])
   useTauriMenuEvents({
     onNewSession: handleNewSession,
     onConnectToServer: menuConnectToServer,
@@ -2344,7 +2384,9 @@ export function App() {
                 label: 'Settings',
                 icon: '⚙',
                 title: `Settings (${formatShortcutKeys('Cmd+,')})`,
-                onClick: () => setSettingsOpen(true),
+                // #5544 — redirect to the Control Room Settings tab (the
+                // single home) instead of opening the legacy slide-out modal.
+                onClick: openSettings,
               },
             ]
             return <HeaderOverflowMenu items={overflowItems} />
@@ -2502,7 +2544,28 @@ export function App() {
             double-rendering with the disconnected/startup screens. */}
         {controlRoomActive && (
           <div className="main-content" data-testid="control-room-main">
-            <ControlRoomView onInvestigate={handleInvestigate} onOpenSession={handleOpenSession} />
+            <ControlRoomView
+              onInvestigate={handleInvestigate}
+              onOpenSession={handleOpenSession}
+              // #5544 — the Settings tab embeds the converged preference body.
+              // Closed→open via a Settings entry point mounts straight onto the
+              // Settings tab (`initialTab`); an entry-point click while the CR
+              // is already open bumps `settingsRedirectNonce` so the view jumps
+              // to Settings even from another tab.
+              initialTab={controlRoomInitialTab}
+              forceTab="settings"
+              forceTabNonce={settingsRedirectNonce}
+              showConsoleTab={showConsoleTab}
+              onToggleConsoleTab={(show) => {
+                setShowConsoleTab(show)
+                persistShowConsoleTab(show)
+              }}
+              interventionPingEnabled={interventionPingEnabled}
+              onToggleInterventionPing={(enabled) => {
+                setInterventionPingEnabled(enabled)
+                persistInterventionPing(enabled)
+              }}
+            />
           </div>
         )}
 

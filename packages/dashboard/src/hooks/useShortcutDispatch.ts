@@ -46,6 +46,13 @@ export interface ShortcutDispatchProps {
   setPaletteOpen: (fn: (prev: boolean) => boolean) => void
   setSidebarOpen: (fn: (prev: boolean) => boolean) => void
   setSettingsOpen: (fn: (prev: boolean) => boolean) => void
+  /**
+   * #5544 — Cmd+, now redirects to the Control Room Settings tab (the single
+   * home for preferences). When provided this takes precedence over the
+   * legacy `setSettingsOpen` modal toggle; left optional so older call sites
+   * / tests that only wire the modal toggle keep working.
+   */
+  openSettings?: () => void
   setShowCreateSession: (open: boolean) => void
   setShortcutHelpOpen: (fn: (prev: boolean) => boolean) => void
   handleSwitchSession: (sessionId: string) => void
@@ -67,6 +74,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     setPaletteOpen,
     setSidebarOpen,
     setSettingsOpen,
+    openSettings,
     setShowCreateSession,
     setShortcutHelpOpen,
     handleSwitchSession,
@@ -188,7 +196,10 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             setSidebarOpen(prev => !prev)
             break
           case 'settings.open':
-            setSettingsOpen(prev => !prev)
+            // #5544 — prefer the Control Room Settings tab redirect; fall back
+            // to the legacy modal toggle when the redirect isn't wired.
+            if (openSettings) openSettings()
+            else setSettingsOpen(prev => !prev)
             break
           case 'session.new':
             setShowCreateSession(true)
@@ -262,6 +273,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     setPaletteOpen,
     setSidebarOpen,
     setSettingsOpen,
+    openSettings,
     setShowCreateSession,
     setShortcutHelpOpen,
   ])
