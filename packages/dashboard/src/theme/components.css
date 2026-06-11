@@ -7558,18 +7558,23 @@ button.sidebar-token-view-session-row:hover {
   border: 1px dashed var(--border-primary);
   border-radius: 6px;
   background: transparent;
-  cursor: pointer;
   text-align: left;
 }
 
-.server-discover-item:hover {
-  background: var(--bg-hover, var(--border-primary));
+/* #5511 — per-daemon actions: primary "Request to pair" + token-entry fallback. */
+.server-discover-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  align-items: center;
 }
 
-.server-discover-add {
-  flex-shrink: 0;
-  font-weight: 600;
-  color: var(--text-secondary);
+.server-discover-pair {
+  white-space: nowrap;
+}
+
+.server-discover-add-btn {
+  white-space: nowrap;
 }
 
 .server-item {

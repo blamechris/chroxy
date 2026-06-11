@@ -202,7 +202,10 @@ function RequestPairPanel({ wsUrl, name, onApproved, onCancel }: RequestPairPane
   onApprovedRef.current = onApproved
 
   useEffect(() => {
-    const handle = requestPairing(wsUrl, name || 'Desktop Browser', (s) => {
+    // deviceName identifies the REQUESTER on the approver's surface — always
+    // this dashboard, never the target daemon's name (`name` only labels the
+    // saved server entry on approval).
+    const handle = requestPairing(wsUrl, 'Desktop Browser', (s) => {
       setState(s)
       if (s.phase === 'approved' && s.token) {
         onApprovedRef.current(name, wsUrl, s.token)
@@ -480,20 +483,40 @@ export function ServerPicker() {
             </span>
           )}
           {freshDiscovered.map(srv => (
-            <button
-              type="button"
+            <div
               key={srv.wsUrl}
-              className="server-item-main server-discover-item"
-              onClick={() => handlePickDiscovered(srv)}
-              data-testid={`server-discover-item-${srv.host}`}
-              title={`Add ${srv.name} (${srv.host}:${srv.port})`}
+              className="server-discover-item"
+              data-testid={`server-discover-row-${srv.host}`}
             >
               <span className="server-item-info">
                 <span className="server-item-name">{srv.name}</span>
                 <span className="server-item-url">{srv.host}:{srv.port}{srv.version ? ` • v${srv.version}` : ''}</span>
               </span>
-              <span className="server-discover-add" aria-hidden="true">+</span>
-            </button>
+              <div className="server-discover-actions">
+                {/* #5511 — one-click approval-gated pairing: no token needed, the
+                    host approves and the issued token is stored + connected. */}
+                <button
+                  type="button"
+                  className="server-btn server-btn-primary server-discover-pair"
+                  onClick={() => handleRequestPair(srv.name, srv.wsUrl)}
+                  data-testid={`server-discover-pair-${srv.host}`}
+                  title={`Request to pair with ${srv.name} (no token needed)`}
+                >
+                  Request to pair
+                </button>
+                {/* Token-entry fallback: pre-fill the add form so a known token
+                    can be supplied manually (#5281 ③). */}
+                <button
+                  type="button"
+                  className="server-btn server-discover-add-btn"
+                  onClick={() => handlePickDiscovered(srv)}
+                  data-testid={`server-discover-item-${srv.host}`}
+                  title={`Add ${srv.name} with a token`}
+                >
+                  Add with token
+                </button>
+              </div>
+            </div>
           ))}
         </div>
       )}
