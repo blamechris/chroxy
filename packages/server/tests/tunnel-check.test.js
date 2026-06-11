@@ -60,12 +60,54 @@ describe('waitForTunnel', () => {
   })
 
   it('throws TUNNEL_NOT_ROUTABLE when all responses are non-ok', async () => {
-    mock.method(globalThis, 'fetch', async () => ({ ok: false }))
+    mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 404 }))
     await assert.rejects(
       () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
       (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
     )
     assert.equal(globalThis.fetch.mock.calls.length, 2)
+  })
+
+  // #5489 — cloudflared returns 502/530 ("edge reached, origin down") when the
+  // tunnel is routable but the server child has not forked yet. The check's
+  // purpose is to confirm the edge resolves and proxies (DNS settling), so a
+  // 502/530 is proof of routability, not a failure.
+  it('resolves when probe returns HTTP 502 (edge reached, origin down)', async () => {
+    mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 502 }))
+    await assert.doesNotReject(() =>
+      waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, initialInterval: 0 })
+    )
+    // Should accept on the first probe, not retry to exhaustion.
+    assert.equal(globalThis.fetch.mock.calls.length, 1)
+  })
+
+  it('resolves when probe returns HTTP 530 (edge reached, origin down)', async () => {
+    mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 530 }))
+    await assert.doesNotReject(() =>
+      waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 3, initialInterval: 0 })
+    )
+    assert.equal(globalThis.fetch.mock.calls.length, 1)
+  })
+
+  it('still fails when probe always errors (no edge reached)', async () => {
+    mock.method(globalThis, 'fetch', async () => { throw new Error('ECONNREFUSED') })
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
+      (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
+    )
+    assert.equal(globalThis.fetch.mock.calls.length, 2)
+  })
+
+  it('still fails when probe times out (AbortError)', async () => {
+    mock.method(globalThis, 'fetch', async () => {
+      const err = new Error('The operation was aborted')
+      err.name = 'AbortError'
+      throw err
+    })
+    await assert.rejects(
+      () => waitForTunnel('https://example.trycloudflare.com', { maxAttempts: 2, initialInterval: 0 }),
+      (err) => err.code === 'TUNNEL_NOT_ROUTABLE'
+    )
   })
 
   it('uses the provided URL in every fetch call', async () => {
