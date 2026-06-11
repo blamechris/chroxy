@@ -61,6 +61,10 @@
       "hash": "ebdb14e",
       "installed": "2026-06-02"
     },
+    "project-audit": {
+      "hash": "aae4d65",
+      "installed": "2026-06-06"
+    },
     "recon": {
       "hash": "ebdb14e",
       "installed": "2026-06-02"
@@ -68,6 +72,11 @@
     "skill": {
       "hash": "18b9f3e",
       "installed": "2026-06-04"
+    },
+    "smoke-form": {
+      "hash": "8cd4426",
+      "installed": "2026-06-11",
+      "profileHash": "57b5312"
     },
     "smoke-test": {
       "hash": "21fa678",
@@ -84,10 +93,6 @@
     "tackle-issues": {
       "hash": "21fa678",
       "installed": "2026-06-03"
-    },
-    "project-audit": {
-      "hash": "aae4d65",
-      "installed": "2026-06-06"
     },
     "visual-brief": {
       "hash": "a4c08cb",
