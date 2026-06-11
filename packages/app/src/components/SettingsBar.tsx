@@ -80,6 +80,10 @@ export interface SettingsBarProps {
   sessionContext?: SessionContext | null;
   latencyMs?: number | null;
   connectionQuality?: 'good' | 'fair' | 'poor' | null;
+  // #5518: which transport is active — 'lan' (direct ws://) or 'tunnel'
+  // (wss:// via Cloudflare). Surfaced next to the latency badge so the user
+  // can see when the faster local path is in use.
+  activePath?: 'lan' | 'tunnel' | null;
   // #5424: active session's provider name (e.g. 'claude-sdk', 'ollama').
   // Drives context-window resolution — the 200k default only applies to
   // claude-backed providers; for providers that legitimately report no
@@ -197,6 +201,7 @@ export function SettingsBar({
   sessionContext,
   latencyMs,
   connectionQuality,
+  activePath,
   provider,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
@@ -372,16 +377,27 @@ export function SettingsBar({
         )}
         {connectionQuality && (() => {
           const qc = QUALITY_COLORS[connectionQuality];
+          const pathLabel = activePath === 'lan' ? 'LAN' : activePath === 'tunnel' ? 'Tunnel' : null;
           return (
             <View
+              testID="connection-quality-badge"
               style={[styles.qualityBadge, { backgroundColor: qc.bg }]}
-              accessibilityLabel={`Connection quality: ${connectionQuality}${latencyMs != null ? `, ${latencyMs}ms latency` : ''}`}
+              accessibilityLabel={
+                `Connection quality: ${connectionQuality}` +
+                (latencyMs != null ? `, ${latencyMs}ms latency` : '') +
+                (pathLabel ? `, ${pathLabel === 'LAN' ? 'direct LAN' : 'tunnel'} path` : '')
+              }
               accessibilityRole="text"
             >
               <View style={[styles.qualityDot, { backgroundColor: qc.fg }]} />
               <Text style={[styles.qualityText, { color: qc.fg }]}>
                 {latencyMs != null ? `${latencyMs}ms` : connectionQuality}
               </Text>
+              {pathLabel && (
+                <Text testID="connection-path-label" style={[styles.qualityPath, { color: qc.fg }]}>
+                  {pathLabel}
+                </Text>
+              )}
             </View>
           );
         })()}
@@ -893,6 +909,12 @@ const styles = StyleSheet.create({
   qualityText: {
     fontSize: 9,
     fontWeight: '600',
+  },
+  qualityPath: {
+    fontSize: 8,
+    fontWeight: '700',
+    opacity: 0.85,
+    marginLeft: 1,
   },
   budgetBarContainer: {
     height: 3,

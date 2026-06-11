@@ -79,6 +79,7 @@ const mockSetServerInfo = jest.fn();
 const mockSetConnectionError = jest.fn();
 const mockSetUserDisconnected = jest.fn();
 const mockSetSavedConnection = jest.fn();
+const mockSetActivePath = jest.fn();
 jest.mock('../src/store/connection-lifecycle', () => ({
   useConnectionLifecycleStore: {
     getState: jest.fn(() => ({
@@ -88,6 +89,9 @@ jest.mock('../src/store/connection-lifecycle', () => ({
       setConnectionError: mockSetConnectionError,
       setUserDisconnected: mockSetUserDisconnected,
       setSavedConnection: mockSetSavedConnection,
+      // #5518 — active-transport badge + dual-endpoint persistence base.
+      setActivePath: mockSetActivePath,
+      savedConnection: null,
     })),
     setState: jest.fn(),
   },
@@ -515,7 +519,13 @@ describe('auth_ok handler', () => {
 
       // Connection details should use the sessionToken, not original token
       expect(mockSetConnectionDetails).toHaveBeenCalledWith('wss://t', 'paired-tok');
-      expect(mockSetSavedConnection).toHaveBeenCalledWith({ url: 'wss://t', token: 'paired-tok' });
+      // #5518 — wss:// connect records the tunnel endpoint; no LAN candidate.
+      expect(mockSetSavedConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'wss://t', token: 'paired-tok', tunnelUrl: 'wss://t' }),
+      );
+      const saved = mockSetSavedConnection.mock.calls.at(-1)![0];
+      expect(saved.lanUrl).toBeUndefined();
+      expect(saved.lanVerified).toBeFalsy();
     });
 
     it('falls back to original token when sessionToken is absent', () => {
@@ -523,7 +533,9 @@ describe('auth_ok handler', () => {
       handleMessage(createAuthOkMessage(), ctx as any);
 
       expect(mockSetConnectionDetails).toHaveBeenCalledWith('wss://t', 'original-tok');
-      expect(mockSetSavedConnection).toHaveBeenCalledWith({ url: 'wss://t', token: 'original-tok' });
+      expect(mockSetSavedConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'wss://t', token: 'original-tok', tunnelUrl: 'wss://t' }),
+      );
     });
   });
 
@@ -532,7 +544,25 @@ describe('auth_ok handler', () => {
       const ctx = { url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket, isReconnect: false, silent: false };
       handleMessage(createAuthOkMessage(), ctx as any);
 
-      expect(mockSetSavedConnection).toHaveBeenCalledWith({ url: 'wss://my.server.com', token: 'my-tok' });
+      expect(mockSetSavedConnection).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'wss://my.server.com', token: 'my-tok' }),
+      );
+    });
+
+    it('#5518 — marks a ws:// LAN connect as the verified LAN candidate', () => {
+      const ctx = { url: 'ws://192.168.1.5:8765', token: 'lan-tok', socket: mockSocket, isReconnect: false, silent: false };
+      handleMessage(createAuthOkMessage(), ctx as any);
+
+      expect(mockSetActivePath).toHaveBeenCalledWith('lan');
+      const saved = mockSetSavedConnection.mock.calls.at(-1)![0];
+      expect(saved.lanUrl).toBe('ws://192.168.1.5:8765');
+      expect(saved.lanVerified).toBe(true);
+    });
+
+    it('#5518 — sets activePath to tunnel for a wss:// connect', () => {
+      const ctx = { url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket, isReconnect: false, silent: false };
+      handleMessage(createAuthOkMessage(), ctx as any);
+      expect(mockSetActivePath).toHaveBeenCalledWith('tunnel');
     });
   });
 });

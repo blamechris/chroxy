@@ -70,6 +70,7 @@ import type {
   MessageAttachment,
   ModelInfo,
   PendingPermissionConfirm,
+  SavedConnection,
   // #4213: typed permission-mode shape used by the
   // ModelsAndPermissionsData slice below.
   PermissionMode,
@@ -366,6 +367,15 @@ export interface UIViewData {
  */
 export interface ConnectionActions {
   connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
+  /**
+   * #5518 — auto-select the best endpoint for a saved connection (races a
+   * `/health` probe against the verified LAN candidate, else tunnel) then
+   * connects. Auto-reconnect paths use this; manual flows call `connect()`.
+   */
+  connectAuto: (
+    saved: SavedConnection,
+    options?: { silent?: boolean; preferTunnel?: boolean },
+  ) => Promise<void>;
   disconnect: () => void;
   loadSavedConnection: () => Promise<void>;
   clearSavedConnection: () => Promise<void>;

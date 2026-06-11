@@ -101,6 +101,15 @@ interface ConnectionLifecycleState {
   connectionError: string | null;
   connectionRetryCount: number;
 
+  /**
+   * #5518 — which transport the current connection is using: `'lan'` for a
+   * direct `ws://` LAN socket, `'tunnel'` for the `wss://` Cloudflare path,
+   * `null` when not connected. Surfaced on the connection-quality badge so the
+   * user can see when the faster local path is active. Set by the endpoint
+   * selector at connect time; cleared on disconnect.
+   */
+  activePath: 'lan' | 'tunnel' | null;
+
   // Saved connection for quick reconnect
   savedConnection: SavedConnection | null;
   userDisconnected: boolean;
@@ -112,6 +121,7 @@ interface ConnectionLifecycleState {
   setServerInfo: (info: ServerInfo) => void;
   setConnectionQuality: (latencyMs: number | null, quality: 'good' | 'fair' | 'poor' | null) => void;
   setConnectionError: (error: string | null, retryCount: number) => void;
+  setActivePath: (path: 'lan' | 'tunnel' | null) => void;
   setSavedConnection: (connection: SavedConnection | null) => void;
   setUserDisconnected: (disconnected: boolean) => void;
   reset: () => void;
@@ -138,6 +148,7 @@ const initialState = {
   connectionQuality: null as 'good' | 'fair' | 'poor' | null,
   connectionError: null as string | null,
   connectionRetryCount: 0,
+  activePath: null as 'lan' | 'tunnel' | null,
   savedConnection: null as SavedConnection | null,
   userDisconnected: false,
 };
@@ -166,6 +177,8 @@ export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set
   setConnectionQuality: (latencyMs, quality) => set({ latencyMs, connectionQuality: quality }),
 
   setConnectionError: (error, retryCount) => set({ connectionError: error, connectionRetryCount: retryCount }),
+
+  setActivePath: (path) => set({ activePath: path }),
 
   setSavedConnection: (connection) => set({ savedConnection: connection }),
 

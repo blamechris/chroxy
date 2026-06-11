@@ -249,7 +249,6 @@ export function SessionScreen() {
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
   const savedConnection = useConnectionLifecycleStore((s) => s.savedConnection);
-  const connect = useConnectionStore((s) => s.connect);
   const isIdle = useConnectionStore(selectIsIdle);
   const activeAgents = useConnectionStore((s) => {
     const id = s.activeSessionId;
@@ -337,6 +336,7 @@ export function SessionScreen() {
   const switchSession = useConnectionStore((s) => s.switchSession);
   const latencyMs = useConnectionLifecycleStore((s) => s.latencyMs);
   const connectionQuality = useConnectionLifecycleStore((s) => s.connectionQuality);
+  const activePath = useConnectionLifecycleStore((s) => s.activePath);
   const connectionError = useConnectionLifecycleStore((s) => s.connectionError);
   const connectionRetryCount = useConnectionLifecycleStore((s) => s.connectionRetryCount);
   const shutdownReason = useConnectionStore((s) => s.shutdownReason);
@@ -1106,6 +1106,7 @@ export function SessionScreen() {
           sessionContext={sessionContext}
           latencyMs={latencyMs}
           connectionQuality={connectionQuality}
+          activePath={activePath}
           // #5424: provider drives context-window resolution — for providers
           // that legitimately report no window (ollama) the usage meter shows
           // the raw token count instead of a percentage against 200k.
@@ -1123,7 +1124,8 @@ export function SessionScreen() {
                 <TouchableOpacity
                   onPress={() => {
                     exitCachedSession();
-                    connect(savedConnection.url, savedConnection.token);
+                    // #5518 — re-select LAN vs tunnel for the saved record.
+                    void useConnectionStore.getState().connectAuto(savedConnection);
                   }}
                   style={styles.cachedReconnectButton}
                   accessibilityRole="button"
