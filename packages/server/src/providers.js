@@ -54,12 +54,6 @@ const PROVIDERS = {
 // Names hidden from listProviders() (backward-compat aliases, etc.)
 const HIDDEN = new Set()
 
-// Seed per-provider registries for built-in providers so models.js can
-// resolve provider-scoped model metadata without waiting for registerProvider.
-for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
-  registerProviderRegistry(name, ProviderClass)
-}
-
 /** Required methods every provider class prototype must expose. */
 const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
 
@@ -91,6 +85,19 @@ export function validateProviderClass(ProviderClass, name) {
       }
     }
   }
+}
+
+// #5555: validate every built-in against the ProviderSession contract at
+// registry construction, then seed its per-provider model registry. Before
+// this, validateProviderClass only ran on the registerProvider() path
+// (Docker / external / config-driven endpoints) — the 9 first-class providers
+// in the PROVIDERS literal got NO interface check, so the documented contract
+// didn't actually cover its main case. A built-in that drops a required method
+// (or flips inProcessPermissions without the permission methods) now fails
+// loudly at module load instead of throwing deep inside a live session.
+for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
+  validateProviderClass(ProviderClass, name)
+  registerProviderRegistry(name, ProviderClass)
 }
 
 /**

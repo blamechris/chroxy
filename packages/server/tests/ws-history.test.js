@@ -704,6 +704,53 @@ describe('sendSessionInfo', () => {
     assert.equal(modelMsg.model, 'sonnet')
   })
 
+  // #5555: the connect handshake used to push available_models twice (once in
+  // sendSessionInfo, once in the post-auth block). sendSessionInfo now takes a
+  // skipModels opt the post-auth path sets so a single connect sends it once.
+  describe('skipModels opt (#5555)', () => {
+    it('skipModels=true suppresses available_models but still sends the rest', () => {
+      const { manager } = createMockSessionManager([
+        { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+      ])
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      sendSessionInfo(ctx, ws, 'sess-1', { skipModels: true })
+      assert.equal(ctx._sends.filter(m => m.type === 'available_models').length, 0,
+        'available_models suppressed when skipModels is set')
+      // The rest of the session info still flows.
+      assert.ok(ctx._sends.find(m => m.type === 'model_changed'), 'model_changed still sent')
+      assert.ok(ctx._sends.find(m => m.type === 'permission_mode_changed'), 'permission_mode_changed still sent')
+    })
+
+    it('default (tab switch) still sends exactly one available_models', () => {
+      const { manager } = createMockSessionManager([
+        { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+      ])
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      sendSessionInfo(ctx, ws, 'sess-1')
+      assert.equal(ctx._sends.filter(m => m.type === 'available_models').length, 1,
+        'tab-switch path is unaffected — still pushes available_models')
+    })
+  })
+
+  it('connect handshake sends available_models exactly once (#5555 de-dupe)', () => {
+    const { manager } = createMockSessionManager(
+      [{ id: 'sess-1', name: 'Alpha', cwd: '/alpha' }],
+    )
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-1' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(ctx._sends.filter(m => m.type === 'available_models').length, 1,
+      'a single connect must push available_models exactly once')
+  })
+
   // #4302 — sendSessionInfo runs on every switch_session. Pre-fix it did
   // not push available_models, so the dashboard's availableModelsProvider
   // stayed tagged with whichever provider sendPostAuthInfo set at auth.
@@ -2255,7 +2302,7 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
     }
   })
 
-  it('is scheduled exactly once per handshake — sendPostAuthInfo does not double-push', async () => {
+  it('is scheduled exactly once per handshake — sendPostAuthInfo does not double-push (#5555)', async () => {
     const name = 'fake-refresh-once'
     const refreshSpy = createSpy(async () => {
       getRegistryForProvider(name).updateModels([
@@ -2279,17 +2326,19 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
     registerClient(ctx, ws)
 
     sendPostAuthInfo(ctx, ws)
-    // The synchronous handshake pushes available_models twice (sendSessionInfo
-    // + the post-auth snapshot) — only sendSessionInfo may schedule a refresh.
+    // #5555: de-duped — the handshake pushes available_models exactly ONCE.
+    // sendSessionInfo is told to skip its own push (skipModels) so the
+    // post-auth block owns the single synchronous snapshot AND the single
+    // refresh schedule. Pre-fix this was two synchronous pushes.
     const syncPushes = ctx._sends.filter(m => m.type === 'available_models').length
-    assert.equal(syncPushes, 2, 'handshake baseline: two synchronous available_models snapshots')
+    assert.equal(syncPushes, 1, 'handshake baseline: one synchronous available_models snapshot')
 
     await flushAsync()
 
     assert.equal(refreshSpy.callCount, 1,
-      'refreshModels must be scheduled exactly once per handshake (sendSessionInfo owns it)')
+      'refreshModels must be scheduled exactly once per handshake')
     const totalPushes = ctx._sends.filter(m => m.type === 'available_models').length
     assert.equal(totalPushes, syncPushes + 1,
-      'exactly one async re-push on top of the synchronous snapshots')
+      'exactly one async re-push on top of the single synchronous snapshot')
   })
 })

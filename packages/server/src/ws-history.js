@@ -348,7 +348,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 
     if (entry) {
       send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-      sendSessionInfo(ctx, ws, activeId)
+      // #5555: `sendSessionInfo` normally pushes `available_models` (the
+      // tab-switch path, #4302). On the connect handshake the post-auth block
+      // below already pushes one provider-scoped `available_models` snapshot
+      // (and, for the no-active-session case, the ONLY snapshot), so skip the
+      // duplicate here to avoid sending `available_models` twice per connect.
+      // The post-auth block owns the refresh schedule in this path (below).
+      sendSessionInfo(ctx, ws, activeId, { skipModels: true })
       replayHistory(ctx, ws, activeId)
     }
 
@@ -368,11 +374,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     const activeProvider = entry?.provider || null
     const activeRegistry = getRegistryForProvider(activeProvider)
     send(ws, { type: 'available_models', models: activeRegistry.getModels(), defaultModel: activeRegistry.getDefaultModelId(), provider: activeProvider })
-    // #5421: dynamic-discovery refresh (ollama /api/tags) is scheduled by
-    // sendSessionInfo above whenever a session is active — scheduling here
-    // too would join the same in-flight probe twice and double-push a
-    // changed list to this client. With no active session activeProvider
-    // is null and there is nothing to refresh.
+    // #5421/#5555: dynamic-discovery refresh (ollama /api/tags). `sendSessionInfo`
+    // above was told to skip its own `available_models` push (de-dupe on connect),
+    // so it also skipped scheduling the refresh — this path now owns the single
+    // schedule. With no active session activeProvider is null and there is nothing
+    // to refresh (scheduleProviderModelsRefresh no-ops on a null provider).
+    scheduleProviderModelsRefresh(ctx, ws, activeProvider)
     send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
     permissions.resendPendingPermissions(ws, client)
     return
@@ -452,8 +459,16 @@ export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
 
 /**
  * Send session-specific info (model, permission, ready status) to a client.
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.skipModels] - #5555: skip the `available_models` push
+ *   (and its paired refresh schedule). Set by `sendPostAuthInfo` on connect,
+ *   where the post-auth block sends a single `available_models` snapshot itself
+ *   — without this the same client would receive `available_models` twice per
+ *   connect. The tab-switch path (#4302) leaves it false so a switch still
+ *   re-tags the dashboard's provider.
  */
-export function sendSessionInfo(ctx, ws, sessionId) {
+export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
   const { sessionManager, send } = ctx
   const entry = sessionManager?.getSession(sessionId)
   if (!entry) return
@@ -469,17 +484,19 @@ export function sendSessionInfo(ctx, ws, sessionId) {
   // the model picker for any session whose provider differs from the
   // initial one — most visibly, a claude-cli session created after a
   // TUI/SDK session loses its picker entirely.
-  const activeProvider = entry.provider || null
-  const activeRegistry = getRegistryForProvider(activeProvider)
-  send(ws, {
-    type: 'available_models',
-    models: activeRegistry.getModels(),
-    defaultModel: activeRegistry.getDefaultModelId(),
-    provider: activeProvider,
-  })
-  // #5421: background dynamic-discovery refresh (ollama /api/tags); a
-  // changed list is re-pushed to this client when the probe lands.
-  scheduleProviderModelsRefresh(ctx, ws, activeProvider)
+  if (!opts.skipModels) {
+    const activeProvider = entry.provider || null
+    const activeRegistry = getRegistryForProvider(activeProvider)
+    send(ws, {
+      type: 'available_models',
+      models: activeRegistry.getModels(),
+      defaultModel: activeRegistry.getDefaultModelId(),
+      provider: activeProvider,
+    })
+    // #5421: background dynamic-discovery refresh (ollama /api/tags); a
+    // changed list is re-pushed to this client when the probe lands.
+    scheduleProviderModelsRefresh(ctx, ws, activeProvider)
+  }
   send(ws, {
     type: 'model_changed',
     // #3687: prefer the user's explicit override (`model`) so a later

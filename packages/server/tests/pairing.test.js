@@ -335,6 +335,90 @@ describe('PairingManager (#1836)', () => {
     })
   })
 
+  // #5555: at the session-token cap the pre-fix code evicted the OLDEST
+  // still-valid token (Map insertion order) — silently logging out the
+  // longest-paired device — even when expired tokens sat in the map ready to
+  // be reaped. Now we sweep expired tokens before evicting any valid one, plus
+  // run a periodic TTL sweep so tokens don't linger to the cap untouched.
+  describe('session token eviction — sweep before evict (#5555)', () => {
+    it('sweeps expired tokens instead of evicting a valid one at the cap', async () => {
+      const pm = new PairingManager({ sessionTokenTtlMs: 30 })
+      // The oldest 5 tokens we insert NOW; they will expire after the TTL.
+      const now = Date.now()
+      for (let i = 0; i < 5; i++) {
+        pm._sessionTokens.set(`old-${i}`, { createdAt: now, sessionId: `old-sess-${i}` })
+      }
+      // Let those 5 expire.
+      await delay(50)
+      // Top up to exactly the cap with FRESH (valid) tokens (indices 5..99).
+      const fresh = Date.now()
+      for (let i = pm._sessionTokens.size; i < 100; i++) {
+        pm._sessionTokens.set(`fresh-${i}`, { createdAt: fresh, sessionId: `fresh-sess-${i}` })
+      }
+      assert.equal(pm._sessionTokens.size, 100, 'at cap before next issuance')
+      // Issue one more — must sweep the 5 expired, NOT evict a valid token.
+      pm._storeSessionToken('brand-new', { createdAt: Date.now(), sessionId: 'new-sess' })
+      // The 5 expired are gone; every fresh token survived; new one stored.
+      for (let i = 0; i < 5; i++) {
+        assert.equal(pm._sessionTokens.has(`old-${i}`), false, `expired old-${i} swept`)
+      }
+      assert.equal(pm._sessionTokens.has('brand-new'), true, 'new token stored')
+      // The longest-paired VALID token must still be present (not evicted).
+      assert.equal(pm._sessionTokens.has('fresh-5'), true, 'longest-paired valid token survives')
+      pm.destroy()
+    })
+
+    it('evicts the oldest valid token only when still at cap after sweeping', () => {
+      // No expired tokens to reclaim → must fall back to evicting the oldest.
+      const pm = new PairingManager({ sessionTokenTtlMs: 60_000 })
+      pm._sessionTokens.clear()
+      const now = Date.now()
+      for (let i = 0; i < 100; i++) {
+        pm._sessionTokens.set(`v-${i}`, { createdAt: now, sessionId: `s-${i}` })
+      }
+      assert.equal(pm._sessionTokens.size, 100)
+      pm._storeSessionToken('overflow', { createdAt: Date.now(), sessionId: 's-new' })
+      assert.equal(pm._sessionTokens.size, 100, 'stays at cap')
+      assert.equal(pm._sessionTokens.has('v-0'), false, 'oldest valid evicted as last resort')
+      assert.equal(pm._sessionTokens.has('overflow'), true)
+      pm.destroy()
+    })
+
+    it('_sweepSessionTokens removes only expired tokens', async () => {
+      const pm = new PairingManager({ sessionTokenTtlMs: 30 })
+      pm._sessionTokens.clear()
+      pm._sessionTokens.set('expired', { createdAt: Date.now(), sessionId: null })
+      await delay(50)
+      pm._sessionTokens.set('alive', { createdAt: Date.now(), sessionId: null })
+      const removed = pm._sweepSessionTokens()
+      assert.equal(removed, 1)
+      assert.equal(pm._sessionTokens.has('expired'), false)
+      assert.equal(pm._sessionTokens.has('alive'), true)
+      pm.destroy()
+    })
+
+    it('arms a periodic sweep timer on issuance and clears it on destroy (no leak)', () => {
+      const pm = new PairingManager({})
+      assert.equal(pm._sessionTokenSweepTimer, null, 'no timer before any token issued')
+      pm._storeSessionToken('t', { createdAt: Date.now(), sessionId: null })
+      assert.notEqual(pm._sessionTokenSweepTimer, null, 'sweep timer armed on first issuance')
+      pm.destroy()
+      assert.equal(pm._sessionTokenSweepTimer, null, 'sweep timer cleared on destroy')
+    })
+
+    it('periodic sweep stops itself once the token map drains', async () => {
+      const pm = new PairingManager({ sessionTokenTtlMs: 30 })
+      pm._storeSessionToken('solo', { createdAt: Date.now(), sessionId: null })
+      assert.notEqual(pm._sessionTokenSweepTimer, null)
+      // Manually drain via the sweep after expiry; the helper should null the timer.
+      await delay(50)
+      pm._sweepSessionTokens()
+      assert.equal(pm._sessionTokens.size, 0)
+      assert.equal(pm._sessionTokenSweepTimer, null, 'timer stops when map empties')
+      pm.destroy()
+    })
+  })
+
   describe('auto-regen on consumption (#2916)', () => {
     it('emits pairing_refreshed after a pairing ID is consumed', () => {
       const pm = new PairingManager({})
