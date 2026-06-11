@@ -870,3 +870,79 @@ describe('ControlRoomSection investigate action (#5202)', () => {
     expect(screen.getByTestId('cr-verdict-onboarded').tagName).toBe('SPAN')
   })
 })
+
+describe('ControlRoomSection open-session action (#5507)', () => {
+  it('does not render an Open session action when no handler is wired', () => {
+    render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    expect(screen.queryByTestId('cr-action-open-chroxy')).toBeNull()
+    expect(screen.queryByTestId('cr-action-open-medlens')).toBeNull()
+    expect(screen.queryByTestId('cr-action-open-no-it-all')).toBeNull()
+  })
+
+  it('renders an Open session action on every repo row, regardless of verdict', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onOpenSession={() => {}}
+      />,
+    )
+    // live, investigate, and onboarded rows all get the action.
+    expect(screen.getByTestId('cr-action-open-chroxy').tagName).toBe('BUTTON')
+    expect(screen.getByTestId('cr-action-open-medlens').tagName).toBe('BUTTON')
+    expect(screen.getByTestId('cr-action-open-no-it-all').tagName).toBe('BUTTON')
+  })
+
+  it('gives the Open session button a per-row accessible name including the repo', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onOpenSession={() => {}}
+      />,
+    )
+    const btn = screen.getByTestId('cr-action-open-medlens')
+    expect(btn).toHaveAttribute('aria-label', expect.stringContaining('medlens'))
+  })
+
+  it('calls onOpenSession with the repo cwd and name on click', () => {
+    const onOpenSession = vi.fn()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onOpenSession={onOpenSession}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('cr-action-open-medlens'))
+    expect(onOpenSession).toHaveBeenCalledWith({
+      cwd: '/Users/me/Projects/medlens',
+      name: 'medlens',
+    })
+  })
+
+  it('opens a session even for a repo with a live session (multi-session allowed)', () => {
+    const onOpenSession = vi.fn()
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onOpenSession={onOpenSession}
+      />,
+    )
+    // chroxy is the live row — still actionable.
+    fireEvent.click(screen.getByTestId('cr-action-open-chroxy'))
+    expect(onOpenSession).toHaveBeenCalledWith({
+      cwd: '/Users/me/Projects/chroxy',
+      name: 'chroxy',
+    })
+  })
+})

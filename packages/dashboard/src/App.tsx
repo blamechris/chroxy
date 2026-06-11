@@ -90,7 +90,7 @@ import { ConsolePage } from './components/ConsolePage'
 import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
-import { type RepoInvestigateRequest } from './components/ControlRoomSection'
+import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
 import { ControlRoomView } from './components/ControlRoomView'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
@@ -1462,6 +1462,15 @@ export function App() {
     openCreateSession({ cwd: req.cwd, seed: req.reason })
   }, [openCreateSession])
 
+  // #5507 — open the create-session picker pre-filled for an "Open session"
+  // row action: cwd = the repo path. Same plumbing as Investigate minus the
+  // composer seeding (no reason note) — the modal suggests + dedupes the
+  // session name from the repo's basename, and the user picks
+  // model/provider/permission/worktree before creating.
+  const handleOpenSession = useCallback((req: RepoOpenSessionRequest) => {
+    openCreateSession({ cwd: req.cwd })
+  }, [openCreateSession])
+
   // #4695 / #4942 — bridge the macOS menu bar items to App-state
   // handlers. See the `useTauriMenuEvents` call below `handleShowQr`
   // (further down in this file) for the actual wiring — we can't
@@ -2448,7 +2457,7 @@ export function App() {
             double-rendering with the disconnected/startup screens. */}
         {controlRoomActive && (
           <div className="main-content" data-testid="control-room-main">
-            <ControlRoomView onInvestigate={handleInvestigate} />
+            <ControlRoomView onInvestigate={handleInvestigate} onOpenSession={handleOpenSession} />
           </div>
         )}
 
