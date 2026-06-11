@@ -1,28 +1,26 @@
 /**
- * #5567 — `useDictationComposer` clears `isDictationUpdateRef` on every
- * dictation teardown path.
+ * #5573 — `useDictationComposer` re-anchors around mid-recognition manual edits.
  *
- * The dictation merge effect sets a private `isDictationUpdateRef = true` just
- * before writing the transcript into the composer via the InputBar's imperative
- * `setValue`. Pre-#5566 that programmatic write fired `onChangeText`, which
- * cleared the flag on the next tick. Since #5566 `setValue` is **silent**, so
- * the flag is only ever cleared by a *subsequent real user keystroke*. If
- * dictation stops or errors after a transcript arrived but before the user
- * types again, the flag wedges `true` and the next genuine keystroke is
- * mis-attributed as "our own dictation echo" — the manual-edit anchor re-point
- * (`dictationStartRef = text.length`) is skipped and paste/anchor behaviour is
- * corrupted.
+ * The dictation merge effect splices each transcript into the composer after a
+ * `dictationStartRef` anchor, via the InputBar's imperative `setValue`. Since
+ * #5566 that `setValue` is **silent** — it writes the draft directly and never
+ * fires `onChangeText`. So the ONLY thing that reaches `handleChangeText` is a
+ * real user keystroke.
  *
- * The flag is private, so these tests observe its EFFECT. `handleChangeText`
- * only runs the manual-edit re-anchor when the flag is false AND recognition is
- * active. So: drive a teardown, then start a fresh cycle, type mid-dictation,
- * and assert the next transcript splices at the user's edited length. That
- * holds only if the flag was cleared during teardown.
+ * Pre-#5573 the hook carried an `isDictationUpdateRef` flag (set true before
+ * each transcript write) to recognise the programmatic echo and skip
+ * re-anchoring on it. With the echo gone (#5566) that flag was dead code that
+ * actively broke the mid-recognition edit case: a transcript flipped the flag
+ * true, the user typed while still recognising, `handleChangeText` saw the stale
+ * `true` and SKIPPED the re-anchor, and the next transcript spliced over the
+ * typed text. #5573 removes the flag, so every `onChangeText` during recognition
+ * re-anchors unconditionally and the typed text is preserved.
  *
- * Each teardown path is isolated:
- *  - silence-end stop (isRecognizing → false with NO mic tap) → catch-all effect
- *  - speech error (error → end spec sequence)               → error effect
- *  - explicit user stop via handleMicPress                  → mic-stop clear
+ * These tests observe behaviour through the InputBar handle (the flag was always
+ * private). The headline test is the exact issue sequence:
+ *   recognising → partial transcript merged → user types mid-recognition →
+ *   next transcript arrives → BOTH the typed text and the new transcript present,
+ *   correctly ordered.
  *
  * No `@testing-library/react-native` in this repo — we drive the hook through a
  * controllable react-test-renderer harness (same pattern as
@@ -57,7 +55,7 @@ type HarnessProps = UseDictationComposerParams;
  * Render the hook in a controllable harness. `api.current` exposes the hook's
  * return so the test can drive `handleChangeText` / `handleMicPress`;
  * `update(props)` re-renders with fresh params (simulating prop changes from
- * the speech hook — `isRecognizing` / `transcript` / `speechError`).
+ * the speech hook — `isRecognizing` / `transcript`).
  */
 function renderHarness(initialProps: HarnessProps) {
   const apiRef: { current: UseDictationComposerReturn | null } = { current: null };
@@ -85,14 +83,28 @@ const baseProps = (overrides: Partial<HarnessProps> = {}): HarnessProps => ({
   inputRef: makeInputRef(),
   isRecognizing: false,
   transcript: '',
-  speechError: null,
   startListening: () => {},
   stopListening: () => {},
   onPasteCollapsed: () => {},
   ...overrides,
 });
 
-describe('useDictationComposer (#5567 dictation flag teardown)', () => {
+/**
+ * Simulate a real user keystroke the way the InputBar does: write the draft via
+ * the handle (the native TextInput's own state) AND fire `handleChangeText`
+ * with (next, prev) — exactly the pair InputBar passes up on each keypress.
+ */
+function typeInto(
+  inputRef: React.RefObject<InputBarHandle | null>,
+  api: { current: UseDictationComposerReturn | null },
+  next: string,
+) {
+  const prev = inputRef.current!.getValue();
+  inputRef.current!.setValue(next);
+  act(() => { api.current!.handleChangeText(next, prev); });
+}
+
+describe('useDictationComposer (#5573 mid-recognition re-anchor)', () => {
   it('handleMicPress starts when idle and stops when active', () => {
     const startListening = jest.fn();
     const stopListening = jest.fn();
@@ -123,75 +135,83 @@ describe('useDictationComposer (#5567 dictation flag teardown)', () => {
     expect(inputRef.current!.getValue()).toBe('hello world');
   });
 
-  it('clears the flag on silence-end stop (no mic tap) — later mid-dictation edit re-anchors', () => {
-    // Catch-all teardown: isRecognizing flips false WITHOUT handleMicPress (a
-    // silence-triggered `end`). If the flag stayed stuck, the next recognising
-    // cycle's mid-dictation manual edit would NOT re-anchor and the following
-    // transcript would overwrite the typed text instead of appending.
+  // ── The #5573 headline: mid-recognition manual edit must survive ──────────
+  it('preserves a manual edit typed mid-recognition and anchors the next transcript AFTER it', () => {
     const inputRef = makeInputRef('');
     const props = (o: Partial<HarnessProps> = {}) => baseProps({ inputRef, ...o });
     const h = renderHarness(props());
 
-    // Cycle 1: start → transcript (flag := true).
+    // 1. Start dictation (anchor := 0).
+    act(() => { h.api.current!.handleMicPress(); });
+    h.update(props({ isRecognizing: true }));
+
+    // 2. A partial transcript is merged into the composer.
+    h.update(props({ isRecognizing: true, transcript: 'hello' }));
+    expect(inputRef.current!.getValue()).toBe('hello');
+
+    // 3. The user types mid-recognition (still recognising) — appends ' there'.
+    //    This MUST re-anchor dictationStartRef to the new length.
+    typeInto(inputRef, h.api, 'hello there');
+
+    // 4. The NEXT transcript arrives. It must splice AFTER the typed edit, not
+    //    overwrite it. Pre-#5573 the stale flag skipped the re-anchor and this
+    //    would have collapsed to just 'bye'.
+    h.update(props({ isRecognizing: true, transcript: 'bye' }));
+
+    const result = inputRef.current!.getValue();
+    expect(result).toBe('hello there bye');
+    // Both the typed text and the new transcript are present and ordered.
+    expect(result).toContain('hello there');
+    expect(result.indexOf('there')).toBeLessThan(result.indexOf('bye'));
+  });
+
+  // ── Negative control: the failing-before behaviour, asserted as a guard ────
+  it('a mid-recognition edit that does NOT re-anchor would lose the typed text (control)', () => {
+    // Drives the merge math directly to demonstrate WHY re-anchoring matters:
+    // if the anchor is left at the pre-edit offset (0), the next transcript's
+    // prefix is empty and the typed text is overwritten. The production hook
+    // avoids this by re-anchoring on every keystroke (asserted in the test
+    // above); here we confirm the stale-anchor path is genuinely lossy.
+    const draft = 'hello there';
+    const staleAnchor = 0;   // anchor NOT moved after the manual edit
+    const freshAnchor = draft.length; // anchor moved to the edited length
+
+    const merge = (anchor: number, transcript: string) => {
+      const prefix = draft.slice(0, anchor);
+      const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
+      return prefix + separator + transcript;
+    };
+
+    // Stale anchor: typed text is lost.
+    expect(merge(staleAnchor, 'bye')).toBe('bye');
+    // Fresh (re-anchored): typed text preserved, transcript appended.
+    expect(merge(freshAnchor, 'bye')).toBe('hello there bye');
+  });
+
+  it('re-anchors after a dictation stop so a later mid-dictation edit is preserved', () => {
+    // Cross-cycle guard (covers the old #5567 teardown concern): a transcript in
+    // cycle 1, then the recogniser stops on its own (silence end) with no
+    // keystroke, then a fresh cycle where the user types mid-dictation. The edit
+    // must re-anchor and the next transcript must append after it.
+    const inputRef = makeInputRef('');
+    const props = (o: Partial<HarnessProps> = {}) => baseProps({ inputRef, ...o });
+    const h = renderHarness(props());
+
+    // Cycle 1: start → transcript.
     act(() => { h.api.current!.handleMicPress(); });
     h.update(props({ isRecognizing: true }));
     h.update(props({ isRecognizing: true, transcript: 'one' }));
     expect(inputRef.current!.getValue()).toBe('one');
 
-    // Silence-end: recogniser stops on its own, no keystroke to clear the flag.
+    // Silence-end: recogniser stops on its own, no keystroke.
     h.update(props({ isRecognizing: false, transcript: 'one' }));
 
-    // Cycle 2: fresh start, then the user types mid-dictation. This must
-    // re-anchor (flag was cleared) so the next transcript appends after it.
+    // Cycle 2: fresh start (anchors at length 3), user types mid-dictation.
     act(() => { h.api.current!.handleMicPress(); }); // anchors at length 3 ('one')
     h.update(props({ isRecognizing: true }));
-    inputRef.current!.setValue('one typed');
-    act(() => { h.api.current!.handleChangeText('one typed', 'one'); }); // re-anchor to 9
+    typeInto(inputRef, h.api, 'one typed'); // re-anchor to 9
     h.update(props({ isRecognizing: true, transcript: 'voice' }));
     expect(inputRef.current!.getValue()).toBe('one typed voice');
-  });
-
-  it('clears the flag on speech error (error → end) — later mid-dictation edit re-anchors', () => {
-    const inputRef = makeInputRef('');
-    const props = (o: Partial<HarnessProps> = {}) => baseProps({ inputRef, ...o });
-    const h = renderHarness(props());
-
-    // Cycle 1: start → transcript (flag := true).
-    act(() => { h.api.current!.handleMicPress(); });
-    h.update(props({ isRecognizing: true }));
-    h.update(props({ isRecognizing: true, transcript: 'draft' }));
-    expect(inputRef.current!.getValue()).toBe('draft');
-
-    // Spec sequence: error surfaces, recogniser stops.
-    h.update(props({ isRecognizing: false, transcript: 'draft', speechError: 'no-speech' }));
-
-    // Cycle 2: fresh start (error cleared), mid-dictation manual edit re-anchors.
-    act(() => { h.api.current!.handleMicPress(); }); // anchors at length 5 ('draft')
-    h.update(props({ isRecognizing: true, speechError: null }));
-    inputRef.current!.setValue('draft edit');
-    act(() => { h.api.current!.handleChangeText('draft edit', 'draft'); }); // re-anchor to 10
-    h.update(props({ isRecognizing: true, speechError: null, transcript: 'said' }));
-    expect(inputRef.current!.getValue()).toBe('draft edit said');
-  });
-
-  it('clears the flag on explicit user stop via handleMicPress', () => {
-    // Same wedge but torn down by an explicit mic tap (the stop branch).
-    const inputRef = makeInputRef('');
-    const props = (o: Partial<HarnessProps> = {}) => baseProps({ inputRef, ...o });
-    const h = renderHarness(props());
-
-    act(() => { h.api.current!.handleMicPress(); });
-    h.update(props({ isRecognizing: true }));
-    h.update(props({ isRecognizing: true, transcript: 'hi' }));
-    act(() => { h.api.current!.handleMicPress(); }); // explicit user stop
-    h.update(props({ isRecognizing: false, transcript: 'hi' }));
-
-    act(() => { h.api.current!.handleMicPress(); }); // anchors at length 2 ('hi')
-    h.update(props({ isRecognizing: true }));
-    inputRef.current!.setValue('hi more');
-    act(() => { h.api.current!.handleChangeText('hi more', 'hi'); }); // re-anchor to 7
-    h.update(props({ isRecognizing: true, transcript: 'voice' }));
-    expect(inputRef.current!.getValue()).toBe('hi more voice');
   });
 
   it('paste detection fires on genuine input after a dictation stop', () => {
@@ -202,21 +222,41 @@ describe('useDictationComposer (#5567 dictation flag teardown)', () => {
 
     const h = renderHarness(props());
 
-    // Dictation produced a transcript (flag := true), then stopped (silence end)
-    // with no intervening keystroke.
+    // Dictation produced a transcript, then stopped (silence end) with no
+    // intervening keystroke.
     act(() => { h.api.current!.handleMicPress(); });
     h.update(props({ isRecognizing: true }));
     h.update(props({ isRecognizing: true, transcript: 'note' }));
     h.update(props({ isRecognizing: false, transcript: 'note' }));
 
     // The user pastes a large block as their next genuine input. Paste detection
-    // must fire — the stale flag must not break the anchor path that precedes it.
+    // must fire normally.
     const big = 'note' + '\n'.repeat(40) + 'pasted-tail';
     act(() => { h.api.current!.handleChangeText(big, 'note'); });
 
     expect(onPasteCollapsed).toHaveBeenCalledTimes(1);
     const [inserted] = onPasteCollapsed.mock.calls[0];
     expect(inserted).toContain('pasted-tail');
+  });
+
+  it('does NOT re-anchor when a change arrives while not recognising', () => {
+    // Guard the `isRecognizing` gate: an edit made when the recogniser is idle
+    // must leave the anchor untouched, so when dictation next starts it anchors
+    // from handleMicPress (current draft length), not a stray mid-edit value.
+    const inputRef = makeInputRef('');
+    const props = (o: Partial<HarnessProps> = {}) => baseProps({ inputRef, ...o });
+    const h = renderHarness(props());
+
+    // User types while idle (not recognising) — no anchor move expected.
+    typeInto(inputRef, h.api, 'typed while idle');
+
+    // Start dictation: handleMicPress anchors at the CURRENT draft length.
+    act(() => { h.api.current!.handleMicPress(); });
+    h.update(props({ isRecognizing: true }));
+
+    // Transcript appends after the full idle-typed draft.
+    h.update(props({ isRecognizing: true, transcript: 'spoken' }));
+    expect(inputRef.current!.getValue()).toBe('typed while idle spoken');
   });
 
   it('consumeUsedVoice reports voice usage once then resets', () => {
