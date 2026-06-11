@@ -1188,6 +1188,17 @@ export interface ConnectionState {
   // wire; an offline send (or a non-integer runId) returns false.
   sendRepoRelayRerun: (repoPath: string, runId: number) => boolean;
 
+  // #5547: request a server-side one-shot summary of a session's persisted
+  // history (the sidebar "Summarize & start new session" action). Dispatches a
+  // `summarize_session` tagged with a requestId the server echoes on the
+  // `summarize_session_result` / SUMMARIZE_FAILED session_error. Returns a
+  // promise that resolves with the continuation brief (+ truncation flag) or
+  // rejects with the failure message — the caller seeds the brief into the
+  // create-session composer on resolve. Rejects immediately if the socket is
+  // not open (never queued — a summary that drains later has no live UI to
+  // land in).
+  summarizeSession: (sessionId: string) => Promise<{ summary: string; truncated: boolean }>;
+
   // #4542: per-category notification preferences. Mirrors the server
   // snapshot received over WS (`notification_prefs`). `null` until the
   // first snapshot lands. Categories is open-ended (server-side keys

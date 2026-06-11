@@ -74,6 +74,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
 import {
@@ -794,6 +795,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return true;
   },
 
+  // #5547: request a server-side one-shot summary of a session's persisted
+  // history. Returns a promise resolved by the `summarize_session_result`
+  // handler (or rejected by the SUMMARIZE_FAILED session_error / a disconnect).
+  // Not queued offline — if the socket is closed we reject immediately so the
+  // caller's UI surfaces an error rather than awaiting a reply that never comes.
+  summarizeSession: (sessionId: string): Promise<{ summary: string; truncated: boolean }> => {
+    const { socket } = get();
+    if (!sessionId || !socket || socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error('Not connected — cannot summarize this session.'));
+    }
+    const requestId = `summarize-${nextMessageId()}`;
+    return new Promise((resolve, reject) => {
+      // Watchdog: a one-shot model turn is slow (much longer than the evaluator
+      // round-trip), so allow 5min — but never leave the entry pending forever
+      // if the server stalls or drops the reply while the socket stays open.
+      // cancelSummarizeRequest clears the entry; we reject the promise here.
+      const timeoutId = setTimeout(() => {
+        cancelSummarizeRequest(requestId);
+        reject(new Error('Summary request timed out after 5 minutes.'));
+      }, 5 * 60_000);
+      registerSummarizeRequest(requestId, { resolve, reject, timeoutId });
+      wsSend(socket, { type: 'summarize_session', sessionId, requestId });
+    });
+  },
+
   // #4542: notification-prefs round-trip. Requests the current snapshot
   // (on Settings panel open) or patches a single category. The server
   // shallow-merges over the categories map, so a single-key patch never
@@ -1366,6 +1392,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // reject them so awaiters get a fast error instead of waiting 60s for
       // the timeout to fire.
       rejectAllEvaluatorRequests('Connection closed before evaluator response arrived');
+      // #5547: a dropped socket means any in-flight summarize_session result
+      // will never arrive — reject so an awaiting create-session flow surfaces
+      // an error instead of hanging.
+      rejectAllSummarizeRequests('Connection closed before the summary arrived');
       // #3587: drop any pending skill_trust_grant correlations — the
       // matching error (if any) will arrive on a different socket (or
       // never), and a stale toast action would call grantCommunitySkillTrust
@@ -1466,6 +1496,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // (#3587) and the per-session arrays (#3588) so the SkillsPanel
       // Trust button doesn't hang across the reconnect.
       rejectAllEvaluatorRequests('Connection errored before evaluator response arrived');
+      rejectAllSummarizeRequests('Connection errored before the summary arrived');
       clearPendingTrustGrants();
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
@@ -1494,6 +1525,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // here (user-initiated) and in onclose (transport drop) because we null
     // out socket.onclose below to suppress auto-reconnect.
     rejectAllEvaluatorRequests('Disconnected before evaluator response arrived');
+    rejectAllSummarizeRequests('Disconnected before the summary arrived');
     // #3587: paired with rejectAllEvaluatorRequests — clear any pending
     // skill_trust_grant correlations so a stale toast button can't fire
     // against the disconnected socket.

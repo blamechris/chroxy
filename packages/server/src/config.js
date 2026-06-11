@@ -72,6 +72,13 @@ const CONFIG_SCHEMA = {
   //     name an env var (`apiKeyEnv`) or a ~/.chroxy/credentials.json
   //     field (`credentialsKey`).
   providers: 'array|object',
+  // #5547: optional override for the one-shot session summarizer (the sidebar
+  // "Summarize & start new session" action). `{ provider?: string, model?:
+  // string }` — when set, the summarizer uses this (typically cheaper) model
+  // instead of the target session's own model. `provider` is accepted for
+  // forward-compat; the one-shot path currently runs through the SDK provider
+  // and only threads the model id. Unset → summarize with the session's model.
+  summarize: 'object',
   maxPayload: 'number',
   maxToolInput: 'number',
   noEncrypt: 'boolean',

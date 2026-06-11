@@ -892,6 +892,26 @@ export const IntegrationActionSchema = z.object({
   requestId: z.string().max(128).optional(),
 }).passthrough()
 
+// #5547: summarize a session's persisted history into a continuation brief.
+// The server reads the session's `SessionMessageHistory` (the universal,
+// restart-surviving source — works even when the provider subprocess is gone),
+// windows long histories, and runs a ONE-SHOT model call (default: the
+// session's own provider/model, override via `summarize.{provider,model}` in
+// config). The reply is a single `summarize_session_result` (see server.ts);
+// failures surface as a `SUMMARIZE_FAILED` session_error. The optional
+// `requestId` correlates a specific right-click click to its outcome, mirroring
+// the `integration_action` correlation contract.
+//
+// Authority (server-enforced, bearer-token-authority checklist): a HOST-level
+// client OR a client bound to THIS session may summarize it — i.e. exactly the
+// clients that could already read the session's history. A client bound to a
+// DIFFERENT session is rejected.
+export const SummarizeSessionSchema = z.object({
+  type: z.literal('summarize_session'),
+  sessionId: z.string().min(1).max(256),
+  requestId: z.string().max(128).optional(),
+})
+
 // -- Encrypted envelope --
 
 export const EncryptedEnvelopeSchema = z.object({
@@ -983,6 +1003,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RunnerStatusRequestSchema,
   IntegrationStatusRequestSchema,
   IntegrationActionSchema,
+  SummarizeSessionSchema,
   PairApproveSchema,
   PairDenySchema,
 ])
@@ -1006,5 +1027,6 @@ export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>
+export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>

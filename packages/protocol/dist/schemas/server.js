@@ -1271,6 +1271,23 @@ export const ServerIntegrationActionAckSchema = z.object({
     runId: z.number().int().nonnegative().finite().nullable().optional(),
     counts: IntegrationActionCountsSchema.nullable(),
 }).passthrough();
+/**
+ * #5547: reply to a `summarize_session` request — the model-written
+ * continuation brief built from the session's persisted history. Sent only to
+ * the requesting client. `summary` is the editable brief the dashboard seeds
+ * into the create-session composer; `truncated` flags that the history was
+ * windowed before summarization (the brief's header also notes this).
+ * `sessionId` echoes the source session, `requestId` correlates the click.
+ * Failures surface separately as a `SUMMARIZE_FAILED` session_error echoing
+ * `sessionId` / `requestId`.
+ */
+export const ServerSummarizeSessionResultSchema = z.object({
+    type: z.literal('summarize_session_result'),
+    sessionId: z.string(),
+    summary: z.string(),
+    truncated: z.boolean().optional(),
+    requestId: z.string().max(128).nullable().optional(),
+}).passthrough();
 export const ServerClientFocusChangedSchema = z.object({
     type: z.literal('client_focus_changed'),
     clientId: z.string(),

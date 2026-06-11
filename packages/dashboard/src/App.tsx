@@ -752,6 +752,64 @@ export function App() {
   useEffect(() => () => {
     if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
   }, [])
+
+  // #5547: copy a SPECIFIC session's transcript (the sidebar right-click
+  // action). Unlike handleCopyTranscript (which copies the ACTIVE session via
+  // `storeMessages`), this reads the target session's messages straight from
+  // the store so it works without switching sessions first. Routes through the
+  // same clipboard helper + warning-toast-on-failure path.
+  const handleCopySessionTranscript = useCallback((sessionId: string) => {
+    const ss = useConnectionStore.getState().sessionStates[sessionId]
+    const text = ss ? formatTranscript(ss.messages) : ''
+    if (!text) {
+      useConnectionStore.getState().addInfoNotification('No transcript to copy for this session yet.')
+      return
+    }
+    void clipboardWriteText(text).then((ok) => {
+      if (!ok) {
+        useConnectionStore.getState().addServerError(
+          'Failed to copy transcript to clipboard. Please try again.',
+          undefined,
+          'warning',
+        )
+        return
+      }
+      useConnectionStore.getState().addInfoNotification('Transcript copied to clipboard.')
+    })
+  }, [])
+
+  // #5547: cross-session /compact. Ask the server to summarize the session's
+  // persisted history, then open the create-session modal with the session's
+  // cwd prefilled and the brief seeded EDITABLE in the composer (never
+  // auto-sent — reuses the Investigate seed path). Progress + failures surface
+  // as info / error toasts; a per-session in-flight latch disables re-entry so
+  // a double right-click can't fire two model calls.
+  const summarizingSessionsRef = useRef<Set<string>>(new Set())
+  const handleSummarizeAndCreateSession = useCallback((sessionId: string) => {
+    if (summarizingSessionsRef.current.has(sessionId)) return
+    const store = useConnectionStore.getState()
+    const session = store.sessions.find(s => s.sessionId === sessionId)
+    const cwd = session?.cwd || null
+    summarizingSessionsRef.current.add(sessionId)
+    store.addInfoNotification('Summarizing session…')
+    void store.summarizeSession(sessionId)
+      .then(({ summary }) => {
+        // Open the create-session modal pre-filled, with the brief staged as
+        // the first (editable) composer message. Mirrors handleInvestigate.
+        openCreateSession({ cwd, seed: summary })
+      })
+      .catch((err: unknown) => {
+        useConnectionStore.getState().addServerError(
+          err instanceof Error ? err.message : 'Could not summarize this session.',
+          undefined,
+          'warning',
+        )
+      })
+      .finally(() => {
+        summarizingSessionsRef.current.delete(sessionId)
+      })
+  }, [openCreateSession])
+
   const [showConsoleTab, setShowConsoleTab] = useState(() => {
     return loadPersistedShowConsoleTab()
   })
@@ -893,6 +951,8 @@ export function App() {
         // cleared by the shared helper).
         openCreateSession({ cwd })
       },
+      copySessionTranscript: handleCopySessionTranscript,
+      summarizeAndCreateSession: handleSummarizeAndCreateSession,
       confirmCloseSession: handleCloseSession,
     })
   }, [
@@ -903,6 +963,8 @@ export function App() {
     resumeConversation,
     handleCloseSession,
     openCreateSession,
+    handleCopySessionTranscript,
+    handleSummarizeAndCreateSession,
   ])
 
   /**
