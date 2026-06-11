@@ -13,13 +13,28 @@ function createMockCtx(sessionManager, opts = {}) {
   const broadcastSpy = createSpy()
   const sendSpy = createSpy()
   const updatePrimarySpy = createSpy()
+  // #5563: the input_conflict gate reads `ctx.transport.getPrimary(sid)` now
+  // (not a `primaryClients` Map field). Back getPrimary/isPrimary by the
+  // optional `primaryClients` seed Map so existing conflict tests keep working.
+  const { primaryClients, ...rest } = opts
+  const primaryMap = primaryClients instanceof Map ? primaryClients : new Map()
   return nsCtx({
     sessionManager,
     broadcast: broadcastSpy,
     send: sendSpy,
     updatePrimary: updatePrimarySpy,
+    getPrimary: (sid) => primaryMap.get(sid),
+    isPrimary: (sid, cid) => primaryMap.get(sid) === cid,
+    claimPrimary: createSpy((sid, cid, o = {}) => {
+      const current = primaryMap.get(sid)
+      if (current === cid) return { changed: false, primaryClientId: current }
+      if (current && !o.force) return { changed: false, rejected: true, primaryClientId: current }
+      primaryMap.set(sid, cid)
+      return { changed: true, primaryClientId: cid }
+    }),
+    clearPrimary: createSpy((sid) => { primaryMap.delete(sid) }),
     checkpointManager: { createCheckpoint: async () => {} },
-    ...opts,
+    ...rest,
     _spies: { broadcast: broadcastSpy, send: sendSpy, updatePrimary: updatePrimarySpy },
   })
 }

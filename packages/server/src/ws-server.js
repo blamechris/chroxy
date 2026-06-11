@@ -587,7 +587,11 @@ export class WsServer {
     this._hookSecrets = new Set() // per-session hook secrets registered by active CliSessions
     this._sessionHookSecrets = new Map() // sessionId -> hookSecret (for cleanup on session_destroyed)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
-    this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
+    // #5563: primary-ownership now lives on the WsClientManager (sessionId →
+    // primary clientId) with explicit claim/observe/hand-off semantics, not a
+    // last-writer-wins map. `primaryClients` is no longer a server-owned Map;
+    // handlers query it through ctx.transport.getPrimary / isPrimary / claim /
+    // clear helpers below.
     // #5510: pairing-approval primitive — requestId → requester ws. The
     // requester's WS stays open (pre-auth) after pair_request; on approve/deny/
     // expire/disconnect we look it up here to deliver `pair_result`. Bounded by
@@ -666,10 +670,19 @@ export class WsServer {
         subscribeClient: (client, sid) => self._clientManager.subscribe(client, sid),
         unsubscribeClient: (client, sid) => self._clientManager.unsubscribe(client, sid),
         setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
+        // #5563: explicit primary-ownership surface. `updatePrimary` is the
+        // first-input adoption path (claims if unclaimed, no-op if already
+        // primary, REJECTED-without-side-effects if another client owns it).
+        // `claimPrimary` is the explicit claim/hand-off path (force=true for an
+        // operator-driven hand-off). `getPrimary`/`isPrimary` are reads used by
+        // the input_conflict gate. `clearPrimary` is the destroy/cleanup path.
         updatePrimary: (sid, cid) => self._updatePrimary(sid, cid),
+        claimPrimary: (sid, cid, opts) => self._claimPrimary(sid, cid, opts),
+        getPrimary: (sid) => self._clientManager.getPrimary(sid),
+        isPrimary: (sid, cid) => self._clientManager.isPrimary(sid, cid),
+        clearPrimary: (sid) => self._clearPrimary(sid),
         sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
         replayHistory: (ws, sid) => self._replayHistory(ws, sid),
-        primaryClients: this._primaryClients,
         get clients() { return self.clients },
       },
       sessions: {
@@ -1887,16 +1900,13 @@ export class WsServer {
 
   /** Handle cleanup when an authenticated client disconnects or is terminated */
   _handleClientDeparture(departingClient) {
-    // Clear primary for any sessions this client was primary on
-    for (const [sessionId, primaryClientId] of this._primaryClients) {
-      if (primaryClientId === departingClient.id) {
-        this._primaryClients.delete(sessionId)
-        this._broadcastToSession(sessionId, {
-          type: 'primary_changed',
-          sessionId,
-          clientId: null,
-        })
-      }
+    // #5563: vacate primary for every session this client owned. Promotion
+    // policy is NOBODY-UNTIL-CLAIM — we clear the slot (broadcast null) rather
+    // than auto-promote an observer, so a backgrounded viewer is never silently
+    // handed the session; the next claim_primary (or first input) takes over.
+    // This matches the pre-#5563 disconnect behaviour exactly.
+    for (const sessionId of this._clientManager.clearPrimaryForClient(departingClient.id)) {
+      this._announcePrimary(sessionId, null)
     }
 
     // Release this client's ownership of any push tokens it registered.
@@ -1927,16 +1937,62 @@ export class WsServer {
     }
   }
 
-  /** Update primary client for a session (last-writer-wins) */
+  /**
+   * First-input adoption path (#5563). A client that sends input to a session
+   * with NO primary becomes primary (claims it). If the session already has a
+   * DIFFERENT primary, the claim is rejected without side effects — the caller
+   * (input-handlers) has already enforced the input_conflict gate, so this is a
+   * belt-and-suspenders no-op rather than a silent last-writer-wins steal. If
+   * the client is already primary it is a no-op. Broadcasts `primary_changed`
+   * (legacy) + `session_role` (new) only on an actual change.
+   */
   _updatePrimary(sessionId, clientId) {
     if (!sessionId) return
-    const current = this._primaryClients.get(sessionId)
-    if (current === clientId) return // already primary
-    this._primaryClients.set(sessionId, clientId)
+    const res = this._clientManager.claimPrimary(sessionId, clientId)
+    if (res.changed) this._announcePrimary(sessionId, clientId)
+  }
+
+  /**
+   * Explicit claim / hand-off path (#5563). Returns the claim result so the
+   * handler can tell the requester whether it succeeded or was rejected
+   * (observe-only: another client already owns the session and no hand-off was
+   * authorised). `force` overrides an existing owner for an operator-driven
+   * hand-off. Broadcasts on an actual change.
+   * @returns {{ changed: boolean, rejected?: boolean, primaryClientId: string|undefined }}
+   */
+  _claimPrimary(sessionId, clientId, opts = {}) {
+    if (!sessionId) return { changed: false, primaryClientId: undefined }
+    const res = this._clientManager.claimPrimary(sessionId, clientId, opts)
+    if (res.changed) this._announcePrimary(sessionId, clientId)
+    return res
+  }
+
+  /** Clear the primary slot for a session and announce the vacancy (#5563). */
+  _clearPrimary(sessionId) {
+    if (!sessionId) return
+    const prev = this._clientManager.clearPrimary(sessionId)
+    if (prev !== undefined) this._announcePrimary(sessionId, null)
+  }
+
+  /**
+   * Announce the current primary for a session to every subscriber (#5563).
+   * Emits BOTH the legacy `primary_changed` envelope (so existing clients keep
+   * working unchanged) AND the new `session_role` envelope that names the
+   * primary and lets a client compute its own role (primary iff
+   * primaryClientId === its own clientId, else observer; null === unclaimed).
+   * @param {string} sessionId
+   * @param {string|null} clientId - the new primary, or null when vacated
+   */
+  _announcePrimary(sessionId, clientId) {
     this._broadcastToSession(sessionId, {
       type: 'primary_changed',
       sessionId,
       clientId,
+    })
+    this._broadcastToSession(sessionId, {
+      type: 'session_role',
+      sessionId,
+      primaryClientId: clientId,
     })
   }
 
@@ -2069,7 +2125,8 @@ export class WsServer {
     // Auto-deny all pending permission requests (both subsystems)
     this.clearAllPendingPermissions()
     this._questionSessionMap.clear()
-    this._primaryClients.clear()
+    // #5563: primary-ownership lives on the client manager now; clear it there.
+    this._clientManager._primaryClients.clear()
     this._normalizer.destroy()
 
     // Clean up all dev preview tunnels (fire-and-forget; close() is synchronous

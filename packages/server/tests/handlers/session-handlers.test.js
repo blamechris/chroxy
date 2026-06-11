@@ -15,8 +15,11 @@ function makeCtx(overrides = {}) {
   // #5563: back the ctx with a real WsClientManager so the index-maintaining
   // helpers exercise the production reverse-index path. The clients Map IS the
   // manager's Map, so directly-inserted test clients are visible to the index.
+  // #5563: makeSessionIndexCtx() now also wires the primary-ownership surface
+  // (getPrimary / claimPrimary / clearPrimary / isPrimary / updatePrimary)
+  // backed by the same real manager, so claim/observe tests exercise the
+  // production path.
   const indexCtx = makeSessionIndexCtx()
-  const primaryClients = new Map()
 
   const ctx = nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
@@ -25,9 +28,7 @@ function makeCtx(overrides = {}) {
     broadcastSessionList: createSpy(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
-    updatePrimary: createSpy(),
     ...indexCtx,
-    primaryClients,
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),
     pendingPermissions: new Map(),
@@ -614,6 +615,95 @@ describe('session-handlers', () => {
       sessionHandlers.client_visible(makeWs(), client, { visible: false }, ctx)
       assert.equal(ctx.transport.send.callCount, 0)
       assert.equal(ctx.transport.broadcast.callCount, 0)
+    })
+  })
+
+  // #5563: explicit primary claim / hand-off handler.
+  describe('claim_primary', () => {
+    function ctxWithSession(id = 'sess-1') {
+      const ctx = makeCtx()
+      ctx._sessions.set(id, { session: createMockSession(), name: 'S', cwd: '/tmp' })
+      return ctx
+    }
+
+    it('requires a sessionId', () => {
+      const ctx = ctxWithSession()
+      sessionHandlers.claim_primary(makeWs(), makeClient(), {}, ctx)
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.match(sent.message, /sessionId is required/)
+    })
+
+    it('errors on unknown session', () => {
+      const ctx = makeCtx()
+      sessionHandlers.claim_primary(makeWs(), makeClient(), { sessionId: 'nope' }, ctx)
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.match(sent.message, /not found/)
+    })
+
+    it('first claim grants primary and replies session_role', () => {
+      const ctx = ctxWithSession()
+      sessionHandlers.claim_primary(makeWs(), makeClient({ id: 'c1' }), { sessionId: 'sess-1' }, ctx)
+      assert.equal(ctx.clientManager.getPrimary('sess-1'), 'c1')
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_role')
+      assert.equal(sent.sessionId, 'sess-1')
+      assert.equal(sent.primaryClientId, 'c1')
+    })
+
+    it('second client claim is REJECTED with input_conflict while another owns it', () => {
+      const ctx = ctxWithSession()
+      sessionHandlers.claim_primary(makeWs(), makeClient({ id: 'c1' }), { sessionId: 'sess-1' }, ctx)
+      sessionHandlers.claim_primary(makeWs(), makeClient({ id: 'c2' }), { sessionId: 'sess-1' }, ctx)
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.category, 'input_conflict')
+      assert.equal(sent.code, 'PRIMARY_HELD')
+      assert.equal(sent.primaryClientId, 'c1')
+      // Owner unchanged — observe-only held.
+      assert.equal(ctx.clientManager.getPrimary('sess-1'), 'c1')
+    })
+
+    it('force claim performs an explicit hand-off to the new client', () => {
+      const ctx = ctxWithSession()
+      sessionHandlers.claim_primary(makeWs(), makeClient({ id: 'c1' }), { sessionId: 'sess-1' }, ctx)
+      sessionHandlers.claim_primary(makeWs(), makeClient({ id: 'c2' }), { sessionId: 'sess-1', force: true }, ctx)
+      assert.equal(ctx.clientManager.getPrimary('sess-1'), 'c2')
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_role')
+      assert.equal(sent.primaryClientId, 'c2')
+    })
+
+    it('re-claim by the current primary is an idempotent session_role (no error)', () => {
+      const ctx = ctxWithSession()
+      const client = makeClient({ id: 'c1' })
+      sessionHandlers.claim_primary(makeWs(), client, { sessionId: 'sess-1' }, ctx)
+      sessionHandlers.claim_primary(makeWs(), client, { sessionId: 'sess-1' }, ctx)
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_role')
+      assert.equal(sent.primaryClientId, 'c1')
+    })
+
+    it('bound client cannot claim a different session', () => {
+      const ctx = ctxWithSession('sess-1')
+      ctx._sessions.set('sess-2', { session: createMockSession(), name: 'S2', cwd: '/tmp' })
+      sessionHandlers.claim_primary(makeWs(), makeClient({ id: 'c1', boundSessionId: 'sess-2' }), { sessionId: 'sess-1' }, ctx)
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      // No primary set for the off-limits session.
+      assert.equal(ctx.clientManager.getPrimary('sess-1'), undefined)
+    })
+
+    it('N-observer scenario: many later claimants all rejected, one owner', () => {
+      const ctx = ctxWithSession()
+      sessionHandlers.claim_primary(makeWs(), makeClient({ id: 'owner' }), { sessionId: 'sess-1' }, ctx)
+      for (const id of ['o2', 'o3', 'o4', 'o5', 'o6']) {
+        sessionHandlers.claim_primary(makeWs(), makeClient({ id }), { sessionId: 'sess-1' }, ctx)
+        const [, sent] = ctx.transport.send.lastCall
+        assert.equal(sent.code, 'PRIMARY_HELD', `${id} should be rejected`)
+      }
+      assert.equal(ctx.clientManager.getPrimary('sess-1'), 'owner')
     })
   })
 })

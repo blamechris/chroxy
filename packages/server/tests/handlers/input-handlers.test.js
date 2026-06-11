@@ -7,12 +7,29 @@ function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
   const broadcasts = []
 
+  // #5563: the input_conflict gate now reads `ctx.transport.getPrimary(sid)`
+  // instead of a `primaryClients` Map. Back the primary surface by a local Map;
+  // tests seed an existing primary via `ctx.transport.claimPrimary(sid, cid,
+  // { force: true })`. `updatePrimary` stays a spy (asserted by clarify-path
+  // tests) while still mutating the Map for any post-adoption read.
+  const primaryClients = new Map()
+  const updatePrimary = createSpy((sid, cid) => { if (!primaryClients.has(sid)) primaryClients.set(sid, cid) })
+
   return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastToSession: createSpy(),
-    updatePrimary: createSpy(),
-    primaryClients: new Map(),
+    updatePrimary,
+    getPrimary: (sid) => primaryClients.get(sid),
+    isPrimary: (sid, cid) => primaryClients.get(sid) === cid,
+    claimPrimary: createSpy((sid, cid, opts = {}) => {
+      const current = primaryClients.get(sid)
+      if (current === cid) return { changed: false, primaryClientId: current }
+      if (current && !opts.force) return { changed: false, rejected: true, primaryClientId: current }
+      primaryClients.set(sid, cid)
+      return { changed: true, primaryClientId: cid }
+    }),
+    clearPrimary: createSpy((sid) => { primaryClients.delete(sid) }),
     sessionManager: {
       getSession: createSpy((id) => sessions.get(id)),
       isBudgetPaused: createSpy(() => false),
@@ -177,13 +194,54 @@ describe('input-handlers', () => {
       session.isRunning = true
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.transport.primaryClients.set('s1', 'other-client')
+      ctx.transport.claimPrimary('s1', 'other-client', { force: true })
       const client = makeClient({ activeSessionId: 's1' })
 
       inputHandlers.input(makeWs(), client, { data: 'hello' }, ctx)
 
       assert.equal(ctx._sent[0].type, 'session_error')
       assert.equal(ctx._sent[0].category, 'input_conflict')
+    })
+
+    // #5563 old-client compatibility: a client that never sends `claim_primary`
+    // still ADOPTS primary implicitly on its first forwarded input — preserving
+    // today's first-writer-becomes-primary behaviour. The legacy primary signal
+    // is driven by updatePrimary (which the full server turns into the legacy
+    // `primary_changed` + new `session_role` broadcast).
+    it('first input on an UNCLAIMED session adopts the sender as primary (old-client compat)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ id: 'first-client', activeSessionId: 's1' })
+
+      inputHandlers.input(makeWs(), client, { data: 'hello' }, ctx)
+
+      // No conflict error; primary adopted to the sender.
+      assert.equal(ctx._sent.filter(m => m.type === 'session_error').length, 0)
+      assert.equal(ctx.transport.updatePrimary.callCount, 1)
+      assert.deepEqual(ctx.transport.updatePrimary.lastCall, ['s1', 'first-client'])
+      assert.equal(ctx.transport.getPrimary('s1'), 'first-client')
+    })
+
+    // #5563: the cross-client input_conflict gate only bites while the session
+    // is RUNNING (mirrors the pre-#5563 behaviour). An idle session accepts a
+    // second client's input — that send simply does not steal primary (the
+    // first-writer adoption is a no-op when already owned).
+    it('non-primary input on an IDLE session is accepted and does not steal primary', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.isRunning = false
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      ctx.transport.claimPrimary('s1', 'owner', { force: true })
+      const other = makeClient({ id: 'observer', activeSessionId: 's1' })
+
+      inputHandlers.input(makeWs(), other, { data: 'hello' }, ctx)
+
+      assert.equal(ctx._sent.filter(m => m.type === 'session_error').length, 0)
+      // Owner unchanged — observer's input did not steal primary.
+      assert.equal(ctx.transport.getPrimary('s1'), 'owner')
     })
 
     it('skips empty input without sending error', () => {
@@ -607,7 +665,7 @@ describe('input-handlers', () => {
         session.isRunning = true
         sessions.set('s1', { session, name: 'S', cwd: '/work' })
         const ctx = makeCtx(sessions)
-        ctx.transport.primaryClients.set('s1', 'other-client')
+        ctx.transport.claimPrimary('s1', 'other-client', { force: true })
         const client = makeClient({ activeSessionId: 's1' })
 
         inputHandlers.input(makeWs(), client, { data: 'cross-client conflict draft' }, ctx)
@@ -1502,7 +1560,7 @@ describe('input-handlers', () => {
       await new Promise((r) => setImmediate(r))
 
       session.isRunning = true
-      ctx.transport.primaryClients.set('s1', 'other-client')
+      ctx.transport.claimPrimary('s1', 'other-client', { force: true })
 
       resolveEval()
       await inFlight
