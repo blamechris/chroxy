@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.46] - 2026-06-11
+
+The control-surface release. The Control Room becomes the dashboard's single operational home: an **Integrations tab** (repo-memory/repo-relay observability and actions), a **Settings tab** converging every scattered preference surface, and per-repo **Open-session** buttons. Connecting gets dramatically easier for camera-less devices (**pairing epic #5509**: approval-gated pairing, one-click LAN pair, typeable short codes, Discord delivery) and faster once connected (**latency epic #5514**: adaptive delta flushing, memoized/virtualized chat, LAN auto-prefer with tunnel fallback). Plus: right-click **session summarize & carry-over**, first-class **OpenRouter** support, and accurate Discord turn-edge status for external sessions.
+
+### Added
+
+- **Control Room Integrations tab (#5498):** per-repo repo-memory status with a Reindex action (#5503, #5504), repo-relay observability — workflow presence, version drift, run status (#5505) — and re-running failed repo-relay runs (#5506).
+- **Control Room Settings tab (#5544):** single home for appearance, session defaults, shortcuts, provider credentials/BYOK, notification preferences, and desktop options; gear, Cmd+,, and Tauri menus redirect to it (#5549).
+- **Per-repo Open-session button (#5507):** quick-start a session in any surveyed repo from the Project status tab, with model + permission pickers (#5508).
+- **Summarize & carry a session (#5547):** right-click a session (or project group) in the sidebar → server-side one-shot continuation brief from the persisted history → create-session modal opens with the summary seeded editable in the composer; Copy transcript joins the same menu (#5551).
+- **Pairing epic #5509 — camera-less connection:**
+  - Pairing-approval primitive — approve new devices from the dashboard (#5527).
+  - One-click Request-to-pair on discovered LAN daemons (#5528).
+  - Typeable 8-char short pairing code — host display + dashboard entry (#5531).
+  - Discord pairing-link delivery — host-triggered, approval-gated (#5538).
+- **OpenRouter ergonomics (#5548):** `chroxy providers add openrouter` preset, generic `modelDiscovery: { url, format }` catalog discovery for anthropic-compatible entries (openrouter + openai formats), and per-model pricing autofill so OpenRouter sessions report real cost (#5550).
+- **Latency instrumentation (#5520):** `serverTs` on stream messages, stamped pong, token-to-render summaries.
+- **Turn-edge ingest (#5541):** `UserPromptSubmit`/`Stop` hook emitters (#5542) + ingest types (#5545) so external-session Discord status flips working/ready on real turn boundaries.
+
+### Changed
+
+- **Streaming feels live (epic #5514):** memoized bubbles, adaptive delta flush keyed on EWMA RTT, tighter single-client coalescing (#5532); chat list virtualization (#5534); terminal WebView writes via postMessage (#5529); mobile auto-prefers a verified direct LAN connection with tunnel fallback (#5535).
+- Control Room tabs auto-fetch on open with a staleness guard — no more manual Refresh on entry (#5546).
+
+### Fixed
+
+- Discord embed: markdown escaped in free-text fields (#5525), subagent counts aggregated per project (#5496), scheduled-wakeup push body rendered as relative time (#5522), webhook URL resolved from encrypted credentials.json (#5523).
+- launchd/systemd service starts out of the box (#5526); cloudflared 502/530 treated as tunnel-routable (#5521).
+- claude-hooks installer hardened against malformed settings.json (#5524).
+
 ## [0.9.45] - 2026-06-10
 
 The notifications release. Epic #5413 lands in full: chroxy now maintains a live per-project **Discord status embed** for any Claude Code session on the machine — not just chroxy-managed ones — via the new `@chroxy/claude-hooks` package (stateless hook emitters + idempotent installer), a `POST /api/events` ingest endpoint with its own daemon-level token class, and server-side subagent counting. Alongside it: a deep **claude-tui reliability wave** (~30 fixes off the failure-readiness audit, from crash containment to PTY redaction to restart-resume), **provider expansion** (local Ollama models with auto-discovery, plus any Anthropic-compatible endpoint via config), and the desktop app finally **surfaces server-startup failures** on the loading screen instead of spinning forever.
