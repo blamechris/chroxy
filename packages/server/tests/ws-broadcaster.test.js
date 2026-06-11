@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { WsBroadcaster } from '../src/ws-broadcaster.js'
+import { WsClientManager } from '../src/ws-client-manager.js'
 import { metrics } from '../src/metrics.js'
 
 /** Create a fake WebSocket with configurable readyState and bufferedAmount */
@@ -574,6 +575,177 @@ describe('WsBroadcaster', () => {
       assert.equal(wsA.closed, true, 'client A closed')
       assert.equal(wsB.closed, true, 'client B closed')
       assert.equal(metrics.get('backpressure.disconnects'), 2, 'one disconnect per client')
+    })
+  })
+
+  // #5563: when wired with a WsClientManager, session-scoped broadcasts +
+  // subscriber counts take the reverse-index fast path. These tests verify the
+  // index path delivers to EXACTLY the recipient set the full-scan filter would
+  // (parity), and that the per-member conditions (authenticated, readyState,
+  // backpressure) still apply per index member.
+  describe('reverse-index fast path (#5563)', () => {
+    let manager
+    let sentIdx
+    let idxBroadcaster
+
+    /** Register an authenticated client with its ws back-ref (like ws-server addClient). */
+    function reg(id, { activeSessionId = null, subscribe = [], authenticated = true, readyState = 1 } = {}) {
+      const ws = createFakeWs({ readyState })
+      // Start with activeSessionId null (like a fresh client) so the helper
+      // performs a real transition and updates the index — passing it directly
+      // to createFakeClient would make setActiveSession a no-op (prev === new).
+      const client = createFakeClient({ id, authenticated })
+      client._ws = ws
+      manager.addClient(ws, client)
+      if (activeSessionId) manager.setActiveSession(client, activeSessionId)
+      for (const sid of subscribe) manager.subscribe(client, sid)
+      return { ws, client }
+    }
+
+    beforeEach(() => {
+      manager = new WsClientManager()
+      sentIdx = []
+      idxBroadcaster = new WsBroadcaster({
+        clients: manager.clients,
+        clientManager: manager,
+        sendFn: (ws, msg) => sentIdx.push({ ws, message: msg }),
+      })
+    })
+
+    it('delivers to active + subscribed clients via the index', () => {
+      const a = reg('a', { activeSessionId: 'sess-1' })
+      reg('b', { activeSessionId: 'sess-2' })
+      const c = reg('c', { activeSessionId: 'other', subscribe: ['sess-1'] })
+
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' })
+
+      const recipients = sentIdx.map(e => e.ws).sort()
+      assert.deepEqual(recipients.length, 2)
+      assert.ok(recipients.includes(a.ws))
+      assert.ok(recipients.includes(c.ws))
+    })
+
+    it('tags the message with sessionId on the index path', () => {
+      reg('a', { activeSessionId: 'sess-1' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'data', value: 42 })
+      assert.equal(sentIdx.length, 1)
+      assert.deepEqual(sentIdx[0].message, { type: 'data', value: 42, sessionId: 'sess-1' })
+    })
+
+    it('skips unauthenticated index members', () => {
+      reg('a', { activeSessionId: 'sess-1', authenticated: false })
+      reg('b', { activeSessionId: 'sess-1' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' })
+      assert.equal(sentIdx.length, 1)
+      assert.equal(manager.clients.get(sentIdx[0].ws).id, 'b')
+    })
+
+    it('skips non-OPEN index members', () => {
+      reg('closed', { activeSessionId: 'sess-1', readyState: 3 })
+      reg('open', { activeSessionId: 'sess-1' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' })
+      assert.equal(sentIdx.length, 1)
+      assert.equal(manager.clients.get(sentIdx[0].ws).id, 'open')
+    })
+
+    it('a custom filter falls back to the full scan (reaches clients outside the index)', () => {
+      reg('a', { activeSessionId: 'sess-1' })
+      // `outsider` is active on a DIFFERENT session, so it is NOT in sess-1's
+      // index. A custom filter targeting it must still deliver — proving the
+      // filter path scans every client and bypasses the index entirely.
+      const outsider = reg('outsider', { activeSessionId: 'sess-2' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' }, (client) => client.id === 'outsider')
+      assert.equal(sentIdx.length, 1)
+      assert.equal(sentIdx[0].ws, outsider.ws)
+    })
+
+    it('_countSessionSubscribers counts from the index (active + subscribed)', () => {
+      reg('a', { activeSessionId: 'sess-1' })
+      reg('b', { activeSessionId: 'other', subscribe: ['sess-1'] })
+      reg('c', { activeSessionId: 'other' })
+      assert.equal(idxBroadcaster._countSessionSubscribers('sess-1'), 2)
+      assert.equal(idxBroadcaster._countSessionSubscribers('other'), 2)
+      assert.equal(idxBroadcaster._countSessionSubscribers('ghost'), 0)
+    })
+
+    it('_countSessionSubscribers excludes unauthenticated + non-OPEN members', () => {
+      reg('a', { activeSessionId: 'sess-1', authenticated: false })
+      reg('b', { activeSessionId: 'sess-1', readyState: 3 })
+      reg('c', { activeSessionId: 'sess-1' })
+      assert.equal(idxBroadcaster._countSessionSubscribers('sess-1'), 1)
+    })
+
+    it('returns 1 for a single-viewer session (the hot-path motivation)', () => {
+      reg('solo', { activeSessionId: 'solo-sess' })
+      assert.equal(idxBroadcaster._countSessionSubscribers('solo-sess'), 1)
+    })
+
+    // The decisive test: over a randomized op sequence, the index broadcaster's
+    // recipient set must equal a full-scan oracle broadcaster's recipient set,
+    // for every session, at every step.
+    it('parity: index recipients === full-scan recipients across randomized ops', () => {
+      let seed = 0x5563beef
+      const rand = () => {
+        seed |= 0; seed = (seed + 0x6D2B79F5) | 0
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+      }
+      const pick = (arr) => arr[Math.floor(rand() * arr.length)]
+
+      const sessions = ['s1', 's2', 's3']
+      const wsById = new Map()
+      const register = (id) => {
+        const ws = createFakeWs({ readyState: 1 })
+        const client = createFakeClient({ id })
+        client._ws = ws
+        manager.addClient(ws, client)
+        wsById.set(id, ws)
+        return client
+      }
+      for (let i = 0; i < 4; i++) register('c' + i)
+
+      // Oracle: a broadcaster WITHOUT a clientManager → full-scan path over the
+      // SAME clients Map.
+      const sentOracle = []
+      const oracleBroadcaster = new WsBroadcaster({
+        clients: manager.clients,
+        sendFn: (ws, msg) => sentOracle.push(ws),
+      })
+
+      const live = () => [...manager.clients.values()]
+
+      for (let step = 0; step < 1500; step++) {
+        const clients = live()
+        const op = Math.floor(rand() * 6)
+        if (op === 0 && clients.length) manager.subscribe(pick(clients), pick(sessions))
+        else if (op === 1 && clients.length) manager.unsubscribe(pick(clients), pick(sessions))
+        else if (op === 2 && clients.length) manager.setActiveSession(pick(clients), pick(sessions))
+        else if (op === 3 && clients.length) manager.setActiveSession(pick(clients), null)
+        else if (op === 4 && clients.length > 1) {
+          const v = pick(clients)
+          manager.removeClient(wsById.get(v.id))
+          wsById.delete(v.id)
+        } else if (op === 5) register('n' + step)
+
+        // Compare recipient sets for every session.
+        for (const sid of sessions) {
+          sentIdx.length = 0
+          sentOracle.length = 0
+          idxBroadcaster._broadcastToSession(sid, { type: 'm' })
+          oracleBroadcaster._broadcastToSession(sid, { type: 'm' })
+          const idxWs = sentIdx.map(e => manager.clients.get(e.ws).id).sort()
+          const oracleWs = sentOracle.map(ws => manager.clients.get(ws).id).sort()
+          assert.deepStrictEqual(idxWs, oracleWs, `recipient drift at step ${step} for ${sid}`)
+          // Counts must also agree.
+          assert.strictEqual(
+            idxBroadcaster._countSessionSubscribers(sid),
+            oracleBroadcaster._countSessionSubscribers(sid),
+            `count drift at step ${step} for ${sid}`,
+          )
+        }
+        manager.verifyIndexIntegrity()
+      }
     })
   })
 

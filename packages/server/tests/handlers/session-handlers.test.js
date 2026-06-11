@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { sessionHandlers } from '../../src/handlers/session-handlers.js'
-import { createSpy, createMockSession, waitFor } from '../test-helpers.js'
+import { createSpy, createMockSession, waitFor, makeSessionIndexCtx } from '../test-helpers.js'
 
 function makeSent() {
   const sent = []
@@ -12,7 +12,11 @@ function makeCtx(overrides = {}) {
   const sent = []
   const broadcasts = []
   const sessions = new Map()
-  const clients = new Map()
+  // #5563: back the ctx with a real WsClientManager so the index-maintaining
+  // helpers exercise the production reverse-index path. The clients Map IS the
+  // manager's Map, so directly-inserted test clients are visible to the index.
+  const indexCtx = makeSessionIndexCtx()
+  const clients = indexCtx.clients
   const primaryClients = new Map()
 
   const ctx = {
@@ -23,7 +27,7 @@ function makeCtx(overrides = {}) {
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
     updatePrimary: createSpy(),
-    clients,
+    ...indexCtx,
     primaryClients,
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),

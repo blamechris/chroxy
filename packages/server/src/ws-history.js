@@ -344,7 +344,14 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       }
     }
 
-    client.activeSessionId = activeId
+    // #5563: route through the index-maintaining helper so the post-auth
+    // restore keeps the sessionId→clients reverse index in sync. Falls back to
+    // a bare assignment for test fixtures whose ctx predates the helper.
+    if (typeof ctx.setActiveSession === 'function') {
+      ctx.setActiveSession(client, activeId)
+    } else {
+      client.activeSessionId = activeId
+    }
 
     if (entry) {
       send(ws, { type: 'session_switched', sessionId: activeId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })

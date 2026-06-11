@@ -78,7 +78,9 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       cwd: checkpoint.cwd,
       name: `Rewind: ${checkpoint.name}`,
     })
-    client.activeSessionId = newSessionId
+    // #5563: index-maintaining helper. Checkpoint restore moves the active
+    // session WITHOUT subscribing, so the index must follow activeSessionId.
+    ctx.setActiveSession(client, newSessionId)
     const newEntry = ctx.sessionManager.getSession(newSessionId)
     ctx.send(ws, {
       type: 'checkpoint_restored',

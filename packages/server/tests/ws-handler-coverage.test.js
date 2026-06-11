@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { homedir } from 'node:os'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
-import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSession, createMockSessionManager, makeSessionIndexCtx } from './test-helpers.js'
 
 /**
  * Integration tests for untested WebSocket message handlers (#994).
@@ -57,7 +57,9 @@ function createMockCtx(sessionManager, opts = {}) {
     devPreview,
     webTaskManager,
     primaryClients: new Map(),
-    clients: new Map(),
+    // #5563: index-maintaining helpers + clients Map backed by a real
+    // WsClientManager so create/destroy/switch handlers can route through them.
+    ...makeSessionIndexCtx(),
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),
     pendingPermissions: new Map(),

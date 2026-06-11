@@ -102,7 +102,20 @@ describe('WsServer._logListener session scoping (#4787)', () => {
 
     for (const c of clients) {
       const ws = createMockWs()
-      server.clients.set(ws, c)
+      // #5563: register through the client manager so the sessionId→clients
+      // reverse index is seeded. These fixtures pre-set `activeSessionId` /
+      // `subscribedSessionIds` on the literal, so after insertion we replay
+      // those memberships through the index-maintaining helpers (a fresh
+      // `activeSessionId` is detected as a transition from null only if the
+      // field starts null — so we seed explicitly).
+      c._ws = ws
+      const active = c.activeSessionId
+      const subs = c.subscribedSessionIds ? [...c.subscribedSessionIds] : []
+      c.activeSessionId = null
+      c.subscribedSessionIds = new Set()
+      server._clientManager.addClient(ws, c)
+      if (active) server._clientManager.setActiveSession(c, active)
+      for (const sid of subs) server._clientManager.subscribe(c, sid)
     }
     return delivered
   }

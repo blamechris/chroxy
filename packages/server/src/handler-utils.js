@@ -366,7 +366,14 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
 export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
   for (const [clientWs, c] of ctx.clients) {
     if (c.authenticated && clientWs !== excludeWs) {
-      c.subscribedSessionIds.add(sessionId)
+      // #5563: route through the index-maintaining helper so the
+      // sessionId→clients reverse index stays in sync. Falls back to a bare
+      // add for fixtures whose ctx predates the helper.
+      if (typeof ctx.subscribeClient === 'function') {
+        ctx.subscribeClient(c, sessionId)
+      } else {
+        c.subscribedSessionIds.add(sessionId)
+      }
     }
   }
 }
