@@ -16,10 +16,19 @@
  *
  * Wording is kept consistent with the dashboard ActivityIndicator chips
  * (#5436): most-recent task by `startedAt`, `description || toolUseId`
- * detail, `+N more` overflow, HH:MM local wakeup time — and the same
- * priority order: outstanding tasks win over an armed wakeup, because a
- * still-running watcher is the thing the user is most likely waiting on
- * (the wakeup will re-busy the session on its own anyway).
+ * detail, `+N more` overflow — and the same priority order: outstanding
+ * tasks win over an armed wakeup, because a still-running watcher is the
+ * thing the user is most likely waiting on (the wakeup will re-busy the
+ * session on its own anyway).
+ *
+ * Wakeup time is rendered RELATIVE ("resumes in 12m"), not as a clock time
+ * (#5474). The push body is delivered to an OS tray / Discord embed with no
+ * timezone context, and chroxy may run in a different zone than the viewer
+ * (e.g. a UTC container vs. an AEST user) — an absolute HH:MM in the server's
+ * zone misleads. A relative offset is timezone- and DST-proof, and reads
+ * naturally in a notification tray. (The dashboard chip keeps "Resumes at
+ * HH:MM" — its `getHours()` runs in the *browser*, i.e. viewer-local, so it
+ * is correct as-is; only the push body needed fixing.)
  */
 
 /** Today's plain idle-push body — unchanged when the snapshot has nothing. */
@@ -65,17 +74,49 @@ function clampDetail(prefix, detail, suffix = '') {
 }
 
 /**
+ * Format the gap from `now` to a future wakeup `at` (both epoch ms) as a short
+ * relative offset for the push body — timezone- and DST-proof (#5474).
+ *
+ * Units climb sensibly so the string stays compact under the 140-char clamp:
+ *   - < 60s        → "<1m"          (sub-minute precision isn't useful in a tray)
+ *   - 1–89 minutes → "Nm"          (e.g. "12m")
+ *   - ≥ 90 minutes → "Hh" / "HhMm" (e.g. "2h", "2h05m")
+ *
+ * Returns null when `at` is non-finite or already in the past (the caller then
+ * degrades to the plain body — an offset of "in 0m" / a negative value would
+ * be noise, and a stale wakeup carries no useful "resumes in" signal).
+ */
+function formatRelativeWakeup(at, now) {
+  if (!Number.isFinite(at) || !Number.isFinite(now)) return null
+  const deltaMs = at - now
+  if (deltaMs <= 0) return null
+
+  const totalSeconds = Math.round(deltaMs / 1000)
+  if (totalSeconds < 60) return '<1m'
+
+  const totalMinutes = Math.round(totalSeconds / 60)
+  if (totalMinutes < 90) return `${totalMinutes}m`
+
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return minutes === 0 ? `${hours}h` : `${hours}h${String(minutes).padStart(2, '0')}m`
+}
+
+/**
  * Compose the idle-push body from a background-task snapshot.
  *
  * @param {{ backgroundTasks?: Array<{toolUseId:string, description?:string, startedAt?:number}>,
  *           scheduledWakeup?: { at:number, reason?:string } | null } | null | undefined} snapshot
  *   Output of `getBackgroundTaskSnapshot()` (#5436), or null when the session
  *   type doesn't expose one / the transcript scan degraded.
+ * @param {number} [now] Reference epoch ms for the relative wakeup offset —
+ *   defaults to `Date.now()`. Parameterized so tests can pin the offset against
+ *   a fixed `at` without freezing the global clock.
  * @returns {string} the notification body — DEFAULT_READY_BODY when there is
- *   nothing outstanding, otherwise the enriched still-watching / resumes-at
+ *   nothing outstanding, otherwise the enriched still-watching / resumes-in
  *   line, clamped to READY_BODY_MAX_LENGTH.
  */
-export function composeReadyNotificationBody(snapshot) {
+export function composeReadyNotificationBody(snapshot, now = Date.now()) {
   if (!snapshot || typeof snapshot !== 'object') return DEFAULT_READY_BODY
 
   const tasks = Array.isArray(snapshot.backgroundTasks) ? snapshot.backgroundTasks : []
@@ -97,13 +138,15 @@ export function composeReadyNotificationBody(snapshot) {
 
   const wakeup = snapshot.scheduledWakeup
   if (wakeup && typeof wakeup === 'object') {
-    const at = new Date(wakeup.at)
-    if (!Number.isFinite(at.getTime())) return DEFAULT_READY_BODY
-    // Server-local HH:MM — same formatting as the dashboard's wakeup chip.
-    const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+    // Relative offset, not an absolute clock time (#5474): the body has no
+    // timezone context and the server may run in a different zone than the
+    // viewer. A past/unparsable `at` degrades to the plain body, exactly as a
+    // NaN time did before.
+    const rel = formatRelativeWakeup(Number(wakeup.at), now)
+    if (rel === null) return DEFAULT_READY_BODY
     const reason = sanitizeDetail(typeof wakeup.reason === 'string' ? wakeup.reason : '')
-    if (!reason) return `Ready for input — resumes at ${hhmm}`
-    return clampDetail(`Ready for input — resumes at ${hhmm}: `, reason)
+    if (!reason) return `Ready for input — resumes in ${rel}`
+    return clampDetail(`Ready for input — resumes in ${rel}: `, reason)
   }
 
   return DEFAULT_READY_BODY
