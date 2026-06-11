@@ -2,7 +2,7 @@
  * ServerPicker — tests for multi-server management UI.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, act } from '@testing-library/react'
 import { ServerPicker } from './ServerPicker'
 import type { ServerEntry } from '../store/types'
 
@@ -37,6 +37,34 @@ const mockDiscover = vi.fn()
 vi.mock('../utils/tauri', () => ({ isTauri: () => mockIsTauri }))
 vi.mock('../utils/discovery', () => ({ discoverLanServers: () => mockDiscover() }))
 
+// #5511 — request-pairing primitive (landed in #5527). The RequestPairPanel
+// drives requestPairing(); we capture its args + the onState callback so tests
+// can step the requesting → code-shown → approved/denied/expired phases without
+// a real WebSocket.
+type PairState = {
+  phase: 'requesting' | 'code-shown' | 'approved' | 'denied' | 'expired' | 'error'
+  verifyCode: string | null
+  token: string | null
+  reason: string | null
+}
+let lastPairArgs: { wsUrl: string; deviceName: string; onState: (s: PairState) => void } | null = null
+const mockPairCancel = vi.fn()
+const mockRequestPairing = vi.fn(
+  (wsUrl: string, deviceName: string, onState: (s: PairState) => void) => {
+    lastPairArgs = { wsUrl, deviceName, onState }
+    // Initial 'requesting' tick, mirroring the real util's first emit().
+    onState({ phase: 'requesting', verifyCode: null, token: null, reason: null })
+    return { cancel: mockPairCancel }
+  },
+)
+vi.mock('../utils/request-pairing', () => ({
+  requestPairing: (
+    wsUrl: string,
+    deviceName: string,
+    onState: (s: PairState) => void,
+  ) => mockRequestPairing(wsUrl, deviceName, onState),
+}))
+
 const FAKE_NOW = 1_741_348_800_000 // 2025-03-07T12:00:00Z
 
 afterEach(() => cleanup())
@@ -45,6 +73,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(Date, 'now').mockReturnValue(FAKE_NOW)
   mockIsTauri = false
+  lastPairArgs = null
   storeState = {
     serverRegistry: [],
     activeServerId: null,
@@ -314,10 +343,14 @@ describe('ServerPicker', () => {
       render(<ServerPicker />)
       fireEvent.click(screen.getByTestId('server-discover-btn'))
       expect(mockDiscover).toHaveBeenCalledTimes(1)
-      const item = await screen.findByTestId('server-discover-item-192.168.1.9')
-      expect(item).toHaveTextContent('devbox')
-      expect(item).toHaveTextContent('192.168.1.9:8765')
-      expect(item).toHaveTextContent('v0.9.44')
+      const row = await screen.findByTestId('server-discover-row-192.168.1.9')
+      expect(row).toHaveTextContent('devbox')
+      expect(row).toHaveTextContent('192.168.1.9:8765')
+      expect(row).toHaveTextContent('v0.9.44')
+      // Each discovered row offers both the one-click pair action (#5511) and the
+      // token-entry fallback (#5281 ③).
+      expect(screen.getByTestId('server-discover-pair-192.168.1.9')).toBeTruthy()
+      expect(screen.getByTestId('server-discover-item-192.168.1.9')).toBeTruthy()
     })
 
     it('clicking a discovered server opens the add form pre-filled with its URL', async () => {
@@ -416,6 +449,143 @@ describe('ServerPicker', () => {
       fireEvent.click(screen.getByTestId('server-add-submit'))
       expect(mockAddServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'embedded-tok')
       expect(mockPairServer).not.toHaveBeenCalled()
+    })
+  })
+
+  // #5511 — one-click Request-to-pair on discovered LAN daemons. The requester
+  // primitive (requestPairing + RequestPairPanel) landed in #5527; these tests
+  // wire it onto the discovered rows and assert token-storage parity with the
+  // chroxy://?pair= flow, plus the requesting/code-shown/approved/denied/expired
+  // states.
+  describe('discovered daemon Request-to-pair (#5511)', () => {
+    const DISCOVERED = [
+      { name: 'devbox', host: '192.168.1.9', port: 8765, wsUrl: 'ws://192.168.1.9:8765/ws', version: '0.9.45' },
+    ]
+
+    async function discover() {
+      mockIsTauri = true
+      mockDiscover.mockResolvedValue(DISCOVERED)
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-discover-btn'))
+      await screen.findByTestId('server-discover-item-192.168.1.9')
+    }
+
+    it('renders a Request-to-pair button on each discovered daemon row', async () => {
+      await discover()
+      expect(screen.getByTestId('server-discover-pair-192.168.1.9')).toBeTruthy()
+    })
+
+    it('clicking Request-to-pair opens the request panel and calls requestPairing with the daemon URL', async () => {
+      await discover()
+      fireEvent.click(screen.getByTestId('server-discover-pair-192.168.1.9'))
+      expect(screen.getByTestId('request-pair-panel')).toBeTruthy()
+      expect(mockRequestPairing).toHaveBeenCalledTimes(1)
+      expect(lastPairArgs?.wsUrl).toBe('ws://192.168.1.9:8765/ws')
+      // The daemon name is forwarded as the device label / stored name.
+      expect(lastPairArgs?.deviceName).toBe('devbox')
+    })
+
+    it('shows the requesting state then the verify code (code-shown)', async () => {
+      await discover()
+      fireEvent.click(screen.getByTestId('server-discover-pair-192.168.1.9'))
+      expect(screen.getByTestId('request-pair-status')).toHaveTextContent(/Requesting/i)
+      act(() => {
+        lastPairArgs!.onState({ phase: 'code-shown', verifyCode: '123456', token: null, reason: null })
+      })
+      expect(screen.getByTestId('request-pair-code')).toHaveTextContent('123456')
+      expect(screen.getByTestId('request-pair-status')).toHaveTextContent(/Waiting for approval/i)
+    })
+
+    it('stores the issued token + connects on approval, like the ?pair= flow', async () => {
+      await discover()
+      fireEvent.click(screen.getByTestId('server-discover-pair-192.168.1.9'))
+      act(() => {
+        lastPairArgs!.onState({ phase: 'approved', verifyCode: '123456', token: 'issued-tok', reason: null })
+      })
+      // Token-storage parity: addServer(name, wsUrl, token) then switchServer.
+      expect(mockAddServer).toHaveBeenCalledWith('devbox', 'ws://192.168.1.9:8765/ws', 'issued-tok')
+      expect(mockSwitchServer).toHaveBeenCalledWith('srv_new')
+      // No token was ever typed by the user (parity with pairing, not manual add).
+      expect(mockPairServer).not.toHaveBeenCalled()
+    })
+
+    it('shows a denied state with a legible retry (Cancel) affordance', async () => {
+      await discover()
+      fireEvent.click(screen.getByTestId('server-discover-pair-192.168.1.9'))
+      act(() => {
+        lastPairArgs!.onState({ phase: 'denied', verifyCode: null, token: null, reason: 'denied' })
+      })
+      expect(screen.getByTestId('request-pair-denied')).toBeTruthy()
+      expect(mockAddServer).not.toHaveBeenCalled()
+    })
+
+    it('shows an expired state when the 120s TTL elapses', async () => {
+      await discover()
+      fireEvent.click(screen.getByTestId('server-discover-pair-192.168.1.9'))
+      act(() => {
+        lastPairArgs!.onState({ phase: 'expired', verifyCode: null, token: null, reason: 'expired' })
+      })
+      expect(screen.getByTestId('request-pair-expired')).toBeTruthy()
+      expect(screen.getByTestId('request-pair-expired')).toHaveTextContent(/Try again/i)
+    })
+
+    it('cancelling the panel cancels the in-flight request', async () => {
+      await discover()
+      fireEvent.click(screen.getByTestId('server-discover-pair-192.168.1.9'))
+      fireEvent.click(screen.getByTestId('request-pair-cancel'))
+      expect(mockPairCancel).toHaveBeenCalled()
+      expect(screen.queryByTestId('request-pair-panel')).toBeNull()
+    })
+
+    it('still offers the token-entry Add path on discovered rows', async () => {
+      await discover()
+      // The existing pre-fill-the-add-form action remains available.
+      fireEvent.click(screen.getByTestId('server-discover-item-192.168.1.9'))
+      expect((screen.getByTestId('server-url-input') as HTMLInputElement).value).toBe('ws://192.168.1.9:8765/ws')
+    })
+  })
+
+  // #5511 — manually-entered hosts: the "Request to pair" button on the add form
+  // already landed in #5527 (a typed wss:// URL with no token). These component
+  // tests cover it here (it had only a util-level test before).
+  describe('manual-host Request-to-pair (landed in #5527, test-covered here)', () => {
+    it('offers Request-to-pair for a plain wss:// URL with no token', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'wss://host/ws' } })
+      const btn = screen.getByTestId('server-request-pair') as HTMLButtonElement
+      expect(btn.disabled).toBe(false)
+    })
+
+    it('disables Request-to-pair until a ws(s):// URL is entered', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      expect((screen.getByTestId('server-request-pair') as HTMLButtonElement).disabled).toBe(true)
+      fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'not-a-url' } })
+      expect((screen.getByTestId('server-request-pair') as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('clicking Request-to-pair opens the panel and drives requestPairing', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-name-input'), { target: { value: 'Studio Mac' } })
+      fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'wss://host/ws' } })
+      fireEvent.click(screen.getByTestId('server-request-pair'))
+      expect(screen.getByTestId('request-pair-panel')).toBeTruthy()
+      expect(lastPairArgs?.wsUrl).toBe('wss://host/ws')
+      expect(lastPairArgs?.deviceName).toBe('Studio Mac')
+    })
+
+    it('stores the issued token + connects on approval (manual host parity)', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-add-btn'))
+      fireEvent.change(screen.getByTestId('server-url-input'), { target: { value: 'wss://host/ws' } })
+      fireEvent.click(screen.getByTestId('server-request-pair'))
+      act(() => {
+        lastPairArgs!.onState({ phase: 'approved', verifyCode: '999111', token: 'manual-tok', reason: null })
+      })
+      expect(mockAddServer).toHaveBeenCalledWith('wss://host/ws', 'wss://host/ws', 'manual-tok')
+      expect(mockSwitchServer).toHaveBeenCalledWith('srv_new')
     })
   })
 })
