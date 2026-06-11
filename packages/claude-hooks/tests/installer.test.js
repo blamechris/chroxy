@@ -138,6 +138,17 @@ describe('installHooks', () => {
     assert.equal(statSync(path).mode & 0o777, 0o600)
   })
 
+  it('rewrites a read-only (0o444) settings file and preserves that mode', () => {
+    // A read-only source mode must not break the atomic write: the temp file
+    // is created writable, fsync'd, then chmod'd to 0o444 AFTER the data is
+    // durable (reopening a 0o444 file with r+ would fail EACCES).
+    const path = tempSettingsPath(JSON.stringify({ model: 'opus' }))
+    chmodSync(path, 0o444)
+    installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
+    assert.equal(statSync(path).mode & 0o777, 0o444)
+    assert.ok(read(path).hooks.SessionStart, 'install did not write through a read-only file')
+  })
+
   it('refuses to overwrite an unparseable settings.json', () => {
     const path = tempSettingsPath('{not valid json')
     assert.throws(() => installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN }), /not valid JSON/)
@@ -159,7 +170,11 @@ describe('installHooks', () => {
     writeFileSync(targetPath, JSON.stringify({ model: 'opus' }))
     const linkDir = mkdtempSync(join(tmpdir(), 'hooks-link-'))
     const linkPath = join(linkDir, 'settings.json')
-    symlinkSync(targetPath, linkPath)
+    // Best-effort: symlink creation is disallowed on some platforms (Windows
+    // CI without Developer Mode / admin, restricted sandboxes). Skip rather
+    // than fail the whole suite — repo precedent, see e.g.
+    // packages/server/tests/skills-loader.test.js:486.
+    try { symlinkSync(targetPath, linkPath) } catch { return }
 
     installHooks({ settingsPath: linkPath, nodePath: NODE, binPath: BIN })
 

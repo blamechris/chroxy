@@ -26,7 +26,7 @@
  * Tests inject `settingsPath` — never the real ~/.claude/settings.json.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -146,12 +146,6 @@ function pruneEventArray(entries) {
 }
 
 /**
- * Pure transform: remove every chroxy-hooks entry from a settings object.
- * Event keys we manage that end up as empty arrays are deleted; everything
- * else (including other hook events and empty arrays we did not cause) is
- * left untouched.
- */
-/**
  * A top-level `hooks` must be a plain object (event-name → array) or absent.
  * An array or string (or any non-plain-object) is malformed: spreading an
  * array yields numeric keys and a string is silently dropped — both destroy
@@ -164,6 +158,12 @@ function assertHooksShape(hooks) {
   }
 }
 
+/**
+ * Pure transform: remove every chroxy-hooks entry from a settings object.
+ * Event keys we manage that end up as empty arrays are deleted; everything
+ * else (including other hook events and empty arrays we did not cause) is
+ * left untouched.
+ */
 export function removeOwnHooks(settings) {
   const out = { ...settings }
   assertHooksShape(out.hooks)
@@ -268,15 +268,23 @@ function writeSettingsAtomic(settingsPath, settings) {
     // New file — default mode (umask applies).
   }
   const tmpPath = `${realPath}.chroxy-hooks-${process.pid}.tmp`
-  writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + '\n', mode === null ? { encoding: 'utf-8' } : { encoding: 'utf-8', mode })
-  // fsync the temp file before rename so a crash can't leave a torn write on
-  // filesystems where rename outruns the data flush.
-  const fd = openSync(tmpPath, 'r+')
+  const payload = JSON.stringify(settings, null, 2) + '\n'
+  // Open ONCE with 'w' (create, default mode), write, then fsync on the same
+  // fd before rename so a crash can't leave a torn write on filesystems where
+  // rename outruns the data flush. We do NOT pass the preserved mode here: a
+  // read-only source (e.g. 0o444) would otherwise make the temp file
+  // unwritable to a follow-up open — and reopening it (the old 'r+' path)
+  // fails with EACCES. The mode is applied AFTER fsync, via chmodSync.
+  const fd = openSync(tmpPath, 'w')
   try {
+    writeSync(fd, payload, null, 'utf-8')
     fsyncSync(fd)
   } finally {
     closeSync(fd)
   }
+  // Apply the preserved mode after the data is durable. chmodSync works even
+  // when tightening to a read-only mode (0o444) — unlike reopening the file.
+  if (mode !== null) chmodSync(tmpPath, mode)
   renameSync(tmpPath, realPath)
 }
 
