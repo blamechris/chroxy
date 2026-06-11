@@ -49,6 +49,18 @@ describe('IngestEventSchema (#5413 Phase 3)', () => {
     }
   })
 
+  it('enumerates the turn-edge event types (#5541)', () => {
+    assert.ok(INGEST_EVENT_TYPES.includes('user_prompt_submit'), 'user_prompt_submit should be enumerated')
+    assert.ok(INGEST_EVENT_TYPES.includes('stop'), 'stop should be enumerated')
+  })
+
+  it('accepts user_prompt_submit and stop envelopes (#5541)', () => {
+    for (const type of ['user_prompt_submit', 'stop']) {
+      const result = IngestEventSchema.safeParse(validEvent({ type, data: { cwd: '/tmp/x' } }))
+      assert.ok(result.success, `type ${type} should validate`)
+    }
+  })
+
   it('is exported from the schemas entry point', async () => {
     const schemas = await import('../src/schemas/index.ts')
     assert.ok(schemas.IngestEventSchema, 'IngestEventSchema re-exported')

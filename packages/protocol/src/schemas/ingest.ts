@@ -18,8 +18,17 @@ import { z } from 'zod'
 /**
  * Accepted event types — named after the Claude Code hook events they
  * originate from (SessionStart, SessionEnd, SubagentStart, SubagentStop,
- * Notification, PostToolUse), snake_cased to match chroxy's wire style.
- * Unknown types are rejected; add new ones here deliberately.
+ * Notification, PostToolUse, UserPromptSubmit, Stop), snake_cased to match
+ * chroxy's wire style. Unknown types are rejected; add new ones here
+ * deliberately.
+ *
+ * #5541 — turn-edge events: `user_prompt_submit` is the authoritative turn
+ * START (carries `{cwd}` only — never the prompt text, for privacy) and
+ * `stop` is the authoritative turn END. They let the server track which
+ * projects have a turn in flight so the Discord status embed stops showing
+ * "Ready for input" while the main agent's subagents are still working.
+ * Inert until the hooks package emits them (PR 2 of #5541); old hooks that
+ * emit only the original six types remain valid.
  */
 export const INGEST_EVENT_TYPES = [
   'session_start',
@@ -28,6 +37,8 @@ export const INGEST_EVENT_TYPES = [
   'subagent_stop',
   'notification',
   'post_tool_use',
+  'user_prompt_submit',
+  'stop',
 ] as const
 
 export type IngestEventType = (typeof INGEST_EVENT_TYPES)[number]
