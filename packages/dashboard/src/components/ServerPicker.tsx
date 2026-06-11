@@ -9,7 +9,7 @@ import { useConnectionStore } from '../store/connection'
 import type { ServerEntry, ConnectionPhase } from '../store/types'
 import { isTauri } from '../utils/tauri'
 import { discoverLanServers, type DiscoveredServer } from '../utils/discovery'
-import { parsePairingUrl } from '../utils/pairing'
+import { parsePairingUrl, parsePairingCodeEntry } from '../utils/pairing'
 import { requestPairing, type PairRequestState, type PairRequestHandle } from '../utils/request-pairing'
 
 function statusDot(phase: ConnectionPhase, isActive: boolean): string {
@@ -266,6 +266,86 @@ function RequestPairPanel({ wsUrl, name, onApproved, onCancel }: RequestPairPane
   )
 }
 
+interface HaveCodePanelProps {
+  /** Pair via host + typed code — same path as the chroxy://?pair= flow (#5512). */
+  onPair: (name: string, wsUrl: string, pairingId: string) => void
+  onCancel: () => void
+}
+
+/**
+ * HaveCodePanel — the camera-less "Have a code?" entry (#5512, epic #5509). The
+ * host displays a short typeable code (read off its OWN screen → physical presence,
+ * so no extra approval, matching QR trust). The user types the host + code here;
+ * `parsePairingCodeEntry` synthesizes the same `chroxy://host?pair=<code>` request
+ * the QR/paste path builds, so this drives the identical pairing handshake. A
+ * bad/expired code is rejected SERVER-SIDE and surfaces as a `pair_fail` alert.
+ */
+function HaveCodePanel({ onPair, onCancel }: HaveCodePanelProps) {
+  const [host, setHost] = useState('')
+  const [code, setCode] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSubmit = useCallback((e?: React.FormEvent) => {
+    e?.preventDefault()
+    const parsed = parsePairingCodeEntry(host, code)
+    if (!parsed?.pairingId) {
+      setError('Enter the host (e.g. my.tunnel.tld or 192.168.1.5:8765) and the code shown on it.')
+      return
+    }
+    setError(null)
+    let name = parsed.wsUrl
+    try { name = new URL(parsed.wsUrl).host } catch { /* keep wsUrl */ }
+    onPair(name, parsed.wsUrl, parsed.pairingId)
+  }, [host, code, onPair])
+
+  return (
+    <form className="server-add-form" data-testid="have-code-form" onSubmit={handleSubmit}>
+      <input
+        type="text"
+        placeholder="Host (e.g. my.tunnel.tld or 192.168.1.5:8765)"
+        value={host}
+        onChange={e => setHost(e.target.value)}
+        className="server-input"
+        data-testid="have-code-host-input"
+      />
+      <input
+        type="text"
+        placeholder="Pairing code"
+        value={code}
+        onChange={e => setCode(e.target.value)}
+        className={`server-input${error ? ' server-input-error' : ''}`}
+        data-testid="have-code-code-input"
+        autoCapitalize="characters"
+        autoCorrect="off"
+        spellCheck={false}
+      />
+      {error && (
+        <span className="server-form-error" data-testid="have-code-error" role="alert">
+          {error}
+        </span>
+      )}
+      <div className="server-add-actions">
+        <button
+          type="submit"
+          className="server-btn server-btn-primary"
+          disabled={!host.trim() || !code.trim()}
+          data-testid="have-code-submit"
+        >
+          Pair
+        </button>
+        <button
+          type="button"
+          className="server-btn"
+          onClick={onCancel}
+          data-testid="have-code-cancel"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  )
+}
+
 interface ServerItemProps {
   server: ServerEntry
   isActive: boolean
@@ -343,6 +423,8 @@ export function ServerPicker() {
   const pairServer = useConnectionStore(s => s.pairServer)
 
   const [showAddForm, setShowAddForm] = useState(false)
+  // #5512 — camera-less "Have a code?" entry (host + typeable code).
+  const [showCodeForm, setShowCodeForm] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
   // #5510 — active "Request to pair" round-trip (requester surface).
   const [pairRequest, setPairRequest] = useState<{ name: string; wsUrl: string } | null>(null)
@@ -372,6 +454,7 @@ export function ServerPicker() {
       pairServer(name, wsUrl, pairingId)
       setAddError(null)
       setShowAddForm(false)
+      setShowCodeForm(false)
       setPrefill(null)
       // A bad/expired pairing id surfaces later as a pair_fail alert; the
       // optimistic entry is cleaned up there.
@@ -427,16 +510,34 @@ export function ServerPicker() {
     <div className="server-picker" data-testid="server-picker">
       <div className="server-picker-header">
         <span className="server-picker-title">Servers</span>
-        <button
-          type="button"
-          className="server-btn server-btn-add"
-          onClick={() => setShowAddForm(true)}
-          data-testid="server-add-btn"
-          aria-label="Add server"
-        >
-          <span aria-hidden="true">+</span>
-        </button>
+        <div className="server-picker-header-actions">
+          {/* #5512 — camera-less entry: type the host + the short code shown on it. */}
+          <button
+            type="button"
+            className="server-btn server-have-code-btn"
+            onClick={() => { setShowCodeForm(true); setShowAddForm(false); setAddError(null) }}
+            data-testid="server-have-code-btn"
+          >
+            Have a code?
+          </button>
+          <button
+            type="button"
+            className="server-btn server-btn-add"
+            onClick={() => { setShowAddForm(true); setShowCodeForm(false) }}
+            data-testid="server-add-btn"
+            aria-label="Add server"
+          >
+            <span aria-hidden="true">+</span>
+          </button>
+        </div>
       </div>
+
+      {showCodeForm && (
+        <HaveCodePanel
+          onPair={handlePair}
+          onCancel={() => setShowCodeForm(false)}
+        />
+      )}
 
       {showAddForm && (
         <AddServerForm

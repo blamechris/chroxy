@@ -6120,6 +6120,29 @@ button.sidebar-token-view-session-row:hover {
   font-size: 13px;
 }
 
+/* #5512 — typeable short pairing code shown beside the linking-mode QR. */
+.qr-modal-code {
+  margin: 14px 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.qr-modal-code-label {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.qr-modal-code-value {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--accent-blue);
+  user-select: all;
+}
+
 .footer-qr-btn {
   background: none;
   border: none;
@@ -7482,6 +7505,18 @@ button.sidebar-token-view-session-row:hover {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-dim);
+}
+
+/* #5512 — header action cluster ("Have a code?" + add). */
+.server-picker-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.server-have-code-btn {
+  font-size: 11px;
+  padding: 3px 8px;
 }
 
 .server-btn {

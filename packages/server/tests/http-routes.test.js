@@ -231,6 +231,69 @@ describe('http-routes', () => {
     })
   })
 
+  // #5512: typeable pairing-code endpoint
+  describe('pairing-code endpoint', () => {
+    function makeCodeMock(snap, overrides = {}) {
+      let extended = 0
+      return createMockServer({
+        _pairingManager: {
+          extendCurrentId() { extended++ },
+          get currentPairingCode() { return snap },
+          _extendedCount: () => extended,
+        },
+        ...overrides,
+      })
+    }
+
+    it('GET /pairing-code returns the typeable code as JSON', async () => {
+      const snap = {
+        code: 'ABCD2345',
+        url: 'chroxy://example.com?pair=ABCD2345',
+        expiresAtMs: Date.now() + 45_000,
+        ttlMs: 60_000,
+      }
+      const mock = makeCodeMock(snap)
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pairing-code`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      assert.equal(res.headers.get('content-type'), 'application/json')
+      const body = await res.json()
+      assert.equal(body.code, 'ABCD2345')
+      assert.equal(body.url, 'chroxy://example.com?pair=ABCD2345')
+      assert.equal(body.expiresAtMs, snap.expiresAtMs)
+      assert.ok(body.expiresInSeconds >= 44 && body.expiresInSeconds <= 45)
+      // Viewing the code extends the grace period (mirrors /qr).
+      assert.equal(mock._pairingManager._extendedCount(), 1)
+    })
+
+    it('returns 403 without auth', async () => {
+      const mock = makeCodeMock({ code: 'ABCD2345', url: null, expiresAtMs: Date.now() + 1000, ttlMs: 60_000 })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pairing-code`)
+      assert.equal(res.status, 403)
+    })
+
+    it('returns 503 when no pairing manager is wired', async () => {
+      const mock = createMockServer({ _pairingManager: null })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pairing-code`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 503)
+    })
+
+    it('returns 503 when no code is available yet', async () => {
+      const mock = makeCodeMock(null)
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pairing-code`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 503)
+    })
+  })
+
   // #3070: per-session "Share this session" QR endpoint
   describe('per-session share QR endpoint', () => {
     function makeSharedMock(overrides = {}) {

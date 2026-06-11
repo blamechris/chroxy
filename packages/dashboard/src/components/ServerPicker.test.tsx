@@ -588,4 +588,63 @@ describe('ServerPicker', () => {
       expect(mockSwitchServer).toHaveBeenCalledWith('srv_new')
     })
   })
+
+  describe('Have a code? entry (#5512)', () => {
+    it('opens the code-entry panel from the header button', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-have-code-btn'))
+      expect(screen.getByTestId('have-code-form')).toBeTruthy()
+      expect(screen.getByTestId('have-code-host-input')).toBeTruthy()
+      expect(screen.getByTestId('have-code-code-input')).toBeTruthy()
+    })
+
+    it('pairs via the same path as a chroxy://?pair= URL (LAN host:port)', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-have-code-btn'))
+      fireEvent.change(screen.getByTestId('have-code-host-input'), { target: { value: '192.168.1.5:8765' } })
+      fireEvent.change(screen.getByTestId('have-code-code-input'), { target: { value: 'abcd-2345' } })
+      fireEvent.click(screen.getByTestId('have-code-submit'))
+      // Code normalized (uppercased, dashes stripped); LAN ws inferred from the port.
+      expect(mockPairServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'ABCD2345')
+      expect(mockAddServer).not.toHaveBeenCalled()
+    })
+
+    it('infers wss for a bare tunnel host', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-have-code-btn'))
+      fireEvent.change(screen.getByTestId('have-code-host-input'), { target: { value: 'my.tunnel.tld' } })
+      fireEvent.change(screen.getByTestId('have-code-code-input'), { target: { value: 'WXYZ2345' } })
+      fireEvent.click(screen.getByTestId('have-code-submit'))
+      expect(mockPairServer).toHaveBeenCalledWith('my.tunnel.tld', 'wss://my.tunnel.tld/ws', 'WXYZ2345')
+    })
+
+    it('disables Pair until both host and code are entered', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-have-code-btn'))
+      expect((screen.getByTestId('have-code-submit') as HTMLButtonElement).disabled).toBe(true)
+      fireEvent.change(screen.getByTestId('have-code-host-input'), { target: { value: 'my.tunnel.tld' } })
+      expect((screen.getByTestId('have-code-submit') as HTMLButtonElement).disabled).toBe(true)
+      fireEvent.change(screen.getByTestId('have-code-code-input'), { target: { value: 'ABCD2345' } })
+      expect((screen.getByTestId('have-code-submit') as HTMLButtonElement).disabled).toBe(false)
+    })
+
+    it('shows a legible error for an unparsable host', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-have-code-btn'))
+      // A code that normalizes to empty (only separators) fails parse though the
+      // raw input is non-blank, so the disabled-guard passes but parse returns null.
+      fireEvent.change(screen.getByTestId('have-code-host-input'), { target: { value: 'my.tunnel.tld' } })
+      fireEvent.change(screen.getByTestId('have-code-code-input'), { target: { value: '- - -' } })
+      fireEvent.click(screen.getByTestId('have-code-submit'))
+      expect(screen.getByTestId('have-code-error')).toBeTruthy()
+      expect(mockPairServer).not.toHaveBeenCalled()
+    })
+
+    it('cancels the code panel', () => {
+      render(<ServerPicker />)
+      fireEvent.click(screen.getByTestId('server-have-code-btn'))
+      fireEvent.click(screen.getByTestId('have-code-cancel'))
+      expect(screen.queryByTestId('have-code-form')).toBeNull()
+    })
+  })
 })

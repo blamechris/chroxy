@@ -59,3 +59,53 @@ export function parsePairingUrl(raw: string): ParsedPairing | null {
 export function isPairingUrl(raw: string): boolean {
   return parsePairingUrl(raw)?.pairingId != null
 }
+
+/**
+ * Normalize a typed pairing code (#5512): uppercase, strip whitespace and dashes.
+ * Mirrors the server's `normalizePairingCode` so a code read off the host screen
+ * validates regardless of case or the spaces/dashes people add when reading aloud.
+ */
+export function normalizePairingCode(raw: string): string {
+  return raw.replace(/[\s-]+/g, '').toUpperCase()
+}
+
+/**
+ * Build a ParsedPairing from a separately-typed host (or full ws/chroxy URL) and a
+ * pairing code (#5512, the TV-app pattern). This is the camera-less equivalent of
+ * pasting a `chroxy://host?pair=<code>` URL — it synthesizes that URL and reuses
+ * `parsePairingUrl`, so the resulting wsUrl + pairingId drive the exact same pair
+ * request as the QR/paste path. Returns null when host or code is empty/unparsable.
+ *
+ * `host` may be a bare `host[:port]`, or a full `ws://`/`wss://`/`chroxy://` URL
+ * (a `?pair=` already present is ignored — the typed code wins).
+ */
+export function parsePairingCodeEntry(host: string, code: string): ParsedPairing | null {
+  const normalizedCode = normalizePairingCode(code.trim())
+  if (!normalizedCode) return null
+  const trimmedHost = host.trim()
+  if (!trimmedHost) return null
+
+  // Reduce whatever the user typed to a scheme + host[:port], then synthesize the
+  // canonical chroxy://host?pair=<code> string parsePairingUrl already understands.
+  let scheme: 'chroxy' | 'ws' | 'wss' = 'chroxy'
+  let hostPart = trimmedHost
+  try {
+    if (/^wss?:\/\//i.test(trimmedHost)) {
+      const u = new URL(trimmedHost)
+      scheme = trimmedHost.toLowerCase().startsWith('wss://') ? 'wss' : 'ws'
+      hostPart = u.host
+    } else if (/^chroxy:\/\//i.test(trimmedHost)) {
+      const u = new URL(trimmedHost.replace(/^chroxy:\/\//i, 'https://'))
+      hostPart = u.host
+    } else {
+      // Bare host[:port] — strip any path/query the user may have pasted.
+      hostPart = trimmedHost.replace(/^\/+/, '').split('/')[0]?.split('?')[0] ?? ''
+    }
+  } catch {
+    return null
+  }
+  if (!hostPart) return null
+
+  const synthesized = `${scheme}://${hostPart}?pair=${encodeURIComponent(normalizedCode)}`
+  return parsePairingUrl(synthesized)
+}
