@@ -35,6 +35,7 @@ import {
   registerTrustGrantRequest,
   clearPendingTrustGrants,
   _testTrustGrantPendingSize,
+  setDeltaFlushIntervalOverride,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import type { ConnectionState } from './types'
@@ -932,6 +933,35 @@ describe('dashboard message-handler dispatch', () => {
       )
       const state = store.getState() as any
       expect(state._terminalWrites).toContain('hello ')
+    })
+
+    // #5516 (epic #5514): the flush is scheduled on an ADAPTIVE timer (was a
+    // fixed 100ms). With the constant override pinned, the first delta must
+    // schedule a setTimeout at exactly that interval. Default (no override)
+    // behavior is covered by resolveDeltaFlushMs's store-core unit tests.
+    it('schedules the delta flush at the overridden interval (#5516)', () => {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      }))
+      setStore(store)
+
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      try {
+        setDeltaFlushIntervalOverride(16)
+        handleMessage({ type: 'stream_start', messageId: 'msg-x', sessionId: 's1' }, ctx() as any)
+        handleMessage({ type: 'stream_delta', messageId: 'msg-x', sessionId: 's1', delta: 'Hi' }, ctx() as any)
+
+        const flushCall = setTimeoutSpy.mock.calls.find((c) => c[1] === 16)
+        expect(flushCall).toBeDefined()
+
+        vi.runAllTimers()
+        const ss = (store.getState() as any).sessionStates.s1
+        expect(ss.messages.find((m: any) => m.id === 'msg-x')?.content).toBe('Hi')
+      } finally {
+        setDeltaFlushIntervalOverride(null)
+        setTimeoutSpy.mockRestore()
+      }
     })
 
     // #3071 — when stream_start is dropped (e.g., session not yet in store at

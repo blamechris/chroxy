@@ -130,6 +130,8 @@ import {
   // #5515 (epic #5514): latency instrumentation primitives.
   RollingPercentiles,
   splitRtt,
+  // #5516 (epic #5514): adaptive client delta-flush interval.
+  resolveDeltaFlushMs,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -565,6 +567,18 @@ function _onPong(serverTs?: number): void {
 // ---------------------------------------------------------------------------
 const pendingDeltas = new Map<string, { sessionId: string | null; delta: string }>();
 let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+// #5516 (epic #5514): adaptive delta-flush interval (was a fixed 100ms).
+// Production adapts to the current EWMA RTT via `resolveDeltaFlushMs`
+// (16-33ms cheap → 100ms poor). Tests pin it with
+// `setDeltaFlushIntervalOverride(N)`; `null` restores adaptive behavior.
+let _deltaFlushOverrideMs: number | null = null;
+export function setDeltaFlushIntervalOverride(ms: number | null): void {
+  _deltaFlushOverrideMs = ms;
+}
+function currentDeltaFlushMs(): number {
+  return _deltaFlushOverrideMs != null ? _deltaFlushOverrideMs : resolveDeltaFlushMs(_ewmaRtt);
+}
 
 function flushPendingDeltas(): void {
   deltaFlushTimer = null;
@@ -1542,7 +1556,9 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
 
     scheduleFlush: () => {
       if (!deltaFlushTimer) {
-        deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
+        // #5516 — adaptive interval (was a fixed 100ms). Memoized rows
+        // (step 1) make the tighter flush cheap: only the tail re-renders.
+        deltaFlushTimer = setTimeout(flushPendingDeltas, currentDeltaFlushMs());
       }
     },
   });

@@ -541,3 +541,16 @@ export {
   resetRenderCounts,
   renderCountSnapshot,
 } from './render-counter'
+
+// #5516 (epic #5514): adaptive client delta-flush interval. Replaces the fixed
+// 100ms client flush with an RTT-aware floor (16-33ms on a cheap link, scaling
+// toward 100ms when EWMA RTT is poor). Shared so the app and dashboard adapt
+// identically; pure + testable with a constant override at each call site.
+export {
+  resolveDeltaFlushMs,
+  DELTA_FLUSH_MIN_MS,
+  DELTA_FLUSH_FLOOR_MS,
+  DELTA_FLUSH_MAX_MS,
+  DELTA_FLUSH_CHEAP_RTT_MS,
+  DELTA_FLUSH_POOR_RTT_MS,
+} from './delta-flush'
