@@ -127,6 +127,9 @@ import {
   // #5039: pre-formatted partial-cost sub-line used by the `case 'error'`
   // branch so the toast and the mobile Alert share copy.
   formatPartialCostLine,
+  // #5515 (epic #5514): latency instrumentation primitives.
+  RollingPercentiles,
+  splitRtt,
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
@@ -497,6 +500,18 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
 
+// #5515 (epic #5514): latency instrumentation. `_deltaServerTs` records the
+// server-stamped serverTs (and local recv time) of the OLDEST un-rendered
+// delta per messageId; on flush we measure serverTs→render (token-to-render)
+// and recv→render (client render cost) into the rolling p50/p95 buffers. See
+// store-core/latency-stats for the clock discipline. Dev-only console readout,
+// throttled so a streaming turn can't spam the log.
+const LATENCY_LOG_INTERVAL_MS = 3_000;
+const _deltaServerTs = new Map<string, { serverTs: number; recvAt: number }>();
+const _tokenToRender = new RollingPercentiles(200);
+const _clientRender = new RollingPercentiles(200);
+let _lastLatencyLogAt = 0;
+
 export function stopHeartbeat(): void {
   if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
   if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
@@ -520,17 +535,28 @@ export function startHeartbeat(socket: WebSocket): void {
   }, HEARTBEAT_INTERVAL_MS);
 }
 
-function _onPong(): void {
+function _onPong(serverTs?: number): void {
   if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
   // Measure RTT and update connection quality using EWMA for stability
   if (_lastPingSentAt > 0) {
-    const rttMs = Date.now() - _lastPingSentAt;
-    _lastPingSentAt = 0;
+    const pongRecvAt = Date.now();
+    const rttMs = pongRecvAt - _lastPingSentAt;
     // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
     _ewmaRtt = _ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ewmaRtt;
     const smoothed = Math.round(_ewmaRtt);
     const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
     getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
+
+    // #5515 (epic #5514): split this RTT into approximate uplink/downlink
+    // halves using the server-stamped serverTs, positioned within the locally-
+    // measured [ping,pong] interval (skew-clamped) — see store-core/latency-
+    // stats. Dev-only, throttled by the same window as token-to-render.
+    const split = splitRtt({ pingSentAt: _lastPingSentAt, pongRecvAt, serverTs });
+    if (split.uplinkMs !== null && pongRecvAt - _lastLatencyLogAt >= LATENCY_LOG_INTERVAL_MS) {
+      _lastLatencyLogAt = pongRecvAt;
+      console.log(`[latency] rtt=${split.rttMs}ms split≈ up ${split.uplinkMs}ms / down ${split.downlinkMs}ms (approx, clock-skew)`);
+    }
+    _lastPingSentAt = 0;
   }
 }
 
@@ -607,6 +633,37 @@ function flushPendingDeltas(): void {
   if (!flatUpdated) {
     getStore().setState({ sessionStates: newSessionStates });
   }
+
+  // #5515 (epic #5514): the store writes above are the render trigger; sample
+  // latency for the ids we just flushed. See store-core/latency-stats for the
+  // clock discipline (serverTs→render is approximate/wall-clock; recv→render is
+  // the skew-free client render cost).
+  recordLatencySamples(updates.keys());
+}
+
+// #5515: measure token-to-render for the flushed message ids into the rolling
+// p50/p95 buffers and emit a throttled dev log. Each id's stamp is consumed
+// once so the next flush window restamps.
+function recordLatencySamples(messageIds: Iterable<string>): void {
+  const now = Date.now();
+  let sampled = false;
+  for (const id of messageIds) {
+    const stamp = _deltaServerTs.get(id);
+    if (!stamp) continue;
+    _deltaServerTs.delete(id);
+    _tokenToRender.add(now - stamp.serverTs);
+    _clientRender.add(now - stamp.recvAt);
+    sampled = true;
+  }
+  if (!sampled) return;
+  if (now - _lastLatencyLogAt < LATENCY_LOG_INTERVAL_MS) return;
+  _lastLatencyLogAt = now;
+  const ttr = _tokenToRender.summary();
+  const cr = _clientRender.summary();
+  console.log(
+    `[latency] token→render(~approx, wall-clock) n=${ttr.count} p50=${ttr.p50}ms p95=${ttr.p95}ms | ` +
+    `client-render n=${cr.count} p50=${cr.p50}ms p95=${cr.p95}ms`
+  );
 }
 
 export function clearDeltaBuffers(): void {
@@ -615,6 +672,8 @@ export function clearDeltaBuffers(): void {
     deltaFlushTimer = null;
   }
   pendingDeltas.clear();
+  // #5515: drop un-flushed latency stamps so they can't survive a reset.
+  _deltaServerTs.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -792,8 +851,8 @@ type Handler = (msg: Record<string, unknown>, get: MsgGet, set: MsgSet, ctx: Con
 
 // --- Extracted handler functions ---
 
-function handlePong(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  _onPong();
+function handlePong(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  _onPong(typeof msg.serverTs === 'number' ? msg.serverTs : undefined);
 }
 
 function handleRaw(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
@@ -1356,6 +1415,16 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
 }
 
 function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  // #5515 (epic #5514): record the server-stamped serverTs and local recv time
+  // of the OLDEST un-rendered delta for this messageId so flushPendingDeltas
+  // can measure token-to-render. First-write-wins until the next flush clears
+  // it (mirrors the server's per-flush emit stamp).
+  if (typeof msg.messageId === 'string') {
+    const sTs = typeof msg.serverTs === 'number' ? msg.serverTs : null;
+    if (sTs !== null && !_deltaServerTs.has(msg.messageId)) {
+      _deltaServerTs.set(msg.messageId, { serverTs: sTs, recvAt: Date.now() });
+    }
+  }
   // #4981 — thin wrapper over `sharedStreamDelta`. The platform-neutral hot
   // path (post-permission split, single-hop defensive remap, post-tool
   // continuation split with the #4999/#5014 sentence gate and #4975 mid-word
