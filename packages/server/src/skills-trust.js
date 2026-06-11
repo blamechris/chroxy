@@ -28,6 +28,14 @@
  * v1 (flat path-keyed object at root) is detected and migrated on first load
  * (#3297). The file is rewritten to v2 on the next flush.
  *
+ * Since #5580 the ledger mechanics (load/isTrusted/getRecord + atomic 0600
+ * persist + fail-open) live in `PathHashTrustLedger`; this class is a subclass
+ * that layers on the skills-specific EXTRAS — trust modes, the v1→v2 migration,
+ * the `inspect()` record/verify/mismatch path with its verify-throttle, the
+ * `communityTrust` sibling index, and `acceptHash`. The records map, key
+ * normalisation, and the atomic-write dance are inherited. The on-disk format
+ * is byte-identical to the pre-#5580 file.
+ *
  * Default location: `~/.chroxy/skills-trust.json`. Picked instead of
  * folding into `session-state.json` because session state is per-session,
  * frequently rewritten by the SessionStatePersistence debounce loop, and
@@ -62,14 +70,16 @@
  * every session. The recovery path is to delete the trust file and
  * re-trust on next load.
  *
- * Persistence safety (#3232):
- *   - Writes go through a `<path>.tmp` sibling and `fs.renameSync` so a
- *     mid-write crash leaves either the previous good file or a stale
- *     `.tmp` (which `_load` ignores). The target file is never observed
- *     in a half-written state.
+ * Persistence safety (#3232) is inherited from PathHashTrustLedger:
+ *   - Writes go through a `<path>.<pid>.<rand>.tmp` sibling and
+ *     `fs.renameSync` so a mid-write crash leaves either the previous good
+ *     file or a stale `.tmp` (which `_load` ignores). The target file is
+ *     never observed in a half-written state.
  *   - The temp file is created with mode `0600` (owner read/write only)
  *     so the ledger isn't world-readable on POSIX. `rename` preserves
  *     mode so the post-rename target keeps `0600`.
+ *   - The skills store re-throws a persistence failure (throwOnFlushError)
+ *     so a handler can surface TRUST_FLUSH_FAILED to the user.
  *
  * Case-insensitive ledger keys (#3233):
  *   - On case-insensitive filesystems (macOS APFS default, Windows NTFS
@@ -88,11 +98,13 @@
  *     the on-disk canonical casing, so the same inode resolves to the
  *     same byPath key regardless of how the caller spelled it.
  */
-import { readFileSync, mkdirSync, existsSync, openSync, writeSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'fs'
-import { dirname, join, basename } from 'path'
+import { existsSync } from 'fs'
+import { basename } from 'path'
 import { homedir } from 'os'
-import { createHash, randomBytes } from 'crypto'
+import { join } from 'path'
+import { createHash } from 'crypto'
 import { createLogger } from './logger.js'
+import { PathHashTrustLedger } from './path-hash-trust-ledger.js'
 
 const log = createLogger('skills-trust')
 
@@ -182,12 +194,19 @@ export function sha256Hex(body) {
  * SessionManager). Operators who explicitly set `'warn'` or `'block'`
  * get those modes; everyone else gets the legacy no-op behaviour.
  */
-export class SkillsTrustStore {
+export class SkillsTrustStore extends PathHashTrustLedger {
   /**
    * @param {{ filePath?: string, mode?: 'warn'|'block', verifyThrottleMs?: number }} [opts]
    */
   constructor({ filePath, mode, verifyThrottleMs } = {}) {
-    this._filePath = filePath || DEFAULT_TRUST_FILE
+    super({
+      filePath: filePath || DEFAULT_TRUST_FILE,
+      log,
+      normalizeKey: _normalizePathKey,
+      approvalField: 'lastVerified',
+      wrapperKey: 'skills',
+      throwOnFlushError: true, // re-throw so handlers can surface TRUST_FLUSH_FAILED
+    })
     this._mode = VALID_TRUST_MODES.has(mode) ? mode : TRUST_MODE_WARN
     // How long a `lastVerified` timestamp stays "fresh enough" to skip
     // an update. Caller may override (tests pass 0 to force a bump on
@@ -196,16 +215,17 @@ export class SkillsTrustStore {
     this._verifyThrottleMs = Number.isFinite(verifyThrottleMs) && verifyThrottleMs >= 0
       ? verifyThrottleMs
       : DEFAULT_VERIFY_THROTTLE_MS
-    const loaded = this._load()
+    const loaded = this._loadRecords()
     this._records = loaded.records
     // Community trust indexes (#3297): byAuthor maps author -> grant record;
     // byPath maps realPath -> grant record. Either index is sufficient for
     // isCommunityTrusted() — a skill is trusted if its author OR its exact
-    // path has been granted.
-    this.communityTrust = loaded.communityTrust
+    // path has been granted. Parsed out of the same raw payload.
+    this.communityTrust = this._parseCommunityTrust(loaded.parsed)
     // Track whether anything changed since the last persist so we can
     // skip writes when a session loaded skills with no mismatches and no
-    // first-time records.
+    // first-time records. A v1→v2 migration marks dirty so the rewritten
+    // v2 shape is flushed on the next access.
     this._dirty = loaded.migratedLegacy || false
   }
 
@@ -236,144 +256,56 @@ export class SkillsTrustStore {
   }
 
   /**
-   * Read + JSON-parse the trust file. Returns `{ records, communityTrust, migratedLegacy }`.
-   * Fails open to empty state on any read/parse error.
+   * Legacy-shape hook (#3297): detect a v1 flat path-keyed root and claim it
+   * for migration. Called by PathHashTrustLedger._loadRecords when the v2
+   * `skills` wrapper key is absent.
    *
-   * #3232: a stale `<path>.tmp` from a prior crash is intentionally
-   * ignored — only the canonical target path is consulted. The next
-   * successful flush atomically replaces the target via rename, which
-   * also overwrites any stale temp file via the writer's pre-clean. So
-   * this read path doesn't need to inspect or clean up `.tmp`.
+   * #3306: we treat the file as v1 if ANY entry looks valid (the per-entry
+   * validation in the base drops malformed records), so a partially-corrupt
+   * v1 file self-heals to a clean v2 ledger keeping every legitimate hash.
    *
-   * #3233: keys read from disk are normalised through `_normalizePathKey`
-   * so a ledger written under one casing on a case-insensitive FS is
-   * still found when realpath resolves to a different casing later.
+   * #3511: the classifier must match the same shape gate as the per-entry
+   * parse loop (sha256 + firstSeen). Without the firstSeen check, a file whose
+   * entries have a valid-looking sha256 but no firstSeen was classified as v1,
+   * then the per-entry loop dropped every record → migration proceeded with an
+   * empty ledger → the next flush wiped the file. Requiring firstSeen here
+   * makes those files fall through to "unrecognised" and fail open instead.
    *
-   * #3297: v1 (flat path-keyed root) is detected and migrated to v2
-   * on load. `migratedLegacy: true` instructs the constructor to set
-   * `_dirty` so the rewritten v2 shape is flushed on the next access.
-   *
-   * @returns {{ records: object, communityTrust: { byAuthor: object, byPath: object }, migratedLegacy: boolean }}
+   * @param {object} parsed
+   * @returns {{ rawMap: object, migratedLegacy: boolean }|null}
+   * @protected
    */
-  _load() {
-    const emptyResult = {
-      records: Object.create(null),
-      communityTrust: { byAuthor: Object.create(null), byPath: Object.create(null) },
-      migratedLegacy: false,
+  _extractLegacy(parsed) {
+    const looksLikeV1Entry = (k) => {
+      const v = parsed[k]
+      return v
+        && typeof v === 'object'
+        && !Array.isArray(v)
+        && typeof v.sha256 === 'string'
+        && /^[0-9a-f]{64}$/.test(v.sha256)
+        && typeof v.firstSeen === 'string'
     }
-
-    let raw
-    try {
-      raw = readFileSync(this._filePath, 'utf8')
-    } catch (err) {
-      if (err && err.code !== 'ENOENT') {
-        log.warn(`Could not read trust file (${err.code || err.message}); starting fresh`)
-      }
-      return emptyResult
+    if (Object.keys(parsed).some(looksLikeV1Entry)) {
+      log.info('Trust file is v1 format; migrating to v2 on next flush')
+      return { rawMap: parsed, migratedLegacy: true }
     }
+    return null
+  }
 
-    let parsed
-    try {
-      parsed = JSON.parse(raw)
-    } catch (err) {
-      log.warn(`Trust file is malformed JSON (${err && err.message ? err.message : err}); starting fresh`)
-      return emptyResult
-    }
-
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      log.warn('Trust file root is not an object; starting fresh')
-      return emptyResult
-    }
-
-    // v2 detection: top-level `skills` key present.
-    // v1 detection: flat path-keyed sha256 records at the root (legacy format).
-    // Anything else treated as empty (fail open).
-    let rawSkillsMap
-    let rawCommunityTrust = null
-    let migratedLegacy = false
-
-    if (parsed.skills && typeof parsed.skills === 'object' && !Array.isArray(parsed.skills)) {
-      // v2 format
-      rawSkillsMap = parsed.skills
-      rawCommunityTrust = parsed.communityTrust && typeof parsed.communityTrust === 'object'
-        ? parsed.communityTrust
-        : null
-    } else {
-      // Detect v1: at least one top-level value has the full v1 shape
-      // (object with sha256 hex string AND firstSeen string).
-      //
-      // #3306: previously we required *every* entry to pass — a single
-      // corrupted record (missing / malformed sha256) made the whole
-      // file fall through to "unrecognised shape" and the user lost ALL
-      // trusted records on the next migration. We now treat the file as
-      // v1 if any entry looks valid; the per-entry loop below already
-      // drops malformed records, so a partially-corrupt v1 file
-      // self-heals to a clean v2 ledger keeping every legitimate hash.
-      //
-      // #3511: the classifier must match the same shape gate as the
-      // per-entry parse loop (sha256 + firstSeen). Without the
-      // firstSeen check, a file whose entries have a valid-looking
-      // sha256 but no firstSeen was classified as v1, then the
-      // per-entry loop dropped every record (no firstSeen) → migration
-      // proceeded with an empty ledger → the next flush wiped the file
-      // to an empty v2 shape. Requiring firstSeen here makes those
-      // files fall through to "unrecognised" and fail open instead.
-      // Arrays are also explicitly rejected as a defence-in-depth
-      // guard against accidentally array-valued entries passing
-      // `typeof === 'object'`.
-      const topLevelKeys = Object.keys(parsed)
-      const looksLikeV1Entry = (k) => {
-        const v = parsed[k]
-        return v
-          && typeof v === 'object'
-          && !Array.isArray(v)
-          && typeof v.sha256 === 'string'
-          && /^[0-9a-f]{64}$/.test(v.sha256)
-          && typeof v.firstSeen === 'string'
-      }
-      const hasAnyV1Entry = topLevelKeys.some(looksLikeV1Entry)
-      if (hasAnyV1Entry) {
-        log.info('Trust file is v1 format; migrating to v2 on next flush')
-        rawSkillsMap = parsed
-        migratedLegacy = true
-      } else if (topLevelKeys.length === 0) {
-        // Empty object — treat as v2 with no records
-        rawSkillsMap = {}
-      } else {
-        // Unrecognised shape — fail open
-        log.warn('Trust file has unrecognised shape; starting fresh')
-        return emptyResult
-      }
-    }
-
-    const out = Object.create(null)
-    for (const [key, value] of Object.entries(rawSkillsMap)) {
-      // Defensive: drop any record that lacks the required shape. A
-      // partially-corrupt record is treated as missing so the next
-      // load re-records cleanly. This matches the "malformed = empty"
-      // guarantee in the file-level catch above.
-      if (
-        value && typeof value === 'object'
-        && typeof value.sha256 === 'string' && /^[0-9a-f]{64}$/.test(value.sha256)
-        && typeof value.firstSeen === 'string'
-      ) {
-        const normKey = _normalizePathKey(key)
-        // Last-writer-wins on collisions — if two entries normalise to
-        // the same key (only possible on case-insensitive FS with mixed
-        // historical casings), keep the most recently iterated one.
-        // `Object.entries` iteration order is insertion-order so this
-        // matches the file's last write.
-        out[normKey] = {
-          sha256: value.sha256,
-          firstSeen: value.firstSeen,
-          lastVerified: typeof value.lastVerified === 'string' ? value.lastVerified : value.firstSeen,
-        }
-      }
-    }
-
-    // Parse community trust indexes from disk (kebab-case on disk → camelCase in memory)
+  /**
+   * Parse the `communityTrust` sibling index out of the raw payload (kebab-case
+   * on disk → camelCase in memory). Returns empty indexes when absent/malformed.
+   *
+   * @param {object|null} parsed
+   * @returns {{ byAuthor: object, byPath: object }}
+   * @private
+   */
+  _parseCommunityTrust(parsed) {
     const byAuthor = Object.create(null)
     const byPath = Object.create(null)
+    const rawCommunityTrust = parsed && parsed.communityTrust && typeof parsed.communityTrust === 'object'
+      ? parsed.communityTrust
+      : null
     if (rawCommunityTrust) {
       const rawByAuthor = rawCommunityTrust['by-author']
       if (rawByAuthor && typeof rawByAuthor === 'object' && !Array.isArray(rawByAuthor)) {
@@ -395,94 +327,30 @@ export class SkillsTrustStore {
         }
       }
     }
-
-    return { records: out, communityTrust: { byAuthor, byPath }, migratedLegacy }
+    return { byAuthor, byPath }
   }
 
   /**
-   * Persist the in-memory ledger to disk. Skipped when no change has
-   * been recorded since the last write to avoid pointless rewrites in
-   * the steady state.
+   * Serialise to the v2 on-disk shape:
+   * `{ skills: {...}, communityTrust: { "by-author": {...}, "by-path": {...} } }`.
+   * Null-prototype objects are converted to plain objects before serialisation.
    *
-   * #3232: writes are atomic-via-rename and chmod 0600.
-   *
-   *   1. The temp file `<path>.tmp` is created with `openSync(..., 'wx',
-   *      0o600)` so a partial / leaked temp from a prior crash is
-   *      cleaned first (`unlinkSync` on EEXIST). `wx` is exclusive-
-   *      create; combined with the unlink that means we never write
-   *      into a partially-populated temp.
-   *   2. After `writeSync` we `fsyncSync` the temp before rename so the
-   *      bytes are on disk before the directory entry flips. A crash
-   *      between writeSync and fsync would leave a stale temp (ignored
-   *      by `_load`); a crash between fsync and rename also leaves a
-   *      stale temp; only a successful rename advances the canonical
-   *      target.
-   *   3. `renameSync` is atomic on the same filesystem — readers see
-   *      either the old file or the new file, never a partial.
-   *
-   * Failure is non-fatal: the loader keeps the in-memory ledger and
-   * will retry on the next first-seen / mismatch. Don't throw — a
-   * read-only $HOME (containerised dev env) shouldn't break skill
-   * loading.
+   * @returns {object}
+   * @protected
    */
-  flush() {
-    if (!this._dirty) return
-    // Per-writer unique temp path. BaseSession constructs one
-    // SkillsTrustStore per session, all pointing at the same default
-    // ledger path, so flush() must tolerate concurrent writers. The
-    // pid+random suffix prevents two writers from racing on the same
-    // .tmp file (where one's unlinkSync would invalidate the other's
-    // open fd, breaking the wx exclusive-create guarantee). Each
-    // writer renames its own unique temp to the target — rename is
-    // atomic so last-writer-wins.
-    const tmpPath = `${this._filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-    let fd = null
-    try {
-      mkdirSync(dirname(this._filePath), { recursive: true })
-      // Convert to v2 shape: { skills: {...}, communityTrust: { "by-author": {...}, "by-path": {...} } }
-      // Null-prototype objects are converted to plain objects before serialisation.
-      const skills = {}
-      for (const [k, v] of Object.entries(this._records)) {
-        skills[k] = v
-      }
-      const byAuthorOut = {}
-      for (const [k, v] of Object.entries(this.communityTrust.byAuthor)) {
-        byAuthorOut[k] = v
-      }
-      const byPathOut = {}
-      for (const [k, v] of Object.entries(this.communityTrust.byPath)) {
-        byPathOut[k] = v
-      }
-      const out = {
-        skills,
-        communityTrust: {
-          'by-author': byAuthorOut,
-          'by-path': byPathOut,
-        },
-      }
-      const payload = JSON.stringify(out, null, 2) + '\n'
-
-      // Open with exclusive-create + 0600. The unique temp path makes
-      // EEXIST effectively impossible (would require pid+random
-      // collision); `wx` is kept as a defence-in-depth guard.
-      fd = openSync(tmpPath, 'wx', 0o600)
-      writeSync(fd, payload, 0, 'utf8')
-      fsyncSync(fd)
-      closeSync(fd)
-      fd = null
-
-      renameSync(tmpPath, this._filePath)
-      this._dirty = false
-    } catch (err) {
-      // Best-effort cleanup of an open fd / our own orphan temp so a
-      // future flush isn't pre-blocked. We never touch other writers'
-      // temps — the unique suffix means our cleanup can't affect them.
-      if (fd !== null) {
-        try { closeSync(fd) } catch { /* ignore */ }
-      }
-      try { unlinkSync(tmpPath) } catch { /* ignore */ }
-      log.warn(`Could not persist trust file (${err && err.code ? err.code : err.message || err})`)
-      throw err
+  _serialize() {
+    const skills = {}
+    for (const [k, v] of Object.entries(this._records)) skills[k] = v
+    const byAuthorOut = {}
+    for (const [k, v] of Object.entries(this.communityTrust.byAuthor)) byAuthorOut[k] = v
+    const byPathOut = {}
+    for (const [k, v] of Object.entries(this.communityTrust.byPath)) byPathOut[k] = v
+    return {
+      skills,
+      communityTrust: {
+        'by-author': byAuthorOut,
+        'by-path': byPathOut,
+      },
     }
   }
 
