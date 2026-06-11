@@ -808,6 +808,16 @@ export interface AuthOkPayload {
    * spread it into state without an existence check.
    */
   serverCapabilities: Record<string, boolean>
+  /**
+   * #5555 (eager key exchange) — the server's ephemeral X25519 public key,
+   * present only when this client sent `eagerPublicKey` + `eagerSalt` in its
+   * `auth` message AND the server honoured the eager path. When non-null the
+   * client derives the shared key immediately and skips the discrete
+   * `key_exchange` round trip; null means fall back to the discrete handshake
+   * (old server, encryption disabled, or no eager fields were sent). Same
+   * validation as `handleKeyExchangeOk`'s `publicKey`.
+   */
+  serverPublicKey: string | null
 }
 
 const DEFAULT_WEB_FEATURES: AuthOkWebFeatures = {
@@ -874,6 +884,12 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     myClientId: parseRawStringField(msg, 'clientId'),
     webFeatures,
     serverCapabilities,
+    // #5555 — null for missing/empty/non-string, exactly the "fall back to
+    // discrete key_exchange" signal the call sites key off. Mirrors
+    // handleKeyExchangeOk's `typeof raw === 'string' && raw` validation so an
+    // empty-string serverPublicKey is treated as absent, not a usable key.
+    serverPublicKey:
+      typeof msg.serverPublicKey === 'string' && msg.serverPublicKey ? msg.serverPublicKey : null,
   }
 }
 

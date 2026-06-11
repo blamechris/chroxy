@@ -12,7 +12,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 vi.mock('./crypto', () => ({
   createKeyPair: vi.fn(() => ({ publicKey: 'mock-pub', secretKey: 'mock-sec' })),
   deriveSharedKey: vi.fn(),
-  encrypt: vi.fn(),
+  // #5555 — return a parseable envelope so the eager-path burst (which is
+  // encrypted once encryptionState is active) serialises to valid JSON.
+  encrypt: vi.fn((_json: string, _key: unknown, n: number) => ({ type: 'encrypted', d: 'cipher', n })),
   decrypt: vi.fn(),
   generateConnectionSalt: vi.fn(() => 'mock-salt'),
   deriveConnectionKey: vi.fn(() => new Uint8Array(32)),
@@ -30,8 +32,10 @@ import {
   setConnectionContext,
   clearDeltaBuffers,
   stopHeartbeat,
+  prepareEagerKeyExchange,
+  setPendingKeyPair,
 } from './message-handler'
-import { createKeyPair } from './crypto'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey } from './crypto'
 import type { ConnectionState } from './types'
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,9 @@ describe('auth_ok handler', () => {
     vi.clearAllMocks()
     localStorage.clear()
     clearDeltaBuffers()
+    // #5555 — reset the module-level eager keypair so a prior test's
+    // prepareEagerKeyExchange() doesn't bleed into the discrete-fallback cases.
+    setPendingKeyPair(null)
 
     mockSocket = createMockSocket()
     store = createMockStore({
@@ -279,6 +286,55 @@ describe('auth_ok handler', () => {
       )
       const keyExchange = sends.find((s: Record<string, unknown>) => s.type === 'key_exchange')
       expect(keyExchange).toEqual({ type: 'key_exchange', publicKey: 'mock-pub', salt: 'mock-salt' })
+    })
+  })
+
+  // #5555 (eager key exchange) — when onopen prepared the keypair eagerly and
+  // the server returns serverPublicKey in auth_ok, the client derives the
+  // shared key inline and sends the post-auth burst immediately (no discrete
+  // key_exchange RTT). When the server omits serverPublicKey (old server), the
+  // client falls back to the discrete handshake.
+  describe('eager key exchange (#5555)', () => {
+    function sendsFrom(socket: WebSocket) {
+      return (socket.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        (c: unknown[]) => JSON.parse(c[0] as string),
+      )
+    }
+
+    it('derives the shared key inline and sends the burst when serverPublicKey is present', () => {
+      // Simulate onopen having prepared the eager keypair.
+      prepareEagerKeyExchange()
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(
+        createAuthOkMessage({ encryption: 'required', serverPublicKey: 'server-pub-key' }),
+        ctx as any,
+      )
+
+      // Eager path derives from the server's public key + our stashed secret.
+      expect(deriveSharedKey).toHaveBeenCalledWith('server-pub-key', 'mock-sec')
+      expect(deriveConnectionKey).toHaveBeenCalled()
+
+      const types = sendsFrom(mockSocket).map((s) => s.type)
+      // No discrete key_exchange frame — the burst flows immediately. The
+      // post-auth burst (list_providers/list_slash_commands/list_agents) goes
+      // out as encrypted envelopes because encryptionState is now active, so
+      // we see 'encrypted' frames, not plaintext list_* types.
+      expect(types).not.toContain('key_exchange')
+      expect(types).not.toContain('list_providers') // encrypted now
+      expect(types.filter((t) => t === 'encrypted').length).toBeGreaterThanOrEqual(3)
+    })
+
+    it('falls back to the discrete key_exchange when serverPublicKey is absent (old server)', () => {
+      prepareEagerKeyExchange()
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      // encryption required but NO serverPublicKey → old server.
+      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx as any)
+
+      const types = sendsFrom(mockSocket).map((s) => s.type)
+      expect(types).toContain('key_exchange')
+      expect(types).not.toContain('list_providers')
+      // Did not derive eagerly.
+      expect(deriveSharedKey).not.toHaveBeenCalled()
     })
   })
 

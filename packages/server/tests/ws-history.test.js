@@ -21,6 +21,15 @@ import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../
 // registerProvider is used by the scheduleProviderModelsRefresh suite to
 // inject fake provider classes (#5450).
 import { registerProvider } from '../src/providers.js'
+import {
+  createKeyPair,
+  deriveSharedKey,
+  deriveConnectionKey,
+  generateConnectionSalt,
+  encrypt,
+  decrypt,
+  DIRECTION_SERVER,
+} from '@chroxy/store-core/crypto'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -633,6 +642,150 @@ describe('sendPostAuthInfo — encryption', () => {
     // Clean up timeout
     const client = ctx.clients.get(ws)
     if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+  })
+})
+
+// ── #5555: eager key exchange ────────────────────────────────────────────────
+//
+// The eager path collapses the discrete key_exchange RTT: the client supplies
+// its ephemeral pubkey + salt as client.eagerKeyExchange (stashed by
+// handleAuthMessage), and sendPostAuthInfo derives the shared key inline,
+// returns the server pubkey in auth_ok, and un-gates the post-auth queue.
+// These tests cover the eager success path, the discrete fallback (old client),
+// the encryption-disabled case, and a malformed-eager-key fallback. They use a
+// production-grade send (createClientSender) so the queue/encrypt gating is the
+// real wire behaviour, not a test stub.
+
+import { createClientSender } from '../src/ws-client-sender.js'
+
+/** ctx whose `send` is the real client-sender (queues + encrypts per client state). */
+function makeEncryptingCtx(overrides = {}) {
+  const sends = []
+  const clientSend = createClientSender({ error: () => {}, warn: () => {} })
+  const ctx = makeCtx({
+    send: (ws, msg) => {
+      const client = ctx.clients.get(ws)
+      sends.push(msg)
+      clientSend(ws, client, msg)
+    },
+    ...overrides,
+  })
+  ctx._plainSends = sends
+  return ctx
+}
+
+describe('sendPostAuthInfo — eager key exchange (#5555)', () => {
+  it('derives the shared key inline and returns serverPublicKey, un-gating the queue', () => {
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })
+    // Client-side ephemeral keypair + salt, exactly as the client would send.
+    const clientKp = createKeyPair()
+    const salt = generateConnectionSalt()
+    const client = registerClient(ctx, ws, {
+      socketIp: '203.0.113.7',
+      eagerKeyExchange: { publicKey: clientKp.publicKey, salt },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    const authOk = ctx._plainSends.find(m => m.type === 'auth_ok')
+    // Server returned its ephemeral public key on the eager path.
+    assert.ok(authOk.serverPublicKey, 'auth_ok carries serverPublicKey on the eager path')
+    assert.equal(authOk.encryption, 'required')
+
+    // Queue is un-gated: NOT pending, no postAuthQueue, no key-exchange timeout.
+    assert.equal(client.encryptionPending, false)
+    assert.equal(client.postAuthQueue, null)
+    assert.equal(client._keyExchangeTimeout, undefined)
+    // eagerKeyExchange is consumed (cleared) so a stray key_exchange can't reuse it.
+    assert.equal(client.eagerKeyExchange, null)
+    // Server established its encryption state.
+    assert.ok(client.encryptionState, 'client.encryptionState set after eager derivation')
+    assert.equal(client.encryptionState.sendNonce > 0, true) // burst frames consumed nonces
+
+    // The client derives the SAME shared key from auth_ok.serverPublicKey.
+    const rawShared = deriveSharedKey(authOk.serverPublicKey, clientKp.secretKey)
+    const clientKey = deriveConnectionKey(rawShared, salt)
+    assert.deepEqual(
+      Array.from(clientKey),
+      Array.from(client.encryptionState.sharedKey),
+      'eager-derived key matches on both sides (identical to the discrete path)',
+    )
+
+    // auth_ok itself went out in plaintext (the client must read serverPublicKey
+    // before it can derive the key). Subsequent burst frames are encrypted.
+    const rawFrames = ws._rawSent.map(s => JSON.parse(s))
+    assert.equal(rawFrames[0].type, 'auth_ok', 'auth_ok is the first frame, plaintext')
+    const firstBurst = rawFrames[1]
+    assert.equal(firstBurst.type, 'encrypted', 'frames after auth_ok are encrypted')
+
+    // And the client can actually decrypt that first burst frame with the shared key.
+    const decrypted = decrypt(firstBurst, clientKey, 0, DIRECTION_SERVER)
+    assert.equal(typeof decrypted.type, 'string')
+  })
+
+  it('falls back to the discrete handshake when the client sends NO eager fields (old client)', () => {
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })
+    // No eagerKeyExchange — the old-client wire shape.
+    const client = registerClient(ctx, ws, { socketIp: '203.0.113.8' })
+
+    sendPostAuthInfo(ctx, ws)
+
+    const authOk = ctx._plainSends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required')
+    // No serverPublicKey → client knows to send the discrete key_exchange.
+    assert.equal(Object.prototype.hasOwnProperty.call(authOk, 'serverPublicKey'), false)
+    // Discrete path still gates the queue exactly as before.
+    assert.equal(client.encryptionPending, true)
+    assert.ok(Array.isArray(client.postAuthQueue))
+    assert.ok(client._keyExchangeTimeout, 'discrete path arms the key-exchange timeout')
+    assert.equal(client.encryptionState, undefined)
+    // Burst frames were queued (gated), not sent on the wire yet.
+    const burstFramesOnWire = ws._rawSent.map(s => JSON.parse(s)).filter(m => m.type !== 'auth_ok')
+    assert.equal(burstFramesOnWire.length, 0, 'post-auth burst is queued, not sent, until key_exchange')
+    clearTimeout(client._keyExchangeTimeout)
+  })
+
+  it('ignores eager fields when encryption is disabled (no serverPublicKey, no encryptionState)', () => {
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx({ encryptionEnabled: false })
+    const clientKp = createKeyPair()
+    const client = registerClient(ctx, ws, {
+      socketIp: '203.0.113.9',
+      eagerKeyExchange: { publicKey: clientKp.publicKey, salt: generateConnectionSalt() },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    const authOk = ctx._plainSends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'disabled')
+    assert.equal(Object.prototype.hasOwnProperty.call(authOk, 'serverPublicKey'), false)
+    assert.equal(client.encryptionState, undefined)
+    assert.equal(client.encryptionPending, false)
+  })
+
+  it('falls back to the discrete handshake when the eager public key is malformed', () => {
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })
+    const client = registerClient(ctx, ws, {
+      socketIp: '203.0.113.10',
+      // Invalid base64 / wrong length → deriveSharedKey throws → discrete fallback.
+      eagerKeyExchange: { publicKey: 'not-a-valid-key', salt: generateConnectionSalt() },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    const authOk = ctx._plainSends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required')
+    assert.equal(Object.prototype.hasOwnProperty.call(authOk, 'serverPublicKey'), false)
+    // Degrades to the discrete handshake rather than failing the connection.
+    assert.equal(client.encryptionPending, true)
+    assert.ok(Array.isArray(client.postAuthQueue))
+    assert.equal(client.encryptionState, undefined)
+    // eagerKeyExchange cleared even on failure.
+    assert.equal(client.eagerKeyExchange, null)
+    clearTimeout(client._keyExchangeTimeout)
   })
 })
 

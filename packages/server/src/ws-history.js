@@ -8,6 +8,7 @@ import { toShortModelId, getModels, getDefaultModelId, getRegistryForProvider } 
 import { PERMISSION_MODES } from './handler-utils.js'
 import { listProviders, getProvider } from './providers.js'
 import { createLogger } from './logger.js'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
@@ -145,6 +146,53 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   const isLocalhost = localhostBypass && (client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1')
   const requireEncryption = encryptionEnabled && !isLocalhost
 
+  // #5555 (eager key exchange) — if the client supplied its ephemeral public
+  // key + salt in the auth message (stashed as client.eagerKeyExchange in
+  // handleAuthMessage), derive the shared key inline NOW and return the
+  // server's public key in auth_ok below. This collapses the discrete
+  // `key_exchange` round trip: the post-auth queue never has to gate, so
+  // replay starts a full RTT earlier.
+  //
+  // Crypto is identical to handleKeyExchange's discrete path:
+  // deriveSharedKey (X25519 DH) → deriveConnectionKey (per-connection sub-key
+  // from the client salt, so the nonce counter can restart at 0 safely on
+  // reconnect without reusing a (key, nonce) pair). Only the transport timing
+  // differs — the eager path folds the second handshake leg into auth_ok
+  // instead of a separate frame, so the TOFU exposure (#5536: no server
+  // identity pinning) is unchanged: the server's public key still travels in
+  // the clear over the same TLS-protected tunnel, just one frame earlier.
+  //
+  // Any failure to derive (malformed eager public key) falls back to the
+  // discrete handshake rather than failing the connection — the client still
+  // has its keypair and will send `key_exchange` when auth_ok arrives without
+  // a serverPublicKey.
+  //
+  // IMPORTANT ordering: the derived encryptionState is NOT assigned to the
+  // client yet. The auth_ok frame that carries serverPublicKey must go out in
+  // PLAINTEXT — the client can't decrypt it because it derives the shared key
+  // *from* that serverPublicKey. We assign client.encryptionState only AFTER
+  // auth_ok is sent (see below), so the subsequent burst (server_mode, status,
+  // session_list, …) is encrypted. This mirrors the discrete path, where
+  // key_exchange_ok is plaintext and encryptionState is set right after.
+  let eagerServerPublicKey = null
+  let eagerEncryptionState = null
+  if (requireEncryption && client.eagerKeyExchange) {
+    try {
+      const serverKp = createKeyPair()
+      const rawSharedKey = deriveSharedKey(client.eagerKeyExchange.publicKey, serverKp.secretKey)
+      const encryptionKey = deriveConnectionKey(rawSharedKey, client.eagerKeyExchange.salt)
+      eagerEncryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
+      eagerServerPublicKey = serverKp.publicKey
+    } catch (err) {
+      log.warn(`Eager key exchange failed for ${client.id}, falling back to discrete handshake: ${err.message}`)
+      eagerEncryptionState = null
+      eagerServerPublicKey = null
+    }
+    // Consumed (or failed) — never leave it set so a later discrete
+    // key_exchange isn't shadowed by stale eager state.
+    client.eagerKeyExchange = null
+  }
+
   const providers = listProviders()
   const features = {
     environments: providers.some(p => p.capabilities?.containerized),
@@ -238,11 +286,31 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // #5356: exposure snapshot for the dashboard warning banner. Optional on
     // the wire — older servers omit it and clients treat that as "unknown".
     ...(exposure ? { exposure } : {}),
+    // #5555: when the eager handshake succeeded, carry the server's public key
+    // so the client derives the shared key immediately. Absent otherwise (no
+    // eager fields / encryption disabled / derivation failed) → client falls
+    // back to the discrete key_exchange.
+    ...(eagerServerPublicKey ? { serverPublicKey: eagerServerPublicKey } : {}),
     ...extra,
   })
 
+  // #5555: now that the plaintext auth_ok (carrying serverPublicKey) has been
+  // flushed, activate encryption for this client so every subsequent frame in
+  // the post-auth burst is encrypted. The client derives the same shared key
+  // from auth_ok.serverPublicKey + its own secret, so both sides start at
+  // nonce 0 in lockstep. This is the un-gated eager path — no postAuthQueue.
+  if (eagerEncryptionState) {
+    client.encryptionState = eagerEncryptionState
+    log.info(`E2E encryption established eagerly with ${client.id}`)
+  }
+
+  // #5555: the eager handshake already established the shared key above, so
+  // the post-auth queue must NOT gate — it's un-gated immediately and the
+  // burst frames flow encrypted right after auth_ok. Only fall into the
+  // discrete-handshake gating below when encryption is required AND the eager
+  // path did not run (old client, or derivation failed).
   // If encryption required, queue all subsequent messages until key exchange completes
-  if (requireEncryption) {
+  if (requireEncryption && !eagerServerPublicKey) {
     client.encryptionPending = true
     client.postAuthQueue = []
     client._keyExchangeTimeout = setTimeout(() => {

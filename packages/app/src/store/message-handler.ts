@@ -509,6 +509,25 @@ export function setPendingKeyPair(kp: KeyPair | null): void {
   _ctx.pendingKeyPair = kp;
 }
 
+/**
+ * #5555 (eager key exchange) — generate this connection's ephemeral X25519
+ * keypair + per-connection salt and stash them on the handler context so they
+ * can be sent WITH the `auth` message (in `socket.onopen`). Returns the public
+ * key + salt to inline into auth.
+ *
+ * The discrete `key_exchange_ok` / fallback handler reads the same
+ * `_ctx.pendingKeyPair` + `_ctx.pendingSalt`, so if the server omits
+ * `serverPublicKey` from auth_ok (old server, encryption disabled, eager
+ * derivation failed) the client still has everything it needs to fall back to
+ * the discrete handshake without regenerating keys. Crypto is identical to the
+ * discrete path — only the send timing changes.
+ */
+export function prepareEagerKeyExchange(): { publicKey: string; salt: string } {
+  _ctx.pendingKeyPair = createKeyPair();
+  _ctx.pendingSalt = generateConnectionSalt();
+  return { publicKey: _ctx.pendingKeyPair.publicKey, salt: _ctx.pendingSalt };
+}
+
 // ---------------------------------------------------------------------------
 // Connection attempt tracking
 // These are kept as export let (not in _ctx) to preserve ES module live-binding
@@ -1236,12 +1255,41 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
       // Initiate key exchange if server requires encryption
       if (auth.encryption === 'required') {
-        _ctx.pendingKeyPair = createKeyPair();
-        _ctx.pendingSalt = generateConnectionSalt();
-        // Send key_exchange plaintext (before encryption is active)
-        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _ctx.pendingKeyPair.publicKey, salt: _ctx.pendingSalt }));
-        // Post-auth messages will be sent after key_exchange_ok arrives
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
+        // #5555 (eager key exchange) — the ephemeral keypair + salt were
+        // already generated and sent WITH the auth message (socket.onopen →
+        // prepareEagerKeyExchange), stashed on _ctx.pendingKeyPair /
+        // _ctx.pendingSalt. If the server honoured the eager path it returns
+        // its public key in auth_ok; derive the shared key immediately and
+        // start the burst a full RTT earlier than the discrete handshake.
+        if (auth.serverPublicKey && _ctx.pendingKeyPair) {
+          const rawSharedKey = deriveSharedKey(auth.serverPublicKey, _ctx.pendingKeyPair.secretKey);
+          const encryptionKey = _ctx.pendingSalt
+            ? deriveConnectionKey(rawSharedKey, _ctx.pendingSalt)
+            : rawSharedKey;
+          _ctx.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
+          _ctx.pendingKeyPair = null;
+          _ctx.pendingSalt = null;
+          console.log('[crypto] E2E encryption established (eager)');
+          // Burst un-gated: server already activated encryption after auth_ok.
+          wsSend(ctx.socket, { type: 'list_providers' });
+          wsSend(ctx.socket, { type: 'list_slash_commands' });
+          wsSend(ctx.socket, { type: 'list_agents' });
+          resetClientVisibleMemo();
+          sendClientVisible(ctx.socket, isVisibleAppState(AppState.currentState));
+        } else {
+          // Fallback (old server / eager derivation declined): the keypair is
+          // still stashed from onopen — send the discrete key_exchange so the
+          // server replies key_exchange_ok. If onopen never ran (defensive),
+          // regenerate so we never send an empty handshake.
+          if (!_ctx.pendingKeyPair) {
+            _ctx.pendingKeyPair = createKeyPair();
+            _ctx.pendingSalt = generateConnectionSalt();
+          }
+          // Send key_exchange plaintext (before encryption is active)
+          ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _ctx.pendingKeyPair.publicKey, salt: _ctx.pendingSalt }));
+          // Post-auth messages will be sent after key_exchange_ok arrives
+        }
       } else {
         // No encryption — send post-auth messages immediately
         wsSend(ctx.socket, { type: 'list_providers' });

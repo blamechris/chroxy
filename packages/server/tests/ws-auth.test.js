@@ -255,6 +255,47 @@ describe('handleAuthMessage', () => {
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
       assert.equal(authFailures.has('127.0.0.1'), false)
     })
+
+    // #5555 (eager key exchange) — when the auth message carries both
+    // eagerPublicKey and eagerSalt, stash them on the client so
+    // sendPostAuthInfo can derive the shared key inline.
+    it('stashes eager key-exchange fields when both are present', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+      })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        eagerPublicKey: 'client-pub-key',
+        eagerSalt: 'client-salt',
+      })
+      assert.deepEqual(client.eagerKeyExchange, {
+        publicKey: 'client-pub-key',
+        salt: 'client-salt',
+      })
+    })
+
+    it('does NOT stash eager fields when only one is present (old/partial client)', () => {
+      for (const partial of [
+        { eagerPublicKey: 'pub-only' },
+        { eagerSalt: 'salt-only' },
+        { eagerPublicKey: '', eagerSalt: 'salt' },
+        { eagerPublicKey: 'pub', eagerSalt: '' },
+        {}, // neither — the old-client wire shape
+      ]) {
+        const { ctx, ws, client } = makeAuthCtx({
+          authRequired: true,
+          isTokenValid: () => true,
+        })
+        handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token', ...partial })
+        assert.equal(
+          client.eagerKeyExchange,
+          undefined,
+          `partial eager fields ${JSON.stringify(partial)} must not stash`,
+        )
+      }
+    })
   })
 
   describe('invalid token — auth failure tracking', () => {
