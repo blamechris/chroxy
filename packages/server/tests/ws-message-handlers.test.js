@@ -31,6 +31,11 @@ function makeSession(overrides = {}) {
 function makeCtx(overrides = {}) {
   const sessionMap = new Map()
   const { sessionManager: smOverrides, ...restOverrides } = overrides
+  // #5563: primary-ownership moved off a `primaryClients` Map onto the
+  // getPrimary / isPrimary / claimPrimary / clearPrimary surface. Back them
+  // with a local Map so destroy/input handlers route through the helpers
+  // (e.g. handleDestroySession now calls ctx.transport.clearPrimary).
+  const primaryMap = new Map()
   return nsCtx({
     sessionManager: {
       getSession: mock.fn((id) => sessionMap.get(id) ?? null),
@@ -50,8 +55,17 @@ function makeCtx(overrides = {}) {
     broadcastToSession: mock.fn(),
     broadcastSessionList: mock.fn(),
     sendSessionInfo: mock.fn(),
-    primaryClients: new Map(),
-    updatePrimary: mock.fn(),
+    updatePrimary: mock.fn((sid, cid) => { if (!primaryMap.has(sid)) primaryMap.set(sid, cid) }),
+    claimPrimary: mock.fn((sid, cid, o = {}) => {
+      const current = primaryMap.get(sid)
+      if (current === cid) return { changed: false, primaryClientId: current }
+      if (current && !o.force) return { changed: false, rejected: true, primaryClientId: current }
+      primaryMap.set(sid, cid)
+      return { changed: true, primaryClientId: cid }
+    }),
+    getPrimary: mock.fn((sid) => primaryMap.get(sid)),
+    isPrimary: mock.fn((sid, cid) => primaryMap.get(sid) === cid),
+    clearPrimary: mock.fn((sid) => { primaryMap.delete(sid) }),
     checkpointManager: {
       createCheckpoint: mock.fn(() => Promise.resolve()),
     },
