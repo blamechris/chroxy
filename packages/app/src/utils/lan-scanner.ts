@@ -49,6 +49,20 @@ export interface HealthInfo {
 }
 
 /**
+ * Map a `ws(s)://`/`http(s)://` URL to its `http(s)://host:port` origin,
+ * dropping any path/query/hash. Falls back to a regex normalisation if `URL`
+ * can't parse the input (defensive — RN's `URL` is reliable for these shapes).
+ */
+function lanWsToHttpOrigin(url: string): string {
+  const httpish = url.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+  try {
+    return new URL(httpish).origin;
+  } catch {
+    return httpish.replace(/\/+(ws)?\/*$/i, '');
+  }
+}
+
+/**
  * Probe a `ws://`/`wss://` (or `http(s)://`) URL's `/health` endpoint.
  *
  * Reused by both the subnet scanner and the endpoint selector (#5518). Returns
@@ -64,11 +78,11 @@ export async function probeHealth(
   timeoutMs: number = PROBE_TIMEOUT_MS,
   outerSignal?: AbortSignal,
 ): Promise<HealthInfo | null> {
-  // Normalise ws(s):// → http(s):// and strip any path so we hit `/health`.
-  const httpBase = url
-    .replace(/^wss:/i, 'https:')
-    .replace(/^ws:/i, 'http:')
-    .replace(/\/+(ws)?\/*$/i, '');
+  // Normalise ws(s):// → http(s):// and strip ANY path/query/hash so we always
+  // hit the origin's `/health` (not e.g. `.../ws/health`). `URL.origin` is the
+  // reliable way to do this — a trailing-slash regex only handled `/` and `/ws`
+  // and would mis-target any other pathname.
+  const httpBase = lanWsToHttpOrigin(url);
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), timeoutMs);
   const onOuterAbort = () => {

@@ -677,6 +677,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectAuto: async (saved: SavedConnection, options?: { silent?: boolean; preferTunnel?: boolean }) => {
     const selection = await selectConnectEndpoint(saved, { preferTunnel: options?.preferTunnel });
     console.log(`[ws] Endpoint selected: ${selection.path} (${selection.url})`);
+    // No-op when the chosen endpoint matches the live connection. Without this
+    // guard a network-change event that re-selects the *same* path (LAN probe
+    // still answers, or no LAN candidate so it stays on the tunnel) would tear
+    // down a healthy socket and re-handshake, disrupting an active session.
+    const { socket } = get();
+    const currentUrl = useConnectionLifecycleStore.getState().wsUrl;
+    const connected =
+      useConnectionLifecycleStore.getState().connectionPhase === 'connected';
+    if (
+      connected &&
+      socket &&
+      socket.readyState === WebSocket.OPEN &&
+      currentUrl === selection.url
+    ) {
+      return;
+    }
     get().connect(selection.url, saved.token, { silent: options?.silent });
   },
 
