@@ -43,6 +43,8 @@ import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
 import { validateAnthropicCompatibleProviders } from './anthropic-compatible-config.js'
 import { registerProvider, getRegisteredProviderNames } from './providers.js'
+import { getRegistryForProvider } from './models.js'
+import { refreshDiscoveredModels } from './model-discovery.js'
 import { cachedResolveCredentialFile } from './auth-probes.js'
 import { createLogger } from './logger.js'
 
@@ -228,13 +230,59 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
     models: Array.isArray(rawEntry.models) && rawEntry.models.length > 0 ? Object.freeze([...rawEntry.models]) : null,
     pricing: rawEntry.pricing ? Object.freeze({ ...ZERO_PRICING, ...rawEntry.pricing }) : null,
     contextWindow: Number.isInteger(rawEntry.contextWindow) && rawEntry.contextWindow > 0 ? rawEntry.contextWindow : null,
+    modelDiscovery: (rawEntry.modelDiscovery
+      && typeof rawEntry.modelDiscovery === 'object'
+      && typeof rawEntry.modelDiscovery.url === 'string'
+      && typeof rawEntry.modelDiscovery.format === 'string')
+      ? Object.freeze({ url: rawEntry.modelDiscovery.url, format: rawEntry.modelDiscovery.format })
+      : null,
   })
 
   const keyless = !entry.apiKeyEnv && !entry.credentialsKey
-  const pricing = entry.pricing || ZERO_PRICING
+  const flatPricing = entry.pricing || ZERO_PRICING
+
+  // Per-class mutable catalog state (#5548). Populated by model discovery
+  // (refreshModels → applyCatalog) when `modelDiscovery` is configured;
+  // otherwise stays null and every model-shaped static falls back to the
+  // static `models`/defaultModel seed. Held in a closure shared by the class
+  // statics — one catalog per registered provider id, exactly like the
+  // module-scoped registry the registry hooks below resolve.
+  //   - catalogIds: Set of discovered model ids (authoritative allowlist)
+  //   - catalogMeta: Map id → { label, contextWindow }
+  //   - catalogPricing: Map id → { input, output, cacheRead, cacheWrite }
+  let catalogIds = null
+  let catalogMeta = null
+  let catalogPricing = null
+
+  function applyCatalog(catalog) {
+    const models = Array.isArray(catalog?.models) ? catalog.models : []
+    if (models.length === 0) return
+    const ids = new Set()
+    const meta = new Map()
+    for (const m of models) {
+      if (typeof m?.id !== 'string' || m.id.length === 0) continue
+      ids.add(m.id)
+      meta.set(m.id, {
+        label: typeof m.label === 'string' && m.label.length > 0 ? m.label : m.id,
+        contextWindow: Number.isInteger(m.contextWindow) && m.contextWindow > 0 ? m.contextWindow : null,
+      })
+    }
+    const pricingTable = catalog?.pricing && typeof catalog.pricing === 'object' ? catalog.pricing : {}
+    const pricingMap = new Map()
+    for (const id of Object.keys(pricingTable)) {
+      const p = pricingTable[id]
+      if (p && typeof p === 'object') {
+        pricingMap.set(id, Object.freeze({ ...ZERO_PRICING, ...p }))
+      }
+    }
+    catalogIds = ids
+    catalogMeta = meta
+    catalogPricing = pricingMap
+  }
 
   // Picker seed: the allowlist when one is declared, otherwise just the
-  // default model (the operator can type any id — unrestricted).
+  // default model (the operator can type any id — unrestricted). Discovery,
+  // once it runs, supersedes this in getFallbackModels via catalogMeta.
   const fallbackModels = Object.freeze(
     (entry.models || [entry.defaultModel]).map((id) =>
       Object.freeze({ id, label: id, fullId: id, contextWindow: entry.contextWindow })),
@@ -321,22 +369,51 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
     }
 
     static getFallbackModels() {
+      // Once a catalog has been discovered, seed the picker from it (hundreds
+      // of models with labels + windows) instead of the static default-only
+      // seed. Pre-discovery (cold boot) the static seed keeps the picker
+      // useful until the first refresh resolves.
+      if (catalogMeta && catalogMeta.size > 0) {
+        return Object.freeze(
+          [...catalogMeta.entries()].map(([id, m]) =>
+            Object.freeze({ id, label: m.label, fullId: id, contextWindow: m.contextWindow })),
+        )
+      }
       return fallbackModels
+    }
+
+    /** The validated modelDiscovery seam for this class (null when absent). */
+    static get modelDiscovery() {
+      return entry.modelDiscovery
     }
 
     /**
      * Tri-state model validation source (settings-handlers, #2946/#5418):
-     *   - `models` declared → the array is the authoritative allowlist.
-     *   - `models` absent   → null = unrestricted; any non-empty model id
-     *     passes through verbatim and an unknown id surfaces as the
-     *     endpoint's own error (the ollama rule).
+     *   - discovered catalog present → the discovered ids are the
+     *     authoritative allowlist (replaces PROVIDER_MODELS_UNRESTRICTED for
+     *     this entry — the issue's tri-state interplay).
+     *   - `models` declared (no/empty catalog) → the static array is the
+     *     authoritative allowlist.
+     *   - neither → null = unrestricted; any non-empty model id passes
+     *     through verbatim and an unknown id surfaces as the endpoint's own
+     *     error (the ollama rule).
      */
     static getAllowedModels() {
+      if (catalogIds && catalogIds.size > 0) return [...catalogIds]
       return entry.models ? [...entry.models] : null
     }
 
     static getModelMetadata(modelId) {
       if (typeof modelId !== 'string' || modelId.length === 0) return null
+      // Discovered catalog wins: it carries real labels + context windows.
+      if (catalogMeta && catalogMeta.size > 0) {
+        const hit = catalogMeta.get(modelId)
+        if (hit) return { id: modelId, label: hit.label, fullId: modelId, contextWindow: hit.contextWindow }
+        // Catalog present but this id isn't in it — unknown model. The picker
+        // is now restricted to the catalog (getAllowedModels), so return null
+        // the same way a declared-allowlist miss does.
+        return null
+      }
       if (entry.models) {
         if (!entry.models.includes(modelId)) return null
         return { id: modelId, label: modelId, fullId: modelId, contextWindow: entry.contextWindow }
@@ -349,11 +426,59 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
       return { id: modelId, label: modelId, fullId: modelId, contextWindow: entry.contextWindow }
     }
 
+    /**
+     * Dynamic model-catalog discovery hook (#5548) — ws-history's generic
+     * `scheduleProviderModelsRefresh` calls this (fire-and-forget) whenever it
+     * sends `available_models` for this provider, and pushes a refreshed list
+     * if discovery changed the registry. No-op (resolves null) when the entry
+     * declares no `modelDiscovery`. Never throws, never blocks validation.
+     *
+     * `deps` is a test seam (fetchFn / now / ttlMs / registry / apiKey).
+     */
+    static refreshModels(deps = {}) {
+      if (!entry.modelDiscovery) return Promise.resolve(null)
+      const apiKey = deps.apiKey !== undefined ? deps.apiKey : resolveDiscoveryApiKey(entry)
+      return refreshDiscoveredModels({
+        id: entry.id,
+        url: entry.modelDiscovery.url,
+        format: entry.modelDiscovery.format,
+        apiKey,
+        registry: deps.registry || getRegistryForProvider(entry.id),
+        applyCatalog,
+        ...deps,
+      })
+    }
+
+    /** Test/introspection hook: the discovered per-model pricing snapshot. */
+    static get discoveredPricing() {
+      return catalogPricing
+    }
+
     constructor(opts = {}) {
       // Force the registry name so the provider id on this session is
       // always the config entry's id — independent of whatever the
       // embedder passed (mirrors DeepSeekSession / OllamaSession).
       super({ ...opts, provider: entry.id })
+    }
+
+    /**
+     * #5548: kick off catalog discovery on session start when the entry opts
+     * in via `modelDiscovery` — the moment we know the user cares about this
+     * endpoint, exactly like OllamaSession.start() probes /api/tags. Fire-and-
+     * forget: discovery must never delay or fail session start (byok's start()
+     * already emitted 'ready' by the time the probe resolves). On a changed
+     * list, emit `models_updated` so the picker refreshes without a restart.
+     */
+    async start() {
+      await super.start()
+      if (!entry.modelDiscovery) return
+      AnthropicCompatibleSession.refreshModels()
+        .then((models) => {
+          if (Array.isArray(models) && models.length > 0) {
+            this.emit('models_updated', { models })
+          }
+        })
+        .catch(() => {})
     }
 
     // --- Seam overrides (see byok-session.js for the contract) ---
@@ -373,12 +498,40 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
       })
     }
 
-    _getPricing() {
-      return pricing
+    /**
+     * Per-model pricing (#5548). When discovery has populated a per-model
+     * table, the model's discovered rates win so OpenRouter sessions report
+     * real cost; otherwise fall back to the flat `pricing` block (or honest
+     * all-zero for local endpoints). byok-session calls this with the active
+     * model id, so cost reflects the specific model in use, not a single flat
+     * rate across a catalog of hundreds.
+     */
+    _getPricing(model) {
+      if (catalogPricing && typeof model === 'string') {
+        const hit = catalogPricing.get(model)
+        if (hit) return hit
+      }
+      return flatPricing
     }
   }
 
   return AnthropicCompatibleSession
+}
+
+/**
+ * Resolve the API key to pass on the discovery probe (#5548). OpenRouter's
+ * /api/v1/models needs no key, but passing the entry's key is harmless and
+ * future-proofs gated aggregators. Returns null (no Authorization header) when
+ * unresolved or for the keyless placeholder. Never logged.
+ *
+ * @param {object} entry - normalized config entry
+ * @returns {string|null}
+ */
+function resolveDiscoveryApiKey(entry) {
+  if (!entry.apiKeyEnv && !entry.credentialsKey) return null
+  const resolved = resolveAnthropicCompatibleApiKey(entry)
+  if (resolved.key && resolved.key !== COMPAT_PLACEHOLDER_API_KEY) return resolved.key
+  return null
 }
 
 /**

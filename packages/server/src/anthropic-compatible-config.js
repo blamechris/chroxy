@@ -23,7 +23,13 @@
  *     "models": ["glm-4.7", "glm-4.7-air"], // optional — allowlist; absent = unrestricted (#5418 tri-state)
  *     "pricing": { "input": 0.6, "output": 2.2, "cacheRead": 0.11, "cacheWrite": 0 },
  *                                           // optional — USD per MTok; absent = zero pricing (local endpoints)
- *     "contextWindow": 200000               // optional — tokens; absent = null (never fabricate, #5444)
+ *     "contextWindow": 200000,              // optional — tokens; absent = null (never fabricate, #5444)
+ *     "modelDiscovery": { "url": "https://openrouter.ai/api/v1/models", "format": "openrouter" }
+ *                                           // optional — live model catalog + per-model pricing autofill (#5548).
+ *                                           //   format 'openrouter' (GET /api/v1/models, OpenAI-ish list with pricing)
+ *                                           //   or 'openai' (bare /v1/models, ids only). A discovered catalog feeds
+ *                                           //   the picker AND replaces the static `models` allowlist for tri-state
+ *                                           //   validation (#5418); per-model pricing overrides the flat `pricing`.
  *   }
  *
  * Security boundary: config.json is NOT permission-restricted and gets
@@ -92,10 +98,19 @@ const FORBIDDEN_SECRET_KEYS = Object.freeze(['apiKey', 'api_key', 'key', 'token'
 // surface at startup instead of silently doing nothing.
 const KNOWN_ENTRY_KEYS = new Set([
   'id', 'label', 'baseUrl', 'apiKeyEnv', 'credentialsKey',
-  'defaultModel', 'models', 'pricing', 'contextWindow',
+  'defaultModel', 'models', 'pricing', 'contextWindow', 'modelDiscovery',
 ])
 
 const PRICING_RATE_KEYS = Object.freeze(['input', 'output', 'cacheRead', 'cacheWrite'])
+
+// Model-catalog discovery formats supported today (#5548). 'openrouter' is the
+// validation target (GET /api/v1/models, OpenAI-ish list carrying per-token
+// pricing); 'openai' covers a bare /v1/models id list (LM Studio, vLLM) — no
+// pricing, just a picker feed. Keep this list the single source of truth so the
+// fetch adapters in model-discovery.js and the validator can never disagree.
+export const MODEL_DISCOVERY_FORMATS = Object.freeze(['openrouter', 'openai'])
+
+const MODEL_DISCOVERY_KEYS = new Set(['url', 'format'])
 
 /**
  * Heuristic: does this string look like a pasted secret VALUE rather
@@ -328,6 +343,63 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
     }
   }
 
+  // --- modelDiscovery (live catalog + per-model pricing autofill, #5548) ---
+  // Absent → no discovery (the picker keeps the static `models`/defaultModel
+  // seed, the steady state since #5419). A malformed value drops the whole
+  // entry: a half-configured discovery seam (bad url, unknown format) is a
+  // misconfig the operator must see, not silently degrade to "no discovery".
+  let modelDiscovery = null
+  if (Object.prototype.hasOwnProperty.call(raw, 'modelDiscovery')) {
+    const md = raw.modelDiscovery
+    if (typeof md !== 'object' || md === null || Array.isArray(md)) {
+      warnings.push(`Invalid value for '${path}.modelDiscovery': expected an object with 'url' and 'format', got ${typeName(md)}`)
+      valid = false
+    } else {
+      let mdValid = true
+      for (const key of Object.keys(md)) {
+        if (!MODEL_DISCOVERY_KEYS.has(key)) {
+          warnings.push(`Unknown key '${path}.modelDiscovery.${key}' (will be ignored)`)
+        }
+      }
+      // url — http(s), no embedded credentials (same posture as baseUrl).
+      let url = null
+      if (typeof md.url !== 'string' || md.url.length === 0) {
+        warnings.push(`Invalid value for '${path}.modelDiscovery.url': required — the http(s) URL of the model-catalog endpoint`)
+        mdValid = false
+      } else {
+        let parsed = null
+        try {
+          parsed = new URL(md.url)
+        } catch {
+          warnings.push(`Invalid URL format for '${path}.modelDiscovery.url': expected an http(s) URL (value not shown — fix it in config.json)`)
+          mdValid = false
+        }
+        if (parsed && parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          warnings.push(`Invalid value for '${path}.modelDiscovery.url': must use http:// or https://, got '${parsed.protocol}'`)
+          mdValid = false
+        }
+        if (parsed && (parsed.username || parsed.password)) {
+          warnings.push(`Invalid value for '${path}.modelDiscovery.url': embedded credentials (user:pass@) are not supported — secrets don't belong in config.json`)
+          mdValid = false
+        }
+        if (mdValid) url = md.url
+      }
+      // format — one of the known adapters.
+      let format = null
+      if (typeof md.format !== 'string' || !MODEL_DISCOVERY_FORMATS.includes(md.format)) {
+        warnings.push(`Invalid value for '${path}.modelDiscovery.format': expected one of ${MODEL_DISCOVERY_FORMATS.map((f) => `'${f}'`).join(', ')}, got ${JSON.stringify(md.format)}`)
+        mdValid = false
+      } else {
+        format = md.format
+      }
+      if (mdValid) {
+        modelDiscovery = Object.freeze({ url, format })
+      } else {
+        valid = false
+      }
+    }
+  }
+
   if (!valid) return null
 
   seenIds.add(id)
@@ -341,6 +413,7 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
     models: models ? Object.freeze(models) : null,
     pricing,
     contextWindow,
+    modelDiscovery,
   })
 }
 
