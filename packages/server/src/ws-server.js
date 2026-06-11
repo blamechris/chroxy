@@ -595,6 +595,9 @@ export class WsServer {
     const sendFn = (ws, msg) => self._send(ws, msg)
     this._broadcaster = new WsBroadcaster({
       clients: this.clients,
+      // #5563: share the reverse index owner so session broadcasts + subscriber
+      // counts iterate the sessionId→clients index instead of scanning all clients.
+      clientManager: this._clientManager,
       sendFn,
       backpressureThreshold: this._backpressureThreshold,
       backpressureMaxDrops: this._backpressureMaxDrops,
@@ -657,6 +660,14 @@ export class WsServer {
       get webTaskManager() { return self._webTaskManager },
       primaryClients: this._primaryClients,
       get clients() { return self.clients },
+      // #5563: index-maintaining mutators for client subscription / active
+      // session. Handlers MUST route subscription + active-session changes
+      // through these (NOT bare `client.subscribedSessionIds.add()` /
+      // `client.activeSessionId = x`) so the sessionId→clients reverse index
+      // can never drift from the per-client Sets.
+      subscribeClient: (client, sid) => self._clientManager.subscribe(client, sid),
+      unsubscribeClient: (client, sid) => self._clientManager.unsubscribe(client, sid),
+      setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
       permissionSessionMap: this._permissionSessionMap,
       questionSessionMap: this._questionSessionMap,
       // #3637: stable per-session auto-evaluator iteration counter (#3186).
@@ -689,6 +700,9 @@ export class WsServer {
     // Context objects for extracted modules (ws-auth.js, ws-history.js)
     this._historyCtx = {
       get clients() { return self.clients },
+      // #5563: index-maintaining active-session mutator for the post-auth
+      // restore path (ws-history.js sets activeSessionId once per connect).
+      setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
       get sessionManager() { return self.sessionManager },
       get cliSession() { return self.cliSession },
       get defaultSessionId() { return self.defaultSessionId },
@@ -1257,6 +1271,10 @@ export class WsServer {
       const rateLimitKey = getRateLimitKey(socketIp, req)
       this._clientManager.addClient(ws, {
         id: clientId,
+        // #5563: stable back-reference to this client's socket so the
+        // sessionId→clients reverse index (which stores `client`) can resolve
+        // the `ws` for readyState + backpressure without a per-send Map lookup.
+        _ws: ws,
         authenticated: false,
         mode: 'chat', // default to chat view
         activeSessionId: null,
@@ -1754,7 +1772,8 @@ export class WsServer {
       // bound binding is the security contract for that client.
       if (client.boundSessionId && client.boundSessionId !== sessionId) continue
       if (!client.subscribedSessionIds) continue
-      client.subscribedSessionIds.add(sessionId)
+      // #5563: route through the index-maintaining helper.
+      this._clientManager.subscribe(client, sessionId)
     }
   }
 
@@ -1787,7 +1806,8 @@ export class WsServer {
       if (!client.authenticated) continue
       if (client.boundSessionId && client.boundSessionId !== sessionId) continue
       if (!client.subscribedSessionIds) continue
-      client.subscribedSessionIds.add(sessionId)
+      // #5563: route through the index-maintaining helper.
+      this._clientManager.subscribe(client, sessionId)
     }
   }
 

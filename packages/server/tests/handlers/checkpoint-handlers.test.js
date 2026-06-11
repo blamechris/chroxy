@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { checkpointHandlers } from '../../src/handlers/checkpoint-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, makeSessionIndexCtx } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
@@ -34,7 +34,8 @@ function makeCtx(sessions = new Map(), overrides = {}) {
       })),
       deleteCheckpoint: createSpy(),
     },
-    clients: new Map(),
+    // #5563: index-maintaining helpers backed by a real WsClientManager.
+    ...makeSessionIndexCtx(),
     _sent: sent,
     _broadcasts: broadcasts,
     ...overrides,

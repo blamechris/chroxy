@@ -48,8 +48,10 @@ function handleSwitchSession(ws, client, msg, ctx) {
     sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
-  client.activeSessionId = targetId
-  client.subscribedSessionIds.add(targetId)
+  // #5563: route active-session + subscription through the index-maintaining
+  // helpers so the sessionId→clients reverse index stays in sync.
+  ctx.setActiveSession(client, targetId)
+  ctx.subscribeClient(client, targetId)
   // #4835: persist the chosen session for this device so the next reconnect
   // restores it instead of snapping back to defaultSessionId. Bound
   // clients are excluded — their activeSessionId is locked to
@@ -151,8 +153,9 @@ function handleCreateSession(ws, client, msg, ctx) {
 
   try {
     const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, ...envOpts })
-    client.activeSessionId = sessionId
-    client.subscribedSessionIds.add(sessionId)
+    // #5563: index-maintaining helpers.
+    ctx.setActiveSession(client, sessionId)
+    ctx.subscribeClient(client, sessionId)
     const entry = ctx.sessionManager.getSession(sessionId)
     ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
     ctx.sendSessionInfo(ws, sessionId)
@@ -207,9 +210,11 @@ async function handleDestroySession(ws, client, msg, ctx) {
 
   const firstId = ctx.sessionManager.firstSessionId
   for (const [clientWs, c] of ctx.clients) {
-    c.subscribedSessionIds?.delete(targetId)
+    // #5563: index-maintaining helpers — unsubscribe every client from the
+    // destroyed session, and re-home any client that was actively viewing it.
+    ctx.unsubscribeClient(c, targetId)
     if (c.authenticated && c.activeSessionId === targetId) {
-      c.activeSessionId = firstId
+      ctx.setActiveSession(c, firstId)
       const entry = ctx.sessionManager.getSession(firstId)
       if (entry) {
         ctx.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
@@ -272,7 +277,8 @@ function handleSubscribeSessions(ws, client, msg, ctx) {
       if (!client.subscribedSessionIds.has(sid)) {
         newlySubscribed.push(sid)
       }
-      client.subscribedSessionIds.add(sid)
+      // #5563: index-maintaining helper.
+      ctx.subscribeClient(client, sid)
     }
   }
   ctx.send(ws, {
@@ -288,7 +294,10 @@ function handleSubscribeSessions(ws, client, msg, ctx) {
 function handleUnsubscribeSessions(ws, client, msg, ctx) {
   for (const sid of msg.sessionIds) {
     if (sid !== client.activeSessionId) {
-      client.subscribedSessionIds.delete(sid)
+      // #5563: index-maintaining helper. (The guard keeps the active session
+      // subscribed; the helper would also keep it indexed via activeSessionId,
+      // but preserving the explicit subscription matches prior behaviour.)
+      ctx.unsubscribeClient(client, sid)
     }
   }
   ctx.send(ws, {

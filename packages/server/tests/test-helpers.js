@@ -1,7 +1,29 @@
 import { EventEmitter } from 'node:events'
+import { WsClientManager } from '../src/ws-client-manager.js'
 
 // Re-export GIT from the source module so test files can import it from here
 export { GIT } from '../src/git.js'
+
+/**
+ * #5563: build the index-maintaining ctx fields backed by a real
+ * WsClientManager so handler tests exercise the production sessionId→clients
+ * reverse-index path. Returns `{ clientManager, clients, subscribeClient,
+ * unsubscribeClient, setActiveSession }`. Spread the returned object into a
+ * handler ctx; `clients` IS the manager's Map, so clients inserted directly
+ * into it are visible to the index and to `verifyIndexIntegrity()`.
+ *
+ * @returns {{clientManager: WsClientManager, clients: Map, subscribeClient: Function, unsubscribeClient: Function, setActiveSession: Function}}
+ */
+export function makeSessionIndexCtx() {
+  const clientManager = new WsClientManager()
+  return {
+    clientManager,
+    clients: clientManager.clients,
+    subscribeClient: (client, sid) => clientManager.subscribe(client, sid),
+    unsubscribeClient: (client, sid) => clientManager.unsubscribe(client, sid),
+    setActiveSession: (client, sid) => clientManager.setActiveSession(client, sid),
+  }
+}
 
 /**
  * Poll until a predicate returns a truthy value, then return it.

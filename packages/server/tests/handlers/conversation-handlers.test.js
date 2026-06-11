@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { conversationHandlers } from '../../src/handlers/conversation-handlers.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, makeSessionIndexCtx } from '../test-helpers.js'
 import { CliSession, buildClaudeCliArgs } from '../../src/cli-session.js'
 import { SdkSession } from '../../src/sdk-session.js'
 import { CodexSession } from '../../src/codex-session.js'
@@ -13,9 +13,10 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     broadcast: createSpy(),
     broadcastToSession: createSpy(),
     broadcastSessionList: createSpy(),
-    // autoSubscribeOtherClients (handler-utils.js) iterates ctx.clients; empty
-    // Map is sufficient for handler-unit tests where no other clients exist.
-    clients: new Map(),
+    // #5563: index-maintaining helpers backed by a real WsClientManager.
+    // autoSubscribeOtherClients (handler-utils.js) iterates ctx.clients; the
+    // manager's empty Map is sufficient where no other clients exist.
+    ...makeSessionIndexCtx(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
     // Default test stubs — never touch real ~/.claude/projects

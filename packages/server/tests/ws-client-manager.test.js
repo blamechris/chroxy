@@ -276,4 +276,254 @@ describe('WsClientManager', () => {
       assert.strictEqual(entries[1][1], info2)
     })
   })
+
+  // #5563: sessionId→clients reverse index. Every mutation path that changes a
+  // client's activeSessionId or subscribedSessionIds membership must keep the
+  // index in lock-step. `verifyIndexIntegrity()` is the drift oracle (full scan
+  // vs index) and is asserted after each mutation so a regression in any helper
+  // surfaces immediately.
+  describe('reverse index (#5563)', () => {
+    /** Register an authenticated client with a back-ref ws, like ws-server addClient. */
+    function register(id, overrides = {}) {
+      const ws = createMockWs(1)
+      const info = createClientInfo({ id, authenticated: true, _ws: ws, ...overrides })
+      manager.addClient(ws, info)
+      return { ws, client: info }
+    }
+
+    /** Set of client ids the index holds for a session (order-independent). */
+    function indexedIds(sessionId) {
+      return [...manager.getSessionSubscribers(sessionId)].map(c => c.id).sort()
+    }
+
+    it('starts empty — a fresh client contributes no index entries', () => {
+      register('c1')
+      assert.deepStrictEqual(indexedIds('s1'), [])
+      manager.verifyIndexIntegrity()
+    })
+
+    it('getSessionSubscribers returns an empty Set for unknown session', () => {
+      const set = manager.getSessionSubscribers('nope')
+      assert.ok(set instanceof Set)
+      assert.strictEqual(set.size, 0)
+    })
+
+    it('subscribe adds to index and to the per-client Set', () => {
+      const { client } = register('c1')
+      manager.subscribe(client, 's1')
+      assert.deepStrictEqual(indexedIds('s1'), ['c1'])
+      assert.ok(client.subscribedSessionIds.has('s1'))
+      manager.verifyIndexIntegrity()
+    })
+
+    it('subscribe is idempotent (re-subscribe does not double-count)', () => {
+      const { client } = register('c1')
+      manager.subscribe(client, 's1')
+      manager.subscribe(client, 's1')
+      assert.strictEqual(manager.getSessionSubscribers('s1').size, 1)
+      manager.verifyIndexIntegrity()
+    })
+
+    it('unsubscribe removes from index when not the active session', () => {
+      const { client } = register('c1')
+      manager.subscribe(client, 's1')
+      manager.unsubscribe(client, 's1')
+      assert.deepStrictEqual(indexedIds('s1'), [])
+      assert.ok(!client.subscribedSessionIds.has('s1'))
+      // empty key pruned
+      assert.ok(!manager._sessionIndex.has('s1'))
+      manager.verifyIndexIntegrity()
+    })
+
+    it('unsubscribe keeps a client indexed if it is still actively viewing', () => {
+      const { client } = register('c1')
+      manager.setActiveSession(client, 's1')
+      manager.subscribe(client, 's1')
+      manager.unsubscribe(client, 's1') // active still references s1
+      assert.deepStrictEqual(indexedIds('s1'), ['c1'])
+      assert.strictEqual(client.activeSessionId, 's1')
+      manager.verifyIndexIntegrity()
+    })
+
+    it('setActiveSession indexes the new session and de-indexes the old', () => {
+      const { client } = register('c1')
+      manager.setActiveSession(client, 's1')
+      assert.deepStrictEqual(indexedIds('s1'), ['c1'])
+      manager.setActiveSession(client, 's2')
+      assert.deepStrictEqual(indexedIds('s1'), [])
+      assert.deepStrictEqual(indexedIds('s2'), ['c1'])
+      manager.verifyIndexIntegrity()
+    })
+
+    it('setActiveSession keeps the old session indexed if still subscribed', () => {
+      const { client } = register('c1')
+      manager.subscribe(client, 's1')
+      manager.setActiveSession(client, 's1')
+      manager.setActiveSession(client, 's2') // s1 still subscribed
+      assert.deepStrictEqual(indexedIds('s1'), ['c1'])
+      assert.deepStrictEqual(indexedIds('s2'), ['c1'])
+      manager.verifyIndexIntegrity()
+    })
+
+    it('setActiveSession(null) clears the active reference', () => {
+      const { client } = register('c1')
+      manager.setActiveSession(client, 's1')
+      manager.setActiveSession(client, null)
+      assert.deepStrictEqual(indexedIds('s1'), [])
+      assert.strictEqual(client.activeSessionId, null)
+      manager.verifyIndexIntegrity()
+    })
+
+    it('a client active AND subscribed appears exactly once in the index', () => {
+      const { client } = register('c1')
+      manager.setActiveSession(client, 's1')
+      manager.subscribe(client, 's1')
+      assert.strictEqual(manager.getSessionSubscribers('s1').size, 1)
+      manager.verifyIndexIntegrity()
+    })
+
+    it('removeClient purges the client from every index Set (disconnect)', () => {
+      const { ws, client } = register('c1')
+      manager.setActiveSession(client, 's1')
+      manager.subscribe(client, 's2')
+      manager.subscribe(client, 's3')
+      manager.removeClient(ws)
+      assert.deepStrictEqual(indexedIds('s1'), [])
+      assert.deepStrictEqual(indexedIds('s2'), [])
+      assert.deepStrictEqual(indexedIds('s3'), [])
+      // all keys pruned
+      assert.strictEqual(manager._sessionIndex.size, 0)
+      manager.verifyIndexIntegrity()
+    })
+
+    it('removeClient mid-subscription leaves other subscribers intact', () => {
+      const a = register('a')
+      const b = register('b')
+      manager.subscribe(a.client, 's1')
+      manager.subscribe(b.client, 's1')
+      manager.removeClient(a.ws)
+      assert.deepStrictEqual(indexedIds('s1'), ['b'])
+      manager.verifyIndexIntegrity()
+    })
+
+    it('destroyed-session cleanup: unsubscribe all + re-home active viewers', () => {
+      // Mirror handleDestroySession: every client unsubscribes from the dead
+      // session; clients active on it move to a fallback session.
+      const a = register('a')
+      const b = register('b')
+      // seed index for current active state
+      manager.setActiveSession(a.client, 's1')
+      manager.subscribe(b.client, 's1')
+      manager.subscribe(a.client, 's1')
+      assert.deepStrictEqual(indexedIds('s1'), ['a', 'b'])
+
+      // destroy s1
+      for (const [, c] of manager) {
+        manager.unsubscribe(c, 's1')
+        if (c.activeSessionId === 's1') manager.setActiveSession(c, 's0')
+      }
+      assert.deepStrictEqual(indexedIds('s1'), [])
+      assert.deepStrictEqual(indexedIds('s0'), ['a'])
+      assert.ok(!manager._sessionIndex.has('s1'))
+      manager.verifyIndexIntegrity()
+    })
+
+    it('verifyIndexIntegrity throws when the index is corrupted by a direct mutation', () => {
+      const { client } = register('c1')
+      manager.subscribe(client, 's1')
+      // Simulate drift: a rogue caller adds to the per-client Set WITHOUT the
+      // index (the exact bug the helpers + lint prevent).
+      client.subscribedSessionIds.add('s2')
+      assert.throws(() => manager.verifyIndexIntegrity(), /index drift/)
+    })
+
+    it('verifyIndexIntegrity throws on a stale index member', () => {
+      const { client } = register('c1')
+      manager.subscribe(client, 's1')
+      // Simulate drift: remove from the per-client Set but leave the index entry.
+      client.subscribedSessionIds.delete('s1')
+      assert.throws(() => manager.verifyIndexIntegrity(), /index drift/)
+    })
+  })
+
+  // #5563 parity oracle: over a randomized sequence of every mutation path, the
+  // reverse index must, at every step, deliver to exactly the recipient set the
+  // OLD full-scan filter (activeSessionId === sid || subscribedSessionIds.has)
+  // would. This is the regression net against any future helper that drifts.
+  describe('reverse index parity oracle (#5563)', () => {
+    /** The pre-#5563 recipient predicate, evaluated by full scan. */
+    function oracleRecipients(mgr, sessionId) {
+      const ids = []
+      for (const [, client] of mgr) {
+        if (client.activeSessionId === sessionId ||
+            (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))) {
+          ids.push(client.id)
+        }
+      }
+      return ids.sort()
+    }
+
+    function indexRecipients(mgr, sessionId) {
+      return [...mgr.getSessionSubscribers(sessionId)].map(c => c.id).sort()
+    }
+
+    it('index recipients equal full-scan recipients across randomized ops', () => {
+      // Deterministic PRNG (mulberry32) so a failure is reproducible.
+      let seed = 0x5563face
+      const rand = () => {
+        seed |= 0; seed = (seed + 0x6D2B79F5) | 0
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+      }
+      const pick = (arr) => arr[Math.floor(rand() * arr.length)]
+
+      const mgr = new WsClientManager()
+      const sessions = ['s1', 's2', 's3', 's4']
+      const wsById = new Map()
+      const register = (id) => {
+        const ws = createMockWs(1)
+        const info = createClientInfo({ id, authenticated: true, _ws: ws })
+        mgr.addClient(ws, info)
+        wsById.set(id, ws)
+        return info
+      }
+      // Start with a few clients.
+      for (let i = 0; i < 5; i++) register('c' + i)
+
+      const liveClients = () => [...mgr].map(([, c]) => c)
+
+      for (let step = 0; step < 3000; step++) {
+        const clients = liveClients()
+        const op = Math.floor(rand() * 6)
+        if (op === 0 && clients.length > 0) {
+          mgr.subscribe(pick(clients), pick(sessions))
+        } else if (op === 1 && clients.length > 0) {
+          mgr.unsubscribe(pick(clients), pick(sessions))
+        } else if (op === 2 && clients.length > 0) {
+          mgr.setActiveSession(pick(clients), pick(sessions))
+        } else if (op === 3 && clients.length > 0) {
+          mgr.setActiveSession(pick(clients), null)
+        } else if (op === 4 && clients.length > 1) {
+          // disconnect a random client mid-subscription
+          const victim = pick(clients)
+          mgr.removeClient(wsById.get(victim.id))
+          wsById.delete(victim.id)
+        } else if (op === 5) {
+          register('c' + step) // new connection
+        }
+
+        // Index must match the oracle for EVERY session at EVERY step.
+        for (const sid of sessions) {
+          assert.deepStrictEqual(
+            indexRecipients(mgr, sid),
+            oracleRecipients(mgr, sid),
+            `parity drift at step ${step} for ${sid}`,
+          )
+        }
+        // And the structural integrity check must hold.
+        mgr.verifyIndexIntegrity()
+      }
+    })
+  })
 })

@@ -94,8 +94,9 @@ async function handleResumeConversation(ws, client, msg, ctx) {
       cwd: cwd || undefined,
       name,
     })
-    client.activeSessionId = sessionId
-    client.subscribedSessionIds.add(sessionId)
+    // #5563: index-maintaining helpers.
+    ctx.setActiveSession(client, sessionId)
+    ctx.subscribeClient(client, sessionId)
     const entry = ctx.sessionManager.getSession(sessionId)
     ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
     ctx.sendSessionInfo(ws, sessionId)

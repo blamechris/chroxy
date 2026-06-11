@@ -18,15 +18,27 @@ const log = createLogger('ws')
  * @param {object} opts
  * @param {Map} opts.clients             ws → client Map (shared reference with WsServer)
  * @param {function} opts.sendFn         (ws, message) => void — handles encryption, seq, etc.
+ * @param {object} [opts.clientManager]  WsClientManager owning the sessionId→clients reverse
+ *                                        index (#5563). When present, session-scoped broadcasts
+ *                                        and subscriber counts iterate the index Set instead of
+ *                                        scanning every client. Optional so unit-test fixtures
+ *                                        that construct WsBroadcaster with a bare `clients` Map
+ *                                        keep working via the full-scan fallback.
  * @param {number} [opts.backpressureThreshold]  bytes; skip send when bufferedAmount exceeds this
  * @param {number} [opts.backpressureMaxDrops]   close connection after this many consecutive drops
  */
 export class WsBroadcaster {
-  constructor({ clients, sendFn, backpressureThreshold, backpressureMaxDrops } = {}) {
+  constructor({ clients, clientManager, sendFn, backpressureThreshold, backpressureMaxDrops } = {}) {
     this._clients = clients
+    this._clientManager = clientManager ?? null
     this._sendFn = sendFn
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024
     this._backpressureMaxDrops = backpressureMaxDrops ?? 10
+    // #5563 drift defense: set CHROXY_WS_INDEX_ASSERT=1 to verify, before every
+    // session broadcast, that the reverse index matches a full scan. OFF by
+    // default — checked once here, not per-broadcast, so the hot path stays a
+    // single boolean test. Intended for staging / reproduction, never prod.
+    this._assertIndexIntegrity = process.env.CHROXY_WS_INDEX_ASSERT === '1'
   }
 
   /** Public broadcast: send a message to all authenticated clients */
@@ -122,18 +134,51 @@ export class WsBroadcaster {
    * encounter an authenticated client without the Set, log a one-shot
    * warning to surface the real bug — the broadcast itself stays alive.
    */
-  _broadcastToSession(sessionId, message, filter = (client) => {
-    if (client.activeSessionId === sessionId) return true
-    if (client.subscribedSessionIds) return client.subscribedSessionIds.has(sessionId)
-    if (client.authenticated && !client._missingSubscribedSessionIdsWarned) {
-      log.warn(`Client ${client.id} is authenticated but has no subscribedSessionIds Set — falling back to activeSessionId match only (sessionId=${sessionId}, messageType=${message?.type || 'unknown'})`)
-      client._missingSubscribedSessionIdsWarned = true
-    }
-    return false
-  }) {
+  _broadcastToSession(sessionId, message, filter) {
     const tagged = { ...message, sessionId }
+
+    if (this._assertIndexIntegrity && this._clientManager) {
+      // Throws on drift, naming the offending session/client — surfaces the
+      // mutation site that bypassed a helper. Gated; off in prod.
+      this._clientManager.verifyIndexIntegrity()
+    }
+
+    // #5563 fast path: iterate the reverse index (clients active-or-subscribed
+    // to this session) instead of scanning every client. Only taken when no
+    // custom filter is supplied — a caller-provided filter overrides the
+    // default recipient selection entirely, so it may match clients that are
+    // NOT in the index (e.g. a broadcast to everyone), which the index can't
+    // serve. The remaining per-member conditions (authenticated, readyState)
+    // are still applied to each index member; index membership exactly equals
+    // the default filter's `activeSessionId === sessionId ||
+    // subscribedSessionIds.has(sessionId)` predicate by construction, so this
+    // path delivers to the identical recipient set the full scan would.
+    if (!filter && this._clientManager) {
+      // The index stores `client`; the send needs its `ws` for readyState +
+      // backpressure. Each client carries a stable `_ws` back-reference set at
+      // registration (ws-server.js addClient), so no per-send Map lookup is
+      // needed. The index Set holds only this session's viewers.
+      for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
+        if (!client.authenticated) continue
+        const sock = client._ws
+        if (!sock || sock.readyState !== 1) continue
+        this._sendOneWithBackpressure(sock, client, tagged)
+      }
+      return
+    }
+
+    // Full-scan fallback: no index (test fixtures) or a custom filter.
+    const effectiveFilter = filter || ((client) => {
+      if (client.activeSessionId === sessionId) return true
+      if (client.subscribedSessionIds) return client.subscribedSessionIds.has(sessionId)
+      if (client.authenticated && !client._missingSubscribedSessionIdsWarned) {
+        log.warn(`Client ${client.id} is authenticated but has no subscribedSessionIds Set — falling back to activeSessionId match only (sessionId=${sessionId}, messageType=${message?.type || 'unknown'})`)
+        client._missingSubscribedSessionIdsWarned = true
+      }
+      return false
+    })
     for (const [ws, client] of this._clients) {
-      if (client.authenticated && filter(client) && ws.readyState === 1) {
+      if (client.authenticated && effectiveFilter(client) && ws.readyState === 1) {
         this._sendOneWithBackpressure(ws, client, tagged)
       }
     }
@@ -150,6 +195,24 @@ export class WsBroadcaster {
    * @returns {number}
    */
   _countSessionSubscribers(sessionId) {
+    // #5563 hot path: this runs once per buffered delta (per token) from
+    // EventNormalizer's coalescing-window heuristic (ws-server.js), so the old
+    // full-clients scan multiplied broadcast cost by delta frequency. Iterate
+    // only the reverse-index Set — its members already satisfy `activeSessionId
+    // === sessionId || subscribedSessionIds.has(sessionId)`, leaving just the
+    // per-member authenticated + readyState checks (cost ∝ subscribers, not
+    // total clients).
+    if (this._clientManager) {
+      let count = 0
+      for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
+        if (!client.authenticated) continue
+        const sock = client._ws
+        if (!sock || sock.readyState !== 1) continue
+        count++
+      }
+      return count
+    }
+    // Full-scan fallback for fixtures constructed without a clientManager.
     let count = 0
     for (const [ws, client] of this._clients) {
       if (!client.authenticated || ws.readyState !== 1) continue
