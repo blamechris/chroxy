@@ -66,6 +66,8 @@ function makeArgs(
     onRevealError: vi.fn(),
     copyToClipboard: vi.fn(),
     openCreateSessionAt: vi.fn(),
+    copySessionTranscript: vi.fn(),
+    summarizeAndCreateSession: vi.fn(),
     confirmCloseSession: vi.fn(),
     ...overrides,
   }
@@ -266,6 +268,38 @@ describe('buildSidebarContextMenuItems', () => {
       expect(close?.destructive).toBe(true)
       expect(close?.separatorAbove).toBe(true)
     })
+
+    it('#5547 — Copy transcript calls copySessionTranscript with the session id', () => {
+      const copySessionTranscript = vi.fn()
+      const session = makeSession({ sessionId: 's42' })
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'session', sessionId: 's42' },
+          sessions: [session],
+          copySessionTranscript,
+        }),
+      )
+      const copy = items.find(i => i.id === 'copy-transcript')
+      expect(copy?.label).toBe('Copy transcript')
+      copy?.onClick?.()
+      expect(copySessionTranscript).toHaveBeenCalledWith('s42')
+    })
+
+    it('#5547 — Summarize calls summarizeAndCreateSession with the session id', () => {
+      const summarizeAndCreateSession = vi.fn()
+      const session = makeSession({ sessionId: 's42' })
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'session', sessionId: 's42' },
+          sessions: [session],
+          summarizeAndCreateSession,
+        }),
+      )
+      const summarize = items.find(i => i.id === 'summarize')
+      expect(summarize?.label).toBe('Summarize & start new session')
+      summarize?.onClick?.()
+      expect(summarizeAndCreateSession).toHaveBeenCalledWith('s42')
+    })
   })
 
   describe('repo branch (#4045 contract)', () => {
@@ -309,6 +343,53 @@ describe('buildSidebarContextMenuItems', () => {
       )
       items.find(i => i.id === 'reveal')?.onClick?.()
       expect(revealInFinder).toHaveBeenCalledWith('/home/user/projects/api')
+    })
+
+    it('#5547 — single live session yields one Summarize item targeting it', () => {
+      const summarizeAndCreateSession = vi.fn()
+      const session = makeSession({ sessionId: 'only', cwd: '/home/user/projects/api' })
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'repo', path: '/home/user/projects/api' },
+          sessions: [session],
+          summarizeAndCreateSession,
+        }),
+      )
+      const summarize = items.filter(i => i.id.startsWith('summarize'))
+      expect(summarize).toHaveLength(1)
+      expect(summarize[0]?.id).toBe('summarize')
+      summarize[0]?.onClick?.()
+      expect(summarizeAndCreateSession).toHaveBeenCalledWith('only')
+    })
+
+    it('#5547 — multiple live sessions disambiguate with one item each, most-recent first', () => {
+      const summarizeAndCreateSession = vi.fn()
+      const older = makeSession({ sessionId: 'older', name: 'Older', cwd: '/p', lastActivityAt: 100 })
+      const newer = makeSession({ sessionId: 'newer', name: 'Newer', cwd: '/p', lastActivityAt: 999 })
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'repo', path: '/p' },
+          sessions: [older, newer],
+          summarizeAndCreateSession,
+        }),
+      )
+      const summarize = items.filter(i => i.id.startsWith('summarize-'))
+      expect(summarize).toHaveLength(2)
+      // Most-recent first.
+      expect(summarize[0]?.label).toContain('Newer')
+      expect(summarize[1]?.label).toContain('Older')
+      summarize[0]?.onClick?.()
+      expect(summarizeAndCreateSession).toHaveBeenCalledWith('newer')
+    })
+
+    it('#5547 — no live session in the group yields no Summarize item', () => {
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'repo', path: '/empty' },
+          sessions: [makeSession({ cwd: '/elsewhere' })],
+        }),
+      )
+      expect(items.some(i => i.id.startsWith('summarize'))).toBe(false)
     })
   })
 

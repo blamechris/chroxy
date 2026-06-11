@@ -135,7 +135,8 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
+import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -2196,6 +2197,23 @@ function handleIntegrationActionAck(msg: Record<string, unknown>, get: MsgGet, s
 }
 
 /**
+ * #5547: a `summarize_session_result` resolves the pending summarize promise
+ * (keyed by the echoed requestId) so the awaiting create-session flow opens
+ * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
+ * promise from the session_error branch below.
+ */
+function handleSummarizeSessionResult(msg: Record<string, unknown>): void {
+  const parsed = ServerSummarizeSessionResultSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const requestId = parsed.data.requestId;
+  if (typeof requestId !== 'string' || !requestId) return;
+  resolveSummarizeRequest(requestId, {
+    summary: parsed.data.summary,
+    truncated: Boolean(parsed.data.truncated),
+  });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
@@ -2263,6 +2281,9 @@ const HANDLERS: Record<string, Handler> = {
   // #5500: positive ack correlating an integration_action (repo-memory
   // Reindex) request to its outcome.
   integration_action_ack: handleIntegrationActionAck,
+  // #5547: one-shot session-summary result; resolves the pending summarize
+  // promise so the create-session flow can open with the brief seeded.
+  summarize_session_result: handleSummarizeSessionResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -2777,6 +2798,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         clearCancellingActivity(get, set, msg.sessionId, msg.activityId);
       } else if (parsed.code === 'SESSION_NOT_FOUND') {
         clearCancellingForSession(get, set, parsed.attemptedSessionId ?? undefined);
+      } else if (parsed.code === 'SUMMARIZE_FAILED' && typeof msg.requestId === 'string') {
+        // #5547: a failed summarize_session echoes the requestId — reject the
+        // pending promise so the awaiting create-session flow surfaces the
+        // (curated, leak-free) message. Return early: the generic toast below
+        // would double-report; the caller decides how to surface it.
+        rejectSummarizeRequest(msg.requestId, parsed.message || 'Could not summarize this session.');
+        return;
       } else if (parsed.code === 'INTEGRATION_ACTION_FAILED' && typeof msg.repoPath === 'string') {
         // #5500/#5502: a failed integration action echoes the exact repoPath
         // (and action) — clear that row's pending state and surface the

@@ -6,8 +6,11 @@
  * useMemo inside App.tsx now just calls this with the live dependencies.
  *
  * Per-branch items:
- *   - `session` — Duplicate Session, Open in Finder (Tauri+cwd), Close Session
- *   - `repo`    — New Session Here, Open in Finder (Tauri)
+ *   - `session` — Duplicate Session, Copy transcript (#5547), Summarize & start
+ *     new session (#5547), Open in Finder (Tauri+cwd), Close Session
+ *   - `repo`    — New Session Here, Summarize & start new session targeting the
+ *     group's most-recent session (or one item per live session when several,
+ *     #5547), Open in Finder (Tauri)
  *   - `resumable` (#4249) — Resume Conversation, Copy Conversation ID,
  *     Open in Finder (Tauri+cwd). cwd is looked up from `conversationHistory`
  *     so the resume + reveal actions point at the same project the
@@ -52,6 +55,19 @@ export interface BuildSidebarContextMenuItemsArgs {
   /** Open the CreateSessionModal at a given cwd (for the repo branch). */
   openCreateSessionAt: (cwd: string) => void
   /**
+   * #5547: copy a SPECIFIC session's transcript to the clipboard. The sidebar
+   * action must work for any session, not just the active one, so this reads
+   * the target session's messages from the store and formats + copies them.
+   */
+  copySessionTranscript: (sessionId: string) => void
+  /**
+   * #5547: summarize a session server-side, then open the create-session modal
+   * with the session's cwd prefilled and the brief seeded EDITABLE in the
+   * composer. Async (awaits the model call); the caller surfaces progress +
+   * errors. Never auto-sends.
+   */
+  summarizeAndCreateSession: (sessionId: string) => void
+  /**
    * Wrapper around the store's `destroySession` that prompts the user first
    * (the session-row Close action must not destroy without confirmation).
    */
@@ -72,6 +88,8 @@ export function buildSidebarContextMenuItems(
     onRevealError,
     copyToClipboard,
     openCreateSessionAt,
+    copySessionTranscript,
+    summarizeAndCreateSession,
     confirmCloseSession,
   } = args
 
@@ -104,6 +122,21 @@ export function buildSidebarContextMenuItems(
         },
       },
       {
+        // #5547: Copy transcript from the right-click menu so it works without
+        // switching to the session first (the header overflow only copies the
+        // ACTIVE session's transcript).
+        id: 'copy-transcript',
+        label: 'Copy transcript',
+        onClick: () => copySessionTranscript(session.sessionId),
+      },
+      {
+        // #5547: cross-session /compact — server-side summary seeded editable
+        // into a fresh create-session composer.
+        id: 'summarize',
+        label: 'Summarize & start new session',
+        onClick: () => summarizeAndCreateSession(session.sessionId),
+      },
+      {
         id: 'reveal',
         label: 'Open in Finder',
         onClick: isTauri && session.cwd ? () => reveal(session.cwd) : undefined,
@@ -128,15 +161,38 @@ export function buildSidebarContextMenuItems(
 
   if (target.type === 'repo' && target.path) {
     const repoPath = target.path
+    // #5547: the group's live sessions, most-recent first. The repo group is
+    // keyed by cwd, so sessions sharing this cwd belong to the group. A single
+    // live session gets one "Summarize…" item targeting it; several get one
+    // item per session (a simple in-menu picker) so the operator disambiguates
+    // which conversation to carry forward.
+    const groupSessions = sessions
+      .filter(s => s.cwd === repoPath)
+      .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))
+    const soleSession = groupSessions.length === 1 ? groupSessions[0] : null
+    const summarizeItems: ContextMenuItem[] = soleSession
+      ? [{
+          id: 'summarize',
+          label: 'Summarize & start new session',
+          onClick: () => summarizeAndCreateSession(soleSession.sessionId),
+        }]
+      : groupSessions.map((s, i) => ({
+          id: `summarize-${s.sessionId}`,
+          label: `Summarize "${s.name}" & start new session`,
+          separatorAbove: i === 0,
+          onClick: () => summarizeAndCreateSession(s.sessionId),
+        }))
     return [
       {
         id: 'new-session',
         label: 'New Session Here',
         onClick: () => openCreateSessionAt(repoPath),
       },
+      ...summarizeItems,
       {
         id: 'reveal',
         label: 'Open in Finder',
+        separatorAbove: summarizeItems.length > 0,
         onClick: isTauri ? () => reveal(repoPath) : undefined,
       },
       {

@@ -123,6 +123,7 @@ const PLATFORM_SPECIFIC = {
   'runner_status_snapshot': 'dashboard', // Control Room self-hosted runner survey reply (#5253) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'integration_status_snapshot': 'dashboard', // Control Room Integrations survey reply (#5499, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'integration_action_ack': 'dashboard', // Control Room Integrations Reindex action ack (#5500, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'summarize_session_result': 'dashboard', // sidebar "Summarize & start new session" reply (#5547) — the sidebar context-menu idiom is dashboard-only; the mobile app is out of scope for v1 (the server endpoint is client-agnostic so the app can adopt later)
   // 'agent_event' (#5016) is now handled by both dashboard and mobile
   // app (#5060 — mobile renders the same nested sub-bubbles inside the
   // parent Task tool_call). No PLATFORM_SPECIFIC entry needed; the
