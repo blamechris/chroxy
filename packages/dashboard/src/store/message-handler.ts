@@ -2069,12 +2069,15 @@ function handleIntegrationActionAck(msg: Record<string, unknown>, get: MsgGet, s
   const parsed = ServerIntegrationActionAckSchema.safeParse(msg);
   if (!parsed.success) return;
   // #5502: route by the echoed action — a relay re-run ack resolves the
-  // rerun bucket; everything else (repo_memory_reindex today, unknown future
-  // actions) keeps the original reindex routing.
+  // rerun bucket, a reindex ack the reindex bucket. An unknown future
+  // action's ack stays opaque (the protocol's forward-compat contract):
+  // this client can't have pending state for an action it can't send, so
+  // clearing either bucket would clobber the wrong row.
   if (parsed.data.action === 'repo_relay_rerun') {
     resolveRelayRerun(get, set, parsed.data.repoPath, { error: null });
     return;
   }
+  if (parsed.data.action !== 'repo_memory_reindex') return;
   resolveReindex(get, set, parsed.data.repoPath, { counts: parsed.data.counts, error: null });
 }
 
@@ -2648,12 +2651,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // (and action) — clear that row's pending state and surface the
         // reason inline (the generic branch below still raises the toast,
         // matching the CANCEL_ACTIVITY_FAILED precedent). Routed by the
-        // echoed action so a rerun failure can't clear a reindex pending.
+        // echoed action so a rerun failure can't clear a reindex pending;
+        // an unknown future action's failure touches neither bucket (the
+        // generic toast below still fires).
         if (msg.action === 'repo_relay_rerun') {
           resolveRelayRerun(get, set, msg.repoPath, {
             error: parsed.message || 'Re-run failed.',
           });
-        } else {
+        } else if (msg.action === 'repo_memory_reindex') {
           resolveReindex(get, set, msg.repoPath, {
             counts: null,
             error: parsed.message || 'Reindex failed.',

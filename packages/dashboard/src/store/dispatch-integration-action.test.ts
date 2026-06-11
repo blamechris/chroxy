@@ -154,8 +154,8 @@ describe('integration action dispatch (#5500)', () => {
       {
         type: 'session_error',
         code: 'INTEGRATION_ACTION_FAILED',
-        message: 'A reindex is already in progress for /Users/me/Projects/chroxy',
-        reason: 'reindex-in-progress',
+        message: 'An integration action (repo_memory_reindex) is already in progress for /Users/me/Projects/chroxy',
+        reason: 'action-in-progress',
         action: 'repo_memory_reindex',
         repoPath: REPO,
         requestId: 'rx-1',
@@ -282,5 +282,35 @@ describe('repo-relay rerun action dispatch (#5502)', () => {
     } as never)
     handleMessage(rerunAck(), ctx() as never)
     expect(store.getState().relayRerunResults[REPO]!.error).toBeNull()
+  })
+
+  it('an ack for an unknown future action touches neither bucket (forward-compat opacity)', () => {
+    handleMessage(rerunAck({ action: 'repo_relay_dispatch', runId: null }), ctx() as never)
+    const s = store.getState()
+    expect(s.relayRerunningRepoPaths.has(REPO)).toBe(true)
+    expect(s.relayRerunResults[REPO]).toBeUndefined()
+    expect(s.reindexingRepoPaths.has(REPO)).toBe(true)
+    expect(s.reindexResults[REPO]).toBeUndefined()
+  })
+
+  it('an INTEGRATION_ACTION_FAILED for an unknown future action touches neither bucket', () => {
+    store.setState({ addServerError: vi.fn() } as never)
+    handleMessage(
+      {
+        type: 'session_error',
+        code: 'INTEGRATION_ACTION_FAILED',
+        message: 'something upstream broke',
+        reason: 'dispatch-failed',
+        action: 'repo_relay_dispatch',
+        repoPath: REPO,
+        requestId: 'rd-1',
+      },
+      ctx() as never,
+    )
+    const s = store.getState()
+    expect(s.relayRerunningRepoPaths.has(REPO)).toBe(true)
+    expect(s.relayRerunResults[REPO]).toBeUndefined()
+    expect(s.reindexingRepoPaths.has(REPO)).toBe(true)
+    expect(s.reindexResults[REPO]).toBeUndefined()
   })
 })
