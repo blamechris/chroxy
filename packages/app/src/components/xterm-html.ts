@@ -103,6 +103,11 @@ export function buildXtermHtml(): string {
     handleMsg(e);
   });
 
+  // Handles RN -> WebView messages delivered via webViewRef.postMessage(...).
+  // e.data is the raw string RN sent; we JSON.parse it back to the bridge
+  // message. This makes terminal writes round-trip byte-identical (quotes,
+  // backticks, backslashes, ANSI escapes, emoji/UTF-16 surrogates) without the
+  // string-eval escaping hazards injectJavaScript invited (#5519).
   function handleMsg(e) {
     try {
       var msg = JSON.parse(e.data);
@@ -121,9 +126,6 @@ export function buildXtermHtml(): string {
       // Ignore malformed messages
     }
   }
-
-  // Expose handleMsg globally so injectJavaScript can call it from RN
-  window.handleMsg = handleMsg;
 })();
 <\/script>
 </body>
