@@ -55,6 +55,19 @@ describe('QrModal', () => {
     expect(screen.getByText(/Scan with Chroxy app/)).toBeInTheDocument()
   })
 
+  it('shows the typeable pairing code beside the QR (#5512)', () => {
+    const svg = '<svg><rect/></svg>'
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} pairingCode="ABCD2345" />)
+    expect(screen.getByTestId('qr-pairing-code')).toBeInTheDocument()
+    expect(screen.getByTestId('qr-pairing-code-value')).toHaveTextContent('ABCD2345')
+  })
+
+  it('omits the pairing code when none is provided (#5512)', () => {
+    const svg = '<svg><rect/></svg>'
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} />)
+    expect(screen.queryByTestId('qr-pairing-code')).not.toBeInTheDocument()
+  })
+
   it('closes on Escape key (#1549)', () => {
     const onClose = vi.fn()
     render(<QrModal open={true} onClose={onClose} qrSvg={null} loading={false} />)

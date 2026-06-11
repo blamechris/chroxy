@@ -606,6 +606,10 @@ export function App() {
   const [qrSvg, setQrSvg] = useState<string | null>(null)
   const [qrLoading, setQrLoading] = useState(false)
   const [qrError, setQrError] = useState<string | null>(null)
+  // #5512 — the typeable short pairing code shown beside the linking-mode QR so
+  // camera-less devices can type it instead of scanning. The QR encodes the same
+  // id. Null for per-session "Share" QRs (those carry a session-bound token).
+  const [qrPairingCode, setQrPairingCode] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(() => {
     const params = new URLSearchParams(window.location.search)
     return params.get('settings') === '1'
@@ -1534,24 +1538,36 @@ export function App() {
     setQrLoading(true)
     setQrError(null)
     setQrSvg(null)
+    setQrPairingCode(null)
     const token = getAuthToken()
     if (!token) {
       setQrLoading(false)
       setQrError('No auth token available')
       return
     }
+    // The typeable code (#5512) only applies to the linking-mode QR — per-session
+    // "Share" QRs (/qr/session/…) issue a session-bound token with no displayed
+    // code. Fetch the code in parallel with the QR for the linking-mode path.
+    const isLinkingQr = path === '/qr'
     try {
-      const res = await fetch(path, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Request failed' }))
-        setQrError(body.error || `HTTP ${res.status}`)
+      const [qrRes, codeRes] = await Promise.all([
+        fetch(path, { headers: { Authorization: `Bearer ${token}` } }),
+        isLinkingQr
+          ? fetch('/pairing-code', { headers: { Authorization: `Bearer ${token}` } }).catch(() => null)
+          : Promise.resolve(null),
+      ])
+      if (!qrRes.ok) {
+        const body = await qrRes.json().catch(() => ({ error: 'Request failed' }))
+        setQrError(body.error || `HTTP ${qrRes.status}`)
         setQrSvg(null)
       } else {
-        const svg = await res.text()
+        const svg = await qrRes.text()
         setQrSvg(svg)
         setQrError(null)
+      }
+      if (codeRes && codeRes.ok) {
+        const body = await codeRes.json().catch(() => null)
+        if (body?.code) setQrPairingCode(String(body.code))
       }
     } catch (err) {
       setQrError(err instanceof Error ? err.message : 'Failed to fetch QR code')
@@ -2816,6 +2832,7 @@ export function App() {
             ? 'Scan to chat into this session only — the scanner cannot list, switch, or destroy other sessions.'
             : 'Scan with Chroxy app to pair your phone'
         }
+        pairingCode={qrShareMode === 'share' ? null : qrPairingCode}
       />
 
       {/* #3209: SkillsPanel — popover for manual-skill toggles + #3205 metadata */}

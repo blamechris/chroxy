@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parsePairingUrl, isPairingUrl } from './pairing'
+import { parsePairingUrl, isPairingUrl, normalizePairingCode, parsePairingCodeEntry } from './pairing'
 
 describe('parsePairingUrl', () => {
   it('infers ws:// for a LAN chroxy URL (explicit port)', () => {
@@ -59,5 +59,41 @@ describe('isPairingUrl', () => {
     expect(isPairingUrl('chroxy://192.168.1.5:8765?token=tok')).toBe(false)
     expect(isPairingUrl('wss://host/ws')).toBe(false)
     expect(isPairingUrl('garbage')).toBe(false)
+  })
+})
+
+describe('normalizePairingCode (#5512)', () => {
+  it('uppercases and strips spaces and dashes', () => {
+    expect(normalizePairingCode('abcd-2345')).toBe('ABCD2345')
+    expect(normalizePairingCode('ab cd 23 45')).toBe('ABCD2345')
+    expect(normalizePairingCode('  AB-CD 2345  ')).toBe('ABCD2345')
+  })
+})
+
+describe('parsePairingCodeEntry (#5512)', () => {
+  it('builds a LAN ws pairing from host:port + code', () => {
+    const r = parsePairingCodeEntry('192.168.1.5:8765', 'abcd-2345')
+    expect(r).toEqual({ wsUrl: 'ws://192.168.1.5:8765/ws', pairingId: 'ABCD2345' })
+  })
+
+  it('builds a tunnel wss pairing from a bare host + code', () => {
+    const r = parsePairingCodeEntry('my.tunnel.tld', 'wxyz2345')
+    expect(r).toEqual({ wsUrl: 'wss://my.tunnel.tld/ws', pairingId: 'WXYZ2345' })
+  })
+
+  it('honors an explicit ws://host URL scheme', () => {
+    const r = parsePairingCodeEntry('ws://my.tunnel.tld:443', 'ABCD2345')
+    expect(r).toEqual({ wsUrl: 'ws://my.tunnel.tld:443/ws', pairingId: 'ABCD2345' })
+  })
+
+  it('accepts a full chroxy:// URL as the host (typed code wins)', () => {
+    const r = parsePairingCodeEntry('chroxy://192.168.1.5:8765?pair=OLDONE', 'new-code-23')
+    expect(r).toEqual({ wsUrl: 'ws://192.168.1.5:8765/ws', pairingId: 'NEWCODE23' })
+  })
+
+  it('returns null when host or code is empty', () => {
+    expect(parsePairingCodeEntry('', 'ABCD2345')).toBeNull()
+    expect(parsePairingCodeEntry('192.168.1.5:8765', '')).toBeNull()
+    expect(parsePairingCodeEntry('192.168.1.5:8765', '   ')).toBeNull()
   })
 })

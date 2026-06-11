@@ -18,6 +18,12 @@ export interface QrModalProps {
   title?: string
   /** Body line shown under the QR — defaults to the link-mode text. */
   instructions?: string
+  /**
+   * Typeable short pairing code shown beside the QR (#5512). The QR encodes the
+   * SAME id, so a camera-less device can type this code instead of scanning.
+   * Omitted for per-session "Share" QRs (those issue a session-bound token).
+   */
+  pairingCode?: string | null
 }
 
 export function QrModal({
@@ -28,6 +34,7 @@ export function QrModal({
   error,
   title = 'Pair Mobile App',
   instructions = 'Scan with Chroxy app to pair your phone',
+  pairingCode = null,
 }: QrModalProps) {
   return (
     <Modal open={open} onClose={onClose} title={title} maxWidth="400px">
@@ -58,6 +65,14 @@ export function QrModal({
           <p className="qr-modal-instructions">
             {instructions}
           </p>
+          {pairingCode && (
+            <div className="qr-modal-code" data-testid="qr-pairing-code">
+              <span className="qr-modal-code-label">Or type this code:</span>
+              <code className="qr-modal-code-value" data-testid="qr-pairing-code-value">
+                {pairingCode}
+              </code>
+            </div>
+          )}
         </div>
       )}
     </Modal>
