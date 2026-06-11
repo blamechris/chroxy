@@ -79,6 +79,34 @@ export function postToolUse(payload) {
   return { type: 'post_tool_use', data }
 }
 
+/**
+ * #5541: authoritative turn START. The server maps this to category
+ * session_activity (state online) and flips the embed idle→online even
+ * when subagents > 0, closing the "Ready for input" gap while subagents
+ * run.
+ *
+ * PRIVACY: the data bag carries `baseData(payload)` (cwd) ONLY. The
+ * Claude Code UserPromptSubmit payload includes the raw prompt text — it
+ * MUST NEVER be forwarded, nor any derivative of it (length, hash,
+ * snippet). The turn-start signal is the cwd; the prompt itself never
+ * leaves the host.
+ */
+export function userPromptSubmit(payload) {
+  return { type: 'user_prompt_submit', data: baseData(payload) }
+}
+
+/**
+ * #5541: authoritative turn END. The server maps this to category
+ * activity_update (state idle, "Ready for input") and clears
+ * turn-in-flight. Emit regardless of `stop_hook_active` (Claude Code sets
+ * it when Stop fires from within an active stop hook) — the server's
+ * idle→idle dedup absorbs any redundant edge. No fields beyond cwd are
+ * forwarded: there is no consumer for `stop_hook_active` server-side.
+ */
+export function stop(payload) {
+  return { type: 'stop', data: baseData(payload) }
+}
+
 /** Claude Code hook event name → emitter. */
 export const EMITTERS = {
   SessionStart: sessionStart,
@@ -87,6 +115,8 @@ export const EMITTERS = {
   SubagentStop: subagentStop,
   Notification: notification,
   PostToolUse: postToolUse,
+  UserPromptSubmit: userPromptSubmit,
+  Stop: stop,
 }
 
 /** Ingest type (CLI arg form) → hook event name, so `emit session_start` works. */
@@ -97,4 +127,6 @@ export const HOOK_EVENT_FOR_TYPE = {
   subagent_stop: 'SubagentStop',
   notification: 'Notification',
   post_tool_use: 'PostToolUse',
+  user_prompt_submit: 'UserPromptSubmit',
+  stop: 'Stop',
 }

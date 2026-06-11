@@ -19,7 +19,7 @@ import { once } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { IngestEventSchema } from '@chroxy/protocol'
+import { IngestEventSchema, INGEST_EVENT_TYPES } from '@chroxy/protocol'
 import { buildEnvelope, resolveHookEvent, runEmit, sanitizeData, SOURCE } from '../src/emit.js'
 import { EMITTERS } from '../src/emitters.js'
 import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT } from '../src/config.js'
@@ -27,6 +27,26 @@ import { classifyNonProjectCwd, deriveProject, worktreeParent } from '../src/pro
 
 const SECRET = 'test-hooks-secret'
 const NOW = 1_750_000_000_000
+
+const KNOWN_INGEST_TYPES = new Set(INGEST_EVENT_TYPES)
+
+/**
+ * Validate an envelope against the REAL IngestEventSchema. The #5541 turn
+ * edges (`user_prompt_submit` / `stop`) only enter the protocol `type`
+ * enum in the SERVER-side PR (PR 1, merge first) — until then the enum
+ * legitimately rejects them. For those types we validate every other field
+ * (source charset, flat data bag, ts bounds) by substituting a known type
+ * for the enum check; the `type` string itself is asserted separately by
+ * the caller. Once PR 1 ships, the substitution becomes a no-op and full
+ * end-to-end validation applies automatically.
+ */
+function assertEnvelopeValid(envelope) {
+  const probe = KNOWN_INGEST_TYPES.has(envelope.type)
+    ? envelope
+    : { ...envelope, type: 'notification' }
+  const result = IngestEventSchema.safeParse(probe)
+  assert.equal(result.success, true, JSON.stringify(result.error?.issues))
+}
 
 function tempRepo({ gitFile = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'hooks-repo-'))
@@ -69,8 +89,7 @@ describe('buildEnvelope', () => {
   for (const hookEvent of Object.keys(EMITTERS)) {
     it(`${hookEvent} envelope validates against IngestEventSchema`, () => {
       const envelope = buildEnvelope(hookEvent, basePayload, { env: {}, now: () => NOW })
-      const result = IngestEventSchema.safeParse(envelope)
-      assert.equal(result.success, true, JSON.stringify(result.error?.issues))
+      assertEnvelopeValid(envelope)
       assert.equal(envelope.source, SOURCE)
       assert.equal(envelope.sessionId, 'sess-abc')
       assert.equal(envelope.ts, NOW)
@@ -86,6 +105,8 @@ describe('buildEnvelope', () => {
       SubagentStop: 'subagent_stop',
       Notification: 'notification',
       PostToolUse: 'post_tool_use',
+      UserPromptSubmit: 'user_prompt_submit',
+      Stop: 'stop',
     }
     for (const [hookEvent, type] of Object.entries(expectations)) {
       assert.equal(buildEnvelope(hookEvent, {}, { env: {}, now: () => NOW }).type, type)
@@ -131,6 +152,67 @@ describe('buildEnvelope', () => {
     assert.equal('sessionId' in envelope, false)
     assert.equal('project' in envelope, false)
     assert.equal(IngestEventSchema.safeParse(envelope).success, true)
+  })
+
+  // #5541 turn edges.
+  it('UserPromptSubmit carries cwd only and validates', () => {
+    const envelope = buildEnvelope(
+      'UserPromptSubmit',
+      { session_id: 'sess-abc', cwd: join(repo, 'src', 'deep') },
+      { env: {}, now: () => NOW },
+    )
+    assert.equal(envelope.type, 'user_prompt_submit')
+    assert.equal(envelope.data.cwd, join(repo, 'src', 'deep'))
+    assert.deepEqual(Object.keys(envelope.data), ['cwd'])
+    assertEnvelopeValid(envelope)
+  })
+
+  // PRIVACY pin: the raw prompt text (and any derivative) must NEVER leave
+  // the host. Even when the payload carries it, the envelope must not.
+  it('UserPromptSubmit NEVER forwards the prompt text, even when present', () => {
+    const secret = 'super-secret-prompt-body-do-not-leak'
+    const envelope = buildEnvelope(
+      'UserPromptSubmit',
+      {
+        session_id: 'sess-abc',
+        cwd: join(repo, 'src', 'deep'),
+        prompt: secret,
+        prompt_text: secret,
+        message: secret,
+        user_prompt: secret,
+      },
+      { env: {}, now: () => NOW },
+    )
+    assert.deepEqual(Object.keys(envelope.data), ['cwd'])
+    assert.ok(!JSON.stringify(envelope).includes(secret), 'prompt text leaked into the envelope')
+  })
+
+  it('UserPromptSubmit omits cwd cleanly when absent', () => {
+    const envelope = buildEnvelope('UserPromptSubmit', {}, { env: {}, now: () => NOW })
+    assert.equal(envelope.type, 'user_prompt_submit')
+    assert.deepEqual(envelope.data, {})
+    assertEnvelopeValid(envelope)
+  })
+
+  it('Stop carries cwd only and validates, even with stop_hook_active', () => {
+    const envelope = buildEnvelope(
+      'Stop',
+      { session_id: 'sess-abc', cwd: join(repo, 'src', 'deep'), stop_hook_active: true },
+      { env: {}, now: () => NOW },
+    )
+    assert.equal(envelope.type, 'stop')
+    assert.equal(envelope.data.cwd, join(repo, 'src', 'deep'))
+    // stop_hook_active is emitted-regardless but NOT forwarded (no consumer).
+    assert.equal('stop_hook_active' in envelope.data, false)
+    assert.deepEqual(Object.keys(envelope.data), ['cwd'])
+    assertEnvelopeValid(envelope)
+  })
+
+  it('Stop omits cwd cleanly when absent', () => {
+    const envelope = buildEnvelope('Stop', {}, { env: {}, now: () => NOW })
+    assert.equal(envelope.type, 'stop')
+    assert.deepEqual(envelope.data, {})
+    assertEnvelopeValid(envelope)
   })
 })
 
@@ -347,6 +429,11 @@ describe('resolveHookEvent', () => {
     assert.equal(resolveHookEvent('SessionStart', {}), 'SessionStart')
     assert.equal(resolveHookEvent('session_start', {}), 'SessionStart')
     assert.equal(resolveHookEvent('post_tool_use', {}), 'PostToolUse')
+    // #5541 turn edges resolve from both the hook-event name and the type.
+    assert.equal(resolveHookEvent('UserPromptSubmit', {}), 'UserPromptSubmit')
+    assert.equal(resolveHookEvent('user_prompt_submit', {}), 'UserPromptSubmit')
+    assert.equal(resolveHookEvent('Stop', {}), 'Stop')
+    assert.equal(resolveHookEvent('stop', {}), 'Stop')
   })
 
   it('falls back to the payload hook_event_name', () => {

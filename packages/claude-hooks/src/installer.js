@@ -42,6 +42,9 @@ export const HOOK_EVENTS = [
   'SubagentStop',
   'Notification',
   'PostToolUse',
+  // #5541 turn edges — matcher-less, like the other non-Notification events.
+  'UserPromptSubmit',
+  'Stop',
 ]
 
 /** Ingest type passed to `emit` per hook event. */
@@ -52,6 +55,8 @@ export const TYPE_FOR_HOOK_EVENT = {
   SubagentStop: 'subagent_stop',
   Notification: 'notification',
   PostToolUse: 'post_tool_use',
+  UserPromptSubmit: 'user_prompt_submit',
+  Stop: 'stop',
 }
 
 /**
