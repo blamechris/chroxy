@@ -27,8 +27,11 @@ import { isPrivateOrSpecialIp } from './ssrf-guard.js'
 function hasProxyHeaders(headers) {
   if (!headers) return false
   // A tunnel / reverse proxy stamps the original client IP here. Presence means
-  // the TCP peer is a proxy, not the real client — treat as remote.
-  return Boolean(headers['cf-connecting-ip'] || headers['x-forwarded-for'])
+  // the TCP peer is a proxy, not the real client — treat as remote. Test for
+  // PRESENCE (!= null), not truthiness: a proxy that forwards an empty-string
+  // header value still means "a proxy is in front", so it must keep deflate —
+  // never be misclassified as a direct local peer.
+  return headers['cf-connecting-ip'] != null || headers['x-forwarded-for'] != null
 }
 
 /**

@@ -54,7 +54,10 @@ export function resolveDeltaFlushMs(ewmaRtt: number | null | undefined): number 
   if (ewmaRtt == null || !Number.isFinite(ewmaRtt)) return DELTA_FLUSH_FLOOR_MS
   if (ewmaRtt <= DELTA_FLUSH_CHEAP_RTT_MS) return DELTA_FLUSH_MIN_MS
   if (ewmaRtt >= DELTA_FLUSH_POOR_RTT_MS) return DELTA_FLUSH_MAX_MS
-  // Linear ramp from FLOOR (at CHEAP) to MAX (at POOR).
+  // Linear ramp toward MAX across the open band (CHEAP, POOR): rising just
+  // above CHEAP starts at FLOOR and climbs to MAX as RTT approaches POOR. (At
+  // exactly CHEAP the earlier branch already returned MIN, so the ramp's lower
+  // endpoint is approached from above, not hit.)
   const t = (ewmaRtt - DELTA_FLUSH_CHEAP_RTT_MS) / (DELTA_FLUSH_POOR_RTT_MS - DELTA_FLUSH_CHEAP_RTT_MS)
   return Math.round(DELTA_FLUSH_FLOOR_MS + t * (DELTA_FLUSH_MAX_MS - DELTA_FLUSH_FLOOR_MS))
 }

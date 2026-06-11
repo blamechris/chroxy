@@ -892,7 +892,8 @@ export class WsServer {
     // can tighten the delta-coalescing window (50→25ms) when a session has a
     // single subscriber — the common phone-on-LAN / single-dashboard case.
     // Multi-client sessions keep the 50ms window (fan-out amortization). Legacy
-    // single-session mode (sessionId === null) reports 0 → default window.
+    // single-session mode (sessionId === null) reports null (unknown), which the
+    // normalizer treats as "keep the default window".
     this._normalizer = new EventNormalizer({
       getSubscriberCount: (sessionId) =>
         sessionId == null ? null : this._broadcaster._countSessionSubscribers(sessionId),
