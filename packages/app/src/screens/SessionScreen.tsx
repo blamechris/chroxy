@@ -846,19 +846,16 @@ export function SessionScreen() {
     inputRef.current?.setValue(prefix + marker + suffix);
   }, []);
 
-  // #5567 — dictation + composer-change bookkeeping (the three voice refs, the
+  // #5573 — dictation + composer-change bookkeeping (the voice refs, the
   // change/mic handlers, and the transcript-merge effect) lives in a dedicated
-  // hook so the `isDictationUpdateRef` teardown contract is explicit. The hook
-  // clears that flag on mic-stop, speech error, the `isRecognizing → false`
-  // transition, and unmount — closing the wedge where a stale flag (set by a
-  // transcript write whose silent `setValue` never echoes through
-  // `onChangeText` since #5556) suppressed anchoring/paste-detection on the next
-  // genuine keystroke.
+  // hook. Since `setValue` is silent (#5566), every `onChangeText` during
+  // recognition is a real user keystroke, so the hook re-anchors unconditionally
+  // on each one — a mid-recognition manual edit is preserved and the next
+  // transcript appends after it instead of overwriting it.
   const { handleChangeText, handleMicPress, consumeUsedVoice } = useDictationComposer({
     inputRef,
     isRecognizing,
     transcript,
-    speechError,
     startListening,
     stopListening,
     onPasteCollapsed: handlePasteCollapsed,

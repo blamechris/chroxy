@@ -7,36 +7,36 @@ import {
 import type { InputBarHandle } from '../components/InputBar';
 
 /**
- * Dictation + composer-change bookkeeping for SessionScreen (#5567).
+ * Dictation + composer-change bookkeeping for SessionScreen (#5573).
  *
- * Owns the three composer refs that the voice-merge path coordinates:
+ * Owns the two composer refs that the voice-merge path coordinates:
  *
- * - `isDictationUpdateRef` — true for exactly one composer change: the echo of
- *   a programmatic dictation `setValue`. Used to distinguish "this change is our
- *   own transcript write" from "the user manually edited mid-dictation" so the
- *   anchor (`dictationStartRef`) isn't clobbered by our own write.
  * - `dictationStartRef` — index in the draft where the current dictation session
- *   began inserting; the transcript is spliced in after this offset.
+ *   began inserting; the transcript is spliced in after this offset. Every user
+ *   edit during recognition re-anchors this to `text.length` so the next
+ *   transcript appends after the typed text rather than overwriting it.
  * - `usedVoiceRef` — whether the pending message originated (partly) from voice,
  *   read by the send path to tag the outgoing message `isVoice`.
  *
- * ## The wedge this hook closes (#5567)
+ * ## Why there is no `isDictationUpdateRef` flag (#5573)
  *
  * Pre-#5566, the InputBar's `setValue` fired `onChangeText`, so the programmatic
- * dictation write produced its own `onChangeText` echo and `handleChangeText`
- * always cleared `isDictationUpdateRef` on the very next tick. After #5566,
- * `InputBarHandle.setValue` is **silent** — it does NOT fire `onChangeText`. So
- * the flag set just before the transcript write is now only ever cleared by a
- * *subsequent real user keystroke*. If dictation stops or errors after a
- * transcript arrived but before the user typed again, the flag stays stuck
- * `true`. The next genuine keystroke then hits the `isDictationUpdateRef` branch
- * in `handleChangeText` and is misread as "our own dictation echo" — the manual-
- * edit anchor re-point is skipped, corrupting paste detection / anchoring for
- * that input.
+ * transcript write produced its own `onChangeText` echo. The hook carried an
+ * `isDictationUpdateRef` flag — set `true` just before each transcript write —
+ * to recognise that echo and skip re-anchoring on it (otherwise our own write
+ * would have clobbered the anchor). That flag needed elaborate teardown clearing
+ * (#5567) to avoid wedging stale `true` across a recogniser stop.
  *
- * The fix: clear `isDictationUpdateRef` on every dictation teardown path —
- * `handleMicPress` stop, speech error, the `isRecognizing → false` transition,
- * and unmount — so a stale `true` can never bleed into the next genuine input.
+ * Since #5566, `InputBarHandle.setValue` is **silent** — it writes the draft
+ * directly and does NOT fire `onChangeText`. The only path that reaches
+ * `handleChangeText` is now a real user keystroke. There is no programmatic echo
+ * left to suppress, so the flag (and its four teardown effects) was dead code
+ * that actively caused the #5573 bug: a manual edit typed mid-recognition landed
+ * on a stuck-`true` flag and was misread as "our own write", so the re-anchor
+ * was skipped and the next transcript spliced over the typed text.
+ *
+ * Removing the flag means every `onChangeText` during recognition is treated as
+ * what it always is now — a user edit — and unconditionally re-anchors.
  */
 
 export interface UseDictationComposerParams {
@@ -46,8 +46,6 @@ export interface UseDictationComposerParams {
   isRecognizing: boolean;
   /** Latest transcript text from the recogniser (empty when none). */
   transcript: string;
-  /** Speech-recognition error string, or null. */
-  speechError: string | null;
   /** Begin a recogniser session. */
   startListening: () => void;
   /** Stop the recogniser session. */
@@ -66,7 +64,7 @@ export interface UseDictationComposerParams {
 export interface UseDictationComposerReturn {
   /** `onChangeText(next, prev)` handler for the InputBar. */
   handleChangeText: (text: string, prev: string) => void;
-  /** Mic toggle: start when idle, stop (and clear the dictation flag) when active. */
+  /** Mic toggle: start the recogniser when idle, stop it when active. */
   handleMicPress: () => void;
   /**
    * Read-and-reset the "used voice" flag for the send path. Returns whether the
@@ -82,15 +80,11 @@ export function useDictationComposer(
     inputRef,
     isRecognizing,
     transcript,
-    speechError,
     startListening,
     stopListening,
     onPasteCollapsed,
   } = params;
 
-  // True for exactly one composer change — the echo of a programmatic dictation
-  // write. See the module doc for why this must be cleared on every teardown.
-  const isDictationUpdateRef = useRef(false);
   // Index where the current dictation session began inserting (#5556).
   const dictationStartRef = useRef(0);
   // Whether the pending message used voice (read by the send path).
@@ -102,11 +96,13 @@ export function useDictationComposer(
   onPasteCollapsedRef.current = onPasteCollapsed;
 
   const handleChangeText = useCallback((text: string, prev: string) => {
-    if (!isDictationUpdateRef.current && isRecognizing) {
-      // User manually edited text during dictation — update anchor point
+    // Every `onChangeText` is a real user keystroke (the dictation write goes
+    // through the silent `setValue` since #5566). So while recognition is active
+    // this IS a manual mid-dictation edit — re-anchor so the next transcript
+    // appends after the typed text instead of overwriting it (#5573).
+    if (isRecognizing) {
       dictationStartRef.current = text.length;
     }
-    isDictationUpdateRef.current = false;
 
     // Paste detection — RN `TextInput` has no native paste event, so we detect
     // by diffing prev→next on each `onChangeText` and feeding the inserted span
@@ -120,13 +116,9 @@ export function useDictationComposer(
     }
   }, [isRecognizing]);
 
-  // Voice input: toggle start/stop and merge transcript into input text. On stop
-  // we MUST clear `isDictationUpdateRef` — a transcript may have set it true and,
-  // since `setValue` is silent post-#5556, nothing else will clear it before the
-  // next genuine keystroke (#5567).
+  // Voice input: toggle start/stop and merge transcript into input text.
   const handleMicPress = useCallback(() => {
     if (isRecognizing) {
-      isDictationUpdateRef.current = false;
       stopListening();
     } else {
       dictationStartRef.current = (inputRef.current?.getValue() ?? '').length;
@@ -134,47 +126,19 @@ export function useDictationComposer(
     }
   }, [isRecognizing, startListening, stopListening, inputRef]);
 
-  // Merge each transcript into the draft after the dictation anchor. Sets the
-  // dictation flag so the (silent) write isn't mistaken for a manual edit, and
-  // marks the message as voice-originated for the send path.
+  // Merge each transcript into the draft after the dictation anchor. The write
+  // goes through the silent `setValue` (#5566), so it never echoes back through
+  // `handleChangeText` as a spurious manual edit. Marks the message as
+  // voice-originated for the send path.
   useEffect(() => {
     if (isRecognizing && transcript) {
       const current = inputRef.current?.getValue() ?? '';
       const prefix = current.slice(0, dictationStartRef.current);
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
-      isDictationUpdateRef.current = true;
       usedVoiceRef.current = true;
       inputRef.current?.setValue(prefix + separator + transcript);
     }
   }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
-
-  // #5567 — clear the dictation flag whenever a speech error surfaces. The spec
-  // sequence (error → end) can stop the recogniser after a transcript already
-  // flipped the flag true; without this the stale flag wedges the next input.
-  useEffect(() => {
-    if (speechError) {
-      isDictationUpdateRef.current = false;
-    }
-  }, [speechError]);
-
-  // #5567 — clear the dictation flag whenever recognition stops for ANY reason
-  // (user stop, silence timeout, hard error, system interruption). This is the
-  // catch-all: the flag is only meaningful while a transcript write is pending
-  // an echo, and once the recogniser is no longer active there is no pending
-  // dictation write to attribute the next change to.
-  useEffect(() => {
-    if (!isRecognizing) {
-      isDictationUpdateRef.current = false;
-    }
-  }, [isRecognizing]);
-
-  // #5567 — defensive unmount clear. Refs survive across renders but not across
-  // re-mounts; this keeps the teardown contract explicit and self-documenting.
-  useEffect(() => {
-    return () => {
-      isDictationUpdateRef.current = false;
-    };
-  }, []);
 
   const consumeUsedVoice = useCallback(() => {
     const used = usedVoiceRef.current;
