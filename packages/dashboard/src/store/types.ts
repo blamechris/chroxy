@@ -595,6 +595,18 @@ export interface ConnectionState {
    */
   pendingPairRequests: ServerPairPendingMessage[];
 
+  /**
+   * #5513 (epic #5509) — a `?pair=` link the dashboard tried to redeem turned
+   * out to be approval-gated (a Discord-delivered link): the server replied
+   * `pair_fail { reason: 'requires_approval' }`. Possession of the link is never
+   * sufficient — the device must REQUEST pairing and the host must approve it.
+   * The pair_fail handler records the failed host here so the UI can
+   * transparently open the request-pair flow (RequestPairPanel) for that host
+   * instead of just surfacing a dead-end alert. Cleared once the panel opens
+   * (clearPendingApprovalPairHost) or the request resolves.
+   */
+  pendingApprovalPairHost: { name: string; wsUrl: string } | null;
+
   hostStatus: ServerHostStatusSnapshotMessage | null;
   /**
    * #5175 — true between dispatching a `host_status_request` and the matching
@@ -1138,6 +1150,10 @@ export interface ConnectionState {
   // #5510: deny a pending pair request, sending `pair_deny`. Same optimistic
   // drop + wire-result contract as approvePairRequest.
   denyPairRequest: (requestId: string) => boolean;
+
+  // #5513: clear the approval-gated redemption signal (`pendingApprovalPairHost`)
+  // after the UI has opened the request-pair flow for it.
+  clearPendingApprovalPairHost: () => void;
 
   // #5253: request a self-hosted runner survey. Dispatches a
   // `runner_status_request`; the server replies with a single

@@ -15,6 +15,7 @@ import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
+import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
 import { createHttpHandler } from './http-routes.js'
@@ -1016,6 +1017,48 @@ export class WsServer {
       return false
     }
     return true
+  }
+
+  /**
+   * Validate that an HTTP request carries the PRIMARY token class — i.e. the
+   * static apiToken (or an active rotation/grace token), NOT a pairing-bound
+   * session token. Used by host-authority endpoints that a scoped, paired
+   * device must not be able to invoke (#5533): e.g. POST /pair-discord, which
+   * posts a fresh pairing link to a shared channel. Per
+   * docs/security/bearer-token-authority.md, pairing-bound tokens are scoped to
+   * one session and must never carry host-level authority.
+   *
+   * A token is primary iff it validates but is NOT a PairingManager-issued
+   * session token. Returns true on pass; writes a 403 and returns false
+   * otherwise.
+   */
+  _validatePrimaryBearerAuth(req, res) {
+    if (!this.authRequired) return true
+    const authHeader = req.headers['authorization'] || ''
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+    if (!token || !this._isTokenValid(token)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'unauthorized' }))
+      return false
+    }
+    // Reject pairing-bound (and any other PairingManager-issued) session tokens:
+    // they are valid, but scoped — not the host-authority primary token.
+    if (this._pairingManager && this._pairingManager.isSessionTokenValid(token)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'primary_token_required' }))
+      return false
+    }
+    return true
+  }
+
+  /**
+   * Post an approval-gated pairing link to the configured Discord webhook
+   * (#5513). Thin seam around discord-pair-delivery.postPairLinkToDiscord so
+   * http-routes can call it and tests can stub it. Never logs / returns the
+   * webhook URL.
+   */
+  async _postPairLinkToDiscord(link) {
+    return postPairLinkToDiscord(link)
   }
 
   /**

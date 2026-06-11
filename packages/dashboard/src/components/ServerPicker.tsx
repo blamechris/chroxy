@@ -421,6 +421,10 @@ export function ServerPicker() {
   const switchServer = useConnectionStore(s => s.switchServer)
   const connectLocal = useConnectionStore(s => s.connectLocal)
   const pairServer = useConnectionStore(s => s.pairServer)
+  // #5513 — a redeemed ?pair= link that turned out approval-gated lands here so
+  // we transparently open the request-pair flow for that host.
+  const pendingApprovalPairHost = useConnectionStore(s => s.pendingApprovalPairHost)
+  const clearPendingApprovalPairHost = useConnectionStore(s => s.clearPendingApprovalPairHost)
 
   const [showAddForm, setShowAddForm] = useState(false)
   // #5512 — camera-less "Have a code?" entry (host + typeable code).
@@ -480,6 +484,20 @@ export function ServerPicker() {
       setAddError(err instanceof Error ? err.message : 'Failed to add paired server')
     }
   }, [addServer, switchServer])
+
+  // #5513 — when the store flags an approval-gated redemption, open the
+  // request-pair panel for that host (the existing #5510 requester flow issues a
+  // fresh pair_request on a new connection). Clear the signal once consumed so
+  // it fires exactly once per redemption.
+  useEffect(() => {
+    if (!pendingApprovalPairHost) return
+    setAddError(null)
+    setShowAddForm(false)
+    setShowCodeForm(false)
+    setPrefill(null)
+    setPairRequest({ name: pendingApprovalPairHost.name, wsUrl: pendingApprovalPairHost.wsUrl })
+    clearPendingApprovalPairHost()
+  }, [pendingApprovalPairHost, clearPendingApprovalPairHost])
 
   const runDiscovery = useCallback(async () => {
     setDiscovering(true)

@@ -299,6 +299,66 @@ describe('WsServer GET /version auth', () => {
   })
 })
 
+describe('WsServer POST /pair-discord primary-class auth (#5513)', () => {
+  let server
+  let pm
+
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    if (pm) { pm.destroy(); pm = null }
+  })
+
+  async function startWithPairing() {
+    const { PairingManager } = await import('../src/pairing.js')
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    server = new WsServer({
+      port: 0,
+      apiToken: 'primary-tok',
+      cliSession: createMockSession(),
+      authRequired: true,
+      pairingManager: pm,
+    })
+    // Stub the actual Discord post so the test never touches the network.
+    server._postPairLinkToDiscord = async (link) => ({ posted: true, expiresInSeconds: 60, _link: link })
+    const port = await startServerAndGetPort(server)
+    return port
+  }
+
+  it('accepts the primary token and posts a fresh gated link', async () => {
+    const port = await startWithPairing()
+    const res = await fetch(`http://127.0.0.1:${port}/pair-discord`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer primary-tok' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.posted, true)
+    assert.ok(Number.isFinite(body.expiresInSeconds))
+  })
+
+  it('rejects a pairing-bound session token (#5533)', async () => {
+    const port = await startWithPairing()
+    // Mint a real pairing-bound session token via the linking-mode pairing.
+    const { sessionToken } = pm.validatePairing(pm.currentPairingId)
+    assert.ok(sessionToken, 'sanity: pairing issued a session token')
+    assert.equal(pm.isSessionTokenValid(sessionToken), true)
+
+    const res = await fetch(`http://127.0.0.1:${port}/pair-discord`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${sessionToken}` },
+    })
+    assert.equal(res.status, 403, 'a scoped session token must not trigger a Discord post')
+    const body = await res.json()
+    assert.equal(body.error, 'primary_token_required')
+  })
+
+  it('rejects an unauthenticated request', async () => {
+    const port = await startWithPairing()
+    const res = await fetch(`http://127.0.0.1:${port}/pair-discord`, { method: 'POST' })
+    assert.equal(res.status, 403)
+  })
+})
+
 describe('WsServer with authRequired: true (default behavior)', () => {
   let server
 

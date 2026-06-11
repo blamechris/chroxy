@@ -392,6 +392,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #5510 (epic #5509): pairing-approval primitive — outstanding pending pair
   // requests fanned out to this host surface. Empty until a pair_pending lands.
   pendingPairRequests: [],
+  // #5513 (epic #5509): set when a redeemed ?pair= link is approval-gated so the
+  // UI can transparently open the request-pair flow. Null otherwise.
+  pendingApprovalPairHost: null,
   // #5175 (epic #5170): Host/Repo Status Control Room snapshot, fed by the
   // host_status_snapshot handler. Null until the first survey lands.
   hostStatus: null,
@@ -712,6 +715,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     wsSend(socket, { type: 'pair_deny', requestId });
     set((s) => ({ pendingPairRequests: s.pendingPairRequests.filter((p) => p.requestId !== requestId) }));
     return true;
+  },
+
+  // #5513: clear the approval-gated redemption signal once the UI has consumed
+  // it (opened the request-pair panel) so it doesn't re-trigger.
+  clearPendingApprovalPairHost: (): void => {
+    set({ pendingApprovalPairHost: null });
   },
 
   // #5253: request a self-hosted runner survey. Mirrors requestHostStatus —
