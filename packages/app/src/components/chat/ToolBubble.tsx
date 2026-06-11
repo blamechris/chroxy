@@ -40,14 +40,22 @@ function formatPartialPreview(partial: string): string {
   return partial;
 }
 
-export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpenDetail }: {
+export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection, onOpenDetail, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
   onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string) => void;
+  /** #5517: seed + persist expand state in ChatView's id-keyed registry so
+   *  it survives FlatList row recycling. */
+  getInitialExpanded?: (id: string) => boolean;
+  onExpandedChange?: (id: string, expanded: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpandedRaw] = useState(() => getInitialExpanded?.(message.id) ?? false);
+  const setExpanded = (next: boolean) => {
+    setExpandedRaw(next);
+    onExpandedChange?.(message.id, next);
+  };
   const longPressedRef = useRef(false);
   // #4081: streaming inputs land in `toolInputPartial` before `content`
   // is populated. Use it as the bubble body when `content` is empty or

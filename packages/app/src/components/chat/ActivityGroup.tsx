@@ -25,11 +25,18 @@ function ActivityEntry({
   isSelected,
   isSelecting,
   onToggleSelection,
+  getInitialExpanded,
+  onExpandedChange,
 }: {
   message: ChatMessage;
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: (id: string) => void;
+  /** #5517: seed expand state from ChatView's id-keyed registry so it
+   *  survives FlatList row recycling (the row may unmount when scrolled
+   *  off-screen and remount fresh). */
+  getInitialExpanded?: (id: string) => boolean;
+  onExpandedChange?: (id: string, expanded: boolean) => void;
 }) {
   const longPressedRef = useRef(false);
   // #4201: per-entry expand state so each tool row can independently reveal
@@ -39,7 +46,15 @@ function ActivityEntry({
   // code for chat because ChatView never routes tool_use through
   // MessageBubble → ToolBubble (groupMessages always wraps in activity
   // groups).
-  const [expanded, setExpanded] = useState(false);
+  //
+  // #5517: seed from the ChatView registry so a recycled row reopens to
+  // the user's last choice instead of resetting to collapsed.
+  const [expanded, setExpanded] = useState(() => getInitialExpanded?.(message.id) ?? false);
+
+  const setExpandedTracked = (next: boolean) => {
+    setExpanded(next);
+    onExpandedChange?.(message.id, next);
+  };
 
   const handlePress = () => {
     if (longPressedRef.current) {
@@ -51,7 +66,7 @@ function ActivityEntry({
       return;
     }
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setExpanded((prev) => !prev);
+    setExpandedTracked(!expanded);
   };
 
   const handleLongPress = () => {
@@ -162,6 +177,9 @@ export function ActivityGroup({
   selectedIds,
   onToggleSelection,
   searchMatchIds,
+  groupKey,
+  getInitialExpanded,
+  onExpandedChange,
 }: {
   messages: ChatMessage[];
   isActive: boolean;
@@ -169,8 +187,18 @@ export function ActivityGroup({
   selectedIds: Set<string>;
   onToggleSelection: (id: string) => void;
   searchMatchIds?: Set<string>;
+  /** #5517: stable group id (the `activity-<firstId>` key) used to seed +
+   *  persist the group's expand state across FlatList row recycling. */
+  groupKey?: string;
+  getInitialExpanded?: (id: string) => boolean;
+  onExpandedChange?: (id: string, expanded: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const registryKey = groupKey ?? activityMessages[0]?.id ?? '';
+  const [expanded, setExpanded] = useState(() => getInitialExpanded?.(registryKey) ?? false);
+  const setExpandedTracked = (next: boolean) => {
+    setExpanded(next);
+    onExpandedChange?.(registryKey, next);
+  };
   const toolCount = activityMessages.filter((m) => m.type === 'tool_use').length;
   const lastMessage = activityMessages[activityMessages.length - 1];
   const isThinking = isActive && lastMessage?.type === 'thinking';
@@ -182,14 +210,14 @@ export function ActivityGroup({
   useEffect(() => {
     if (hasSearchMatch && !expanded) {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setExpanded(true);
+      setExpandedTracked(true);
     }
   }, [hasSearchMatch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handlePress = () => {
     if (isSelecting) return;
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setExpanded((prev) => !prev);
+    setExpandedTracked(!expanded);
   };
 
   // Auto-collapse when activity completes
@@ -197,7 +225,7 @@ export function ActivityGroup({
   useEffect(() => {
     if (wasActiveRef.current && !isActive) {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setExpanded(false);
+      setExpandedTracked(false);
     }
     wasActiveRef.current = isActive;
   }, [isActive]);
@@ -237,6 +265,8 @@ export function ActivityGroup({
               isSelected={selectedIds.has(msg.id)}
               isSelecting={isSelecting}
               onToggleSelection={onToggleSelection}
+              getInitialExpanded={getInitialExpanded}
+              onExpandedChange={onExpandedChange}
             />
           ))}
         </ScrollView>
