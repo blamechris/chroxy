@@ -25,10 +25,10 @@
  * URLs (token part is the secret); masking at the use site via
  * maskWebhookUrl is the second layer.
  */
-import { readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { cachedResolveCredentialFile } from './auth-probes.js'
+import { readStoredField } from './credential-store.js'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home (same rationale as byok-credentials.js).
@@ -77,48 +77,46 @@ export function resolveDiscordWebhookUrl() {
   }
 
   const CREDENTIALS_FILE = credentialsFilePath()
-  let stat
+
+  // #5490: route the file read through credential-store's cipher-aware reader.
+  // The webhook URL lives in the SAME credentials.json the BYOK/API-key
+  // resolvers read, and the #5154 at-rest migration rewrites that file into an
+  // encrypted envelope on first daemon start. A plain JSON.parse here finds no
+  // `discordWebhookUrl` key in the envelope, so the sink silently goes
+  // unconfigured. `readStoredField` applies the same 0600 mode enforcement,
+  // envelope decryption, and keychain-unavailable handling as the other
+  // resolvers — plaintext (not-yet-encrypted) files still pass through. Never
+  // throws (readStore catches fs/JSON/decrypt errors); never logs or returns
+  // the URL in a reason string.
+  let read
   try {
-    stat = statSync(CREDENTIALS_FILE)
+    read = readStoredField('discordWebhookUrl')
   } catch (err) {
-    if (err.code === 'ENOENT') {
-      return {
-        url: null,
-        source: 'none',
-        reason: `CHROXY_DISCORD_WEBHOOK_URL not set and ${CREDENTIALS_FILE} does not exist`,
-      }
-    }
+    // Defensive: readStoredField is non-throwing by contract, but if it ever
+    // does, degrade to source:'none' rather than crash the sink's probe.
     return {
       url: null,
       source: 'none',
-      reason: `unable to stat ${CREDENTIALS_FILE}: ${err.message}`,
+      reason: `unable to read ${CREDENTIALS_FILE}: ${err.message}`,
     }
   }
 
-  // Refuse anything more permissive than 0600 — same security boundary as
-  // the BYOK/DeepSeek resolvers. A pasted-in credentials.json defaulting to
-  // 0644 on macOS would otherwise leak the webhook to every local user.
-  const perms = stat.mode & 0o777
-  if (perms !== 0o600) {
+  if (!read.fileExists) {
     return {
       url: null,
       source: 'none',
-      reason: `${CREDENTIALS_FILE} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600 — run: chmod 600 ${CREDENTIALS_FILE})`,
+      reason: `CHROXY_DISCORD_WEBHOOK_URL not set and ${CREDENTIALS_FILE} does not exist`,
     }
   }
 
-  let parsed
-  try {
-    parsed = JSON.parse(readFileSync(CREDENTIALS_FILE, 'utf8'))
-  } catch (err) {
-    return {
-      url: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} unreadable or not valid JSON: ${err.message}`,
-    }
+  // A read error covers bad mode, malformed JSON, an encrypted envelope whose
+  // keychain data key is unavailable, and a corrupt/undecryptable envelope.
+  // The reason is value-free (built by credential-store from the path/cause).
+  if (read.error) {
+    return { url: null, source: 'none', reason: read.error }
   }
 
-  if (typeof parsed?.discordWebhookUrl !== 'string' || parsed.discordWebhookUrl.length === 0) {
+  if (read.value === null) {
     return {
       url: null,
       source: 'none',
@@ -126,7 +124,7 @@ export function resolveDiscordWebhookUrl() {
     }
   }
 
-  return { url: parsed.discordWebhookUrl, source: 'file' }
+  return { url: read.value, source: 'file' }
 }
 
 /**

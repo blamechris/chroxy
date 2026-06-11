@@ -20,11 +20,15 @@ import { join } from 'node:path'
 import { DiscordWebhookSink, formatDuration } from '../src/notifications/discord-webhook-sink.js'
 import {
   resolveDiscordWebhookUrl,
+  cachedResolveDiscordWebhookUrl,
   isValidDiscordWebhookUrl,
   extractWebhookIdToken,
   maskWebhookUrl,
 } from '../src/discord-credentials.js'
 import { redactSensitive } from '../src/logger.js'
+import { _setCredentialKeychainForTests } from '../src/credential-store.js'
+import { encryptJson, getOrCreateMasterKey } from '../src/credential-cipher.js'
+import { resetCachesForTest } from '../src/auth-probes.js'
 import { SinkRegistry } from '../src/notifications/sink-registry.js'
 import { PushManager } from '../src/push.js'
 import { validateConfig } from '../src/config.js'
@@ -33,6 +37,18 @@ const WEBHOOK_ID = '123456789012345678'
 const WEBHOOK_TOKEN = 'aBcDeFgHiJkLmNoPqRsTuVwXyZ-0123456789_abcdefghijklmnopqrstuvwx'
 const WEBHOOK = `https://discord.com/api/webhooks/${WEBHOOK_ID}/${WEBHOOK_TOKEN}`
 const API_BASE = `https://discord.com/api/webhooks/${WEBHOOK_ID}/${WEBHOOK_TOKEN}`
+
+// In-memory keychain fake — drives the #5154 encrypted path deterministically
+// without touching the host's real OS keychain (suite default is no-keychain).
+function inMemoryKeychain() {
+  const store = new Map()
+  return {
+    isKeychainAvailable: () => true,
+    getToken: (service) => store.get(service) ?? null,
+    setToken: (token, service) => { store.set(service, token) },
+    _store: store,
+  }
+}
 
 let originalFetch
 let originalHome
@@ -161,6 +177,118 @@ describe('discord-credentials — webhook URL sourcing', () => {
     const r = resolveDiscordWebhookUrl()
     assert.equal(r.url, null)
     assert.equal(r.source, 'none')
+  })
+
+  it('missing-field reason is value-free and stable on a plaintext file', () => {
+    const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    process.env.HOME = home
+    const dir = join(home, '.chroxy')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'credentials.json')
+    // A credentials.json carrying only an API key — no webhook URL.
+    writeFileSync(file, JSON.stringify({ anthropicApiKey: 'sk-ant-xyz' }), { mode: 0o600 })
+    chmodSync(file, 0o600)
+    const r = resolveDiscordWebhookUrl()
+    assert.equal(r.url, null)
+    assert.equal(r.source, 'none')
+    assert.match(r.reason, /missing or empty "discordWebhookUrl"/)
+  })
+
+  // #5490: the #5154 at-rest encryption rewrites credentials.json into the
+  // cipher envelope on first daemon start. A plain JSON.parse finds no
+  // `discordWebhookUrl` key in the envelope, so the sink silently goes
+  // unconfigured. The resolver must decrypt via the keychain-backed key.
+  it('reads discordWebhookUrl from an ENCRYPTED credentials.json (#5490)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    process.env.HOME = home
+    const dir = join(home, '.chroxy')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'credentials.json')
+
+    // Drive the encrypted branch with an in-memory keychain (the suite default
+    // is no-keychain → plaintext). Mint/fetch the data key the same way the
+    // store does, encrypt the plaintext blob, and write the envelope at 0600 —
+    // exactly what maybeEncryptCredentialsAtRest() produces at startup.
+    const keychain = inMemoryKeychain()
+    _setCredentialKeychainForTests(keychain)
+    resetCachesForTest()
+    try {
+      const key = getOrCreateMasterKey(keychain)
+      const envelope = encryptJson({ discordWebhookUrl: WEBHOOK }, key)
+      // Sanity: the secret must not be present in the on-disk envelope.
+      const serialized = JSON.stringify(envelope)
+      assert.ok(!serialized.includes(WEBHOOK_TOKEN), 'token must not appear in the envelope')
+      writeFileSync(file, serialized, { mode: 0o600 })
+      chmodSync(file, 0o600)
+
+      const r = resolveDiscordWebhookUrl()
+      assert.equal(r.source, 'file')
+      assert.equal(r.url, WEBHOOK)
+    } finally {
+      _setCredentialKeychainForTests(null)
+      resetCachesForTest()
+    }
+  })
+
+  it('encrypted file + unavailable keychain → none with a value-free reason (#5490)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    process.env.HOME = home
+    const dir = join(home, '.chroxy')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'credentials.json')
+
+    // Encrypt under a real key, then drop the keychain so the read can't fetch
+    // the data key (locked keychain / headless host). Must fail closed to
+    // source:'none' with a reason that never echoes the URL.
+    const keychain = inMemoryKeychain()
+    _setCredentialKeychainForTests(keychain)
+    resetCachesForTest()
+    try {
+      const key = getOrCreateMasterKey(keychain)
+      const envelope = encryptJson({ discordWebhookUrl: WEBHOOK }, key)
+      writeFileSync(file, JSON.stringify(envelope), { mode: 0o600 })
+      chmodSync(file, 0o600)
+
+      // Swap to a keychain that reports unavailable → getMasterKey returns null.
+      _setCredentialKeychainForTests({ isKeychainAvailable: () => false })
+      const r = resolveDiscordWebhookUrl()
+      assert.equal(r.source, 'none')
+      assert.equal(r.url, null)
+      assert.ok(typeof r.reason === 'string' && r.reason.length > 0)
+      assert.ok(!r.reason.includes(WEBHOOK_TOKEN), 'reason must not echo the webhook token')
+    } finally {
+      _setCredentialKeychainForTests(null)
+      resetCachesForTest()
+    }
+  })
+
+  it('cachedResolveDiscordWebhookUrl composes with decryption (#5490)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    process.env.HOME = home
+    const dir = join(home, '.chroxy')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'credentials.json')
+
+    const keychain = inMemoryKeychain()
+    _setCredentialKeychainForTests(keychain)
+    resetCachesForTest()
+    try {
+      const key = getOrCreateMasterKey(keychain)
+      const envelope = encryptJson({ discordWebhookUrl: WEBHOOK }, key)
+      writeFileSync(file, JSON.stringify(envelope), { mode: 0o600 })
+      chmodSync(file, 0o600)
+
+      // First (cold) call decrypts; second (cached) call must return the same.
+      const first = cachedResolveDiscordWebhookUrl()
+      assert.equal(first.source, 'file')
+      assert.equal(first.url, WEBHOOK)
+      const second = cachedResolveDiscordWebhookUrl()
+      assert.equal(second.source, 'file')
+      assert.equal(second.url, WEBHOOK)
+    } finally {
+      _setCredentialKeychainForTests(null)
+      resetCachesForTest()
+    }
   })
 
   it('validates webhook URL shapes', () => {
