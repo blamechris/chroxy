@@ -51,8 +51,10 @@ export async function postPairDiscord(deps = {}) {
     if (res && res.ok && body?.posted) {
       return { ok: true, expiresInSeconds: body.expiresInSeconds }
     }
-    // Map the daemon's structured reason through; fall back to a status string.
-    const reason = body?.reason || (res ? `http_${res.status}` : 'unavailable')
+    // Map the daemon's structured reason through; auth/availability failures
+    // arrive as { error: ... } rather than { reason: ... } — read both before
+    // degrading to a bare status string.
+    const reason = body?.reason || body?.error || (res ? `http_${res.status}` : 'unavailable')
     return { ok: false, reason }
   } catch (err) {
     return { ok: false, reason: 'unavailable', message: err?.message || 'request failed' }

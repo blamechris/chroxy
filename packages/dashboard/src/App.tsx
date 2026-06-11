@@ -1596,7 +1596,8 @@ export function App() {
       if (res.ok && body?.posted) {
         return { posted: true as const, expiresInSeconds: body.expiresInSeconds }
       }
-      return { posted: false as const, reason: body?.reason || `http_${res.status}` }
+      // Auth/availability failures arrive as { error: ... }, not { reason: ... }.
+      return { posted: false as const, reason: body?.reason || body?.error || `http_${res.status}` }
     } catch {
       return { posted: false as const, reason: 'post_failed' }
     }

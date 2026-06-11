@@ -48,6 +48,12 @@ function discordFailureMessage(reason?: string): string {
   if (reason === 'post_failed') {
     return 'Discord rejected the post — check the webhook.'
   }
+  if (reason === 'no_token' || reason === 'unauthorized') {
+    return 'Not authorized — reconnect to the daemon and try again.'
+  }
+  if (reason === 'primary_token_required') {
+    return 'Only the primary device can post pairing links.'
+  }
   return `Could not post to Discord${reason ? `: ${reason}` : ''}.`
 }
 
