@@ -14,6 +14,7 @@ import { PermissionHistoryScreen } from './screens/PermissionHistoryScreen';
 import { HistoryScreen } from './screens/HistoryScreen';
 import ActivityScreen from './screens/ActivityScreen';
 import { LockScreen } from './components/LockScreen';
+import { ConnectionAnnouncer } from './components/ConnectionAnnouncer';
 import { useConnectionStore } from './store/connection';
 import { useConnectionLifecycleStore } from './store/connection-lifecycle';
 import { setupNotificationResponseListener } from './notifications';
@@ -100,6 +101,9 @@ export default function App() {
   return (
     <NavigationContainer>
       <StatusBar style="light" />
+      {/* #5581 — single app-level live region: announces settled
+          connection-phase transitions to screen readers (debounced). */}
+      <ConnectionAnnouncer />
       <Stack.Navigator
         screenOptions={{
           headerStyle: { backgroundColor: '#1a1a2e' },
