@@ -176,20 +176,24 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // key_exchange_ok is plaintext and encryptionState is set right after.
   let eagerServerPublicKey = null
   let eagerEncryptionState = null
-  if (requireEncryption && client.eagerKeyExchange) {
-    try {
-      const serverKp = createKeyPair()
-      const rawSharedKey = deriveSharedKey(client.eagerKeyExchange.publicKey, serverKp.secretKey)
-      const encryptionKey = deriveConnectionKey(rawSharedKey, client.eagerKeyExchange.salt)
-      eagerEncryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
-      eagerServerPublicKey = serverKp.publicKey
-    } catch (err) {
-      log.warn(`Eager key exchange failed for ${client.id}, falling back to discrete handshake: ${err.message}`)
-      eagerEncryptionState = null
-      eagerServerPublicKey = null
+  if (client.eagerKeyExchange) {
+    if (requireEncryption) {
+      try {
+        const serverKp = createKeyPair()
+        const rawSharedKey = deriveSharedKey(client.eagerKeyExchange.publicKey, serverKp.secretKey)
+        const encryptionKey = deriveConnectionKey(rawSharedKey, client.eagerKeyExchange.salt)
+        eagerEncryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
+        eagerServerPublicKey = serverKp.publicKey
+      } catch (err) {
+        log.warn(`Eager key exchange failed for ${client.id}, falling back to discrete handshake: ${err.message}`)
+        eagerEncryptionState = null
+        eagerServerPublicKey = null
+      }
     }
-    // Consumed (or failed) — never leave it set so a later discrete
-    // key_exchange isn't shadowed by stale eager state.
+    // Consumed (encryption required), unused (encryption disabled / localhost
+    // bypass), or failed — never leave it set so a later discrete key_exchange
+    // isn't shadowed by stale eager state and no handshake material lingers on
+    // the client object longer than the one auth pass that could use it.
     client.eagerKeyExchange = null
   }
 

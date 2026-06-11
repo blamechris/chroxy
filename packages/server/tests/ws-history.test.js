@@ -763,6 +763,9 @@ describe('sendPostAuthInfo — eager key exchange (#5555)', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(authOk, 'serverPublicKey'), false)
     assert.equal(client.encryptionState, undefined)
     assert.equal(client.encryptionPending, false)
+    // eagerKeyExchange is cleared even when encryption is disabled so no
+    // stale handshake material lingers on the client object (#5555 review).
+    assert.equal(client.eagerKeyExchange, null)
   })
 
   it('falls back to the discrete handshake when the eager public key is malformed', () => {
