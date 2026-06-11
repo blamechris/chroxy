@@ -233,6 +233,42 @@ describe('WsBroadcaster', () => {
     })
   })
 
+  // #5516 (epic #5514): subscriber count drives the normalizer's adaptive
+  // delta-coalescing window (25ms when a session has exactly one viewer).
+  describe('_countSessionSubscribers()', () => {
+    it('counts activeSessionId matches and explicit subscribers', () => {
+      clients.set(createFakeWs(), createFakeClient({ id: 'c1', activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), createFakeClient({ id: 'c2', activeSessionId: 'other', subscribedSessionIds: new Set(['sess-1']) }))
+      clients.set(createFakeWs(), createFakeClient({ id: 'c3', activeSessionId: 'other' }))
+      assert.equal(broadcaster._countSessionSubscribers('sess-1'), 2)
+      assert.equal(broadcaster._countSessionSubscribers('other'), 2) // c2 active + c3 active
+    })
+
+    it('returns 1 for a single-viewer session', () => {
+      clients.set(createFakeWs(), createFakeClient({ id: 'c1', activeSessionId: 'solo' }))
+      assert.equal(broadcaster._countSessionSubscribers('solo'), 1)
+    })
+
+    it('returns 0 when nobody is watching', () => {
+      clients.set(createFakeWs(), createFakeClient({ id: 'c1', activeSessionId: 'other' }))
+      assert.equal(broadcaster._countSessionSubscribers('ghost'), 0)
+    })
+
+    it('excludes unauthenticated and non-OPEN clients', () => {
+      clients.set(createFakeWs({ readyState: 1 }), createFakeClient({ id: 'c1', activeSessionId: 'sess-1', authenticated: false }))
+      clients.set(createFakeWs({ readyState: 3 }), createFakeClient({ id: 'c2', activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs({ readyState: 1 }), createFakeClient({ id: 'c3', activeSessionId: 'sess-1' }))
+      assert.equal(broadcaster._countSessionSubscribers('sess-1'), 1)
+    })
+
+    it('does not throw when a client lacks subscribedSessionIds (#4799 parity)', () => {
+      const c = createFakeClient({ id: 'c1', activeSessionId: 'other' })
+      c.subscribedSessionIds = undefined
+      clients.set(createFakeWs(), c)
+      assert.equal(broadcaster._countSessionSubscribers('sess-1'), 0)
+    })
+  })
+
   describe('_broadcastClientJoined()', () => {
     it('sends client_joined to all except the joining client ws', () => {
       const wsNew = createFakeWs()

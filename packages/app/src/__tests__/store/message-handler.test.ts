@@ -15,6 +15,7 @@ import {
   resetReplayFlags,
   registerPendingPermissionModeRequest,
   _testClearPendingPermissionModeRequests,
+  setDeltaFlushIntervalOverride,
 } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
@@ -1880,6 +1881,39 @@ describe('stream_delta handler', () => {
     const ss = store.getState().sessionStates.s1;
     const msg = ss.messages.find((m) => m.id === 'msg-1');
     expect(msg?.content).toBe('Hello world');
+  });
+
+  // #5516 (epic #5514): the delta flush is scheduled on an ADAPTIVE timer
+  // (was a fixed 100ms). With the constant override pinned, the first delta
+  // must schedule a setTimeout at exactly that interval — proving the override
+  // is honored and the call site reads it. Default (no override) is covered by
+  // resolveDeltaFlushMs's own unit tests in store-core.
+  it('schedules the delta flush at the overridden interval (#5516)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+    try {
+      setDeltaFlushIntervalOverride(16);
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+      _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Hi' });
+
+      // The flush timer must have been scheduled at the pinned 16ms.
+      const flushCall = setTimeoutSpy.mock.calls.find((c) => c[1] === 16);
+      expect(flushCall).toBeDefined();
+
+      jest.runAllTimers();
+      const ss = store.getState().sessionStates.s1;
+      expect(ss.messages.find((m) => m.id === 'msg-1')?.content).toBe('Hi');
+    } finally {
+      setDeltaFlushIntervalOverride(null);
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   // #5515 (epic #5514): the latency instrumentation reads the optional

@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks'
 import { toShortModelId } from './models.js'
 import { createLogger } from './logger.js'
 
@@ -658,8 +659,25 @@ Object.assign(EVENT_MAP, {
  * Owns delta buffering with configurable flush interval.
  */
 export class EventNormalizer {
-  constructor({ flushIntervalMs = 50 } = {}) {
+  /**
+   * @param {object} [opts]
+   * @param {number} [opts.flushIntervalMs=50] - default delta coalescing window.
+   * @param {number} [opts.singleClientFlushIntervalMs=25] - #5516 (epic #5514):
+   *   tighter window used when EXACTLY ONE client is subscribed to the session
+   *   being buffered. With a single viewer there's no fan-out to amortize, so a
+   *   tighter coalescing window cuts perceived streaming latency in half (the
+   *   common phone-on-LAN / single-dashboard case). Multi-client sessions keep
+   *   the default window unchanged — coalescing amortizes the fan-out cost and
+   *   keeps every client's bandwidth bounded.
+   * @param {(sessionId: string|null) => (number|null)} [opts.getSubscriberCount]
+   *   - returns how many clients are subscribed to `sessionId`, or null when
+   *   unknown (e.g. legacy single-session mode). When the count is exactly 1 the
+   *   single-client window is used; otherwise (0, ≥2, or null) the default.
+   */
+  constructor({ flushIntervalMs = 50, singleClientFlushIntervalMs = 25, getSubscriberCount = null } = {}) {
     this._flushIntervalMs = flushIntervalMs
+    this._singleClientFlushIntervalMs = singleClientFlushIntervalMs
+    this._getSubscriberCount = typeof getSubscriberCount === 'function' ? getSubscriberCount : null
     // Delta buffer: key -> accumulated text
     // In multi-session mode key = `${sessionId}:${messageId}`, otherwise just messageId
     this._deltaBuffer = new Map()
@@ -669,7 +687,25 @@ export class EventNormalizer {
     // — a true monotonic duration, same process both ends.
     this._deltaEmitMono = new Map()
     this._deltaFlushTimer = null
+    // #5516: monotonic deadline (performance.now ms) the pending flush timer is
+    // scheduled to fire at. Lets a later single-client buffer SHORTEN an
+    // already-scheduled default-window timer instead of waiting it out.
+    this._deltaFlushDeadline = 0
     this._onFlush = null // callback: (entries) => void, where entries = [{ key, sessionId, messageId, delta, emitMonoMs }]
+  }
+
+  /**
+   * #5516: resolve the coalescing window for the session currently being
+   * buffered. Single-subscriber sessions get the tighter window; everything
+   * else (0, 2+, or unknown count) keeps the default. No subscriber-count
+   * resolver wired (legacy mode) → always the default.
+   * @param {string|null} sessionId
+   * @returns {number} flush interval in ms
+   */
+  _resolveFlushIntervalMs(sessionId) {
+    if (!this._getSubscriberCount) return this._flushIntervalMs
+    const count = this._getSubscriberCount(sessionId)
+    return count === 1 ? this._singleClientFlushIntervalMs : this._flushIntervalMs
   }
 
   /**
@@ -731,8 +767,22 @@ export class EventNormalizer {
     if (typeof emitMonoMs === 'number' && !this._deltaEmitMono.has(key)) {
       this._deltaEmitMono.set(key, emitMonoMs)
     }
+    // #5516 (epic #5514): adaptive coalescing window — tighter (25ms) when this
+    // session has a single subscriber, default (50ms) otherwise. The flush
+    // timer is shared across all buffered sessions, so a single-client session
+    // buffered AFTER a default-window timer was already armed must be able to
+    // pull the deadline IN (reschedule to the sooner target) rather than wait
+    // out the 50ms. We never push a deadline out.
+    const intervalMs = this._resolveFlushIntervalMs(sessionId)
+    const now = performance.now()
+    const wantDeadline = now + intervalMs
     if (!this._deltaFlushTimer) {
-      this._deltaFlushTimer = setTimeout(() => this._flushDeltas(), this._flushIntervalMs)
+      this._deltaFlushDeadline = wantDeadline
+      this._deltaFlushTimer = setTimeout(() => this._flushDeltas(), intervalMs)
+    } else if (wantDeadline < this._deltaFlushDeadline) {
+      clearTimeout(this._deltaFlushTimer)
+      this._deltaFlushDeadline = wantDeadline
+      this._deltaFlushTimer = setTimeout(() => this._flushDeltas(), Math.max(0, wantDeadline - now))
     }
   }
 
@@ -766,6 +816,7 @@ export class EventNormalizer {
     if (this._deltaBuffer.size === 0 && this._deltaFlushTimer) {
       clearTimeout(this._deltaFlushTimer)
       this._deltaFlushTimer = null
+      this._deltaFlushDeadline = 0
     }
     return entries
   }
@@ -775,6 +826,7 @@ export class EventNormalizer {
    */
   _flushDeltas() {
     this._deltaFlushTimer = null
+    this._deltaFlushDeadline = 0
     if (this._deltaBuffer.size === 0) return
     if (this._onFlush) {
       const entries = []
@@ -816,6 +868,7 @@ export class EventNormalizer {
       clearTimeout(this._deltaFlushTimer)
       this._deltaFlushTimer = null
     }
+    this._deltaFlushDeadline = 0
     this._deltaBuffer.clear()
     this._deltaEmitMono.clear()
   }

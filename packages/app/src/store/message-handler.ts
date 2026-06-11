@@ -138,6 +138,8 @@ import {
   // #5515 (epic #5514): latency instrumentation primitives.
   RollingPercentiles,
   splitRtt,
+  // #5516 (epic #5514): adaptive client delta-flush interval.
+  resolveDeltaFlushMs,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
@@ -597,6 +599,21 @@ const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
 // can't spam the console — one line every few seconds is enough to watch the
 // numbers move when flush intervals are tuned.
 const LATENCY_LOG_INTERVAL_MS = 3_000;
+
+// #5516 (epic #5514): adaptive delta-flush interval. Production reads the
+// current EWMA RTT and adapts (16-33ms cheap → 100ms poor) via
+// `resolveDeltaFlushMs`. Tests pin it to a constant by calling
+// `setDeltaFlushIntervalOverride(N)`; `null` (the default) restores adaptive
+// behavior. Kept testable per the issue's "constant override testable" ask.
+let _deltaFlushOverrideMs: number | null = null;
+export function setDeltaFlushIntervalOverride(ms: number | null): void {
+  _deltaFlushOverrideMs = ms;
+}
+function currentDeltaFlushMs(): number {
+  return _deltaFlushOverrideMs != null
+    ? _deltaFlushOverrideMs
+    : resolveDeltaFlushMs(_ctx.ewmaRtt);
+}
 
 export function stopHeartbeat(): void {
   if (_ctx.heartbeatInterval) { clearInterval(_ctx.heartbeatInterval); _ctx.heartbeatInterval = null; }
@@ -1720,7 +1737,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
         scheduleFlush: () => {
           if (!_ctx.deltaFlushTimer) {
-            _ctx.deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
+            // #5516 — adaptive interval (was a fixed 100ms). Memoized bubbles
+            // (step 1) make the tighter flush cheap: only the tail re-renders.
+            _ctx.deltaFlushTimer = setTimeout(flushPendingDeltas, currentDeltaFlushMs());
           }
         },
       });

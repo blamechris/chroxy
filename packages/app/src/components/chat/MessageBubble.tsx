@@ -8,7 +8,7 @@ import {
   Image,
   LayoutAnimation,
 } from 'react-native';
-import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
+import { OTHER_OPTION_VALUE, bumpRenderCount } from '@chroxy/store-core';
 // #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
 // so the mobile store, the mobile screen, and (eventually) the dashboard
 // can converge on a single declaration paired with the shared
@@ -52,7 +52,7 @@ export type { OtherFreeformAnswer };
 
 export type SelectOptionValue = string | OtherFreeformAnswer;
 
-export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall }: {
+function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall }: {
   message: ChatMessage;
   onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
   /**
@@ -85,6 +85,13 @@ export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, 
    */
   onRetryStreamStall?: () => void;
 }) {
+  // #5516 (epic #5514): dev-only render tally. Proves (in the memoization
+  // test and ad-hoc dev profiling) that only the tail/streaming bubble
+  // re-renders on a delta flush — non-tail bubbles must skip this entirely
+  // thanks to the React.memo comparator below. Cheap Map write; never read on
+  // the hot path. Stripped from release builds by the `__DEV__` guard.
+  if (__DEV__) bumpRenderCount(`MessageBubble:${message.id}`);
+
   const longPressedRef = useRef(false);
   const [isExpired, setIsExpired] = useState(() =>
     message.expiresAt != null && message.expiresAt <= Date.now()
@@ -516,6 +523,36 @@ export function MessageBubble({ message, onSelectOption, onSubmitMultiQuestion, 
     </TouchableOpacity>
   );
 }
+
+/**
+ * #5516 (epic #5514): memoize the bubble so a streaming delta flush only
+ * re-renders the ONE message whose content changed — the rest of the
+ * transcript skips React reconciliation (and, crucially, the markdown
+ * re-parse inside FormattedResponse) entirely.
+ *
+ * The store's flush replaces ONLY the streamed message's object (`{ ...m,
+ * content: m.content + d }` in `flushPendingDeltas`) — every non-tail message
+ * keeps its identity across the flush. So a reference check on `message` is
+ * both correct and the cheapest possible comparator for the data half.
+ *
+ * The callback props (`onPress`, `onLongPress`, `onSelectOption`,
+ * `onSubmitMultiQuestion`, `onOpenDetail`, `onImagePress`) are recreated by
+ * ChatView on every render, so comparing them by identity would defeat the
+ * memo — we intentionally ignore them. `onRetryStreamStall` is the one
+ * callback whose PRESENCE (not identity) changes render output (the stall
+ * chip's Retry affordance is wired only on the tail), so we compare it as a
+ * boolean. The remaining render-affecting props are scalar booleans.
+ */
+export const MessageBubble = React.memo(MessageBubbleImpl, (prev, next) => {
+  return (
+    prev.message === next.message &&
+    prev.isSelected === next.isSelected &&
+    prev.isSelecting === next.isSelecting &&
+    prev.allowMultiQuestion === next.allowMultiQuestion &&
+    (prev.onRetryStreamStall == null) === (next.onRetryStreamStall == null)
+  );
+});
+MessageBubble.displayName = 'MessageBubble';
 
 const styles = StyleSheet.create({
   messageBubble: {

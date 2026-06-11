@@ -4601,3 +4601,67 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
     assert.equal(authOk.hardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
   })
 })
+
+// #5516 (epic #5514): permessage-deflate is skipped for local/LAN peers so a
+// fast local link doesn't pay per-frame gzip CPU, but kept for tunnel
+// connections (real WAN bandwidth saving). The decision keys off the
+// unspoofable socket peer; a forged proxy header can only KEEP deflate.
+describe('WsServer permessage-deflate locality (#5516)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Open a ws client (offering permessage-deflate) and return its negotiated extensions string. */
+  async function negotiatedExtensions(port, headers) {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { headers })
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'connection timeout',
+    )
+    // ws exposes the negotiated extensions; permessage-deflate present => compression on.
+    const ext = ws.extensions || ''
+    ws.close()
+    return ext
+  }
+
+  it('does NOT negotiate permessage-deflate for a direct loopback peer', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-deflate',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const ext = await negotiatedExtensions(port)
+    assert.ok(
+      !/permessage-deflate/.test(ext),
+      `loopback peer should skip deflate, got extensions: "${ext}"`,
+    )
+  })
+
+  it('DOES negotiate permessage-deflate when a proxy header marks the connection as remote (tunnel)', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-deflate',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    // A real tunnel arrives from loopback but stamps cf-connecting-ip; simulate
+    // that so isLocalOrLanPeer treats the connection as remote and keeps deflate.
+    const ext = await negotiatedExtensions(port, { 'cf-connecting-ip': '203.0.113.9' })
+    assert.ok(
+      /permessage-deflate/.test(ext),
+      `tunnel peer should keep deflate, got extensions: "${ext}"`,
+    )
+  })
+})
