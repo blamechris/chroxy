@@ -91,6 +91,17 @@ describe('windowTranscript', () => {
     assert.equal(truncated, true)
     assert.ok(out.length <= 100)
   })
+
+  it('never exceeds maxChars even when the cap is smaller than head + marker', () => {
+    // #5547 review: at a tiny cap the head sample + truncation marker alone can
+    // exceed maxChars; the helper must still clamp the return to <= maxChars.
+    const text = 'z'.repeat(1000)
+    for (const maxChars of [1, 5, 10, 30, 56, 60]) {
+      const { text: out, truncated } = windowTranscript(text, { maxChars, headChars: 8 })
+      assert.equal(truncated, true)
+      assert.ok(out.length <= maxChars, `windowed length ${out.length} must be <= ${maxChars}`)
+    }
+  })
 })
 
 describe('buildSummaryPrompt', () => {

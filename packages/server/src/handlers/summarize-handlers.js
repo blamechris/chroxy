@@ -95,8 +95,13 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
   try {
     history = ctx.sessionManager.getHistory(sessionId)
   } catch (err) {
+    // Curated, fixed message — never echo the raw error onto the wire. The raw
+    // text is logged server-side only (a thrown history-read error could carry
+    // internal paths or unexpected text; keep the SUMMARIZE_FAILED surface
+    // leak-safe, matching the model-call failure path below).
+    log.warn(`summarize_session history read failed for ${sessionId}: ${err && err.message ? err.message : 'unknown error'}`)
     summarizeError(ws, ctx, sessionId, requestId, 'history-failed',
-      `Could not read session history: ${err && err.message ? err.message : 'unknown error'}`)
+      'Could not read this session\'s history')
     return
   }
 

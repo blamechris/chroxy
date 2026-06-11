@@ -125,7 +125,15 @@ export function windowTranscript(transcript, opts = {}) {
   const tailBudget = maxChars - effectiveHead - TRUNCATION_MARKER.length
   const head = effectiveHead > 0 ? text.slice(0, effectiveHead) : ''
   const tail = tailBudget > 0 ? text.slice(text.length - tailBudget) : text.slice(text.length - maxChars)
-  return { text: `${head}${TRUNCATION_MARKER}${tail}`, truncated: true }
+  const windowed = `${head}${TRUNCATION_MARKER}${tail}`
+  // Honour the contract for ANY maxChars > 0: when the cap is so small that the
+  // head + marker already exceed it (tailBudget <= 0), the assembled string can
+  // overshoot. Clamp to the most-recent maxChars so the return is always
+  // <= maxChars. (Unreachable at the production 100k cap; guards custom opts.)
+  return {
+    text: windowed.length <= maxChars ? windowed : windowed.slice(windowed.length - maxChars),
+    truncated: true,
+  }
 }
 
 /**

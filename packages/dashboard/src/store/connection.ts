@@ -74,7 +74,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
-import { registerSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
+import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
 import {
@@ -807,7 +807,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     const requestId = `summarize-${nextMessageId()}`;
     return new Promise((resolve, reject) => {
-      registerSummarizeRequest(requestId, { resolve, reject });
+      // Watchdog: a one-shot model turn is slow (much longer than the evaluator
+      // round-trip), so allow 5min — but never leave the entry pending forever
+      // if the server stalls or drops the reply while the socket stays open.
+      // cancelSummarizeRequest clears the entry; we reject the promise here.
+      const timeoutId = setTimeout(() => {
+        cancelSummarizeRequest(requestId);
+        reject(new Error('Summary request timed out after 5 minutes.'));
+      }, 5 * 60_000);
+      registerSummarizeRequest(requestId, { resolve, reject, timeoutId });
       wsSend(socket, { type: 'summarize_session', sessionId, requestId });
     });
   },

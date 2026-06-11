@@ -19,6 +19,11 @@ export interface SummarizeResult {
 interface PendingSummarize {
   resolve: (result: SummarizeResult) => void
   reject: (err: Error) => void
+  // Per-request watchdog timer (set by connection.summarizeSession). Cleared on
+  // any settle so the request never lingers in the Map if the server stalls or
+  // drops the reply while the socket stays open — mirrors the evaluator
+  // registry's timeout discipline.
+  timeoutId?: ReturnType<typeof setTimeout>
 }
 
 const pending = new Map<string, PendingSummarize>()
@@ -29,12 +34,25 @@ export function registerSummarizeRequest(requestId: string, handlers: PendingSum
 }
 
 /**
+ * Cancel a pending summarize request without settling its promise — used by the
+ * watchdog timeout, which rejects the promise itself before clearing the entry.
+ * No-op if unknown. Clears the timer to avoid a dangling handle.
+ */
+export function cancelSummarizeRequest(requestId: string): void {
+  const entry = pending.get(requestId)
+  if (!entry) return
+  if (entry.timeoutId !== undefined) clearTimeout(entry.timeoutId)
+  pending.delete(requestId)
+}
+
+/**
  * Resolve a pending summarize request (a `summarize_session_result` arrived).
  * No-op if the requestId is unknown (e.g. already settled or a stale reply).
  */
 export function resolveSummarizeRequest(requestId: string, result: SummarizeResult): void {
   const entry = pending.get(requestId)
   if (!entry) return
+  if (entry.timeoutId !== undefined) clearTimeout(entry.timeoutId)
   pending.delete(requestId)
   entry.resolve(result)
 }
@@ -46,6 +64,7 @@ export function resolveSummarizeRequest(requestId: string, result: SummarizeResu
 export function rejectSummarizeRequest(requestId: string, message: string): void {
   const entry = pending.get(requestId)
   if (!entry) return
+  if (entry.timeoutId !== undefined) clearTimeout(entry.timeoutId)
   pending.delete(requestId)
   entry.reject(new Error(message))
 }
@@ -56,6 +75,7 @@ export function rejectSummarizeRequest(requestId: string, message: string): void
  */
 export function rejectAllSummarizeRequests(message: string): void {
   for (const [, entry] of pending) {
+    if (entry.timeoutId !== undefined) clearTimeout(entry.timeoutId)
     entry.reject(new Error(message))
   }
   pending.clear()

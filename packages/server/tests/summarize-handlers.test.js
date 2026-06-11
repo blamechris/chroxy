@@ -191,6 +191,21 @@ describe('summarize_session handler', () => {
       assert.ok(!/api\.example/.test(reply.message), 'raw endpoint must not leak')
     })
 
+    it('does not echo a raw getHistory error into the message', async () => {
+      ctx = makeCtx()
+      ctx.sessionManager.getHistory = () => {
+        throw new Error('ENOENT: /home/secret/.chroxy/session-state.json missing')
+      }
+      await summarizeHandlers.summarize_session(ws, client, {
+        type: 'summarize_session', sessionId: 'sess-1', requestId: 'r',
+      }, ctx)
+      const reply = lastSent(ctx)
+      assert.equal(reply.code, 'SUMMARIZE_FAILED')
+      assert.equal(reply.reason, 'history-failed')
+      assert.ok(!/ENOENT/.test(reply.message), 'raw error text must not leak')
+      assert.ok(!/\.chroxy/.test(reply.message), 'internal path must not leak')
+    })
+
     it('maps empty-history to a friendly message', async () => {
       ctx = makeCtx({
         summarizeSession: createSpy(async () => {
