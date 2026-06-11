@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { statSync, mkdirSync, rmSync } from 'fs'
-import { join, resolve } from 'path'
+import { join, resolve, dirname } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { getProvider } from './providers.js'
@@ -16,6 +16,7 @@ import { CostBudgetManager } from './cost-budget-manager.js'
 import { SessionStatePersistence } from './session-state-persistence.js'
 import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-manager.js'
 import { SessionMessageHistory } from './session-message-history.js'
+import { SkillsUsageRecorder } from './skills-usage.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import {
@@ -250,6 +251,13 @@ export class SessionManager extends EventEmitter {
     stateTtlMs,
     persistDebounceMs = 2000,
 
+    // #5554: per-skill usage recorder. Records which skills activate in each
+    // session, powering the Control Room Skills tab's "previously used" surface.
+    // Tests pass their own (temp-pathed) recorder; production wires a default
+    // whose file sits next to the session-state file (so a temp stateFilePath
+    // keeps the usage log out of the real ~/.chroxy too).
+    skillsUsageRecorder,
+
     // Message history
     maxMessages,
     maxHistory,
@@ -387,6 +395,14 @@ export class SessionManager extends EventEmitter {
     this._stateFilePath = this._persistence._stateFilePath
     this._stateTtlMs = this._persistence._stateTtlMs
     this._persistDebounceMs = this._persistence._persistDebounceMs
+
+    // #5554: usage recorder. Use the caller-supplied one (tests pin a temp
+    // path), else default to a file alongside the session-state file so a temp
+    // stateFilePath also redirects the usage log away from the real home — the
+    // sandbox guard (#4633) then never fires from a SessionManager constructed
+    // with a temp stateFilePath.
+    this.skillsUsageRecorder = skillsUsageRecorder
+      || new SkillsUsageRecorder({ filePath: join(dirname(this._stateFilePath), 'skills-usage.json') })
     Object.defineProperty(this, '_persistTimer', {
       get: () => this._persistence._persistTimer,
       set: (v) => { this._persistence._persistTimer = v },
@@ -901,6 +917,25 @@ export class SessionManager extends EventEmitter {
 
     log.info(`Created session ${sessionId} "${sessionName}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_created', { sessionId, name: sessionName, cwd: resolvedCwd })
+
+    // #5554 Phase 2: record the skills that ACTIVATED for this fresh session.
+    // The narrowest reliable point — `session._skills` is the active set the
+    // loader actually injected into this session's prompt (provider-scoped,
+    // manual-activation-resolved), and the sessionId + repo (resolvedCwd) are
+    // now known. Skip restores (re-hydrating a session is not a new use) and
+    // guard everything so a usage-log failure can never break session creation.
+    if (!isRestore) {
+      try {
+        const activeSkills = Array.isArray(session?._skills)
+          ? session._skills.map(s => (s && typeof s.name === 'string' ? s.name : null)).filter(Boolean)
+          : []
+        if (activeSkills.length > 0) {
+          this.skillsUsageRecorder?.record({ sessionId, repo: resolvedCwd, skills: activeSkills })
+        }
+      } catch (err) {
+        log.debug(`skills-usage: failed to record activation for ${sessionId} (non-fatal): ${err && err.message ? err.message : err}`)
+      }
+    }
     // Flush synchronously — a new session must survive an abrupt shutdown,
     // otherwise rebuilds / crashes during the 2s debounce window lose it.
     // Exception: restoreState calls us in a loop and seeds history/budget
@@ -1295,6 +1330,8 @@ export class SessionManager extends EventEmitter {
     this._timeoutManager.destroy()
     this._history.clear()
     this._costBudget.clear()
+    // #5554: persist any pending usage records on shutdown (best-effort).
+    try { this.skillsUsageRecorder?.flush() } catch { /* non-fatal */ }
   }
 
   /**

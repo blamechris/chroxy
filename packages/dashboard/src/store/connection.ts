@@ -408,6 +408,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // integration_status_snapshot handler. Null until the first survey lands.
   integrationStatus: null,
   integrationStatusLoading: false,
+  // #5554 (epic #5159): Control Room Skills inventory snapshot, fed by the
+  // skills_inventory_snapshot handler. Null until the first survey lands.
+  skillsInventory: null,
+  skillsInventoryLoading: false,
   // #5500: repo-memory Reindex action — in-flight repo paths + last outcome
   // per repo for inline display (same lifecycle as cancellingActivityIds).
   reindexingRepoPaths: new Set<string>(),
@@ -748,6 +752,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ integrationStatusLoading: true });
       wsSend(socket, { type: 'integration_status_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #5554 (epic #5159): request a Skills inventory survey. Mirrors
+  // requestIntegrationStatus — flips skillsInventoryLoading and sends a
+  // skills_inventory_request; the reply is a single skills_inventory_snapshot
+  // handled into skillsInventory. Returns false (and does NOT set loading) when
+  // the socket is closed.
+  requestSkillsInventory: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ skillsInventoryLoading: true });
+      wsSend(socket, { type: 'skills_inventory_request' });
       return true;
     }
     return false;

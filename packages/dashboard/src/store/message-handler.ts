@@ -137,7 +137,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2133,6 +2133,18 @@ function handleIntegrationStatusSnapshot(msg: Record<string, unknown>, _get: Msg
 }
 
 /**
+ * #5554 (epic #5159) — Skills inventory survey `skills_inventory_snapshot`:
+ * REPLACE the stored inventory and clear the loading flag. Same defensive,
+ * full-replace, clear-loading-only-on-valid-parse contract as the host /
+ * runner / integration survey handlers above.
+ */
+function handleSkillsInventorySnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSkillsInventorySnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ skillsInventory: parsed.data, skillsInventoryLoading: false });
+}
+
+/**
  * #5500 — resolve one repo's pending Reindex state: drop the repoPath from
  * `reindexingRepoPaths` and record the outcome (ack counts or failure
  * message) in `reindexResults` for inline display. Shared by the success ack
@@ -2279,6 +2291,7 @@ const HANDLERS: Record<string, Handler> = {
   runner_status_snapshot: handleRunnerStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
+  skills_inventory_snapshot: handleSkillsInventorySnapshot,
   // #5500: positive ack correlating an integration_action (repo-memory
   // Reindex) request to its outcome.
   integration_action_ack: handleIntegrationActionAck,

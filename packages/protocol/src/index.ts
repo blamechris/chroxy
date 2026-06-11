@@ -109,6 +109,15 @@ export type {
   ServerIntegrationActionAckMessage,
 } from './schemas/server.ts'
 
+// #5554 (epic #5159): pin the Skills tab contract at the entry point so the
+// dashboard panel + store import `SkillInventoryEntry` / `SkillInventoryRepo` /
+// `ServerSkillsInventorySnapshotMessage` as a stable public contract.
+export type {
+  SkillInventoryEntry,
+  SkillInventoryRepo,
+  ServerSkillsInventorySnapshotMessage,
+} from './schemas/server.ts'
+
 // #5171: the client→server request type is pinned at the entry point too so
 // consumers can import the alias without reaching into `./schemas/client.ts`.
 export type { HostStatusRequestMessage } from './schemas/client.ts'
@@ -118,6 +127,8 @@ export type { RunnerStatusRequestMessage } from './schemas/client.ts'
 export type { IntegrationStatusRequestMessage } from './schemas/client.ts'
 // #5500: integrations Reindex action request alias.
 export type { IntegrationActionMessage } from './schemas/client.ts'
+// #5554: skills inventory survey request alias.
+export type { SkillsInventoryRequestMessage } from './schemas/client.ts'
 
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'

@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -644,6 +644,19 @@ export interface ConnectionState {
    */
   integrationStatusLoading: boolean;
   /**
+   * #5554 — latest Control Room Skills inventory survey snapshot (global tier +
+   * per-repo overlays, with descriptions / trust / hashes / usage). `null`
+   * until the first snapshot lands (the Skills section renders an empty/loading
+   * state). Replaced wholesale on each snapshot (no delta stream).
+   */
+  skillsInventory: ServerSkillsInventorySnapshotMessage | null;
+  /**
+   * #5554 — true between dispatching a `skills_inventory_request` and the
+   * matching `skills_inventory_snapshot` arriving, so the Skills-tab Refresh
+   * button can spin. Cleared when a snapshot lands.
+   */
+  skillsInventoryLoading: boolean;
+  /**
    * #5500 — repo paths with an in-flight `integration_action` reindex request:
    * set when sendRepoMemoryReindex is called, cleared on the
    * `integration_action_ack` (success) or the INTEGRATION_ACTION_FAILED
@@ -1168,6 +1181,13 @@ export interface ConnectionState {
   // whether the message went on the wire (false = socket closed). Sets
   // `integrationStatusLoading` while in flight.
   requestIntegrationStatus: () => boolean;
+
+  // #5554 (epic #5159): request a Skills inventory survey. Dispatches a
+  // `skills_inventory_request`; the server replies with a single
+  // `skills_inventory_snapshot` handled into `skillsInventory`. Returns whether
+  // the message went on the wire (false = socket closed). Sets
+  // `skillsInventoryLoading` while in flight.
+  requestSkillsInventory: () => boolean;
 
   // #5500 (epic #5498): run the repo-memory Reindex action for one surveyed
   // repo. Dispatches an `integration_action` (action: repo_memory_reindex)

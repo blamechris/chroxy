@@ -402,6 +402,7 @@ function _isSecureRequest(req) {
  *   { type: 'runner_status_snapshot', requestId?, generatedAt, root, summary, repos, error? } — Control Room self-hosted runner survey reply (#5253 schema + emitter); reply to a `runner_status_request`. Same degraded-snapshot-with-`error` posture as `host_status_snapshot`: always the full shape; on failure `repos` is empty, `summary` is zeroed, and an additive `error: { code, message }` is present. `requestId` echoes the request when provided.
  *   { type: 'integration_status_snapshot', requestId?, generatedAt, root, summary, repos, repoMemoryCli?, error? } — Control Room Integrations survey reply (#5499 schema + emitter, epic #5498); reply to an `integration_status_request`. Per-repo repo-memory status (config, cache stats, telemetry report); `repoMemoryCli` notes the once-per-snapshot binary probe. Same degraded-snapshot-with-`error` posture as the host/runner surveys. `requestId` echoes the request when provided.
  *   { type: 'integration_action_ack', action, repoPath, requestId?, counts } — Control Room Integrations action ack (#5500, epic #5498); reply to a successful `integration_action` (currently `repo_memory_reindex`). Echoes `action`/`repoPath` (+ `requestId` when provided) cloning the cancel_activity_ack correlation contract; `counts` carries the parsed scanned/summarized/fresh/skipped index result, or null when the CLI output was unparseable. Failures surface as an INTEGRATION_ACTION_FAILED `session_error` echoing the same correlation fields.
+ *   { type: 'skills_inventory_snapshot', requestId?, generatedAt, root, global, globalError?, repos, error? } — Control Room Skills inventory survey reply (#5554 schema + emitter, epic #5159); reply to a `skills_inventory_request`. `global` is the `~/.chroxy/skills/` tier and `repos` the per-repo `.chroxy/skills/` overlays, each entry carrying name/description/activation/trust/hash/installed + usage (lastUsed/count/repos). Skill BODIES never leave the server. Same degraded-snapshot-with-`error` posture as the host/runner/integration surveys; `globalError` / per-repo `error` degrade a single tier without blanking the snapshot. `requestId` echoes the request when provided.
  *   { type: 'summarize_session_result', sessionId, summary, truncated?, requestId? } — reply to a `summarize_session` (#5547); the model-written continuation brief built from the session's persisted history, seeded editable into the dashboard's create-session composer. `truncated` flags a windowed history. Failures surface as a SUMMARIZE_FAILED `session_error` echoing `sessionId`/`requestId` (curated message — no token/key material).
  *   { type: 'provider_list', providers }                — available providers
  *   { type: 'byok_credentials_status', requestId?, status, source, masked?, reason? } — BYOK credentials state for the dashboard (#4052)
@@ -648,6 +649,10 @@ export class WsServer {
       get sessionManager() { return self.sessionManager },
       get cliSession() { return self.cliSession },
       get pushManager() { return self.pushManager },
+      // #5554: the per-skill usage recorder lives on the SessionManager (it
+      // records activations at session creation); the Skills inventory handler
+      // reads its aggregates to join lastUsed / count / repos onto the snapshot.
+      get skillsUsageRecorder() { return self.sessionManager?.skillsUsageRecorder ?? null },
       // #5510: pairing-approval primitive — host-level approve/deny handlers.
       get pairingManager() { return self._pairingManager },
       resolvePairRequester: (requestId, result) => self._resolvePairRequester(requestId, result),

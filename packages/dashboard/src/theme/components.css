@@ -9145,6 +9145,90 @@ button.sidebar-token-view-session-row:hover {
   background: var(--accent-red);
 }
 
+/* ---------------------------------------------------------------------------
+ * #5554 — Skills inventory tab cards (SkillsInventorySection).
+ * Card-per-tier layout (Global + one per repo overlay), each listing expandable
+ * skill rows. Reuses the cr-tag / cr-chip / cr-mono / cr-dim primitives.
+ * ------------------------------------------------------------------------- */
+.cr-skill-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin: 14px 0;
+}
+
+.cr-skill-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.cr-skill-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.cr-skill-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.cr-skill {
+  border-top: 1px solid var(--border-primary);
+  padding: 10px 0;
+}
+
+.cr-skill:first-child {
+  border-top: none;
+}
+
+.cr-skill-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.cr-skill-head:disabled {
+  cursor: default;
+}
+
+.cr-skill-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cr-skill-meta {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.cr-skill-sub {
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.cr-skill-desc {
+  margin: 8px 0 2px;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
 /* Live agent dot next to a repo name */
 .cr-live-dot {
   display: inline-block;

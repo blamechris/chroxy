@@ -41,6 +41,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { IntegrationsSection } from './IntegrationsSection'
+import { SkillsInventorySection } from './SkillsInventorySection'
 import { SettingsContent } from './SettingsPanel'
 import { useConnectionStore } from '../store/connection'
 import type { ConnectionState } from '../store/types'
@@ -121,6 +122,20 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'integrationStatus',
     loadingKey: 'integrationStatusLoading',
     requestKey: 'requestIntegrationStatus',
+  },
+  // #5554 (epic #5159): the Skills tab — inventory of installed chroxy skills
+  // (global ~/.chroxy/skills/ + per-repo .chroxy/skills/ overlays) with
+  // descriptions / trust / hashes / install dates plus usage history. Same
+  // survey:true request/snapshot flow as Integrations; the #5546 staleness
+  // guard comes free via the registry.
+  {
+    key: 'skills',
+    label: 'Skills',
+    survey: true,
+    requestType: 'skills_inventory_request',
+    snapshotKey: 'skillsInventory',
+    loadingKey: 'skillsInventoryLoading',
+    requestKey: 'requestSkillsInventory',
   },
   // #5544: the Settings tab converges the scattered preference surfaces
   // (notification categories, appearance, session defaults, BYOK, Tauri desktop
@@ -334,6 +349,8 @@ export function ControlRoomView({
         <RunnerStatusSection />
       ) : tab === 'integrations' ? (
         <IntegrationsSection />
+      ) : tab === 'skills' ? (
+        <SkillsInventorySection />
       ) : (
         // #5544: scrollable wrapper so the (often long) settings body scrolls
         // inside the tab panel rather than the whole Control Room view. The

@@ -858,6 +858,21 @@ export const IntegrationStatusRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #5554 (epic #5159): the dashboard's Control Room "Skills" tab asks the server
+// for an inventory of installed chroxy skills — the global `~/.chroxy/skills/`
+// tier plus the per-repo `.chroxy/skills/` overlays for the surveyed repos, with
+// descriptions, trust state, content hashes, install dates, and per-skill usage
+// history (last used / count / repos). The server scans on request only (NOT in
+// the periodic survey — overlay scans are too costly to run on the survey
+// cadence) and replies with a single `skills_inventory_snapshot` (see
+// server.ts). Pull-on-Refresh, same host-level authority as the host / runner /
+// integration surveys. The optional `requestId` lets the dashboard correlate a
+// Refresh click to its snapshot.
+export const SkillsInventoryRequestSchema = z.object({
+  type: z.literal('skills_inventory_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // #5500 (epic #5498): a MUTATING Control Room integration action — the
 // observe half of the tab is `integration_status_request`; this is the
 // control half. Actions:
@@ -1002,6 +1017,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   HostStatusRequestSchema,
   RunnerStatusRequestSchema,
   IntegrationStatusRequestSchema,
+  SkillsInventoryRequestSchema,
   IntegrationActionSchema,
   SummarizeSessionSchema,
   PairApproveSchema,
@@ -1026,6 +1042,7 @@ export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>
 export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
+export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
