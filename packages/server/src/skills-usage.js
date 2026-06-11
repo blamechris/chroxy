@@ -41,11 +41,10 @@
  * aggregates (count / lastUsed / repos); the raw entries never cross the wire.
  */
 
-import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join } from 'node:path'
 import { createLogger } from './logger.js'
-import { writeFileRestricted } from './platform.js'
+import { loadJsonState, saveJsonState } from './json-state-file.js'
 
 const log = createLogger('skills-usage')
 
@@ -136,14 +135,12 @@ function normalizeAggregate(agg) {
  * @returns {{ version: number, entries: object[], aggregates: object }}
  */
 export function loadUsageStore(filePath = defaultSkillsUsagePath()) {
-  if (!existsSync(filePath)) return emptyStore()
-  try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf8'))
-    return normalizeStore(parsed)
-  } catch (err) {
-    log.debug(`skills-usage: failed to parse ${filePath} — starting empty: ${err && err.message ? err.message : err}`)
-    return emptyStore()
-  }
+  // #5580: fail-open read+parse via the shared JsonStateFile seam. A missing or
+  // unparseable file degrades to an empty store (best-effort telemetry, never
+  // load-bearing). `requireObject: false` so normalizeStore — not the loader —
+  // owns the "non-object → empty" coercion, preserving the prior tolerant shape.
+  const parsed = loadJsonState(filePath, () => null, { requireObject: false, log })
+  return normalizeStore(parsed)
 }
 
 /**
@@ -164,9 +161,10 @@ export function loadUsageStore(filePath = defaultSkillsUsagePath()) {
  * @param {string} [filePath]
  */
 export function saveUsageStore(store, filePath = defaultSkillsUsagePath()) {
-  const dir = dirname(filePath)
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
-  writeFileRestricted(filePath, JSON.stringify(store, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
+  // #5580: atomic 0600 save via the shared JsonStateFile seam (which delegates
+  // to writeFileRestricted — same per-pid tmp suffix per #5579, same mkdir +
+  // rename-failure cleanup). Suffix kept byte-identical to the prior `.tmp-<pid>`.
+  saveJsonState(filePath, store, { tmpSuffix: `.tmp-${process.pid}` })
 }
 
 /**
