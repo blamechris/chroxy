@@ -52,7 +52,7 @@ export type { OtherFreeformAnswer };
 
 export type SelectOptionValue = string | OtherFreeformAnswer;
 
-function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall }: {
+function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
   /**
@@ -84,6 +84,13 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
    * the chip renders text only without a misleading Retry affordance.
    */
   onRetryStreamStall?: () => void;
+  /**
+   * #5517: seed + persist row expand state in ChatView's id-keyed registry
+   * so it survives FlatList row recycling. Forwarded to the inner ToolBubble
+   * (tool rows) and used for the answered-permission collapse toggle.
+   */
+  getInitialExpanded?: (id: string) => boolean;
+  onExpandedChange?: (id: string, expanded: boolean) => void;
 }) {
   // #5516 (epic #5514): dev-only render tally. Proves (in the memoization
   // test and ad-hoc dev profiling) that only the tail/streaming bubble
@@ -96,7 +103,15 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
   const [isExpired, setIsExpired] = useState(() =>
     message.expiresAt != null && message.expiresAt <= Date.now()
   );
-  const [permissionExpanded, setPermissionExpanded] = useState(false);
+  // #5517: seed from the ChatView registry so a recycled permission pill
+  // reopens to the user's last choice instead of resetting to collapsed.
+  const [permissionExpanded, setPermissionExpandedRaw] = useState(
+    () => getInitialExpanded?.(message.id) ?? false,
+  );
+  const setPermissionExpanded = (next: boolean) => {
+    setPermissionExpandedRaw(next);
+    onExpandedChange?.(message.id, next);
+  };
   // #3746: free-text mode when user picks the synthetic "Other" option
   const [otherActive, setOtherActive] = useState(false);
   const [otherText, setOtherText] = useState('');
@@ -228,6 +243,8 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
         isSelecting={isSelecting}
         onToggleSelection={onPress}
         onOpenDetail={onOpenDetail}
+        getInitialExpanded={getInitialExpanded}
+        onExpandedChange={onExpandedChange}
       />
     );
   }

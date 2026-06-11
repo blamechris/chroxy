@@ -5,7 +5,7 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
+  FlatList,
   Platform,
   Keyboard,
   Share,
@@ -124,7 +124,10 @@ export function SessionScreen() {
   const [inputText, setInputText] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
-  const scrollViewRef = useRef<ScrollView>(null);
+  // #5517: ChatView's transcript is a virtualized FlatList. SessionScreen
+  // only forwards this ref (never calls imperative methods on it); typed as
+  // FlatList<unknown> to match ChatView's prop without naming the row type.
+  const scrollViewRef = useRef<FlatList<unknown>>(null);
   const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
