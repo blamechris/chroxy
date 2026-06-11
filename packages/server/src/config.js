@@ -1308,6 +1308,53 @@ export function writeReposToConfig(repos, configPath = DEFAULT_CONFIG_PATH) {
 }
 
 /**
+ * Write (or clear) the daemon-side session-preset override for a repo path
+ * (#5553). The override lives on the matching `repos[]` entry's `sessionPreset`
+ * key. When `preset` is null the key is removed (revert to repo-local file /
+ * no preset). When the repo path has no `repos[]` entry yet, one is created so
+ * the operator can configure an override for a repo that isn't otherwise
+ * registered. Other config fields and repo entries are preserved.
+ *
+ * @param {string} repoPath - The repo path to key the override by.
+ * @param {object|null} preset - The preset object ({ preamble?, seed?, enabled? }) or null to clear.
+ * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
+ */
+export function writeSessionPresetOverrideToConfig(repoPath, preset, configPath = DEFAULT_CONFIG_PATH) {
+  let existing = {}
+  try {
+    if (existsSync(configPath)) {
+      existing = JSON.parse(readFileSync(configPath, 'utf-8'))
+    }
+  } catch {
+    // Start fresh if parse fails
+  }
+  if (!existing || typeof existing !== 'object') existing = {}
+  if (!Array.isArray(existing.repos)) existing.repos = []
+
+  const idx = existing.repos.findIndex(
+    r => r && typeof r === 'object' && typeof r.path === 'string' && r.path === repoPath,
+  )
+  if (idx === -1) {
+    if (preset === null) {
+      // Nothing to clear and no entry exists — no-op write avoided.
+      return
+    }
+    existing.repos.push({ path: repoPath, sessionPreset: preset })
+  } else {
+    const entry = existing.repos[idx]
+    if (preset === null) {
+      delete entry.sessionPreset
+    } else {
+      entry.sessionPreset = preset
+    }
+  }
+
+  const dir = dirname(configPath)
+  mkdirSync(dir, { recursive: true })
+  writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
+}
+
+/**
  * Read the Control Room discovery root from a config file (#5172).
  * @param {string} [configPath] - Path to config.json. Defaults to ~/.chroxy/config.json.
  * @returns {string|undefined} The configured root, or undefined if missing/invalid.

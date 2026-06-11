@@ -196,6 +196,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
+  // #5553: per-repo session preset disclosure. When the chosen cwd has an
+  // ACTIVE preset, surface a compact, expandable indicator so the operator can
+  // never be surprised by an invisibly-injected preamble. Pending presets are
+  // surfaced too (so the operator knows one is awaiting approval in the drawer).
+  const requestSessionPreset = useConnectionStore(s => s.requestSessionPreset)
+  const sessionPresetSnapshots = useConnectionStore(s => s.sessionPresetSnapshots)
+  const [presetExpanded, setPresetExpanded] = useState(false)
+  // Defensive: tests mock the store with a partial slice; treat a missing
+  // action/map as "feature unavailable" rather than crashing the modal.
+  const requestSessionPresetSafe = typeof requestSessionPreset === 'function' ? requestSessionPreset : undefined
 
   // Imperative refs for submit — React 19 resets controlled input DOM values
   // before the next event fires, so we can't read from the DOM in submit.
@@ -211,6 +221,22 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const merged = [...new Set([...autocompleteSuggestions, ...known])]
     return merged.sort()
   }, [knownCwds, autocompleteSuggestions, cwd])
+
+  // #5553: debounced preset lookup for the chosen cwd. Requesting on every
+  // keystroke would spam the server, so wait 400ms after the cwd settles. The
+  // reply lands in `sessionPresetSnapshots[cwd]` and the disclosure below reads
+  // from there. Only fires when the modal is open and a cwd is present.
+  const trimmedCwd = cwd.trim()
+  useEffect(() => {
+    if (!open || !trimmedCwd || !requestSessionPresetSafe) return
+    const t = setTimeout(() => { requestSessionPresetSafe(trimmedCwd) }, 400)
+    return () => clearTimeout(t)
+  }, [open, trimmedCwd, requestSessionPresetSafe])
+
+  // The resolved preset for the current cwd (undefined = not fetched; null = no
+  // preset). Collapse the expanded preview whenever the cwd changes.
+  const currentPreset = trimmedCwd ? sessionPresetSnapshots?.[trimmedCwd] : undefined
+  useEffect(() => { setPresetExpanded(false) }, [trimmedCwd])
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
@@ -559,6 +585,45 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </div>
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
+          )}
+          {currentPreset && (
+            <div className="repo-preset-disclosure" data-testid="repo-preset-disclosure">
+              <button
+                type="button"
+                className="repo-preset-summary"
+                data-testid="repo-preset-summary"
+                onClick={() => setPresetExpanded(v => !v)}
+                aria-expanded={presetExpanded}
+              >
+                {currentPreset.trustState === 'pending' ? (
+                  <span>Repo preset pending review — approve it in the repo drawer to apply</span>
+                ) : currentPreset.active ? (
+                  <span>
+                    Repo preset applies: preamble {currentPreset.preambleLength} chars
+                    {currentPreset.seedLength > 0 ? ` · seed ${currentPreset.seedLength} chars` : ' · no seed'}
+                    {currentPreset.capped ? ' · capped' : ''} — view
+                  </span>
+                ) : (
+                  <span>Repo preset present but disabled</span>
+                )}
+              </button>
+              {presetExpanded && (
+                <div className="repo-preset-detail" data-testid="repo-preset-detail">
+                  {currentPreset.preamble && (
+                    <div className="repo-preset-field">
+                      <div className="repo-preset-label">Preamble (system prompt, every turn)</div>
+                      <pre className="repo-preset-text" data-testid="repo-preset-preamble">{currentPreset.preamble}</pre>
+                    </div>
+                  )}
+                  {currentPreset.seed && (
+                    <div className="repo-preset-field">
+                      <div className="repo-preset-label">Seed (staged editable into the composer)</div>
+                      <pre className="repo-preset-text" data-testid="repo-preset-seed">{currentPreset.seed}</pre>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </>
       )}

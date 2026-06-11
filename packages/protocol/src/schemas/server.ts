@@ -935,6 +935,58 @@ export const ServerHostStatusSnapshotSchema = z.object({
 })
 
 // ---------------------------------------------------------------------------
+// #5553: per-repo session preset surfaces.
+//
+// Two distinct projections of the resolved preset cross the wire:
+//   - on `session_switched` (create confirm): the DISCLOSURE shape — length-only
+//     preamble (the text is already folded into the prompt server-side) plus the
+//     seed text (staged editable into the composer) + trust metadata. See
+//     `ServerSessionPresetDisclosureSchema`.
+//   - on `session_preset_snapshot` (the per-repo drawer's read/write reply): the
+//     FULL shape including preamble + seed text so the operator can preview/edit
+//     the daemon override. This only reaches HOST-level clients (server gate).
+//
+// `source` is 'daemon' (a pre-trusted override in ~/.chroxy/config.json) or
+// 'repo' (a trust-gated `.chroxy/session.json`). `trustState` is 'trusted'
+// (active) or 'pending' (inert until approved). `active` = trusted && enabled —
+// only an active preset folds its preamble + stages its seed.
+
+export const ServerSessionPresetDisclosureSchema = z.object({
+  source: z.enum(['daemon', 'repo']),
+  active: z.boolean(),
+  trustState: z.enum(['trusted', 'pending']),
+  enabled: z.boolean(),
+  seed: z.string(),
+  preambleLength: z.number().int().nonnegative(),
+  seedLength: z.number().int().nonnegative(),
+  capped: z.boolean(),
+  repoPath: z.string().nullable(),
+})
+
+export const ServerSessionPresetFullSchema = z.object({
+  source: z.enum(['daemon', 'repo']),
+  active: z.boolean(),
+  trustState: z.enum(['trusted', 'pending']),
+  enabled: z.boolean(),
+  preamble: z.string(),
+  seed: z.string(),
+  preambleLength: z.number().int().nonnegative(),
+  seedLength: z.number().int().nonnegative(),
+  capped: z.boolean(),
+  repoPath: z.string().nullable(),
+})
+
+// Reply to session_preset_get / _set / _approve / _revoke (see client.ts).
+// `preset` is null when the repo has no preset at all. `requestId` is echoed
+// when the request carried one.
+export const ServerSessionPresetSnapshotSchema = z.object({
+  type: z.literal('session_preset_snapshot'),
+  cwd: z.string().nullable(),
+  preset: ServerSessionPresetFullSchema.nullable(),
+  requestId: z.string().max(128).optional(),
+})
+
+// ---------------------------------------------------------------------------
 // #5253: Self-hosted runner status Control Room surface.
 //
 // A second host-level pull survey, sibling to the Host/Repo Status one above.
@@ -2316,6 +2368,11 @@ export type RepoTree = z.infer<typeof RepoTreeSchema>
 export type RepoStatus = z.infer<typeof RepoStatusSchema>
 export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>
 export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>
+
+// #5553: per-repo session preset wire types.
+export type ServerSessionPresetDisclosure = z.infer<typeof ServerSessionPresetDisclosureSchema>
+export type ServerSessionPresetFull = z.infer<typeof ServerSessionPresetFullSchema>
+export type ServerSessionPresetSnapshotMessage = z.infer<typeof ServerSessionPresetSnapshotSchema>
 
 // #5253: Self-hosted runner status Control Room contract. Consumed by the
 // server emitter (runners.js), the dashboard store handler, and the

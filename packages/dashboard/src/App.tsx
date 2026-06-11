@@ -93,6 +93,7 @@ import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
 import { ControlRoomView, type ControlRoomTab } from './components/ControlRoomView'
+import { RepoPresetDrawer } from './components/RepoPresetDrawer'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -603,6 +604,8 @@ export function App() {
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
   const [pendingCwd, setPendingCwd] = useState<string | null>(null)
+  // #5553 — the open per-repo settings drawer target (path + name), or null.
+  const [repoPresetDrawer, setRepoPresetDrawer] = useState<{ path: string; name: string } | null>(null)
   const [isCreatingSession, setIsCreatingSession] = useState(false)
   const [sessionCreateError, setSessionCreateError] = useState<string | null>(null)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
@@ -1065,10 +1068,17 @@ export function App() {
       // write the per-session draft ref too so the draft-restore effect (which
       // runs after this one on the same activeSessionId change) reads the seed
       // rather than clobbering it with an empty draft.
-      if (pendingSeedPromptRef.current) {
-        const reason = pendingSeedPromptRef.current
-        inputDraftsRef.current.set(activeSessionId, reason)
-        setInputDraftValue(reason)
+      // #5553: a server-provided repo-preset SEED (delivered on session_switched
+      // and stashed in the store keyed by sessionId) takes precedence — it's the
+      // repo's intentional first-message template. Falls back to the client-side
+      // Investigate/summarize seed (#5202/#5547). Either way the seed is staged
+      // EDITABLE (never auto-sent) via the same draft-ref path.
+      const takeSeed = useConnectionStore.getState().takePendingServerSeed
+      const serverSeed = typeof takeSeed === 'function' ? takeSeed(activeSessionId) : null
+      const seed = serverSeed || pendingSeedPromptRef.current
+      if (seed) {
+        inputDraftsRef.current.set(activeSessionId, seed)
+        setInputDraftValue(seed)
         setControlRoomActive(false)
         pendingSeedPromptRef.current = null
       }
@@ -1584,6 +1594,12 @@ export function App() {
   const handleOpenSession = useCallback((req: RepoOpenSessionRequest) => {
     openCreateSession({ cwd: req.cwd })
   }, [openCreateSession])
+
+  // #5553 — the per-repo settings drawer (gear on a Control Room repo row). One
+  // drawer open at a time; the target repo path+name is stashed in state.
+  const handleConfigureRepo = useCallback((req: { path: string; name: string }) => {
+    setRepoPresetDrawer(req)
+  }, [])
 
   // #4695 / #4942 — bridge the macOS menu bar items to App-state
   // handlers. See the `useTauriMenuEvents` call below `handleShowQr`
@@ -2617,6 +2633,7 @@ export function App() {
             <ControlRoomView
               onInvestigate={handleInvestigate}
               onOpenSession={handleOpenSession}
+              onConfigureRepo={handleConfigureRepo}
               // #5544 — the Settings tab embeds the converged preference body.
               // Closed→open via a Settings entry point mounts straight onto the
               // Settings tab (`initialTab`); an entry-point click while the CR
@@ -3034,6 +3051,16 @@ export function App() {
         serverError={sessionCreateError ?? undefined}
         isCreating={isCreatingSession}
       />
+
+      {/* #5553 — the per-repo settings drawer (session preset editor). Opened
+          from a Control Room repo-row gear; one at a time. */}
+      {repoPresetDrawer && (
+        <RepoPresetDrawer
+          repoPath={repoPresetDrawer.path}
+          repoName={repoPresetDrawer.name}
+          onClose={() => setRepoPresetDrawer(null)}
+        />
+      )}
 
       {/* #5206 — session-close confirmation. Shown only when the
           confirmSessionClose setting is enabled (handleCloseSession gates it).

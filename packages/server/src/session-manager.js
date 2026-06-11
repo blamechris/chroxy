@@ -17,6 +17,8 @@ import { SessionStatePersistence } from './session-state-persistence.js'
 import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-manager.js'
 import { SessionMessageHistory } from './session-message-history.js'
 import { SkillsUsageRecorder } from './skills-usage.js'
+import { resolveSessionPreset, foldPreamble } from './session-preset.js'
+import { SessionPresetTrustStore } from './session-preset-trust.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import {
@@ -258,6 +260,15 @@ export class SessionManager extends EventEmitter {
     // keeps the usage log out of the real ~/.chroxy too).
     skillsUsageRecorder,
 
+    // #5553: trust ledger for repo-local session presets
+    // (.chroxy/session.json). Tests pass their own temp-pathed store; production
+    // wires a default whose file sits next to the session-state file so a temp
+    // stateFilePath also redirects the ledger out of the real ~/.chroxy.
+    presetTrustStore,
+    // #5553: config path for the daemon-side preset override map. Tests point
+    // this at a temp config.json; production uses the default ~/.chroxy/config.json.
+    presetConfigPath,
+
     // Message history
     maxMessages,
     maxHistory,
@@ -403,6 +414,14 @@ export class SessionManager extends EventEmitter {
     // with a temp stateFilePath.
     this.skillsUsageRecorder = skillsUsageRecorder
       || new SkillsUsageRecorder({ filePath: join(dirname(this._stateFilePath), 'skills-usage.json') })
+    // #5553: per-repo session-preset trust ledger. Same temp-redirect logic as
+    // skillsUsageRecorder — the default file sits next to the session-state
+    // file so a test's temp stateFilePath keeps the ledger out of the real home.
+    this.presetTrustStore = presetTrustStore
+      || new SessionPresetTrustStore({ filePath: join(dirname(this._stateFilePath), 'session-preset-trust.json') })
+    // Config path the preset resolver reads the daemon override map from.
+    // Defaults to undefined → resolveSessionPreset uses its own DEFAULT_CONFIG_PATH.
+    this.presetConfigPath = typeof presetConfigPath === 'string' ? presetConfigPath : null
     Object.defineProperty(this, '_persistTimer', {
       get: () => this._persistence._persistTimer,
       set: (v) => { this._persistence._persistTimer = v },
@@ -722,6 +741,59 @@ export class SessionManager extends EventEmitter {
     const resolvedProvider = resolvedProviderType
     const ProviderClass = PreflightProviderClass
 
+    // #5553: resolve the per-repo session preset now that the cwd is known.
+    // The resolver walks up from resolvedCwd to the nearest `.chroxy/session.json`
+    // (worktrees inherit the parent repo's preset via the same walk), applies
+    // the daemon-override precedence, and consults the trust ledger. A repo-local
+    // preset is INERT until the operator approves its content hash; a daemon
+    // override is pre-trusted. Everything is wrapped so a preset resolution
+    // failure can never break session creation (fail closed = no preset).
+    //
+    // Skip on restore: a restored session already had its (folded) preamble
+    // persisted, and re-folding here would double-apply the repo preamble.
+    let presetDescriptor = null
+    let effectiveSessionPreamble = sessionPreamble
+    if (!isRestore) {
+      try {
+        const resolved = resolveSessionPreset(resolvedCwd, {
+          trustStore: this.presetTrustStore,
+          configPath: this.presetConfigPath || undefined,
+        })
+        if (resolved) {
+          // Fold the preamble only when the preset is ACTIVE (trusted + enabled).
+          // A pending/disabled preset is still surfaced to the client for
+          // disclosure + approval, but never injected.
+          let folded = { value: '', capped: false }
+          if (resolved.active && resolved.preamble) {
+            folded = foldPreamble(resolved.preamble, sessionPreamble)
+            effectiveSessionPreamble = folded.value
+          }
+          presetDescriptor = {
+            source: resolved.source,
+            active: resolved.active,
+            trustState: resolved.trustState,
+            enabled: resolved.enabled,
+            // Only surface the seed when the preset is active — a pending preset
+            // never stages text into the composer.
+            seed: resolved.active ? resolved.seed : '',
+            preambleLength: resolved.preambleLength,
+            seedLength: resolved.seedLength,
+            // `capped` reflects EITHER a read-time over-budget flag OR the fold
+            // truncating the concatenated preamble — so the UI always discloses
+            // a truncation.
+            capped: resolved.capped || folded.capped,
+            repoPath: resolved.repoPath,
+            path: resolved.path,
+          }
+        }
+      } catch (err) {
+        // Leak guard: never echo preset contents in the failure path.
+        log.warn(`Session preset resolution failed for session ${sessionId} (non-fatal): ${err && err.message ? err.message : 'error'}`)
+        presetDescriptor = null
+        effectiveSessionPreamble = sessionPreamble
+      }
+    }
+
     const providerOpts = {
       cwd: resolvedCwd,
       model: resolvedModel,
@@ -786,7 +858,11 @@ export class SessionManager extends EventEmitter {
     forwardPerSessionSettingsToProviderOpts(providerOpts, {
       promptEvaluator,
       chroxyContextHint,
-      sessionPreamble,
+      // #5553: the repo preamble is folded into the session-level preamble
+      // (repo first, capped) above. Forward the FOLDED result so the repo
+      // preamble lands in `sessionPreamble` and reaches every provider via
+      // BASE_SESSION_OPT_KEYS.
+      sessionPreamble: effectiveSessionPreamble,
     })
     // #3639: per-session promptEvaluatorSkipPattern. Kept out of the
     // per-session-settings registry because the wire shape ('non-empty
@@ -874,6 +950,12 @@ export class SessionManager extends EventEmitter {
       // accumulator stays at zero for them and the dashboard / app side
       // knows to skip the cost badge.
       cumulativeUsage: makeZeroCumulativeUsage(),
+      // #5553: the resolved per-repo session-preset descriptor (or null). The
+      // create_session handler reads this off the entry to (a) disclose the
+      // preset metadata on the session_switched reply and (b) stage the seed
+      // editable into the new session's composer. Not persisted — it is
+      // re-resolved from disk on every fresh create, and restores skip folding.
+      sessionPreset: presetDescriptor,
     }
 
     this._sessions.set(sessionId, entry)
@@ -1052,6 +1134,98 @@ export class SessionManager extends EventEmitter {
     const entry = this._sessions.get(sessionId)
     if (!entry || entry._destroying) return null
     return entry
+  }
+
+  /**
+   * #5553: read the resolved per-repo session preset for a session entry, in
+   * the shape the create_session reply discloses to clients. Returns null when
+   * the session has no preset (or is unknown). Never includes the preamble
+   * TEXT (it's already folded into the prompt) — only its length + the seed
+   * text (operator-facing, staged editable into the composer) + trust metadata.
+   *
+   * @param {string} sessionId
+   * @returns {null | {
+   *   source: 'daemon' | 'repo',
+   *   active: boolean,
+   *   trustState: 'trusted' | 'pending',
+   *   enabled: boolean,
+   *   seed: string,
+   *   preambleLength: number,
+   *   seedLength: number,
+   *   capped: boolean,
+   *   repoPath: string | null,
+   * }}
+   */
+  getSessionPreset(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || !entry.sessionPreset) return null
+    const p = entry.sessionPreset
+    return {
+      source: p.source,
+      active: p.active,
+      trustState: p.trustState,
+      enabled: p.enabled,
+      seed: p.seed || '',
+      preambleLength: p.preambleLength,
+      seedLength: p.seedLength,
+      capped: !!p.capped,
+      repoPath: p.repoPath || null,
+    }
+  }
+
+  /**
+   * #5553: resolve the per-repo session preset for an arbitrary cwd WITHOUT
+   * creating a session. Powers the create-session modal's pre-create
+   * disclosure ("this repo's preset applies") and the per-repo settings drawer.
+   * Surfaces full preset metadata INCLUDING the preamble + seed text so the
+   * drawer can show a read-only preview. Trust-gated identically to
+   * createSession. Returns null when there is no preset.
+   *
+   * @param {string} cwd
+   * @returns {null | object}
+   */
+  resolveSessionPresetForCwd(cwd) {
+    try {
+      return resolveSessionPreset(cwd, {
+        trustStore: this.presetTrustStore,
+        configPath: this.presetConfigPath || undefined,
+      })
+    } catch (err) {
+      log.warn(`resolveSessionPresetForCwd failed (non-fatal): ${err && err.message ? err.message : 'error'}`)
+      return null
+    }
+  }
+
+  /**
+   * #5553: approve the CURRENT content hash of a repo-local preset so it
+   * becomes trusted (and active for future sessions). Re-resolves the preset
+   * from disk to obtain the live hash (so a stale client-supplied hash can't
+   * pin a different version). Returns the updated descriptor or null when the
+   * cwd has no trust-gated repo-local preset (e.g. a daemon override, which is
+   * pre-trusted, or no preset at all).
+   *
+   * @param {string} cwd
+   * @returns {null | object}
+   */
+  approveSessionPreset(cwd) {
+    const resolved = this.resolveSessionPresetForCwd(cwd)
+    if (!resolved || resolved.source !== 'repo' || !resolved.path) return null
+    this.presetTrustStore.approve(resolved.path, resolved.hash)
+    return this.resolveSessionPresetForCwd(cwd)
+  }
+
+  /**
+   * #5553: revoke trust for a repo-local preset so it goes inert (pending)
+   * again. Returns the updated descriptor or null.
+   *
+   * @param {string} cwd
+   * @returns {null | object}
+   */
+  revokeSessionPreset(cwd) {
+    const resolved = this.resolveSessionPresetForCwd(cwd)
+    if (!resolved || resolved.source !== 'repo' || !resolved.path) return null
+    this.presetTrustStore.revoke(resolved.path)
+    return this.resolveSessionPresetForCwd(cwd)
   }
 
   /**
