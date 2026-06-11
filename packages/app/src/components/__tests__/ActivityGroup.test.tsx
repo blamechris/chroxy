@@ -324,4 +324,78 @@ describe('ActivityGroup / ActivityEntry — structured-renderer wiring (#4201)',
     expect(allText).toMatch(/1 image attached/);
     expect(allText).not.toMatch(/2 images attached/);
   });
+
+  // #5517: virtualization recycle-safety. ChatView now renders the
+  // transcript through a FlatList, so a group / entry can unmount when
+  // scrolled off-screen and remount on the way back. The group + entry expand
+  // flags must seed from ChatView's id-keyed registry (getInitialExpanded /
+  // onExpandedChange) so the row reopens to the user's last choice rather than
+  // snapping back to collapsed.
+  describe('expand state survives FlatList row recycling (#5517)', () => {
+    function makeRegistry() {
+      const map = new Map<string, boolean>();
+      return {
+        getInitialExpanded: (id: string) => map.get(id) ?? false,
+        onExpandedChange: (id: string, expanded: boolean) => {
+          if (expanded) map.set(id, true);
+          else map.delete(id);
+        },
+        map,
+      };
+    }
+
+    function mountGroup(
+      reg: ReturnType<typeof makeRegistry>,
+      messages: ChatMessage[],
+    ): renderer.ReactTestRenderer {
+      let root!: renderer.ReactTestRenderer;
+      act(() => {
+        root = renderer.create(
+          <ActivityGroup
+            messages={messages}
+            isActive={false}
+            isSelecting={false}
+            selectedIds={new Set()}
+            onToggleSelection={() => {}}
+            groupKey={`activity-${messages[0].id}`}
+            getInitialExpanded={reg.getInitialExpanded}
+            onExpandedChange={reg.onExpandedChange}
+          />,
+        );
+      });
+      return root;
+    }
+
+    it('reopens an expanded group + entry after unmount/remount via the registry', () => {
+      const reg = makeRegistry();
+      const messages = [makeToolMessage({ id: 'm1' })];
+
+      // First mount: expand the group then the entry, then unmount (recycle).
+      const first = mountGroup(reg, messages);
+      expandGroup(first);
+      expandEntry(first, 'activity-entry-m1');
+      expect(findByTestId(first, 'todo-list-header')[0]).toBeTruthy();
+      act(() => first.unmount());
+
+      // The registry remembers both the group key and the entry id.
+      expect(reg.map.get('activity-m1')).toBe(true);
+      expect(reg.map.get('m1')).toBe(true);
+
+      // Remount (scrolled back into view): the structured renderer appears
+      // immediately, with no taps — proving the row seeded from the registry.
+      const second = mountGroup(reg, messages);
+      expect(findByTestId(second, 'todo-list-header')[0]).toBeTruthy();
+    });
+
+    it('a collapsed group stays collapsed after recycling (no false-positive)', () => {
+      const reg = makeRegistry();
+      const messages = [makeToolMessage({ id: 'm2' })];
+      const first = mountGroup(reg, messages);
+      // Never expanded.
+      act(() => first.unmount());
+      expect(reg.map.has('activity-m2')).toBe(false);
+      const second = mountGroup(reg, messages);
+      expect(findByTestId(second, 'todo-list-header')).toHaveLength(0);
+    });
+  });
 });

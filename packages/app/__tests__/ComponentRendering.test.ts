@@ -107,8 +107,9 @@ describe('ChatView component', () => {
     expect(chatViewSrc).toMatch(/import\s+React,\s*\{.*useState.*useRef.*useEffect.*useMemo/)
   })
 
-  test('imports ScrollView, AccessibilityInfo from react-native', () => {
-    expect(chatViewSrc).toMatch(/import[\s\S]*ScrollView[\s\S]*from\s+['"]react-native['"]/)
+  test('imports FlatList, AccessibilityInfo from react-native (#5517 virtualized list)', () => {
+    // #5517: the transcript is now a virtualized FlatList, not a ScrollView.
+    expect(chatViewSrc).toMatch(/import[\s\S]*FlatList[\s\S]*from\s+['"]react-native['"]/)
     expect(chatViewSrc).toMatch(/import[\s\S]*AccessibilityInfo[\s\S]*from\s+['"]react-native['"]/)
   })
 
@@ -142,7 +143,9 @@ describe('ChatView component', () => {
   })
 
   test('shows empty state text when no messages', () => {
-    expect(chatViewSrc).toMatch(/messages\.length === 0/)
+    // #5517: empty state is rendered through FlatList's ListEmptyComponent
+    // rather than a `messages.length === 0` ternary in the render body.
+    expect(chatViewSrc).toMatch(/ListEmptyComponent/)
     expect(chatViewSrc).toMatch(/Connected\. Send a message to Claude!/)
     expect(chatViewSrc).toMatch(/Starting Claude Code\.\.\./)
   })
