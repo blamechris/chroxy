@@ -179,6 +179,38 @@ describe('discord-credentials — webhook URL sourcing', () => {
     assert.equal(r.source, 'none')
   })
 
+  // #5523 review: a non-ENOENT stat failure (EACCES/EPERM) must surface the
+  // real error, NOT be misreported as "does not exist". readStore() returns such
+  // failures as { fileExists:false, error:'unable to stat …' }, so the resolver
+  // must consult `error` before the missing-file branch. We force EACCES by
+  // making the parent `.chroxy` dir non-traversable. chmod is a no-op for root,
+  // so skip there.
+  it('non-ENOENT stat failure (EACCES) surfaces the real error, not "does not exist" (#5523)', () => {
+    if (process.getuid && process.getuid() === 0) return // root bypasses dir perms
+    const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    process.env.HOME = home
+    const dir = join(home, '.chroxy')
+    const file = join(dir, 'credentials.json')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(file, JSON.stringify({ discordWebhookUrl: WEBHOOK }), { mode: 0o600 })
+    chmodSync(file, 0o600)
+    // Drop traverse on the parent dir → statSync(file) fails with EACCES.
+    chmodSync(dir, 0o000)
+    try {
+      const r = resolveDiscordWebhookUrl()
+      assert.equal(r.url, null)
+      assert.equal(r.source, 'none')
+      // The real reason must surface (stat error), never the misleading
+      // "does not exist", and never the URL/token.
+      assert.match(r.reason, /unable to stat/)
+      assert.doesNotMatch(r.reason, /does not exist/)
+      assert.ok(!r.reason.includes(WEBHOOK_TOKEN), 'reason must not echo the webhook token')
+    } finally {
+      // Restore so the temp dir is removable / harness cleanup succeeds.
+      chmodSync(dir, 0o700)
+    }
+  })
+
   it('missing-field reason is value-free and stable on a plaintext file', () => {
     const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
     process.env.HOME = home

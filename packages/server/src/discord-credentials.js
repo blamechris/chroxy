@@ -101,19 +101,24 @@ export function resolveDiscordWebhookUrl() {
     }
   }
 
+  // A read error covers bad mode, malformed JSON, an encrypted envelope whose
+  // keychain data key is unavailable, a corrupt/undecryptable envelope, AND a
+  // non-ENOENT stat failure (EACCES/EPERM). readStore() reports those stat
+  // failures with `fileExists:false` but a populated `error`, so this MUST be
+  // checked before the `!fileExists` "does not exist" branch below — otherwise a
+  // permission error would be misreported as a missing file, hiding the real
+  // cause from an operator debugging a 0600/ownership problem. The reason is
+  // value-free (built by credential-store from the path/cause).
+  if (read.error) {
+    return { url: null, source: 'none', reason: read.error }
+  }
+
   if (!read.fileExists) {
     return {
       url: null,
       source: 'none',
       reason: `CHROXY_DISCORD_WEBHOOK_URL not set and ${CREDENTIALS_FILE} does not exist`,
     }
-  }
-
-  // A read error covers bad mode, malformed JSON, an encrypted envelope whose
-  // keychain data key is unavailable, and a corrupt/undecryptable envelope.
-  // The reason is value-free (built by credential-store from the path/cause).
-  if (read.error) {
-    return { url: null, source: 'none', reason: read.error }
   }
 
   if (read.value === null) {
