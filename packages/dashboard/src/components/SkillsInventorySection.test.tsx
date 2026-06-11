@@ -101,6 +101,25 @@ describe('SkillsInventorySection — snapshot rendering', () => {
     expect(screen.getByTestId('skills-chip-count-used').textContent).toBe('1')
   })
 
+  it('counts a skill used in both the global tier and a repo overlay only once', () => {
+    // Usage aggregates are keyed by name and joined onto BOTH the global entry
+    // and the same-named repo overlay entry — the "Used" chip must dedupe by
+    // name so a cross-tier skill isn't double-counted.
+    const snap = snapshot({
+      global: [skill({ name: 'batch-merge', useCount: 12 })],
+      repos: [
+        {
+          name: 'chroxy',
+          path: '/Users/x/Projects/chroxy',
+          skills: [skill({ name: 'batch-merge', source: 'repo', overridesGlobal: true, useCount: 12 })],
+          error: null,
+        },
+      ],
+    })
+    render(<SkillsInventorySection {...baseProps} snapshot={snap} />)
+    expect(screen.getByTestId('skills-chip-count-used').textContent).toBe('1')
+  })
+
   it('renders the Global card and one card per repo overlay', () => {
     render(<SkillsInventorySection {...baseProps} snapshot={snapshot()} />)
     expect(screen.getByTestId('skills-card-global')).toBeTruthy()

@@ -231,8 +231,15 @@ export function SkillsInventorySection({
   // Summary tallies for the chip row.
   const repos: readonly SkillInventoryRepo[] = snapshot?.repos ?? []
   const reposWithOverlay = repos.filter((r) => r.skills.length > 0).length
+  // Distinct skills used. Usage aggregates are keyed by skill NAME and joined
+  // onto every inventory row of that name, so a skill present in both the global
+  // tier and a repo overlay would otherwise be counted twice — dedupe by name.
   const usedCount = (snapshot
-    ? [...snapshot.global, ...repos.flatMap((r) => r.skills)].filter((s) => s.useCount > 0).length
+    ? new Set(
+        [...snapshot.global, ...repos.flatMap((r) => r.skills)]
+          .filter((s) => s.useCount > 0)
+          .map((s) => s.name),
+      ).size
     : 0)
 
   return (
