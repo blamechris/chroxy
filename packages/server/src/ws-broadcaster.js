@@ -226,8 +226,12 @@ export class WsBroadcaster {
 
   /**
    * #5578: does ANY authenticated, connected subscriber of this session sit on a
-   * deflate-negotiated socket (i.e. tunnel/cellular, NOT a LAN/loopback peer for
-   * which deflate was stripped at upgrade — ws-server.js)? Used by the
+   * non-LAN socket that KEPT permessage-deflate (i.e. tunnel/cellular, NOT a
+   * LAN/loopback peer for which deflate was stripped at upgrade — ws-server.js)?
+   * Driven by `client.usesDeflate`, the upgrade-time locality decision (deflate
+   * permitted vs stripped), not the per-client negotiated extension — a remote
+   * client that declines deflate still counts, which is the intended direction
+   * (same WAN per-frame cost). Used by the
    * EventNormalizer to widen the delta-coalescing window on links where each
    * sub-threshold (<1024B) stream_delta ships UNCOMPRESSED and the per-frame
    * small-packet cost dominates. Mirrors `_countSessionSubscribers`'s recipient
