@@ -104,6 +104,16 @@ fail=red, blocked=amber, skipped=gray. Respect `prefers-reduced-motion`.
 
 - Every input persists to `localStorage` keyed by the file's slug+date
   (restore on load; checkbox auto-checks when a result is chosen).
+- **Dictation (progressive enhancement):** if `window.SpeechRecognition ||
+  window.webkitSpeechRecognition` exists, render a small round 🎤 button beside
+  every note field and tester-metadata input. Click → start recognition
+  (`continuous: true`, final results only, `lang` from `navigator.language`),
+  appending each final transcript to the field (space-joined) and persisting;
+  button pulses red while recording, click again (⏹) to stop; only one active
+  recorder at a time. Errors (mic permission, offline) surface via the button
+  tooltip — never an alert. Where the API is absent the button simply doesn't
+  render. Title-hint the privacy caveat: Chromium relays audio to Google's
+  speech service; macOS users can always use built-in Dictation instead.
 - Progress counts update live in header and section summaries.
 - **Copy Results markdown format** (exact):
 
@@ -140,4 +150,4 @@ Result: X pass / Y fail / Z blocked / W skipped / U untested
   item UNLESS it has a visual/device component automation can't see.
   Server node:test + dashboard/store-core vitest + app jest suites run in CI on every PR; the 20 Maestro flows (`packages/app/.maestro/run-all.yaml`) cover mobile UI on a simulator; `/smoke-test` drives the dashboard headless via Playwright. Manual items should target what those cannot see: real-device feel (latency, scroll, keyboard), multi-machine flows (LAN pairing, tunnel fallback), Discord-side rendering, and anything flagged "needs simulator/device pass" in PR bodies.
 
-<!-- skill-templates: smoke-form 8cd4426 2026-06-11 -->
+<!-- skill-templates: smoke-form 3cd93cc 2026-06-11 -->
