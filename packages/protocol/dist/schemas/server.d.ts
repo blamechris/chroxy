@@ -73,6 +73,30 @@ export declare const ServerPairFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"pair_fail">;
     reason: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerPairRequestPendingSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_request_pending">;
+    requestId: z.ZodString;
+    verifyCode: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerPairPendingSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_pending">;
+    requestId: z.ZodString;
+    deviceName: z.ZodString;
+    verifyCode: z.ZodString;
+    expiresAt: z.ZodNumber;
+}, z.core.$strip>;
+export declare const ServerPairResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_result">;
+    requestId: z.ZodString;
+    ok: z.ZodBoolean;
+    token: z.ZodOptional<z.ZodString>;
+    reason: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerPairResolvedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_resolved">;
+    requestId: z.ZodString;
+    reason: z.ZodString;
+}, z.core.$strip>;
 /**
  * #5431 — one outstanding background task surfaced on `claude_ready`.
  *
@@ -1080,8 +1104,8 @@ export declare const RepoRelayRunSchema: z.ZodObject<{
  */
 export declare const RepoRelayVerdictSchema: z.ZodEnum<{
     unknown: "unknown";
-    failing: "failing";
     ok: "ok";
+    failing: "failing";
     drifted: "drifted";
     not_installed: "not_installed";
 }>;
@@ -1121,8 +1145,8 @@ export declare const RepoRelayStatusSchema: z.ZodObject<{
     failureStreak: z.ZodNumber;
     verdict: z.ZodEnum<{
         unknown: "unknown";
-        failing: "failing";
         ok: "ok";
+        failing: "failing";
         drifted: "drifted";
         not_installed: "not_installed";
     }>;
@@ -1177,8 +1201,8 @@ export declare const IntegrationRepoSchema: z.ZodObject<{
         failureStreak: z.ZodNumber;
         verdict: z.ZodEnum<{
             unknown: "unknown";
-            failing: "failing";
             ok: "ok";
+            failing: "failing";
             drifted: "drifted";
             not_installed: "not_installed";
         }>;
@@ -1273,8 +1297,8 @@ export declare const ServerIntegrationStatusSnapshotSchema: z.ZodObject<{
             failureStreak: z.ZodNumber;
             verdict: z.ZodEnum<{
                 unknown: "unknown";
-                failing: "failing";
                 ok: "ok";
+                failing: "failing";
                 drifted: "drifted";
                 not_installed: "not_installed";
             }>;
@@ -1933,6 +1957,10 @@ export declare const ServerEvaluatorClarifySchema: z.ZodObject<{
     evaluatorIteration: z.ZodNumber;
 }, z.core.$strip>;
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>;
+export type ServerPairRequestPendingMessage = z.infer<typeof ServerPairRequestPendingSchema>;
+export type ServerPairPendingMessage = z.infer<typeof ServerPairPendingSchema>;
+export type ServerPairResultMessage = z.infer<typeof ServerPairResultSchema>;
+export type ServerPairResolvedMessage = z.infer<typeof ServerPairResolvedSchema>;
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>;
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>;
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>;

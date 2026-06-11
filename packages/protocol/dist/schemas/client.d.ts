@@ -48,6 +48,20 @@ export declare const PairSchema: z.ZodObject<{
     }, z.core.$loose>>;
     capabilities: z.ZodDefault<z.ZodCatch<z.ZodOptional<z.ZodArray<z.ZodString>>>>;
 }, z.core.$loose>;
+export declare const PairRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_request">;
+    deviceName: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodString;
+    protocolVersion: z.ZodOptional<z.ZodNumber>;
+}, z.core.$loose>;
+export declare const PairApproveSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_approve">;
+    requestId: z.ZodString;
+}, z.core.$loose>;
+export declare const PairDenySchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_deny">;
+    requestId: z.ZodString;
+}, z.core.$loose>;
 export declare const InputSchema: z.ZodObject<{
     type: z.ZodLiteral<"input">;
     data: z.ZodOptional<z.ZodString>;
@@ -956,9 +970,18 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     repoPath: z.ZodString;
     runId: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"pair_approve">;
+    requestId: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"pair_deny">;
+    requestId: z.ZodString;
 }, z.core.$loose>], "type">;
 export type AuthMessage = z.infer<typeof AuthSchema>;
 export type PairMessage = z.infer<typeof PairSchema>;
+export type PairRequestMessage = z.infer<typeof PairRequestSchema>;
+export type PairApproveMessage = z.infer<typeof PairApproveSchema>;
+export type PairDenyMessage = z.infer<typeof PairDenySchema>;
 export type InputMessage = z.infer<typeof InputSchema>;
 export type InterruptMessage = z.infer<typeof InterruptSchema>;
 export type CancelActivityMessage = z.infer<typeof CancelActivitySchema>;

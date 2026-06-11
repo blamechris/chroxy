@@ -133,7 +133,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerIntegrationActionAckSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -2062,6 +2062,35 @@ function handleHostStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, se
 }
 
 /**
+ * #5510 (epic #5509) — a new device requested pairing; the daemon fanned the
+ * request out to this host surface. Append it to `pendingPairRequests` (deduped
+ * by requestId so a replay/reconnect can't double-stack the banner). Validated
+ * with the protocol Zod schema; a malformed payload is dropped rather than
+ * crashing the renderer. `deviceName` is attacker-controlled — stored as-is and
+ * rendered as plain text (React escapes on render).
+ */
+function handlePairPending(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerPairPendingSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const existing = get().pendingPairRequests;
+  const next = existing.filter((p) => p.requestId !== parsed.data.requestId);
+  next.push(parsed.data);
+  set({ pendingPairRequests: next });
+}
+
+/**
+ * #5510 — a pending pair request was resolved (approved/denied elsewhere, or it
+ * expired). Drop it from the banner queue. The carried `reason` is informational
+ * only; the surface simply retracts the entry.
+ */
+function handlePairResolved(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerPairResolvedSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const next = get().pendingPairRequests.filter((p) => p.requestId !== parsed.data.requestId);
+  set({ pendingPairRequests: next });
+}
+
+/**
  * #5253 — self-hosted runner survey `runner_status_snapshot`: REPLACE the
  * stored runner survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host survey
@@ -2206,6 +2235,9 @@ const HANDLERS: Record<string, Handler> = {
   activity_delta: handleActivityDelta,
   // #5277: positive ack correlating a cancel_activity request to its outcome.
   cancel_activity_ack: handleCancelActivityAck,
+  // #5510 (epic #5509): pairing-approval primitive — host-surface fan-out.
+  pair_pending: handlePairPending,
+  pair_resolved: handlePairResolved,
   // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
   host_status_snapshot: handleHostStatusSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.

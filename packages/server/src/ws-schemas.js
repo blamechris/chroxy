@@ -9,6 +9,9 @@ export {
   // Client schemas
   AuthSchema,
   PairSchema,
+  PairRequestSchema,
+  PairApproveSchema,
+  PairDenySchema,
   InputSchema,
   InterruptSchema,
   SetModelSchema,

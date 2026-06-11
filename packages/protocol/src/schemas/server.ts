@@ -120,6 +120,53 @@ export const ServerPairFailSchema = z.object({
   reason: z.string(),
 })
 
+// -- Pairing-approval primitive (#5510, epic #5509) --
+//
+// The verify code travels ONLY server→surfaces: the requester receives it on
+// `pair_request_pending` to display; the approver receives it on `pair_pending`
+// to compare. The requester never sends the code back, so it cannot influence
+// the value (mismatch is impossible by construction). The issued token is
+// delivered EXACTLY once on `pair_result { ok: true }` — never logged.
+
+// To the requester, immediately after the daemon queues its pair_request.
+export const ServerPairRequestPendingSchema = z.object({
+  type: z.literal('pair_request_pending'),
+  requestId: z.string(),
+  // 6-digit human-comparable verification code (string to preserve leading zeros).
+  verifyCode: z.string(),
+})
+
+// Fanned out to HOST-LEVEL (unbound) approval surfaces. deviceName is
+// attacker-controlled — capped at the schema and rendered as plain text.
+export const ServerPairPendingSchema = z.object({
+  type: z.literal('pair_pending'),
+  requestId: z.string(),
+  deviceName: z.string().max(64),
+  verifyCode: z.string(),
+  // epoch ms when this request expires (lets the surface render a countdown
+  // and drop the entry on TTL without a separate message).
+  expiresAt: z.number().int().nonnegative().finite(),
+})
+
+// To the requester over its still-open connection. On approve: { ok: true,
+// token }. On deny / timeout / approver-gone: { ok: false, reason }.
+export const ServerPairResultSchema = z.object({
+  type: z.literal('pair_result'),
+  requestId: z.string(),
+  ok: z.boolean(),
+  token: z.string().optional(),
+  reason: z.string().optional(),
+})
+
+// Sent to a host-level surface to RETRACT a pending request that has been
+// resolved (approved/denied elsewhere, or expired) so every surface can drop
+// its banner. No verify code — just the id and why.
+export const ServerPairResolvedSchema = z.object({
+  type: z.literal('pair_resolved'),
+  requestId: z.string(),
+  reason: z.string(),
+})
+
 /**
  * #5431 — one outstanding background task surfaced on `claude_ready`.
  *
@@ -2114,6 +2161,10 @@ export const ServerEvaluatorClarifySchema = z.object({
 // -- Inferred TypeScript types --
 
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>
+export type ServerPairRequestPendingMessage = z.infer<typeof ServerPairRequestPendingSchema>
+export type ServerPairPendingMessage = z.infer<typeof ServerPairPendingSchema>
+export type ServerPairResultMessage = z.infer<typeof ServerPairResultSchema>
+export type ServerPairResolvedMessage = z.infer<typeof ServerPairResolvedSchema>
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>

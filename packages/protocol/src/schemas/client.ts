@@ -57,6 +57,41 @@ export const PairSchema = z.object({
   capabilities: z.array(z.string()).optional().catch([]).default([]),
 }).passthrough()
 
+// -- Pairing-approval primitive (#5510, epic #5509) --
+//
+// A camera-less device requests pairing without a QR/URL; the user approves it
+// from a trusted surface (host dashboard/tray). `pair_request` is UNAUTHENTICATED
+// — same exposure class as `pair` (handled pre-auth in ws-server.js, rate-limited
+// + TTL'd + queue-capped server-side), so it is NOT part of ClientMessageSchema.
+//
+// `deviceName` is attacker-controlled — hard length cap (64) here so it cannot be
+// used to inflate the pending-queue payload or any surface that renders it. It is
+// treated as PLAIN TEXT everywhere (React escapes on render; never interpolated
+// into a server log format).
+export const PairRequestSchema = z.object({
+  type: z.literal('pair_request'),
+  // Free-text device label shown to the approver. Capped at 64 chars.
+  deviceName: z.string().max(64).optional(),
+  // Client-generated correlation id echoed on pair_request_pending / pair_result.
+  requestId: z.string().min(1).max(128),
+  protocolVersion: z.number().int().min(0).optional(),
+}).passthrough()
+
+// `pair_approve` / `pair_deny` — host-level authority ONLY (an unbound client;
+// a session-bound pairing token is rejected, like host_status_request). These
+// ARE part of ClientMessageSchema (post-auth). The verify code never travels
+// from approver→server: the approver only confirms `requestId`, so the requester
+// cannot influence the code by construction.
+export const PairApproveSchema = z.object({
+  type: z.literal('pair_approve'),
+  requestId: z.string().min(1).max(128),
+}).passthrough()
+
+export const PairDenySchema = z.object({
+  type: z.literal('pair_deny'),
+  requestId: z.string().min(1).max(128),
+}).passthrough()
+
 export const InputSchema = z.object({
   type: z.literal('input'),
   data: z.string().max(100_000).optional(),
@@ -948,12 +983,17 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RunnerStatusRequestSchema,
   IntegrationStatusRequestSchema,
   IntegrationActionSchema,
+  PairApproveSchema,
+  PairDenySchema,
 ])
 
 // -- Inferred TypeScript types --
 
 export type AuthMessage = z.infer<typeof AuthSchema>
 export type PairMessage = z.infer<typeof PairSchema>
+export type PairRequestMessage = z.infer<typeof PairRequestSchema>
+export type PairApproveMessage = z.infer<typeof PairApproveSchema>
+export type PairDenyMessage = z.infer<typeof PairDenySchema>
 export type InputMessage = z.infer<typeof InputSchema>
 export type InterruptMessage = z.infer<typeof InterruptSchema>
 export type CancelActivityMessage = z.infer<typeof CancelActivitySchema>

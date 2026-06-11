@@ -14,7 +14,7 @@ import { createFileOps } from './ws-file-ops/index.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
-import { handleAuthMessage, handlePairMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
+import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
 import { createHttpHandler } from './http-routes.js'
@@ -578,6 +578,11 @@ export class WsServer {
     this._sessionHookSecrets = new Map() // sessionId -> hookSecret (for cleanup on session_destroyed)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
     this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
+    // #5510: pairing-approval primitive — requestId → requester ws. The
+    // requester's WS stays open (pre-auth) after pair_request; on approve/deny/
+    // expire/disconnect we look it up here to deliver `pair_result`. Bounded by
+    // the PairingManager queue cap; cleaned up on resolution and on disconnect.
+    this._pairRequesters = new Map() // requestId -> ws
     // Late-binding wrappers: allows tests to monkey-patch _send/_broadcast
     const self = this
     const sendFn = (ws, msg) => self._send(ws, msg)
@@ -636,6 +641,10 @@ export class WsServer {
       get sessionManager() { return self.sessionManager },
       get cliSession() { return self.cliSession },
       get pushManager() { return self.pushManager },
+      // #5510: pairing-approval primitive — host-level approve/deny handlers.
+      get pairingManager() { return self._pairingManager },
+      resolvePairRequester: (requestId, result) => self._resolvePairRequester(requestId, result),
+      broadcastPairResolved: (requestId, reason) => self._broadcastPairResolved(requestId, reason),
       get checkpointManager() { return self._checkpointManager },
       get devPreview() { return self._devPreview },
       get webTaskManager() { return self._webTaskManager },
@@ -747,6 +756,10 @@ export class WsServer {
       minProtocolVersion: MIN_PROTOCOL_VERSION,
       serverProtocolVersion: SERVER_PROTOCOL_VERSION,
       flushPostAuthQueue: (ws, queue) => self._flushPostAuthQueue(ws, queue),
+      // #5510: register the requester's still-open ws so a later approve/deny
+      // can reach it, and fan `pair_pending` out to host-level surfaces.
+      registerPairRequester: (requestId, ws) => self._pairRequesters.set(requestId, ws),
+      broadcastPairPending: (msg) => self._broadcastPairPending(msg),
     }
 
     this.pushManager = pushManager
@@ -886,12 +899,22 @@ export class WsServer {
     // Wire PairingManager refresh events — broadcast pairing_refreshed to all
     // authenticated dashboard clients so they can auto-refresh the QR code (#2916).
     this._pairingRefreshedHandler = null
+    this._pendingRequestExpiredHandler = null
     if (this._pairingManager) {
       this._pairingRefreshedHandler = () => {
         this._broadcast({ type: 'pairing_refreshed' })
         log.debug('Broadcasted pairing_refreshed to all clients')
       }
       this._pairingManager.on('pairing_refreshed', this._pairingRefreshedHandler)
+
+      // #5510: a pending pair request hit its TTL while still unresolved. Tell
+      // the requester (its connection may still be open) and retract the banner
+      // on every host surface.
+      this._pendingRequestExpiredHandler = ({ requestId }) => {
+        this._resolvePairRequester(requestId, { ok: false, reason: 'expired' })
+        this._broadcastPairResolved(requestId, 'expired')
+      }
+      this._pairingManager.on('pending_request_expired', this._pendingRequestExpiredHandler)
     }
 
     // Wire TokenManager rotation events — broadcast new token to all clients
@@ -1288,6 +1311,10 @@ export class WsServer {
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
+        // #5510: if a pair requester (unauthenticated, connection-pending) drops
+        // before resolution, deny + drop its queue entry and retract the host
+        // banner so an abandoned request can't sit on a queue slot for its TTL.
+        this._cleanupPairRequesterOnDisconnect(ws)
         // Do not remove rate limiter entries on disconnect — the limiter keys by IP,
         // so removing on disconnect would reset the shared bucket for all connections
         // from the same real IP. The sliding window's natural expiry cleans up entries.
@@ -1451,6 +1478,11 @@ export class WsServer {
     if (!client.authenticated) {
       if (msg.type === 'pair') {
         handlePairMessage(this._authCtx, ws, msg)
+      } else if (msg.type === 'pair_request') {
+        // #5510: camera-less device requests pairing. Same exposure class as
+        // `pair` (unauthenticated, rate-limited, queue-capped). The connection
+        // stays OPEN — the requester waits for `pair_result`.
+        handlePairRequestMessage(this._authCtx, ws, msg)
       } else {
         handleAuthMessage(this._authCtx, ws, msg)
       }
@@ -1558,6 +1590,51 @@ export class WsServer {
    */
   _broadcastToSession(sessionId, message, filter) {
     this._broadcaster._broadcastToSession(sessionId, message, filter)
+  }
+
+  /**
+   * #5510: fan a `pair_pending` (or any pairing-approval surface event) out to
+   * HOST-LEVEL clients only — authenticated clients with no `boundSessionId`.
+   * A session-bound (share-a-session) token must NOT see host-wide pair
+   * requests, mirroring the `host_status_request` authority gate. The verify
+   * code in `msg` is server-generated; deviceName is attacker-controlled and is
+   * relayed verbatim as plain text (surfaces escape on render).
+   */
+  _broadcastPairPending(message) {
+    this._broadcast(message, (client) => !client.boundSessionId)
+  }
+
+  /** #5510: retract a resolved pending request from every host surface. */
+  _broadcastPairResolved(requestId, reason) {
+    this._broadcastPairPending({ type: 'pair_resolved', requestId, reason })
+  }
+
+  /**
+   * #5510: deliver a terminal `pair_result` to the requester's still-open
+   * connection (if present) and drop the tracking entry. On approve the result
+   * carries the issued token; on deny/expire/disconnect it carries a reason.
+   * If the requester's connection is gone, the entry is just dropped.
+   */
+  _resolvePairRequester(requestId, result) {
+    const ws = this._pairRequesters.get(requestId)
+    this._pairRequesters.delete(requestId)
+    if (!ws || ws.readyState !== 1) return
+    this._send(ws, { type: 'pair_result', requestId, ...result })
+  }
+
+  /**
+   * #5510: a requester's connection closed. If it had an outstanding pending
+   * request, remove it from the queue (freeing the slot) and retract the host
+   * banner. No `pair_result` is sent (the socket is gone).
+   */
+  _cleanupPairRequesterOnDisconnect(ws) {
+    if (this._pairRequesters.size === 0) return
+    for (const [requestId, reqWs] of this._pairRequesters) {
+      if (reqWs !== ws) continue
+      this._pairRequesters.delete(requestId)
+      if (this._pairingManager) this._pairingManager.denyPendingRequest(requestId)
+      this._broadcastPairResolved(requestId, 'disconnected')
+    }
   }
 
   /**
@@ -1783,11 +1860,16 @@ export class WsServer {
 
   /** Graceful shutdown */
   close() {
-    // Remove PairingManager listener to prevent post-shutdown broadcasts
+    // Remove PairingManager listeners to prevent post-shutdown broadcasts
     if (this._pairingManager && this._pairingRefreshedHandler) {
       this._pairingManager.off('pairing_refreshed', this._pairingRefreshedHandler)
       this._pairingRefreshedHandler = null
     }
+    if (this._pairingManager && this._pendingRequestExpiredHandler) {
+      this._pairingManager.off('pending_request_expired', this._pendingRequestExpiredHandler)
+      this._pendingRequestExpiredHandler = null
+    }
+    this._pairRequesters.clear()
 
     // Remove TokenManager listener to prevent post-shutdown broadcasts
     if (this._tokenManager && this._tokenRotatedHandler) {

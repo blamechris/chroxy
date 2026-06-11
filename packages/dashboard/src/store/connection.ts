@@ -389,6 +389,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // reducer from activity_snapshot / activity_delta.
   activity: createEmptyActivityState(),
   cancellingActivityIds: new Set<string>(),
+  // #5510 (epic #5509): pairing-approval primitive — outstanding pending pair
+  // requests fanned out to this host surface. Empty until a pair_pending lands.
+  pendingPairRequests: [],
   // #5175 (epic #5170): Host/Repo Status Control Room snapshot, fed by the
   // host_status_snapshot handler. Null until the first survey lands.
   hostStatus: null,
@@ -685,6 +688,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return true;
     }
     return false;
+  },
+
+  // #5510 (epic #5509): approve a pending pair request. Sends `pair_approve`
+  // and optimistically drops the request from the local queue (the server also
+  // retracts it via `pair_resolved` to every host surface). Returns false when
+  // the socket is closed (the banner stays so the operator can retry once
+  // reconnected). The verify code is never sent — the operator already compared
+  // it out-of-band; only `requestId` travels.
+  approvePairRequest: (requestId: string): boolean => {
+    const { socket } = get();
+    if (!requestId || !socket || socket.readyState !== WebSocket.OPEN) return false;
+    wsSend(socket, { type: 'pair_approve', requestId });
+    set((s) => ({ pendingPairRequests: s.pendingPairRequests.filter((p) => p.requestId !== requestId) }));
+    return true;
+  },
+
+  // #5510: deny a pending pair request. Same optimistic-drop + wire-result
+  // contract as approvePairRequest.
+  denyPairRequest: (requestId: string): boolean => {
+    const { socket } = get();
+    if (!requestId || !socket || socket.readyState !== WebSocket.OPEN) return false;
+    wsSend(socket, { type: 'pair_deny', requestId });
+    set((s) => ({ pendingPairRequests: s.pendingPairRequests.filter((p) => p.requestId !== requestId) }));
+    return true;
   },
 
   // #5253: request a self-hosted runner survey. Mirrors requestHostStatus —

@@ -4,12 +4,13 @@
  * Shows a list of registered servers with connection status indicators.
  * Provides add/remove/switch actions and an inline "Add Server" form.
  */
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { ServerEntry, ConnectionPhase } from '../store/types'
 import { isTauri } from '../utils/tauri'
 import { discoverLanServers, type DiscoveredServer } from '../utils/discovery'
 import { parsePairingUrl } from '../utils/pairing'
+import { requestPairing, type PairRequestState, type PairRequestHandle } from '../utils/request-pairing'
 
 function statusDot(phase: ConnectionPhase, isActive: boolean): string {
   if (!isActive) return 'server-dot disconnected'
@@ -58,9 +59,11 @@ interface AddServerFormProps {
   initialUrl?: string
   /** Pair via a pasted chroxy://…?pair= URL — no token typed (#5281 ③ PR 2). */
   onPair: (name: string, wsUrl: string, pairingId: string) => void
+  /** #5510 — request approval-gated pairing for a known wss:// URL (no token). */
+  onRequestPair: (name: string, wsUrl: string) => void
 }
 
-function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = '', onPair }: AddServerFormProps) {
+function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = '', onPair, onRequestPair }: AddServerFormProps) {
   const [name, setName] = useState(initialName)
   const [url, setUrl] = useState(initialUrl)
   const [token, setToken] = useState('')
@@ -140,6 +143,25 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
         >
           {pairingMode ? 'Pair' : 'Add'}
         </button>
+        {/* #5510 — when a plain ws(s):// URL is known but no token/pairing id is
+            present, offer approval-gated pairing: send a pair_request and wait
+            for the host to approve. */}
+        {!embeddedCreds && (() => {
+          const trimmed = url.trim()
+          const looksLikeWs = /^wss?:\/\//i.test(trimmed)
+          return (
+            <button
+              type="button"
+              className="server-btn"
+              disabled={!looksLikeWs}
+              onClick={() => onRequestPair(name.trim() || trimmed, trimmed)}
+              data-testid="server-request-pair"
+              title="Request approval-gated pairing from the host (no token needed)"
+            >
+              Request to pair
+            </button>
+          )
+        })()}
         <button
           type="button"
           className="server-btn"
@@ -150,6 +172,94 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
         </button>
       </div>
     </form>
+  )
+}
+
+interface RequestPairPanelProps {
+  /** Normalized ws(s):// URL of the daemon to request pairing from. */
+  wsUrl: string
+  /** Display name to store on the registry entry once approved. */
+  name: string
+  /** Token in hand → store the server + connect (mirrors the ?pair= flow). */
+  onApproved: (name: string, wsUrl: string, token: string) => void
+  onCancel: () => void
+}
+
+/**
+ * RequestPairPanel — the requester side of the pairing-approval primitive
+ * (#5510, epic #5509). Opens a short-lived pre-auth WS to the daemon, sends
+ * `pair_request`, shows the 6-digit verify code to compare with the host
+ * surface, and waits for `pair_result`. On approval it hands the issued token up
+ * so the server is added + connected exactly like the `chroxy://?pair=` flow.
+ */
+function RequestPairPanel({ wsUrl, name, onApproved, onCancel }: RequestPairPanelProps) {
+  const [state, setState] = useState<PairRequestState>({
+    phase: 'requesting', verifyCode: null, token: null, reason: null,
+  })
+  const handleRef = useRef<PairRequestHandle | null>(null)
+  // Latch onApproved so the effect can run exactly once without re-subscribing.
+  const onApprovedRef = useRef(onApproved)
+  onApprovedRef.current = onApproved
+
+  useEffect(() => {
+    const handle = requestPairing(wsUrl, name || 'Desktop Browser', (s) => {
+      setState(s)
+      if (s.phase === 'approved' && s.token) {
+        onApprovedRef.current(name, wsUrl, s.token)
+      }
+    })
+    handleRef.current = handle
+    return () => handle.cancel()
+  }, [wsUrl, name])
+
+  const host = wsUrl.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')
+
+  return (
+    <div className="server-pair-request" data-testid="request-pair-panel">
+      <div className="server-pair-request-host">{host}</div>
+      {(state.phase === 'requesting' || state.phase === 'code-shown') && (
+        <>
+          <div className="server-pair-request-status" data-testid="request-pair-status">
+            {state.phase === 'requesting'
+              ? 'Requesting pairing…'
+              : 'Waiting for approval on the host'}
+          </div>
+          {state.verifyCode && (
+            <>
+              <div className="server-pair-request-compare">
+                Compare this code with the host:
+              </div>
+              <div className="server-pair-request-code" data-testid="request-pair-code">
+                {state.verifyCode}
+              </div>
+            </>
+          )}
+        </>
+      )}
+      {state.phase === 'denied' && (
+        <div className="server-pair-request-status server-pair-request-status--error" data-testid="request-pair-denied">
+          Pairing denied by the host.
+        </div>
+      )}
+      {state.phase === 'expired' && (
+        <div className="server-pair-request-status server-pair-request-status--error" data-testid="request-pair-expired">
+          Request expired. Try again.
+        </div>
+      )}
+      {state.phase === 'error' && (
+        <div className="server-pair-request-status server-pair-request-status--error" data-testid="request-pair-error">
+          Could not pair{state.reason ? ` (${state.reason})` : ''}.
+        </div>
+      )}
+      <button
+        type="button"
+        className="server-btn"
+        onClick={onCancel}
+        data-testid="request-pair-cancel"
+      >
+        {state.phase === 'approved' ? 'Done' : 'Cancel'}
+      </button>
+    </div>
   )
 }
 
@@ -231,6 +341,8 @@ export function ServerPicker() {
 
   const [showAddForm, setShowAddForm] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
+  // #5510 — active "Request to pair" round-trip (requester surface).
+  const [pairRequest, setPairRequest] = useState<{ name: string; wsUrl: string } | null>(null)
   // #5281 ③ — pre-fill the add form from a LAN-discovered daemon.
   const [prefill, setPrefill] = useState<{ name: string; url: string } | null>(null)
   // #5281 ③ — LAN discovery (desktop/Tauri only).
@@ -264,6 +376,24 @@ export function ServerPicker() {
       setAddError(err instanceof Error ? err.message : 'Failed to pair')
     }
   }, [pairServer])
+
+  // #5510 — open the requester panel for a known wss:// URL.
+  const handleRequestPair = useCallback((name: string, wsUrl: string) => {
+    setAddError(null)
+    setShowAddForm(false)
+    setPrefill(null)
+    setPairRequest({ name, wsUrl })
+  }, [])
+
+  // #5510 — pair_result approved with a token: store + connect like ?pair=.
+  const handlePairApproved = useCallback((name: string, wsUrl: string, token: string) => {
+    try {
+      const entry = addServer(name, wsUrl, token)
+      switchServer(entry.id)
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : 'Failed to add paired server')
+    }
+  }, [addServer, switchServer])
 
   const runDiscovery = useCallback(async () => {
     setDiscovering(true)
@@ -310,10 +440,21 @@ export function ServerPicker() {
           key={prefill?.url ?? 'blank'}
           onAdd={handleAdd}
           onPair={handlePair}
+          onRequestPair={handleRequestPair}
           onCancel={() => { setShowAddForm(false); setAddError(null); setPrefill(null) }}
           error={addError}
           initialName={prefill?.name ?? ''}
           initialUrl={prefill?.url ?? ''}
+        />
+      )}
+
+      {pairRequest && (
+        <RequestPairPanel
+          key={pairRequest.wsUrl}
+          wsUrl={pairRequest.wsUrl}
+          name={pairRequest.name}
+          onApproved={handlePairApproved}
+          onCancel={() => setPairRequest(null)}
         />
       )}
 

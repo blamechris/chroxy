@@ -17,8 +17,22 @@ const SESSION_TOKEN_BYTES = 32
 const MAX_SESSION_TOKENS = 100
 const MAX_ACTIVE_PAIRINGS = 10
 
+// -- Pairing-approval primitive (#5510, epic #5509) --
+//
+// A camera-less device requests pairing without a QR; the user approves it from
+// a host-level surface. The pending queue is an UNAUTHENTICATED-fed DoS surface,
+// so it is hard-bounded on three axes: a global cap, a per-request TTL, and a
+// per-source rate limit. Expired entries are swept on an unref'd timer.
+const DEFAULT_PENDING_TTL_MS = 120_000 // 120s — a pending request expires
+const MAX_PENDING_REQUESTS = 5 // global cap on outstanding pending requests
+const PENDING_SWEEP_INTERVAL_MS = 5_000 // sweep cadence for expired entries
+// Per-source rate limit: at most N new requests in a rolling window.
+const PENDING_RATE_MAX = 5
+const PENDING_RATE_WINDOW_MS = 60_000
+const MAX_RATE_SOURCES = 1_000 // cap the rate-limit map cardinality
+
 export class PairingManager extends EventEmitter {
-  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, sessionTokenTtlMs = DEFAULT_SESSION_TOKEN_TTL_MS, autoRefresh = false } = {}) {
+  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, sessionTokenTtlMs = DEFAULT_SESSION_TOKEN_TTL_MS, autoRefresh = false, pendingTtlMs = DEFAULT_PENDING_TTL_MS } = {}) {
     super()
     this._wsUrl = wsUrl
     this._ttlMs = ttlMs
@@ -29,6 +43,12 @@ export class PairingManager extends EventEmitter {
     this._sessionTokens = new Map() // sessionToken → { createdAt }
     this._refreshTimer = null
     this._destroyed = false
+
+    // -- Pairing-approval primitive (#5510) --
+    this._pendingTtlMs = pendingTtlMs
+    this._pendingRequests = new Map() // requestId → { deviceName, verifyCode, expiresAt, resolved }
+    this._pendingRateBuckets = new Map() // source → { count, windowStart }
+    this._sweepTimer = null
 
     this._generatePairing()
     if (autoRefresh) this._scheduleRefresh()
@@ -249,14 +269,239 @@ export class PairingManager extends EventEmitter {
     this._wsUrl = wsUrl
   }
 
+  // ===================================================================
+  //  Pairing-approval primitive (#5510, epic #5509)
+  //
+  //  A new device sends `pair_request`; the daemon queues it with a 6-digit
+  //  verify code and a TTL, fans the request out to host-level surfaces, and
+  //  issues a session token only when an approver confirms it. The queue is an
+  //  unauthenticated-fed DoS surface — bounded by cap + TTL + per-source rate.
+  // ===================================================================
+
+  /**
+   * Queue a new pending pair request.
+   *
+   * The verify code is generated SERVER-SIDE and returned to the caller only so
+   * the WsServer can relay it to the requester (display) and to host surfaces
+   * (compare). The requester never sends it back, so a mismatch is impossible by
+   * construction.
+   *
+   * @param {object} args
+   * @param {string} args.requestId - client-generated correlation id
+   * @param {string} [args.deviceName] - attacker-controlled label (already
+   *   length-capped at the schema; re-clamped here defensively)
+   * @param {string} args.source - rate-limit key (CF-Connecting-IP / socket ip)
+   * @returns {{ ok: true, verifyCode: string, expiresAt: number }
+   *           | { ok: false, reason: 'rate_limited'|'queue_full'|'duplicate_request'|'invalid' }}
+   */
+  enqueuePendingRequest({ requestId, deviceName = '', source = '' } = {}) {
+    if (this._destroyed) return { ok: false, reason: 'invalid' }
+    if (typeof requestId !== 'string' || requestId.length === 0) {
+      return { ok: false, reason: 'invalid' }
+    }
+
+    this._sweepPending()
+
+    // Per-source rate limit (rolling window). Checked BEFORE the cap so a
+    // single noisy source cannot starve the cap-rejection path for others.
+    if (this._isRateLimited(source)) {
+      return { ok: false, reason: 'rate_limited' }
+    }
+
+    // Duplicate requestId — the caller should mint a fresh id. Reject rather
+    // than overwrite so an in-flight approval can never be hijacked by a
+    // collision.
+    if (this._pendingRequests.has(requestId)) {
+      return { ok: false, reason: 'duplicate_request' }
+    }
+
+    // Global cap. Reject newest-on-full (fail closed) rather than evicting an
+    // existing entry — evicting would silently drop a request the user may be
+    // mid-approval on.
+    if (this._pendingRequests.size >= MAX_PENDING_REQUESTS) {
+      return { ok: false, reason: 'queue_full' }
+    }
+
+    // Count this request against the source's bucket only after it is accepted.
+    this._recordRateAttempt(source)
+
+    const verifyCode = this._generateVerifyCode()
+    const expiresAt = Date.now() + this._pendingTtlMs
+    const cleanName = typeof deviceName === 'string' ? deviceName.slice(0, 64) : ''
+    this._pendingRequests.set(requestId, {
+      deviceName: cleanName,
+      verifyCode,
+      expiresAt,
+      resolved: false,
+    })
+
+    this._ensureSweepTimer()
+    return { ok: true, verifyCode, expiresAt }
+  }
+
+  /**
+   * Snapshot of a pending request for fan-out to host surfaces. Never includes
+   * the issued token (none exists yet). Returns null if absent/expired/resolved.
+   */
+  getPendingRequest(requestId) {
+    const entry = this._pendingRequests.get(requestId)
+    if (!entry || entry.resolved) return null
+    if (Date.now() > entry.expiresAt) return null
+    return {
+      requestId,
+      deviceName: entry.deviceName,
+      verifyCode: entry.verifyCode,
+      expiresAt: entry.expiresAt,
+    }
+  }
+
+  /** All live (unresolved, unexpired) pending requests — for surface replay. */
+  listPendingRequests() {
+    this._sweepPending()
+    const out = []
+    for (const [requestId, entry] of this._pendingRequests) {
+      if (entry.resolved) continue
+      out.push({
+        requestId,
+        deviceName: entry.deviceName,
+        verifyCode: entry.verifyCode,
+        expiresAt: entry.expiresAt,
+      })
+    }
+    return out
+  }
+
+  /**
+   * Approve a pending request and issue a session token EXACTLY once. A second
+   * approve of the same requestId is a no-op error (`already_resolved`).
+   *
+   * The issued token is an unbound (host-authority) session token — same class
+   * and TTL as a linking-mode QR pairing. The verify code is never consulted
+   * here: the approver confirmed the requestId out-of-band by eyeballing the
+   * code on both screens.
+   *
+   * @param {string} requestId
+   * @returns {{ ok: true, token: string }
+   *           | { ok: false, reason: 'not_found'|'expired'|'already_resolved' }}
+   */
+  approvePendingRequest(requestId) {
+    if (this._destroyed) return { ok: false, reason: 'not_found' }
+    const entry = this._pendingRequests.get(requestId)
+    if (!entry) return { ok: false, reason: 'not_found' }
+    if (entry.resolved) return { ok: false, reason: 'already_resolved' }
+    if (Date.now() > entry.expiresAt) {
+      entry.resolved = true
+      return { ok: false, reason: 'expired' }
+    }
+
+    // Mark resolved BEFORE issuing the token so a concurrent re-entrant approve
+    // (same tick) cannot mint a second token for the same request. The resolved
+    // entry stays in the map as a tombstone (reaped on the next sweep) so a
+    // second approve returns `already_resolved`, not `not_found`.
+    entry.resolved = true
+
+    const token = randomBytes(SESSION_TOKEN_BYTES).toString('base64url')
+    if (this._sessionTokens.size >= MAX_SESSION_TOKENS) {
+      const oldest = this._sessionTokens.keys().next().value
+      this._sessionTokens.delete(oldest)
+    }
+    // Unbound (host-authority) token — sessionId: null, like linking-mode QR.
+    this._sessionTokens.set(token, { createdAt: Date.now(), sessionId: null })
+    return { ok: true, token }
+  }
+
+  /**
+   * Deny / cancel a pending request. Returns true if a live entry was denied.
+   * Idempotent: denying an already-resolved/absent request returns false. The
+   * resolved tombstone is reaped on the next sweep.
+   */
+  denyPendingRequest(requestId) {
+    const entry = this._pendingRequests.get(requestId)
+    if (!entry || entry.resolved) return false
+    entry.resolved = true
+    return true
+  }
+
+  /** Generate a zero-padded 6-digit verification code (0-999999). */
+  _generateVerifyCode() {
+    // rejection-sampling-free: 4 bytes → uint32 → mod 1_000_000. The tiny modulo
+    // bias (2^32 % 1e6) is irrelevant for a 120s human-comparison code.
+    const n = randomBytes(4).readUInt32BE(0) % 1_000_000
+    return String(n).padStart(6, '0')
+  }
+
+  _isRateLimited(source) {
+    if (!source) return false
+    const bucket = this._pendingRateBuckets.get(source)
+    if (!bucket) return false
+    const now = Date.now()
+    if (now - bucket.windowStart > PENDING_RATE_WINDOW_MS) return false
+    return bucket.count >= PENDING_RATE_MAX
+  }
+
+  _recordRateAttempt(source) {
+    if (!source) return
+    const now = Date.now()
+    let bucket = this._pendingRateBuckets.get(source)
+    if (!bucket || now - bucket.windowStart > PENDING_RATE_WINDOW_MS) {
+      // Cap cardinality before inserting a fresh source.
+      if (!this._pendingRateBuckets.has(source) && this._pendingRateBuckets.size >= MAX_RATE_SOURCES) {
+        const oldest = this._pendingRateBuckets.keys().next().value
+        this._pendingRateBuckets.delete(oldest)
+      }
+      bucket = { count: 0, windowStart: now }
+      this._pendingRateBuckets.set(source, bucket)
+    }
+    bucket.count++
+  }
+
+  /**
+   * Remove expired pending requests, emitting `pending_request_expired` for
+   * each so the WsServer can notify the requester and retract host banners.
+   */
+  _sweepPending() {
+    if (this._destroyed) return
+    const now = Date.now()
+    for (const [requestId, entry] of this._pendingRequests) {
+      if (entry.resolved || now > entry.expiresAt) {
+        this._pendingRequests.delete(requestId)
+        if (!entry.resolved) {
+          this.emit('pending_request_expired', { requestId })
+        }
+      }
+    }
+    // Prune stale rate buckets opportunistically.
+    for (const [source, bucket] of this._pendingRateBuckets) {
+      if (now - bucket.windowStart > PENDING_RATE_WINDOW_MS) {
+        this._pendingRateBuckets.delete(source)
+      }
+    }
+    if (this._pendingRequests.size === 0 && this._sweepTimer) {
+      clearInterval(this._sweepTimer)
+      this._sweepTimer = null
+    }
+  }
+
+  _ensureSweepTimer() {
+    if (this._destroyed || this._sweepTimer) return
+    this._sweepTimer = setInterval(() => this._sweepPending(), PENDING_SWEEP_INTERVAL_MS)
+    this._sweepTimer.unref?.()
+  }
+
   destroy() {
     this._destroyed = true
     this._current = null
     this._activePairings.clear()
     this._sessionTokens.clear()
+    this._pendingRequests.clear()
+    this._pendingRateBuckets.clear()
     if (this._refreshTimer) {
       clearTimeout(this._refreshTimer)
       this._refreshTimer = null
+    }
+    if (this._sweepTimer) {
+      clearInterval(this._sweepTimer)
+      this._sweepTimer = null
     }
     this.removeAllListeners()
   }

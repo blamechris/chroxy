@@ -59,6 +59,7 @@ import { WelcomeScreen } from './components/WelcomeScreen'
 import { CreateSessionModal } from './components/CreateSessionModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { NotificationBanners } from './components/NotificationBanners'
+import { PendingPairRequests } from './components/PendingPairRequests'
 import { Toast, type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
 import { CheckpointTimeline } from './components/CheckpointTimeline'
@@ -307,6 +308,10 @@ export function App() {
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
+  // #5510 (epic #5509): pairing-approval primitive — host-surface pending queue.
+  const pendingPairRequests = useConnectionStore(s => s.pendingPairRequests)
+  const approvePairRequest = useConnectionStore(s => s.approvePairRequest)
+  const denyPairRequest = useConnectionStore(s => s.denyPairRequest)
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const connectedClients = useConnectionStore(s => s.connectedClients)
   // #5281 ①.3 — global primary (last-driver) fallback for the pre-session /
@@ -2470,6 +2475,14 @@ export function App() {
             className="main-content"
           />
         )}
+
+        {/* #5510 (epic #5509): pairing-approval primitive — host-level
+            approve/deny banner for camera-less device pair requests. */}
+        <PendingPairRequests
+          requests={pendingPairRequests}
+          onApprove={approvePairRequest}
+          onDeny={denyPairRequest}
+        />
 
         {/* Cross-session notification banners */}
         {sessionNotifications.length > 0 && (
