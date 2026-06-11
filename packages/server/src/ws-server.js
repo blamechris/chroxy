@@ -938,9 +938,18 @@ export class WsServer {
     // shrank the server window from 25/50ms so it no longer stacks on top of
     // that EWMA. Legacy single-session mode (sessionId === null) reports null
     // (unknown), which the normalizer treats as "keep the default window".
+    // #5578: also hand it a deflate-subscriber predicate so the window can
+    // widen (8/16 → 16/25ms) when any subscriber is on a deflate-negotiated
+    // (tunnel/cellular) socket, where each sub-1024B stream_delta ships
+    // uncompressed and the per-frame small-packet cost dominates. O(subscribers)
+    // via the #5575 reverse index — never an O(all-clients) scan on the
+    // per-token hot path. Legacy single-session mode (sessionId === null) can't
+    // resolve subscribers, so it reports false → keeps the LAN window.
     this._normalizer = new EventNormalizer({
       getSubscriberCount: (sessionId) =>
         sessionId == null ? null : this._broadcaster._countSessionSubscribers(sessionId),
+      getHasDeflateSubscriber: (sessionId) =>
+        sessionId == null ? false : this._broadcaster._hasDeflateSubscriber(sessionId),
     })
     this._gitInfo = getGitInfo()
     this._startedAt = Date.now()
@@ -1272,7 +1281,16 @@ export class WsServer {
       // Security: isLocalOrLanPeer keys off the unspoofable socket peer; a
       // forged proxy header can only KEEP deflate (the safe default), never
       // remove it. See connection-locality.js.
-      if (isLocalOrLanPeer(req)) {
+      // #5578: stash the locality decision on `req` so the 'connection' handler
+      // can stamp a per-client `usesDeflate` flag without re-classifying. A
+      // LAN/loopback peer had its extension header stripped (no deflate); any
+      // other peer keeps the server-level permessage-deflate. The flag drives
+      // the deflate-aware delta-coalescing window (see EventNormalizer /
+      // ws-broadcaster `_hasDeflateSubscriber`). Keyed off the unspoofable
+      // socket peer, identical to the strip decision — they can never diverge.
+      const localPeer = isLocalOrLanPeer(req)
+      req._chroxyUsesDeflate = !localPeer
+      if (localPeer) {
         delete req.headers['sec-websocket-extensions']
       }
       this.wss.handleUpgrade(req, socket, head, (ws) => {
@@ -1309,6 +1327,16 @@ export class WsServer {
         ip,
         socketIp,
         rateLimitKey,
+        // #5578: true for a non-LAN peer (tunnel / remote) that kept the
+        // server-level permessage-deflate; false for LAN/loopback peers whose
+        // extension header was stripped at upgrade. This is the upgrade-time
+        // LOCALITY decision, not the actual negotiated extension — a remote
+        // client that declines deflate in its handshake still reads true, which
+        // is the intended (and safe) direction: those links pay the same WAN
+        // per-frame cost. Drives the deflate-aware delta-coalescing window
+        // — see EventNormalizer._resolveFlushIntervalMs. Set from the
+        // unspoofable upgrade-time locality decision (req._chroxyUsesDeflate).
+        usesDeflate: req._chroxyUsesDeflate === true,
         // #3404: visible defaults to true; mobile flips to false on backgrounding
         // so completion push notifications fire instead of being suppressed by
         // a still-alive but invisible WS connection.

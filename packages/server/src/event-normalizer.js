@@ -17,6 +17,23 @@ const log = createLogger('event-normalizer')
 const MAX_DELTA_KEY_BYTES = 256 * 1024 // 256 KB per stream
 const MAX_DELTA_TOTAL_BYTES = 2 * 1024 * 1024 // 2 MB across all streams
 
+// #5578: deflate-aware coalescing windows. The #5568 floors (8ms single / 16ms
+// multi) are correct for LAN/loopback peers — deflate is stripped at upgrade,
+// each tiny stream_delta is cheap, and a fast emitter producing ~125 frames/sec
+// is fine. They are WRONG for deflate-negotiated (tunnel/cellular) peers: every
+// stream_delta is ~40-75 bytes including serverTs, UNDER the permessage-deflate
+// threshold:1024, so it ships UNCOMPRESSED. The 8ms floor then triples the
+// small-packet count (~40 frames/sec at the old 25ms → ~125/sec at 8ms) on
+// exactly the links where per-frame cost dominates (small-packet overhead,
+// cellular radio wake-ups, tunnel framing). We re-coalesce a beat longer when
+// any subscriber is on a deflate socket: ~16ms single / ~25ms multi. These are
+// still fixed micro-batch windows below the client-side adaptive EWMA floor
+// (store-core resolveDeltaFlushMs, 16-100ms), so they don't reintroduce the
+// pre-#5562 server/client window stacking — they only halve the frame rate on
+// the links that pay for each frame. LAN sessions keep the tight floors.
+const DEFLATE_FLUSH_INTERVAL_MS = 25 // any deflate subscriber, multi-client
+const DEFLATE_SINGLE_CLIENT_FLUSH_INTERVAL_MS = 16 // any deflate subscriber, single client
+
 /**
  * Declarative event-to-WS-message mapping.
  *
@@ -697,11 +714,25 @@ export class EventNormalizer {
    *   - returns how many clients are subscribed to `sessionId`, or null when
    *   unknown (e.g. legacy single-session mode). When the count is exactly 1 the
    *   single-client window is used; otherwise (0, ≥2, or null) the default.
+   * @param {number} [opts.deflateFlushIntervalMs=25] - #5578: multi-client
+   *   window used when ANY subscriber of the session is on a deflate-negotiated
+   *   (tunnel/cellular) socket. Wider than the LAN default because each
+   *   sub-threshold delta ships uncompressed; see DEFLATE_FLUSH_INTERVAL_MS.
+   * @param {number} [opts.deflateSingleClientFlushIntervalMs=16] - #5578:
+   *   single-client window when the sole subscriber is on a deflate socket.
+   * @param {(sessionId: string|null) => boolean} [opts.getHasDeflateSubscriber]
+   *   - returns true when ANY subscriber of `sessionId` is on a
+   *   deflate-negotiated socket. Resolved O(subscribers) via the reverse index
+   *   (#5575). When absent (legacy mode) the deflate-aware widening is disabled
+   *   and the LAN floors apply.
    */
-  constructor({ flushIntervalMs = 16, singleClientFlushIntervalMs = 8, getSubscriberCount = null, maxKeyBytes = MAX_DELTA_KEY_BYTES, maxTotalBytes = MAX_DELTA_TOTAL_BYTES } = {}) {
+  constructor({ flushIntervalMs = 16, singleClientFlushIntervalMs = 8, getSubscriberCount = null, getHasDeflateSubscriber = null, deflateFlushIntervalMs = DEFLATE_FLUSH_INTERVAL_MS, deflateSingleClientFlushIntervalMs = DEFLATE_SINGLE_CLIENT_FLUSH_INTERVAL_MS, maxKeyBytes = MAX_DELTA_KEY_BYTES, maxTotalBytes = MAX_DELTA_TOTAL_BYTES } = {}) {
     this._flushIntervalMs = flushIntervalMs
     this._singleClientFlushIntervalMs = singleClientFlushIntervalMs
+    this._deflateFlushIntervalMs = deflateFlushIntervalMs
+    this._deflateSingleClientFlushIntervalMs = deflateSingleClientFlushIntervalMs
     this._getSubscriberCount = typeof getSubscriberCount === 'function' ? getSubscriberCount : null
+    this._getHasDeflateSubscriber = typeof getHasDeflateSubscriber === 'function' ? getHasDeflateSubscriber : null
     // #5555: residency caps for the coalescing buffer. A runaway provider (huge
     // tool output, model repetition loop) can grow this Map between flushes
     // faster than ws-broadcaster's socket backpressure can react — the data
@@ -732,19 +763,32 @@ export class EventNormalizer {
   }
 
   /**
-   * #5516/#5562: resolve the fixed micro-batch window for the session currently
-   * being buffered. Single-subscriber sessions get the tighter window;
-   * everything else (0, 2+, or unknown count) keeps the default. No
-   * subscriber-count resolver wired (legacy mode) → always the default. This is
-   * a fixed window, not an adaptive throttle — the adaptive part lives in the
-   * client's resolveDeltaFlushMs EWMA (store-core).
+   * #5516/#5562/#5578: resolve the fixed micro-batch window for the session
+   * currently being buffered. Two axes:
+   *   - subscriber COUNT: exactly 1 → tighter single-client window; else (0, 2+,
+   *     unknown) → the multi-client window.
+   *   - deflate LOCALITY: any subscriber on a deflate-negotiated (tunnel/
+   *     cellular) socket → widen to the deflate window for the resolved count.
+   *     #5578 — on those links each sub-1024B stream_delta ships uncompressed,
+   *     so the LAN floors (8/16ms) triple the small-packet count where per-frame
+   *     cost dominates. All-LAN sessions keep the tight floors.
+   * No subscriber-count resolver wired (legacy mode) → always the default LAN
+   * window. This is a fixed window, not an adaptive throttle — the adaptive part
+   * lives in the client's resolveDeltaFlushMs EWMA (store-core).
    * @param {string|null} sessionId
    * @returns {number} flush interval in ms
    */
   _resolveFlushIntervalMs(sessionId) {
     if (!this._getSubscriberCount) return this._flushIntervalMs
     const count = this._getSubscriberCount(sessionId)
-    return count === 1 ? this._singleClientFlushIntervalMs : this._flushIntervalMs
+    const single = count === 1
+    // #5578: prefer the deflate window when any subscriber sits on a deflate
+    // socket. The predicate is O(subscribers) and short-circuits on the first
+    // match (ws-broadcaster._hasDeflateSubscriber) — no O(all-clients) scan.
+    if (this._getHasDeflateSubscriber && this._getHasDeflateSubscriber(sessionId)) {
+      return single ? this._deflateSingleClientFlushIntervalMs : this._deflateFlushIntervalMs
+    }
+    return single ? this._singleClientFlushIntervalMs : this._flushIntervalMs
   }
 
   /**
@@ -844,9 +888,11 @@ export class EventNormalizer {
       }
       return
     }
-    // #5516/#5562: fixed micro-batch window (NOT an adaptive coalescing window)
-    // — tighter (8ms) when this session has a single subscriber, default (16ms)
-    // otherwise. Its only job is to absorb the per-token burst into one
+    // #5516/#5562/#5578: fixed micro-batch window (NOT an adaptive coalescing
+    // window) — tighter (8ms) when this session has a single LAN subscriber,
+    // default (16ms) for multi/LAN, and WIDER (16/25ms) when any subscriber is
+    // on a deflate (tunnel/cellular) socket where each sub-threshold frame ships
+    // uncompressed. Its only job is to absorb the per-token burst into one
     // emit/broadcast and bound that overhead; the ADAPTIVE throttle lives
     // client-side in store-core resolveDeltaFlushMs (16-100ms EWMA). The flush
     // timer is shared across all buffered sessions, so a single-client session
