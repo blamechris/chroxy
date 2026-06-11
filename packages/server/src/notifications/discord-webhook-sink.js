@@ -486,18 +486,26 @@ export class DiscordWebhookSink extends NotificationSink {
       //                    live fields; re-ping 🦀 "Ready for input" when the
       //                    LAST subagent finishes while idle. Permission +
       //                    count→0 falls through to online (row-20 diff).
+      //   The turnInFlight rescope applies ONLY to the `idle` hold. A
+      //   `permission` embed is an approval request the user must act on, and
+      //   permission prompts fire MID-turn (an agent hits a tool-approval gate
+      //   while working) — so turnInFlight is true with subagents running. If
+      //   the flip-to-online branch fired here it would hide the approval. The
+      //   `permission` hold therefore keeps its original pre-#5541 behavior
+      //   UNCONDITIONALLY: while subagents > 0 the permission state/text is
+      //   held (live fields refreshed); count→0 falls through to online (the
+      //   intentional row-20 "approval cleared by next activity" diff).
       const turnInFlight = data.turnInFlight === true
-      if (state === 'online' && turnInFlight && entry.subagents > 0) {
-        // Mid-turn with live subagents: surface the work in the online embed
-        // (Status line) instead of holding idle. (Plain online with no
-        // subagents falls through to the routine path below, flipping to
-        // "Session Online".)
+      if (state === 'online' && turnInFlight && entry.subagents > 0 && prev?.state !== 'permission') {
+        // Mid-turn with live subagents (and NOT a permission prompt): surface
+        // the work in the online embed (Status line) instead of holding idle.
+        // (Plain online with no subagents falls through to the routine path
+        // below, flipping to "Session Online".)
         entry.body = this._workingDetail(entry.subagents, data.agentType)
       } else if (
-        !turnInFlight &&
         state === 'online' &&
         prev?.messageId &&
-        (prev.state === 'idle' || prev.state === 'permission')
+        ((prev.state === 'idle' && !turnInFlight) || prev.state === 'permission')
       ) {
         const allDone = entry.subagents === 0 && Number.isFinite(prev.subagents) && prev.subagents > 0
         if (entry.subagents > 0 || (allDone && prev.state === 'idle')) {

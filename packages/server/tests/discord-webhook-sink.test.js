@@ -1248,6 +1248,12 @@ describe('DiscordWebhookSink — GAP C rescope for turn edges (#5541)', () => {
     body: 'Claude is waiting for input',
     data: { project: 'proj1', ...data },
   })
+  const approval = (data = {}) => ({
+    category: 'activity_waiting',
+    title: 'Input needed',
+    body: 'Claude is waiting',
+    data: { project: 'proj1', ...data },
+  })
 
   /** online (m1) → idle embed with running subagents (DELETE m1 + POST m2). */
   async function seedIdleWithSubagents(sink, advance) {
@@ -1256,6 +1262,16 @@ describe('DiscordWebhookSink — GAP C rescope for turn edges (#5541)', () => {
     advance(16_000)
     scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
     await sink.send(ready({ subagents: 2 }))
+    advance(16_000)
+  }
+
+  /** online (m1) → permission embed with running subagents (DELETE m1 + POST m2). */
+  async function seedPermissionWithSubagents(sink, advance) {
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    advance(16_000)
+    scriptFetch([{ status: 204 }, { status: 200, body: { id: 'm2' } }])
+    await sink.send(approval({ subagents: 2 }))
     advance(16_000)
   }
 
@@ -1273,6 +1289,42 @@ describe('DiscordWebhookSink — GAP C rescope for turn edges (#5541)', () => {
       'detail line reads "Working — 2 subagents"'
     )
     assert.equal(readState(statePath).projects.proj1.state, 'online', 'stored state flips to online')
+  })
+
+  it('permission embed STAYS sticky mid-turn: turn-in-flight does NOT flip away an approval prompt', async () => {
+    // Permission prompts fire MID-turn (an agent hits a tool-approval gate
+    // while working), so turnInFlight is true and subagents are running. An
+    // online-mapped event must NOT flip the permission embed back online —
+    // that would hide the approval request the user must act on. The
+    // turnInFlight rescope applies ONLY to the idle hold; permission keeps its
+    // original pre-#5541 sticky-while-subagents behavior unconditionally.
+    const { sink, statePath, advance } = makeSink()
+    await seedPermissionWithSubagents(sink, advance)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 1, turnInFlight: true })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH', 'refreshes in place — does not flip away the approval prompt')
+    assert.match(
+      JSON.parse(calls[0].body).embeds[0].title,
+      /Needs Approval/,
+      'embed keeps the permission title while subagents run mid-turn'
+    )
+    assert.equal(
+      readState(statePath).projects.proj1.state,
+      'permission',
+      'stored state stays permission — the approval request is preserved'
+    )
+  })
+
+  it('permission count→0 mid-turn falls through to online (approval cleared by next activity)', async () => {
+    const { sink, statePath, advance } = makeSink()
+    await seedPermissionWithSubagents(sink, advance)
+    const calls = scriptFetch([{ status: 200 }])
+    assert.equal(await sink.send(activity({ subagents: 0, turnInFlight: true })), true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'PATCH', 'no re-ping — permission clears to online when the last subagent finishes')
+    assert.match(JSON.parse(calls[0].body).embeds[0].title, /Session Online/)
+    assert.equal(readState(statePath).projects.proj1.state, 'online')
   })
 
   it('uses the single subagent agentType when count is 1 ("Working — <agentType>")', async () => {
