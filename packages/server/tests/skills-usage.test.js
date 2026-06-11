@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -112,13 +112,50 @@ describe('loadUsageStore / saveUsageStore (atomic, temp paths only)', () => {
     assert.equal(loaded.aggregates['batch-merge'].count, 1)
   })
 
-  it('leaves no .tmp file behind after a successful write', () => {
+  it('leaves no temp sidecar behind after a successful write', () => {
     const store = { version: 1, entries: [], aggregates: {} }
     applyUsage(store, { skill: 'x', ts: 1 })
     saveUsageStore(store, filePath)
     const dir = join(tmpDir, 'nested')
-    const leftover = readdirSync(dir).filter((f) => f.endsWith('.tmp'))
-    assert.deepEqual(leftover, [], 'no .tmp file should remain after an atomic write')
+    // #5579: the sidecar is now `.tmp-<pid>` (per-pid), so match any `.tmp`
+    // fragment, not just a trailing `.tmp`, to catch a leaked per-pid sidecar.
+    const leftover = readdirSync(dir).filter((f) => f.includes('.tmp'))
+    assert.deepEqual(leftover, [], 'no temp sidecar should remain after an atomic write')
+  })
+
+  it('#5579: uses a per-pid temp sidecar so concurrent writers do not collide', () => {
+    // Simulate two daemons (different pids) writing the same target around the
+    // same time. The #5309 convention gives each writer its own `.tmp-<pid>`
+    // sidecar, so a stale sidecar pre-created by writer B can NOT be torn or
+    // clobbered by writer A's write — the only contended step is the atomic
+    // rename. We approximate the overlap by pre-creating a foreign-pid sidecar,
+    // running a save, and asserting (a) the foreign sidecar is untouched and
+    // (b) the final file is the save's intact JSON.
+    const dir = join(tmpDir, 'nested')
+    mkdirSync(dir, { recursive: true })
+    const foreignPid = process.pid + 1
+    const foreignSidecar = `${filePath}.tmp-${foreignPid}`
+    const foreignBytes = 'OTHER-WRITER-IN-FLIGHT'
+    writeFileSync(foreignSidecar, foreignBytes)
+
+    const store = { version: 1, entries: [], aggregates: {} }
+    applyUsage(store, { skill: 'mine', ts: 7 })
+    saveUsageStore(store, filePath)
+
+    // Our writer used `.tmp-<our pid>` and renamed it away — the foreign
+    // writer's sidecar is left exactly as it was (no collision).
+    assert.ok(existsSync(foreignSidecar), 'foreign-pid sidecar must survive our write')
+    assert.equal(readFileSync(foreignSidecar, 'utf8'), foreignBytes, 'foreign sidecar bytes untouched')
+
+    // The final target is our intact JSON, not a torn interleave.
+    const loaded = loadUsageStore(filePath)
+    assert.equal(loaded.entries.length, 1)
+    assert.equal(loaded.entries[0].skill, 'mine')
+
+    // Our own per-pid sidecar was consumed by the rename — none left behind.
+    const ourSidecar = `skills-usage.json.tmp-${process.pid}`
+    const leftover = readdirSync(dir).filter((f) => f === ourSidecar)
+    assert.deepEqual(leftover, [], 'our per-pid sidecar must be renamed away')
   })
 
   it('degrades a corrupt file to an empty store rather than throwing', () => {

@@ -11,6 +11,7 @@ import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from '../src/base-
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
+import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 // Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
@@ -4663,5 +4664,59 @@ describe('WsServer permessage-deflate locality (#5516)', () => {
       /permessage-deflate/.test(ext),
       `tunnel peer should keep deflate, got extensions: "${ext}"`,
     )
+  })
+})
+
+describe('#5579: production handler ctx is deep-asserted at construction', () => {
+  let server = null
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('a real WsServer constructs cleanly — every CTX_NAMESPACES field is wired', () => {
+    // ws-server.js calls `assertCtxShape(this._handlerCtx, { deep: true })` in
+    // the constructor. If any CTX_NAMESPACES field were missing from
+    // _handlerCtx, this `new WsServer(...)` would throw before returning. The
+    // act of constructing is the assertion.
+    assert.doesNotThrow(() => {
+      server = new WsServer({
+        port: 0,
+        apiToken: 'tok-ctx-deep',
+        cliSession: createMockSession(),
+        authRequired: true,
+      })
+    }, 'WsServer construction must pass the deep ctx assert')
+  })
+
+  it('a CTX_NAMESPACES field dropped from a construction-shaped ctx throws (deep)', () => {
+    // Build a ctx with EVERY declared field present (the production happy path),
+    // then delete exactly one field and confirm the deep assert — the same call
+    // ws-server.js makes at construction — throws naming the missing key. This
+    // is the guard that turns a forgotten _handlerCtx field from a silent
+    // `undefined` read in prod into a construction-time crash.
+    const ctx = {}
+    for (const ns of CTX_NAMESPACE_NAMES) {
+      ctx[ns] = {}
+      for (const key of CTX_NAMESPACES[ns]) ctx[ns][key] = null
+    }
+    // Sanity: the fully-populated ctx passes deep.
+    assert.doesNotThrow(() => assertCtxShape(ctx, { deep: true }))
+
+    const droppedNs = 'services'
+    const droppedKey = CTX_NAMESPACES[droppedNs][0]
+    delete ctx[droppedNs][droppedKey]
+    assert.throws(
+      () => assertCtxShape(ctx, { deep: true }),
+      new RegExp(`ctx\\.${droppedNs} is missing required key '${droppedKey}'`),
+      'deep assert must throw naming the dropped field',
+    )
+
+    // And the SHALLOW assert would NOT catch it — proving the deep upgrade is
+    // what closes the gap (the namespace object is still present).
+    assert.doesNotThrow(() => assertCtxShape(ctx), 'shallow assert misses a missing key — that is the bug deep closes')
   })
 })

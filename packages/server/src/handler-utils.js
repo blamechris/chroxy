@@ -372,6 +372,10 @@ export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
       if (typeof ctx.transport.subscribeClient === 'function') {
         ctx.transport.subscribeClient(c, sessionId)
       } else {
+        // lint-ignore-ws-index-mutation: guarded fixture fallback. This
+        // else-branch only runs for legacy test fixtures whose ctx predates the
+        // #5563 index-maintaining subscribeClient helper; production always takes
+        // the helper path above, so this bare add can't drift the reverse index.
         c.subscribedSessionIds.add(sessionId)
       }
     }
