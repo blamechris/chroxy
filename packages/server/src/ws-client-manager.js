@@ -1,9 +1,19 @@
 import { EventEmitter } from 'node:events'
 
-// #5563: shared frozen empty Set returned by getSessionSubscribers when a
+// #5563: shared immutable empty Set returned by getSessionSubscribers when a
 // session has no indexed clients — avoids allocating per call on the hot path.
-// Frozen so a misbehaving caller can't mutate the shared singleton.
-const EMPTY_SET = Object.freeze(new Set())
+// `Object.freeze` does NOT stop `.add()`/`.delete()` on a Set's contents, so we
+// also override the mutators to throw: an accidental write to the shared
+// singleton fails loudly instead of silently leaking a phantom subscriber into
+// every empty-session lookup.
+const EMPTY_SET = (() => {
+  const s = new Set()
+  const fail = () => { throw new Error('getSessionSubscribers() returned the shared empty Set — it must not be mutated') }
+  s.add = fail
+  s.delete = fail
+  s.clear = fail
+  return Object.freeze(s)
+})()
 
 /**
  * Manages WebSocket client connections lifecycle.
@@ -144,11 +154,18 @@ export class WsClientManager extends EventEmitter {
    * Register a new client connection. A fresh client has `activeSessionId:
    * null` and an empty `subscribedSessionIds`, so it contributes no index
    * entries until it subscribes or switches via the helpers above.
+   *
+   * Centralizes the `_ws` back-reference invariant (#5563): the reverse-index
+   * fast path resolves each indexed client's socket via `client._ws`, so a
+   * client registered without it would be silently skipped by session
+   * broadcasts/counts. `addClient` already receives `ws`, so it backfills
+   * `clientInfo._ws` when missing — call sites need not remember to set it.
    * @param {WebSocket} ws
    * @param {object} clientInfo - Initial client state
    * @returns {object} the stored client info
    */
   addClient(ws, clientInfo) {
+    if (clientInfo && clientInfo._ws == null) clientInfo._ws = ws
     this.clients.set(ws, clientInfo)
     return clientInfo
   }

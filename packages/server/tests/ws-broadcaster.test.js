@@ -648,15 +648,15 @@ describe('WsBroadcaster', () => {
       assert.equal(manager.clients.get(sentIdx[0].ws).id, 'open')
     })
 
-    it('a custom filter falls back to the full scan (overrides index path)', () => {
-      const a = reg('a', { activeSessionId: 'sess-1' })
-      const b = reg('b', { activeSessionId: 'sess-1' })
-      // Custom filter selects a client that is NOT indexed for sess-1, proving
-      // the filter path scans all clients and the index path is bypassed.
-      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' }, (client) => client.id === 'b')
+    it('a custom filter falls back to the full scan (reaches clients outside the index)', () => {
+      reg('a', { activeSessionId: 'sess-1' })
+      // `outsider` is active on a DIFFERENT session, so it is NOT in sess-1's
+      // index. A custom filter targeting it must still deliver — proving the
+      // filter path scans every client and bypasses the index entirely.
+      const outsider = reg('outsider', { activeSessionId: 'sess-2' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' }, (client) => client.id === 'outsider')
       assert.equal(sentIdx.length, 1)
-      assert.equal(sentIdx[0].ws, b.ws)
-      void a
+      assert.equal(sentIdx[0].ws, outsider.ws)
     })
 
     it('_countSessionSubscribers counts from the index (active + subscribed)', () => {
