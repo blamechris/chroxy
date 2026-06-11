@@ -20,6 +20,7 @@ export function registerServiceCommand(program) {
         getServicePaths,
         resolveNode22Path,
         resolveChroxyBin,
+        resolveClaudeBin,
         loadServiceState,
         installService,
       } = await import('../service.js')
@@ -54,6 +55,17 @@ export function registerServiceCommand(program) {
         process.exit(1)
       }
 
+      // Resolve the claude CLI from the installer's PATH and bake it into the
+      // service PATH (#5491). Install MUST fail here rather than register a job
+      // that crash-loops on preflight when claude isn't on launchd's PATH.
+      let claudeBin
+      try {
+        claudeBin = resolveClaudeBin()
+      } catch (err) {
+        console.error(`Error: ${err.message}`)
+        process.exit(1)
+      }
+
       const cwd = options.cwd || homedir()
 
       if (options.cwd && !existsSync(options.cwd)) {
@@ -67,6 +79,7 @@ export function registerServiceCommand(program) {
         installService({
           nodePath,
           chroxyBin,
+          claudeBin,
           cwd,
           startAtLogin,
         })
@@ -77,6 +90,7 @@ export function registerServiceCommand(program) {
         console.log('\n\u2705 Chroxy service installed successfully!\n')
         console.log(`  Node:         ${nodePath}`)
         console.log(`  Chroxy CLI:   ${chroxyBin}`)
+        console.log(`  Claude CLI:   ${claudeBin}`)
         console.log(`  Service file: ${servicePath}`)
         console.log(`  Log dir:      ${paths.logDir}`)
         console.log(`  Working dir:  ${cwd}`)

@@ -4,13 +4,18 @@ import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
+import { fileURLToPath } from 'url'
 import {
   getServicePaths,
   generateLaunchdPlist,
   generateSystemdUnit,
+  generateServiceWrapper,
   getWindowsAlternatives,
   resolveNode22Path,
   resolveChroxyBin,
+  resolveClaudeBin,
+  buildServicePath,
+  writeServiceWrapper,
   loadServiceState,
   saveServiceState,
   installService,
@@ -20,6 +25,7 @@ import {
   getServiceStatus,
   getFullServiceStatus,
 } from '../src/service.js'
+import { statSync } from 'fs'
 
 describe('service', () => {
   let tmpDir
@@ -789,6 +795,331 @@ describe('service', () => {
       // _skipExec bypasses the actual exec calls — should succeed regardless
       const result = startService({ _skipExec: true, _platform: 'darwin' })
       assert.equal(result.started, true)
+    })
+  })
+
+  // ---- #5491: launchd robustness (PATH baking, keychain wrapper, start UX) ----
+
+  describe('resolveClaudeBin() (#5491 gap 1)', () => {
+    it('returns the path resolved by `which claude`', () => {
+      // Inject a fake `which` that points at a real file (this test file).
+      const fakePath = fileURLToPath(import.meta.url)
+      const which = (cmd, args) => {
+        assert.equal(cmd, 'which')
+        assert.deepEqual(args, ['claude'])
+        return fakePath + '\n'
+      }
+      const resolved = resolveClaudeBin({ _which: which })
+      assert.equal(resolved, fakePath)
+    })
+
+    it('throws an actionable error when claude cannot be resolved', () => {
+      const which = () => {
+        const err = new Error('which: no claude')
+        throw err
+      }
+      assert.throws(() => resolveClaudeBin({ _which: which }), {
+        message: /claude.*CLI|install claude code/i,
+      })
+    })
+
+    it('throws when `which` returns a path that does not exist', () => {
+      const which = () => '/nonexistent/path/to/claude\n'
+      assert.throws(() => resolveClaudeBin({ _which: which }), {
+        message: /claude/i,
+      })
+    })
+  })
+
+  describe('buildServicePath() (#5491 gap 1)', () => {
+    it('includes the node and claude bin dirs', () => {
+      const p = buildServicePath({
+        nodePath: '/opt/homebrew/opt/node@22/bin/node',
+        claudeBin: '/Users/me/.local/bin/claude',
+      })
+      const parts = p.split(':')
+      assert.ok(parts.includes('/opt/homebrew/opt/node@22/bin'))
+      assert.ok(parts.includes('/Users/me/.local/bin'))
+      // node and claude dirs come before system dirs
+      assert.ok(parts.indexOf('/opt/homebrew/opt/node@22/bin') < parts.indexOf('/usr/bin'))
+      assert.ok(parts.indexOf('/Users/me/.local/bin') < parts.indexOf('/usr/bin'))
+    })
+
+    it('still includes system dirs', () => {
+      const p = buildServicePath({ nodePath: '/usr/local/bin/node' })
+      assert.ok(p.includes('/usr/bin'))
+      assert.ok(p.includes('/bin'))
+    })
+
+    it('does not duplicate a dir that holds both binaries', () => {
+      const p = buildServicePath({
+        nodePath: '/usr/local/bin/node',
+        claudeBin: '/usr/local/bin/claude',
+      })
+      const occurrences = p.split(':').filter(d => d === '/usr/local/bin').length
+      assert.equal(occurrences, 1)
+    })
+  })
+
+  describe('generateLaunchdPlist() with baked claude PATH (#5491 gap 1)', () => {
+    it('bakes the claude bin dir into the plist PATH', () => {
+      const plist = generateLaunchdPlist({
+        nodePath: '/opt/homebrew/opt/node@22/bin/node',
+        chroxyBin: '/some/cli.js',
+        claudeBin: '/Users/me/.local/bin/claude',
+        cwd: '/Users/me',
+      })
+      assert.ok(plist.includes('<key>PATH</key>'))
+      assert.ok(plist.includes('/Users/me/.local/bin'))
+      assert.ok(plist.includes('/opt/homebrew/opt/node@22/bin'))
+    })
+
+    it('execs the wrapper when wrapperPath is provided', () => {
+      const plist = generateLaunchdPlist({
+        nodePath: '/n/node',
+        chroxyBin: '/c/cli.js',
+        wrapperPath: '/Users/me/.chroxy/service-wrapper.sh',
+        cwd: '/Users/me',
+      })
+      assert.ok(plist.includes('<string>/Users/me/.chroxy/service-wrapper.sh</string>'))
+      // Direct node+start args are replaced by the wrapper
+      assert.ok(!plist.includes('<string>start</string>'))
+    })
+  })
+
+  describe('generateSystemdUnit() with baked claude PATH (#5491 gap 1)', () => {
+    it('bakes the claude bin dir into Environment=PATH', () => {
+      const unit = generateSystemdUnit({
+        nodePath: '/usr/local/bin/node',
+        chroxyBin: '/some/cli.js',
+        claudeBin: '/home/me/.local/bin/claude',
+        cwd: '/home/me',
+      })
+      assert.ok(unit.includes('Environment=PATH='))
+      assert.ok(unit.includes('/home/me/.local/bin'))
+    })
+
+    it('uses the wrapper in ExecStart when wrapperPath is provided', () => {
+      const unit = generateSystemdUnit({
+        nodePath: '/usr/local/bin/node',
+        chroxyBin: '/some/cli.js',
+        wrapperPath: '/home/me/.chroxy/service-wrapper.sh',
+        cwd: '/home/me',
+      })
+      assert.ok(unit.includes('ExecStart=/home/me/.chroxy/service-wrapper.sh'))
+    })
+  })
+
+  describe('generateServiceWrapper() (#5491 gap 2)', () => {
+    const config = {
+      nodePath: '/opt/homebrew/opt/node@22/bin/node',
+      chroxyBin: '/some/cli.js',
+      pathValue: '/opt/homebrew/opt/node@22/bin:/usr/bin:/bin',
+      cwd: '/Users/me',
+    }
+
+    it('is a POSIX sh script', () => {
+      const w = generateServiceWrapper(config)
+      assert.ok(w.startsWith('#!/bin/sh'))
+    })
+
+    it('resolves the api token from the keychain via /usr/bin/security', () => {
+      const w = generateServiceWrapper(config)
+      assert.ok(w.includes('/usr/bin/security find-generic-password'))
+      assert.ok(w.includes("-s 'chroxy'"))
+      assert.ok(w.includes("-a 'api-token'"))
+      assert.ok(w.includes('export API_TOKEN='))
+    })
+
+    it('resolves the discord webhook from the keychain (relates to #5490)', () => {
+      const w = generateServiceWrapper(config)
+      assert.ok(w.includes("-s 'chroxy-discord-webhook'"))
+      assert.ok(w.includes("-a 'webhook-url'"))
+      assert.ok(w.includes('export CHROXY_DISCORD_WEBHOOK_URL='))
+    })
+
+    it('reads the keychain gracefully (suppresses errors, guards empty)', () => {
+      const w = generateServiceWrapper(config)
+      // security errors are swallowed (2>/dev/null) and empty values skipped
+      assert.ok(w.includes('2>/dev/null'))
+      assert.ok(/if \[ -n "\$_val" \]/.test(w))
+    })
+
+    it('exports the baked PATH and execs the server', () => {
+      const w = generateServiceWrapper(config)
+      assert.ok(w.includes('export PATH='))
+      assert.ok(w.includes(config.pathValue))
+      assert.ok(w.includes(`exec '${config.nodePath}' '${config.chroxyBin}' start`))
+    })
+
+    it('does NOT embed any token value in the script', () => {
+      const w = generateServiceWrapper(config)
+      // The token is resolved at runtime; only the security invocation appears.
+      assert.ok(!w.includes('API_TOKEN=sk-'))
+    })
+  })
+
+  describe('writeServiceWrapper() (#5491 gap 2)', () => {
+    it('writes the wrapper 0700 (owner rwx only)', () => {
+      const wrapperPath = join(tmpDir, '.chroxy', 'service-wrapper.sh')
+      writeServiceWrapper(wrapperPath, '#!/bin/sh\necho hi\n')
+      assert.ok(existsSync(wrapperPath))
+      const mode = statSync(wrapperPath).mode & 0o777
+      assert.equal(mode, 0o700, `expected 0700, got ${mode.toString(8)}`)
+    })
+
+    it('creates the parent directory if missing', () => {
+      const wrapperPath = join(tmpDir, 'nested', 'dir', 'service-wrapper.sh')
+      writeServiceWrapper(wrapperPath, '#!/bin/sh\n')
+      assert.ok(existsSync(wrapperPath))
+    })
+  })
+
+  describe('installService() writes wrapper and bakes PATH (#5491)', () => {
+    it('writes a 0700 wrapper with the security invocation on darwin', () => {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      const logDir = join(tmpDir, 'logs')
+      const stateDir = join(tmpDir, 'state')
+
+      installService({
+        nodePath: '/opt/homebrew/opt/node@22/bin/node',
+        chroxyBin: '/some/cli.js',
+        claudeBin: '/Users/me/.local/bin/claude',
+        cwd: '/Users/me',
+        _servicePath: join(serviceDir, 'com.chroxy.server.plist'),
+        _logDir: logDir,
+        _stateDir: stateDir,
+        _skipRegister: true,
+        _platform: 'darwin',
+      })
+
+      const wrapperPath = join(stateDir, 'service-wrapper.sh')
+      assert.ok(existsSync(wrapperPath), 'wrapper should be written')
+      const mode = statSync(wrapperPath).mode & 0o777
+      assert.equal(mode, 0o700)
+      const wrapper = readFileSync(wrapperPath, 'utf-8')
+      assert.ok(wrapper.includes('/usr/bin/security find-generic-password'))
+
+      // Plist execs the wrapper and bakes claude into PATH
+      const plist = readFileSync(join(serviceDir, 'com.chroxy.server.plist'), 'utf-8')
+      assert.ok(plist.includes(wrapperPath))
+      assert.ok(plist.includes('/Users/me/.local/bin'))
+
+      // State records claudeBin + wrapperPath
+      const state = loadServiceState(stateDir)
+      assert.equal(state.claudeBin, '/Users/me/.local/bin/claude')
+      assert.equal(state.wrapperPath, wrapperPath)
+    })
+  })
+
+  describe('uninstallService() removes the wrapper (#5491)', () => {
+    it('deletes the wrapper script', () => {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      const servicePath = join(serviceDir, 'com.chroxy.server.plist')
+      writeFileSync(servicePath, '<plist>test</plist>')
+      const stateDir = join(tmpDir, 'state')
+      const wrapperPath = join(stateDir, 'service-wrapper.sh')
+      writeServiceWrapper(wrapperPath, '#!/bin/sh\n')
+      saveServiceState({
+        installedAt: new Date().toISOString(),
+        platform: 'darwin',
+        servicePath,
+        wrapperPath,
+        nodePath: '/n/node',
+        chroxyBin: '/c/cli.js',
+      }, stateDir)
+
+      assert.ok(existsSync(wrapperPath))
+      uninstallService({ _stateDir: stateDir, _skipUnregister: true })
+      assert.ok(!existsSync(wrapperPath), 'wrapper should be removed')
+    })
+  })
+
+  describe('startService() bootout-then-bootstrap + EIO hint (#5491 gap 3)', () => {
+    it('boots out the stale label before bootstrapping', () => {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      const servicePath = join(serviceDir, 'com.chroxy.server.plist')
+      writeFileSync(servicePath, '<plist/>')
+      const stateDir = join(tmpDir, 'state')
+      saveServiceState({
+        installedAt: new Date().toISOString(),
+        platform: 'darwin',
+        servicePath,
+        nodePath: '/n/node',
+        chroxyBin: '/c/cli.js',
+      }, stateDir)
+
+      const calls = []
+      const exec = (cmd, args) => { calls.push([cmd, ...args]) }
+      const result = startService({ _platform: 'darwin', _stateDir: stateDir, _exec: exec })
+
+      assert.equal(result.started, true)
+      // bootout must precede bootstrap
+      const bootoutIdx = calls.findIndex(c => c.includes('bootout'))
+      const bootstrapIdx = calls.findIndex(c => c.includes('bootstrap'))
+      assert.ok(bootoutIdx >= 0, 'should call bootout')
+      assert.ok(bootstrapIdx >= 0, 'should call bootstrap')
+      assert.ok(bootoutIdx < bootstrapIdx, 'bootout must run before bootstrap')
+    })
+
+    it('ignores bootout failure (label not loaded) and still bootstraps', () => {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      const servicePath = join(serviceDir, 'com.chroxy.server.plist')
+      writeFileSync(servicePath, '<plist/>')
+      const stateDir = join(tmpDir, 'state')
+      saveServiceState({
+        installedAt: new Date().toISOString(),
+        platform: 'darwin',
+        servicePath,
+        nodePath: '/n/node',
+        chroxyBin: '/c/cli.js',
+      }, stateDir)
+
+      let bootstrapped = false
+      const exec = (cmd, args) => {
+        if (args.includes('bootout')) throw new Error('No such process')
+        if (args.includes('bootstrap')) bootstrapped = true
+      }
+      const result = startService({ _platform: 'darwin', _stateDir: stateDir, _exec: exec })
+      assert.equal(result.started, true)
+      assert.ok(bootstrapped, 'bootstrap should still run after a failed bootout')
+    })
+
+    it('translates Bootstrap failed: 5: Input/output error into an actionable hint', () => {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      const servicePath = join(serviceDir, 'com.chroxy.server.plist')
+      writeFileSync(servicePath, '<plist/>')
+      const stateDir = join(tmpDir, 'state')
+      saveServiceState({
+        installedAt: new Date().toISOString(),
+        platform: 'darwin',
+        servicePath,
+        nodePath: '/n/node',
+        chroxyBin: '/c/cli.js',
+      }, stateDir)
+
+      const exec = (cmd, args) => {
+        if (args.includes('bootout')) return
+        if (args.includes('bootstrap')) {
+          const err = new Error('Command failed')
+          err.stderr = 'Bootstrap failed: 5: Input/output error\n'
+          throw err
+        }
+      }
+      assert.throws(
+        () => startService({ _platform: 'darwin', _stateDir: stateDir, _exec: exec }),
+        (err) => {
+          assert.ok(/Input\/output error/.test(err.message), 'mentions the original error')
+          assert.ok(/bootout/.test(err.message), 'suggests bootout')
+          assert.ok(/chroxy service/i.test(err.message), 'suggests a chroxy command')
+          return true
+        }
+      )
     })
   })
 
