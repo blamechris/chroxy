@@ -3207,6 +3207,15 @@ button.sidebar-token-view-session-row:hover {
   flex: 1;
 }
 
+/* #5556 — restart-mode context line ("Graceful restart" / "Recovering from
+   crash"). Muted secondary label that rides alongside the message without
+   competing for the flex stretch. */
+.reconnect-detail {
+  flex-shrink: 0;
+  opacity: 0.75;
+  font-size: var(--text-sm);
+}
+
 .btn-retry {
   background: var(--accent-orange);
   color: var(--bg-secondary);
