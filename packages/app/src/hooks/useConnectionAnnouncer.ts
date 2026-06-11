@@ -77,24 +77,19 @@ export function useConnectionAnnouncer({
 }: UseConnectionAnnouncerOptions = {}): void {
   const phase = useConnectionLifecycleStore((s) => s.connectionPhase);
 
-  // Last phase we actually announced. Seeded lazily with the mount phase (see
-  // the mount-guard effect below) so the first paint does not announce — a
-  // cold open in `disconnected` must stay silent until a real connect/drop.
+  // Last phase we actually announced. Seeded SYNCHRONOUSLY during the first
+  // render (not in an effect — effects run after commit, and a store
+  // transition sneaking in before a mount effect would seed the wrong phase
+  // and could swallow the first real announcement). The lazy render-phase ref
+  // write is idempotent and React-sanctioned for one-time init; it guarantees
+  // the seed is exactly the first-render phase, so a cold open in
+  // `disconnected` stays silent until a genuine transition.
   const lastAnnouncedRef = useRef<ConnectionPhase | null>(null);
+  if (lastAnnouncedRef.current === null) {
+    lastAnnouncedRef.current = phase;
+  }
   // Pending debounce timer; successive phase changes cancel the prior one.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Seed the last-announced ref with the phase present at mount, BEFORE the
-  // debounce effect runs, so the initial phase is treated as already-spoken
-  // and never scheduled. Empty dep array → runs once on mount.
-  useEffect(() => {
-    if (lastAnnouncedRef.current === null) {
-      lastAnnouncedRef.current = phase;
-    }
-    // Intentionally mount-only — we want the phase captured at first render,
-    // not on every phase change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     // Clear any pending timer — only the LAST change in a churn window fires.

@@ -101,8 +101,9 @@ export default function App() {
   return (
     <NavigationContainer>
       <StatusBar style="light" />
-      {/* #5581 — single app-level live region: announces settled
-          connection-phase transitions to screen readers (debounced). */}
+      {/* #5581 — single app-level announcer: speaks settled connection-phase
+          transitions via AccessibilityInfo.announceForAccessibility (debounced,
+          renders nothing — no persistent live-region element). */}
       <ConnectionAnnouncer />
       <Stack.Navigator
         screenOptions={{
