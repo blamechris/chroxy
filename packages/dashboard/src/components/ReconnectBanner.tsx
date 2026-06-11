@@ -83,13 +83,18 @@ export function ReconnectBanner({
       setCountdown(null)
       return
     }
+    // `interval` is declared up front (not `const` in-block) so the first
+    // synchronous `update()` — which runs before `setInterval` returns — can
+    // safely call `clearInterval(interval)` if the ETA is already expired on
+    // mount, instead of hitting a TDZ ReferenceError on the `const`.
+    let interval: ReturnType<typeof setInterval> | undefined
     const update = () => {
       const remaining = computeRemaining(restartEtaMs, restartingSince)
       setCountdown(remaining)
-      if (remaining != null && remaining <= 0) clearInterval(interval)
+      if (remaining != null && remaining <= 0 && interval !== undefined) clearInterval(interval)
     }
     update()
-    const interval = setInterval(update, 1000)
+    interval = setInterval(update, 1000)
     return () => clearInterval(interval)
   }, [visible, inRestartMode, restartEtaMs, restartingSince])
 

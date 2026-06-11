@@ -90,6 +90,30 @@ describe('ReconnectBanner', () => {
       expect(screen.getByTestId('reconnect-banner').textContent).toContain('~1:05')
     })
 
+    it('does not throw when the ETA is already expired on mount', () => {
+      // Regression: the first synchronous `update()` runs before `interval` is
+      // assigned, so an already-zero countdown must not hit a TDZ on
+      // `clearInterval(interval)`. `restartingSince` is in the past beyond the
+      // ETA, so `computeRemaining` returns 0 on the very first call.
+      const now = 2_500_000
+      vi.setSystemTime(now)
+      expect(() => {
+        render(
+          <ReconnectBanner
+            {...baseProps}
+            message="Server restarting..."
+            restartEtaMs={5_000}
+            restartingSince={now - 10_000}
+            shutdownReason="restart"
+          />,
+        )
+      }).not.toThrow()
+      const text = screen.getByTestId('reconnect-banner').textContent || ''
+      // Expired → no countdown, falls back to the plain restart line.
+      expect(text).toContain('Server restarting...')
+      expect(text).not.toMatch(/~\d+:\d{2}/)
+    })
+
     it('ticks the countdown down each second', () => {
       const now = 3_000_000
       vi.setSystemTime(now)
