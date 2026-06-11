@@ -16,7 +16,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync, existsSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync, existsSync, symlinkSync, lstatSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -138,6 +138,17 @@ describe('installHooks', () => {
     assert.equal(statSync(path).mode & 0o777, 0o600)
   })
 
+  it('rewrites a read-only (0o444) settings file and preserves that mode', () => {
+    // A read-only source mode must not break the atomic write: the temp file
+    // is created writable, fsync'd, then chmod'd to 0o444 AFTER the data is
+    // durable (reopening a 0o444 file with r+ would fail EACCES).
+    const path = tempSettingsPath(JSON.stringify({ model: 'opus' }))
+    chmodSync(path, 0o444)
+    installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
+    assert.equal(statSync(path).mode & 0o777, 0o444)
+    assert.ok(read(path).hooks.SessionStart, 'install did not write through a read-only file')
+  })
+
   it('refuses to overwrite an unparseable settings.json', () => {
     const path = tempSettingsPath('{not valid json')
     assert.throws(() => installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN }), /not valid JSON/)
@@ -148,6 +159,71 @@ describe('installHooks', () => {
     const path = tempSettingsPath('')
     installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
     assert.ok(read(path).hooks.SessionEnd)
+  })
+
+  it('preserves a symlinked settings.json (writes through to the link target)', () => {
+    // Simulate a dotfile manager (stow/chezmoi/yadm): settings.json is a
+    // symlink into a managed store. Install must write through the link, not
+    // clobber it with a regular file.
+    const storeDir = mkdtempSync(join(tmpdir(), 'hooks-store-'))
+    const targetPath = join(storeDir, 'real-settings.json')
+    writeFileSync(targetPath, JSON.stringify({ model: 'opus' }))
+    const linkDir = mkdtempSync(join(tmpdir(), 'hooks-link-'))
+    const linkPath = join(linkDir, 'settings.json')
+    // Best-effort: symlink creation is disallowed on some platforms (Windows
+    // CI without Developer Mode / admin, restricted sandboxes). Skip rather
+    // than fail the whole suite — repo precedent, see e.g.
+    // packages/server/tests/skills-loader.test.js:486.
+    try { symlinkSync(targetPath, linkPath) } catch { return }
+
+    installHooks({ settingsPath: linkPath, nodePath: NODE, binPath: BIN })
+
+    // The path is still a symlink…
+    assert.equal(lstatSync(linkPath).isSymbolicLink(), true, 'settings.json link was clobbered')
+    // …pointing at the same target…
+    assert.equal(realpathSync(linkPath), realpathSync(targetPath))
+    // …and the install landed in the target file.
+    const viaLink = read(linkPath)
+    const viaTarget = read(targetPath)
+    assert.equal(viaLink.model, 'opus')
+    assert.ok(viaTarget.hooks.SessionStart, 'install did not reach the link target')
+    assert.deepEqual(viaLink, viaTarget)
+  })
+
+  it('preserves a hook whose command merely contains the marker (compound wrapper)', () => {
+    // A user-authored compound command that wraps our emitter must NOT be
+    // pruned on install — the installer only owns commands of the exact shape
+    // it writes.
+    const wrapper = `'${NODE}' '${BIN}' emit session_start && afplay /System/Library/Sounds/Glass.aiff`
+    const settings = {
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: wrapper }] }],
+      },
+    }
+    const path = tempSettingsPath(JSON.stringify(settings))
+    installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN })
+    const after = read(path)
+    const commands = after.hooks.SessionStart.flatMap((g) => g.hooks.map((h) => h.command))
+    assert.ok(commands.includes(wrapper), 'compound wrapper command was pruned on install')
+    // Our own entry (exact shape) is still added exactly once alongside it.
+    const exact = `'${NODE}' '${BIN}' emit session_start`
+    assert.equal(commands.filter((c) => c === exact).length, 1)
+    // Two SessionStart commands total: the wrapper + our one exact entry.
+    assert.equal(commands.length, 2)
+  })
+
+  it('aborts install when top-level hooks is an array', () => {
+    const malformed = JSON.stringify({ hooks: [{ matcher: 'x', hooks: [] }] })
+    const path = tempSettingsPath(malformed)
+    assert.throws(() => installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN }), /hooks/)
+    assert.equal(readFileSync(path, 'utf-8'), malformed)
+  })
+
+  it('aborts install when top-level hooks is a string', () => {
+    const malformed = JSON.stringify({ hooks: 'nope' })
+    const path = tempSettingsPath(malformed)
+    assert.throws(() => installHooks({ settingsPath: path, nodePath: NODE, binPath: BIN }), /hooks/)
+    assert.equal(readFileSync(path, 'utf-8'), malformed)
   })
 })
 
@@ -204,6 +280,20 @@ describe('uninstallHooks', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'hooks-none-')), 'settings.json')
     uninstallHooks({ settingsPath: path })
     assert.equal(existsSync(path), false)
+  })
+
+  it('does NOT remove a compound wrapper command that merely contains the marker', () => {
+    const wrapper = `'${NODE}' '${BIN}' emit session_start && afplay /System/Library/Sounds/Glass.aiff`
+    const settings = {
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: wrapper }] }],
+      },
+    }
+    const path = tempSettingsPath(JSON.stringify(settings))
+    uninstallHooks({ settingsPath: path })
+    const after = read(path)
+    const commands = (after.hooks?.SessionStart || []).flatMap((g) => g.hooks.map((h) => h.command))
+    assert.ok(commands.includes(wrapper), 'compound wrapper command was removed on uninstall')
   })
 
   it('install → uninstall on a fresh file round-trips to no chroxy-hooks entries', () => {
