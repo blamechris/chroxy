@@ -290,7 +290,7 @@ async function handleInput(ws, client, msg, ctx) {
 
   // Input conflict: reject if session is already processing input from a different client
   if (entry.session.isRunning) {
-    const primaryClientId = ctx.transport.primaryClients.get(targetSessionId)
+    const primaryClientId = ctx.transport.getPrimary(targetSessionId)
     if (primaryClientId && primaryClientId !== client.id) {
       ctx.transport.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
       return
@@ -427,7 +427,7 @@ async function handleInput(ws, client, msg, ctx) {
       // session). Without this, the rewritten/forward draft would race
       // ahead of the now-busy session and produce out-of-order sends.
       if (entry.session.isRunning) {
-        const primaryClientId = ctx.transport.primaryClients.get(targetSessionId)
+        const primaryClientId = ctx.transport.getPrimary(targetSessionId)
         if (primaryClientId && primaryClientId !== client.id) {
           ctx.transport.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
           return

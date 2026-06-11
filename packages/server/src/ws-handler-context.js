@@ -27,10 +27,13 @@
  * @property {(client: object, sessionId: string) => void} subscribeClient - Index-maintaining subscribe (#5563).
  * @property {(client: object, sessionId: string) => void} unsubscribeClient - Index-maintaining unsubscribe (#5563).
  * @property {(client: object, sessionId: string|null) => void} setActiveSession - Index-maintaining active-session set (#5563).
- * @property {(sessionId: string, clientId: string) => void} updatePrimary - Promote a client to primary for a session.
+ * @property {(sessionId: string, clientId: string) => void} updatePrimary - First-input adoption: claim primary iff unclaimed, else no-op (#5563).
+ * @property {(sessionId: string, clientId: string, opts?: {force?: boolean}) => {changed: boolean, rejected?: boolean, primaryClientId: string|undefined}} claimPrimary - Explicit claim / hand-off (force=true) for a session (#5563).
+ * @property {(sessionId: string) => string|undefined} getPrimary - Current primary clientId for a session, or undefined (#5563).
+ * @property {(sessionId: string, clientId: string) => boolean} isPrimary - True iff clientId is the session's primary (#5563).
+ * @property {(sessionId: string) => void} clearPrimary - Vacate a session's primary slot, announcing the vacancy (#5563).
  * @property {(ws: any, sessionId: string) => void} sendSessionInfo - Send a session_info envelope.
  * @property {(ws: any, sessionId: string) => void} replayHistory - Replay a session's history to a client.
- * @property {Map} primaryClients - sessionId → primary clientId.
  * @property {Map} clients - WebSocket → client-state Map (the WsClientManager's Map).
  *
  * @typedef {Object} WsHandlerSessions
@@ -96,9 +99,12 @@ export const CTX_NAMESPACES = {
     'unsubscribeClient',
     'setActiveSession',
     'updatePrimary',
+    'claimPrimary',
+    'getPrimary',
+    'isPrimary',
+    'clearPrimary',
     'sendSessionInfo',
     'replayHistory',
-    'primaryClients',
     'clients',
   ],
   sessions: [

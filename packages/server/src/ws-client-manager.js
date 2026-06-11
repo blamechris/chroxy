@@ -49,6 +49,118 @@ export class WsClientManager extends EventEmitter {
     // active-or-subscribed predicate.
     /** @type {Map<string, Set<object>>} sessionId → Set<client> */
     this._sessionIndex = new Map()
+    // #5563: explicit primary-ownership for shared sessions. Replaces the old
+    // last-writer-wins `_primaryClients` map that lived on WsServer. A session's
+    // primary is the client currently DRIVING it; every other subscriber is an
+    // OBSERVER. v1 semantics:
+    //   - First client to claim a session becomes primary.
+    //   - The explicit `claim_primary` wire path is STICKY: a claim against an
+    //     owned session is rejected unless `force: true` (hand-off).
+    //   - Input that passed the input_conflict gate adopts primary with force
+    //     (see WsServer._updatePrimary): the server can't tell "same user,
+    //     second device" from "shared-session observer" without identity, so
+    //     accepted input keeps today's seamless device hand-off; true
+    //     observe-only enforcement is #5281 client-role work built on the
+    //     sticky claim path.
+    //   - On primary disconnect the slot is CLEARED (nobody-until-claim) so a
+    //     backgrounded observer is never silently promoted; the next claimant
+    //     (or first input) takes over. This matches the pre-#5563 disconnect
+    //     behaviour (clear + broadcast null) exactly.
+    // Stored by clientId (not the client object) to mirror the old map's shape
+    // and survive a client object being replaced on reconnect-with-same-id.
+    /** @type {Map<string, string>} sessionId → primary clientId */
+    this._primaryClients = new Map()
+  }
+
+  /**
+   * The current primary clientId for `sessionId`, or undefined if unclaimed.
+   * @param {string} sessionId
+   * @returns {string|undefined}
+   */
+  getPrimary(sessionId) {
+    return this._primaryClients.get(sessionId)
+  }
+
+  /**
+   * True iff `clientId` is the primary for `sessionId`.
+   * @param {string} sessionId
+   * @param {string} clientId
+   * @returns {boolean}
+   */
+  isPrimary(sessionId, clientId) {
+    return this._primaryClients.get(sessionId) === clientId
+  }
+
+  /**
+   * Attempt to make `clientId` the primary for `sessionId`.
+   *
+   * Returns a result describing what happened so the caller can decide whether
+   * to broadcast a role change:
+   *   - `{ changed: true, primaryClientId }`  — ownership actually moved (the
+   *      session was unclaimed, or this is a `force` hand-off to a new owner).
+   *   - `{ changed: false, primaryClientId }` — no change: either the caller is
+   *      already the primary (idempotent no-op) OR the claim was REJECTED
+   *      because another client owns it and `force` is false. Inspect `rejected`
+   *      to distinguish (set only on the rejection branch).
+   *
+   * `force` (explicit hand-off / first-input adoption) overrides an existing
+   * owner. Without `force`, a claim against a session another client already
+   * owns is rejected (returns `{ changed:false, rejected:true }`) — this is the
+   * observe-only guarantee.
+   *
+   * @param {string} sessionId
+   * @param {string} clientId
+   * @param {{ force?: boolean }} [opts]
+   * @returns {{ changed: boolean, rejected?: boolean, primaryClientId: string|undefined }}
+   */
+  claimPrimary(sessionId, clientId, { force = false } = {}) {
+    if (!sessionId || !clientId) return { changed: false, primaryClientId: this._primaryClients.get(sessionId) }
+    const current = this._primaryClients.get(sessionId)
+    if (current === clientId) return { changed: false, primaryClientId: current }
+    if (current && !force) {
+      // Session already owned by someone else and this is not an explicit
+      // hand-off / adoption — reject to preserve observe-only semantics.
+      return { changed: false, rejected: true, primaryClientId: current }
+    }
+    this._primaryClients.set(sessionId, clientId)
+    return { changed: true, primaryClientId: clientId }
+  }
+
+  /**
+   * Clear the primary slot for `sessionId`. Returns the previous owner (or
+   * undefined). Used on destroy_session.
+   * @param {string} sessionId
+   * @returns {string|undefined} previous primary clientId
+   */
+  clearPrimary(sessionId) {
+    const prev = this._primaryClients.get(sessionId)
+    this._primaryClients.delete(sessionId)
+    return prev
+  }
+
+  /**
+   * Vacate every primary slot (server shutdown / close path). No broadcast —
+   * the server is tearing down. Keeps the `_primaryClients` map private to this
+   * class so callers don't depend on its representation (#5563).
+   */
+  clearAllPrimary() {
+    this._primaryClients.clear()
+  }
+
+  /**
+   * Clear every session this client was primary on (disconnect path).
+   * @param {string} clientId
+   * @returns {string[]} sessionIds the client was vacated from
+   */
+  clearPrimaryForClient(clientId) {
+    const vacated = []
+    for (const [sessionId, primaryClientId] of this._primaryClients) {
+      if (primaryClientId === clientId) {
+        this._primaryClients.delete(sessionId)
+        vacated.push(sessionId)
+      }
+    }
+    return vacated
   }
 
   /**
