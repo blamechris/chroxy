@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, utimesSync, unlinkSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest } from '../src/providers.js'
+import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest, validateProviderClass, getRegisteredProviderNames } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { CodexSession } from '../src/codex-session.js'
@@ -54,6 +54,61 @@ describe('Provider Registry', () => {
     }
     registerProvider('test-roundtrip', TestProvider)
     assert.equal(getProvider('test-roundtrip'), TestProvider)
+  })
+
+  // #5555: validateProviderClass was only invoked on the registerProvider()
+  // path (Docker / external). The built-ins in the PROVIDERS literal, seeded via
+  // the registry construction loop, got NO interface check — the contract
+  // didn't cover its main case. The loop now validates every built-in at module
+  // load, so a regressed built-in fails loudly instead of deep in a live session.
+  describe('built-in provider contract validation (#5555)', () => {
+    it('every registered built-in passes validateProviderClass', () => {
+      // The module already loaded (and the seeding loop already validated), so
+      // reaching this test at all proves no built-in throws. Re-assert per
+      // built-in for a precise failure message if one ever regresses.
+      const builtins = getRegisteredProviderNames().filter(n => !n.startsWith('test-') && !n.startsWith('docker-'))
+      assert.ok(builtins.length >= 9, 'expected the 9 first-class built-ins to be registered')
+      for (const name of builtins) {
+        const ProviderClass = getProvider(name)
+        assert.doesNotThrow(() => validateProviderClass(ProviderClass, name),
+          `built-in '${name}' must satisfy the ProviderSession contract`)
+      }
+    })
+
+    it('a bogus built-in (missing a required method) fails loudly — mirrors the seeding loop', () => {
+      // Simulate what the registry construction loop does to each entry of the
+      // PROVIDERS literal: a class dropping a required method must throw, naming
+      // the method, rather than register silently and explode at call time.
+      class BogusProvider {
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        // destroy() intentionally omitted
+      }
+      assert.throws(
+        () => validateProviderClass(BogusProvider, 'bogus-builtin'),
+        /missing required method: destroy/,
+      )
+    })
+
+    it('a built-in claiming inProcessPermissions without the methods fails loudly', () => {
+      class HalfBakedInProcess {
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+        static get capabilities() { return { inProcessPermissions: true } }
+        // respondToPermission / respondToQuestion intentionally omitted
+      }
+      assert.throws(
+        () => validateProviderClass(HalfBakedInProcess, 'half-baked'),
+        /inProcessPermissions=true but is missing required method/,
+      )
+    })
   })
 
   it('listProviders returns registered providers with capabilities', () => {
