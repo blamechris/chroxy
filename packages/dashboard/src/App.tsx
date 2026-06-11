@@ -1579,6 +1579,29 @@ export function App() {
 
   const handleShowQr = useCallback(() => fetchQrInto('/qr'), [fetchQrInto])
 
+  // #5513 — host-triggered Discord pairing-link delivery. POSTs to the daemon's
+  // primary-class-gated /pair-discord, which mints a FRESH approval-gated id and
+  // posts only the chroxy:// link. Redeeming it from the channel still needs host
+  // approval, so the channel grants nothing on its own. Returns a result the
+  // QrModal renders inline. Never surfaces token material.
+  const handlePostPairLinkToDiscord = useCallback(async () => {
+    const token = getAuthToken()
+    if (!token) return { posted: false as const, reason: 'no_token' }
+    try {
+      const res = await fetch('/pair-discord', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const body = await res.json().catch(() => null)
+      if (res.ok && body?.posted) {
+        return { posted: true as const, expiresInSeconds: body.expiresInSeconds }
+      }
+      return { posted: false as const, reason: body?.reason || `http_${res.status}` }
+    } catch {
+      return { posted: false as const, reason: 'post_failed' }
+    }
+  }, [])
+
   // #4695 / #4942 — bridge the macOS menu bar items to App-state
   // handlers. The sidebar's per-project "+" row and the command
   // palette entries currently open their respective dialogs through
@@ -2833,6 +2856,7 @@ export function App() {
             : 'Scan with Chroxy app to pair your phone'
         }
         pairingCode={qrShareMode === 'share' ? null : qrPairingCode}
+        onPostToDiscord={qrShareMode === 'share' ? undefined : handlePostPairLinkToDiscord}
       />
 
       {/* #3209: SkillsPanel — popover for manual-skill toggles + #3205 metadata */}

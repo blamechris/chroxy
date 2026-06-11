@@ -2495,17 +2495,31 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // pairing failed before a session token was issued, so drop the dead entry.
       ctx.socket.close();
       set({ connectionPhase: 'disconnected', socket: null });
+      const { reason } = sharedPairFail(msg, 'unknown');
       const failedServerId = get().activeServerId;
-      if (failedServerId) {
-        const entry = get().serverRegistry.find((s) => s.id === failedServerId);
-        if (entry && !entry.token) get().removeServer(failedServerId);
+      // Capture the failed host BEFORE removing the optimistic entry, so the
+      // approval-gated path below can re-open the request-pair flow for it.
+      const failedEntry = failedServerId
+        ? get().serverRegistry.find((s) => s.id === failedServerId)
+        : undefined;
+      if (failedEntry && !failedEntry.token) get().removeServer(failedServerId!);
+
+      // #5513 (epic #5509) — the redeemed ?pair= link was approval-gated (a
+      // Discord-delivered link). Possession of the link is never sufficient: the
+      // device must REQUEST pairing and the host must approve it. Transparently
+      // fall into the request-pair UX (RequestPairPanel) for the same host
+      // instead of dead-ending on an alert. Old/other surfaces that don't read
+      // pendingApprovalPairHost still see the legible reason via the alert below.
+      if (reason === 'requires_approval' && failedEntry?.wsUrl) {
+        set({ pendingApprovalPairHost: { name: failedEntry.name, wsUrl: failedEntry.wsUrl } });
+        break;
       }
+
       if (!ctx.silent) {
         // Reason parse shared via store-core (#5454). The dashboard keeps its
         // plain `Pairing failed: <reason>` copy — the friendly
         // PAIR_FAIL_MESSAGES strings are QR-flow wording ("Scan the latest QR
         // code…") that doesn't fit this paste-a-pairing-URL surface.
-        const { reason } = sharedPairFail(msg, 'unknown');
         _adapters.alert.alert('Pairing Failed', `Pairing failed: ${reason}`);
       }
       break;

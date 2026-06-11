@@ -294,6 +294,122 @@ describe('http-routes', () => {
     })
   })
 
+  // #5513: host-triggered Discord pairing-link delivery
+  describe('pair-discord endpoint', () => {
+    function makeDiscordMock(overrides = {}) {
+      const gatedIds = []
+      const posted = []
+      return createMockServer({
+        // Primary-class gate (#5533): only the static primary token may trigger.
+        _validatePrimaryBearerAuth(req, res) {
+          if (!this.authRequired) return true
+          const authHeader = req.headers['authorization'] || ''
+          const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+          // Treat 'pairing-bound' as a non-primary token in the mock.
+          if (token === 'pairing-bound') {
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'primary_token_required' }))
+            return false
+          }
+          if (token !== this.apiToken) {
+            res.writeHead(403, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'unauthorized' }))
+            return false
+          }
+          return true
+        },
+        _pairingManager: {
+          createApprovalGatedPairingId() {
+            const id = `gated-${gatedIds.length}`
+            gatedIds.push(id)
+            return { pairingId: id, pairingUrl: `chroxy://example.com?pair=${id}`, expiresAt: Date.now() + 60_000 }
+          },
+        },
+        async _postPairLinkToDiscord(link) {
+          posted.push(link)
+          return { posted: true, expiresInSeconds: 60 }
+        },
+        _gatedIds: gatedIds,
+        _postedLinks: posted,
+        ...overrides,
+      })
+    }
+
+    it('POST /pair-discord generates a gated id, posts it, returns posted:true', async () => {
+      const mock = makeDiscordMock()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pair-discord`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      const body = await res.json()
+      assert.equal(body.posted, true)
+      assert.equal(body.expiresInSeconds, 60)
+      assert.equal(mock._gatedIds.length, 1, 'one fresh gated id generated')
+      assert.equal(mock._postedLinks.length, 1)
+      assert.ok(mock._postedLinks[0].url.includes('gated-0'))
+    })
+
+    it('returns 403 without auth', async () => {
+      const mock = makeDiscordMock()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pair-discord`, { method: 'POST' })
+      assert.equal(res.status, 403)
+      assert.equal(mock._gatedIds.length, 0, 'no gated id minted for an unauthed request')
+    })
+
+    it('returns 403 for a pairing-bound (non-primary) token (#5533)', async () => {
+      const mock = makeDiscordMock()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pair-discord`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      assert.equal(mock._gatedIds.length, 0, 'a non-primary token must not trigger a Discord post')
+    })
+
+    it('returns 503 when no pairing manager is wired', async () => {
+      const mock = makeDiscordMock({ _pairingManager: null })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pair-discord`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 503)
+    })
+
+    it('returns 409 + reason when the webhook is not configured', async () => {
+      const mock = makeDiscordMock({
+        async _postPairLinkToDiscord() { return { posted: false, reason: 'not_configured' } },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pair-discord`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 409)
+      const body = await res.json()
+      assert.equal(body.posted, false)
+      assert.equal(body.reason, 'not_configured')
+    })
+
+    it('returns 502 when the Discord POST fails', async () => {
+      const mock = makeDiscordMock({
+        async _postPairLinkToDiscord() { return { posted: false, reason: 'post_failed' } },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pair-discord`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 502)
+      const body = await res.json()
+      assert.equal(body.reason, 'post_failed')
+    })
+  })
+
   // #3070: per-session "Share this session" QR endpoint
   describe('per-session share QR endpoint', () => {
     function makeSharedMock(overrides = {}) {

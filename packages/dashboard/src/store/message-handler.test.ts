@@ -245,6 +245,32 @@ describe('dashboard message-handler dispatch', () => {
       handleMessage({ type: 'pair_fail', reason: 'rate_limited' }, ctx() as any)
       expect((store.getState() as any)._removeServerCalls).toEqual([])
     })
+
+    // #5513 — approval-gated redemption: a Discord-delivered link mints no
+    // token; the server replies requires_approval. The dashboard falls into the
+    // request-pair flow for the same host instead of dead-ending on an alert.
+    it('records the host in pendingApprovalPairHost on requires_approval (#5513)', () => {
+      store = createMockStore(baseState({
+        activeServerId: 'srv_gated',
+        serverRegistry: [{ id: 'srv_gated', name: 'GatedHost', wsUrl: 'wss://gated/ws', token: '', lastConnectedAt: null }],
+      }))
+      setStore(store)
+      handleMessage({ type: 'pair_fail', reason: 'requires_approval' }, ctx() as any)
+      const state = store.getState() as any
+      expect(state.pendingApprovalPairHost).toEqual({ name: 'GatedHost', wsUrl: 'wss://gated/ws' })
+      // The optimistic tokenless entry is still cleaned up.
+      expect(state._removeServerCalls).toEqual(['srv_gated'])
+    })
+
+    it('does NOT set pendingApprovalPairHost for other pair_fail reasons (#5513)', () => {
+      store = createMockStore(baseState({
+        activeServerId: 'srv_gated',
+        serverRegistry: [{ id: 'srv_gated', name: 'GatedHost', wsUrl: 'wss://gated/ws', token: '', lastConnectedAt: null }],
+      }))
+      setStore(store)
+      handleMessage({ type: 'pair_fail', reason: 'expired' }, ctx() as any)
+      expect((store.getState() as any).pendingApprovalPairHost).toBeUndefined()
+    })
   })
 
   describe('error dispatch', () => {

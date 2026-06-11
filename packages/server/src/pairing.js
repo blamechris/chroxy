@@ -182,12 +182,64 @@ export class PairingManager extends EventEmitter {
   }
 
   /**
+   * Generate a NEW pairing id flagged `requiresApproval: true` (#5513, epic
+   * #5509) — the Discord-delivery path. Unlike `generateBoundPairing`, a gated
+   * id NEVER mints a token on redemption: `validatePairing` returns
+   * `requires_approval` so the WsServer routes the redemption into the #5510
+   * pending-request approval flow (verify-code + host approve). Possession of
+   * the Discord channel therefore grants nothing on its own — a leaked link
+   * still needs an out-of-band host approval to connect.
+   *
+   * Like `generateBoundPairing`, this does NOT replace `_current` (the
+   * linking-mode QR keeps auto-refreshing); it adds an additional one-shot,
+   * single-use, TTL'd entry. Each trigger surface (CLI / dashboard button)
+   * calls this fresh so every Discord post carries its own ephemeral id.
+   *
+   * @returns {{ pairingId: string, pairingUrl: string|null, expiresAt: number }}
+   * @throws {Error} If the manager is destroyed.
+   */
+  createApprovalGatedPairingId() {
+    if (this._destroyed) {
+      throw new Error('PairingManager is destroyed')
+    }
+
+    // Cap active pairings to prevent unbounded growth. Skip _current.id when
+    // picking the eviction victim — dropping the linking-mode QR's entry would
+    // silently invalidate the main /qr (same rationale as generateBoundPairing).
+    if (this._activePairings.size >= MAX_ACTIVE_PAIRINGS) {
+      const linkingId = this._current?.id || null
+      let victim = null
+      for (const id of this._activePairings.keys()) {
+        if (id !== linkingId) {
+          victim = id
+          break
+        }
+      }
+      this._activePairings.delete(victim ?? this._activePairings.keys().next().value)
+    }
+
+    const id = generateTypeableCode()
+    const expiresAt = Date.now() + this._ttlMs
+    this._activePairings.set(id, { expiresAt, used: false, requiresApproval: true })
+
+    const pairingUrl = this._wsUrl
+      ? `chroxy://${this._wsUrl.replace(/^wss?:\/\//, '')}?pair=${id}`
+      : null
+    return { pairingId: id, pairingUrl, expiresAt }
+  }
+
+  /**
    * Validate a pairing ID and issue a session token if valid.
    * Accepts any active pairing ID (current or recently-refreshed within TTL).
    *
    * If the pairing entry was created via `generateBoundPairing(sessionId)`,
    * the binding is taken from the entry — `sessionId` param is ignored.
    * Otherwise (linking-mode pairings), the param controls the binding.
+   *
+   * Approval-gated entries (#5513, `createApprovalGatedPairingId`) are consumed
+   * (marked used) but NEVER mint a token: the call returns
+   * `{ valid: false, reason: 'requires_approval' }` so the caller routes the
+   * redemption into the host-approval flow instead.
    *
    * @param {string} pairingId
    * @param {string|null} [sessionId] - Session ID to bind to the issued token
@@ -216,6 +268,14 @@ export class PairingManager extends EventEmitter {
 
     // Mark as used (one-time)
     entry.used = true
+
+    // Approval-gated id (#5513): consume it but mint NO token. The caller
+    // (WsServer / handlePairMessage) maps `requires_approval` into the #5510
+    // pending-request flow — host approval is still required, so possession of
+    // the Discord-delivered link grants nothing on its own.
+    if (entry.requiresApproval) {
+      return { valid: false, reason: 'requires_approval' }
+    }
 
     // Issue a session token (with FIFO eviction at cap). Entry-bound pairings
     // (#3070) take precedence — the param is only honored for linking-mode

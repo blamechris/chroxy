@@ -68,6 +68,36 @@ describe('QrModal', () => {
     expect(screen.queryByTestId('qr-pairing-code')).not.toBeInTheDocument()
   })
 
+  // #5513 — host-triggered Discord pairing-link delivery
+  it('renders the Post-to-Discord button when onPostToDiscord is provided', () => {
+    const svg = '<svg><rect/></svg>'
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} pairingCode="ABCD2345" onPostToDiscord={vi.fn()} />)
+    expect(screen.getByTestId('qr-post-discord-btn')).toBeInTheDocument()
+  })
+
+  it('omits the Post-to-Discord button when onPostToDiscord is absent', () => {
+    const svg = '<svg><rect/></svg>'
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} pairingCode="ABCD2345" />)
+    expect(screen.queryByTestId('qr-post-discord-btn')).not.toBeInTheDocument()
+  })
+
+  it('calls onPostToDiscord and shows a success message on resolve', async () => {
+    const svg = '<svg><rect/></svg>'
+    const onPost = vi.fn().mockResolvedValue({ posted: true, expiresInSeconds: 60 })
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} pairingCode="ABCD2345" onPostToDiscord={onPost} />)
+    fireEvent.click(screen.getByTestId('qr-post-discord-btn'))
+    expect(onPost).toHaveBeenCalledOnce()
+    expect(await screen.findByTestId('qr-post-discord-status')).toHaveTextContent(/posted/i)
+  })
+
+  it('shows an error message when the post fails', async () => {
+    const svg = '<svg><rect/></svg>'
+    const onPost = vi.fn().mockResolvedValue({ posted: false, reason: 'not_configured' })
+    render(<QrModal open={true} onClose={vi.fn()} qrSvg={svg} loading={false} pairingCode="ABCD2345" onPostToDiscord={onPost} />)
+    fireEvent.click(screen.getByTestId('qr-post-discord-btn'))
+    expect(await screen.findByTestId('qr-post-discord-status')).toHaveTextContent(/webhook|configur/i)
+  })
+
   it('closes on Escape key (#1549)', () => {
     const onClose = vi.fn()
     render(<QrModal open={true} onClose={onClose} qrSvg={null} loading={false} />)

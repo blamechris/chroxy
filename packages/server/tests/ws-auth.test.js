@@ -777,6 +777,33 @@ describe('handlePairMessage', () => {
     })
   })
 
+  describe('approval-gated redemption (#5513)', () => {
+    it('does NOT authenticate or mint a token when validation returns requires_approval', () => {
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'requires_approval' })) }
+      const { ctx, ws, client, onAuthSuccess } = makePairCtx({ pairingManager })
+      const result = handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'gated-id' })
+      assert.equal(result, true)
+      assert.equal(client.authenticated, false, 'a gated id must never authenticate the client')
+      assert.equal(client._sessionToken, undefined, 'no token material is issued')
+      assert.equal(onAuthSuccess.callCount, 0)
+      const last = ws.lastSent()
+      assert.equal(last.type, 'pair_fail')
+      assert.equal(last.reason, 'requires_approval', 'legible reason so old clients fail cleanly and new clients fall into request-pair')
+      assert.equal(ws.closed, true)
+    })
+
+    it('does NOT count requires_approval toward the brute-force rate limiter', () => {
+      const authFailures = new Map()
+      const benignPairAttempts = new Map()
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'requires_approval' })) }
+      const client = makeMockClient({ ip: '127.0.0.1', rateLimitKey: '203.0.113.9' })
+      const { ctx, ws } = makePairCtx({ pairingManager, authFailures, benignPairAttempts, client })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'gated-id' })
+      assert.equal(authFailures.has('203.0.113.9'), false, 'requires_approval is not a brute-force signal')
+      assert.equal(benignPairAttempts.has('203.0.113.9'), false, 'requires_approval is a normal redemption, not benign hammering')
+    })
+  })
+
   describe('successful pairing', () => {
     it('authenticates client when pairingManager validates successfully', () => {
       const pairingManager = { validatePairing: createSpy(() => ({ valid: true, sessionToken: 'sess-tok' })) }

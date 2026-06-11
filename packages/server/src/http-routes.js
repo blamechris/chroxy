@@ -174,7 +174,7 @@ export function createHttpHandler(server) {
   const dispatch = async (req, res) => {
     // CORS preflight
     if (req.method === 'OPTIONS') {
-      const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect') || req.url?.startsWith('/pairing-code')
+      const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect') || req.url?.startsWith('/pairing-code') || req.url?.startsWith('/pair-discord')
       const corsOrigin = isRestricted
         ? matchAllowedOrigin(req.headers['origin'])
         : '*'
@@ -491,6 +491,55 @@ export function createHttpHandler(server) {
         expiresAtMs: snap.expiresAtMs,
         expiresInSeconds: Math.ceil(expiresInMs / 1000),
       }))
+      return
+    }
+
+    // Discord pairing-link delivery (#5513, epic #5509): POST /pair-discord
+    // generates a FRESH approval-gated pairing id and posts its chroxy:// link
+    // to the configured Discord webhook. Host-triggered only (CLI / dashboard
+    // button). The gated id mints no token on redemption — the host must still
+    // approve (#5510) — so possession of the channel grants nothing.
+    //
+    // Gated on the PRIMARY token class from day one (#5533): posting a fresh
+    // pairing link is a host-authority action, so a pairing-bound session token
+    // (which is scoped, not host-level) is rejected. Mirrors /pairing-code's
+    // CORS, but uses _validatePrimaryBearerAuth instead of _validateBearerAuth.
+    if (req.method === 'POST' && req.url?.split('?')[0] === '/pair-discord') {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const pdCors = matchAllowedOrigin(req.headers['origin'])
+      const pdHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+      if (pdCors) {
+        pdHeaders['Access-Control-Allow-Origin'] = pdCors
+        pdHeaders['Vary'] = 'Origin'
+      }
+      if (!server._pairingManager) {
+        res.writeHead(503, pdHeaders)
+        res.end(JSON.stringify({ error: 'Pairing not available' }))
+        return
+      }
+      // Fresh gated id per trigger (60s TTL, single-use). The chroxy:// link is
+      // the only material posted — no token.
+      const gated = server._pairingManager.createApprovalGatedPairingId()
+      if (!gated?.pairingUrl) {
+        res.writeHead(503, pdHeaders)
+        res.end(JSON.stringify({ error: 'Pairing link not available — server has no public URL yet' }))
+        return
+      }
+      const expiresInSeconds = Number.isFinite(gated.expiresAt)
+        ? Math.max(0, Math.ceil((gated.expiresAt - Date.now()) / 1000))
+        : 60
+      const result = await server._postPairLinkToDiscord({ url: gated.pairingUrl, expiresInSeconds })
+      if (result?.posted) {
+        res.writeHead(200, pdHeaders)
+        res.end(JSON.stringify({ posted: true, expiresInSeconds: result.expiresInSeconds ?? expiresInSeconds }))
+        return
+      }
+      // not_configured → 409 (no webhook set); anything else → 502 (post failed).
+      // The webhook URL / token never appears in the response — postPairLinkToDiscord
+      // returns only a fixed reason code.
+      const status = result?.reason === 'not_configured' ? 409 : 502
+      res.writeHead(status, pdHeaders)
+      res.end(JSON.stringify({ posted: false, reason: result?.reason || 'post_failed' }))
       return
     }
 

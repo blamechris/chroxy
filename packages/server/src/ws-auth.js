@@ -303,6 +303,25 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
+  // Approval-gated id (#5513, epic #5509): a Discord-delivered pairing link
+  // carries a flagged id that mints NO token. validatePairing consumed it
+  // (single-use) and reported `requires_approval`. This is NOT a failure — it
+  // is the intended routing: possession of the link is never sufficient; the
+  // device must request pairing and the host must approve it (#5510). We reply
+  // with a legible `pair_fail { reason: 'requires_approval' }` and close:
+  //   - old clients surface the reason and clean up (no hang);
+  //   - new dashboards detect the reason and transparently open the
+  //     request-pair UX (RequestPairPanel), which issues a fresh `pair_request`
+  //     on its own connection through the existing #5510 flow.
+  // It does NOT count toward either rate-limit bucket — this is a normal,
+  // expected redemption, not a brute-force or benign-hammer signal.
+  if (result.reason === 'requires_approval') {
+    log.info(`Gated pairing id redeemed from ${rateLimitKey} — routing to host approval (requires_approval)`)
+    send(ws, { type: 'pair_fail', reason: 'requires_approval' })
+    ws.close()
+    return true
+  }
+
   // Pairing failure — only increment the shared rate-limiter bucket for
   // genuine brute-force signals (invalid_pairing_id).
   //
