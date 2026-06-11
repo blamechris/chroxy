@@ -380,7 +380,8 @@ Many services and local inference servers now expose **Anthropic-compatible `/v1
         "defaultModel": "glm-4.7",
         "models": ["glm-4.7", "glm-4.7-air"],
         "pricing": { "input": 0.6, "output": 2.2 },
-        "contextWindow": 200000
+        "contextWindow": 200000,
+        "modelDiscovery": { "url": "https://openrouter.ai/api/v1/models", "format": "openrouter" }
       }
     ]
   }
@@ -398,6 +399,7 @@ Many services and local inference servers now expose **Anthropic-compatible `/v1
 | `models` | no | Model **allowlist** for live model switching. Omit entirely for an unrestricted endpoint (any model id is passed through verbatim — the `ollama` rule; an unknown id surfaces as the endpoint's own error). |
 | `pricing` | no | USD per million tokens: `{ "input", "output", "cacheRead", "cacheWrite" }` (missing rates default to 0). Omit for free/local endpoints — cost reports an honest $0. |
 | `contextWindow` | no | Context window in tokens (dashboard chip). Omit when unknown — Chroxy never fabricates a window; the chip is simply hidden. |
+| `modelDiscovery` | no | Live model-catalog discovery: `{ "url", "format" }`. `format` is `openrouter` (`GET /api/v1/models`, OpenAI-ish list with per-token pricing) or `openai` (bare `/v1/models`, ids only). A discovered catalog feeds the dashboard picker, **replaces** the static `models` allowlist for validation, and (openrouter) autofills per-model cost. See [OpenRouter](#openrouter) below. |
 
 **Secrets never go in `config.json`.** `apiKeyEnv` / `credentialsKey` name *where* the key lives; an entry carrying a literal key (an `apiKey`/`token` field, a value that looks like `sk-...`, or `user:pass@` in the URL) is rejected at startup with a pointed warning. Invalid entries are skipped; valid siblings still register.
 
@@ -422,7 +424,7 @@ LM Studio 0.4.1+ serves an Anthropic-compatible `/v1/messages` locally. llama.cp
 
 No `apiKeyEnv` / `credentialsKey` → no credential gate (a placeholder key is sent on the wire, which local servers ignore); no `pricing` → cost is always $0; no `models` → any loaded model id is accepted; no `contextWindow` → decided by the local model, so no chip is shown.
 
-For **OpenRouter**, use `"baseUrl": "https://openrouter.ai/api"`, `"apiKeyEnv": "OPENROUTER_API_KEY"`, and any platform model id (e.g. `"defaultModel": "qwen/qwen3-coder"`) — OpenRouter's `/v1/messages` accepts the Anthropic format for all models, not just Claude.
+For **OpenRouter** — which accepts the Anthropic format for *every* model on the platform and adds live catalog discovery + per-model pricing — there's a one-command preset: see [OpenRouter](#openrouter) below.
 
 ### Use
 
@@ -436,6 +438,40 @@ npx chroxy start --provider lm-studio
 - These compatibility layers are young — llama.cpp explicitly makes "no strong claims of compatibility". Probe streamed tool input (`input_json_delta`), parallel tool calls, and usage accounting against your specific server before relying on them.
 - Tool-use quality depends entirely on the model behind the endpoint (same caveat as Ollama).
 - Capabilities are identical to `claude-byok` by construction — see the [capability matrix](#capability-matrix) note.
+
+## OpenRouter
+
+[OpenRouter](https://openrouter.ai) aggregates hundreds of models behind one key and accepts the **Anthropic Messages format for every model on the platform** — so it drives the same agent loop as `claude-byok` (streaming, tools, permission prompts, MCP, history, cost). It's an [Anthropic-compatible endpoint](#anthropic-compatible-endpoints-config-driven) with first-class ergonomics: a preset, live model-catalog discovery, and per-model pricing autofill.
+
+### Preset
+
+```bash
+npx chroxy providers add openrouter
+```
+
+This writes the `providers.anthropicCompatible` entry for you — `baseUrl https://openrouter.ai/api`, the `OPENROUTER_API_KEY` env seam (or the `openrouterApiKey` field in `~/.chroxy/credentials.json`, mode `0600`), a sensible default model, and the `modelDiscovery` block. It's **idempotent**: re-running leaves an existing entry untouched (`--force` rewrites it to the current preset).
+
+Then provide your key and start:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...           # or save it as "openrouterApiKey" in ~/.chroxy/credentials.json (0600)
+npx chroxy start --provider openrouter
+```
+
+### Model discovery
+
+On session start (and on every `available_models` push) Chroxy probes `GET https://openrouter.ai/api/v1/models` and feeds the live catalog into the model picker — exactly like Ollama's `/api/tags` discovery. Results (success *and* failure) are cached for 5 minutes and concurrent callers share one in-flight request, so a reconnecting dashboard never hammers the endpoint. The catalog is large (hundreds of models); the dashboard picker supports filter/search to navigate it.
+
+Discovery is **authoritative for validation**: once a catalog is in hand the discovered ids become the model allowlist for that provider (replacing the unrestricted pass-through), so an unknown id is rejected before it reaches OpenRouter. Until the first probe resolves (cold boot), the `defaultModel` works immediately and the endpoint stays unrestricted.
+
+### Pricing autofill
+
+OpenRouter's models endpoint reports per-token pricing. Chroxy converts it to its internal USD-per-MTok convention and applies it **per model**, so a session reports the real cost of the specific model in use instead of `$0` — no hand-authored `pricing` block needed. A model not present in the catalog (or a probe that hasn't run yet) falls back to the entry's flat `pricing` block, or an honest `$0` if none is configured.
+
+### Caveats
+
+- The same young-compatibility-layer caveats as any [Anthropic-compatible endpoint](#caveats) apply; tool-use quality depends on the model you route to.
+- `modelDiscovery` generalizes beyond OpenRouter: any aggregator or local server exposing an OpenAI-format `/v1/models` (LM Studio, vLLM) can opt in with `"format": "openai"` (ids only, no pricing).
 
 ## Selecting a provider
 
