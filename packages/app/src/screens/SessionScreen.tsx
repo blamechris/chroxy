@@ -34,7 +34,7 @@ import type { SelectOptionValue } from '../components/chat/MessageBubble';
 import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { WebTasksPanel } from '../components/WebTasksPanel';
-import { InputBar } from '../components/InputBar';
+import { InputBar, type InputBarHandle } from '../components/InputBar';
 import { ActivityIndicator } from '../components/ActivityIndicator';
 import { CheckInChip } from '../components/CheckInChip';
 import { FileBrowser } from '../components/FileBrowser';
@@ -121,7 +121,9 @@ export function formatTranscript(selected: ChatMessage[]): string {
 
 export function SessionScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const [inputText, setInputText] = useState('');
+  // #5556 — the composer draft now lives inside InputBar (see `inputRef`
+  // below). SessionScreen no longer holds it in render-scope state, which is
+  // what decouples typing from streaming-message re-renders.
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
   // #5517: ChatView's transcript is a virtualized FlatList. SessionScreen
@@ -367,7 +369,10 @@ export function SessionScreen() {
   const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition({
     mode: inputSettings.voiceInputMode,
   });
-  const dictationStartRef = useRef(inputText.length);
+  // Anchor index where the current dictation session began inserting. Seeded
+  // to 0 and reset in handleMicPress (and on manual edits during dictation)
+  // from the live draft length read off the InputBar ref (#5556).
+  const dictationStartRef = useRef(0);
   const usedVoiceRef = useRef(false);
 
   // Surface speech recognition errors to the user
@@ -531,8 +536,12 @@ export function SessionScreen() {
   const isSelectingRef = useRef(false);
   isSelectingRef.current = isSelecting;
 
-  // Ref for focusing the input bar when user taps "Give Feedback" on plan approval
-  const inputRef = useRef<TextInput>(null);
+  // #5556 — InputBar now owns its draft internally and exposes an imperative
+  // handle (focus/getValue/setValue/clear). SessionScreen reads/writes the
+  // composer draft through this ref for the send path, voice-transcript merge,
+  // seed prompts, and pasted-text marker stripping — so streaming re-renders no
+  // longer churn the TextInput on every delta.
+  const inputRef = useRef<InputBarHandle>(null);
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -579,16 +588,23 @@ export function SessionScreen() {
     }
   }, [messages, selectedIds, clearSelection]);
 
-  const handleSend = () => {
+  // #5556 — `handleSend` closes over fast-changing state (pendingAttachments,
+  // streamingMessageId, pastedTextBlocks, viewMode, …), so a useCallback dep
+  // array would re-create it on every streaming delta and defeat InputBar's
+  // React.memo. Instead we keep the live implementation in a ref (refreshed
+  // each render) behind a single stable wrapper passed to InputBar.
+  const handleSendImpl = () => {
     const hasAttachments = pendingAttachments.length > 0;
-    if ((!inputText.trim() && !hasAttachments) || streamingMessageId) return;
+    // #5556 — read the draft from the InputBar ref (it owns the value now).
+    const draft = inputRef.current?.getValue() ?? '';
+    if ((!draft.trim() && !hasAttachments) || streamingMessageId) return;
     // Expand any collapsed-paste markers back to their original content
     // before send (#3797). Trim happens AFTER expansion so an expanded
     // payload with surrounding whitespace still sends cleanly.
     const blockMap = new Map(pastedTextBlocks.map(b => [b.id, b.content]));
-    const expanded = blockMap.size > 0 ? expandPasteMarkers(inputText, blockMap) : inputText;
+    const expanded = blockMap.size > 0 ? expandPasteMarkers(draft, blockMap) : draft;
     const text = expanded.trim();
-    setInputText('');
+    inputRef.current?.clear();
     // Clear paste state alongside the input — neither persists across sends.
     setPastedTextBlocks([]);
     pastedTextNextIdRef.current = 0;
@@ -659,6 +675,10 @@ export function SessionScreen() {
       });
     }
   };
+  // Refresh the live implementation each render, then expose a stable wrapper.
+  const handleSendRef = useRef(handleSendImpl);
+  handleSendRef.current = handleSendImpl;
+  const handleSend = useCallback(() => handleSendRef.current(), []);
 
   const addAttachment = useCallback(async (picker: () => Promise<Attachment | null>) => {
     if (pendingAttachments.length >= MAX_ATTACHMENTS) {
@@ -692,7 +712,7 @@ export function SessionScreen() {
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
-  const handleKeyPress = (key: string) => {
+  const handleKeyPress = useCallback((key: string) => {
     const keyMap: Record<string, string> = {
       'Enter': '\r',
       'Tab': '\t',
@@ -709,7 +729,18 @@ export function SessionScreen() {
     if (keyMap[key]) {
       sendInput(keyMap[key]);
     }
-  };
+  }, [sendInput]);
+
+  // #5556 — stable handlers for InputBar so React.memo isn't defeated by
+  // fresh inline arrows on each streaming re-render.
+  const handleClearTerminal = useCallback(() => {
+    clearTerminalBuffer();
+    terminalRef.current?.clear();
+  }, [clearTerminalBuffer]);
+  const handleToggleEnterMode = useCallback(() => {
+    const key = viewMode === 'terminal' ? 'terminalEnterToSend' : 'chatEnterToSend';
+    updateInputSettings({ [key]: !inputSettings[key] });
+  }, [viewMode, inputSettings, updateInputSettings]);
 
   // Handle tapping a prompt option
   // #4755 — `value` widened to `SelectOptionValue` to carry the
@@ -790,11 +821,11 @@ export function SessionScreen() {
   }, []);
 
   const handleInvokeAgent = useCallback((agentName: string) => {
-    setInputText(`@${agentName} `);
+    inputRef.current?.setValue(`@${agentName} `);
     inputRef.current?.focus();
   }, []);
 
-  // Track whether the latest inputText change came from dictation (vs manual edit)
+  // Track whether the latest draft change came from dictation (vs manual edit)
   const isDictationUpdateRef = useRef(false);
 
   // Pasted-text-block storage for the composer (#3797). React Native
@@ -807,9 +838,12 @@ export function SessionScreen() {
   const pastedTextNextIdRef = useRef(0);
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null);
 
-  // Wrap setInputText to detect manual edits during dictation AND to
-  // collapse oversized pastes (#3797).
-  const handleChangeText = useCallback((text: string) => {
+  // #5556 — InputBar owns the draft and has already applied the user's
+  // keystroke before calling this; we only react to it. `prev` is supplied by
+  // InputBar (the value before this change) so paste-diff no longer needs the
+  // draft in SessionScreen's render-scope state. On a collapse we push the
+  // marker-substituted value BACK into InputBar via the imperative setValue.
+  const handleChangeText = useCallback((text: string, prev: string) => {
     if (!isDictationUpdateRef.current && isRecognizing) {
       // User manually edited text during dictation — update anchor point
       dictationStartRef.current = text.length;
@@ -825,28 +859,26 @@ export function SessionScreen() {
     // the 20-line threshold (#3798 review, #3799). Running
     // `detectPasteFromDiff` on every grow keeps both clients honouring
     // the same criteria.
-    const prev = inputText;
     if (text.length > prev.length) {
       const diff = detectPasteFromDiff(prev, text);
       if (diff && shouldCollapsePaste(diff.inserted)) {
         const nextId = pastedTextNextIdRef.current + 1;
         pastedTextNextIdRef.current = nextId;
         const marker = formatPasteMarker(nextId, diff.inserted);
-        setPastedTextBlocks(prev => [...prev, { id: nextId, content: diff.inserted }]);
-        setInputText(diff.prefix + marker + diff.suffix);
-        return;
+        setPastedTextBlocks(prevBlocks => [...prevBlocks, { id: nextId, content: diff.inserted }]);
+        inputRef.current?.setValue(diff.prefix + marker + diff.suffix);
       }
     }
-
-    setInputText(text);
-  }, [isRecognizing, inputText]);
+  }, [isRecognizing]);
 
   const handleRemovePastedText = useCallback((id: number) => {
     setPastedTextBlocks(prev => prev.filter(b => b.id !== id));
     // Strip this block's marker from the input. Per-id regex so we only
-    // touch the matching marker, not unrelated ones.
+    // touch the matching marker, not unrelated ones. #5556 — read/write the
+    // draft through the InputBar ref instead of a functional setState.
     const markerRe = new RegExp(`\\[Pasted text #${id} \\+\\d+ (?:lines|chars)\\]`, 'g');
-    setInputText(prev => prev.replace(markerRe, ''));
+    const current = inputRef.current?.getValue() ?? '';
+    inputRef.current?.setValue(current.replace(markerRe, ''));
     setInspectedPastedTextId(curr => (curr === id ? null : curr));
   }, []);
 
@@ -854,23 +886,26 @@ export function SessionScreen() {
     setInspectedPastedTextId(id);
   }, []);
 
-  // Voice input: toggle start/stop and merge transcript into input text
+  // Voice input: toggle start/stop and merge transcript into input text.
+  // #5556 — anchor the dictation start at the live draft length read off the
+  // InputBar ref, and merge the transcript back through the ref.
   const handleMicPress = useCallback(() => {
     if (isRecognizing) {
       stopListening();
     } else {
-      dictationStartRef.current = inputText.length;
+      dictationStartRef.current = (inputRef.current?.getValue() ?? '').length;
       startListening();
     }
-  }, [isRecognizing, inputText.length, startListening, stopListening]);
+  }, [isRecognizing, startListening, stopListening]);
 
   useEffect(() => {
     if (isRecognizing && transcript) {
-      const prefix = inputText.slice(0, dictationStartRef.current);
+      const current = inputRef.current?.getValue() ?? '';
+      const prefix = current.slice(0, dictationStartRef.current);
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
       isDictationUpdateRef.current = true;
       usedVoiceRef.current = true;
-      setInputText(prefix + separator + transcript);
+      inputRef.current?.setValue(prefix + separator + transcript);
     }
   }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
 
@@ -1463,17 +1498,13 @@ export function SessionScreen() {
       {/* Input area */}
       <InputBar
         ref={inputRef}
-        inputText={inputText}
         onChangeText={handleChangeText}
         onSend={handleSend}
         onInterrupt={sendInterrupt}
-        onClearTerminal={() => { clearTerminalBuffer(); terminalRef.current?.clear(); }}
+        onClearTerminal={handleClearTerminal}
         onKeyPress={handleKeyPress}
         enterToSend={enterToSend}
-        onToggleEnterMode={() => {
-          const key = viewMode === 'terminal' ? 'terminalEnterToSend' : 'chatEnterToSend';
-          updateInputSettings({ [key]: !inputSettings[key] });
-        }}
+        onToggleEnterMode={handleToggleEnterMode}
         isStreaming={!!streamingMessageId}
         claudeReady={claudeReady}
         viewMode={viewMode}

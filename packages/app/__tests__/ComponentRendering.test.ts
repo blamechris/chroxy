@@ -38,10 +38,22 @@ describe('InputBar component', () => {
 
   test('defines InputBarProps interface with required props', () => {
     expect(inputBarSrc).toMatch(/export\s+interface\s+InputBarProps/)
-    expect(inputBarSrc).toMatch(/inputText:\s*string/)
+    // #5556 — InputBar owns its draft internally; `inputText` is now an
+    // optional seed prop and the draft is driven via the imperative ref.
+    expect(inputBarSrc).toMatch(/inputText\?:\s*string/)
     expect(inputBarSrc).toMatch(/onSend:\s*\(\)/)
     expect(inputBarSrc).toMatch(/onInterrupt:\s*\(\)/)
     expect(inputBarSrc).toMatch(/isStreaming:\s*boolean/)
+  })
+
+  test('exposes an imperative InputBarHandle (focus/getValue/setValue/clear) and is memoized (#5556)', () => {
+    expect(inputBarSrc).toMatch(/export\s+interface\s+InputBarHandle/)
+    expect(inputBarSrc).toMatch(/focus:\s*\(\)/)
+    expect(inputBarSrc).toMatch(/getValue:\s*\(\)/)
+    expect(inputBarSrc).toMatch(/setValue:\s*\(text:\s*string\)/)
+    expect(inputBarSrc).toMatch(/clear:\s*\(\)/)
+    expect(inputBarSrc).toMatch(/useImperativeHandle/)
+    expect(inputBarSrc).toMatch(/React\.memo\(/)
   })
 
   test('has send button with accessibilityRole and accessibilityLabel', () => {
