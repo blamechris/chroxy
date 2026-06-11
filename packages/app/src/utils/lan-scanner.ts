@@ -35,6 +35,75 @@ export function validatePort(portStr: string): number | null {
 }
 
 /**
+ * The `/health` response shape. The server exposes `{ status, mode, version }`
+ * (plus an optional `hostname`) on an unauthenticated `GET /health`
+ * (see bearer-token-authority.md §10). This is fingerprint-level data only —
+ * it does NOT prove the responder is a particular daemon, just that *some*
+ * chroxy is listening. Identity is established by the auth handshake, not here.
+ */
+export interface HealthInfo {
+  status: string;
+  mode: string;
+  version: string;
+  hostname?: string;
+}
+
+/**
+ * Probe a `ws://`/`wss://` (or `http(s)://`) URL's `/health` endpoint.
+ *
+ * Reused by both the subnet scanner and the endpoint selector (#5518). Returns
+ * the parsed health body when the endpoint answers `{ status: 'ok' }`, else
+ * `null` (unreachable, non-ok, or non-chroxy). Never throws — a probe failure
+ * is the common case and is reported as `null`.
+ *
+ * The optional `outerSignal` lets a caller cancel an in-flight batch; the
+ * internal timeout still bounds a single probe.
+ */
+export async function probeHealth(
+  url: string,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
+  outerSignal?: AbortSignal,
+): Promise<HealthInfo | null> {
+  // Normalise ws(s):// → http(s):// and strip any path so we hit `/health`.
+  const httpBase = url
+    .replace(/^wss:/i, 'https:')
+    .replace(/^ws:/i, 'http:')
+    .replace(/\/+(ws)?\/*$/i, '');
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), timeoutMs);
+  const onOuterAbort = () => {
+    clearTimeout(timeout);
+    ctrl.abort();
+  };
+  if (outerSignal) {
+    if (outerSignal.aborted) {
+      clearTimeout(timeout);
+      return null;
+    }
+    outerSignal.addEventListener('abort', onOuterAbort);
+  }
+  try {
+    const res = await fetch(`${httpBase}/health`, { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data.status === 'ok') {
+      return {
+        status: 'ok',
+        mode: data.mode || 'unknown',
+        version: data.version || '',
+        hostname: data.hostname,
+      };
+    }
+  } catch {
+    // Expected for most IPs — connection refused, timeout, etc.
+  } finally {
+    clearTimeout(timeout);
+    if (outerSignal) outerSignal.removeEventListener('abort', onOuterAbort);
+  }
+  return null;
+}
+
+/**
  * Probe a single IP:port for a Chroxy health endpoint.
  * Returns DiscoveredServer if found, null otherwise.
  */
@@ -43,33 +112,15 @@ async function probeHost(
   port: number,
   outerSignal: AbortSignal,
 ): Promise<DiscoveredServer | null> {
-  const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
-  const onOuterAbort = () => {
-    clearTimeout(timeout);
-    ctrl.abort();
+  const health = await probeHealth(`http://${ip}:${port}`, PROBE_TIMEOUT_MS, outerSignal);
+  if (!health) return null;
+  return {
+    ip,
+    port,
+    hostname: health.hostname || ip,
+    mode: health.mode,
+    version: health.version,
   };
-  outerSignal.addEventListener('abort', onOuterAbort);
-  try {
-    const res = await fetch(`http://${ip}:${port}/health`, { signal: ctrl.signal });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (data.status === 'ok') {
-      return {
-        ip,
-        port,
-        hostname: data.hostname || ip,
-        mode: data.mode || 'unknown',
-        version: data.version || '',
-      };
-    }
-  } catch {
-    // Expected for most IPs — connection refused, timeout, etc.
-  } finally {
-    clearTimeout(timeout);
-    outerSignal.removeEventListener('abort', onOuterAbort);
-  }
-  return null;
 }
 
 /**

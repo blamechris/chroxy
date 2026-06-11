@@ -12,6 +12,7 @@ import { create } from 'zustand';
 import { Alert, AppState, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as Device from 'expo-device';
+import * as Network from 'expo-network';
 import { type EncryptedEnvelope } from '../utils/crypto';
 import { hapticLight, hapticMedium, hapticWarning } from '../utils/haptics';
 
@@ -19,6 +20,9 @@ import { hapticLight, hapticMedium, hapticWarning } from '../utils/haptics';
 declare global {
   // eslint-disable-next-line no-var
   var __chroxy_appStateSub: ReturnType<typeof AppState.addEventListener> | undefined;
+  // #5518 — network-change subscription (LAN↔tunnel re-evaluation).
+  // eslint-disable-next-line no-var
+  var __chroxy_networkSub: { remove: () => void } | undefined;
 }
 
 // Re-export all types for backward compatibility
@@ -78,10 +82,12 @@ import type {
   ConnectionState,
   ContextUsage,
   MessageAttachment,
+  SavedConnection,
   SessionInfo,
   SessionState,
 } from './types';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter, formatQuestionAnswerSummary } from './utils';
+import { selectConnectEndpoint } from '../utils/endpoint-selector';
 import {
   setStore,
   wsSend,
@@ -659,6 +665,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   clearSavedConnection: async () => {
     await clearSavedCredentials();
     useConnectionLifecycleStore.getState().setSavedConnection(null);
+  },
+
+  // #5518 — auto-select the best endpoint for a saved connection, then connect.
+  //
+  // Races a cheap `/health` probe against the record's *verified* LAN candidate
+  // and prefers it when reachable, else uses the tunnel (see endpoint-selector).
+  // Used by the auto-reconnect paths (saved-connection load, app resume, network
+  // change). The manual paths (QR scan, ServerPicker, manual entry) keep calling
+  // `connect()` directly so an explicit user choice is never second-guessed.
+  connectAuto: async (saved: SavedConnection, options?: { silent?: boolean; preferTunnel?: boolean }) => {
+    const selection = await selectConnectEndpoint(saved, { preferTunnel: options?.preferTunnel });
+    console.log(`[ws] Endpoint selected: ${selection.path} (${selection.url})`);
+    get().connect(selection.url, saved.token, { silent: options?.silent });
   },
 
   // Initial connection uses bounded retries (MAX_RETRIES) with exponential backoff.
@@ -1849,7 +1868,15 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
     if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
       console.log('[ws] App resumed, socket stale — reconnecting');
       _lastResumeReconnectAt = now;
-      useConnectionStore.getState().connect(wsUrl, apiToken);
+      // #5518: re-evaluate the endpoint on resume — a phone returning to home
+      // wifi should switch from the tunnel back to the direct LAN path. Use the
+      // saved record when present so the LAN candidate is considered; otherwise
+      // fall back to the exact url/token we were connected with.
+      if (savedConnection?.url && savedConnection?.token) {
+        void useConnectionStore.getState().connectAuto(savedConnection);
+      } else {
+        useConnectionStore.getState().connect(wsUrl, apiToken);
+      }
       return;
     }
 
@@ -1861,8 +1888,52 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
     if (connectionPhase === 'disconnected' && !userDisconnected && savedConnection?.url && savedConnection?.token) {
       console.log('[ws] App resumed from disconnected state — auto-reconnecting to saved server');
       _lastResumeReconnectAt = now;
-      useConnectionStore.getState().connect(savedConnection.url, savedConnection.token);
+      void useConnectionStore.getState().connectAuto(savedConnection);
     }
   }
 });
 global.__chroxy_appStateSub = _appStateSub;
+
+// ---------------------------------------------------------------------------
+// #5518 — re-evaluate the endpoint on network change.
+//
+// When the device's network changes (cellular → home wifi, or wifi → wifi as it
+// roams), re-run endpoint selection so a phone arriving on the daemon's LAN
+// switches from the tunnel to the direct path (and vice-versa on leaving). We
+// only act when there's a saved connection the user hasn't explicitly
+// disconnected from, and we debounce so a flurry of transition events (which
+// expo-network emits) collapses to one reconnect.
+// ---------------------------------------------------------------------------
+if (global.__chroxy_networkSub) {
+  global.__chroxy_networkSub.remove();
+}
+
+const NETWORK_CHANGE_COOLDOWN_MS = 5000;
+let _lastNetworkReconnectAt = 0;
+
+export const _networkSub = Network.addNetworkStateListener((state) => {
+  const isConnected = state.isConnected === true;
+  // Only react when the device has connectivity. A drop to offline is handled
+  // by the existing socket.onclose reconnect path; we just re-evaluate which
+  // endpoint to use once a network is (back) up (cellular→wifi, or wifi roam).
+  if (!isConnected) return;
+
+  const now = Date.now();
+  if (now - _lastNetworkReconnectAt < NETWORK_CHANGE_COOLDOWN_MS) return;
+
+  const { userDisconnected, savedConnection, connectionPhase } =
+    useConnectionLifecycleStore.getState();
+  if (userDisconnected || !savedConnection?.url || !savedConnection?.token) return;
+  // Don't interrupt an in-flight connect/reconnect attempt.
+  if (connectionPhase === 'connecting' || connectionPhase === 'reconnecting') return;
+
+  // Only bother re-selecting when a faster local path could exist for this
+  // record — i.e. it carries a verified LAN candidate. Without one, the tunnel
+  // is the only option and the existing reconnect logic already covers drops.
+  if (!savedConnection.lanUrl || !savedConnection.lanVerified) return;
+
+  console.log('[ws] Network changed — re-evaluating LAN/tunnel endpoint');
+  _lastNetworkReconnectAt = now;
+  void useConnectionStore.getState().connectAuto(savedConnection, { silent: true });
+});
+global.__chroxy_networkSub = _networkSub;

@@ -175,6 +175,7 @@ import { useTerminalStore } from './terminal';
 import { useNotificationStore } from './notifications';
 import { useConversationStore } from './conversations';
 import { useConnectionLifecycleStore } from './connection-lifecycle';
+import { recordVerifiedLanCandidate } from '../utils/endpoint-selector';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -976,28 +977,93 @@ async function registerPushToken(socket: WebSocket): Promise<void> {
 // Connection persistence helpers
 // ---------------------------------------------------------------------------
 import * as SecureStore from 'expo-secure-store';
+import type { SavedConnection } from '@chroxy/store-core';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
 const STORAGE_KEY_TOKEN = 'chroxy_last_token';
+// #5518 — dual-endpoint metadata (LAN candidate + verification + tunnel URL)
+// kept in a separate JSON blob so the legacy url/token keys stay byte-for-byte
+// compatible with pre-#5518 builds.
+const STORAGE_KEY_LAN_META = 'chroxy_last_lan_meta';
 
-export async function saveConnection(url: string, token: string): Promise<void> {
+/** Optional dual-endpoint fields persisted alongside the legacy url+token. */
+export type SavedConnectionExtras = Pick<SavedConnection, 'lanUrl' | 'lanVerified' | 'tunnelUrl'>;
+
+export async function saveConnection(
+  url: string,
+  token: string,
+  extras?: SavedConnectionExtras,
+): Promise<void> {
   try {
     await SecureStore.setItemAsync(STORAGE_KEY_URL, url);
     await SecureStore.setItemAsync(STORAGE_KEY_TOKEN, token);
+    // Only persist a metadata blob when there's something to store; otherwise
+    // delete any stale one so a fresh server (no LAN) can't inherit old fields.
+    const meta: SavedConnectionExtras = {};
+    if (extras?.lanUrl) meta.lanUrl = extras.lanUrl;
+    if (extras?.lanVerified) meta.lanVerified = true;
+    if (extras?.tunnelUrl) meta.tunnelUrl = extras.tunnelUrl;
+    if (Object.keys(meta).length > 0) {
+      await SecureStore.setItemAsync(STORAGE_KEY_LAN_META, JSON.stringify(meta));
+    } else {
+      await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
+    }
   } catch {
     // Storage not available (e.g. Expo Go limitations)
   }
 }
 
-export async function loadConnection(): Promise<{ url: string; token: string } | null> {
+export async function loadConnection(): Promise<SavedConnection | null> {
   try {
     const url = await SecureStore.getItemAsync(STORAGE_KEY_URL);
     const token = await SecureStore.getItemAsync(STORAGE_KEY_TOKEN);
-    if (url && token) return { url, token };
+    if (!url || !token) return null;
+    const conn: SavedConnection = { url, token };
+    try {
+      const rawMeta = await SecureStore.getItemAsync(STORAGE_KEY_LAN_META);
+      if (rawMeta) {
+        const meta = JSON.parse(rawMeta) as SavedConnectionExtras;
+        // Validate types defensively — a tampered/stale blob must not flow
+        // unverified LAN state through to the endpoint selector.
+        if (typeof meta.lanUrl === 'string' && /^ws:\/\//i.test(meta.lanUrl)) {
+          conn.lanUrl = meta.lanUrl;
+        }
+        if (meta.lanVerified === true && conn.lanUrl) conn.lanVerified = true;
+        if (typeof meta.tunnelUrl === 'string') conn.tunnelUrl = meta.tunnelUrl;
+      }
+    } catch {
+      // Corrupt metadata — drop it, keep the legacy url+token.
+    }
+    return conn;
   } catch {
     // Storage not available
   }
   return null;
+}
+
+/**
+ * #5518 — persist the connection record after a SUCCESSFUL auth handshake.
+ *
+ * Folds the just-connected URL into the dual-endpoint record via
+ * `recordVerifiedLanCandidate` (which sets `lanVerified` only for ws:// LAN URLs
+ * and clears stale verification on token change), then writes it to both
+ * SecureStore and the in-memory lifecycle store. Centralised so the auth_ok and
+ * token_rotated sites share identical semantics.
+ */
+export function persistVerifiedConnection(connectedUrl: string, token: string): void {
+  const prev = useConnectionLifecycleStore.getState().savedConnection;
+  const base: SavedConnection = prev?.token === token && prev
+    ? prev
+    : { url: connectedUrl, token };
+  const next = recordVerifiedLanCandidate(base, connectedUrl, token);
+  // `url` tracks the last-dialed endpoint for backward compat / manual flows.
+  next.url = connectedUrl;
+  void saveConnection(next.url, next.token, {
+    lanUrl: next.lanUrl,
+    lanVerified: next.lanVerified,
+    tunnelUrl: next.tunnelUrl,
+  });
+  useConnectionLifecycleStore.getState().setSavedConnection(next);
 }
 
 /**
@@ -1012,6 +1078,7 @@ export async function clearSavedCredentials(): Promise<void> {
   try {
     await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
     await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
+    await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
   } catch {
     // Storage not available
   }
@@ -1138,6 +1205,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Sync connection lifecycle store
       useConnectionLifecycleStore.getState().setConnectionPhase('connected');
       useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, effectiveToken);
+      // #5518 — surface the active transport on the connection-quality badge.
+      // ws:// is the direct LAN path; wss:// is the tunnel.
+      useConnectionLifecycleStore.getState().setActivePath(
+        /^ws:\/\//i.test(ctx.url) ? 'lan' : 'tunnel',
+      );
       useConnectionLifecycleStore.getState().setServerInfo({
         serverMode: authServerMode,
         serverVersion: auth.serverVersion,
@@ -1180,9 +1252,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         resetClientVisibleMemo();
         sendClientVisible(ctx.socket, isVisibleAppState(AppState.currentState));
       }
-      // Save for quick reconnect (use effectiveToken for pairing flow)
-      saveConnection(ctx.url, effectiveToken);
-      useConnectionLifecycleStore.getState().setSavedConnection({ url: ctx.url, token: effectiveToken });
+      // Save for quick reconnect (use effectiveToken for pairing flow).
+      // #5518: fold the just-completed handshake into the dual-endpoint record.
+      // A successful auth against ctx.url with effectiveToken proves identity,
+      // so if ctx.url is a ws:// LAN URL it becomes the *verified* LAN candidate
+      // (the only kind we ever auto-prefer — see endpoint-selector.ts).
+      persistVerifiedConnection(ctx.url, effectiveToken);
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
       break;
@@ -2970,9 +3045,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // effects stay platform-specific.
       const { token: newToken } = sharedTokenRotated(msg);
       if (newToken) {
-        // Server sent the new token — update stored credentials seamlessly
+        // Server sent the new token — update stored credentials seamlessly.
+        // #5518: a token change invalidates any prior LAN verification (it was
+        // earned by the old credential), so persistVerifiedConnection clears it.
         console.log('[ws] Server token rotated — updating stored token');
-        saveConnection(ctx.url, newToken);
+        persistVerifiedConnection(ctx.url, newToken);
       } else {
         // Legacy: server didn't include new token — disconnect and prompt re-auth
         console.log('[ws] Server token rotated — re-authentication required');

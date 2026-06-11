@@ -129,7 +129,8 @@ export function ConnectScreen() {
       const saved = useConnectionLifecycleStore.getState().savedConnection;
       if (saved) {
         setAutoConnecting(true);
-        connect(saved.url, saved.token, { silent: true });
+        // #5518 — auto-select LAN vs tunnel for the saved record on reconnect.
+        void useConnectionStore.getState().connectAuto(saved, { silent: true });
       }
     });
     return () => { mounted = false; };
@@ -201,7 +202,8 @@ export function ConnectScreen() {
 
   const handleReconnect = () => {
     if (savedConnection) {
-      connect(savedConnection.url, savedConnection.token);
+      // #5518 — re-select LAN vs tunnel for the saved record on reconnect.
+      void useConnectionStore.getState().connectAuto(savedConnection);
     }
   };
 
