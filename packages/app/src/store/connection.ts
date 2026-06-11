@@ -219,9 +219,16 @@ let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
 let _cachedDeviceId: string | null = null;
+// #5555 — memoize the *in-flight* read, not just the resolved string. The #5555
+// prewarm kicks getDeviceId() off at connect() start and `socket.onopen` calls
+// it again; on a cold first launch (empty/unavailable storage) caching only the
+// resolved value would let the two overlapping calls each pass the empty-cache
+// check and generate *different* random IDs (a race onto inconsistent deviceIds
+// within one connection). Sharing the promise collapses concurrent callers onto
+// a single SecureStore read + single generated id.
+let _deviceIdPromise: Promise<string> | null = null;
 
-async function getDeviceId(): Promise<string> {
-  if (_cachedDeviceId) return _cachedDeviceId;
+async function readOrCreateDeviceId(): Promise<string> {
   try {
     const stored = await SecureStore.getItemAsync(STORAGE_KEY_DEVICE_ID);
     if (stored) {
@@ -242,13 +249,30 @@ async function getDeviceId(): Promise<string> {
   return id;
 }
 
+function getDeviceId(): Promise<string> {
+  if (_cachedDeviceId) return Promise.resolve(_cachedDeviceId);
+  // Reuse an in-flight read so the prewarm and the onopen await share one result.
+  if (_deviceIdPromise) return _deviceIdPromise;
+  _deviceIdPromise = readOrCreateDeviceId();
+  // Drop the in-flight handle once settled; the resolved id is now in
+  // `_cachedDeviceId`, so the next caller short-circuits at the top. On
+  // rejection (it shouldn't — readOrCreateDeviceId never throws) clear it too so
+  // a later call can retry rather than replaying a poisoned promise.
+  void _deviceIdPromise.finally(() => {
+    _deviceIdPromise = null;
+  });
+  return _deviceIdPromise;
+}
+
 /**
- * Test-only: clear the memoized device id so a test can exercise a *cold*
- * SecureStore read (e.g. the #5555 prewarm-ordering assertion). No-op /
- * harmless in production — nothing calls it outside tests.
+ * Test-only: clear the memoized device id (resolved value AND any in-flight
+ * read) so a test can exercise a *cold* SecureStore read (e.g. the #5555
+ * prewarm-ordering assertion). No-op / harmless in production — nothing calls it
+ * outside tests.
  */
 export function __resetDeviceIdCacheForTests(): void {
   _cachedDeviceId = null;
+  _deviceIdPromise = null;
 }
 
 function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'tablet' | 'desktop' | 'unknown'; platform: string } {
@@ -704,9 +728,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     get().connect(selection.url, saved.token, {
       silent: options?.silent,
-      // #5555 — the selector already probed `/health` against this exact URL
-      // (LAN path only). Thread the fresh result through so connect() doesn't
-      // probe the same host a second time before opening the WS.
+      // #5555 — the selector already ran a liveness probe (`/health`) against
+      // this exact URL (LAN path only). Thread the fresh result through so
+      // connect() doesn't re-check the same host before opening the WS.
       healthPrecheck: selection.healthPrecheck,
     });
   },
@@ -789,10 +813,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // rejection can't surface as an unhandled-promise warning.
     void getDeviceId().catch(() => {});
 
-    // #5555 — fast path: connectAuto already probed `/health` against this exact
-    // URL and the result is fresh + ok. Skip the redundant GET and open the WS
-    // directly so one connect == one probe. (Retries and the manual paths carry
-    // no precheck, so they still run the full health check below — including the
+    // #5555 — fast path: connectAuto's selector already probed `/health` against
+    // this exact URL and the result is fresh + ok. Skip connect()'s own pre-WS
+    // liveness check below (the `fetch(httpUrl)` GET of the bare origin — the
+    // server answers both `/` and `/health`) and open the WS directly so one
+    // connect == one round-trip. (Retries and the manual paths carry no
+    // precheck, so they still run the full check below — including the
     // `restarting` detection.)
     if (freshPrecheck) {
       if (myAttemptId !== connectionAttemptId) return;
