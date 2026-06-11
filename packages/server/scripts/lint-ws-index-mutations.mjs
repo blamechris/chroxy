@@ -14,6 +14,7 @@
  *   - `<expr>.subscribedSessionIds.add(<…>)`    (bare subscribe)
  *   - `<expr>.subscribedSessionIds.delete(<…>)` (bare unsubscribe)
  *   - `<expr>.subscribedSessionIds.clear()`     (bare clear)
+ *   - `<expr>.subscribedSessionIds = <…>`       (whole-Set reassignment)
  *
  * NOT forbidden (and not matched):
  *   - comparisons: `client.activeSessionId === sessionId`, `!==`, `==`
@@ -70,6 +71,10 @@ const IGNORE_COMMENT = 'lint-ignore-ws-index-mutation'
 const ACTIVE_WRITE_RE = /\.activeSessionId\s*=(?![=>])/g
 // Bare subscription-Set mutation.
 const SET_MUTATE_RE = /\.subscribedSessionIds\.(add|delete|clear)\s*\(/g
+// Whole-Set reassignment (`.subscribedSessionIds = new Set()`) — corrupts the
+// reverse index exactly like `.add()` would, so it gets the same treatment as
+// the activeSessionId field write. NOT `==` / `===` / `=>`.
+const SET_ASSIGN_RE = /\.subscribedSessionIds\s*=(?![=>])/g
 
 function walk(dir, acc = []) {
   for (const ent of readdirSync(dir)) {
@@ -122,7 +127,7 @@ function hasIgnoreAbove(src, idx) {
 
 function findOffenders(src, label) {
   const offenders = []
-  for (const re of [ACTIVE_WRITE_RE, SET_MUTATE_RE]) {
+  for (const re of [ACTIVE_WRITE_RE, SET_MUTATE_RE, SET_ASSIGN_RE]) {
     re.lastIndex = 0
     let m
     while ((m = re.exec(src)) !== null) {

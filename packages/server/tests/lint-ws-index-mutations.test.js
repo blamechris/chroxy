@@ -63,6 +63,17 @@ export function badSubscribe(client, sid) {
 }
 `
 
+// A whole-Set reassignment outside the owner — must FAIL; a comparison and an
+// arrow after `=` must NOT (regression for the assignment-vs-comparison split).
+const SET_REASSIGN_SRC = `
+export function badReplace(client) {
+  client.subscribedSessionIds = new Set()
+}
+export function fineCompare(client, other) {
+  return client.subscribedSessionIds === other.subscribedSessionIds
+}
+`
+
 // A bare delete + clear outside the owner — must FAIL (two offenses).
 const BARE_DELETE_CLEAR_SRC = `
 export function badRemove(client, sid) {
@@ -167,6 +178,15 @@ describe('lint-ws-index-mutations', () => {
     const { code, stderr } = runLint(srcDir)
     assert.equal(code, 1, 'bare subscribe must fail')
     assert.match(stderr, /handler-utils\.js:3/, 'error should name the offending file:line')
+  })
+
+  test('fails on whole-Set reassignment but not comparison', () => {
+    const { dir, srcDir } = setupFixtureTree({ 'bad-replace.js': SET_REASSIGN_SRC })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'whole-Set reassignment must fail')
+    assert.match(stderr, /bad-replace\.js:3/, 'should flag the reassignment line')
+    assert.doesNotMatch(stderr, /bad-replace\.js:6/, 'comparison must not be flagged')
   })
 
   test('fails on bare delete and clear (two offenses)', () => {
