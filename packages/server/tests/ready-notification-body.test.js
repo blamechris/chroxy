@@ -128,6 +128,64 @@ describe('composeReadyNotificationBody — armed wakeup (relative, #5474)', () =
     assert.equal(body, 'Ready for input — resumes in <1m: check again')
   })
 
+  // Boundary regression (#5522): thresholds compare raw deltaMs and the minute
+  // conversion floors — a near-boundary delta must NOT round across a branch.
+  it('keeps a 59.4s offset as "<1m"', () => {
+    const at = NOW + 59_400 // 59.4s — must not round up to a minute
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in <1m'
+    )
+  })
+
+  it('keeps a 59.6s offset as "<1m" (no round-up to "1m")', () => {
+    const at = NOW + 59_600 // 59.6s — Math.round would have produced "1m"
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in <1m'
+    )
+  })
+
+  it('renders a just-shy-of-1m offset as "<1m" right up to the 60s mark', () => {
+    const at = NOW + 59_999 // 59.999s
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in <1m'
+    )
+  })
+
+  it('keeps an 89.5m offset in the minutes branch (no early switch to hours)', () => {
+    const at = NOW + 89.5 * 60_000 // 89.5m — Math.round would have switched to "1h30m"
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 89m'
+    )
+  })
+
+  it('switches to the hours branch only at the true 90m mark (89.999m → "89m")', () => {
+    const at = NOW + 89.999 * 60_000
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 89m'
+    )
+  })
+
+  it('keeps the h+m branch self-consistent for a near-hour-boundary delta (1h59m30s → "1h59m")', () => {
+    const at = NOW + 119.5 * 60_000 // 1h59m30s — floor must not roll over to "1h60m"/"2h0m"
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 1h59m'
+    )
+  })
+
+  it('renders 119.7m as "1h59m" without rounding minutes up to 60', () => {
+    const at = NOW + 119.7 * 60_000
+    assert.equal(
+      composeReadyNotificationBody({ backgroundTasks: [], scheduledWakeup: { at, reason: '' } }, NOW),
+      'Ready for input — resumes in 1h59m'
+    )
+  })
+
   it('renders bare minutes up to 89m, then switches to hours', () => {
     const at89 = NOW + 89 * 60_000
     assert.equal(

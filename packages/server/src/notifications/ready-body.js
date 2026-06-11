@@ -91,10 +91,17 @@ function formatRelativeWakeup(at, now) {
   const deltaMs = at - now
   if (deltaMs <= 0) return null
 
-  const totalSeconds = Math.round(deltaMs / 1000)
-  if (totalSeconds < 60) return '<1m'
+  // Compare the raw deltaMs against each boundary and FLOOR the minute
+  // conversion — never round. Rounding `deltaMs/1000` (or seconds/60) can push
+  // a value across a branch boundary it hasn't actually reached: 59.6s would
+  // round to 60s and render "1m" instead of the documented "<1m", and 89.5m
+  // would round to 90m and switch to the hours format before the real 90m
+  // mark. Flooring honours "<60s" and "<90m" precisely, and — because
+  // totalMinutes never reaches the next-hour value early — keeps the h+m branch
+  // self-consistent (e.g. 1h59m30s → "1h59m", never "1h60m"/"2h0m").
+  if (deltaMs < 60_000) return '<1m'
 
-  const totalMinutes = Math.round(totalSeconds / 60)
+  const totalMinutes = Math.floor(deltaMs / 60_000)
   if (totalMinutes < 90) return `${totalMinutes}m`
 
   const hours = Math.floor(totalMinutes / 60)
