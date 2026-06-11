@@ -8,7 +8,10 @@
  * delivered via any other channel must use the #5510 approval primitive instead.
  *
  * Prints once with the remaining TTL and exits (scriptable). It does NOT loop —
- * the code rotates every ~60s, so re-run to get a fresh one.
+ * re-run to get a fresh code. Note the fetch hits GET /pairing-code, which (like
+ * /qr) extends the current code's grace period, so the displayed code can stay
+ * valid past the ~60s base TTL; the printed "expires in NNs" reflects the live
+ * (possibly extended) remaining window.
  */
 
 function portFromUrl(url) {

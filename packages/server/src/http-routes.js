@@ -489,7 +489,7 @@ export function createHttpHandler(server) {
         code: snap.code,
         url: snap.url,
         expiresAtMs: snap.expiresAtMs,
-        expiresInSeconds: Math.round(expiresInMs / 1000),
+        expiresInSeconds: Math.ceil(expiresInMs / 1000),
       }))
       return
     }
