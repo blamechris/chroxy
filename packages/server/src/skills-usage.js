@@ -41,10 +41,11 @@
  * aggregates (count / lastUsed / repos); the raw entries never cross the wire.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { createLogger } from './logger.js'
+import { writeFileRestricted } from './platform.js'
 
 const log = createLogger('skills-usage')
 
@@ -147,8 +148,17 @@ export function loadUsageStore(filePath = defaultSkillsUsagePath()) {
 
 /**
  * Persist a store object to disk. Atomic temp+rename so a crashed write cannot
- * corrupt the file; on POSIX the file ends up at mode 0600. Mirrors
- * `notification-prefs.js` savePrefs (the #4463 cleanup pattern).
+ * corrupt the file; on POSIX the file ends up at mode 0600.
+ *
+ * #5579: the temp sidecar carries a per-pid suffix (`.tmp-<pid>`), mirroring
+ * the #5309 convention in `session-state-persistence.js`. A fixed `.tmp` meant
+ * two daemons writing concurrently (e.g. an old process still flushing while a
+ * restart spins up) shared one intermediate path and could clobber each other
+ * mid-write, tearing the file. The per-pid suffix gives each writer its own
+ * sidecar so the rename — the atomic step — is the only point of contention.
+ * Delegates to `writeFileRestricted` (platform.js), which also unlinks the
+ * orphaned sidecar on rename failure and warns on a non-ENOENT cleanup miss so
+ * a stale `.tmp-<pid>` can't go silently undeleted.
  *
  * @param {object} store
  * @param {string} [filePath]
@@ -156,15 +166,7 @@ export function loadUsageStore(filePath = defaultSkillsUsagePath()) {
 export function saveUsageStore(store, filePath = defaultSkillsUsagePath()) {
   const dir = dirname(filePath)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const tmp = `${filePath}.tmp`
-  writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 })
-  try { chmodSync(tmp, 0o600) } catch { /* best-effort perms */ }
-  try {
-    renameSync(tmp, filePath)
-  } catch (err) {
-    try { unlinkSync(tmp) } catch { /* cleanup race — swallow */ }
-    throw err
-  }
+  writeFileRestricted(filePath, JSON.stringify(store, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
 }
 
 /**

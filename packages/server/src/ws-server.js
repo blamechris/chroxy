@@ -720,7 +720,13 @@ export class WsServer {
       },
     }
     // Fail loudly if the production ctx ever drifts from the declared shape.
-    assertCtxShape(this._handlerCtx)
+    // #5579: deep assert so a CTX_NAMESPACES field forgotten on _handlerCtx
+    // fails at construction, not as a silent `undefined` read in prod. The
+    // deep check uses `key in bucket`, which does NOT invoke getters — so the
+    // late-bound getter fields (config, skillsUsageRecorder, projectsDirs, …)
+    // are verified present without triggering their side effects. One-time
+    // cost at startup is acceptable.
+    assertCtxShape(this._handlerCtx, { deep: true })
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)
     this._historyCtx = {

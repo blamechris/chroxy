@@ -350,6 +350,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     if (typeof ctx.setActiveSession === 'function') {
       ctx.setActiveSession(client, activeId)
     } else {
+      // lint-ignore-ws-index-mutation: guarded fixture fallback. This else-branch
+      // only runs for legacy test fixtures whose ctx predates the #5563
+      // index-maintaining setActiveSession helper; production always takes the
+      // helper path above, so this bare write can't drift the reverse index.
       client.activeSessionId = activeId
     }
 

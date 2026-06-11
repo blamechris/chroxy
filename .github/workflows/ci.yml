@@ -35,6 +35,13 @@ jobs:
 
       - name: Run tests with coverage
         run: npm test
+        env:
+          # #5579: arm the reverse-index drift assert (#5563) so the production
+          # assert path runs across the full server suite, not just the
+          # in-test parity oracle. Cheap O(clients × sessions) check per
+          # mutation; surfaces a desync between the per-client Sets and the
+          # sessionId→clients reverse index immediately.
+          CHROXY_WS_INDEX_ASSERT: '1'
 
       - name: Upload server coverage
         if: always()
@@ -242,6 +249,22 @@ jobs:
             echo "OK — enforced modules use loggerForSession"
           else
             echo "::error::A session-aware module dropped its loggerForSession import or introduced a bare createLogger. See packages/server/scripts/lint-logger-session-scoping.sh."
+            exit 1
+          fi
+
+      - name: Check reverse-index mutations route through ws-client-manager
+        run: |
+          # Issue #5579 — the sessionId→clients reverse index (#5575) only
+          # stays correct if every change to a client's active session or
+          # subscription Set goes through the index-maintaining mutators on
+          # ws-client-manager.js. A bare `client.activeSessionId = x` or
+          # `client.subscribedSessionIds.add(...)` elsewhere silently drifts
+          # the index. This lint forbids those outside the owner file (the two
+          # guarded #5563 fixture fallbacks carry a lint-ignore comment).
+          if scripts/lint-ws-index-mutations.sh; then
+            echo "OK — no bare reverse-index mutations outside ws-client-manager.js"
+          else
+            echo "::error::A bare reverse-index mutation was found outside ws-client-manager.js. See packages/server/scripts/lint-ws-index-mutations.sh."
             exit 1
           fi
 
