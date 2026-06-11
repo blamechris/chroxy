@@ -92,12 +92,12 @@ export class WsClientManager extends EventEmitter {
    *
    * Returns a result describing what happened so the caller can decide whether
    * to broadcast a role change:
-   *   - `{ changed: true, primaryClientId }`  — claim succeeded (was unclaimed,
-   *      or this is an explicit hand-off target, or already primary→no-op with
-   *      changed:false).
-   *   - `{ changed: false, primaryClientId }` — already primary (no-op) OR the
-   *      claim was REJECTED because another client owns it and `force` is false.
-   *      Inspect `rejected` to distinguish.
+   *   - `{ changed: true, primaryClientId }`  — ownership actually moved (the
+   *      session was unclaimed, or this is a `force` hand-off to a new owner).
+   *   - `{ changed: false, primaryClientId }` — no change: either the caller is
+   *      already the primary (idempotent no-op) OR the claim was REJECTED
+   *      because another client owns it and `force` is false. Inspect `rejected`
+   *      to distinguish (set only on the rejection branch).
    *
    * `force` (explicit hand-off / first-input adoption) overrides an existing
    * owner. Without `force`, a claim against a session another client already
@@ -132,6 +132,15 @@ export class WsClientManager extends EventEmitter {
     const prev = this._primaryClients.get(sessionId)
     this._primaryClients.delete(sessionId)
     return prev
+  }
+
+  /**
+   * Vacate every primary slot (server shutdown / close path). No broadcast —
+   * the server is tearing down. Keeps the `_primaryClients` map private to this
+   * class so callers don't depend on its representation (#5563).
+   */
+  clearAllPrimary() {
+    this._primaryClients.clear()
   }
 
   /**

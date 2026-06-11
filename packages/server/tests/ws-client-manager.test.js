@@ -617,6 +617,14 @@ describe('WsClientManager', () => {
       assert.strictEqual(manager.getPrimary('s1'), 'c1')
     })
 
+    it('clearAllPrimary vacates every slot (shutdown path)', () => {
+      manager.claimPrimary('s1', 'c1')
+      manager.claimPrimary('s2', 'c2')
+      manager.clearAllPrimary()
+      assert.strictEqual(manager.getPrimary('s1'), undefined)
+      assert.strictEqual(manager.getPrimary('s2'), undefined)
+    })
+
     it('disconnect-promotion policy is nobody-until-claim: an observer is not auto-promoted', () => {
       manager.claimPrimary('s1', 'primary')
       // Observers exist but are not tracked as candidates — vacating clears.

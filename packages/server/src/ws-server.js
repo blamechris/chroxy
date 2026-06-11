@@ -2125,8 +2125,9 @@ export class WsServer {
     // Auto-deny all pending permission requests (both subsystems)
     this.clearAllPendingPermissions()
     this._questionSessionMap.clear()
-    // #5563: primary-ownership lives on the client manager now; clear it there.
-    this._clientManager._primaryClients.clear()
+    // #5563: primary-ownership lives on the client manager now; clear it via
+    // its public API rather than reaching into the private `_primaryClients`.
+    this._clientManager.clearAllPrimary()
     this._normalizer.destroy()
 
     // Clean up all dev preview tunnels (fire-and-forget; close() is synchronous
