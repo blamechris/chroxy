@@ -223,6 +223,19 @@ vi.mock('./store/connection', () => {
     switchServer: vi.fn(),
     connectToServer: vi.fn(),
     updateServer: vi.fn(),
+    // #5543 — Control Room auto-fetch: ControlRoomView's mount effect reads the
+    // three snapshot/loading slices and calls the matching request action when
+    // the active tab is stale and the WS is connected. Mirror the real store so
+    // the effect doesn't crash on a missing action when CR tests run connected.
+    hostStatus: null,
+    runnerStatus: null,
+    integrationStatus: null,
+    hostStatusLoading: false,
+    runnerStatusLoading: false,
+    integrationStatusLoading: false,
+    requestHostStatus: vi.fn(),
+    requestRunnerStatus: vi.fn(),
+    requestIntegrationStatus: vi.fn(),
   }
   const useConnectionStore = (
     selector?: (s: typeof baseState) => unknown,
