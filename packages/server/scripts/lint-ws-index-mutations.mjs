@@ -86,6 +86,14 @@ function isInsideComment(src, idx) {
   const lineSoFar = src.slice(lineStart, idx)
   if (lineSoFar.trimStart().startsWith('//')) return true
   if (lineSoFar.trimStart().startsWith('*')) return true
+  // Trailing inline `//` comment: a `//` opener earlier on the SAME line puts
+  // `idx` inside a line comment (e.g. `foo() // client.activeSessionId = x`).
+  // Ignore a `://` (URL scheme) so an inline URL before the match doesn't
+  // spuriously suppress a real offense; the matched tokens are code-like so a
+  // `//` inside a string literal on the same line is vanishingly unlikely.
+  for (let i = lineSoFar.indexOf('//'); i !== -1; i = lineSoFar.indexOf('//', i + 1)) {
+    if (i === 0 || lineSoFar[i - 1] !== ':') return true
+  }
   const lastOpen = src.lastIndexOf('/*', idx)
   const lastClose = src.lastIndexOf('*/', idx)
   return lastOpen > lastClose

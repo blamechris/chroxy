@@ -95,6 +95,16 @@ export function note() {
 }
 `
 
+// A mutation pattern that appears only in a TRAILING inline \`//\` comment —
+// must NOT be flagged (regression for the inline-comment false positive).
+const INLINE_COMMENT_SRC = `
+export function note(client, s) {
+  doThing() // client.activeSessionId = s — the wrong way; use ctx.setActiveSession
+  more() // client.subscribedSessionIds.add(s) is also forbidden
+  return true
+}
+`
+
 function setupFixtureTree(extraFiles = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-lint-ws-idx-'))
   const srcDir = join(dir, 'src')
@@ -180,6 +190,13 @@ describe('lint-ws-index-mutations', () => {
     cleanups.push(dir)
     const { code } = runLint(srcDir)
     assert.equal(code, 0, 'comment-only references must not be flagged')
+  })
+
+  test('does not flag mutation patterns inside a trailing inline // comment', () => {
+    const { dir, srcDir } = setupFixtureTree({ 'doc.js': INLINE_COMMENT_SRC })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 0, `inline-comment references must not be flagged\nstderr:\n${stderr}`)
   })
 
   test('--dry-run reports offenders but exits 0', () => {
