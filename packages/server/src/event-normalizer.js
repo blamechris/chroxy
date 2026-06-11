@@ -663,8 +663,13 @@ export class EventNormalizer {
     // Delta buffer: key -> accumulated text
     // In multi-session mode key = `${sessionId}:${messageId}`, otherwise just messageId
     this._deltaBuffer = new Map()
+    // #5515 (epic #5514): key -> monotonic ms of the FIRST delta buffered into
+    // the current (un-flushed) window. Lets ws-forwarding measure the time the
+    // oldest token in a flush spent inside the server (coalescing + forwarding)
+    // — a true monotonic duration, same process both ends.
+    this._deltaEmitMono = new Map()
     this._deltaFlushTimer = null
-    this._onFlush = null // callback: (entries) => void, where entries = [{ key, sessionId, messageId, delta }]
+    this._onFlush = null // callback: (entries) => void, where entries = [{ key, sessionId, messageId, delta, emitMonoMs }]
   }
 
   /**
@@ -715,11 +720,17 @@ export class EventNormalizer {
    * @param {string} sessionId - Session ID (may be null for legacy mode)
    * @param {string} messageId - Stream message ID
    * @param {string} delta - Text delta to buffer
+   * @param {number} [emitMonoMs] - #5515: monotonic ms the provider emitted this
+   *   delta. First-write-wins per flush window so the flushed entry reports how
+   *   long the OLDEST coalesced token waited inside the server.
    */
-  bufferDelta(sessionId, messageId, delta) {
+  bufferDelta(sessionId, messageId, delta, emitMonoMs) {
     const key = sessionId ? `${sessionId}:${messageId}` : messageId
     const existing = this._deltaBuffer.get(key) || ''
     this._deltaBuffer.set(key, existing + delta)
+    if (typeof emitMonoMs === 'number' && !this._deltaEmitMono.has(key)) {
+      this._deltaEmitMono.set(key, emitMonoMs)
+    }
     if (!this._deltaFlushTimer) {
       this._deltaFlushTimer = setTimeout(() => this._flushDeltas(), this._flushIntervalMs)
     }
@@ -729,7 +740,7 @@ export class EventNormalizer {
    * Flush all buffered deltas for a specific session (called before stream_end).
    * Returns the flushed entries so the caller can broadcast them.
    * @param {string|null} sessionId - Session to flush (null = flush all)
-   * @returns {Array<{ key, sessionId, messageId, delta }>}
+   * @returns {Array<{ key, sessionId, messageId, delta, emitMonoMs }>}
    */
   flushSession(sessionId) {
     const entries = []
@@ -738,16 +749,18 @@ export class EventNormalizer {
       for (const [key, delta] of this._deltaBuffer) {
         if (key.startsWith(prefix)) {
           const messageId = key.slice(prefix.length)
-          entries.push({ key, sessionId, messageId, delta })
+          entries.push({ key, sessionId, messageId, delta, emitMonoMs: this._deltaEmitMono.get(key) })
           this._deltaBuffer.delete(key)
+          this._deltaEmitMono.delete(key)
         }
       }
     } else {
       // Legacy mode: flush everything
       for (const [key, delta] of this._deltaBuffer) {
-        entries.push({ key, sessionId: null, messageId: key, delta })
+        entries.push({ key, sessionId: null, messageId: key, delta, emitMonoMs: this._deltaEmitMono.get(key) })
       }
       this._deltaBuffer.clear()
+      this._deltaEmitMono.clear()
     }
     // If buffer is now empty, cancel the pending timer
     if (this._deltaBuffer.size === 0 && this._deltaFlushTimer) {
@@ -766,11 +779,12 @@ export class EventNormalizer {
     if (this._onFlush) {
       const entries = []
       for (const [key, delta] of this._deltaBuffer) {
+        const emitMonoMs = this._deltaEmitMono.get(key)
         const sepIdx = key.indexOf(':')
         if (sepIdx !== -1) {
-          entries.push({ key, sessionId: key.slice(0, sepIdx), messageId: key.slice(sepIdx + 1), delta })
+          entries.push({ key, sessionId: key.slice(0, sepIdx), messageId: key.slice(sepIdx + 1), delta, emitMonoMs })
         } else {
-          entries.push({ key, sessionId: null, messageId: key, delta })
+          entries.push({ key, sessionId: null, messageId: key, delta, emitMonoMs })
         }
       }
       // #5313 (WP-1.3): _onFlush is a broadcast callback invoked from a
@@ -786,10 +800,12 @@ export class EventNormalizer {
         log.error(`Delta flush onFlush callback threw: ${message}${err?.stack ? '\n' + err.stack : ''}`)
       } finally {
         this._deltaBuffer.clear()
+        this._deltaEmitMono.clear()
       }
       return
     }
     this._deltaBuffer.clear()
+    this._deltaEmitMono.clear()
   }
 
   /**
@@ -801,6 +817,7 @@ export class EventNormalizer {
       this._deltaFlushTimer = null
     }
     this._deltaBuffer.clear()
+    this._deltaEmitMono.clear()
   }
 }
 

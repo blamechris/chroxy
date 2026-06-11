@@ -79,6 +79,69 @@ describe('setupForwarding', () => {
     })
   })
 
+  // #5515 (epic #5514): latency instrumentation — broadcast-time serverTs.
+  describe('serverTs stamping (#5515)', () => {
+    it('stamps a wall-clock serverTs on flushed stream_delta (session path)', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+      const before = Date.now()
+      ctx.normalizer._onFlush([
+        { sessionId: 'sess-1', messageId: 'msg-1', delta: 'hello' },
+      ])
+      const after = Date.now()
+      const msg = ctx.broadcastToSession.mock.calls[0].arguments[1]
+      assert.equal(typeof msg.serverTs, 'number')
+      assert.ok(msg.serverTs >= before && msg.serverTs <= after, `serverTs ${msg.serverTs} not in [${before}, ${after}]`)
+    })
+
+    it('stamps serverTs on flushed stream_delta (broadcast/legacy path)', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+      ctx.normalizer._onFlush([
+        { sessionId: null, messageId: 'msg-2', delta: 'world' },
+      ])
+      const msg = ctx.broadcast.mock.calls[0].arguments[0]
+      assert.equal(typeof msg.serverTs, 'number')
+    })
+
+    it('stamps serverTs on stream_start / stream_end broadcast through the normalizer', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-1',
+        event: 'stream_start',
+        data: { messageId: 'm1' },
+      })
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-1',
+        event: 'stream_end',
+        data: { messageId: 'm1' },
+      })
+      const stamped = ctx.broadcastToSession.mock.calls
+        .map((c) => c.arguments[1])
+        .filter((m) => m && (m.type === 'stream_start' || m.type === 'stream_end'))
+      assert.ok(stamped.length >= 2, `expected stream_start+stream_end, got ${stamped.map((m) => m.type)}`)
+      for (const m of stamped) {
+        assert.equal(typeof m.serverTs, 'number', `${m.type} missing serverTs`)
+      }
+    })
+
+    it('does not stamp serverTs on non-stream messages (e.g. session_activity)', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-1',
+        event: 'stream_start',
+        data: { messageId: 'm1' },
+      })
+      const activity = ctx.broadcast.mock.calls
+        .map((c) => c.arguments[0])
+        .find((m) => m && m.type === 'session_activity')
+      assert.ok(activity, 'expected a session_activity broadcast')
+      assert.equal(activity.serverTs, undefined)
+    })
+  })
+
   describe('models_updated event', () => {
     it('broadcasts available_models to all clients', () => {
       const ctx = makeCtx()

@@ -1064,6 +1064,11 @@ describe('outbound message sequence numbers', () => {
     assert.equal(pong.seq, initialCount + 1,
       'pong seq should continue from where initial messages left off')
 
+    // #5515 (epic #5514): the pong reply carries a wall-clock serverTs so
+    // clients can split the ping/pong RTT into uplink/downlink halves.
+    assert.equal(typeof pong.serverTs, 'number', 'pong should carry a serverTs')
+    assert.ok(pong.serverTs > 0, 'serverTs should be a positive ms epoch')
+
     ws.close()
   })
 

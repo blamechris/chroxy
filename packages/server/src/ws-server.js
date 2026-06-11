@@ -1463,7 +1463,13 @@ export class WsServer {
 
     // Respond to client-side heartbeat pings immediately (even during drain)
     if (msg.type === 'ping') {
-      this._send(ws, { type: 'pong' })
+      // #5515 (epic #5514): stamp a wall-clock (ms epoch) serverTs so clients
+      // can split the ping/pong RTT into uplink (ping send → serverTs) and
+      // downlink (serverTs → pong recv) halves. Wall-clock — not the monotonic
+      // clock used by the #5414 watchdogs — because it crosses machines; the
+      // client treats it as skew-prone and derives one-way numbers from the
+      // RTT split, never from raw clock subtraction.
+      this._send(ws, { type: 'pong', serverTs: Date.now() })
       return
     }
 

@@ -817,7 +817,12 @@ export class SdkSession extends BaseSession {
                     this.emit('stream_start', { messageId })
                   }
                   didStreamText = true
-                  this.emit('stream_delta', { messageId, delta: delta.text })
+                  // #5515 (epic #5514): stamp the monotonic emit time so
+                  // ws-forwarding can measure emit→broadcast (the server-side
+                  // coalescing cost). Monotonic (hrtime) — not wall-clock —
+                  // because both ends are this same process; it's a true
+                  // elapsed duration, unlike the cross-machine serverTs field.
+                  this.emit('stream_delta', { messageId, delta: delta.text, _emitMonoMs: Number(process.hrtime.bigint() / 1_000_000n) })
                 }
                 break
               }

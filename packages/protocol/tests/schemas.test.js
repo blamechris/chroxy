@@ -2756,5 +2756,65 @@ describe('@chroxy/protocol schemas', () => {
         }).success)
       })
     })
+
+    // #5515 (epic #5514): latency instrumentation — optional, additive
+    // `serverTs` (wall-clock ms epoch, stamped at broadcast) on the stream
+    // messages and the pong reply so clients can measure token-to-render and
+    // split RTT into uplink/downlink.
+    describe('serverTs latency instrumentation (#5515)', () => {
+      it('ServerStreamDeltaSchema accepts an optional serverTs', async () => {
+        const { ServerStreamDeltaSchema } = await import('../src/schemas/server.ts')
+        const result = ServerStreamDeltaSchema.safeParse({
+          type: 'stream_delta',
+          messageId: 'm1',
+          delta: 'hi',
+          serverTs: 1_700_000_000_000,
+        })
+        assert.ok(result.success, JSON.stringify(result.error?.issues))
+        assert.equal(result.data.serverTs, 1_700_000_000_000)
+      })
+
+      it('ServerStreamDeltaSchema still validates without serverTs (additive)', async () => {
+        const { ServerStreamDeltaSchema } = await import('../src/schemas/server.ts')
+        assert.ok(ServerStreamDeltaSchema.safeParse({
+          type: 'stream_delta',
+          messageId: 'm1',
+          delta: 'hi',
+        }).success)
+      })
+
+      it('ServerStreamStartSchema / ServerStreamEndSchema accept serverTs', async () => {
+        const { ServerStreamStartSchema, ServerStreamEndSchema } = await import('../src/schemas/server.ts')
+        assert.ok(ServerStreamStartSchema.safeParse({
+          type: 'stream_start',
+          messageId: 'm1',
+          serverTs: 1_700_000_000_000,
+        }).success)
+        assert.ok(ServerStreamEndSchema.safeParse({
+          type: 'stream_end',
+          messageId: 'm1',
+          serverTs: 1_700_000_000_000,
+        }).success)
+        // Additive: both still validate without it.
+        assert.ok(ServerStreamStartSchema.safeParse({ type: 'stream_start', messageId: 'm1' }).success)
+        assert.ok(ServerStreamEndSchema.safeParse({ type: 'stream_end', messageId: 'm1' }).success)
+      })
+
+      it('ServerPongSchema accepts an optional serverTs and still validates without it', async () => {
+        const { ServerPongSchema } = await import('../src/schemas/server.ts')
+        assert.ok(ServerPongSchema.safeParse({ type: 'pong', serverTs: 1_700_000_000_000 }).success)
+        assert.ok(ServerPongSchema.safeParse({ type: 'pong' }).success)
+      })
+
+      it('rejects a non-numeric serverTs on stream_delta', async () => {
+        const { ServerStreamDeltaSchema } = await import('../src/schemas/server.ts')
+        assert.ok(!ServerStreamDeltaSchema.safeParse({
+          type: 'stream_delta',
+          messageId: 'm1',
+          delta: 'hi',
+          serverTs: 'nope',
+        }).success)
+      })
+    })
   })
 })

@@ -113,15 +113,18 @@ export declare const ServerClaudeReadySchema: z.ZodObject<{
 export declare const ServerStreamStartSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_start">;
     messageId: z.ZodString;
+    serverTs: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerStreamDeltaSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_delta">;
     messageId: z.ZodString;
     delta: z.ZodString;
+    serverTs: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerStreamEndSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_end">;
     messageId: z.ZodString;
+    serverTs: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"message">;
@@ -1752,6 +1755,7 @@ export declare const ServerShutdownSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ServerPongSchema: z.ZodObject<{
     type: z.ZodLiteral<"pong">;
+    serverTs: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerCostUpdateSchema: z.ZodObject<{
     type: z.ZodLiteral<"cost_update">;
