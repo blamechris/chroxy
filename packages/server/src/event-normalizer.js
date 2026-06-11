@@ -674,20 +674,31 @@ Object.assign(EVENT_MAP, {
 export class EventNormalizer {
   /**
    * @param {object} [opts]
-   * @param {number} [opts.flushIntervalMs=50] - default delta coalescing window.
-   * @param {number} [opts.singleClientFlushIntervalMs=25] - #5516 (epic #5514):
-   *   tighter window used when EXACTLY ONE client is subscribed to the session
-   *   being buffered. With a single viewer there's no fan-out to amortize, so a
-   *   tighter coalescing window cuts perceived streaming latency in half (the
-   *   common phone-on-LAN / single-dashboard case). Multi-client sessions keep
-   *   the default window unchanged — coalescing amortizes the fan-out cost and
-   *   keeps every client's bandwidth bounded.
+   * @param {number} [opts.flushIntervalMs=16] - #5562: default delta micro-batch
+   *   window. This is NOT an adaptive throttle — it's a small fixed window that
+   *   coalesces the burst of per-token deltas a provider emits into a single
+   *   emit + broadcast, bounding per-token CPU/socket overhead. The ADAPTIVE
+   *   throttle lives client-side (store-core resolveDeltaFlushMs, a 16-100ms
+   *   EWMA keyed on render cost). Before #5562 the server window was 25/50ms,
+   *   which STACKED on top of the client EWMA — up to ~150ms of pure buffering
+   *   on a poor link, and a LAN client never got under the 25ms floor. Shrinking
+   *   it to ~8-16ms leaves the client EWMA as the sole adaptive system while the
+   *   server still amortizes the per-token broadcast cost.
+   * @param {number} [opts.singleClientFlushIntervalMs=8] - #5562: tighter
+   *   micro-batch window used when EXACTLY ONE client is subscribed to the
+   *   session being buffered. With a single viewer there's no fan-out to
+   *   amortize, so the window only needs to absorb the immediate per-token burst
+   *   (the common phone-on-LAN / single-dashboard case). The subscriber-count
+   *   distinction is kept because it bounds broadcast amplification — a wider
+   *   window on multi-client sessions still batches the fan-out — but both
+   *   values are now far below the client EWMA floor so they no longer dominate
+   *   end-to-end latency.
    * @param {(sessionId: string|null) => (number|null)} [opts.getSubscriberCount]
    *   - returns how many clients are subscribed to `sessionId`, or null when
    *   unknown (e.g. legacy single-session mode). When the count is exactly 1 the
    *   single-client window is used; otherwise (0, ≥2, or null) the default.
    */
-  constructor({ flushIntervalMs = 50, singleClientFlushIntervalMs = 25, getSubscriberCount = null, maxKeyBytes = MAX_DELTA_KEY_BYTES, maxTotalBytes = MAX_DELTA_TOTAL_BYTES } = {}) {
+  constructor({ flushIntervalMs = 16, singleClientFlushIntervalMs = 8, getSubscriberCount = null, maxKeyBytes = MAX_DELTA_KEY_BYTES, maxTotalBytes = MAX_DELTA_TOTAL_BYTES } = {}) {
     this._flushIntervalMs = flushIntervalMs
     this._singleClientFlushIntervalMs = singleClientFlushIntervalMs
     this._getSubscriberCount = typeof getSubscriberCount === 'function' ? getSubscriberCount : null
@@ -721,10 +732,12 @@ export class EventNormalizer {
   }
 
   /**
-   * #5516: resolve the coalescing window for the session currently being
-   * buffered. Single-subscriber sessions get the tighter window; everything
-   * else (0, 2+, or unknown count) keeps the default. No subscriber-count
-   * resolver wired (legacy mode) → always the default.
+   * #5516/#5562: resolve the fixed micro-batch window for the session currently
+   * being buffered. Single-subscriber sessions get the tighter window;
+   * everything else (0, 2+, or unknown count) keeps the default. No
+   * subscriber-count resolver wired (legacy mode) → always the default. This is
+   * a fixed window, not an adaptive throttle — the adaptive part lives in the
+   * client's resolveDeltaFlushMs EWMA (store-core).
    * @param {string|null} sessionId
    * @returns {number} flush interval in ms
    */
@@ -831,12 +844,15 @@ export class EventNormalizer {
       }
       return
     }
-    // #5516 (epic #5514): adaptive coalescing window — tighter (25ms) when this
-    // session has a single subscriber, default (50ms) otherwise. The flush
+    // #5516/#5562: fixed micro-batch window (NOT an adaptive coalescing window)
+    // — tighter (8ms) when this session has a single subscriber, default (16ms)
+    // otherwise. Its only job is to absorb the per-token burst into one
+    // emit/broadcast and bound that overhead; the ADAPTIVE throttle lives
+    // client-side in store-core resolveDeltaFlushMs (16-100ms EWMA). The flush
     // timer is shared across all buffered sessions, so a single-client session
     // buffered AFTER a default-window timer was already armed must be able to
     // pull the deadline IN (reschedule to the sooner target) rather than wait
-    // out the 50ms. We never push a deadline out.
+    // out the wider window. We never push a deadline out.
     const intervalMs = this._resolveFlushIntervalMs(sessionId)
     const now = performance.now()
     const wantDeadline = now + intervalMs

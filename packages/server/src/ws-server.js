@@ -890,12 +890,15 @@ export class WsServer {
     }
 
     this.serverMode = 'cli'
-    // #5516 (epic #5514): hand the normalizer a subscriber-count resolver so it
-    // can tighten the delta-coalescing window (50→25ms) when a session has a
+    // #5516/#5562: hand the normalizer a subscriber-count resolver so it can
+    // tighten the fixed delta micro-batch window (16→8ms) when a session has a
     // single subscriber — the common phone-on-LAN / single-dashboard case.
-    // Multi-client sessions keep the 50ms window (fan-out amortization). Legacy
-    // single-session mode (sessionId === null) reports null (unknown), which the
-    // normalizer treats as "keep the default window".
+    // Multi-client sessions keep the 16ms window (fan-out amortization). These
+    // are fixed micro-batch windows, not an adaptive throttle — the adaptive
+    // part is the client-side store-core EWMA (resolveDeltaFlushMs); #5562
+    // shrank the server window from 25/50ms so it no longer stacks on top of
+    // that EWMA. Legacy single-session mode (sessionId === null) reports null
+    // (unknown), which the normalizer treats as "keep the default window".
     this._normalizer = new EventNormalizer({
       getSubscriberCount: (sessionId) =>
         sessionId == null ? null : this._broadcaster._countSessionSubscribers(sessionId),

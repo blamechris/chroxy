@@ -1037,20 +1037,23 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
     try { fn(delays) } finally { mock.restoreAll() }
   }
 
-  it('uses the 25ms window when a session has exactly one subscriber', () => {
+  // #5562: the server micro-batch window was shrunk from 25/50ms to 8/16ms so
+  // it no longer stacks on the client's 16-100ms EWMA. These assert the NEW
+  // contract (8ms single-subscriber / 16ms otherwise).
+  it('uses the 8ms window when a session has exactly one subscriber', () => {
     const n = new EventNormalizer({ getSubscriberCount: () => 1 })
     withSetTimeoutSpy((delays) => {
       n.bufferDelta('sess-1', 'msg-1', 'hi')
-      assert.equal(delays[0], 25)
+      assert.equal(delays[0], 8)
     })
     n.destroy()
   })
 
-  it('uses the default 50ms window when 2+ clients are subscribed', () => {
+  it('uses the default 16ms window when 2+ clients are subscribed', () => {
     const n = new EventNormalizer({ getSubscriberCount: () => 2 })
     withSetTimeoutSpy((delays) => {
       n.bufferDelta('sess-1', 'msg-1', 'hi')
-      assert.equal(delays[0], 50)
+      assert.equal(delays[0], 16)
     })
     n.destroy()
   })
@@ -1059,14 +1062,14 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
     const nZero = new EventNormalizer({ getSubscriberCount: () => 0 })
     withSetTimeoutSpy((delays) => {
       nZero.bufferDelta('sess-1', 'msg-1', 'hi')
-      assert.equal(delays[0], 50)
+      assert.equal(delays[0], 16)
     })
     nZero.destroy()
 
     const nNull = new EventNormalizer({ getSubscriberCount: () => null })
     withSetTimeoutSpy((delays) => {
       nNull.bufferDelta('sess-1', 'msg-1', 'hi')
-      assert.equal(delays[0], 50)
+      assert.equal(delays[0], 16)
     })
     nNull.destroy()
   })
@@ -1075,7 +1078,7 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
     const n = new EventNormalizer()
     withSetTimeoutSpy((delays) => {
       n.bufferDelta('sess-1', 'msg-1', 'hi')
-      assert.equal(delays[0], 50)
+      assert.equal(delays[0], 16)
     })
     n.destroy()
   })
@@ -1098,14 +1101,14 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
     const counts = { 'sess-multi': 3, 'sess-solo': 1 }
     const n = new EventNormalizer({ getSubscriberCount: (s) => counts[s] ?? 0 })
     withSetTimeoutSpy((delays) => {
-      // Multi-client session arms the 50ms timer first.
+      // Multi-client session arms the 16ms timer first.
       n.bufferDelta('sess-multi', 'm', 'a')
-      assert.equal(delays[0], 50)
+      assert.equal(delays[0], 16)
       // A solo session buffered immediately after must SHORTEN the deadline:
-      // the reschedule clears the old timer and arms a sooner one (~25ms).
+      // the reschedule clears the old timer and arms a sooner one (~8ms).
       n.bufferDelta('sess-solo', 's', 'b')
       assert.equal(delays.length, 2, 'a reschedule must have occurred')
-      assert.ok(delays[1] <= 25, `expected reschedule <=25ms, got ${delays[1]}`)
+      assert.ok(delays[1] <= 8, `expected reschedule <=8ms, got ${delays[1]}`)
     })
     n.destroy()
   })
@@ -1114,13 +1117,62 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
     const counts = { 'sess-multi': 3, 'sess-solo': 1 }
     const n = new EventNormalizer({ getSubscriberCount: (s) => counts[s] ?? 0 })
     withSetTimeoutSpy((delays) => {
-      n.bufferDelta('sess-solo', 's', 'a')      // arms ~25ms
-      assert.equal(delays[0], 25)
-      n.bufferDelta('sess-multi', 'm', 'b')     // wants 50ms — but 25ms deadline is sooner
+      n.bufferDelta('sess-solo', 's', 'a')      // arms ~8ms
+      assert.equal(delays[0], 8)
+      n.bufferDelta('sess-multi', 'm', 'b')     // wants 16ms — but 8ms deadline is sooner
       // No reschedule: the existing sooner deadline stands.
       assert.equal(delays.length, 1, 'must not reschedule to a later deadline')
     })
     n.destroy()
+  })
+
+  // #5562 + #5520: real-timer sanity check that the shrunk window actually
+  // flushes a buffered delta through the real setTimeout path, and that the
+  // #5515/#5520 emitMonoMs instrumentation bufferDelta carries through still
+  // round-trips to the flushed entry after the window change. The EXACT 8/16ms
+  // contract is locked by the setTimeout-spy tests above; this test deliberately
+  // does NOT re-assert it. The upper bound here is a loose ceiling only — proof
+  // the flush is no longer near the old 25/50ms-stacked floor — set well above
+  // worst-case timer slip so it can't go flaky under CI scheduling jitter. A
+  // bounded timeout makes a never-fired callback fail fast instead of hanging,
+  // and destroy() runs in finally so an assertion failure can't leak the timer.
+  it('flushes a single-subscriber delta via the real timer and round-trips emitMonoMs', async () => {
+    const n = new EventNormalizer({ getSubscriberCount: () => 1 })
+    try {
+      const flushed = []
+      let resolveFlush
+      const done = new Promise((res) => { resolveFlush = res })
+      n.onFlush = (entries) => {
+        flushed.push({ at: performance.now(), entries })
+        resolveFlush()
+      }
+      const emitMono = Number(process.hrtime.bigint() / 1_000_000n)
+      const buffered = performance.now()
+      n.bufferDelta('sess-1', 'msg-1', 'hello', emitMono)
+      // Bounded race: if the flush callback never fires, fail fast rather than
+      // hang until the test-runner timeout.
+      let bail
+      const timeout = new Promise((_, rej) => {
+        bail = setTimeout(() => rej(new Error('flush callback did not fire within 1000ms')), 1000)
+      })
+      try {
+        await Promise.race([done, timeout])
+      } finally {
+        clearTimeout(bail)
+      }
+      const elapsed = flushed[0].at - buffered
+      // Loose ceiling — NOT the 8ms contract (that's the spy tests' job). 100ms is
+      // far above any realistic single-timer slip yet still well below the old
+      // 25/50ms server window stacked on the client EWMA, so it confirms the
+      // server half no longer dominates without being jitter-sensitive.
+      assert.ok(elapsed < 100, `expected a prompt real-timer flush, got ${elapsed.toFixed(1)}ms`)
+      assert.equal(flushed[0].entries.length, 1)
+      assert.equal(flushed[0].entries[0].delta, 'hello')
+      // The #5520 emitMonoMs instrumentation survives the coalescing path.
+      assert.equal(flushed[0].entries[0].emitMonoMs, emitMono)
+    } finally {
+      n.destroy()
+    }
   })
 })
 
