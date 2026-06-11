@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks'
 import { toShortModelId } from './models.js'
 import { createLogger } from './logger.js'
 
