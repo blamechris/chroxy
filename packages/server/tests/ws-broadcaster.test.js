@@ -233,8 +233,9 @@ describe('WsBroadcaster', () => {
     })
   })
 
-  // #5516 (epic #5514): subscriber count drives the normalizer's adaptive
-  // delta-coalescing window (25ms when a session has exactly one viewer).
+  // #5516/#5562: subscriber count drives the normalizer's fixed delta
+  // micro-batch window (8ms when a session has exactly one viewer, 16ms
+  // otherwise). The adaptive throttle is client-side (store-core EWMA).
   describe('_countSessionSubscribers()', () => {
     it('counts activeSessionId matches and explicit subscribers', () => {
       clients.set(createFakeWs(), createFakeClient({ id: 'c1', activeSessionId: 'sess-1' }))
