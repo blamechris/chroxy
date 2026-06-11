@@ -671,6 +671,55 @@ export const RemoveRepoSchema = z.object({
     type: z.literal('remove_repo'),
     path: z.string().min(1).max(4096),
 });
+// #5553: per-repo session presets — two channels configured per repo, both
+// optional: a PREAMBLE auto-folded into `sessionPreamble` at create time
+// (model-facing, every turn) and a SEED staged editable into the composer
+// (operator-facing, once). Sourced from `.chroxy/session.json` (walk-up) with a
+// daemon-side override map in `~/.chroxy/config.json` (daemon entry wins).
+// Repo-local presets are TRUST-GATED — inert until the operator approves the
+// content hash. The four messages below are HOST-AUTHORITY (server rejects a
+// session-bound pairing client): they read/write the host-wide preset config.
+//
+// `cwd` is the repo path; the server walks up + applies the daemon-override
+// precedence + the trust gate (the same resolution createSession uses). The
+// optional `requestId` correlates a UI action to its `session_preset_snapshot`
+// reply (see server.ts), mirroring the integration-action correlation contract.
+// Read the resolved preset for a repo path (the per-repo drawer's load).
+export const SessionPresetGetSchema = z.object({
+    type: z.literal('session_preset_get'),
+    cwd: z.string().min(1).max(4096),
+    requestId: z.string().max(128).optional(),
+});
+// Write (or clear) the DAEMON-side override for a repo path. A daemon override
+// is pre-trusted (the operator wrote it). `preset: null` clears the override.
+// The server validates/coerces the preset to the canonical shape before
+// persisting; oversized fields are capped at write time, never at run time.
+export const SessionPresetSetSchema = z.object({
+    type: z.literal('session_preset_set'),
+    cwd: z.string().min(1).max(4096),
+    preset: z
+        .object({
+        preamble: z.string().max(8192).optional(),
+        seed: z.string().max(16384).optional(),
+        enabled: z.boolean().optional(),
+    })
+        .nullable(),
+    requestId: z.string().max(128).optional(),
+});
+// Approve the CURRENT content hash of a repo-local preset so it becomes
+// trusted + active for future sessions. The server re-resolves to obtain the
+// live hash (a stale client value can't pin a different version).
+export const SessionPresetApproveSchema = z.object({
+    type: z.literal('session_preset_approve'),
+    cwd: z.string().min(1).max(4096),
+    requestId: z.string().max(128).optional(),
+});
+// Revoke trust for a repo-local preset so it goes inert (pending) again.
+export const SessionPresetRevokeSchema = z.object({
+    type: z.literal('session_preset_revoke'),
+    cwd: z.string().min(1).max(4096),
+    requestId: z.string().max(128).optional(),
+});
 // -- Extension message --
 export const ExtensionMessageSchema = z.object({
     type: z.literal('extension_message'),
@@ -887,6 +936,10 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ListReposSchema,
     AddRepoSchema,
     RemoveRepoSchema,
+    SessionPresetGetSchema,
+    SessionPresetSetSchema,
+    SessionPresetApproveSchema,
+    SessionPresetRevokeSchema,
     QueryPermissionAuditSchema,
     ExtensionMessageSchema,
     CreateEnvironmentSchema,

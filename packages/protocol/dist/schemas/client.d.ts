@@ -549,6 +549,31 @@ export declare const RemoveRepoSchema: z.ZodObject<{
     type: z.ZodLiteral<"remove_repo">;
     path: z.ZodString;
 }, z.core.$strip>;
+export declare const SessionPresetGetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_get">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SessionPresetSetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_set">;
+    cwd: z.ZodString;
+    preset: z.ZodNullable<z.ZodObject<{
+        preamble: z.ZodOptional<z.ZodString>;
+        seed: z.ZodOptional<z.ZodString>;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SessionPresetApproveSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_approve">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SessionPresetRevokeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_revoke">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ExtensionMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"extension_message">;
     provider: z.ZodString;
@@ -927,6 +952,27 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"remove_repo">;
     path: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_get">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_set">;
+    cwd: z.ZodString;
+    preset: z.ZodNullable<z.ZodObject<{
+        preamble: z.ZodOptional<z.ZodString>;
+        seed: z.ZodOptional<z.ZodString>;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_approve">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_revoke">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"query_permission_audit">;
     sessionId: z.ZodOptional<z.ZodString>;
     auditType: z.ZodOptional<z.ZodEnum<{
@@ -1012,5 +1058,9 @@ export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRe
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
+export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
+export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;
+export type SessionPresetApproveMessage = z.infer<typeof SessionPresetApproveSchema>;
+export type SessionPresetRevokeMessage = z.infer<typeof SessionPresetRevokeSchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>;

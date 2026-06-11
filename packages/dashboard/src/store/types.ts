@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -616,6 +616,23 @@ export interface ConnectionState {
   hostStatusLoading: boolean;
 
   /**
+   * #5553 — per-repo session presets, keyed by cwd. `undefined` = not yet
+   * fetched; `null` = fetched, no preset for that repo; a value = the resolved
+   * preset (full preamble + seed text for the drawer). Populated by
+   * `session_preset_snapshot` replies (the per-repo drawer + the create-session
+   * modal disclosure both read from here).
+   */
+  sessionPresetSnapshots: Record<string, ServerSessionPresetFull | null>;
+
+  /**
+   * #5553 — server-provided composer SEEDs keyed by sessionId. A create-confirm
+   * (`session_switched`) carrying an active repo preset's seed stashes it here;
+   * App's create-confirm effect drains it into the new session's composer
+   * EDITABLE (never auto-sent), then removes the entry.
+   */
+  pendingServerSeed: Record<string, string>;
+
+  /**
    * #5253 — Control Room self-hosted runner survey: the latest
    * `runner_status_snapshot` from the server. `null` until the first snapshot
    * lands (the runner section renders an empty/loading state). Replaced
@@ -1154,6 +1171,17 @@ export interface ConnectionState {
   // button surfaces a "not connected" state). Sets `hostStatusLoading` while in
   // flight so the button can show a spinner.
   requestHostStatus: () => boolean;
+
+  // #5553 — per-repo session preset surface (host-authority). Each returns
+  // whether the message went on the wire. Replies arrive as
+  // `session_preset_snapshot` and land in `sessionPresetSnapshots[cwd]`.
+  requestSessionPreset: (cwd: string) => boolean;
+  setSessionPresetOverride: (cwd: string, preset: { preamble?: string; seed?: string; enabled?: boolean } | null) => boolean;
+  approveSessionPreset: (cwd: string) => boolean;
+  revokeSessionPreset: (cwd: string) => boolean;
+  // Drain a server-provided composer seed for a session (returns it + removes
+  // the entry). Used by App's create-confirm effect.
+  takePendingServerSeed: (sessionId: string) => string | null;
 
   // #5510 (epic #5509): approve a pending pair request, sending `pair_approve`.
   // Optimistically drops the request from `pendingPairRequests` (the server also

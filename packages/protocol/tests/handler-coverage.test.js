@@ -125,6 +125,7 @@ const PLATFORM_SPECIFIC = {
   'integration_action_ack': 'dashboard', // Control Room Integrations Reindex action ack (#5500, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'skills_inventory_snapshot': 'dashboard', // Control Room Skills inventory survey reply (#5554, epic #5159) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'summarize_session_result': 'dashboard', // sidebar "Summarize & start new session" reply (#5547) — the sidebar context-menu idiom is dashboard-only; the mobile app is out of scope for v1 (the server endpoint is client-agnostic so the app can adopt later)
+  'session_preset_snapshot': 'dashboard', // Control Room per-repo session-preset reply (#5553, epic #5159) — host-level surface (gear drawer + create-modal disclosure), dashboard-only; the server applies the preamble universally, so the mobile app needs no handler for v1 (explicitly out of scope per the issue)
   // 'agent_event' (#5016) is now handled by both dashboard and mobile
   // app (#5060 — mobile renders the same nested sub-bubbles inside the
   // parent Task tool_call). No PLATFORM_SPECIFIC entry needed; the

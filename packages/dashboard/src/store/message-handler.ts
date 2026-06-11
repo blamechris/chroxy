@@ -137,7 +137,7 @@ import {
   type PlatformAdapters, type StorageAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -1324,6 +1324,18 @@ function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: M
   const switched = sharedSessionSwitched(msg);
   if (!switched) return;
   const { newSessionId: sessionId, conversationId: switchConvId } = switched;
+  // #5553: a create-confirm may carry the resolved repo preset. When it carries
+  // a SEED, stash it keyed by sessionId so App's create-confirm effect can stage
+  // it EDITABLE into the new session's composer (never auto-sent — same path as
+  // the #5547 summarize seed). The preamble is already folded server-side; only
+  // the seed crosses into the composer.
+  const presetRaw = (msg as { sessionPreset?: unknown }).sessionPreset;
+  if (presetRaw && typeof presetRaw === 'object') {
+    const seed = (presetRaw as { seed?: unknown }).seed;
+    if (typeof seed === 'string' && seed.length > 0) {
+      set({ pendingServerSeed: { ...get().pendingServerSeed, [sessionId]: seed } });
+    }
+  }
   // Per-id dedup runs on every history replay path (#2901), so we no longer
   // need a "pending-switch" hint to distinguish user-initiated session switches
   // from auth-triggered ones.
@@ -2080,6 +2092,24 @@ function handleHostStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, se
 }
 
 /**
+ * #5553 — per-repo session-preset snapshot. The reply to session_preset_get /
+ * _set / _approve / _revoke. Store the resolved preset keyed by cwd so the
+ * create-session modal can disclose "repo preset applies" and the per-repo
+ * drawer can render/edit it. Validated with the protocol Zod schema; a
+ * malformed payload is dropped rather than crashing the renderer. A null preset
+ * (no preset for the repo) is stored explicitly so the modal can distinguish
+ * "no preset" from "not yet fetched".
+ */
+function handleSessionPresetSnapshot(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSessionPresetSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { cwd, preset } = parsed.data;
+  if (!cwd) return;
+  const next = { ...get().sessionPresetSnapshots, [cwd]: preset };
+  set({ sessionPresetSnapshots: next });
+}
+
+/**
  * #5510 (epic #5509) — a new device requested pairing; the daemon fanned the
  * request out to this host surface. Append it to `pendingPairRequests` (deduped
  * by requestId so a replay/reconnect can't double-stack the banner). Validated
@@ -2287,6 +2317,7 @@ const HANDLERS: Record<string, Handler> = {
   pair_resolved: handlePairResolved,
   // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
   host_status_snapshot: handleHostStatusSnapshot,
+  session_preset_snapshot: handleSessionPresetSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
