@@ -26,8 +26,8 @@
  * Tests inject `settingsPath` — never the real ~/.claude/settings.json.
  */
 
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -83,11 +83,42 @@ export function buildHookCommand(hookEvent, { nodePath = process.execPath, binPa
   return `${shellQuote(nodePath)} ${shellQuote(binPath)} emit ${type}`
 }
 
+/** The exact emit types the installer ever writes. */
+const KNOWN_EMIT_TYPES = new Set(Object.values(TYPE_FOR_HOOK_EVENT))
+
+/**
+ * Matches ONLY commands of the exact shape this installer writes:
+ *   '<nodePath>' '<binPath>' emit <type>
+ * where <binPath> carries the COMMAND_MARKER. Both paths are single-quoted
+ * (shellQuote), there are no shell operators, and the trailing token is one
+ * of our known emit types. This is deliberately stricter than a bare
+ * `includes(COMMAND_MARKER)` substring: a user's compound command that wraps
+ * our emitter (`'…' '…/chroxy-hooks.js' emit … && afplay ding.aiff`) is NOT
+ * ours and must survive install/uninstall untouched.
+ *
+ * The match is structural, not path-pinned, so it still recognizes our own
+ * entries written from a STALE checkout path (different binPath, same shape) —
+ * that's what makes the prune-then-add migration converge.
+ *
+ *   group 1: node path (inside quotes)
+ *   group 2: bin/script path (inside quotes) — must contain the marker
+ *   group 3: emit type
+ */
+const OUR_COMMAND_RE = /^'((?:[^']|'\\'')*)' '((?:[^']|'\\'')*)' emit ([a-z_]+)$/
+
 function isOurs(hookEntry) {
-  return hookEntry
-    && hookEntry.type === 'command'
-    && typeof hookEntry.command === 'string'
-    && hookEntry.command.includes(COMMAND_MARKER)
+  if (
+    !hookEntry
+    || hookEntry.type !== 'command'
+    || typeof hookEntry.command !== 'string'
+  ) {
+    return false
+  }
+  const m = OUR_COMMAND_RE.exec(hookEntry.command)
+  if (!m) return false
+  const scriptPath = m[2]
+  const emitType = m[3]
+  return scriptPath.includes(COMMAND_MARKER) && KNOWN_EMIT_TYPES.has(emitType)
 }
 
 /**
@@ -120,8 +151,22 @@ function pruneEventArray(entries) {
  * else (including other hook events and empty arrays we did not cause) is
  * left untouched.
  */
+/**
+ * A top-level `hooks` must be a plain object (event-name → array) or absent.
+ * An array or string (or any non-plain-object) is malformed: spreading an
+ * array yields numeric keys and a string is silently dropped — both destroy
+ * user data. Same policy as unparseable JSON: abort, never destroy.
+ */
+function assertHooksShape(hooks) {
+  if (hooks === undefined || hooks === null) return
+  if (typeof hooks !== 'object' || Array.isArray(hooks)) {
+    throw new Error('hooks in settings.json has an unexpected shape (expected an object) — fix or remove it, then re-run')
+  }
+}
+
 export function removeOwnHooks(settings) {
   const out = { ...settings }
+  assertHooksShape(out.hooks)
   if (!out.hooks || typeof out.hooks !== 'object') return out
   const hooks = { ...out.hooks }
   for (const event of Object.keys(hooks)) {
@@ -195,18 +240,44 @@ function readSettings(settingsPath) {
 
 function writeSettingsAtomic(settingsPath, settings) {
   mkdirSync(dirname(settingsPath), { recursive: true })
+
+  // If settings.json is a symlink (dotfile managers: stow, chezmoi, yadm),
+  // resolve to the real target BEFORE the temp+rename so the write lands at
+  // the link target and the user's symlink is preserved. realpathSync throws
+  // ENOENT for a brand-new file (or a dangling link) — fall back to the path
+  // as given. We resolve the parent dir + basename separately so a NEW file
+  // inside a symlinked DIRECTORY still resolves correctly.
+  let realPath = settingsPath
+  try {
+    realPath = realpathSync(settingsPath)
+  } catch {
+    try {
+      realPath = join(realpathSync(dirname(settingsPath)), basename(settingsPath))
+    } catch {
+      // Parent doesn't resolve either — use the path as given.
+    }
+  }
+
   // Preserve the existing file's mode across the temp+rename — settings.json
   // can carry sensitive values (env, apiKeyHelper) and users may have
   // tightened it to 0600; a default-mode temp file must not loosen that.
   let mode = null
   try {
-    mode = statSync(settingsPath).mode & 0o777
+    mode = statSync(realPath).mode & 0o777
   } catch {
     // New file — default mode (umask applies).
   }
-  const tmpPath = `${settingsPath}.chroxy-hooks-${process.pid}.tmp`
+  const tmpPath = `${realPath}.chroxy-hooks-${process.pid}.tmp`
   writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + '\n', mode === null ? { encoding: 'utf-8' } : { encoding: 'utf-8', mode })
-  renameSync(tmpPath, settingsPath)
+  // fsync the temp file before rename so a crash can't leave a torn write on
+  // filesystems where rename outruns the data flush.
+  const fd = openSync(tmpPath, 'r+')
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+  renameSync(tmpPath, realPath)
 }
 
 /** Install (idempotent). Returns the settings path written. */
