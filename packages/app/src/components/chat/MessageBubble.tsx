@@ -423,6 +423,15 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
                   isDisabled && !isChosen && styles.promptOptionDisabled,
                   isChosen && styles.promptOptionChosen,
                 ]}
+                accessibilityRole="button"
+                // #5634 — combine the option label with the tool context so a
+                // screen-reader user hears what they are approving/denying
+                // (e.g. "Approve, Bash(rm …)"). `message.tool` is the same tool
+                // string shown in the bubble header.
+                accessibilityLabel={
+                  message.tool ? `${opt.label}, ${message.tool}` : opt.label
+                }
+                accessibilityState={{ disabled: isDisabled, selected: isChosen }}
                 disabled={isDisabled}
                 onPress={() => {
                   if (opt.value === OTHER_OPTION_VALUE) {
@@ -491,6 +500,10 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
           <TouchableOpacity
             style={[styles.promptFreetextSend, !otherText.trim() && styles.promptOptionDisabled]}
             disabled={!otherText.trim()}
+            accessibilityRole="button"
+            // #5634 — name the freeform response in the tool context.
+            accessibilityLabel={message.tool ? `Send response, ${message.tool}` : 'Send response'}
+            accessibilityState={{ disabled: !otherText.trim() }}
             // #4755 — see input testID comment above.
             testID="approval-freetext-send"
             onPress={() => {
@@ -509,6 +522,9 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.promptFreetextCancel}
+            accessibilityRole="button"
+            // #5634 — cancel the freeform response and return to the options.
+            accessibilityLabel="Cancel response"
             onPress={() => {
               setOtherActive(false);
               setOtherText('');
@@ -650,6 +666,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.accentOrangeMedium,
     paddingHorizontal: 16,
     paddingVertical: 8,
+    // #5634 — guarantee a 44pt minimum touch target for the security-sensitive
+    // approve/deny taps. paddingVertical 8 alone leaves the button ~30pt.
+    minHeight: 44,
+    justifyContent: 'center',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: COLORS.accentOrangeBorderStrong,
