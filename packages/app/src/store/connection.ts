@@ -127,6 +127,7 @@ import {
   clearPendingPermissionModeRequestsForSession,
   CLIENT_PROTOCOL_VERSION,
   isVisibleAppState,
+  HEARTBEAT_INTERVAL_MS,
 } from './message-handler';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import {
@@ -1379,21 +1380,36 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       timestamp: Date.now(),
     };
 
+    // #5633: capture the session this optimistic turn belongs to AT ARM TIME.
+    // The old safety net re-read `get().activeSessionId` when the timer FIRED,
+    // so switching sessions (or a legitimately slow stream_start on cellular)
+    // let it null `streamingMessageId` and wipe the "thinking" indicator for
+    // whatever session happened to be active then — the wrong/live turn.
+    const armedSessionId = get().activeSessionId;
+
     updateActiveSession((ss) => ({
       messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
       streamingMessageId: 'pending',
     }));
 
-    // Safety net: if no stream_start arrives, clear pending state after 5 seconds.
+    // Safety net: if no stream_start arrives, clear the pending state for THIS
+    // session. Prefer the server-advertised stream-stall window (#4497/#4766,
+    // already plumbed in connection-lifecycle) so the net matches the real
+    // server cadence; fall back to 5s when the server doesn't advertise one.
+    const stallMs = useConnectionLifecycleStore.getState().streamStallTimeoutMs;
+    const safetyNetMs = stallMs && stallMs > 0 ? stallMs : 5000;
     setTimeout(() => {
-      const sid = get().activeSessionId;
-      const ss = sid ? get().sessionStates[sid] : null;
+      if (!armedSessionId) return;
+      const ss = get().sessionStates[armedSessionId];
+      // Only clear if this exact session is still waiting on the same pending
+      // turn — never touch a session that has since started streaming, or a
+      // different session the user switched to.
       if (!ss || ss.streamingMessageId !== 'pending') return;
-      updateActiveSession((ss) => ({
-        messages: filterThinking(ss.messages),
+      updateSession(armedSessionId, (s) => ({
+        messages: filterThinking(s.messages),
         streamingMessageId: null,
       }));
-    }, 5000);
+    }, safetyNetMs);
   },
 
   appendTerminalData: (data) => {
@@ -2140,6 +2156,14 @@ if (global.__chroxy_appStateSub) {
 // toggles (e.g., switching apps quickly) don't spam connect(). Fixes #2813.
 const RESUME_RECONNECT_COOLDOWN_MS = 5000;
 let _lastResumeReconnectAt = 0;
+// #5633: timestamp of the most recent transition OUT of the foreground. iOS
+// suspends JS while backgrounded, freezing the heartbeat interval, and the
+// tunnel/NAT can silently drop the TCP connection. On foreground the socket
+// frequently still reports `readyState === OPEN` despite being dead, so for
+// ~20s `sendInput` ships into a black hole and reports 'sent'. We measure how
+// long we were away and, if it's at least one heartbeat cycle, treat
+// `readyState === OPEN` as untrustworthy and proactively reconnect.
+let _backgroundedAt = 0;
 
 export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   // #3404: keep the server in sync with foreground/background state so it
@@ -2148,13 +2172,55 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
   const { socket } = useConnectionStore.getState();
   sendClientVisible(socket, isVisibleAppState(nextState));
 
+  if (nextState !== 'active') {
+    // Record the first transition away from foreground; later inactive→
+    // background hops (iOS emits both) must not reset the clock.
+    if (_backgroundedAt === 0) _backgroundedAt = Date.now();
+    return;
+  }
+
   if (nextState === 'active') {
     const now = Date.now();
+    // #5633: snapshot and clear the backgrounded timestamp up-front so every
+    // resume path (including the early cooldown return) starts the next cycle
+    // clean. A 0 (never backgrounded, e.g. cold start) yields duration 0.
+    const backgroundedFor = _backgroundedAt > 0 ? now - _backgroundedAt : 0;
+    _backgroundedAt = 0;
+
     if (now - _lastResumeReconnectAt < RESUME_RECONNECT_COOLDOWN_MS) {
       return;
     }
 
     const { connectionPhase, wsUrl, apiToken, userDisconnected, savedConnection } = useConnectionLifecycleStore.getState();
+
+    // #5633 Case 0 (zombie socket): we believe we're connected, the socket
+    // even still claims OPEN, but we were away at least one heartbeat cycle —
+    // long enough for iOS to have suspended JS and the connection to have
+    // silently died. `readyState` is not trustworthy here, so reconnect
+    // proactively rather than letting input fall into a dead socket for ~20s
+    // until the next heartbeat pong-timeout notices. The cooldown above (and
+    // the reconnect ladder inside connect/connectAuto) prevents storms.
+    const longBackground = backgroundedFor >= HEARTBEAT_INTERVAL_MS;
+    if (
+      connectionPhase === 'connected' &&
+      socket &&
+      socket.readyState === WebSocket.OPEN &&
+      longBackground &&
+      !userDisconnected &&
+      wsUrl &&
+      apiToken
+    ) {
+      console.log(
+        `[ws] App resumed after ${Math.round(backgroundedFor / 1000)}s — socket claims OPEN but may be a zombie; verifying via reconnect`,
+      );
+      _lastResumeReconnectAt = now;
+      if (savedConnection?.url && savedConnection?.token) {
+        void useConnectionStore.getState().connectAuto(savedConnection);
+      } else {
+        useConnectionStore.getState().connect(wsUrl, apiToken);
+      }
+      return;
+    }
 
     // Case 1: socket thinks it was connected but is actually stale
     if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
