@@ -185,6 +185,29 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+// #5632 — post-handshake plaintext guard (consensus C3 / Adversary F1).
+// Once E2E encryption is established (encState set), every server→client frame
+// MUST arrive inside an `encrypted` envelope. The #5614 downgrade gate only
+// protects the `auth_ok` handshake frame; without this guard a MITM could still
+// inject a forged plaintext app frame (e.g. permission_request) AFTER the
+// handshake and have the client act on it. We fail closed exactly like a
+// decrypt failure.
+//
+// The allow-list is the set of cleartext handshake frames the server
+// legitimately emits before encryption is active (auth_ok / key_exchange_ok /
+// auth_fail / pair_fail — see packages/server/src/ws-auth.js). In practice
+// these all arrive while encState is still null (the eager path sets encState
+// WHILE handling auth_ok, but the onmessage decrypt-check for that frame already
+// ran with encState null), so they never actually hit this guard on a normal
+// connection — they are listed so a benign duplicate/terminal handshake frame
+// is tolerated rather than tearing down the socket.
+const ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST = new Set([
+  'auth_ok',
+  'key_exchange_ok',
+  'auth_fail',
+  'pair_fail',
+]);
+
 // #5555.5 — the close/error-path reconnect delay is no longer a fixed
 // constant. Both handlers now climb the RETRY_DELAYS ladder (defined in
 // connect()) via the module-level reconnectAttempt counter, which resets on
@@ -1137,6 +1160,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           socket.close();
           return;
         }
+      } else if (encState && !ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST.has(msg.type)) {
+        // #5632 — encryption is active but this frame is NOT an `encrypted`
+        // envelope and NOT a permitted cleartext handshake frame. Treat it as a
+        // downgrade/injection attempt and fail closed on the same path a decrypt
+        // failure takes (log + close, no dispatch).
+        console.error('[crypto] Rejected plaintext frame after encryption established:', msg.type);
+        socket.close();
+        return;
       }
       handleMessage(msg, socketCtx);
     };

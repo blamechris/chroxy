@@ -178,6 +178,26 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
+// #5632 — post-handshake plaintext guard (consensus C3 / Adversary F1).
+// Once E2E encryption is established (encState set), every server→client frame
+// MUST arrive inside an `encrypted` envelope. The #5614 downgrade gate only
+// protects the `auth_ok` handshake frame; without this guard a MITM could still
+// inject a forged plaintext app frame AFTER the handshake and have the client
+// act on it. We fail closed exactly like a decrypt failure.
+//
+// The allow-list is the set of cleartext handshake frames the server
+// legitimately emits before encryption is active (auth_ok / key_exchange_ok /
+// auth_fail / pair_fail — see packages/server/src/ws-auth.js). On a normal
+// connection these all arrive while encState is still null, so they never hit
+// this guard; they are listed so a benign duplicate/terminal handshake frame is
+// tolerated rather than tearing down the socket.
+const ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST = new Set([
+  'auth_ok',
+  'key_exchange_ok',
+  'auth_fail',
+  'pair_fail',
+]);
+
 /**
  * Tools eligible for session-scoped auto-approval via the "Allow for Session"
  * button (#2834). Mirrors packages/app/src/store/connection.ts:924 — kept in
@@ -1532,6 +1552,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           socket.close();
           return;
         }
+      } else if (encState && !ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST.has(msg.type)) {
+        // #5632 — encryption is active but this frame is NOT an `encrypted`
+        // envelope and NOT a permitted cleartext handshake frame. Treat it as a
+        // downgrade/injection attempt and fail closed on the same path a decrypt
+        // failure takes (log + close, no dispatch).
+        console.error('[crypto] Rejected plaintext frame after encryption established:', msg.type);
+        socket.close();
+        return;
       }
       handleMessage(msg, socketCtx);
     };
