@@ -1339,14 +1339,16 @@ describe('SettingsPanel', () => {
     it('mobile SettingsScreen also labels every server category (cross-client guard)', () => {
       // Same guard for the other client, asserted from one place so a new
       // server category cannot fall into the raw-key tail on either UI.
+      // NOTIFICATION_CATEGORY_LABELS was lifted from SettingsScreen.tsx into
+      // packages/app/src/components/settings/constants.ts (#5658).
       const mobileSource = fs.readFileSync(
-        path.resolve(__dirname, '../../../app/src/screens/SettingsScreen.tsx'),
+        path.resolve(__dirname, '../../../app/src/components/settings/constants.ts'),
         'utf-8',
       )
       const m = mobileSource.match(/const NOTIFICATION_CATEGORY_LABELS[^=]*=\s*\{([\s\S]*?)\n\};/)
       if (!m) {
         throw new Error(
-          'NOTIFICATION_CATEGORY_LABELS not found in packages/app/src/screens/SettingsScreen.tsx — update this sync test',
+          'NOTIFICATION_CATEGORY_LABELS not found in packages/app/src/components/settings/constants.ts — update this sync test',
         )
       }
       for (const cat of allCategories) {

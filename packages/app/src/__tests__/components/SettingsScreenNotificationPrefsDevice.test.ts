@@ -15,10 +15,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const settingsSource = fs.readFileSync(
-  path.resolve(__dirname, '../../screens/SettingsScreen.tsx'),
-  'utf-8',
-);
+// #5655: the notification-prefs UI was extracted from SettingsScreen.tsx
+// into `src/components/settings/*`. Read the screen plus every extracted
+// settings component so the static-source assertions keep matching.
+const settingsDir = path.resolve(__dirname, '../../components/settings');
+const settingsSource = [
+  fs.readFileSync(path.resolve(__dirname, '../../screens/SettingsScreen.tsx'), 'utf-8'),
+  ...fs
+    .readdirSync(settingsDir)
+    .filter((f) => f.endsWith('.ts') || f.endsWith('.tsx'))
+    .map((f) => fs.readFileSync(path.resolve(settingsDir, f), 'utf-8')),
+].join('\n');
 
 const typesSource = fs.readFileSync(
   path.resolve(__dirname, '../../store/types.ts'),
