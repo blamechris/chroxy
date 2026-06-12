@@ -38,6 +38,10 @@ export function createFileOps(sendFn, workspaceRoot) {
     getDiff: reader.getDiff,
     listSlashCommands: browser.listSlashCommands,
     listAgents: browser.listAgents,
+    // #5555: socket-free compute variants for the connect-time auth_bootstrap
+    // burst — same payloads as the list_* request responses, no ws send.
+    computeSlashCommands: browser.computeSlashCommands,
+    computeAgents: browser.computeAgents,
     listFiles: browser.listFiles,
     gitStatus: git.gitStatus,
     gitBranches: git.gitBranches,

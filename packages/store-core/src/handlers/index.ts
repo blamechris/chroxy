@@ -818,6 +818,14 @@ export interface AuthOkPayload {
    * validation as `handleKeyExchangeOk`'s `publicKey`.
    */
   serverPublicKey: string | null
+  /**
+   * #5555 (auth_bootstrap) — the static permission-mode enum folded into
+   * auth_ok so a new client doesn't have to wait for the discrete
+   * `available_permission_modes` burst frame. Validated with the same shape
+   * checks as `handleAvailablePermissionModes`. Null when the field is absent
+   * (older server) — consumers then fall back to the discrete frame.
+   */
+  availablePermissionModes: PermissionMode[] | null
 }
 
 const DEFAULT_WEB_FEATURES: AuthOkWebFeatures = {
@@ -890,6 +898,11 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     // empty-string serverPublicKey is treated as absent, not a usable key.
     serverPublicKey:
       typeof msg.serverPublicKey === 'string' && msg.serverPublicKey ? msg.serverPublicKey : null,
+    // #5555 — reuse the discrete-frame parser on the folded field. Absent /
+    // non-array → null so the consumer falls back to the discrete frame.
+    availablePermissionModes: Array.isArray(msg.availablePermissionModes)
+      ? handleAvailablePermissionModes({ modes: msg.availablePermissionModes })
+      : null,
   }
 }
 
@@ -2563,6 +2576,34 @@ export function handleProviderList(
 ): { providers: unknown[] } | null {
   if (!Array.isArray(msg.providers)) return null
   return { providers: msg.providers as unknown[] }
+}
+
+/**
+ * #5555 (auth_bootstrap) — parse the connect-time bootstrap burst into the
+ * three list-replacement arrays. The frame folds `list_providers` /
+ * `list_slash_commands` / `list_agents` responses into one server-initiated
+ * push so a new client skips its connect-time request round trip.
+ *
+ * Each list is independent and defaults to `[]` when missing/non-array so a
+ * partial server compute (e.g. an unreadable agents dir shipped `[]` for that
+ * list only) still applies the lists that ARE present. Element shape is NOT
+ * validated here — consumers reuse the same per-list casts they apply to the
+ * discrete `provider_list` / `slash_commands` / `agent_list` messages.
+ *
+ * No session-id guard: providers are server-wide, and the slash/agent lists
+ * are scoped to the active session the server just restored for this connect
+ * (the same session the client lands on), so a connect-time burst is always
+ * for the right session. The optional `sessionId` is surfaced so a consumer
+ * CAN drop a stale burst if it has already switched away.
+ */
+export function handleAuthBootstrap(
+  msg: Record<string, unknown>,
+): { providers: unknown[]; slashCommands: unknown[]; agents: unknown[]; sessionId: string | null } {
+  const providers: unknown[] = Array.isArray(msg.providers) ? (msg.providers as unknown[]) : []
+  const slashCommands: unknown[] = Array.isArray(msg.slashCommands) ? (msg.slashCommands as unknown[]) : []
+  const agents: unknown[] = Array.isArray(msg.agents) ? (msg.agents as unknown[]) : []
+  const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null
+  return { providers, slashCommands, agents, sessionId }
 }
 
 /**

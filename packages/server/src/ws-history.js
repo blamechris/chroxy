@@ -222,6 +222,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // arrive — instead the section either hides itself or surfaces a
     // "not supported on this server" message.
     notificationPrefs: true,
+    // #5555 — this server emits an `auth_bootstrap` burst frame carrying the
+    // provider / slash-command / agent lists right after auth_ok, so a new
+    // client can SKIP its 3-request connect-time round trip (list_providers /
+    // list_slash_commands / list_agents). Clients that don't see this flag
+    // (older server) fall back to requesting the three lists as before. The
+    // request handlers stay live either way for post-connect refreshes.
+    authBootstrap: true,
   }
 
   // #3760, #3905: surface the effective inactivity timeouts so clients
@@ -284,6 +291,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     webFeatures: webTaskManager.getFeatureStatus(),
     features,
     capabilities,
+    // #5555 — fold the static permission-mode enum into auth_ok so a new
+    // client never has to wait for (or react to) the discrete
+    // `available_permission_modes` burst frame. The discrete frame is still
+    // sent below for older clients that read the enum only from it.
+    availablePermissionModes: PERMISSION_MODES,
     resultTimeoutMs: effectiveResultTimeoutMs,
     hardTimeoutMs: effectiveHardTimeoutMs,
     streamStallTimeoutMs: effectiveStreamStallTimeoutMs,
@@ -465,6 +477,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     scheduleProviderModelsRefresh(ctx, ws, activeProvider)
     send(ws, { type: 'available_permission_modes', modes: PERMISSION_MODES })
     permissions.resendPendingPermissions(ws, client)
+    // #5555: fire the connect-time bootstrap burst (providers + slash commands
+    // + agents) so a new client never sends its 3-request list_* round trip.
+    // Fire-and-forget — the slash/agent compute is async (disk scans) and the
+    // synchronous post-auth burst above must not block on it.
+    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId })
     return
   }
 
@@ -493,6 +510,90 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   }
 
   permissions.resendPendingPermissions(ws)
+  // #5555: legacy single-session bootstrap burst — providers + slash commands
+  // + agents for the cliSession's cwd (no provider scoping in legacy mode).
+  sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null })
+}
+
+/**
+ * #5555 (auth_bootstrap) — compute the provider / slash-command / agent lists
+ * and push them in a single `auth_bootstrap` burst frame right after the
+ * post-auth sync block. This is the server half of the round-trip collapse:
+ * a new client (one that saw `capabilities.authBootstrap` in auth_ok) consumes
+ * these payloads and SKIPS its connect-time `list_providers` /
+ * `list_slash_commands` / `list_agents` requests.
+ *
+ * Fire-and-forget by design: the slash-command and agent computes scan disk
+ * (project + user `.claude/{commands,agents}`), so awaiting them inline would
+ * stall the synchronous post-auth burst. We compute in the background and emit
+ * the frame when ready; if the socket has since closed, the send is a no-op.
+ *
+ * The payloads are byte-identical to the `provider_list` / `slash_commands` /
+ * `agent_list` request responses (same `listProviders()` and the shared
+ * `computeSlashCommands` / `computeAgents` used by the request handlers), so
+ * the client reuses its existing per-message handlers to consume them.
+ *
+ * Resilient: each list is computed independently; a failure in one (e.g. an
+ * unreadable agents dir) still ships the others. A total failure ships an
+ * empty bootstrap so the client doesn't sit waiting for data that never comes
+ * — it can always refresh later via the (still-live) list_* request paths.
+ *
+ * @param {object} ctx
+ * @param {WebSocket} ws
+ * @param {{ cwd: string|null, provider: string|null, sessionId: string|null }} info
+ */
+function sendAuthBootstrap(ctx, ws, info = {}) {
+  const { send, services } = ctx
+  const fileOps = ctx.fileOps || services?.fileOps || null
+  const cwd = info.cwd || null
+  const provider = info.provider || null
+
+  // providers is a cheap synchronous read off the registry — same source as
+  // the list_providers handler.
+  let providers = []
+  try {
+    providers = listProviders()
+  } catch (err) {
+    log.warn(`auth_bootstrap: listProviders failed: ${err.message}`)
+    providers = []
+  }
+
+  // slash commands + agents are async disk scans; compute in parallel and
+  // tolerate either failing on its own.
+  const slashP = fileOps && typeof fileOps.computeSlashCommands === 'function'
+    ? fileOps.computeSlashCommands(cwd, provider).catch(err => {
+        log.warn(`auth_bootstrap: computeSlashCommands failed: ${err.message}`)
+        return []
+      })
+    : Promise.resolve([])
+  const userAgentsDirs = ctx.userAgentsDirs
+  const agentsOpts = Array.isArray(userAgentsDirs) && userAgentsDirs.length > 0
+    ? { userAgentsDirs }
+    : {}
+  const agentsP = fileOps && typeof fileOps.computeAgents === 'function'
+    ? fileOps.computeAgents(cwd, agentsOpts).catch(err => {
+        log.warn(`auth_bootstrap: computeAgents failed: ${err.message}`)
+        return []
+      })
+    : Promise.resolve([])
+
+  Promise.all([slashP, agentsP]).then(([slashCommands, agents]) => {
+    // Socket may have closed while the disk scans were in flight — bail out
+    // rather than sending to a dead peer.
+    if (ws.readyState !== 1) return
+    send(ws, {
+      type: 'auth_bootstrap',
+      providers,
+      slashCommands,
+      agents,
+      ...(info.sessionId ? { sessionId: info.sessionId } : {}),
+    })
+  }).catch(err => {
+    // Defensive: Promise.all here can only reject if one of the .catch handlers
+    // above itself threw, which they don't — but never let a bootstrap failure
+    // surface as an unhandled rejection.
+    log.warn(`auth_bootstrap: burst failed for ${ctx.clients?.get(ws)?.id || 'client'}: ${err.message}`)
+  })
 }
 
 /**

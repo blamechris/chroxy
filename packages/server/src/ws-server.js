@@ -305,6 +305,7 @@ function _isSecureRequest(req) {
  *   All session-scoped messages include a `sessionId` field for background sync.
  *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms, streamStallTimeoutMs = stream-stall recovery window in ms (0 = disabled) — #3760, #3905, #4477)
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
+ *   { type: 'auth_bootstrap', providers, slashCommands, agents, sessionId? } — #5555: connect-time burst folding the provider/slash-command/agent lists so a new client skips its 3-request list_* round trip
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
  *   { type: 'message',      ... }                     — parsed chat message
@@ -785,6 +786,12 @@ export class WsServer {
       // surfaced in auth_ok so the dashboard can render a warning banner.
       // null until start() has bound a socket.
       get exposure() { return self.exposure },
+      // #5555 (auth_bootstrap): file ops + provider agent dirs so the
+      // connect-time bootstrap burst can compute the slash-command / agent
+      // lists inline (same payloads the list_* request handlers produce),
+      // letting the client skip its 3-request connect-time round trip.
+      get fileOps() { return self._fileOps },
+      get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
     }
     this._authCtx = {
       get clients() { return self.clients },

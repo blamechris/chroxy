@@ -65,6 +65,11 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
         quickTunnel: z.ZodBoolean;
     }, z.core.$strip>>;
     serverPublicKey: z.ZodOptional<z.ZodString>;
+    availablePermissionModes: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        label: z.ZodString;
+        description: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;
@@ -1815,6 +1820,36 @@ export declare const ServerProviderListSchema: z.ZodObject<{
         }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+export declare const ServerAuthBootstrapSchema: z.ZodObject<{
+    type: z.ZodLiteral<"auth_bootstrap">;
+    providers: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        auth: z.ZodOptional<z.ZodObject<{
+            ready: z.ZodBoolean;
+            source: z.ZodEnum<{
+                none: "none";
+                env: "env";
+                oauth: "oauth";
+            }>;
+            envVar: z.ZodNullable<z.ZodString>;
+            envVars: z.ZodArray<z.ZodString>;
+            hint: z.ZodString;
+            detail: z.ZodString;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>>;
+    slashCommands: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        description: z.ZodOptional<z.ZodString>;
+        source: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>>;
+    agents: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        description: z.ZodOptional<z.ZodString>;
+        source: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const ServerSkillsListSchema: z.ZodObject<{
     type: z.ZodLiteral<"skills_list">;
     skills: z.ZodArray<z.ZodObject<{
@@ -2215,6 +2250,7 @@ export type ServerSessionStoppedMessage = z.infer<typeof ServerSessionStoppedSch
 export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
+export type ServerAuthBootstrapMessage = z.infer<typeof ServerAuthBootstrapSchema>;
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>;
 export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewriteSchema>;
 export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>;

@@ -5016,3 +5016,90 @@ describe('multi_question_intervention handler (#4764)', () => {
     expect(sB.interventions[0].toolUseId).toBe('toolu_b');
   });
 });
+
+// #5555 (auth_bootstrap) — the server folds the permission-mode enum into
+// auth_ok and, when it advertises capabilities.authBootstrap, pushes an
+// auth_bootstrap burst with the provider/slash/agent lists. The client then
+// SKIPS the 3 connect-time list requests; against an old server (no flag) it
+// requests them as before. The list_* refresh paths stay live.
+describe('auth_bootstrap (#5555)', () => {
+  function sentTypes(ctx: ReturnType<typeof createMockContext>) {
+    return (ctx.socket.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0]).type);
+  }
+
+  it('skips the 3 connect-time list requests when capabilities.authBootstrap is set', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    const ctx = createMockContext();
+    _testMessageHandler.setContext(ctx as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+      capabilities: { authBootstrap: true },
+    });
+
+    const types = sentTypes(ctx);
+    expect(types).not.toContain('list_providers');
+    expect(types).not.toContain('list_slash_commands');
+    expect(types).not.toContain('list_agents');
+  });
+
+  it('requests the 3 lists when authBootstrap is absent (old server)', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    const ctx = createMockContext();
+    _testMessageHandler.setContext(ctx as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+    });
+
+    const types = sentTypes(ctx);
+    expect(types).toContain('list_providers');
+    expect(types).toContain('list_slash_commands');
+    expect(types).toContain('list_agents');
+  });
+
+  it('folds availablePermissionModes from auth_ok into the store', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+      availablePermissionModes: [{ id: 'approve', label: 'Approve' }],
+    });
+
+    expect(store.getState().availablePermissionModes).toEqual([{ id: 'approve', label: 'Approve' }]);
+  });
+
+  it('applies a subsequent auth_bootstrap burst to the provider/slash/agent stores', () => {
+    const store = createMockStore({ sessionStates: {}, activeSessionId: null });
+    setStore(store as any);
+    const ctx = createMockContext();
+    _testMessageHandler.setContext(ctx as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+      capabilities: { authBootstrap: true },
+    });
+    _testMessageHandler.handle({
+      type: 'auth_bootstrap',
+      providers: [{ name: 'anthropic' }],
+      slashCommands: [{ name: 'clear', source: 'builtin' }],
+      agents: [{ name: 'reviewer', source: 'project' }],
+    });
+
+    expect(store.getState().availableProviders).toEqual([{ name: 'anthropic' }]);
+    expect(store.getState().slashCommands).toEqual([{ name: 'clear', source: 'builtin' }]);
+    expect(store.getState().customAgents).toEqual([{ name: 'reviewer', source: 'project' }]);
+  });
+});

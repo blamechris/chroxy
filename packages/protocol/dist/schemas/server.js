@@ -115,6 +115,20 @@ export const ServerAuthOkSchema = z.object({
     // the server predates #5555 (old server) — in every absent case the client
     // falls back to the discrete `key_exchange` handshake. No flag day.
     serverPublicKey: z.string().max(512).optional(),
+    // #5555 (auth_bootstrap) — fold the static permission-mode enum into auth_ok
+    // so a new client reads it here instead of waiting for the discrete
+    // `available_permission_modes` burst frame (still sent for older clients).
+    // Optional: servers from before #5555 omit it and clients fall back to the
+    // discrete frame.
+    // Object array — each entry is `{ id, label, description? }` (server
+    // `PERMISSION_MODES`), the SAME shape as the discrete
+    // `available_permission_modes` frame's `modes`. (#5592 review: a
+    // `z.array(z.string())` here would reject a real new-server auth_ok.)
+    availablePermissionModes: z.array(z.object({
+        id: z.string(),
+        label: z.string(),
+        description: z.string().optional(),
+    })).optional(),
 }).passthrough();
 export const ServerAuthFailSchema = z.object({
     type: z.literal('auth_fail'),
@@ -1674,6 +1688,35 @@ export const ServerProviderListSchema = z.object({
         auth: ProviderAuthSchema.optional(),
     })),
 });
+// #5555 (auth_bootstrap) — single connect-time burst frame that carries the
+// provider / slash-command / agent lists right after auth_ok, so a new client
+// can SKIP its 3-request `list_providers` / `list_slash_commands` /
+// `list_agents` round trip. Payloads mirror the respective request responses
+// (`provider_list`, `slash_commands`, `agent_list`) so clients reuse their
+// existing per-list handlers to consume them. Each list is optional and
+// defaults to empty so a partial server compute (e.g. an unreadable agents
+// dir) still parses. `passthrough()` keeps the frame forward-compatible.
+export const ServerAuthBootstrapSchema = z.object({
+    type: z.literal('auth_bootstrap'),
+    providers: z.array(z.object({
+        name: z.string(),
+        capabilities: z.record(z.string(), z.boolean()).optional(),
+        auth: ProviderAuthSchema.optional(),
+    })).default([]),
+    slashCommands: z.array(z.object({
+        name: z.string(),
+        description: z.string().optional(),
+        source: z.string().optional(),
+    })).default([]),
+    agents: z.array(z.object({
+        name: z.string(),
+        description: z.string().optional(),
+        source: z.string().optional(),
+    })).default([]),
+    // The active session id this burst was scoped to, when applicable. Lets a
+    // client ignore a stale burst if it has already switched sessions.
+    sessionId: z.string().optional(),
+}).passthrough();
 export const ServerSkillsListSchema = z.object({
     type: z.literal('skills_list'),
     skills: z.array(z.object({

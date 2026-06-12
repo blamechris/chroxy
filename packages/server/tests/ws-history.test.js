@@ -792,6 +792,146 @@ describe('sendPostAuthInfo — eager key exchange (#5555)', () => {
   })
 })
 
+// ── #5555: auth_bootstrap burst coalescing ───────────────────────────────────
+//
+// The server folds the static permission-mode enum into auth_ok and advertises
+// `capabilities.authBootstrap: true`, then pushes a single `auth_bootstrap`
+// burst frame (providers + slashCommands + agents) so a new client can SKIP its
+// 3-request connect-time list_* round trip. The discrete frames
+// (available_permission_modes) stay for older clients. These tests assert the
+// new-client content, that old-client behaviour is unchanged, and that the
+// burst no-ops on a closed socket.
+
+/**
+ * Fake fileOps whose compute methods return fixed lists, so the bootstrap test
+ * can assert the exact payloads without touching the disk. Mirrors the
+ * production createFileOps surface used by sendAuthBootstrap.
+ */
+function makeFakeFileOps(slashCommands, agents) {
+  return {
+    computeSlashCommands: async () => slashCommands,
+    computeAgents: async () => agents,
+  }
+}
+
+describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
+  it('auth_ok advertises capabilities.authBootstrap and folds availablePermissionModes', () => {
+    const ctx = makeCtx()
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.capabilities.authBootstrap, true)
+    assert.deepEqual(authOk.availablePermissionModes, PERMISSION_MODES)
+  })
+
+  it('still sends the discrete available_permission_modes frame (old-client compat)', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-1' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    const permModes = ctx._sends.find(m => m.type === 'available_permission_modes')
+    assert.ok(permModes, 'discrete available_permission_modes frame still sent')
+    assert.deepEqual(permModes.modes, PERMISSION_MODES)
+  })
+
+  it('multi-session: emits an auth_bootstrap burst with providers + slashCommands + agents', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    const slash = [{ name: 'clear', description: 'clear', source: 'builtin' }]
+    const agents = [{ name: 'reviewer', description: 'review', source: 'project' }]
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      fileOps: makeFakeFileOps(slash, agents),
+    })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    // Bootstrap is fire-and-forget (async disk compute) — drain microtasks.
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.ok(boot, 'auth_bootstrap burst frame was sent')
+    assert.ok(Array.isArray(boot.providers), 'providers present')
+    assert.ok(boot.providers.length > 0, 'providers non-empty (registry seeded)')
+    assert.deepEqual(boot.slashCommands, slash)
+    assert.deepEqual(boot.agents, agents)
+    assert.equal(boot.sessionId, 'sess-1')
+  })
+
+  it('legacy single-session: emits an auth_bootstrap burst scoped to the cliSession cwd', async () => {
+    const slash = [{ name: 'help', description: 'help', source: 'builtin' }]
+    const agents = []
+    const cliSession = { cwd: '/opt/project', isReady: false, model: null, permissionMode: 'approve' }
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ cliSession, fileOps: makeFakeFileOps(slash, agents) })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.ok(boot, 'auth_bootstrap burst sent in legacy mode')
+    assert.deepEqual(boot.slashCommands, slash)
+    assert.deepEqual(boot.agents, agents)
+    // No active session id in legacy mode.
+    assert.equal(Object.prototype.hasOwnProperty.call(boot, 'sessionId'), false)
+  })
+
+  it('ships empty lists when no fileOps is wired (graceful degrade)', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    const ws = makeFakeWs()
+    // No fileOps in ctx → slash/agents compute path falls back to [].
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-1' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.ok(boot, 'auth_bootstrap still sent without fileOps')
+    assert.deepEqual(boot.slashCommands, [])
+    assert.deepEqual(boot.agents, [])
+    // Providers still come from the registry (synchronous, fileOps-independent).
+    assert.ok(Array.isArray(boot.providers))
+  })
+
+  it('does not send the burst when the socket closed before the compute resolved', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    // computeSlashCommands resolves on a later microtask; close the ws first.
+    let resolveSlash
+    const fileOps = {
+      computeSlashCommands: () => new Promise(r => { resolveSlash = () => r([]) }),
+      computeAgents: async () => [],
+    }
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-1', fileOps })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    // Socket closes while the compute is in flight.
+    ws.readyState = 3 // CLOSED
+    resolveSlash()
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.equal(boot, undefined, 'no burst frame after the socket closed')
+  })
+})
+
 // ── sendSessionInfo ────────────────────────────────────────────────────────
 
 describe('sendSessionInfo', () => {

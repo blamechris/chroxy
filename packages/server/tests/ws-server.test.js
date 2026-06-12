@@ -1021,8 +1021,11 @@ describe('outbound message sequence numbers', () => {
 
     const { ws, messages } = await createClient(port, true)
 
-    // Wait for initial messages to settle (auth_ok, server_mode, status, etc.)
+    // Wait for initial messages to settle (auth_ok, server_mode, status, etc.).
+    // #5555: also wait for the async auth_bootstrap burst so it's included in
+    // the monotonic-seq sweep deterministically rather than racing the assert.
     await waitForMessage(messages, 'status')
+    await waitForMessage(messages, 'auth_bootstrap', 1000)
 
     // All messages should have a seq field
     assert.ok(messages.length > 0, 'Should have received messages')
@@ -1051,8 +1054,12 @@ describe('outbound message sequence numbers', () => {
 
     const { ws, messages } = await createClient(port, true)
 
-    // Wait for initial messages
+    // Wait for initial messages. #5555: the connect-time auth_bootstrap burst
+    // (providers + slash commands + agents) is fire-and-forget (async disk
+    // scans), so it can land AFTER `status`. Wait for it before snapshotting the
+    // count so the pong-seq continuity check isn't shifted by a late burst frame.
     await waitForMessage(messages, 'status')
+    await waitForMessage(messages, 'auth_bootstrap', 1000)
 
     const initialCount = messages.length
 
