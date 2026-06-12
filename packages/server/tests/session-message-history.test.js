@@ -526,4 +526,68 @@ describe('SessionMessageHistory', () => {
       assert.equal(synthetics.length, 1)
     })
   })
+
+  // #5555.3 — monotonic per-session history seq used by lastSeq delta replay.
+  describe('history seq (#5555.3)', () => {
+    it('stamps a strictly increasing 1-based _seq on each pushed entry', () => {
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'b', timestamp: 2 })
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 3 })
+      const seqs = history.getHistory('s1').map(e => e._seq)
+      assert.deepStrictEqual(seqs, [1, 2, 3])
+    })
+
+    it('keeps seq climbing past a ring-buffer front-trim (gap detection input)', () => {
+      const h = new SessionMessageHistory({ maxMessages: 3 })
+      for (let i = 0; i < 5; i++) {
+        h.recordHistory('s1', 'message', { type: 'user_input', content: `m${i}`, timestamp: i })
+      }
+      // Buffer holds the last 3 entries; their seqs are 3,4,5 (1 and 2 trimmed).
+      assert.deepStrictEqual(h.getHistory('s1').map(e => e._seq), [3, 4, 5])
+      assert.equal(h.getOldestSeq('s1'), 3)
+      assert.equal(h.getLatestSeq('s1'), 5)
+    })
+
+    it('seq is per-session (counters do not bleed across sessions)', () => {
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
+      history.recordHistory('s2', 'message', { type: 'user_input', content: 'x', timestamp: 1 })
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'b', timestamp: 2 })
+      assert.deepStrictEqual(history.getHistory('s1').map(e => e._seq), [1, 2])
+      assert.deepStrictEqual(history.getHistory('s2').map(e => e._seq), [1])
+    })
+
+    it('getOldestSeq/getLatestSeq on an empty session', () => {
+      assert.equal(history.getOldestSeq('nope'), null)
+      assert.equal(history.getLatestSeq('nope'), 0)
+    })
+
+    it('setHistory re-stamps restored entries 1..N and advances the counter', () => {
+      history.setHistory('s1', [
+        { type: 'message', content: 'a' },
+        { type: 'message', content: 'b' },
+      ])
+      assert.deepStrictEqual(history.getHistory('s1').map(e => e._seq), [1, 2])
+      // Next recorded entry continues the sequence.
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 1 })
+      assert.equal(history.getHistory('s1')[2]._seq, 3)
+    })
+
+    it('truncateEntry strips _seq so it never reaches the persisted state file', () => {
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
+      const entry = history.getHistory('s1')[0]
+      assert.equal(entry._seq, 1)
+      const serialized = history.truncateEntry(entry)
+      assert.equal(serialized._seq, undefined)
+      // original entry retains its seq (truncateEntry clones)
+      assert.equal(entry._seq, 1)
+    })
+
+    it('cleanupSession resets the seq counter for that session', () => {
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'b', timestamp: 2 })
+      history.cleanupSession('s1')
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 3 })
+      assert.equal(history.getHistory('s1')[0]._seq, 1)
+    })
+  })
 })

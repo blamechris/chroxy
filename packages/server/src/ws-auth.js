@@ -15,6 +15,12 @@ const log = createLogger('ws')
  *  When the cap is reached the oldest entry is evicted before inserting. */
 export const MAX_AUTH_FAILURE_ENTRIES = 10_000
 
+/** #5555.3 — cap on the number of per-session history cursors honoured from a
+ *  single `auth` message. A client only ever replays its bound/active session
+ *  on connect, so a handful is the realistic case; this bound keeps a
+ *  malformed/oversized map from inflating the post-auth path. */
+export const MAX_HISTORY_CURSORS = 64
+
 /** Lenient counter for benign pairing failures (already_used / expired).
  *
  *  These reasons are exempt from the strict brute-force `authFailures` bucket
@@ -183,6 +189,26 @@ export function handleAuthMessage(ctx, ws, msg) {
     if (typeof authData.eagerPublicKey === 'string' && authData.eagerPublicKey &&
         typeof authData.eagerSalt === 'string' && authData.eagerSalt) {
       client.eagerKeyExchange = { publicKey: authData.eagerPublicKey, salt: authData.eagerSalt }
+    }
+
+    // #5555.3 (lastSeq delta replay) — stash the per-session history cursor map
+    // so replayHistory (via sendPostAuthInfo → onAuthSuccess) can send only the
+    // entries newer than the client's cursor. The schema already coerced it to
+    // a { [sessionId]: nonNegativeInt } record; cap the honoured keys
+    // defensively (MAX_HISTORY_CURSORS) so an oversized map can't bloat the
+    // post-auth path. Absent → client.historyCursors stays undefined → full
+    // replay (the backward-compatible default).
+    if (authData.historyCursors && typeof authData.historyCursors === 'object') {
+      const cursors = {}
+      let n = 0
+      for (const [sid, seq] of Object.entries(authData.historyCursors)) {
+        if (n >= MAX_HISTORY_CURSORS) break
+        if (typeof seq === 'number' && Number.isFinite(seq) && seq >= 0) {
+          cursors[sid] = seq
+          n++
+        }
+      }
+      if (n > 0) client.historyCursors = cursors
     }
 
     onAuthSuccess(ws, client)

@@ -24,9 +24,57 @@ export class SessionMessageHistory extends EventEmitter {
     super()
     this._maxHistory = maxMessages ?? maxHistory ?? 1000
     this._maxToolInput = maxToolInput || null
-    this._messageHistory = new Map()    // sessionId -> Array<{ type, ...data }>
+    this._messageHistory = new Map()    // sessionId -> Array<{ type, _seq, ...data }>
     this._pendingStreams = new Map()     // sessionId:messageId -> accumulated delta text
     this._historyTruncated = new Map()  // sessionId -> boolean
+    // #5555.3 (lastSeq delta replay) — per-session monotonic history sequence.
+    // Every entry pushed into the ring buffer is stamped with a strictly
+    // increasing `_seq` (1-based). The counter NEVER resets while a session
+    // lives, even as the ring buffer trims old entries off the front — so a
+    // client cursor (`lastSeq`) can be compared against the oldest RETAINED
+    // entry's seq to detect a trim gap and fall back to a full replay. The
+    // seq is server-internal bookkeeping; the wire only exposes it as
+    // `historySeq` on replayed entries (see ws-history.js).
+    this._seqCounters = new Map()        // sessionId -> next seq to assign (>= 1)
+  }
+
+  /**
+   * #5555.3 — allocate the next monotonic seq for a session.
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  _nextSeq(sessionId) {
+    const next = this._seqCounters.get(sessionId) || 1
+    this._seqCounters.set(sessionId, next + 1)
+    return next
+  }
+
+  /**
+   * #5555.3 — seq of the oldest entry still retained in the ring buffer, or
+   * null when the session has no history. Used by the cursor-replay path to
+   * detect whether a client's cursor points at an entry that has since been
+   * trimmed off the front (gap → full-replay fallback).
+   * @param {string} sessionId
+   * @returns {number|null}
+   */
+  getOldestSeq(sessionId) {
+    const history = this._messageHistory.get(sessionId)
+    if (!history || history.length === 0) return null
+    const seq = history[0]._seq
+    return typeof seq === 'number' ? seq : null
+  }
+
+  /**
+   * #5555.3 — seq of the newest entry, or 0 when the session has no history
+   * (so `lastSeq >= getLatestSeq` cleanly means "nothing newer to replay").
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  getLatestSeq(sessionId) {
+    const history = this._messageHistory.get(sessionId)
+    if (!history || history.length === 0) return 0
+    const seq = history[history.length - 1]._seq
+    return typeof seq === 'number' ? seq : 0
   }
 
   /**
@@ -106,6 +154,19 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {Array} history
    */
   setHistory(sessionId, history) {
+    // #5555.3 — restored entries predate the seq scheme (it is server-internal
+    // and not persisted), so stamp them with a fresh 1..N sequence and advance
+    // the counter past the end. A reconnecting client's cursor from a PRIOR
+    // server process can't be honoured across a restart (seqs reset to 1), so
+    // it will simply fall through to a full replay — the safe default.
+    if (Array.isArray(history)) {
+      let seq = 1
+      for (const entry of history) {
+        if (entry && typeof entry === 'object') entry._seq = seq
+        seq++
+      }
+      this._seqCounters.set(sessionId, seq)
+    }
     this._messageHistory.set(sessionId, history)
   }
 
@@ -327,6 +388,12 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {string} sessionId
    */
   _pushHistory(history, entry, sessionId) {
+    // #5555.3 — stamp the monotonic per-session seq before pushing. The counter
+    // keeps climbing past any front-trim below, so a cursor can always be
+    // compared against the oldest retained entry's seq to detect a trim gap.
+    if (entry && typeof entry === 'object' && entry._seq === undefined) {
+      entry._seq = this._nextSeq(sessionId)
+    }
     history.push(entry)
     if (history.length > this._maxHistory) {
       history.shift()
@@ -343,6 +410,9 @@ export class SessionMessageHistory extends EventEmitter {
   truncateEntry(entry) {
     const MAX = 50 * 1024
     const clone = { ...entry }
+    // #5555.3 — `_seq` is per-process server bookkeeping (reassigned 1..N on
+    // restore via setHistory), so keep it out of the persisted state file.
+    delete clone._seq
     if (typeof clone.content === 'string' && clone.content.length > MAX) {
       clone.content = clone.content.slice(0, MAX) + '[truncated]'
     }
@@ -396,6 +466,7 @@ export class SessionMessageHistory extends EventEmitter {
   cleanupSession(sessionId) {
     this._messageHistory.delete(sessionId)
     this._historyTruncated.delete(sessionId)
+    this._seqCounters.delete(sessionId)
 
     // Clean up pending stream state (composite keys: `${sessionId}:messageId`)
     const prefix = sessionId + ':'
@@ -413,5 +484,6 @@ export class SessionMessageHistory extends EventEmitter {
     this._messageHistory.clear()
     this._historyTruncated.clear()
     this._pendingStreams.clear()
+    this._seqCounters.clear()
   }
 }

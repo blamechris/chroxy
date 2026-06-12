@@ -1941,6 +1941,27 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #5555.3 — seq of the oldest history entry still retained in the ring
+   * buffer (null when empty). The cursor-replay path compares a client's
+   * `lastSeq` against this to detect a trim gap.
+   * @param {string} sessionId
+   * @returns {number|null}
+   */
+  getOldestHistorySeq(sessionId) {
+    return this._history.getOldestSeq(sessionId)
+  }
+
+  /**
+   * #5555.3 — seq of the newest history entry (0 when empty). When a client's
+   * `lastSeq >= this`, there is nothing newer to replay.
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  getLatestHistorySeq(sessionId) {
+    return this._history.getLatestSeq(sessionId)
+  }
+
+  /**
    * Get the conversation ID (SDK session ID) for a session.
    * @returns {string|null}
    */

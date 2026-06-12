@@ -731,26 +731,143 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
 }
 
 /**
- * Replay message history for a session to a single client.
- * Sends the full ring buffer in batches to yield the event loop.
+ * #5555.3 — resolve a client's history cursor for a session into a replay plan.
  *
- * Marks the replay as `fullHistory: true` so clients clear their per-session
- * messages array before applying the replayed events. Without this, every
- * reconnect (the client re-enters `replayHistory` each time it reconnects to
- * an existing session) appends a fresh copy of the ring buffer on top of
- * whatever the client already had. `isReplayDuplicate` cannot save us when
- * ring-buffer entries and live-broadcast entries have different messageIds —
- * the user-visible failure is duplicated assistant turns and scrambled order
- * (#3743; discovered during the v0.7.16 dogfood smoke-test in #3741).
+ * Given the client's `lastSeq` for this session (the highest `historySeq` it
+ * has already applied), decide:
+ *   - `fullHistory`: true  → replay the WHOLE retained ring buffer; the client
+ *                            must REBUILD (swap) its message set. This is the
+ *                            backward-compatible default and the fallback for
+ *                            every case we can't honour a cursor.
+ *   - `fullHistory`: false → CURSOR replay; replay only entries with
+ *                            `_seq > lastSeq`. Naturally append-only on the
+ *                            client; near-zero on a quick reconnect.
+ *   - `startOffset`: index into `history` of the first entry to send.
+ *
+ * Fallback to full replay (fullHistory: true, startOffset 0) when:
+ *   - no cursor supplied (old client, or first connect),
+ *   - cursor <= 0 (client has nothing yet),
+ *   - cursor > latestSeq — the client's cursor is numerically AHEAD of the
+ *     newest retained entry. This is the server-restart reassignment trap:
+ *     `_seq` is server-internal and reassigned 1..N on state restore, so a
+ *     client reconnecting after a restart can hold a cursor (e.g. 500) far
+ *     above the freshly-reassigned latest (e.g. 300). The trim-gap check below
+ *     does NOT catch this (oldest is 1, not `> 501`), and a delta replay would
+ *     hand the client an EMPTY slice while it keeps stale messages and never
+ *     rebuilds — and the cursor (500) would never recover past latest (300).
+ *     Force a full rebuild so the client re-syncs to the authoritative set.
+ *   - the oldest RETAINED entry's seq is `> lastSeq + 1` — i.e. the entry the
+ *     cursor pointed just-after has been trimmed off the front (or the seqs
+ *     reset on a server restart), so a delta replay would leave a gap. The
+ *     client can't append across a gap, so it must rebuild.
+ *
+ * When `lastSeq === latestSeq` the client is already current: cursor replay with
+ * an empty slice (startOffset === history.length). The caller still emits the
+ * start/end frames so the client clears its `receivingHistoryReplay` flag and
+ * resolves any stale prompts — just with nothing to append.
+ *
+ * @param {object} sessionManager
+ * @param {Array} history - the retained ring buffer (already fetched)
+ * @param {string} sessionId
+ * @param {number|null|undefined} lastSeq - client cursor, if any
+ * @param {number} [latestSeq] - seq of the newest retained entry (0 when empty)
+ * @returns {{ fullHistory: boolean, startOffset: number }}
  */
-export function replayHistory(ctx, ws, sessionId) {
-  const { sessionManager, send } = ctx
+export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq) {
+  // No cursor / nothing applied yet → full replay (backward compatible).
+  if (typeof lastSeq !== 'number' || !Number.isFinite(lastSeq) || lastSeq <= 0) {
+    return { fullHistory: true, startOffset: 0 }
+  }
+  // Cursor ahead of the newest retained entry (server-restart seq reassignment,
+  // or any seq regression): a delta replay would yield an empty slice and leave
+  // the client wedged on stale messages with a cursor that never recovers. Force
+  // a full rebuild. `latestSeq` is sourced by the caller from
+  // getLatestHistorySeq; fall back to a fetch here so a direct caller / test
+  // that omits it still gets the guard.
+  const resolvedLatest = typeof latestSeq === 'number' && Number.isFinite(latestSeq)
+    ? latestSeq
+    : (typeof sessionManager.getLatestHistorySeq === 'function'
+        ? sessionManager.getLatestHistorySeq(sessionId)
+        : 0)
+  if (lastSeq > resolvedLatest) {
+    return { fullHistory: true, startOffset: 0 }
+  }
+  const oldestSeq = typeof sessionManager.getOldestHistorySeq === 'function'
+    ? sessionManager.getOldestHistorySeq(sessionId)
+    : null
+  // Empty history can't happen here (caller guards history.length), but be safe.
+  if (oldestSeq === null) return { fullHistory: true, startOffset: 0 }
+  // Trim gap (or post-restart seq reset): the entry just after the cursor is
+  // gone, so a delta replay would skip entries. Rebuild instead.
+  if (oldestSeq > lastSeq + 1) {
+    return { fullHistory: true, startOffset: 0 }
+  }
+  // Cursor honoured — find the first entry strictly newer than lastSeq. The
+  // ring buffer is seq-ordered, so a linear scan from the front is fine (and
+  // typically lands on the tail for a quick reconnect).
+  let startOffset = 0
+  while (startOffset < history.length && (history[startOffset]._seq || 0) <= lastSeq) {
+    startOffset++
+  }
+  return { fullHistory: false, startOffset }
+}
+
+/**
+ * Replay message history for a session to a single client.
+ * Sends the retained ring buffer in batches to yield the event loop.
+ *
+ * #5555.3 — honours an optional per-session client cursor
+ * (`client.historyCursors[sessionId]`). When the cursor can be honoured the
+ * replay is INCREMENTAL: only entries newer than the cursor are sent and the
+ * `history_replay_start` frame carries `fullHistory: false`, telling the client
+ * to APPEND (no message wipe, no blank flash). When the cursor can't be honoured
+ * (no cursor / trimmed past / seq reset) the replay falls back to FULL, with
+ * `fullHistory: true` — the long-standing rebuild path.
+ *
+ * Each replayed entry carries its `historySeq` (the server-internal monotonic
+ * seq) so the client can advance its cursor for the next reconnect.
+ *
+ * The `fullHistory: true` flag is why every reconnect doesn't stack duplicate
+ * ring buffers: without it, the client would append a fresh copy on top of what
+ * it already had. `isReplayDuplicate` cannot save us when ring-buffer entries
+ * and live-broadcast entries have different messageIds — the user-visible
+ * failure is duplicated assistant turns and scrambled order (#3743; discovered
+ * during the v0.7.16 dogfood smoke-test in #3741).
+ */
+export function replayHistory(ctx, ws, sessionId, opts = {}) {
+  const { sessionManager, send, clients } = ctx
   if (!sessionManager) return
   const history = sessionManager.getHistory(sessionId)
   if (history.length === 0) return
 
   const truncated = sessionManager.isHistoryTruncated(sessionId)
-  send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory: true })
+
+  // #5555.3 — resolve the client's cursor into a replay plan. clients map may
+  // be absent in some test fixtures → treat as no cursor (full replay).
+  //
+  // `opts.forceFull` short-circuits the cursor and forces a FULL rebuild. The
+  // CONNECT handshake (sendPostAuthInfo) honours the cursor — the client was
+  // fully disconnected, so no background live messages arrived to desync it.
+  // SESSION SWITCH (session-handlers.js) passes forceFull: a background session
+  // streams live broadcasts into the client's per-session messages WHILE it's
+  // viewed elsewhere, so the cursor lags behind those live appends and a delta
+  // replay would re-send (and, with mismatched ids, duplicate) them. Forcing a
+  // full rebuild on switch keeps the long-standing authoritative-replace
+  // semantics and the atomic swap (#5555.4) hides the rebuild with no flash.
+  const client = clients && typeof clients.get === 'function' ? clients.get(ws) : null
+  const lastSeq = opts.forceFull ? undefined : client?.historyCursors?.[sessionId]
+
+  // `latestSeq` rides the start frame so the client can advance its cursor even
+  // when the slice is empty (already-current reconnect) — there'd be no entry
+  // to read a `historySeq` off otherwise. Defensive against legacy ctx fixtures
+  // whose manager predates the seq helper. Computed BEFORE resolveReplayPlan so
+  // the cursor-ahead-of-latest guard (#5555.3 server-restart trap) can use it.
+  const latestSeq = typeof sessionManager.getLatestHistorySeq === 'function'
+    ? sessionManager.getLatestHistorySeq(sessionId)
+    : 0
+  const { fullHistory, startOffset } = resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq)
+
+  send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory, latestSeq })
 
   const CHUNK_SIZE = 20
   const sendChunk = (offset) => {
@@ -772,7 +889,11 @@ export function replayHistory(ctx, ws, sessionId) {
     let nextOffset = end
     for (let i = offset; i < end; i++) {
       const entry = history[i]
-      send(ws, { ...entry, sessionId })
+      // #5555.3 — surface the server-internal `_seq` to the client as
+      // `historySeq` (and strip the underscore-prefixed internal field) so the
+      // client can advance its per-session cursor as it applies each entry.
+      const { _seq, ...wireEntry } = entry
+      send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
       // #4628: mirror the live `result → agent_idle` fan-out from
       // event-normalizer.js. The dashboard's handler dispatch table has
       // no `result` entry — only `agent_idle` — so a raw `result` in
@@ -808,10 +929,18 @@ export function replayHistory(ctx, ws, sessionId) {
       // tool_result payloads.
       scheduleAfterDrain(ws, () => sendChunk(nextOffset))
     } else {
-      send(ws, { type: 'history_replay_end', sessionId })
+      send(ws, { type: 'history_replay_end', sessionId, latestSeq })
     }
   }
-  sendChunk(0)
+  // #5555.3 — start at the resolved offset: 0 for a full replay, the
+  // first-newer-than-cursor index for a delta replay. When the client is
+  // already current (startOffset === history.length) this immediately falls
+  // through to the empty-slice path and emits start+end with nothing between.
+  if (startOffset >= history.length) {
+    send(ws, { type: 'history_replay_end', sessionId, latestSeq })
+  } else {
+    sendChunk(startOffset)
+  }
 }
 
 /**

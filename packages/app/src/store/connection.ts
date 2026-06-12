@@ -144,6 +144,10 @@ import {
   // to `useSpeechRecognition({ mode })`. Now gated by the same guard
   // the dashboard uses (#4853).
   isVoiceInputMode,
+  // #5555.3 — per-session history cursors for delta replay, sent in `auth`.
+  getHistoryCursors,
+  // #5555.4 — hard-reset the replay reconcile state on explicit disconnect.
+  resetReplayReconcile,
 } from '@chroxy/store-core';
 import type { InputSettings } from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
@@ -969,6 +973,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             // stashed keypair. Generating eagerly is cheap and harmless even
             // when the server ends up not requiring encryption.
             const eager = prepareEagerKeyExchange();
+            // #5555.3 — send per-session history cursors so the server replays
+            // only entries newer than what we've applied. Empty on first
+            // connect → omitted → full replay (old-client shape).
+            const historyCursors = getHistoryCursors();
             socket.send(JSON.stringify({
               type: 'auth',
               token,
@@ -977,6 +985,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               capabilities: CLIENT_CAPABILITIES.mobile,
               eagerPublicKey: eager.publicKey,
               eagerSalt: eager.salt,
+              ...(Object.keys(historyCursors).length > 0 ? { historyCursors } : {}),
             }));
           }
         }
@@ -1119,6 +1128,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearInactivityWarningsAcrossSessions(set, get);
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
+    // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay
+    // baseline AND the history cursors so a later connect (possibly to a
+    // different server) starts from a full replay. Tunnel-blip RECONNECTS keep
+    // cursors (they don't run disconnect(); auth_ok clears only the baseline).
+    resetReplayReconcile({ clearCursors: true });
     // Flush and clear any pending delta buffer
     clearDeltaBuffers();
     // Clear permission boundary split tracking

@@ -66,7 +66,12 @@ function handleSwitchSession(ws, client, msg, ctx) {
   loggerForSession('ws', targetId).info(`Client ${client.id} switched to session ${targetId}`)
   ctx.transport.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
   ctx.transport.sendSessionInfo(ws, targetId)
-  ctx.transport.replayHistory(ws, targetId)
+  // #5555.3 — forceFull: a session SWITCH gets the authoritative full rebuild,
+  // not a cursor delta. Background sessions accumulate live broadcasts in the
+  // client's per-session message list while viewed elsewhere, so the replay
+  // cursor lags and a delta would re-send/duplicate them. The connect handshake
+  // (not this path) is where the cursor delta-replay win applies.
+  ctx.transport.replayHistory(ws, targetId, { forceFull: true })
   // Re-send provider-scoped available_models so clients that switch from a
   // Claude session to a Codex/Gemini session (or vice-versa) update their
   // model dropdown immediately (#2956).
@@ -230,7 +235,8 @@ async function handleDestroySession(ws, client, msg, ctx) {
       if (entry) {
         ctx.transport.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
         ctx.transport.sendSessionInfo(clientWs, firstId)
-        ctx.transport.replayHistory(clientWs, firstId)
+        // #5555.3 — forced re-home after a destroy: authoritative full rebuild.
+        ctx.transport.replayHistory(clientWs, firstId, { forceFull: true })
       }
       broadcastFocusChanged(c, firstId, ctx)
     }
@@ -298,7 +304,9 @@ function handleSubscribeSessions(ws, client, msg, ctx) {
   })
   for (const sid of newlySubscribed) {
     ctx.transport.sendSessionInfo(ws, sid)
-    ctx.transport.replayHistory(ws, sid)
+    // #5555.3 — new subscription: authoritative full rebuild (the client may
+    // hold stale cached state for this session; cursor delta is connect-only).
+    ctx.transport.replayHistory(ws, sid, { forceFull: true })
   }
 }
 

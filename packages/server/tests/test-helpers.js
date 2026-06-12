@@ -261,6 +261,20 @@ export function createMockSessionManager(sessions = [], overrides = {}) {
     return list
   }
   manager.getHistory = () => []
+  // #5555.3 — seq helpers used by replayHistory's cursor logic. Default to the
+  // _seq stamped on the (overridable) getHistory entries so cursor-replay tests
+  // can drive them by supplying entries with `_seq`; tests that don't care get
+  // the no-history defaults (null oldest, 0 latest).
+  manager.getOldestHistorySeq = () => {
+    const h = manager.getHistory()
+    if (!Array.isArray(h) || h.length === 0) return null
+    return typeof h[0]._seq === 'number' ? h[0]._seq : null
+  }
+  manager.getLatestHistorySeq = () => {
+    const h = manager.getHistory()
+    if (!Array.isArray(h) || h.length === 0) return 0
+    return typeof h[h.length - 1]._seq === 'number' ? h[h.length - 1]._seq : 0
+  }
   manager.recordUserInput = () => {}
   manager.touchActivity = () => {}
   manager.getFullHistoryAsync = async () => []

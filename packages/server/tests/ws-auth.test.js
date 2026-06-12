@@ -298,6 +298,68 @@ describe('handleAuthMessage', () => {
     })
   })
 
+  // #5555.3 (lastSeq delta replay) — the per-session history cursor map stashed
+  // off `auth` so replayHistory can send only entries newer than the cursor.
+  describe('history cursors (#5555.3)', () => {
+    it('stashes a valid per-session history cursor map', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        historyCursors: { 'sess-1': 42, 'sess-2': 0 },
+      })
+      assert.deepEqual(client.historyCursors, { 'sess-1': 42, 'sess-2': 0 })
+    })
+
+    it('leaves historyCursors undefined for old clients (field absent)', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
+      assert.equal(client.historyCursors, undefined)
+    })
+
+    it('rejects auth when a cursor value is invalid (negative / non-finite / non-integer / non-numeric)', () => {
+      // AuthSchema validates historyCursors as
+      // z.record(z.string(), z.number().int().nonnegative()), so a single bad
+      // VALUE fails the whole safeParse → auth_fail (invalid_message), not a
+      // silent filter. The handler's defensive value-filter loop is therefore
+      // belt-and-suspenders only — these inputs never reach it. We pin the real
+      // wire behaviour here so a future schema relaxation can't regress to
+      // silently honouring a malformed cursor.
+      for (const bad of [-1, Infinity, NaN, 1.5, 'x', null]) {
+        const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+        handleAuthMessage(ctx, ws, {
+          type: 'auth',
+          token: 'good-token',
+          historyCursors: { ok: 7, bad },
+        })
+        const last = ws.lastSent()
+        assert.equal(last?.type, 'auth_fail', `bad value ${String(bad)} must reject auth`)
+        assert.equal(last?.reason, 'invalid_message')
+        assert.equal(client.authenticated, false)
+        assert.equal(client.historyCursors, undefined)
+      }
+    })
+
+    it('honours a fully-valid cursor map (handler filter passes every entry through)', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        historyCursors: { ok: 7, zero: 0 },
+      })
+      assert.deepEqual(client.historyCursors, { ok: 7, zero: 0 })
+    })
+
+    it('caps the number of honoured cursors at MAX_HISTORY_CURSORS', () => {
+      const big = {}
+      for (let i = 0; i < 200; i++) big[`s${i}`] = i + 1
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token', historyCursors: big })
+      assert.ok(client.historyCursors)
+      assert.equal(Object.keys(client.historyCursors).length, 64)
+    })
+  })
+
   describe('invalid token — auth failure tracking', () => {
     it('rejects invalid token with auth_fail', () => {
       const { ctx, ws } = makeAuthCtx({

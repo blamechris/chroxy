@@ -2744,30 +2744,31 @@ describe('dashboard message-handler dispatch', () => {
       expect(msgs[0].id).toBe('tool-1')
     })
 
-    it('deduplicates tool_use by stable messageId during session-switch replay', () => {
-      seedWithTool('tool-1')
+    it('deduplicates tool_use by stable messageId during a full-rebuild replay (#5555.4)', () => {
+      // #5555.4 — full rebuild no longer wipes at start; the old prefix stays
+      // visible and the replayed set is appended then swapped at end. Dedup
+      // during rebuild is scoped to the appended tail, so a replay that sends
+      // the SAME tool twice still collapses to one entry, and the atomic swap
+      // drops the pre-replay prefix.
+      seedWithTool('tool-1') // pre-replay prefix (stays visible, no flash)
       handleMessage(
         { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
         ctx() as any,
       )
-      // session-switch replay clears messages first, so re-seed a tool to
-      // simulate the replay sending the same tool a client already cached
-      // (e.g. from a previous fetch). We bypass the clear by re-injecting.
-      ;(store.getState() as any).sessionStates.s1.messages = [
-        { id: 'tool-1', type: 'tool_use', content: 'Bash: ls', tool: 'Bash', timestamp: 1 },
-      ]
-      handleMessage(
-        {
-          type: 'tool_start',
-          messageId: 'tool-1',
-          tool: 'Bash',
-          input: 'ls',
-          sessionId: 's1',
-        },
-        ctx() as any,
-      )
+      // Messages are NOT cleared — the prefix is still there.
+      expect((store.getState() as any).sessionStates.s1.messages).toHaveLength(1)
+      const send = (id: string) =>
+        handleMessage(
+          { type: 'tool_start', messageId: id, tool: 'Bash', input: 'ls', sessionId: 's1' },
+          ctx() as any,
+        )
+      send('tool-1') // first replayed copy → appended to tail
+      send('tool-1') // duplicate within the replay → deduped against the tail
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      // Atomic swap → only the replayed tail (one tool-1), prefix dropped.
       const msgs = (store.getState() as any).sessionStates.s1.messages
       expect(msgs).toHaveLength(1)
+      expect(msgs[0].id).toBe('tool-1')
     })
 
     it('appends new tool_use whose id is not yet in cache (legitimate replay)', () => {
@@ -5274,17 +5275,17 @@ describe('dashboard message-handler dispatch', () => {
         messages: [originalToolMsg as any],
       })
       // Step 1: tab switch → server sends history_replay_start with
-      // fullHistory:true. The dashboard clears the messages array — this
-      // is what makes the cached-message dedup miss on the replayed
-      // tool_start that follows.
+      // fullHistory:true. #5555.4 — messages are NO LONGER wiped here (no blank
+      // flash); the prefix stays visible until the atomic swap at end. The
+      // replay-dedup cache is scoped to the appended tail, so the cached-message
+      // dedup still "misses" the replayed tool_start (it's not in the tail yet).
       handleMessage(
         { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
         ctx() as any,
       )
-      // After history_replay_start: messages is [] but activeTools must still
-      // hold the original entry with its original startedAt.
+      // After history_replay_start: prefix preserved; activeTools intact.
       let ss = (store.getState() as any).sessionStates.s1
-      expect(ss.messages).toEqual([])
+      expect(ss.messages).toHaveLength(1)
       expect(ss.activeTools).toHaveLength(1)
       expect(ss.activeTools[0].startedAt).toBe(originalStartedAt)
       // Step 2: server replays the original tool_start (same messageId and

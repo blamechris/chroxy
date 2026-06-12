@@ -57,6 +57,12 @@ import {
   // conversation_id migrated to the shared dispatch table (#5556)
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
+  // #5555.3 / #5555.4 — lastSeq cursor + no-blank-flash reconcile.
+  recordHistorySeq,
+  reconcileReplayStart,
+  reconcileReplayEnd,
+  replayDedupCache,
+  resetReplayReconcile,
   handlePermissionExpired as sharedPermissionExpired,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — dashboard adopts the shared permission family + the remaining
@@ -1651,11 +1657,18 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   const toolStartTargetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
   const cached = (() => {
     const targetState = toolStartTargetId ? get().sessionStates[toolStartTargetId] : null;
-    return targetState ? targetState.messages : get().messages;
+    // #5555.4 — scope to the appended replay tail during a full rebuild (see
+    // the `message` case for the rationale).
+    return replayDedupCache(
+      toolStartTargetId,
+      targetState ? targetState.messages : get().messages,
+    );
   })();
   // #4493 — per-session replay scoping. Dedup against the cached history
   // only when THIS message's session is currently replaying.
   const toolStartIsReplay = toolStartTargetId ? _replayingSessions.has(toolStartTargetId) : false;
+  // #5555.3 — advance the cursor for replayed tool_start entries.
+  if (toolStartIsReplay) recordHistorySeq(toolStartTargetId, (msg as { historySeq?: unknown }).historySeq);
   const result = sharedToolStart(msg, get().activeSessionId, toolStartIsReplay, cached);
   if (!result.shouldDispatch || !result.chatMessage) return;
   const toolMsg = result.chatMessage;
@@ -2430,6 +2443,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // per-session replaying set so a reconnect doesn't leave stale ids
       // gating future activity bumps).
       _replayingSessions.clear();
+      // #5555.4 — clear any in-progress replay BASELINE (a rebuild that never
+      // saw its history_replay_end before the socket dropped). Cursors are
+      // intentionally RETAINED so this reconnect's replay can be incremental.
+      resetReplayReconcile();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // #4766: full wire-shape decode lives in the shared parser
@@ -3081,18 +3098,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'history_replay_start': {
       // Parser is shared via store-core; flag mutation stays at this call
       // site (module-level state, not store state).
-      const { fullHistory, sessionId: replayTargetId } = sharedHistoryReplayStart(
+      const { fullHistory, sessionId: replayTargetId, latestSeq } = sharedHistoryReplayStart(
         msg,
         get().activeSessionId,
       );
       // #4493 — track per-session. Falls back to activeSessionId via
       // sharedHistoryReplayStart, matching the gate's targetId resolution.
       if (replayTargetId) _replayingSessions.add(replayTargetId);
-      // Full history replay (from request_full_history): clear messages before replay
-      if (fullHistory) {
-        if (replayTargetId && get().sessionStates[replayTargetId]) {
-          updateSession(replayTargetId, () => ({ messages: [] }));
-        }
+      // #5555.4 — DO NOT wipe messages here. For a full rebuild we record the
+      // pre-replay baseline and keep the existing messages visible; the
+      // authoritative replayed set is appended after the baseline and swapped
+      // in atomically at history_replay_end (no blank flash). For a delta
+      // replay (cursor honoured) this is purely append-only. `latestSeq` seeds
+      // the cursor so an already-current empty replay still advances it.
+      {
+        const curLen =
+          (replayTargetId && get().sessionStates[replayTargetId]?.messages.length) || 0;
+        reconcileReplayStart(replayTargetId, fullHistory, curLen, latestSeq);
       }
       // Clear transient state — these events are not replayed from history,
       // so any surviving entries are stale from pre-disconnect
@@ -3127,6 +3149,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const endTargetId =
           (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
         if (endTargetId) _replayingSessions.delete(endTargetId);
+        // #5555.4 — atomic swap for a full rebuild: replace messages with the
+        // appended replayed tail in ONE update (old prefix dropped here, not at
+        // start → no blank flash). reconcileReplayEnd also advances the cursor
+        // from `latestSeq`. Returns null for a delta replay (nothing to swap).
+        const endLatestSeq =
+          typeof msg.latestSeq === 'number' && Number.isFinite(msg.latestSeq)
+            ? msg.latestSeq
+            : undefined;
+        if (endTargetId && get().sessionStates[endTargetId]) {
+          const { swappedMessages } = reconcileReplayEnd(
+            endTargetId,
+            get().sessionStates[endTargetId]!.messages,
+            endLatestSeq,
+          );
+          if (swappedMessages) {
+            updateSession(endTargetId, () => ({
+              messages: swappedMessages as SessionState['messages'],
+            }));
+          }
+        } else {
+          // Session vanished mid-replay — still settle the cursor.
+          reconcileReplayEnd(endTargetId, [], endLatestSeq);
+        }
       }
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
@@ -3179,11 +3224,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Resolve the cache used for replay-dedup (target session if known,
       // else the global message log).
       const targetState = targetId ? get().sessionStates[targetId] : null;
-      const cached = targetState ? targetState.messages : get().messages;
+      // #5555.4 — during a FULL rebuild, dedup only against the appended replay
+      // tail (replayDedupCache slices off the about-to-be-discarded prefix) so a
+      // replayed entry isn't suppressed by an id in the prefix and then lost in
+      // the swap. For delta replay / no rebuild this returns the whole array.
+      const cached = replayDedupCache(
+        targetId,
+        targetState ? targetState.messages : get().messages,
+      );
       // #4493 — dedup against history only when THIS message's session is
       // currently replaying. A module-wide boolean would suppress live
       // messages for session B while A replays.
       const messageIsReplay = targetId ? _replayingSessions.has(targetId) : false;
+      // #5555.3 — advance this session's cursor as we apply a replayed entry.
+      if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
       if (!result.shouldDispatch) break;
       const newMsg = result.chatMessage;

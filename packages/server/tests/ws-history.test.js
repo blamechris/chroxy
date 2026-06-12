@@ -8,6 +8,7 @@ import {
   sendPostAuthInfo,
   sendSessionInfo,
   replayHistory,
+  resolveReplayPlan,
   flushPostAuthQueue,
   scheduleAfterDrain,
   scheduleProviderModelsRefresh,
@@ -1439,6 +1440,249 @@ describe('replayHistory', () => {
 
     const types = ctx._sends.map(m => m.type)
     assert.ok(!types.includes('agent_idle'), 'no result → no synthetic agent_idle')
+  })
+})
+
+// #5555.3 — lastSeq delta replay. The client sends a per-session cursor in
+// `auth` (stashed on client.historyCursors); replayHistory sends only entries
+// newer than the cursor, flagging fullHistory:false so the client appends
+// rather than rebuilds. Falls back to a full replay (fullHistory:true) when the
+// cursor can't be honoured (trimmed / unknown / reset).
+describe('replayHistory — lastSeq delta replay (#5555.3)', () => {
+  // Build a session-manager mock whose history entries carry _seq, and whose
+  // seq helpers derive from the (front-trimmable) entries. `oldestSeq` lets a
+  // test simulate front-trimming without actually mutating the array.
+  function managerWith(history, { truncated = false } = {}) {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    manager.getHistory = () => history
+    manager.isHistoryTruncated = () => truncated
+    return manager
+  }
+
+  it('resolveReplayPlan: no cursor → full replay from offset 0', () => {
+    const history = [{ type: 'm', _seq: 1 }, { type: 'm', _seq: 2 }]
+    const manager = managerWith(history)
+    assert.deepEqual(resolveReplayPlan(manager, history, 'sess-1', undefined), { fullHistory: true, startOffset: 0 })
+    assert.deepEqual(resolveReplayPlan(manager, history, 'sess-1', 0), { fullHistory: true, startOffset: 0 })
+  })
+
+  it('resolveReplayPlan: cursor at an entry → delta replay starts at the NEXT entry (exact boundary)', () => {
+    // seqs 1..5; cursor = 3 → entry _seq=3 NOT resent, _seq=4 is the first sent.
+    const history = [1, 2, 3, 4, 5].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 3)
+    assert.equal(plan.fullHistory, false)
+    assert.equal(plan.startOffset, 3) // index of _seq=4
+    assert.equal(history[plan.startOffset]._seq, 4)
+  })
+
+  it('resolveReplayPlan: cursor == latest → empty delta slice (already current)', () => {
+    const history = [1, 2, 3].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 3)
+    assert.equal(plan.fullHistory, false)
+    assert.equal(plan.startOffset, history.length) // nothing to send
+  })
+
+  it('resolveReplayPlan: cursor below oldest retained (trim gap) → full replay fallback', () => {
+    // Ring buffer trimmed: oldest retained is _seq=10, client cursor is 4.
+    // 10 > 4 + 1 → gap → full replay.
+    const history = [10, 11, 12].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 4)
+    assert.deepEqual(plan, { fullHistory: true, startOffset: 0 })
+  })
+
+  it('resolveReplayPlan: cursor exactly one below oldest (no gap) → delta from offset 0', () => {
+    // oldest retained _seq=5, cursor=4 → 5 === 4+1 → contiguous, replay all.
+    const history = [5, 6, 7].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 4)
+    assert.deepEqual(plan, { fullHistory: false, startOffset: 0 })
+  })
+
+  // #5555.3 server-restart trap: `_seq` is server-internal and reassigned 1..N
+  // on state restore, so a client reconnecting after a restart can hold a cursor
+  // NUMERICALLY AHEAD of the freshly-reassigned latest. The trim-gap check
+  // (oldest > cursor+1) does NOT catch this (oldest is 1, not > cursor+1). Without
+  // a cursor>latest guard the client would get an EMPTY delta, keep stale
+  // messages, never rebuild, and its cursor would never recover past latest.
+  it('resolveReplayPlan: cursor AHEAD of latest (server-restart seq reassignment) → full replay', () => {
+    // Restored history reassigned 1..N (oldest=1, latest=300, but only 3 entries
+    // modelled here); client cursor from a prior process is 500.
+    const history = [1, 2, 3].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    // managerWith leaves getLatestHistorySeq deriving from getHistory → latest=3.
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 500)
+    assert.deepEqual(plan, { fullHistory: true, startOffset: 0 },
+      'cursor ahead of latest must force a full rebuild, not an empty delta')
+  })
+
+  it('resolveReplayPlan: cursor exactly one above latest → full replay (boundary)', () => {
+    const history = [1, 2, 3].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 4) // latest=3
+    assert.deepEqual(plan, { fullHistory: true, startOffset: 0 })
+  })
+
+  it('resolveReplayPlan: explicit latestSeq arg drives the cursor-ahead guard', () => {
+    // Caller passes latestSeq directly (the production path in replayHistory).
+    const history = [1, 2, 3].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    // latestSeq passed = 3; cursor 4 > 3 → full replay even though the manager
+    // helper would agree. Verifies the arg is honoured (no double-fetch needed).
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 4, 3)
+    assert.deepEqual(plan, { fullHistory: true, startOffset: 0 })
+  })
+
+  it('delta replay: start frame carries fullHistory:false + latestSeq, only newer entries sent', async () => {
+    const history = [1, 2, 3, 4, 5].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws, { historyCursors: { 'sess-1': 3 } })
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, false)
+    assert.equal(start.latestSeq, 5)
+    const replayed = ctx._sends.filter(m => m.type === 'response')
+    assert.deepEqual(replayed.map(m => m.historySeq), [4, 5], 'only entries newer than cursor 3 are sent, in order')
+    // _seq internal field must not leak; wire field is historySeq.
+    assert.ok(replayed.every(m => m._seq === undefined), '_seq stripped from wire')
+    assert.ok(ctx._sends.some(m => m.type === 'history_replay_end'))
+  })
+
+  it('delta replay: cursor == latest → start+end with no entries between (no blank, nothing to append)', async () => {
+    const history = [1, 2, 3].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws, { historyCursors: { 'sess-1': 3 } })
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const types = ctx._sends.map(m => m.type)
+    assert.deepEqual(types, ['history_replay_start', 'history_replay_end'])
+    assert.equal(ctx._sends[0].fullHistory, false)
+    assert.equal(ctx._sends[0].latestSeq, 3)
+    assert.equal(ctx._sends[1].latestSeq, 3)
+  })
+
+  it('trim gap → full replay flagged fullHistory:true so the client rebuilds', async () => {
+    // oldest retained _seq=10, cursor=4 → gap → full replay of everything.
+    const history = [10, 11, 12].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history, { truncated: true })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws, { historyCursors: { 'sess-1': 4 } })
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, true)
+    assert.equal(start.truncated, true)
+    const replayed = ctx._sends.filter(m => m.type === 'response')
+    assert.deepEqual(replayed.map(m => m.historySeq), [10, 11, 12], 'full replay sends every retained entry')
+  })
+
+  it('cursor AHEAD of latest (server restart) → full replay rebuild, every entry sent', async () => {
+    // Reconnect after a server restart: history reassigned 1..3, but the client
+    // still presents its pre-restart cursor (500). A delta would yield nothing;
+    // the client must rebuild from the authoritative set instead.
+    const history = [1, 2, 3].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws, { historyCursors: { 'sess-1': 500 } })
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, true, 'cursor-ahead must flag a full rebuild')
+    assert.equal(start.latestSeq, 3)
+    const replayed = ctx._sends.filter(m => m.type === 'response')
+    assert.deepEqual(replayed.map(m => m.historySeq), [1, 2, 3],
+      'full replay re-sends every retained entry so the client re-syncs')
+  })
+
+  it('unknown session cursor (no cursor for THIS session) → full replay', async () => {
+    const history = [1, 2, 3].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    // Client has a cursor for a DIFFERENT session only.
+    registerClient(ctx, ws, { historyCursors: { 'other-session': 2 } })
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, true)
+    assert.equal(ctx._sends.filter(m => m.type === 'response').length, 3)
+  })
+
+  it('old client (no historyCursors at all) → full replay unchanged', async () => {
+    const history = [1, 2, 3].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws) // no historyCursors
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, true)
+    // Full replay still carries historySeq so a NEW client can begin tracking.
+    const replayed = ctx._sends.filter(m => m.type === 'response')
+    assert.deepEqual(replayed.map(m => m.historySeq), [1, 2, 3])
+  })
+
+  it('forceFull overrides the cursor → full rebuild on session switch', async () => {
+    const history = [1, 2, 3, 4, 5].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    // Client HAS a fresh cursor — but a switch must ignore it.
+    registerClient(ctx, ws, { historyCursors: { 'sess-1': 4 } })
+
+    replayHistory(ctx, ws, 'sess-1', { forceFull: true })
+    await new Promise(r => setImmediate(r))
+
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, true)
+    const replayed = ctx._sends.filter(m => m.type === 'response')
+    assert.deepEqual(replayed.map(m => m.historySeq), [1, 2, 3, 4, 5], 'forceFull replays everything despite the cursor')
+  })
+
+  it('seq ordering is preserved across the replay→live boundary', async () => {
+    // Replay entries seqs 1..3 via cursor=1 (sends 2,3). A subsequent live
+    // entry would be _seq=4 in the ring buffer; the replayed slice must end
+    // at the highest retained seq so the client's cursor lands at latest.
+    const history = [1, 2, 3].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws, { historyCursors: { 'sess-1': 1 } })
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const replayed = ctx._sends.filter(m => m.type === 'response')
+    const seqs = replayed.map(m => m.historySeq)
+    assert.deepEqual(seqs, [2, 3])
+    // strictly increasing
+    for (let i = 1; i < seqs.length; i++) assert.ok(seqs[i] > seqs[i - 1])
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.latestSeq, 3, 'client cursor advances to the latest retained seq')
   })
 })
 

@@ -69,6 +69,12 @@ import {
   handleConversationsList as sharedConversationsList,
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
+  // #5555.3 / #5555.4 — lastSeq cursor + no-blank-flash reconcile.
+  recordHistorySeq,
+  reconcileReplayStart,
+  reconcileReplayEnd,
+  replayDedupCache,
+  resetReplayReconcile,
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionExpired as sharedPermissionExpired,
@@ -1242,6 +1248,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // per-session replaying set so a reconnect doesn't leave stale ids
       // gating future activity bumps).
       _ctx.replayingSessions.clear();
+      // #5555.4 — clear any in-progress replay BASELINE (a rebuild that never
+      // saw history_replay_end before the socket dropped). Cursors are RETAINED
+      // so this reconnect's replay can be incremental.
+      resetReplayReconcile();
       _ctx.isSessionSwitchReplay = false;
       _ctx.pendingSwitchSessionId = null;
       if (!ctx.isReconnect) hapticSuccess();
@@ -1746,19 +1756,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'history_replay_start': {
       // Parser is shared via store-core; flag mutation stays at this call
       // site (module-level _ctx state, not store state).
-      const { fullHistory, sessionId: replayTargetId } = sharedHistoryReplayStart(
+      const { fullHistory, sessionId: replayTargetId, latestSeq } = sharedHistoryReplayStart(
         msg,
         get().activeSessionId,
       );
       // #4512 — track per-session. Falls back to activeSessionId via
       // sharedHistoryReplayStart, matching the gate's targetId resolution.
       if (replayTargetId) _ctx.replayingSessions.add(replayTargetId);
-      // Full history replay (from request_full_history): clear messages before replay
+      // #5555.4 — DO NOT wipe messages here. Full rebuild keeps the existing
+      // messages visible and records a baseline; the authoritative replayed set
+      // is appended and swapped in atomically at history_replay_end (no blank
+      // flash). Delta replay (cursor honoured) is purely append-only.
+      // `isSessionSwitchReplay` still gates the same UX paths as before.
       if (fullHistory) {
         _ctx.isSessionSwitchReplay = true;
-        if (replayTargetId && get().sessionStates[replayTargetId]) {
-          updateSession(replayTargetId, () => ({ messages: [] }));
-        }
+      }
+      {
+        const curLen =
+          (replayTargetId && get().sessionStates[replayTargetId]?.messages.length) || 0;
+        reconcileReplayStart(replayTargetId, fullHistory, curLen, latestSeq);
       }
       // Clear transient state — these events are not replayed from history,
       // so any surviving entries are stale from pre-disconnect
@@ -1799,6 +1815,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         const endTargetId =
           (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
         if (endTargetId) _ctx.replayingSessions.delete(endTargetId);
+        // #5555.4 — atomic swap for a full rebuild: replace messages with the
+        // appended replayed tail in ONE update (no blank flash). reconcileReplayEnd
+        // also advances the cursor from `latestSeq`; returns null for delta replay.
+        const endLatestSeq =
+          typeof msg.latestSeq === 'number' && Number.isFinite(msg.latestSeq)
+            ? msg.latestSeq
+            : undefined;
+        if (endTargetId && get().sessionStates[endTargetId]) {
+          const { swappedMessages } = reconcileReplayEnd(
+            endTargetId,
+            get().sessionStates[endTargetId]!.messages,
+            endLatestSeq,
+          );
+          if (swappedMessages) {
+            updateSession(endTargetId, () => ({
+              messages: swappedMessages as SessionState['messages'],
+            }));
+          }
+        } else {
+          reconcileReplayEnd(endTargetId, [], endLatestSeq);
+        }
       }
       _ctx.isSessionSwitchReplay = false;
       // Mark all replayed prompts as answered — any prompt in history
@@ -1835,11 +1872,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Use the shared resolver so trim / empty-string normalization stays
       // consistent with sharedMessageHandler and the rest of store-core.
       const targetId = resolveSessionId(msg, get().activeSessionId);
-      const cached = getSessionMessages(targetId);
+      // #5555.4 — during a full rebuild, dedup only against the appended replay
+      // tail so a replayed entry isn't suppressed by an id in the discarded
+      // prefix and lost in the swap. Delta replay / no rebuild → whole array.
+      const cached = replayDedupCache(targetId, getSessionMessages(targetId));
       // #4512 — dedup against history only when THIS message's session is
       // currently replaying. A per-connection boolean would suppress live
       // messages for session B while A replays.
       const messageIsReplay = targetId ? _ctx.replayingSessions.has(targetId) : false;
+      // #5555.3 — advance the cursor for replayed entries.
+      if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
       if (!result.shouldDispatch) break;
       const newMsg = result.chatMessage;
@@ -1991,12 +2033,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'tool_start': {
       const targetId = (msg.sessionId as string) || get().activeSessionId;
-      const cached = getSessionMessages(targetId);
+      // #5555.4 — scope dedup to the appended replay tail during a full rebuild
+      // (see the `message` case for rationale).
+      const cached = replayDedupCache(targetId, getSessionMessages(targetId));
       // #4512 — dedup against the cached history only when THIS message's
       // session is currently replaying. A per-connection boolean would
       // wrongly suppress live tool_start broadcasts for session B while A
       // is replaying.
       const toolStartIsReplay = targetId ? _ctx.replayingSessions.has(targetId) : false;
+      // #5555.3 — advance the cursor for replayed tool_start entries.
+      if (toolStartIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedToolStart(
         msg,
         get().activeSessionId,

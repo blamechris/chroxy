@@ -2522,6 +2522,7 @@ describe('handleHistoryReplayStart', () => {
       receivingHistoryReplay: true,
       fullHistory: false,
       sessionId: null,
+      latestSeq: null,
     })
   })
 
@@ -2548,6 +2549,7 @@ describe('handleHistoryReplayStart', () => {
       receivingHistoryReplay: true,
       fullHistory: true,
       sessionId: 'sess-1',
+      latestSeq: null,
     })
   })
 
@@ -2583,6 +2585,19 @@ describe('handleHistoryReplayStart', () => {
         'active-1',
       ).sessionId,
     ).toBe('active-1')
+  })
+
+  // #5555.3 — latestSeq cursor advancement.
+  it('parses a finite numeric latestSeq', () => {
+    expect(handleHistoryReplayStart({ latestSeq: 42 }, null).latestSeq).toBe(42)
+    expect(handleHistoryReplayStart({ latestSeq: 0 }, null).latestSeq).toBe(0)
+  })
+
+  it('returns null latestSeq when absent or non-finite (older server / bad value)', () => {
+    expect(handleHistoryReplayStart({}, null).latestSeq).toBeNull()
+    expect(handleHistoryReplayStart({ latestSeq: NaN }, null).latestSeq).toBeNull()
+    expect(handleHistoryReplayStart({ latestSeq: '5' }, null).latestSeq).toBeNull()
+    expect(handleHistoryReplayStart({ latestSeq: Infinity }, null).latestSeq).toBeNull()
   })
 })
 
