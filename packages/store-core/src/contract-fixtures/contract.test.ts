@@ -99,6 +99,15 @@ function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: C
       expect(result.added[i], `${fx.name}: added[${i}]`).toMatchObject(m)
     })
   }
+  if (exp.callbacks) {
+    expect(result.callbacks.length, `${fx.name}: callback count`).toBe(exp.callbacks.length)
+    exp.callbacks.forEach((cb, i) => {
+      expect(result.callbacks[i].name, `${fx.name}: callbacks[${i}].name`).toBe(cb.name)
+      expect(result.callbacks[i].payload, `${fx.name}: callbacks[${i}].payload`).toMatchObject(
+        cb.payload,
+      )
+    })
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -75,6 +75,13 @@ export interface FixtureExpectation {
   flat?: Record<string, unknown>
   /** Expected messages pushed via `addMessage` (partial deep-equal, in order). */
   added?: Array<Record<string, unknown>>
+  /**
+   * Expected imperative-callback invocations (#5653), in order. Each entry is
+   * `{ name, payload }`: the channel name and a partial deep-equal of the
+   * payload. An empty array asserts NO callback fired (the dashboard side of a
+   * file-ops / git case, which DECLINES). Omit the slice to "don't care".
+   */
+  callbacks?: Array<{ name: string; payload: Record<string, unknown> }>
   /** When true, assert NO mutation happened at all (state is untouched). */
   noop?: boolean
 }
@@ -486,6 +493,191 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'notification_prefs',
     message: { type: 'notification_prefs', prefs: 'not-an-object' },
     expect: { noop: true },
+  },
+
+  // -------------------------------------------------------------------------
+  // Slice 3 — file-ops / git wrapper cases (#5653).
+  //
+  // These do NOT mutate the store: their only effect is invoking a one-shot
+  // imperative callback with the parsed payload. They DIVERGE by design — the
+  // app routes through `adapter.getCallback` (so the callback fires through the
+  // shared table), while the dashboard does NOT plug its callbacks into the
+  // table and so DECLINES, handling these in its own switch. Each fixture
+  // documents that split: app fires the callback (store surface is a no-op);
+  // dashboard's shared-table surface is a no-op with NO callback.
+  // -------------------------------------------------------------------------
+  {
+    name: 'directory_listing → app fires directoryListing callback; dashboard declines',
+    type: 'directory_listing',
+    message: {
+      type: 'directory_listing',
+      path: '/root',
+      parentPath: '/',
+      entries: [{ name: 'a.ts' }],
+      error: null,
+    },
+    divergent: {
+      reason:
+        'app opts its imperative-callback registry into the shared table; dashboard reads _directoryListingCallback in its own switch (#5653)',
+      app: {
+        noop: true,
+        callbacks: [
+          {
+            name: 'directoryListing',
+            payload: { path: '/root', parentPath: '/', entries: [{ name: 'a.ts' }], error: null },
+          },
+        ],
+      },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'file_listing → app fires fileBrowser callback; dashboard declines',
+    type: 'file_listing',
+    message: { type: 'file_listing', path: '/p', entries: [], error: 'oops' },
+    divergent: {
+      reason: 'app routes file_listing through the shared table; dashboard handles it locally (#5653)',
+      app: {
+        noop: true,
+        callbacks: [{ name: 'fileBrowser', payload: { path: '/p', parentPath: null, entries: [], error: 'oops' } }],
+      },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'file_content → app fires fileContent callback; dashboard declines',
+    type: 'file_content',
+    message: {
+      type: 'file_content',
+      path: '/f.ts',
+      content: 'x',
+      language: 'typescript',
+      size: 1,
+      truncated: true,
+    },
+    divergent: {
+      reason: 'app routes file_content through the shared table; dashboard handles it locally (#5653)',
+      app: {
+        noop: true,
+        callbacks: [
+          {
+            name: 'fileContent',
+            payload: { path: '/f.ts', content: 'x', language: 'typescript', size: 1, truncated: true, error: null },
+          },
+        ],
+      },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'write_file_result → app fires fileWrite callback; dashboard declines (app-only type)',
+    type: 'write_file_result',
+    message: { type: 'write_file_result', path: '/f.ts' },
+    divergent: {
+      reason: 'app-only type; dashboard has no write_file_result handler and DECLINES via the shared table (#5653)',
+      app: { noop: true, callbacks: [{ name: 'fileWrite', payload: { path: '/f.ts', error: null } }] },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'diff_result → app fires diff callback with files + error; dashboard declines',
+    type: 'diff_result',
+    message: { type: 'diff_result', files: [], error: null },
+    divergent: {
+      reason: 'app routes diff_result through the shared table; dashboard handles it locally (#5653)',
+      app: { noop: true, callbacks: [{ name: 'diff', payload: { files: [], error: null } }] },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'git_status_result → app fires gitStatus callback (5-field payload); dashboard declines',
+    type: 'git_status_result',
+    message: {
+      type: 'git_status_result',
+      branch: 'main',
+      staged: [{ path: 'a.ts', status: 'modified' }],
+      unstaged: [{ path: 'b.ts', status: 'added' }],
+      untracked: ['c.ts'],
+      error: null,
+    },
+    divergent: {
+      reason: 'app routes git_status_result through the shared table; dashboard handles it locally (#5653)',
+      app: {
+        noop: true,
+        callbacks: [
+          {
+            name: 'gitStatus',
+            payload: {
+              branch: 'main',
+              staged: [{ path: 'a.ts', status: 'modified' }],
+              unstaged: [{ path: 'b.ts', status: 'added' }],
+              untracked: ['c.ts'],
+              error: null,
+            },
+          },
+        ],
+      },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'git_branches_result → app fires gitBranches callback; dashboard declines (app-only type)',
+    type: 'git_branches_result',
+    message: {
+      type: 'git_branches_result',
+      branches: [{ name: 'main', isCurrent: true, isRemote: false }],
+      currentBranch: 'main',
+    },
+    divergent: {
+      reason: 'app-only type; dashboard has no git_branches_result handler and DECLINES via the shared table (#5653)',
+      app: {
+        noop: true,
+        callbacks: [
+          {
+            name: 'gitBranches',
+            payload: {
+              branches: [{ name: 'main', isCurrent: true, isRemote: false }],
+              currentBranch: 'main',
+              error: null,
+            },
+          },
+        ],
+      },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'git_stage_result → app fires gitStage callback; dashboard declines (app-only type)',
+    type: 'git_stage_result',
+    message: { type: 'git_stage_result' },
+    divergent: {
+      reason: 'app-only type; dashboard has no git_stage_result handler and DECLINES via the shared table (#5653)',
+      app: { noop: true, callbacks: [{ name: 'gitStage', payload: { error: null } }] },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'git_unstage_result → app routes to the SAME gitStage callback; dashboard declines (app-only type)',
+    type: 'git_unstage_result',
+    message: { type: 'git_unstage_result', error: 'nope' },
+    divergent: {
+      reason: 'app-only type sharing the gitStage channel; dashboard DECLINES via the shared table (#5653)',
+      app: { noop: true, callbacks: [{ name: 'gitStage', payload: { error: 'nope' } }] },
+      dashboard: { noop: true, callbacks: [] },
+    },
+  },
+  {
+    name: 'git_commit_result → app fires gitCommit callback; dashboard declines (app-only type)',
+    type: 'git_commit_result',
+    message: { type: 'git_commit_result', hash: 'abc', message: 'feat: x' },
+    divergent: {
+      reason: 'app-only type; dashboard has no git_commit_result handler and DECLINES via the shared table (#5653)',
+      app: {
+        noop: true,
+        callbacks: [{ name: 'gitCommit', payload: { hash: 'abc', message: 'feat: x', error: null } }],
+      },
+      dashboard: { noop: true, callbacks: [] },
+    },
   },
 ]
 

@@ -79,11 +79,30 @@ import {
   handleWebTaskList,
   // notification_prefs (slice 2 reconcile — app dropped its inline copy)
   handleNotificationPrefs,
+  // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
+  handleDirectoryListing,
+  handleFileListing,
+  handleFileContent,
+  handleWriteFileResult,
+  handleDiffResult,
+  handleGitStatusResult,
+  handleGitBranchesResult,
+  handleGitStageResult,
+  handleGitCommitResult,
   resolveSessionId,
   type PermissionMode,
   type PermissionRule,
   type PendingPermissionConfirm,
   type NotificationPrefsState,
+  type DirectoryListingPayload,
+  type FileListingPayload,
+  type FileContentPayload,
+  type WriteFileResultPayload,
+  type DiffResultPayload,
+  type GitStatusResultPayload,
+  type GitBranchesResultPayload,
+  type GitStageResultPayload,
+  type GitCommitResultPayload,
 } from './handlers'
 
 // ---------------------------------------------------------------------------
@@ -147,7 +166,57 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   addMessage(message: ChatMessage): void
   /** Read the current session list (for `session_updated`). */
   getSessions(): SessionInfo[]
+  /**
+   * Resolve a one-shot imperative callback by name (#5653). Used by the
+   * file-ops / git wrapper cases, whose only effect is to invoke a callback the
+   * UI registered out-of-band with the parsed payload — there is NO store
+   * mutation. Returns the registered callback, or null when none is set.
+   *
+   * OPTIONAL: a client that does NOT plug an imperative-callback registry into
+   * the table (e.g. the dashboard, which reads its callbacks straight off the
+   * Zustand store) simply omits this. When it is absent, the file-ops / git
+   * dispatch handlers DECLINE (return `false`) so {@link runDispatch} falls
+   * through to that client's own switch — keeping migration per-client and
+   * behaviour-preserving for clients that have not opted in.
+   *
+   * The payload type is the union of all parsed file-ops / git payloads; the
+   * caller (which knows the concrete callback signature for `name`) narrows it.
+   */
+  getCallback?(name: DispatchCallbackName): ((payload: DispatchCallbackPayload) => void) | null | undefined
 }
+
+/**
+ * Names of the imperative callbacks the file-ops / git dispatch cases invoke
+ * (#5653). Mirrors the app's `CallbackName` union for the migrated subset;
+ * `terminalWrite` is NOT here because the terminal case is not table-migrated.
+ */
+export type DispatchCallbackName =
+  | 'directoryListing'
+  | 'fileBrowser'
+  | 'fileContent'
+  | 'fileWrite'
+  | 'diff'
+  | 'gitStatus'
+  | 'gitBranches'
+  | 'gitStage'
+  | 'gitCommit'
+
+/**
+ * Union of the parsed payloads the file-ops / git callbacks receive. Each
+ * dispatch handler invokes its callback with exactly the payload the prior
+ * inline `case` arm passed (entries cast to the concrete `DirectoryEntry[]` /
+ * `FileEntry[]` happens client-side via the registered callback's own type).
+ */
+export type DispatchCallbackPayload =
+  | DirectoryListingPayload
+  | FileListingPayload
+  | FileContentPayload
+  | WriteFileResultPayload
+  | DiffResultPayload
+  | GitStatusResultPayload
+  | GitBranchesResultPayload
+  | GitStageResultPayload
+  | GitCommitResultPayload
 
 // ---------------------------------------------------------------------------
 // Per-entry message shapes (protocol-derived narrowing)
@@ -268,16 +337,38 @@ export interface DispatchMessageMap {
     type: 'notification_prefs'
     prefs?: unknown
   }
+  // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
+  // These all carry the raw fields the corresponding `handle*` parser reads;
+  // the parser does the per-field narrowing, so the map only needs `type`.
+  directory_listing: { type: 'directory_listing' }
+  file_listing: { type: 'file_listing' }
+  file_content: { type: 'file_content' }
+  write_file_result: { type: 'write_file_result' }
+  diff_result: { type: 'diff_result' }
+  git_status_result: { type: 'git_status_result' }
+  git_branches_result: { type: 'git_branches_result' }
+  git_stage_result: { type: 'git_stage_result' }
+  git_unstage_result: { type: 'git_unstage_result' }
+  git_commit_result: { type: 'git_commit_result' }
 }
 
 /** Union of message types this table currently handles. */
 export type DispatchMessageType = keyof DispatchMessageMap
 
-/** A single dispatch-table entry: a pure delegation into a store-core handler. */
+/**
+ * A single dispatch-table entry: a pure delegation into a store-core handler.
+ *
+ * Returns `void` (handled — the common case) or `false` to DECLINE, signalling
+ * {@link runDispatch} to fall through to the caller's own switch. Only the
+ * file-ops / git wrapper cases (#5653) decline — they need the client's
+ * imperative-callback registry via {@link ClientStoreAdapter.getCallback}, and
+ * a client that does not supply one (e.g. the dashboard) must keep handling
+ * those types in its local switch.
+ */
 export type DispatchHandler<K extends DispatchMessageType, S extends DispatchSessionBase> = (
   msg: DispatchMessageMap[K],
   adapter: ClientStoreAdapter<S>,
-) => void
+) => void | false
 
 /** The full dispatch table — every migrated type maps to its handler. */
 export type DispatchTable<S extends DispatchSessionBase> = {
@@ -606,6 +697,148 @@ function dispatchNotificationPrefs<S extends DispatchSessionBase>(
 }
 
 // ---------------------------------------------------------------------------
+// Slice 3 — file-ops / git wrapper cases (epic #5556, #5653)
+//
+// Each was the SAME `getCallback(name) → shared*(msg) → cb(payload)` shape in
+// the app switch: parse the wire message with an existing store-core handler,
+// then invoke a one-shot imperative callback the UI registered out-of-band.
+// There is NO store mutation — the only effect is the callback invocation — so
+// these route through `adapter.getCallback` instead of the session/flat-state
+// methods the other cases use.
+//
+// Each handler DECLINES (returns `false`) when the adapter has no
+// `getCallback`, so a client that has not opted its imperative-callback
+// registry into the table (the dashboard) falls through to its own switch
+// unchanged. A client that DID opt in (the app) always OWNS the message: it
+// invokes the callback when one is registered and no-ops otherwise — exactly
+// the prior inline `if (cb) cb(...)` behaviour.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the imperative callback for `name` through the adapter. Returns the
+ * special `DECLINE` sentinel when the adapter does not implement `getCallback`
+ * at all (client not opted in), or the (possibly null) callback otherwise.
+ */
+const DECLINE = Symbol('dispatch-decline')
+
+function resolveCallback<S extends DispatchSessionBase>(
+  adapter: ClientStoreAdapter<S>,
+  name: DispatchCallbackName,
+): ((payload: DispatchCallbackPayload) => void) | null | undefined | typeof DECLINE {
+  if (typeof adapter.getCallback !== 'function') return DECLINE
+  return adapter.getCallback(name)
+}
+
+/** `directory_listing` — invoke the registered directory-listing callback. */
+function dispatchDirectoryListing<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['directory_listing'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'directoryListing')
+  if (cb === DECLINE) return false
+  if (cb) cb(handleDirectoryListing(msg as Record<string, unknown>))
+}
+
+/** `file_listing` — invoke the registered file-browser callback. */
+function dispatchFileListing<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['file_listing'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'fileBrowser')
+  if (cb === DECLINE) return false
+  if (cb) cb(handleFileListing(msg as Record<string, unknown>))
+}
+
+/** `file_content` — invoke the registered file-content callback. */
+function dispatchFileContent<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['file_content'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'fileContent')
+  if (cb === DECLINE) return false
+  if (cb) cb(handleFileContent(msg as Record<string, unknown>))
+}
+
+/** `write_file_result` — invoke the registered file-write callback. */
+function dispatchWriteFileResult<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['write_file_result'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'fileWrite')
+  if (cb === DECLINE) return false
+  if (cb) cb(handleWriteFileResult(msg as Record<string, unknown>))
+}
+
+/** `diff_result` — invoke the registered diff callback. */
+function dispatchDiffResult<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['diff_result'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'diff')
+  if (cb === DECLINE) return false
+  if (cb) {
+    const payload = handleDiffResult(msg as Record<string, unknown>)
+    cb({ files: payload.files, error: payload.error })
+  }
+}
+
+/** `git_status_result` — invoke the registered git-status callback. */
+function dispatchGitStatusResult<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['git_status_result'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'gitStatus')
+  if (cb === DECLINE) return false
+  if (cb) {
+    const payload = handleGitStatusResult(msg as Record<string, unknown>)
+    cb({
+      branch: payload.branch,
+      staged: payload.staged,
+      unstaged: payload.unstaged,
+      untracked: payload.untracked,
+      error: payload.error,
+    })
+  }
+}
+
+/** `git_branches_result` — invoke the registered git-branches callback. */
+function dispatchGitBranchesResult<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['git_branches_result'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'gitBranches')
+  if (cb === DECLINE) return false
+  if (cb) {
+    const payload = handleGitBranchesResult(msg as Record<string, unknown>)
+    cb({
+      branches: payload.branches,
+      currentBranch: payload.currentBranch,
+      error: payload.error,
+    })
+  }
+}
+
+/** `git_stage_result` / `git_unstage_result` — invoke the git-stage callback. */
+function dispatchGitStageResult<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['git_stage_result'] | DispatchMessageMap['git_unstage_result'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'gitStage')
+  if (cb === DECLINE) return false
+  if (cb) cb(handleGitStageResult(msg as Record<string, unknown>))
+}
+
+/** `git_commit_result` — invoke the registered git-commit callback. */
+function dispatchGitCommitResult<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['git_commit_result'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  const cb = resolveCallback(adapter, 'gitCommit')
+  if (cb === DECLINE) return false
+  if (cb) cb(handleGitCommitResult(msg as Record<string, unknown>))
+}
+
+// ---------------------------------------------------------------------------
 // Table + runner
 // ---------------------------------------------------------------------------
 
@@ -640,6 +873,17 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     web_feature_status: dispatchWebFeatureStatus,
     web_task_list: dispatchWebTaskList,
     notification_prefs: dispatchNotificationPrefs,
+    // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
+    directory_listing: dispatchDirectoryListing,
+    file_listing: dispatchFileListing,
+    file_content: dispatchFileContent,
+    write_file_result: dispatchWriteFileResult,
+    diff_result: dispatchDiffResult,
+    git_status_result: dispatchGitStatusResult,
+    git_branches_result: dispatchGitBranchesResult,
+    git_stage_result: dispatchGitStageResult,
+    git_unstage_result: dispatchGitStageResult,
+    git_commit_result: dispatchGitCommitResult,
   }
 }
 
@@ -667,14 +911,27 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'web_feature_status',
   'web_task_list',
   'notification_prefs',
+  // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
+  'directory_listing',
+  'file_listing',
+  'file_content',
+  'write_file_result',
+  'diff_result',
+  'git_status_result',
+  'git_branches_result',
+  'git_stage_result',
+  'git_unstage_result',
+  'git_commit_result',
 ]
 
 /**
  * Run a message through the shared table.
  *
  * @returns `true` when the table owned (and handled) the message — the caller
- *   should stop. `false` on a table MISS — the caller falls through to its own
- *   switch, keeping incremental migration possible.
+ *   should stop. `false` on a table MISS, OR when the matched handler DECLINED
+ *   (returned `false`, e.g. a file-ops / git case on a client whose adapter has
+ *   no `getCallback`) — the caller falls through to its own switch, keeping
+ *   incremental, per-client migration possible.
  */
 export function runDispatch<S extends DispatchSessionBase>(
   table: DispatchTable<S>,
@@ -685,6 +942,6 @@ export function runDispatch<S extends DispatchSessionBase>(
   if (typeof type !== 'string') return false
   if (!Object.prototype.hasOwnProperty.call(table, type)) return false
   const handler = table[type as DispatchMessageType] as DispatchHandler<DispatchMessageType, S>
-  handler(msg as DispatchMessageMap[DispatchMessageType], adapter)
-  return true
+  // A handler returning `false` DECLINES — fall through to the caller's switch.
+  return handler(msg as DispatchMessageMap[DispatchMessageType], adapter) !== false
 }

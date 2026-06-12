@@ -37,6 +37,13 @@ function makeAdapter(init?: {
   activeSessionId?: string | null
   sessions?: Record<string, FakeSession>
   sessionList?: SessionInfo[]
+  /**
+   * When provided, the adapter implements `getCallback` (the app opts into the
+   * imperative-callback registry for the #5653 file-ops / git cases). When
+   * omitted, the adapter has NO `getCallback`, so those cases DECLINE (the
+   * dashboard's behaviour — fall through to the local switch).
+   */
+  callbacks?: Partial<Record<string, ((payload: unknown) => void) | null>>
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
@@ -55,6 +62,12 @@ function makeAdapter(init?: {
     setState: (patch) => Object.assign(flat, patch),
     addMessage: (m) => addedMessages.push(m),
     getSessions: () => sessionList,
+    ...(init?.callbacks
+      ? {
+          getCallback: ((name: string) =>
+            (init.callbacks?.[name] ?? null)) as ClientStoreAdapter<FakeSession>['getCallback'],
+        }
+      : {}),
   }
 
   return {
@@ -608,6 +621,137 @@ describe('shared dispatch table', () => {
       const env = makeAdapter()
       dispatch(env, { type: 'notification_prefs', prefs: 'not-an-object' })
       expect(env.flat.notificationPrefs).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Slice 3 — file-ops / git wrapper cases (#5653)
+  //
+  // These route through `adapter.getCallback`: parse the wire message, then
+  // invoke the registered imperative callback. A client whose adapter has no
+  // `getCallback` (the dashboard) DECLINES — `runDispatch` returns false so the
+  // caller falls through to its own switch.
+  // -------------------------------------------------------------------------
+  describe('file-ops / git wrapper cases', () => {
+    it('declines (runDispatch false) when the adapter has no getCallback', () => {
+      const env = makeAdapter() // no callbacks → no getCallback method
+      expect(dispatch(env, { type: 'directory_listing', path: '/a' })).toBe(false)
+      expect(dispatch(env, { type: 'git_status_result' })).toBe(false)
+      expect(dispatch(env, { type: 'git_commit_result' })).toBe(false)
+    })
+
+    it('owns the message (runDispatch true) when getCallback is present, even with no registered callback', () => {
+      // App opted in but nothing registered for this channel → no-op, still owned.
+      const env = makeAdapter({ callbacks: {} })
+      expect(dispatch(env, { type: 'directory_listing', path: '/a' })).toBe(true)
+      expect(dispatch(env, { type: 'git_status_result' })).toBe(true)
+    })
+
+    it('invokes directoryListing with the parsed payload', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { directoryListing: (p) => seen.push(p) } })
+      expect(
+        dispatch(env, {
+          type: 'directory_listing',
+          path: '/root',
+          parentPath: '/',
+          entries: [{ name: 'a' }],
+        }),
+      ).toBe(true)
+      expect(seen).toEqual([
+        { path: '/root', parentPath: '/', entries: [{ name: 'a' }], error: null },
+      ])
+    })
+
+    it('invokes fileBrowser for file_listing', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { fileBrowser: (p) => seen.push(p) } })
+      dispatch(env, { type: 'file_listing', path: '/p', entries: [], error: 'oops' })
+      expect(seen).toEqual([{ path: '/p', parentPath: null, entries: [], error: 'oops' }])
+    })
+
+    it('invokes fileContent for file_content', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { fileContent: (p) => seen.push(p) } })
+      dispatch(env, {
+        type: 'file_content',
+        path: '/f.ts',
+        content: 'x',
+        language: 'typescript',
+        size: 1,
+        truncated: true,
+      })
+      expect(seen).toEqual([
+        { path: '/f.ts', content: 'x', language: 'typescript', size: 1, truncated: true, error: null },
+      ])
+    })
+
+    it('invokes fileWrite for write_file_result', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { fileWrite: (p) => seen.push(p) } })
+      dispatch(env, { type: 'write_file_result', path: '/f.ts' })
+      expect(seen).toEqual([{ path: '/f.ts', error: null }])
+    })
+
+    it('invokes diff with only files + error', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { diff: (p) => seen.push(p) } })
+      dispatch(env, { type: 'diff_result', files: [], error: null })
+      expect(seen).toEqual([{ files: [], error: null }])
+    })
+
+    it('invokes gitStatus with the five-field payload', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { gitStatus: (p) => seen.push(p) } })
+      dispatch(env, {
+        type: 'git_status_result',
+        branch: 'main',
+        staged: [{ path: 'a.ts', status: 'modified' }],
+        unstaged: [{ path: 'b.ts', status: 'added' }],
+        untracked: ['c.ts'],
+        error: null,
+      })
+      expect(seen).toEqual([
+        {
+          branch: 'main',
+          staged: [{ path: 'a.ts', status: 'modified' }],
+          unstaged: [{ path: 'b.ts', status: 'added' }],
+          untracked: ['c.ts'],
+          error: null,
+        },
+      ])
+    })
+
+    it('invokes gitBranches with branches + currentBranch + error', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { gitBranches: (p) => seen.push(p) } })
+      dispatch(env, {
+        type: 'git_branches_result',
+        branches: [{ name: 'main', isCurrent: true, isRemote: false }],
+        currentBranch: 'main',
+      })
+      expect(seen).toEqual([
+        {
+          branches: [{ name: 'main', isCurrent: true, isRemote: false }],
+          currentBranch: 'main',
+          error: null,
+        },
+      ])
+    })
+
+    it('routes both git_stage_result and git_unstage_result to gitStage', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { gitStage: (p) => seen.push(p) } })
+      dispatch(env, { type: 'git_stage_result' })
+      dispatch(env, { type: 'git_unstage_result', error: 'nope' })
+      expect(seen).toEqual([{ error: null }, { error: 'nope' }])
+    })
+
+    it('invokes gitCommit with hash + message + error', () => {
+      const seen: unknown[] = []
+      const env = makeAdapter({ callbacks: { gitCommit: (p) => seen.push(p) } })
+      dispatch(env, { type: 'git_commit_result', hash: 'abc', message: 'feat: x' })
+      expect(seen).toEqual([{ hash: 'abc', message: 'feat: x', error: null }])
     })
   })
 })

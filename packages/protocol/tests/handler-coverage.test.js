@@ -237,9 +237,30 @@ describe('handler coverage contract', () => {
   // #5556 — cases owned by the shared store-core dispatch table count as
   // covered by BOTH clients (each routes through `runDispatch` first). Union
   // them into both per-client sets so a migrated case isn't reported missing.
+  //
+  // #5653 — EXCEPTION for decline-capable cases: some shared-table handlers
+  // (the file-ops / git wrapper cases) require a client to opt its imperative
+  // -callback registry into the table via `adapter.getCallback`; a client that
+  // does not (the dashboard) DECLINES — `runDispatch` returns false and the
+  // case falls through to that client's own switch. So a shared-table type that
+  // is declared single-platform in PLATFORM_SPECIFIC is credited ONLY to its
+  // declared platform, not blindly to both (the other platform really does NOT
+  // handle it — it declines and has no local case). This keeps the
+  // "PLATFORM_SPECIFIC matches actual coverage" guard honest.
+  const platformSpecificSet = new Set(Object.keys(PLATFORM_SPECIFIC))
   const sharedDispatchTypes = extractSharedDispatchTypes(dispatchSrc)
-  const appTypes = new Set([...extractAppHandlerTypes(appSrc), ...sharedDispatchTypes])
-  const dashTypes = new Set([...extractDashboardHandlerTypes(dashSrc), ...sharedDispatchTypes])
+  const sharedForApp = new Set(
+    [...sharedDispatchTypes].filter(
+      (t) => !platformSpecificSet.has(t) || PLATFORM_SPECIFIC[t] === 'app',
+    ),
+  )
+  const sharedForDash = new Set(
+    [...sharedDispatchTypes].filter(
+      (t) => !platformSpecificSet.has(t) || PLATFORM_SPECIFIC[t] === 'dashboard',
+    ),
+  )
+  const appTypes = new Set([...extractAppHandlerTypes(appSrc), ...sharedForApp])
+  const dashTypes = new Set([...extractDashboardHandlerTypes(dashSrc), ...sharedForDash])
 
   it('every ServerMessageType is handled by at least one handler (or explicitly excluded)', () => {
     const unhandled = []
