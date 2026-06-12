@@ -64,10 +64,19 @@ function assertField(actual: unknown, expected: unknown, label: string) {
 
 function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: ContractFixture) {
   if (exp.noop) {
-    // No flat writes, no added messages, and every seeded session untouched
-    // beyond its shell.
+    // No flat writes and no added messages…
     expect(Object.keys(result.flat), `${fx.name}: expected no flat writes`).toHaveLength(0)
     expect(result.added, `${fx.name}: expected no addMessage`).toHaveLength(0)
+    // …and every seeded session is untouched beyond its shell: it must carry
+    // only the keys it was seeded with (the `{ sessionId, messages }` shell plus
+    // the fixture's own `init.sessions[id]` keys). A handler that wrote a NEW
+    // field onto a session despite the no-op contract is caught here.
+    const seeded = fx.init?.sessions ?? {}
+    for (const [id, session] of Object.entries(result.sessions)) {
+      const allowedKeys = new Set(['sessionId', 'messages', ...Object.keys(seeded[id] ?? {})])
+      const extraKeys = Object.keys(session).filter((k) => !allowedKeys.has(k))
+      expect(extraKeys, `${fx.name}: session ${id} mutated on a no-op`).toEqual([])
+    }
     return
   }
   if (exp.sessions) {

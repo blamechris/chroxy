@@ -245,6 +245,8 @@ export class FakeHandshakeClient {
   readonly keyPair: KeyPair
   private sharedKey: Uint8Array | null = null
   private recvNonce = 0
+  /** Send-side nonce for client→server frames — must advance per frame. */
+  private sendNonce = 0
   /** Frames observed in plaintext AFTER encryption activated (must stay empty). */
   readonly plaintextAfterActivation: string[] = []
   readonly phases: HandshakePhase[] = []
@@ -254,8 +256,14 @@ export class FakeHandshakeClient {
     private readonly store: HandshakeStoreAdapter,
     private readonly opts: HandshakeClientOptions = {},
   ) {
-    // Fresh per-connection reconcile state (clears any module-level cursors from
-    // a prior scenario in the same test file).
+    // The reconcile/dedup helpers keep their cursor + rebuild baseline in
+    // module-level state. A fresh `FakeHandshakeClient` models a brand-new
+    // connection from a clean slate, so we deliberately clear BOTH here — this is
+    // a test-isolation reset (every scenario constructs its own client), NOT the
+    // production reconnect path, which retains cursors across reconnects and
+    // clears them only on explicit disconnect. The scenarios that assert
+    // cross-reconnect cursor behaviour seed it explicitly via `preSeed` + the
+    // replay frames rather than relying on a leaked cursor from a prior test.
     resetReplayReconcile({ clearCursors: true })
     this.keyPair = createKeyPair()
   }
@@ -402,10 +410,16 @@ export class FakeHandshakeClient {
     }
   }
 
-  /** A test helper: encrypt a CLIENT→server frame (to assert no-plaintext-out). */
+  /**
+   * A test helper: encrypt a CLIENT→server frame (to assert no-plaintext-out).
+   * Advances `sendNonce` per call so repeated frames never reuse a
+   * (key, nonce, direction) tuple — the same nonce contract the real client's
+   * `wsSend` honours.
+   */
   encryptClientFrame(payload: Record<string, unknown>): EncryptedEnvelope {
     if (!this.sharedKey) throw new Error('cannot encrypt before key derivation')
-    const env = encrypt(JSON.stringify(payload), this.sharedKey, 0, DIRECTION_CLIENT)
+    const env = encrypt(JSON.stringify(payload), this.sharedKey, this.sendNonce, DIRECTION_CLIENT)
+    this.sendNonce++
     return env
   }
 }
