@@ -19,9 +19,8 @@ import type { BaseSessionState } from '@chroxy/store-core'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
-import { SessionContextMenu, type ContextMenuItem } from './components/SessionContextMenu'
+import { type ContextMenuItem } from './components/SessionContextMenu'
 import { buildSidebarContextMenuItems } from './sidebarContextMenuItems'
-import { CommandPalette } from './components/CommandPalette'
 import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
 import { ChatView } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
@@ -33,13 +32,11 @@ import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { StatusBar } from './components/StatusBar'
 import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
-import { SkillsPanel } from './components/SkillsPanel'
 import { HeaderOverflowMenu, type HeaderOverflowItem } from './components/HeaderOverflowMenu'
 import { NotificationsWidget } from './components/NotificationsWidget'
 import { formatTranscript } from './lib/transcript'
 import { ActivityIndicator } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
-import { PastedTextModal } from './components/PastedTextModal'
 import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { PlanApproval } from './components/PlanApproval'
@@ -48,17 +45,13 @@ import { ExposureWarningBanner } from './components/ExposureWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
-import { CreateSessionModal } from './components/CreateSessionModal'
-import { ConfirmDialog } from './components/ConfirmDialog'
 import { NotificationBanners } from './components/NotificationBanners'
 import { PendingPairRequests } from './components/PendingPairRequests'
-import { Toast, type ToastItem } from './components/Toast'
+import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
 import { CheckpointTimeline } from './components/CheckpointTimeline'
 import { FooterBar } from './components/FooterBar'
-import { QrModal } from './components/QrModal'
-import { SettingsPanel } from './components/SettingsPanel'
-import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
+import { type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
 import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
 import { buildShortcutEntries } from './shortcuts/buildShortcutEntries'
@@ -89,7 +82,7 @@ import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
 import { ControlRoomView } from './components/ControlRoomView'
-import { RepoPresetDrawer } from './components/RepoPresetDrawer'
+import { AppModals } from './components/AppModals'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -2389,167 +2382,101 @@ export function App() {
         activeSessionId={activeSessionId}
       />
 
-      {/* Settings panel */}
-      <SettingsPanel
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+      {/* #5560 — the top-level overlay / modal stack is grouped into the
+          presentational <AppModals>. App still owns all the state; these are
+          leaf overlays separate from the main-content / terminal subtree. */}
+      <AppModals
+        settingsOpen={settingsOpen}
+        onSettingsClose={() => setSettingsOpen(false)}
         showConsoleTab={showConsoleTab}
-        onToggleConsoleTab={(show) => {
-          setShowConsoleTab(show)
-          persistShowConsoleTab(show)
-        }}
+        onToggleConsoleTab={(show) => { setShowConsoleTab(show); persistShowConsoleTab(show) }}
         interventionPingEnabled={interventionPingEnabled}
-        onToggleInterventionPing={(enabled) => {
-          setInterventionPingEnabled(enabled)
-          persistInterventionPing(enabled)
-        }}
-      />
-
-      {/* Keyboard shortcut help */}
-      <ShortcutHelp isOpen={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={SHORTCUTS} />
-
-      {/* Pasted-text inspect modal (#3797) — read-only viewer for the
-          collapsed paste whose chip the user clicked. */}
-      {inspectedPastedTextId != null && (() => {
-        const block = pastedTextBlocks.find(b => b.id === inspectedPastedTextId)
-        if (!block) return null
-        return (
-          <PastedTextModal
-            id={block.id}
-            content={block.content}
-            onClose={() => setInspectedPastedTextId(null)}
-            onRemove={handleRemovePastedText}
-          />
-        )
-      })()}
-
-      {/* QR code modal — shared by linking-mode QR and per-session "Share" QR (#3070) */}
-      <QrModal
-        open={qrModalOpen}
-        onClose={() => setQrModalOpen(false)}
+        onToggleInterventionPing={(enabled) => { setInterventionPingEnabled(enabled); persistInterventionPing(enabled) }}
+        shortcutHelpOpen={shortcutHelpOpen}
+        onShortcutHelpClose={() => setShortcutHelpOpen(false)}
+        shortcuts={SHORTCUTS}
+        inspectedPastedTextId={inspectedPastedTextId}
+        pastedTextBlocks={pastedTextBlocks}
+        onPastedTextClose={() => setInspectedPastedTextId(null)}
+        onRemovePastedText={handleRemovePastedText}
+        qrModalOpen={qrModalOpen}
+        onQrClose={() => setQrModalOpen(false)}
         qrSvg={qrSvg}
-        loading={qrLoading}
-        error={qrError ?? undefined}
-        title={qrShareMode === 'share' ? 'Share This Session' : 'Pair Mobile App'}
-        instructions={
-          qrShareMode === 'share'
-            ? 'Scan to chat into this session only — the scanner cannot list, switch, or destroy other sessions.'
-            : 'Scan with Chroxy app to pair your phone'
-        }
-        pairingCode={qrShareMode === 'share' ? null : qrPairingCode}
-        onPostToDiscord={qrShareMode === 'share' ? undefined : handlePostPairLinkToDiscord}
-      />
-
-      {/* #3209: SkillsPanel — popover for manual-skill toggles + #3205 metadata */}
-      {skillsPanelOpen && (
-        <SkillsPanel
-          skills={activeSkills}
-          canToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
-          mismatchedSkillNames={mismatchedSet}
-          onActivate={activateSkill}
-          onDeactivate={deactivateSkill}
-          onAcceptTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
-          pendingCommunitySkills={activePendingCommunitySkills}
-          onGrantTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
-          capabilities={{ skillTrustGrant: skillTrustGrantSupported }}
-          pendingTrustGrants={activePendingTrustGrants}
-          onClose={() => setSkillsPanelOpen(false)}
-        />
-      )}
-
-      {/* #4045: sidebar right-click context menu. Rendered at top level so
-          it floats above the sidebar without inheriting clip/overflow from
-          ancestor containers; SessionContextMenu handles its own outside-
-          click / Esc / blur dismissal. */}
-      {sidebarContextMenu && (
-        <SessionContextMenu
-          x={sidebarContextMenu.x}
-          y={sidebarContextMenu.y}
-          items={sidebarContextMenuItems}
-          onDismiss={dismissSidebarContextMenu}
-        />
-      )}
-
-      {/* Modals */}
-      <CreateSessionModal
-        open={showCreateSession}
-        onClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
-        onCreate={handleCreateSession}
-        initialCwd={pendingCwd}
+        qrLoading={qrLoading}
+        qrError={qrError}
+        qrShareMode={qrShareMode}
+        qrPairingCode={qrPairingCode}
+        onPostPairLinkToDiscord={handlePostPairLinkToDiscord}
+        skillsPanelOpen={skillsPanelOpen}
+        skills={activeSkills}
+        skillsCanToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
+        mismatchedSkillNames={mismatchedSet}
+        onActivateSkill={activateSkill}
+        onDeactivateSkill={deactivateSkill}
+        onAcceptSkillTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
+        pendingCommunitySkills={activePendingCommunitySkills}
+        onGrantSkillTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
+        skillsPanelCapabilities={{ skillTrustGrant: skillTrustGrantSupported }}
+        pendingTrustGrants={activePendingTrustGrants}
+        onSkillsPanelClose={() => setSkillsPanelOpen(false)}
+        sidebarContextMenu={sidebarContextMenu}
+        sidebarContextMenuItems={sidebarContextMenuItems}
+        onDismissSidebarContextMenu={dismissSidebarContextMenu}
+        showCreateSession={showCreateSession}
+        onCreateSessionClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
+        onCreateSession={handleCreateSession}
+        createSessionInitialCwd={pendingCwd}
         knownCwds={knownCwds}
-        existingNames={sessions.map(s => s.name)}
-        serverError={sessionCreateError ?? undefined}
-        isCreating={isCreatingSession}
-      />
-
-      {/* #5553 — the per-repo settings drawer (session preset editor). Opened
-          from a Control Room repo-row gear; one at a time. */}
-      {repoPresetDrawer && (
-        <RepoPresetDrawer
-          repoPath={repoPresetDrawer.path}
-          repoName={repoPresetDrawer.name}
-          onClose={() => setRepoPresetDrawer(null)}
-        />
-      )}
-
-      {/* #5206 — session-close confirmation. Shown only when the
-          confirmSessionClose setting is enabled (handleCloseSession gates it).
-          Confirm tears the session down; cancel/Escape/backdrop keep it. */}
-      <ConfirmDialog
-        open={closeConfirmSessionId !== null}
-        title="Close session?"
-        message={(() => {
+        existingSessionNames={sessions.map(s => s.name)}
+        sessionCreateError={sessionCreateError ?? undefined}
+        isCreatingSession={isCreatingSession}
+        repoPresetDrawer={repoPresetDrawer}
+        onRepoPresetDrawerClose={() => setRepoPresetDrawer(null)}
+        closeConfirmOpen={closeConfirmSessionId !== null}
+        closeConfirmMessage={(() => {
           const name = sessions.find(s => s.sessionId === closeConfirmSessionId)?.name
           return name
             ? `Close "${name}"? The Claude process will be terminated.`
             : 'Close this session? The Claude process will be terminated.'
         })()}
-        confirmLabel="Close session"
-        cancelLabel="Cancel"
-        danger
-        onConfirm={() => {
+        onCloseConfirm={() => {
           if (closeConfirmSessionId) performCloseSession(closeConfirmSessionId)
           setCloseConfirmSessionId(null)
         }}
-        onCancel={() => setCloseConfirmSessionId(null)}
-      />
-
-      {/* Toasts */}
-      <Toast items={toastItems} onDismiss={(id) => {
-        // #4075: cost-threshold toast IDs are routed via the per-session
-        // dismissedAt latch; everything else falls through to the
-        // existing server-error / info-notification dismissal paths.
-        if (id.startsWith('cost-threshold-')) {
-          const sid = id.slice('cost-threshold-'.length)
-          const states = useConnectionStore.getState().sessionStates
-          const ss = states[sid]
-          if (ss?.costThresholdWarning) {
-            useConnectionStore.setState({
-              sessionStates: {
-                ...states,
-                [sid]: {
-                  ...ss,
-                  costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+        onCloseConfirmCancel={() => setCloseConfirmSessionId(null)}
+        toastItems={toastItems}
+        onToastDismiss={(id) => {
+          // #4075: cost-threshold toast IDs are routed via the per-session
+          // dismissedAt latch; everything else falls through to the
+          // existing server-error / info-notification dismissal paths.
+          if (id.startsWith('cost-threshold-')) {
+            const sid = id.slice('cost-threshold-'.length)
+            const states = useConnectionStore.getState().sessionStates
+            const ss = states[sid]
+            if (ss?.costThresholdWarning) {
+              useConnectionStore.setState({
+                sessionStates: {
+                  ...states,
+                  [sid]: {
+                    ...ss,
+                    costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+                  },
                 },
-              },
-            })
+              })
+            }
+            return
           }
-          return
-        }
-        const item = toastItems.find(t => t.id === id)
-        if (!item) return
-        if (item.level === 'error') {
-          dismissServerError(id)
-        } else {
-          dismissInfoNotification(id)
-        }
-      }} />
-
-      {/* Command palette */}
-      <CommandPalette
+          const item = toastItems.find(t => t.id === id)
+          if (!item) return
+          if (item.level === 'error') {
+            dismissServerError(id)
+          } else {
+            dismissInfoNotification(id)
+          }
+        }}
         commands={trackedCommands}
-        isOpen={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
+        paletteOpen={paletteOpen}
+        onPaletteClose={() => setPaletteOpen(false)}
         mruList={paletteOpen ? getMruCommands() : undefined}
       />
     </div>
