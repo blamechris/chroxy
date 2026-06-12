@@ -1,0 +1,209 @@
+/**
+ * #5555.5 — reconnect backoff on the socket-close/error path (dashboard).
+ *
+ * The close/error handlers used to schedule reconnects at a FIXED delay
+ * (AUTO_RECONNECT_DELAY=1500ms / ERROR_RECONNECT_DELAY=2000ms). They now climb
+ * the shared RETRY_DELAYS ladder ([1000, 2000, 3000, 5000, 8000], jittered) via
+ * a module-level counter that RESETS on `auth_ok` (a successful connect), NOT on
+ * mere socket-open.
+ *
+ * Math.random is pinned to 0 so withJitter() is the identity and each rung's
+ * delay is exactly RETRY_DELAYS[N]. Mirrors the WebSocket/fetch mock harness in
+ * connection-pairing.test.ts, with fake timers so we can assert exact delays.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+
+const store: Record<string, string> = {}
+const localStorageMock = {
+  getItem: (k: string) => store[k] ?? null,
+  setItem: (k: string, v: string) => { store[k] = v },
+  removeItem: (k: string) => { delete store[k] },
+  clear: () => { for (const k of Object.keys(store)) delete store[k] },
+  get length() { return Object.keys(store).length },
+  key: (i: number) => Object.keys(store)[i] ?? null,
+}
+Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, writable: true })
+vi.mock('../utils/auth', () => ({ getAuthToken: () => null }))
+
+const RETRY_DELAYS: [number, number, number, number, number] = [1000, 2000, 3000, 5000, 8000]
+
+class MockWebSocket {
+  static OPEN = 1
+  static instances: MockWebSocket[] = []
+  url: string
+  readyState = 1
+  sent: string[] = []
+  onopen: (() => void) | null = null
+  onmessage: ((e: unknown) => void) | null = null
+  onclose: ((e?: unknown) => void) | null = null
+  onerror: ((e?: unknown) => void) | null = null
+  constructor(url: string) { this.url = url; MockWebSocket.instances.push(this) }
+  send(d: string) { this.sent.push(d) }
+  close() { this.readyState = 3 }
+}
+;(globalThis as unknown as { WebSocket: unknown }).WebSocket = MockWebSocket
+;(globalThis as unknown as { fetch: unknown }).fetch = vi.fn(async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ status: 'ok' }),
+}))
+
+const { useConnectionStore } = await import('./connection')
+// Import the namespace (not a destructured binding) so `mh.reconnectAttempt`
+// reflects the live module-level counter — destructuring a `let` export copies
+// the value at import time and would always read 0.
+const mh = await import('./message-handler')
+const { resetReconnectAttempt, nextReconnectAttempt } = mh
+
+/**
+ * Open a connection, walk it through the health check + WS handshake, and mark
+ * it connected so a subsequent onclose takes the auto-reconnect branch.
+ * Returns the freshly opened socket.
+ */
+async function openConnected(): Promise<MockWebSocket> {
+  const before = MockWebSocket.instances.length
+  useConnectionStore.getState().connect('wss://tunnel.example.com/ws', 'tok')
+  // Flush the health-check fetch (microtasks) so the WS is constructed.
+  await vi.advanceTimersByTimeAsync(0)
+  const ws = MockWebSocket.instances[before]!
+  ws.readyState = 1
+  ws.onopen?.()
+  await vi.advanceTimersByTimeAsync(0)
+  useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false })
+  return ws
+}
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  MockWebSocket.instances = []
+  resetReconnectAttempt()
+  vi.spyOn(Math, 'random').mockReturnValue(0) // zero jitter
+  for (const k of Object.keys(store)) delete store[k]
+  useConnectionStore.setState({
+    serverRegistry: [],
+    activeServerId: null,
+    connectionPhase: 'disconnected',
+    wsUrl: null,
+    userDisconnected: false,
+  })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
+
+// ---------------------------------------------------------------------------
+// Ladder math
+// ---------------------------------------------------------------------------
+
+describe('reconnect backoff ladder counter (#5555.5)', () => {
+  it('nextReconnectAttempt advances and resetReconnectAttempt rewinds', () => {
+    expect(mh.reconnectAttempt).toBe(0)
+    expect(nextReconnectAttempt()).toBe(0)
+    expect(nextReconnectAttempt()).toBe(1)
+    resetReconnectAttempt()
+    expect(mh.reconnectAttempt).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// End-to-end close-path backoff
+// ---------------------------------------------------------------------------
+
+describe('socket-close reconnect backoff (#5555.5)', () => {
+  /**
+   * Drives one drop → reconnect cycle and asserts the reconnect fires at exactly
+   * `expectedDelay` ms (no sooner). Marks the new socket connected for reuse.
+   */
+  async function expectReconnectAt(expectedDelay: number) {
+    const socket = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    const before = MockWebSocket.instances.length
+
+    socket.onclose?.({ code: 1006 })
+
+    // One tick short: no reconnect yet.
+    await vi.advanceTimersByTimeAsync(expectedDelay - 1)
+    expect(MockWebSocket.instances.length).toBe(before)
+
+    // Cross the boundary: connect() → fetch → new socket.
+    await vi.advanceTimersByTimeAsync(1)
+    expect(MockWebSocket.instances.length).toBe(before + 1)
+
+    const next = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    next.readyState = 1
+    next.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    useConnectionStore.setState({ connectionPhase: 'connected' })
+  }
+
+  it('escalates through the RETRY_DELAYS ladder across consecutive drops', async () => {
+    await openConnected()
+    await expectReconnectAt(RETRY_DELAYS[0])
+    await expectReconnectAt(RETRY_DELAYS[1])
+    await expectReconnectAt(RETRY_DELAYS[2])
+    await expectReconnectAt(RETRY_DELAYS[3])
+  })
+
+  it('caps at the top rung (8000ms) once the ladder is exhausted', async () => {
+    await openConnected()
+    await expectReconnectAt(RETRY_DELAYS[0])
+    await expectReconnectAt(RETRY_DELAYS[1])
+    await expectReconnectAt(RETRY_DELAYS[2])
+    await expectReconnectAt(RETRY_DELAYS[3])
+    await expectReconnectAt(RETRY_DELAYS[4])
+    await expectReconnectAt(RETRY_DELAYS[4]) // clamps
+  })
+
+  it('a user-disconnect short-circuit does NOT burn a ladder rung', async () => {
+    const ws = await openConnected()
+    // Mark a user disconnect: scheduleReconnect returns before advancing the ladder.
+    useConnectionStore.setState({ userDisconnected: true })
+    ws.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(RETRY_DELAYS[4])
+    expect(mh.reconnectAttempt).toBe(0) // never advanced
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Reset-on-auth_ok (NOT on socket-open)
+// ---------------------------------------------------------------------------
+
+describe('backoff ladder resets on auth_ok, not socket-open (#5555.5)', () => {
+  it('a successful auth_ok rewinds the ladder back to the bottom rung', async () => {
+    const s0 = await openConnected()
+
+    s0.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(RETRY_DELAYS[0]) // rung 0 fires
+    const s1 = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    s1.readyState = 1
+    s1.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    useConnectionStore.setState({ connectionPhase: 'connected' })
+
+    s1.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(RETRY_DELAYS[1]) // rung 1 fires
+    const s2 = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    s2.readyState = 1
+    s2.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mh.reconnectAttempt).toBe(2) // climbed, not yet reset
+
+    // Drive a real auth_ok through the production onmessage path.
+    s2.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', serverMode: 'cli' }) })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mh.reconnectAttempt).toBe(0) // auth_ok reset it
+  })
+
+  it('socket-open alone does NOT reset the ladder (only auth_ok does)', async () => {
+    const s0 = await openConnected()
+
+    s0.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(RETRY_DELAYS[0]) // rung 0 fires
+    const s1 = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    s1.readyState = 1
+    s1.onopen?.() // opened but never authenticated
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mh.reconnectAttempt).toBe(1) // NOT reset by socket-open
+  })
+})

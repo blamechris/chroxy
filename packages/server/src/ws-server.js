@@ -173,6 +173,16 @@ export const TUNNEL_STATUS_MIN_PROTOCOL_VERSION = 2
 let _latestVersionCache = { version: null, checkedAt: 0 }
 const VERSION_CHECK_TTL = 3600_000 // 1 hour
 
+// #5555.6 — keepalive sweep cadence. Previously 30s, which (with the
+// two-phase mark-then-terminate cycle) held a zombie client up to ~60s — ~6×
+// longer than a client holds a zombie server (15s ping + 5s pong timeout =
+// 20s). We now (1) treat ANY inbound frame as proof of life (the client's own
+// 15s heartbeat ping suffices — see ws.on('message')), and (2) drop the sweep
+// to 15s so a client that goes truly silent is detected in 15–30s, ~2× the
+// client cadence. The server's own ws.ping() still fires each sweep to hold
+// Cloudflare / mobile-OS idle timeouts open for clients that don't initiate.
+export const KEEPALIVE_SWEEP_MS = 15_000
+
 async function checkLatestVersion(packageName) {
   const now = Date.now()
   if (_latestVersionCache.checkedAt > 0 && (now - _latestVersionCache.checkedAt) < VERSION_CHECK_TTL) {
@@ -1450,6 +1460,13 @@ export class WsServer {
         // reason string ('encryption required') is diagnostic enough for a
         // legitimate misconfigured client.
         const client = this.clients.get(ws)
+        // #5555.6 — any inbound frame is proof of life. The client's 15s
+        // heartbeat ping is the dominant signal, but ANY decoded frame (input,
+        // subscribe, pong-as-message, …) resets the liveness flag so the 15s
+        // keepalive sweep never terminates a client that is actively talking.
+        // This is the "client ping IS liveness" half of #5555.6; the protocol
+        // `pong` listener on the socket covers the server-initiated ping.
+        if (client) client.isAlive = true
         if (client?.encryptionState) {
           if (msg.type !== 'encrypted') {
             log.error(`Plaintext frame from ${client.id} after encryption established (type=${msg?.type}); closing connection`)
@@ -1598,23 +1615,9 @@ export class WsServer {
       broadcastSessionList: () => this._handlerCtx.transport.broadcastSessionList(),
     })
 
-    // Ping all authenticated clients every 30s to keep connections alive through
-    // Cloudflare/mobile OS idle timeouts. Terminate unresponsive clients.
-    this._pingInterval = setInterval(() => {
-      for (const [ws, client] of this.clients) {
-        if (!client.authenticated) continue
-        if (ws.readyState !== 1) continue
-        if (!client.isAlive) {
-          log.info(`Client ${client.id} unresponsive, terminating`)
-          this._handleClientDeparture(client)
-          this._clientManager.removeClient(ws)
-          try { ws.terminate() } catch {}
-          continue
-        }
-        client.isAlive = false
-        try { ws.ping() } catch {}
-      }
-    }, 30_000)
+    // #5555.6 — sweep authenticated clients every KEEPALIVE_SWEEP_MS. See
+    // _keepaliveSweep for the liveness/eviction contract.
+    this._pingInterval = setInterval(() => this._keepaliveSweep(), KEEPALIVE_SWEEP_MS)
 
     // Prune stale auth failure entries every 60s
     this._authCleanupInterval = setInterval(() => {
@@ -1903,6 +1906,40 @@ export class WsServer {
   /** Broadcast client_joined to all OTHER authenticated clients */
   _broadcastClientJoined(newClient, excludeWs) {
     this._broadcaster._broadcastClientJoined(newClient, excludeWs)
+  }
+
+  /**
+   * #5555.6 — one keepalive sweep over all authenticated clients.
+   *
+   * Liveness contract: `client.isAlive` is set true by ANY inbound frame
+   * (ws.on('message')) and by the protocol-level `pong` handler, so a client
+   * running its 15s heartbeat ping always reads alive at the 15s sweep. Each
+   * sweep clears the flag on live clients and pings them (to hold Cloudflare /
+   * mobile-OS idle timeouts open for peers that don't initiate). A client that
+   * goes truly silent fails the `!isAlive` check on the sweep AFTER the one that
+   * cleared its flag — detection in 15–30s, ~2× the client cadence (was up to
+   * ~60s with the old 30s sweep).
+   *
+   * Eviction goes through the sanctioned departure path so the
+   * sessionId→clients reverse index (WsClientManager) and any primary-client
+   * claim (#5589) are released atomically — the index lint rejects raw
+   * mutations. `_handleClientDeparture` runs first (it reads client state),
+   * then `removeClient` updates the index, then we terminate the socket.
+   */
+  _keepaliveSweep() {
+    for (const [ws, client] of this.clients) {
+      if (!client.authenticated) continue
+      if (ws.readyState !== 1) continue
+      if (!client.isAlive) {
+        log.info(`Client ${client.id} unresponsive, terminating`)
+        this._handleClientDeparture(client)
+        this._clientManager.removeClient(ws)
+        try { ws.terminate() } catch {}
+        continue
+      }
+      client.isAlive = false
+      try { ws.ping() } catch {}
+    }
   }
 
   /** Handle cleanup when an authenticated client disconnects or is terminated */
