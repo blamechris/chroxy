@@ -8,7 +8,7 @@ import { toShortModelId, getModels, getDefaultModelId, getRegistryForProvider } 
 import { PERMISSION_MODES } from './handler-utils.js'
 import { listProviders, getProvider } from './providers.js'
 import { createLogger } from './logger.js'
-import { createKeyPair, deriveSharedKey, deriveConnectionKey } from '@chroxy/store-core/crypto'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
@@ -110,6 +110,8 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // undefined when the server hasn't bound a socket (test harnesses) or the
     // ctx predates the field; the auth_ok field is omitted in that case.
     exposure,
+    // #5536: long-lived identity keypair for signing the eager exchange key.
+    serverIdentity,
   } = ctx
   const client = clients.get(ws)
 
@@ -175,6 +177,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // session_list, …) is encrypted. This mirrors the discrete path, where
   // key_exchange_ok is plaintext and encryptionState is set right after.
   let eagerServerPublicKey = null
+  let eagerServerKeySig = null
   let eagerEncryptionState = null
   if (client.eagerKeyExchange) {
     if (requireEncryption) {
@@ -184,10 +187,24 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
         const encryptionKey = deriveConnectionKey(rawSharedKey, client.eagerKeyExchange.salt)
         eagerEncryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
         eagerServerPublicKey = serverKp.publicKey
+        // #5536 — sign the eager exchange key with the long-lived identity so a
+        // client that pinned our identity can verify it BEFORE keying off the
+        // serverPublicKey in auth_ok. Same crypto binding as the discrete path
+        // (key_exchange_ok.serverKeySig); only the carrying frame differs. Absent
+        // when pinning is unavailable — old clients ignore it, exchange stays TOFU.
+        if (serverIdentity?.secretKey) {
+          try {
+            eagerServerKeySig = signExchangeKey(serverKp.publicKey, serverIdentity.secretKey)
+          } catch (sigErr) {
+            log.warn(`Failed to sign eager exchange key for ${client.id}: ${sigErr.message}`)
+            eagerServerKeySig = null
+          }
+        }
       } catch (err) {
         log.warn(`Eager key exchange failed for ${client.id}, falling back to discrete handshake: ${err.message}`)
         eagerEncryptionState = null
         eagerServerPublicKey = null
+        eagerServerKeySig = null
       }
     }
     // Consumed (encryption required), unused (encryption disabled / localhost
@@ -307,6 +324,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // eager fields / encryption disabled / derivation failed) → client falls
     // back to the discrete key_exchange.
     ...(eagerServerPublicKey ? { serverPublicKey: eagerServerPublicKey } : {}),
+    // #5536: identity signature over the eager exchange key, so a pinned client
+    // can verify it before keying off serverPublicKey. Absent when pinning is
+    // unavailable; old clients ignore it.
+    ...(eagerServerKeySig ? { serverKeySig: eagerServerKeySig } : {}),
     ...extra,
   })
 

@@ -20,6 +20,31 @@ describe('parseChroxyUrl (#1852)', () => {
     }
   });
 
+  it('captures the pinned identity key from ?idk= (#5536)', () => {
+    const result = parseChroxyUrl('chroxy://example.com?pair=abc&idk=SOME_B64_KEY');
+    expect(result).toEqual({
+      ok: true,
+      wsUrl: 'wss://example.com',
+      pairingId: 'abc',
+      identityKey: 'SOME_B64_KEY',
+    });
+  });
+
+  it('captures ?idk= on the legacy token flow too (#5536)', () => {
+    const result = parseChroxyUrl('chroxy://example.com?token=t1&idk=KEY2');
+    expect(result).toEqual({
+      ok: true,
+      wsUrl: 'wss://example.com',
+      token: 't1',
+      identityKey: 'KEY2',
+    });
+  });
+
+  it('omits identityKey when ?idk= is absent (old daemon)', () => {
+    const result = parseChroxyUrl('chroxy://example.com?pair=abc');
+    expect(result).not.toHaveProperty('identityKey');
+  });
+
   it('parses wss:// URL without token', () => {
     const result = parseChroxyUrl('wss://example.com');
     expect(result).toEqual({ ok: true, wsUrl: 'wss://example.com', token: '' });

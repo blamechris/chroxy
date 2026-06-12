@@ -65,6 +65,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
         quickTunnel: z.ZodBoolean;
     }, z.core.$strip>>;
     serverPublicKey: z.ZodOptional<z.ZodString>;
+    serverKeySig: z.ZodOptional<z.ZodString>;
     availablePermissionModes: z.ZodOptional<z.ZodArray<z.ZodObject<{
         id: z.ZodString;
         label: z.ZodString;

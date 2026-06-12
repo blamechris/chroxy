@@ -157,6 +157,7 @@ export {
 
 export type {
   KeyPair,
+  SigningKeyPair,
   EncryptedEnvelope,
   EncryptionState,
 } from './crypto'
@@ -166,6 +167,9 @@ export {
   DIRECTION_CLIENT,
   initPRNG,
   createKeyPair,
+  createSigningKeyPair,
+  signExchangeKey,
+  verifyExchangeKeySignature,
   deriveSharedKey,
   nonceFromCounter,
   encrypt,
@@ -173,6 +177,17 @@ export {
   generateConnectionSalt,
   deriveConnectionKey,
 } from './crypto'
+
+export type {
+  KeyPinDecision,
+  KeyPinInput,
+} from './key-pinning'
+
+export {
+  KEY_PIN_MISMATCH_MESSAGE,
+  decideKeyPin,
+  decideKeyPinWithPairingIdentity,
+} from './key-pinning'
 
 export {
   stripAnsi,

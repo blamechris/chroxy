@@ -37,6 +37,16 @@ describe('parsePairingUrl', () => {
     expect(r?.wsUrl).toBe('wss://proxy.example.com:8443/ws')
   })
 
+  it('captures the pinned identity key from ?idk= (#5536)', () => {
+    const r = parsePairingUrl('chroxy://my.tunnel.tld?pair=p1&idk=ID_KEY_B64')
+    expect(r).toEqual({ wsUrl: 'wss://my.tunnel.tld/ws', pairingId: 'p1', identityKey: 'ID_KEY_B64' })
+  })
+
+  it('omits identityKey when ?idk= is absent (old daemon)', () => {
+    const r = parsePairingUrl('chroxy://my.tunnel.tld?pair=p1')
+    expect(r).not.toHaveProperty('identityKey')
+  })
+
   it('returns null for a URL with neither pair nor token', () => {
     expect(parsePairingUrl('chroxy://192.168.1.5:8765')).toBeNull()
   })

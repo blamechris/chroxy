@@ -236,6 +236,17 @@ export interface SavedConnection {
    * real authenticated connection. Cleared if the record's token changes.
    */
   lanVerified?: boolean;
+  /**
+   * #5536 — the daemon's pinned E2E identity public key (base64 Ed25519),
+   * captured from the trusted pairing channel (QR / pairing-code `idk=`) and
+   * pinned on first successful connect. On every subsequent handshake the
+   * client verifies the server's signed ephemeral exchange key against this
+   * pinned value; a mismatch refuses the connection (server-identity change /
+   * MITM). Absent for records paired before this change or daemons with no
+   * identity (encryption disabled / older server) — those stay TOFU and pin on
+   * first use after upgrade (trust continuity).
+   */
+  pinnedIdentityKey?: string;
 }
 
 export interface ContextUsage {

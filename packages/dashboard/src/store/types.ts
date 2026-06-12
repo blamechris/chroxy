@@ -362,6 +362,14 @@ export interface ServerEntry {
   token: string;
   /** Timestamp of last successful connection */
   lastConnectedAt: number | null;
+  /**
+   * #5536 — the daemon's pinned E2E identity public key (base64 Ed25519),
+   * captured from the trusted pairing URL (`idk=`) and pinned on first connect.
+   * Every later handshake verifies the server's signed exchange key against it;
+   * a mismatch refuses the connection. Absent for entries paired before this
+   * change / daemons with no identity — those stay TOFU and pin on first use.
+   */
+  pinnedIdentityKey?: string;
 }
 
 // #3209: per-session skill metadata. Loaded via list_skills, mutated
@@ -1342,7 +1350,7 @@ export interface ConnectionState {
   // Multi-server registry actions
   addServer: (name: string, wsUrl: string, token: string) => ServerEntry;
   removeServer: (serverId: string) => void;
-  updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token'>>) => void;
+  updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token' | 'pinnedIdentityKey'>>) => void;
   /** Switch to a different server — disconnects, clears session, connects fresh. */
   switchServer: (serverId: string) => void;
   /** Reconnect to a server without clearing session state (auto-reconnect/startup). */
@@ -1352,7 +1360,7 @@ export interface ConnectionState {
   /** Add a server from a pairing URL and connect via the ephemeral pairing
       handshake (no permanent token); the issued session token replaces the
       entry's empty token. (#5281 ③ PR 2) */
-  pairServer: (name: string, wsUrl: string, pairingId: string) => ServerEntry;
+  pairServer: (name: string, wsUrl: string, pairingId: string, identityKey?: string) => ServerEntry;
   /**
    * Reconnect to whatever server is currently active — the registry server when
    * `activeServerId` is set, otherwise the local same-origin daemon. Preserves

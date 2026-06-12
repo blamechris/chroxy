@@ -27,6 +27,7 @@ const log = createLogger('cli')
 import { removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
+import { getOrCreateServerIdentity } from './server-identity.js'
 import { getLanIp } from './lan-ip.js'
 import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopbackBind } from './bind-host.js'
 import { writeFileRestricted } from './platform.js'
@@ -793,10 +794,28 @@ export async function startCliServer(config) {
   })
   if (tokenManager) tokenManager.start()
 
+  // #5536 — long-lived server identity for E2E key pinning. Minted once and
+  // persisted across restarts (keychain, or a 0600 file fallback). Its public
+  // half rides the pairing payload (pinned by clients); its secret half signs
+  // each connection's ephemeral exchange key so a pinned client can verify the
+  // exchange key really came from this daemon. Only relevant when encryption is
+  // on and auth is required — skip the keypair work for --no-auth / --no-encrypt
+  // so those modes carry no pinning surface (and old TOFU behaviour is unchanged).
+  let serverIdentity = null
+  if (!NO_AUTH && !config.noEncrypt) {
+    try {
+      serverIdentity = getOrCreateServerIdentity()
+    } catch (err) {
+      log.warn(`Could not establish server identity key (${err.message}); E2E key pinning disabled — connections stay TOFU`)
+      serverIdentity = null
+    }
+  }
+
   // Create pairing manager for ephemeral QR-based pairing (replaces permanent token in QR)
   const pairingManager = NO_AUTH ? null : new PairingManager({
     ttlMs: 60_000,
     autoRefresh: true,
+    identityPublicKey: serverIdentity?.publicKey || null,
   })
 
   wsServer = new WsServer({
@@ -810,6 +829,10 @@ export async function startCliServer(config) {
     noEncrypt: config.noEncrypt,
     tokenManager,
     pairingManager,
+    // #5536 — the identity keypair the WsServer uses to sign each connection's
+    // ephemeral exchange public key (both eager and discrete paths). Null when
+    // pinning is unavailable (no-auth / no-encrypt / keychain failure).
+    serverIdentity,
     environmentManager,
     // Full runtime config so handlers can consult settings at message
     // time — e.g. validateCwdAllowed consults config.workspaceRoots to

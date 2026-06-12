@@ -509,6 +509,9 @@ export function createHttpHandler(server) {
       res.end(JSON.stringify({
         code: snap.code,
         url: snap.url,
+        // #5536 — the daemon's pinned E2E identity public key. Absent (null)
+        // when encryption is disabled or the daemon predates pinning.
+        identityPublicKey: snap.identityPublicKey ?? null,
         expiresAtMs: snap.expiresAtMs,
         expiresInSeconds: Math.ceil(expiresInMs / 1000),
       }))

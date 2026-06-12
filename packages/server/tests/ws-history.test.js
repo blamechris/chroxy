@@ -725,6 +725,52 @@ describe('sendPostAuthInfo — eager key exchange (#5555)', () => {
     assert.equal(typeof decrypted.type, 'string')
   })
 
+  it('#5536 — signs the eager serverPublicKey with the configured identity', async () => {
+    const { createSigningKeyPair, verifyExchangeKeySignature } = await import('@chroxy/store-core/crypto')
+    const identity = createSigningKeyPair()
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx({
+      encryptionEnabled: true,
+      keyExchangeTimeoutMs: 60000,
+      serverIdentity: identity,
+    })
+    const clientKp = createKeyPair()
+    const salt = generateConnectionSalt()
+    registerClient(ctx, ws, {
+      socketIp: '203.0.113.9',
+      eagerKeyExchange: { publicKey: clientKp.publicKey, salt },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    const authOk = ctx._plainSends.find(m => m.type === 'auth_ok')
+    assert.ok(authOk.serverPublicKey, 'eager serverPublicKey present')
+    assert.ok(authOk.serverKeySig, 'auth_ok carries serverKeySig when an identity is configured')
+    // The pinned-client verification: the sig is over serverPublicKey, under the
+    // identity public key.
+    assert.equal(
+      verifyExchangeKeySignature(authOk.serverPublicKey, authOk.serverKeySig, identity.publicKey),
+      true,
+    )
+  })
+
+  it('#5536 — omits serverKeySig on the eager path when no identity is configured', () => {
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })
+    const clientKp = createKeyPair()
+    const salt = generateConnectionSalt()
+    registerClient(ctx, ws, {
+      socketIp: '203.0.113.10',
+      eagerKeyExchange: { publicKey: clientKp.publicKey, salt },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    const authOk = ctx._plainSends.find(m => m.type === 'auth_ok')
+    assert.ok(authOk.serverPublicKey, 'eager serverPublicKey still present')
+    assert.equal(Object.prototype.hasOwnProperty.call(authOk, 'serverKeySig'), false)
+  })
+
   it('falls back to the discrete handshake when the client sends NO eager fields (old client)', () => {
     const ws = makeFakeWs()
     const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })

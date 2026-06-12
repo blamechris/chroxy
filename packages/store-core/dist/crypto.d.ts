@@ -27,6 +27,40 @@ export declare function initPRNG(getRandomBytes: (n: number) => Uint8Array): voi
  * Generate an ephemeral X25519 keypair for key exchange.
  */
 export declare function createKeyPair(): KeyPair;
+export interface SigningKeyPair {
+    publicKey: string;
+    secretKey: Uint8Array;
+}
+/**
+ * Generate a long-lived Ed25519 identity (signing) keypair. The server
+ * persists this across restarts (keychain / state dir); the public half is the
+ * value pinned by clients at pairing time.
+ */
+export declare function createSigningKeyPair(): SigningKeyPair;
+/**
+ * Sign an ephemeral exchange public key (base64) with the identity secret key.
+ * Returns the detached signature as base64. The signed message is the RAW bytes
+ * of the exchange public key (decoded from base64), so both sides sign/verify
+ * over identical bytes regardless of base64 canonicalisation.
+ *
+ * @param exchangePublicKeyBase64 - the per-connection X25519 public key to bind
+ * @param identitySecretKey - the 64-byte Ed25519 secret key
+ * @returns base64-encoded 64-byte detached signature
+ */
+export declare function signExchangeKey(exchangePublicKeyBase64: string, identitySecretKey: Uint8Array): string;
+/**
+ * Verify that `signatureBase64` is a valid Ed25519 signature over
+ * `exchangePublicKeyBase64`, produced by the holder of the secret key matching
+ * `identityPublicKeyBase64` (the pinned identity key). Returns true on a valid
+ * signature, false on any mismatch / malformed input. NEVER throws — a bad or
+ * absent signature is a verification FAILURE the caller must treat as a refusal,
+ * not an exception to swallow.
+ *
+ * @param exchangePublicKeyBase64 - the per-connection X25519 public key offered
+ * @param signatureBase64 - the detached signature offered by the server
+ * @param identityPublicKeyBase64 - the PINNED identity public key to verify against
+ */
+export declare function verifyExchangeKeySignature(exchangePublicKeyBase64: string, signatureBase64: string, identityPublicKeyBase64: string): boolean;
 /**
  * Derive a shared symmetric key from the other side's public key and our secret key.
  */

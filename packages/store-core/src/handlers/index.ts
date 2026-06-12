@@ -819,6 +819,16 @@ export interface AuthOkPayload {
    */
   serverPublicKey: string | null
   /**
+   * #5536 (E2E key pinning) — the server's Ed25519 signature (base64) over the
+   * eager `serverPublicKey`, present only on the eager path when the daemon has
+   * a pinned identity. A client that pinned this daemon's identity public key
+   * (at pairing time) MUST verify this signature against the pinned key before
+   * keying off `serverPublicKey`; a mismatch is a refusal (MITM key swap). Null
+   * when absent (unpinned daemon / discrete path) — see the connect-flow's
+   * pin-or-TOFU decision. Same string validation as `serverPublicKey`.
+   */
+  serverKeySig: string | null
+  /**
    * #5555 (auth_bootstrap) — the static permission-mode enum folded into
    * auth_ok so a new client doesn't have to wait for the discrete
    * `available_permission_modes` burst frame. Validated with the same shape
@@ -898,6 +908,10 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     // empty-string serverPublicKey is treated as absent, not a usable key.
     serverPublicKey:
       typeof msg.serverPublicKey === 'string' && msg.serverPublicKey ? msg.serverPublicKey : null,
+    // #5536 — identity signature over the eager serverPublicKey. Null for
+    // missing/empty/non-string (unpinned daemon / discrete path).
+    serverKeySig:
+      typeof msg.serverKeySig === 'string' && msg.serverKeySig ? msg.serverKeySig : null,
     // #5555 — reuse the discrete-frame parser on the folded field. Absent /
     // non-array → null so the consumer falls back to the discrete frame.
     availablePermissionModes: Array.isArray(msg.availablePermissionModes)
@@ -971,10 +985,14 @@ export function handleAuthFail(msg: Record<string, unknown>): { reason: string }
  * setting `_encryptionState`, sending post-auth WS messages) stay at the call
  * site — they touch crypto state and the websocket directly.
  */
-export function handleKeyExchangeOk(msg: Record<string, unknown>): { publicKey: string | null } {
+export function handleKeyExchangeOk(msg: Record<string, unknown>): { publicKey: string | null; serverKeySig: string | null } {
   const raw = msg.publicKey
+  const sig = msg.serverKeySig
   return {
     publicKey: typeof raw === 'string' && raw ? raw : null,
+    // #5536 — Ed25519 signature (base64) over publicKey, present when the daemon
+    // has a pinned identity. Null when absent (unpinned daemon / older server).
+    serverKeySig: typeof sig === 'string' && sig ? sig : null,
   }
 }
 

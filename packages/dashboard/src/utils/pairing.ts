@@ -20,6 +20,12 @@ export interface ParsedPairing {
   pairingId?: string
   /** Present for the legacy token flow (`?token=`). */
   token?: string
+  /**
+   * #5536 — the daemon's pinned E2E identity public key (base64 Ed25519),
+   * conveyed over the trusted pairing channel as `?idk=`. Pinned on first
+   * connect; absent for older daemons / encryption-off.
+   */
+  identityKey?: string
 }
 
 /**
@@ -51,8 +57,16 @@ export function parsePairingUrl(raw: string): ParsedPairing | null {
   const token = u.searchParams.get('token') ?? undefined
   if (!pairingId && !token) return null
 
+  // #5536 — the pinned identity rides the same trusted pairing URL.
+  const identityKey = u.searchParams.get('idk') ?? undefined
+
   const wsUrl = `${scheme}://${u.host}/ws`
-  return { wsUrl, ...(pairingId ? { pairingId } : {}), ...(token ? { token } : {}) }
+  return {
+    wsUrl,
+    ...(pairingId ? { pairingId } : {}),
+    ...(token ? { token } : {}),
+    ...(identityKey ? { identityKey } : {}),
+  }
 }
 
 /** True when a string looks like a pairing URL (carries `?pair=`). */

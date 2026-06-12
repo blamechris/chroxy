@@ -85,6 +85,7 @@ import {
   setConnectionContext,
   setEncryptionState,
   setPendingKeyPair,
+  setPendingPairingIdentityKey,
   prepareEagerKeyExchange,
   getEncryptionState,
   connectionAttemptId,
@@ -3045,7 +3046,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ serverRegistry: updated });
   },
 
-  updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token'>>) => {
+  updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token' | 'pinnedIdentityKey'>>) => {
     const updated = updateServerEntry(get().serverRegistry, serverId, patch);
     set({ serverRegistry: updated });
   },
@@ -3155,9 +3156,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
    * in the auth_ok message handler) so reconnects authenticate normally. A
    * `pair_fail` clears the armed pairing id and surfaces the reason.
    */
-  pairServer: (name: string, wsUrl: string, pairingId: string): ServerEntry => {
+  pairServer: (name: string, wsUrl: string, pairingId: string, identityKey?: string): ServerEntry => {
     const entry = get().addServer(name, wsUrl, '');
     pendingPairingId = pairingId;
+    // #5536 — capture the daemon's identity (from the trusted pairing URL `idk=`)
+    // for this pairing attempt. Verified against the server's signed exchange key
+    // on the first handshake and pinned on success (key_exchange / auth_ok).
+    setPendingPairingIdentityKey(identityKey ?? null);
     get().switchServer(entry.id);
     return entry;
   },
