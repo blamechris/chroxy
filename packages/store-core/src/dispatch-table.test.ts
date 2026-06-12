@@ -6,6 +6,7 @@ import {
   type ClientStoreAdapter,
 } from './dispatch-table'
 import type { ChatMessage, SessionInfo } from './types'
+import type { PermissionRule } from './handlers'
 
 // ---------------------------------------------------------------------------
 // Fake adapter — a minimal in-memory store that records every mutation a
@@ -18,7 +19,7 @@ interface FakeSession {
   messages: ChatMessage[]
   isIdle?: boolean
   conversationId?: string | null
-  sessionRules?: unknown[]
+  sessionRules?: PermissionRule[]
   [k: string]: unknown
 }
 
@@ -231,7 +232,7 @@ describe('shared dispatch table', () => {
 
     it('defaults to an empty rule set when rules is not an array', () => {
       const env = makeAdapter({
-        sessions: { s1: { sessionId: 's1', messages: [], sessionRules: [{ x: 1 }] } },
+        sessions: { s1: { sessionId: 's1', messages: [], sessionRules: [{ tool: 'Bash', decision: 'allow' }] } },
       })
       dispatch(env, { type: 'permission_rules_updated', sessionId: 's1' })
       expect(env.sessions.s1.sessionRules).toEqual([])

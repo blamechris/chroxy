@@ -570,7 +570,7 @@ export type {
   DeltaFlushScheduler,
 } from './delta-flush'
 
-// #5556 (epic #5514, sub-item 3): shared client message dispatch table. A
+// epic #5556, sub-item 3: shared client message dispatch table. A
 // `Record<msgType, handler>` registry of pure-delegation cases that were
 // byte-identical between the app and dashboard switches, driven through a thin
 // per-client `ClientStoreAdapter`. Clients dispatch through `runDispatch`

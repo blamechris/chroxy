@@ -1,5 +1,5 @@
 /**
- * Shared message dispatch table (#5556 sub-item 3, first slice).
+ * Shared message dispatch table (epic #5556, sub-item 3, first slice).
  *
  * The mobile app and web dashboard each maintained a hand-copied `switch
  * (msg.type)` wrapping the SAME store-core handler functions with the SAME
@@ -84,7 +84,7 @@ import {
 export interface DispatchSessionBase {
   messages: ChatMessage[]
   conversationId?: string | null
-  sessionRules?: unknown[]
+  sessionRules?: PermissionRule[]
   isIdle?: boolean
 }
 
@@ -231,7 +231,7 @@ function dispatchBudgetResumed<S extends DispatchSessionBase>(
       targetId,
       (ss) =>
         ({
-          messages: [...(ss as { messages: ChatMessage[] }).messages, systemMessage],
+          messages: [...ss.messages, systemMessage],
         } as Partial<S>),
     )
   } else {
@@ -264,7 +264,7 @@ function dispatchPermissionRulesUpdated<S extends DispatchSessionBase>(
   if (rulesSessionId && adapter.hasSession(rulesSessionId)) {
     adapter.updateSession(
       rulesSessionId,
-      () => ({ sessionRules: rules as PermissionRule[] } as Partial<S>),
+      () => ({ sessionRules: rules } as Partial<S>),
     )
   }
 }

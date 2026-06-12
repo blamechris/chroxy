@@ -139,7 +139,7 @@ const PLATFORM_SPECIFIC = {
 
 /**
  * Extract the message types owned by the SHARED store-core dispatch table
- * (#5556, epic #5514 sub-item 3). These cases were migrated OUT of both
+ * (epic #5556, sub-item 3). These cases were migrated OUT of both
  * clients' switches into `store-core/src/dispatch-table.ts`, so they no longer
  * appear as a `case` in app/dashboard source — but they ARE covered by both
  * clients (each routes through `runDispatch` before its own switch). The

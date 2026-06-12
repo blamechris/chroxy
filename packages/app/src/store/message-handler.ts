@@ -140,7 +140,7 @@ import {
   // #5556 (epic #5514): shared delta-flusher wiring (accumulator + timer +
   // override) — the client supplies only its `applyDeltas` store mutation.
   createDeltaFlusher,
-  // #5556 (epic #5514, sub-item 3): shared client message dispatch table.
+  // epic #5556, sub-item 3: shared client message dispatch table.
   // Pure-delegation cases that were byte-identical with the dashboard route
   // through this table; a miss falls through to the switch below unchanged.
   createDispatchTable,
@@ -916,7 +916,7 @@ export function updateActiveSession(updater: (session: SessionState) => Partial<
 }
 
 // ---------------------------------------------------------------------------
-// Shared dispatch table (#5556 epic #5514, sub-item 3)
+// Shared dispatch table (epic #5556, sub-item 3)
 //
 // Pure-delegation message cases that were byte-identical with the dashboard's
 // handler are owned by the store-core table. `handleMessage` runs the table
