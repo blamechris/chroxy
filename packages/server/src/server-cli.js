@@ -817,19 +817,24 @@ export async function startCliServer(config) {
         // keychain (or grants access) and the SAME pinned identity loads. The
         // CHROXY_ALLOW_UNPINNED_BOOT escape hatch lets an operator who knows no
         // clients are pinned boot anyway with pinning DISABLED this boot — the
-        // server then signs nothing and clients are told pinning is unavailable
-        // (an old-daemon shape: TOFU), rather than being shown a false MITM.
+        // server then signs nothing. Clients that NEVER pinned this daemon see an
+        // old-daemon shape (TOFU). Clients that ALREADY pinned it will REFUSE the
+        // unsigned handshake (pinned-but-unsigned) — which is the safe outcome and
+        // still better than a false "impersonation" alert from a rotated identity.
+        // (err.message already begins with "server identity keychain read
+        // failed (…)", so log it directly — no redundant prefix.)
         if (process.env.CHROXY_ALLOW_UNPINNED_BOOT === '1') {
           log.warn(
-            `Server identity keychain read failed (${err.message}). ` +
+            `${err.message}. ` +
             'CHROXY_ALLOW_UNPINNED_BOOT=1 set — starting WITH KEY PINNING DISABLED this boot ' +
-            '(server signs no exchange keys; pinned clients see TOFU, not a false impersonation alert). ' +
+            '(server signs no exchange keys). Clients that never pinned this daemon get TOFU; ' +
+            'clients that ALREADY pinned it will refuse until you restore the identity. ' +
             'Unlock the keychain and restart to restore pinning.',
           )
           serverIdentity = null
         } else {
           log.error(
-            `Server identity keychain read failed (${err.message}). ` +
+            `${err.message}. ` +
             'Refusing to start: minting a replacement would rotate this daemon\'s identity and ' +
             'falsely alarm every paired client as a network-impersonation attempt. ' +
             'Unlock your OS keychain (or grant chroxy access) and start again. ' +

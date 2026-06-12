@@ -317,13 +317,30 @@ describe('encrypted handshake — plaintext-downgrade cell (#5614)', () => {
     expect(store.state.refusal?.reason).toBe('pinned-but-unencrypted')
   })
 
-  it('a PINNED client receiving an auth_ok with NO encryption field is REFUSED', () => {
+  it('a PINNED client receiving an auth_ok with NO encryption field (null) is REFUSED', () => {
     const server = new FakeHandshakeServer()
     const store = makeMemoryStore()
     const client = new FakeHandshakeClient(store, { pinnedIdentityKey: server.identityPublicKey })
     const auth = client.sendAuth()
     server.keyExchangeWithClient(auth.publicKey as string)
     const decision = client.handleAuthOk(server.authOk({ encryption: null }))
+    expect(decision.action).toBe('refuse')
+    if (decision.action === 'refuse') expect(decision.reason).toBe('pinned-but-unencrypted')
+    expect(store.state.encryptionActive).toBe(false)
+  })
+
+  it('a PINNED client receiving an auth_ok with encryption:undefined is REFUSED', () => {
+    // The forged frame carries an explicit `undefined` (or, equivalently, the
+    // field truly omitted) — the harness now reads either as the parsed `null`
+    // shape, so this exercises the same end-to-end refusal as the null case but
+    // proves the `undefined` rung of the matrix end-to-end, not just at the unit
+    // level (closes the #5614 coverage gap).
+    const server = new FakeHandshakeServer()
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: server.identityPublicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+    const decision = client.handleAuthOk(server.authOk({ encryption: undefined }))
     expect(decision.action).toBe('refuse')
     if (decision.action === 'refuse') expect(decision.reason).toBe('pinned-but-unencrypted')
     expect(store.state.encryptionActive).toBe(false)

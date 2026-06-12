@@ -288,13 +288,13 @@ export class FakeHandshakeClient {
     // #5614 — the plaintext-downgrade gate runs FIRST, exactly as production does
     // (before the encryption branch / pin check). A pinned connection whose
     // auth_ok is not encryption:'required' is refused here, so a MITM can't forge
-    // a plaintext auth_ok to skip the pin check below. The mode defaults to
-    // 'required' only when the key is ABSENT (so existing encrypted scenarios are
-    // unaffected); an explicit `null` models the parsed "no encryption field"
-    // shape (production's parseRawStringField), which must be refused when pinned.
-    const encryptionMode = 'encryption' in authOk
-      ? (authOk.encryption as string | null | undefined)
-      : 'required'
+    // a plaintext auth_ok to skip the pin check below. We read the field exactly
+    // as production's parser would: an explicit value passes through; a field that
+    // is truly ABSENT arrives as `null` (production's parseRawStringField maps a
+    // missing/empty field to null), which is NOT 'required' and so is refused when
+    // pinned — faithfully modelling the "MITM omits the field" downgrade shape
+    // rather than papering over it with a 'required' default.
+    const encryptionMode = (authOk.encryption as string | null | undefined) ?? null
     const gate = decodeEncryptionGate({
       pinnedIdentityKey: this.opts.pinnedIdentityKey ?? null,
       pairingIdentityKey: this.opts.pairingIdentityKey ?? null,
