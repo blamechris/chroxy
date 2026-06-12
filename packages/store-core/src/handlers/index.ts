@@ -2624,9 +2624,21 @@ export function handleAuthBootstrap(
   const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null
   // #5555 (sub-item 7): the server's live public tunnel URL, when a tunnel is
   // up. Lets a reconnecting client re-learn a URL that rotated while it was
-  // offline. Absent in LAN / no-tunnel deployments.
-  const tunnelUrl = typeof msg.tunnelUrl === 'string' && msg.tunnelUrl ? msg.tunnelUrl : null
+  // offline. Absent in LAN / no-tunnel deployments. Validated as `wss://` here
+  // (not just non-empty) so the parser matches its documented contract and a
+  // bogus scheme is dropped before either client's apply step.
+  const tunnelUrl = asWssUrl(msg.tunnelUrl)
   return { providers, slashCommands, agents, sessionId, tunnelUrl }
+}
+
+/**
+ * #5555 (sub-item 7) — coerce a wire value to a `wss://` URL string, or null.
+ * The tunnel URL is always a secure WebSocket endpoint; rejecting any other
+ * scheme (or non-string) here keeps the shared tunnel-URL parsers honest so the
+ * platform apply steps never have to re-defend against `ws://`/garbage.
+ */
+function asWssUrl(value: unknown): string | null {
+  return typeof value === 'string' && /^wss:\/\//i.test(value) ? value : null
 }
 
 /**
@@ -2645,10 +2657,12 @@ export function handleAuthBootstrap(
 export function handleTunnelUrlChanged(
   msg: Record<string, unknown>,
 ): { url: string; previousUrl: string | null } | null {
-  const url = typeof msg.url === 'string' && msg.url ? msg.url : null
+  // Validate as `wss://` (the parser's documented contract) rather than just
+  // non-empty, so a malformed scheme is dropped here instead of relying on each
+  // client's apply step to re-check it.
+  const url = asWssUrl(msg.url)
   if (!url) return null
-  const previousUrl =
-    typeof msg.previousUrl === 'string' && msg.previousUrl ? msg.previousUrl : null
+  const previousUrl = asWssUrl(msg.previousUrl)
   return { url, previousUrl }
 }
 

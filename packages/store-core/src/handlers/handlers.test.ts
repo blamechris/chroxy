@@ -3556,6 +3556,9 @@ describe('handleAuthBootstrap', () => {
     expect(handleAuthBootstrap({ tunnelUrl: '' }).tunnelUrl).toBeNull()
     expect(handleAuthBootstrap({ tunnelUrl: 42 as unknown as string }).tunnelUrl).toBeNull()
     expect(handleAuthBootstrap({}).tunnelUrl).toBeNull()
+    // Rejects a non-wss scheme — the parser only ever yields a secure endpoint.
+    expect(handleAuthBootstrap({ tunnelUrl: 'ws://evil.example' }).tunnelUrl).toBeNull()
+    expect(handleAuthBootstrap({ tunnelUrl: 'http://nope' }).tunnelUrl).toBeNull()
   })
 })
 
@@ -3587,6 +3590,16 @@ describe('handleTunnelUrlChanged', () => {
     expect(handleTunnelUrlChanged({ type: 'tunnel_url_changed' })).toBeNull()
     expect(handleTunnelUrlChanged({ url: '' })).toBeNull()
     expect(handleTunnelUrlChanged({ url: 99 as unknown as string })).toBeNull()
+  })
+
+  it('rejects a non-wss url and drops a non-wss previousUrl', () => {
+    // A bogus scheme on `url` means the whole push is skipped.
+    expect(handleTunnelUrlChanged({ url: 'ws://evil.example' })).toBeNull()
+    expect(handleTunnelUrlChanged({ url: 'http://nope' })).toBeNull()
+    // A valid wss `url` with a non-wss `previousUrl` keeps the url, drops prev.
+    expect(
+      handleTunnelUrlChanged({ url: 'wss://new.example', previousUrl: 'ws://old.example' }),
+    ).toEqual({ url: 'wss://new.example', previousUrl: null })
   })
 })
 
