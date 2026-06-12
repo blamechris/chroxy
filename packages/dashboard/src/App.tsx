@@ -16,13 +16,11 @@ import {
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { BaseSessionState } from '@chroxy/store-core'
-import type { ChatViewMessage } from './components/ChatView'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
-import { SessionContextMenu, type ContextMenuItem } from './components/SessionContextMenu'
+import { type ContextMenuItem } from './components/SessionContextMenu'
 import { buildSidebarContextMenuItems } from './sidebarContextMenuItems'
-import { CommandPalette } from './components/CommandPalette'
 import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
 import { ChatView } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
@@ -32,23 +30,10 @@ import { toWireAttachments } from './utils/attachment-utils'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
-import { StatusBar } from './components/StatusBar'
-import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
-import { SkillsPanel } from './components/SkillsPanel'
-import { HeaderOverflowMenu, type HeaderOverflowItem } from './components/HeaderOverflowMenu'
-import { NotificationsWidget } from './components/NotificationsWidget'
-import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
-import { QuestionPrompt } from './components/QuestionPrompt'
 import { ActivityIndicator } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
-import { ToolBubble } from './components/ToolBubble'
-import { ToolGroup } from './components/ToolGroup'
-import { PastedTextModal } from './components/PastedTextModal'
-import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
-import { StreamStallChip } from './components/StreamStallChip'
-import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
-import { ResumeUnknownChip } from './components/ResumeUnknownChip'
+import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
@@ -56,32 +41,33 @@ import { ExposureWarningBanner } from './components/ExposureWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
-import { CreateSessionModal } from './components/CreateSessionModal'
-import { ConfirmDialog } from './components/ConfirmDialog'
 import { NotificationBanners } from './components/NotificationBanners'
 import { PendingPairRequests } from './components/PendingPairRequests'
-import { Toast, type ToastItem } from './components/Toast'
+import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
 import { CheckpointTimeline } from './components/CheckpointTimeline'
 import { FooterBar } from './components/FooterBar'
-import { QrModal } from './components/QrModal'
-import { SettingsPanel } from './components/SettingsPanel'
-import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
+import { type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
 import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
-import { formatBindingForDisplay, parseBinding } from './shortcuts/registry'
+import { buildShortcutEntries } from './shortcuts/buildShortcutEntries'
 import { writeText as clipboardWriteText } from './utils/clipboard'
-import { formatQuestionAnswerSummary } from './utils/questionAnswerSummary'
 import { useTauriEvents } from './hooks/useTauriEvents'
-import { useTauriMenuEvents } from './hooks/useTauriMenuEvents'
+import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { useInterventionPing } from './hooks/useInterventionPing'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
-import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder, persistSessionTabOrder, loadPersistedSessionTabOrder } from './store/persistence'
+import { useTunnelReady } from './hooks/useTunnelReady'
+import { useQrModal } from './hooks/useQrModal'
+import { useSidebarOrdering } from './hooks/useSidebarOrdering'
+import { useControlRoomState } from './hooks/useControlRoomState'
+import { useMessageRenderer } from './hooks/useMessageRenderer'
+import { SplitPane } from './components/SplitPane'
+import { ViewSwitcher } from './components/ViewSwitcher'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
@@ -92,8 +78,9 @@ import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
-import { ControlRoomView, type ControlRoomTab } from './components/ControlRoomView'
-import { RepoPresetDrawer } from './components/RepoPresetDrawer'
+import { ControlRoomView } from './components/ControlRoomView'
+import { AppModals } from './components/AppModals'
+import { AppHeader } from './components/AppHeader'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -129,134 +116,6 @@ function formatContext(usage: { inputTokens: number; outputTokens: number } | nu
   const total = usage.inputTokens + usage.outputTokens
   if (total === 0) return undefined
   return `${formatTokensCompact(total)} tokens`
-}
-
-// #5204 — 'control-room' is no longer a per-session viewMode; the Control
-// Room is a dedicated session-independent top-level tab (see `controlRoomOpen`
-// / `controlRoomActive` in App).
-type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool'
-
-/** Scrollable tab bar with arrow buttons when overflowing */
-function ViewSwitcher({
-  viewMode, setViewMode, splitMode, setSplitMode, persistSplitMode,
-  showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
-}: {
-  viewMode: string
-  setViewMode: (m: ViewMode) => void
-  splitMode: SplitDirection | null
-  setSplitMode: (m: SplitDirection | null) => void
-  persistSplitMode: (m: SplitDirection | null) => void
-  showConsoleTab: boolean
-  unreadSystemCount: number
-  checkpointsOpen: boolean
-  setCheckpointsOpen: (fn: (prev: boolean) => boolean) => void
-}) {
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const [canScrollLeft, setCanScrollLeft] = useState(false)
-  const [canScrollRight, setCanScrollRight] = useState(false)
-  const dragState = useRef<{ isDragging: boolean; startX: number; scrollLeft: number }>({
-    isDragging: false, startX: 0, scrollLeft: 0,
-  })
-
-  const updateArrows = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    setCanScrollLeft(el.scrollLeft > 1)
-    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 1)
-  }, [])
-
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    updateArrows()
-    let ro: ResizeObserver | undefined
-    if (typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(updateArrows)
-      ro.observe(el)
-    }
-    el.addEventListener('scroll', updateArrows, { passive: true })
-    return () => { ro?.disconnect(); el.removeEventListener('scroll', updateArrows) }
-  }, [updateArrows, showConsoleTab, unreadSystemCount])
-
-  const scroll = useCallback((dir: number) => {
-    const el = scrollRef.current
-    if (!el) return
-    // Scroll by one tab width (use the first tab's width as reference)
-    const tabWidth = el.querySelector('.view-tab')?.getBoundingClientRect().width ?? 100
-    el.scrollBy({ left: dir * (tabWidth + 8), behavior: 'smooth' })
-  }, [])
-
-  // Drag-to-scroll handlers
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    // Only drag on the container background, not on buttons or their children
-    if ((e.target as HTMLElement).closest('button')) return
-    const el = scrollRef.current
-    if (!el) return
-    dragState.current = { isDragging: true, startX: e.clientX, scrollLeft: el.scrollLeft }
-    el.setPointerCapture(e.pointerId)
-    el.style.cursor = 'grabbing'
-  }, [])
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragState.current.isDragging) return
-    const el = scrollRef.current
-    if (!el) return
-    const dx = e.clientX - dragState.current.startX
-    el.scrollLeft = dragState.current.scrollLeft - dx
-  }, [])
-
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    if (!dragState.current.isDragging) return
-    dragState.current.isDragging = false
-    const el = scrollRef.current
-    if (!el) return
-    el.releasePointerCapture(e.pointerId)
-    el.style.cursor = ''
-  }, [])
-
-  return (
-    <div className="view-switch-wrapper">
-      {canScrollLeft && (
-        <button className="view-switch-arrow view-switch-arrow-left" onClick={() => scroll(-1)} type="button" aria-label="Scroll tabs left">‹</button>
-      )}
-      <div
-        className="view-switch"
-        ref={scrollRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      >
-        <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
-        <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
-        {/* #5200/#5204: the Control Room is launched from the bottom sidebar
-            panel slot (its header "Control Room" button) and opens as its own
-            session-independent top-level tab in the SessionBar strip — not a
-            per-session view tab here. */}
-        <button
-          className={`view-tab${splitMode ? ' active' : ''}`}
-          onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
-          type="button" title={`Split view (${formatShortcutKeys('Cmd+\\')})`}
-        >Split</button>
-        <button className={`view-tab${viewMode === 'files' ? ' active' : ''}`} onClick={() => setViewMode('files')} type="button">Files</button>
-        <button className={`view-tab${viewMode === 'system' ? ' active' : ''}`} onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }} type="button">
-          System{unreadSystemCount > 0 && <span className="system-badge">{unreadSystemCount}</span>}
-        </button>
-        {showConsoleTab && (
-          <button className={`view-tab${viewMode === 'console' ? ' active' : ''}`} onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }} type="button">Console</button>
-        )}
-        <button className={`view-tab${viewMode === 'environments' ? ' active' : ''}`} onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }} type="button">Envs</button>
-        <button className={`view-tab${viewMode === 'snapshots' ? ' active' : ''}`} onClick={() => { setViewMode('snapshots'); setSplitMode(null); persistSplitMode(null) }} type="button">Snapshots</button>
-        <button className={`view-tab${viewMode === 'pool' ? ' active' : ''}`} onClick={() => { setViewMode('pool'); setSplitMode(null); persistSplitMode(null) }} type="button">Pool</button>
-        <div className="view-switch-spacer" />
-        <button className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`} onClick={() => setCheckpointsOpen(prev => !prev)} type="button" title="Toggle checkpoint timeline">Checkpoints</button>
-        <button className={`view-tab${viewMode === 'diff' ? ' active' : ''}`} onClick={() => setViewMode('diff')} type="button">Diff</button>
-      </div>
-      {canScrollRight && (
-        <button className="view-switch-arrow view-switch-arrow-right" onClick={() => scroll(1)} type="button" aria-label="Scroll tabs right">›</button>
-      )}
-    </div>
-  )
 }
 
 export function App() {
@@ -610,95 +469,36 @@ export function App() {
   const [sessionCreateError, setSessionCreateError] = useState<string | null>(null)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
-  const [qrModalOpen, setQrModalOpen] = useState(false)
-  const [qrSvg, setQrSvg] = useState<string | null>(null)
-  const [qrLoading, setQrLoading] = useState(false)
-  const [qrError, setQrError] = useState<string | null>(null)
-  // #5512 — the typeable short pairing code shown beside the linking-mode QR so
-  // camera-less devices can type it instead of scanning. The QR encodes the same
-  // id. Null for per-session "Share" QRs (those carry a session-bound token).
-  const [qrPairingCode, setQrPairingCode] = useState<string | null>(null)
-  const [settingsOpen, setSettingsOpen] = useState(() => {
-    const params = new URLSearchParams(window.location.search)
-    return params.get('settings') === '1'
-  })
-  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
-  // #4832 — user-defined order for the sidebar's repo groups and the
-  // sessions inside each group. Both are layered on top of the
-  // server-supplied session list and persisted in localStorage so they
-  // survive reload + Tauri restart. State sits at App-level so the
-  // `sidebarRepos` memo below can apply the order to the derived
-  // RepoNode[].
-  const [sidebarRepoOrder, setSidebarRepoOrder] = useState<string[]>(() => loadPersistedSidebarRepoOrder())
-  const [sidebarSessionOrder, setSidebarSessionOrder] = useState<Record<string, string[]>>(() => loadPersistedSidebarSessionOrder())
   // #4045: sidebar right-click context menu state. `null` when closed.
   const [sidebarContextMenu, setSidebarContextMenu] = useState<{
     target: ContextMenuTarget
     x: number
     y: number
   } | null>(null)
-  const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
-  // #5204 — Control Room top-level tab. `controlRoomOpen` is whether the
-  // pinned tab exists in the SessionBar strip; `controlRoomActive` is whether
-  // it's the focused view. Both are local (not persisted) — opening the CR is
-  // cheap (the host/repo snapshot lives in the store, so closing/reopening
-  // doesn't wipe it) and it should not survive a reload. Switching to a
-  // session deactivates it; switching back re-activates without re-fetching.
-  const [controlRoomOpen, setControlRoomOpen] = useState(false)
-  const [controlRoomActive, setControlRoomActive] = useState(false)
-  const openControlRoom = useCallback(() => {
-    setControlRoomOpen(true)
-    setControlRoomActive(true)
-    setSplitMode(null)
-    persistSplitMode(null)
-  }, [])
-  // #5544 — the Control Room Settings tab is now the single home for the
-  // preference surfaces that used to live in the slide-out SettingsPanel
-  // modal. Two redirect paths converge on the Settings tab:
-  //   - Control Room already open: bump `settingsRedirectNonce`, which
-  //     ControlRoomView watches to switch tabs (even from another tab).
-  //   - Control Room closed: mount ControlRoomView with `initialTab='settings'`
-  //     so it opens straight onto Settings without a flash of another tab.
-  // `controlRoomInitialTab` is a one-shot: cleared back to undefined right
-  // after the open so a later sidebar "Control Room" click lands on the
-  // operator's persisted tab, not Settings.
-  const [settingsRedirectNonce, setSettingsRedirectNonce] = useState(0)
-  const [controlRoomInitialTab, setControlRoomInitialTab] = useState<ControlRoomTab | undefined>(undefined)
-  const openSettings = useCallback(() => {
-    // The redirect must also dismiss the legacy modal (the `?settings=1`
-    // deep-link can leave it open) — otherwise the tab switch happens behind
-    // the overlay and the shortcut appears dead.
-    setSettingsOpen(false)
-    if (controlRoomActive) {
-      // CR already visible — drive the redirect via the nonce instead.
-      setSettingsRedirectNonce((n) => n + 1)
-    } else {
-      // CR is opening fresh — seed the initial tab so the mount lands on
-      // Settings without a flash of another tab.
-      setControlRoomInitialTab('settings')
-    }
-    openControlRoom()
-  }, [controlRoomActive, openControlRoom])
-  // #5544 — clear the one-shot initial-tab seed after the Control Room has
-  // mounted with it. ControlRoomView only reads `initialTab` in its mount
-  // initializer, so clearing it now is invisible to the live view but ensures
-  // a later reopen (e.g. sidebar "Control Room") starts on the persisted tab.
-  useEffect(() => {
-    if (controlRoomActive && controlRoomInitialTab !== undefined) {
-      setControlRoomInitialTab(undefined)
-    }
-  }, [controlRoomActive, controlRoomInitialTab])
-  const closeControlRoom = useCallback(() => {
-    // Closing is non-destructive: the tab disappears and we fall back to the
-    // prior session (activeSessionId is untouched). The store-held snapshot
-    // survives, so reopening re-renders from cache.
-    setControlRoomOpen(false)
-    setControlRoomActive(false)
-  }, [])
+  // #5560 — Control Room tab (#5204), converged Settings redirect (#5544), the
+  // legacy settings modal + shortcut-help flags, and split-view mode all live
+  // in `useControlRoomState` (split-view is co-located because openControlRoom
+  // clears it).
+  const {
+    controlRoomOpen,
+    controlRoomActive,
+    setControlRoomActive,
+    settingsRedirectNonce,
+    controlRoomInitialTab,
+    settingsOpen,
+    setSettingsOpen,
+    shortcutHelpOpen,
+    setShortcutHelpOpen,
+    splitMode,
+    setSplitMode,
+    openControlRoom,
+    openSettings,
+    closeControlRoom,
+  } = useControlRoomState()
   // #5206 — the session id awaiting close-confirmation, or null when no
   // confirm is pending. Drives the ConfirmDialog rendered near the modals.
   const [closeConfirmSessionId, setCloseConfirmSessionId] = useState<string | null>(null)
@@ -1171,37 +971,17 @@ export function App() {
     })
   }, [sessionStates, sessionActivityNow])
 
-  // #4831 — user-defined SessionBar tab order (overlay on the server's
-  // `sessions[]` membership). Loaded lazily from localStorage on mount and
-  // re-persisted whenever the user drags / keyboard-reorders a tab. The
-  // server is still authoritative for which sessions EXIST; this slice
-  // controls only the visual order in the top tab strip (issue #4831).
-  const [tabOrder, setTabOrder] = useState<string[]>(() => loadPersistedSessionTabOrder())
-  // #4831 — `loadPersistedSessionTabOrder` reads under the *current*
-  // server scope (set by `setServerScope` on server-switch). The initial
-  // `useState` only fires once on mount, so without this effect a server
-  // switch in the same browser tab would leave SessionBar showing the
-  // previous server's tabOrder until a full page refresh. Re-load whenever
-  // the active server changes so each server gets its own persisted order.
-  const activeServerId = useConnectionStore(s => s.activeServerId)
-  useEffect(() => {
-    setTabOrder(loadPersistedSessionTabOrder())
-  }, [activeServerId])
-  // #4940 — same server-switch refresh for the sidebar repo / per-repo
-  // session orders declared above (see lines around the `sidebarRepoOrder`
-  // useState). The persistence layer is already server-scoped via
-  // `scopedKey` / `scopedRead`, but the App-level state was initialised
-  // once and never re-read. Without this effect, switching servers via
-  // the ServerPicker left server A's drag-ordering applied to server B's
-  // sidebar until a full page reload, silently bypassing the scoping.
-  useEffect(() => {
-    setSidebarRepoOrder(loadPersistedSidebarRepoOrder())
-    setSidebarSessionOrder(loadPersistedSidebarSessionOrder())
-  }, [activeServerId])
-  const handleReorderTabs = useCallback((nextOrder: string[]) => {
-    setTabOrder(nextOrder)
-    persistSessionTabOrder(nextOrder)
-  }, [])
+  // #5560 — the three user-defined ordering overlays (SessionBar tab order
+  // #4831; sidebar repo + per-repo session orders #4832) plus their
+  // server-switch refresh effects (#4831 / #4940) live in `useSidebarOrdering`.
+  const {
+    tabOrder,
+    sidebarRepoOrder,
+    sidebarSessionOrder,
+    handleReorderTabs,
+    handleReorderRepos,
+    handleReorderSidebarSessions,
+  } = useSidebarOrdering()
 
   // Map sessions to SessionTabData[] with unified status indicators.
   //
@@ -1321,23 +1101,6 @@ export function App() {
       }
     })
   }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage, sidebarRepoOrder, sidebarSessionOrder])
-
-  // #4832 — reorder callbacks wired into the Sidebar component. Both
-  // persist immediately so a reload (or Tauri restart) restores the
-  // order. We update local state synchronously so the UI reflects the
-  // new order on the next render without waiting for a round-trip.
-  const handleReorderRepos = useCallback((orderedPaths: string[]) => {
-    setSidebarRepoOrder(orderedPaths)
-    persistSidebarRepoOrder(orderedPaths)
-  }, [])
-
-  const handleReorderSidebarSessions = useCallback((repoPath: string, orderedIds: string[]) => {
-    setSidebarSessionOrder(prev => {
-      const next = { ...prev, [repoPath]: orderedIds }
-      persistSidebarSessionOrder(next)
-      return next
-    })
-  }, [])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(
@@ -1654,176 +1417,32 @@ export function App() {
     setImageAttachments(prev => prev.filter((_, i) => i !== index))
   }, [])
 
-  const fetchQrInto = useCallback(async (path: string) => {
-    setQrModalOpen(true)
-    setQrLoading(true)
-    setQrError(null)
-    setQrSvg(null)
-    setQrPairingCode(null)
-    const token = getAuthToken()
-    if (!token) {
-      setQrLoading(false)
-      setQrError('No auth token available')
-      return
-    }
-    // The typeable code (#5512) only applies to the linking-mode QR — per-session
-    // "Share" QRs (/qr/session/…) issue a session-bound token with no displayed
-    // code. Fetch the code in parallel with the QR for the linking-mode path.
-    const isLinkingQr = path === '/qr'
-    try {
-      const [qrRes, codeRes] = await Promise.all([
-        fetch(path, { headers: { Authorization: `Bearer ${token}` } }),
-        isLinkingQr
-          ? fetch('/pairing-code', { headers: { Authorization: `Bearer ${token}` } }).catch(() => null)
-          : Promise.resolve(null),
-      ])
-      if (!qrRes.ok) {
-        const body = await qrRes.json().catch(() => ({ error: 'Request failed' }))
-        setQrError(body.error || `HTTP ${qrRes.status}`)
-        setQrSvg(null)
-      } else {
-        const svg = await qrRes.text()
-        setQrSvg(svg)
-        setQrError(null)
-      }
-      if (codeRes && codeRes.ok) {
-        const body = await codeRes.json().catch(() => null)
-        if (body?.code) setQrPairingCode(String(body.code))
-      }
-    } catch (err) {
-      setQrError(err instanceof Error ? err.message : 'Failed to fetch QR code')
-      setQrSvg(null)
-    } finally {
-      setQrLoading(false)
-    }
-  }, [])
+  // #5560 — the QR-modal surface (linking-mode QR, per-session "Share" QR,
+  // typeable pairing code, Discord pairing-link delivery) lives in `useQrModal`.
+  // `handleShowQr` is consumed by the Tauri menu wiring directly below, so the
+  // hook is called here (not lower with the rest of the modal handlers).
+  const {
+    qrModalOpen,
+    setQrModalOpen,
+    qrSvg,
+    qrLoading,
+    qrError,
+    qrPairingCode,
+    qrShareMode,
+    handleShowQr,
+    handleShareSession,
+    handlePostPairLinkToDiscord,
+  } = useQrModal(activeSessionId, pairingRefreshedCount)
 
-  const handleShowQr = useCallback(() => fetchQrInto('/qr'), [fetchQrInto])
-
-  // #5513 — host-triggered Discord pairing-link delivery. POSTs to the daemon's
-  // primary-class-gated /pair-discord, which mints a FRESH approval-gated id and
-  // posts only the chroxy:// link. Redeeming it from the channel still needs host
-  // approval, so the channel grants nothing on its own. Returns a result the
-  // QrModal renders inline. Never surfaces token material.
-  const handlePostPairLinkToDiscord = useCallback(async () => {
-    const token = getAuthToken()
-    if (!token) return { posted: false as const, reason: 'no_token' }
-    try {
-      const res = await fetch('/pair-discord', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      })
-      const body = await res.json().catch(() => null)
-      if (res.ok && body?.posted) {
-        return { posted: true as const, expiresInSeconds: body.expiresInSeconds }
-      }
-      // Auth/availability failures arrive as { error: ... }, not { reason: ... }.
-      return { posted: false as const, reason: body?.reason || body?.error || `http_${res.status}` }
-    } catch {
-      return { posted: false as const, reason: 'post_failed' }
-    }
-  }, [])
-
-  // #4695 / #4942 — bridge the macOS menu bar items to App-state
-  // handlers. The sidebar's per-project "+" row and the command
-  // palette entries currently open their respective dialogs through
-  // inline handlers, so they are NOT routed through this hook. Hook
-  // is a no-op outside Tauri (web dashboard).
-  //
-  // Handler wiring (one prop per menu item that flows through this
-  // hook — Rust-side direct dispatches like Shell > Start aren't here):
-  //   - onNewSession        — File > New Session (same callback the
-  //                            chrome "New Session" button uses)
-  //   - onConnectToServer   — File > Connect to Server… (opens the
-  //                            Settings panel; the Server Registry
-  //                            section is the existing surface for
-  //                            managing connections)
-  //   - onDisconnect        — File > Disconnect (calls the store's
-  //                            disconnect action; no-op if not
-  //                            connected)
-  //   - onToggleSidebar     — View > Toggle Sidebar (same setter as
-  //                            the Cmd+B registry handler)
-  //   - onTogglePlanMode    — View > Toggle Plan Mode (same logic as
-  //                            the Shift+Tab registry handler)
-  //   - onShowQr            — View > Show QR Code (same fetch the
-  //                            chrome "Show QR" affordance triggers)
-  //   - onReload            — View > Reload (window.location.reload —
-  //                            Tauri's webview honours this)
-  //   - onTunnelSettings    — Tunnel > Tunnel Settings… (opens the
-  //                            Settings panel; tunnel mode lives there)
-  //   - onPreferences       — Chroxy > Preferences… (opens Settings)
-  //
-  // Window > Bring All to Front is handled entirely Rust-side
-  // (`handle_bring_all_to_front` iterates every webview window — main
-  // and any open `qr_popup` — and brings each one forward). The
-  // dashboard has no state to mutate, so it doesn't appear in the hook
-  // surface at all.
-  const menuConnectToServer = useCallback(() => {
-    // The dashboard's existing "connect to a different server" surface
-    // is the Settings panel's Server Registry section. The menu item
-    // opens Settings; the user picks a registry entry there.
-    // #5544 — Settings now lives in the Control Room Settings tab.
-    openSettings()
-  }, [openSettings])
-  const menuDisconnect = useCallback(() => {
-    useConnectionStore.getState().disconnect()
-  }, [])
-  const menuToggleSidebar = useCallback(() => {
-    setSidebarOpen(prev => !prev)
-  }, [])
-  const menuTogglePlanMode = useCallback(() => {
-    const state = useConnectionStore.getState()
-    if (state.permissionMode === 'plan') {
-      setPermissionMode(state.previousPermissionMode || 'approve')
-    } else {
-      setPermissionMode('plan')
-    }
-  }, [setPermissionMode])
-  const menuReload = useCallback(() => {
-    window.location.reload()
-  }, [])
-  const menuOpenSettings = useCallback(() => {
-    // #5544 — redirect to the Control Room Settings tab (the single home).
-    openSettings()
-  }, [openSettings])
-  useTauriMenuEvents({
+  // #5560 — the macOS menu-bar wiring (#4695 / #4942) lives in
+  // `useTauriMenuWiring`. No-op outside Tauri.
+  useTauriMenuWiring({
     onNewSession: handleNewSession,
-    onConnectToServer: menuConnectToServer,
-    onDisconnect: menuDisconnect,
-    onToggleSidebar: menuToggleSidebar,
-    onTogglePlanMode: menuTogglePlanMode,
     onShowQr: handleShowQr,
-    onReload: menuReload,
-    onTunnelSettings: menuOpenSettings,
-    onPreferences: menuOpenSettings,
+    openSettings,
+    setSidebarOpen,
+    setPermissionMode,
   })
-
-  // #3070: per-session "Share this session" QR. Issues a token bound to the
-  // active session — the scanner can chat into it but cannot list/switch
-  // others. Distinct from the linking-mode QR above, which lets the paired
-  // device manage every session.
-  const [qrShareMode, setQrShareMode] = useState<'link' | 'share'>('link')
-  const handleShareSession = useCallback(() => {
-    if (!activeSessionId) return
-    setQrShareMode('share')
-    void fetchQrInto(`/qr/session/${encodeURIComponent(activeSessionId)}`)
-  }, [activeSessionId, fetchQrInto])
-  // Reset share-mode label whenever the modal reopens via the regular QR
-  // button so the title reflects the actual content.
-  useEffect(() => {
-    if (qrModalOpen && qrShareMode === 'share') return
-    if (!qrModalOpen) setQrShareMode('link')
-  }, [qrModalOpen, qrShareMode])
-
-  // Auto-refresh QR when the server regenerates the pairing ID (#2916).
-  // Only refresh while the modal is open — guarding on qrSvg would reopen
-  // the modal after the user closes it if qrSvg was not cleared on close.
-  useEffect(() => {
-    if (pairingRefreshedCount === 0) return
-    if (!qrModalOpen) return
-    handleShowQr()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairingRefreshedCount])
 
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
     sendPermissionResponse(requestId, 'allow')
@@ -1847,223 +1466,25 @@ export function App() {
     startServer()
   }, [])
 
-  // Custom message renderer for permission prompts and tool bubbles.
-  // `chatTailMessageId` is sourced from `useChatMessages` above (#4770).
-  const renderMessage = useCallback((msg: ChatViewMessage) => {
-    // Tool-group synthetic row (#3747) — id is a group key, not a store id.
-    if (msg.type === 'tool_group') {
-      const payload = chatToolGroupPayloads.get(msg.id)
-      if (!payload) return null
-      // #4305 — keep the trailing group expanded so the Chat tab matches
-      // Output-tab chronology when a turn ends on a tool run with no
-      // follow-up summary.
-      return (
-        <ToolGroup
-          messages={payload.messages}
-          isActive={payload.isActive}
-          isTail={msg.id === chatTailMessageId}
-        />
-      )
-    }
-    const storeMsg = storeMsgMap.get(msg.id)
-    if (!storeMsg) return null
-
-    // Permission prompt
-    if (storeMsg.requestId && storeMsg.expiresAt && !storeMsg.answered) {
-      // #3619 wall-clock site (kept on `Date.now()` intentionally).
-      // `storeMsg.expiresAt` is computed at receipt as
-      // `Date.now() + msg.remainingMs` in `message-handler.ts`, so this
-      // subtraction is wall-clock-vs-wall-clock — both sides use the
-      // same clock, no mixing. Switching this site to `performance.now()`
-      // would subtract a process-local monotonic clock from a wall-clock
-      // anchor and produce garbage. Wall-clock jumps after receipt do
-      // change `Date.now()` and therefore affect each re-computation
-      // here — that is correct behavior for a wall-clock anchor.
-      // Whatever value falls out is what feeds `<PermissionPrompt>`'s
-      // local countdown anchor as its initial `remainingMs` prop.
-      const remainingMs = Math.max(0, storeMsg.expiresAt - Date.now())
-      return (
-        <PermissionPrompt
-          requestId={storeMsg.requestId}
-          tool={storeMsg.tool || 'Unknown'}
-          description={storeMsg.content}
-          remainingMs={remainingMs}
-          onRespond={(reqId, decision) => sendPermissionResponse(reqId, decision)}
-        />
-      )
-    }
-
-    // Question prompt (options or free-text fallback)
-    if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
-      // #4615 — suppress unanswered prompts that have been invalidated by
-      // a subsequent ASK_USER_QUESTION_STALL. The chip rendered for the
-      // stall error carries the retry affordance; leaving the interactive
-      // prompt visible would let the user submit answers into a dead
-      // _pendingUserAnswer slot. Already-answered prompts still render
-      // (their answer summary is part of chat history).
-      if (stalledPromptIds.has(storeMsg.id)) return null
-      return (
-        <QuestionPrompt
-          question={storeMsg.content}
-          options={storeMsg.options}
-          questions={storeMsg.questions}
-          answered={storeMsg.answered}
-          // #4735 / #4731 — SDK / BYOK / Codex / Gemini sessions get the
-          // interactive MultiQuestionForm; TUI / CLI sessions keep the
-          // #4666 deferred notice (their permission-hook still denies
-          // multi-question forms per #4648). Derivation lives at
-          // `allowMultiQuestionForm` above so the flag flips correctly
-          // on session-switch without a full re-render of every prompt.
-          allowMultiQuestion={allowMultiQuestionForm}
-          // #4685 — gate the question content render on the matching
-          // AskUserQuestion permission_request being resolved. Pre-fix
-          // the user_question card rendered the moment the wire event
-          // arrived (which the server emits in parallel with the
-          // permission_request), leaking the model-supplied question
-          // text + options before the user had a chance to click Allow.
-          // The derivation `hasPendingAskUserQuestionPermission` scans
-          // the same session's messages for any AskUserQuestion
-          // permission prompt that is still unresolved on both this
-          // client and across clients. Already-answered prompts skip the
-          // gate so post-answer chat history renders normally.
-          pendingPermission={!storeMsg.answered && hasPendingAskUserQuestionPermission}
-          onSelect={(answer) => {
-            // #4604 Chunk B / #4735 — answer is `string` for
-            // single-question / free-text paths and
-            // `Record<string, string | string[]>` for multi-question
-            // forms (multi-select values are native arrays on the
-            // widened wire). sendUserQuestionResponse handles both
-            // shapes; markPromptAnswered records a string summary on
-            // the bubble so the post-answer collapse UI has something
-            // readable to show.
-            sendUserQuestionResponse(answer, storeMsg.toolUseId)
-            markPromptAnswered(storeMsg.id, formatQuestionAnswerSummary(answer))
-          }}
-        />
-      )
-    }
-
-    // Tool bubble
-    if (storeMsg.type === 'tool_use' && storeMsg.toolUseId) {
-      // #4313 — singleton activity runs (a single trailing tool_use)
-      // bypass the ToolGroup path entirely: `chatToolGroupPayloads`
-      // only collapses contiguous runs of 2+ messages (see above,
-      // ~line 897). Pass the same `isTail` signal that ToolGroup uses
-      // (#4309) so the Chat tab's last item matches Output-tab
-      // chronology in the 1-tool case too. Without this, a turn
-      // shaped `summary text -> 1 trailing tool` skipped the #4309
-      // mitigation entirely and the trailing tool rendered collapsed
-      // while Output still showed it inline.
-      return (
-        <ToolBubble
-          toolName={storeMsg.tool || 'Tool'}
-          toolUseId={storeMsg.toolUseId}
-          input={storeMsg.toolInput}
-          inputPartial={storeMsg.toolInputPartial}
-          result={storeMsg.toolResult}
-          serverName={storeMsg.serverName}
-          isTail={msg.id === chatTailMessageId}
-          resultImages={storeMsg.toolResultImages}
-          childAgentEvents={storeMsg.childAgentEvents}
-        />
-      )
-    }
-
-    // #3188: auto-evaluator rewrite banner. The system message is pushed
-    // by the dashboard's `evaluator_rewrite` handler and persisted in
-    // the per-session localStorage cache (`sessionMessagesKey` in
-    // packages/dashboard/src/store/persistence.ts). Reconnect/replay
-    // re-renders the banner from that cached metadata — no need to
-    // re-fire the transient wire event.
-    if (storeMsg.type === 'system' && storeMsg.evaluator?.kind === 'rewrite') {
-      return <EvaluatorRewriteBanner meta={storeMsg.evaluator} />
-    }
-
-    // #4476: distinct chip for stream-stall errors (server PR #4475 emits
-    // `error{code: 'stream_stall'}` after the configured inactivity window).
-    // Generic red bubble reads as "broken"; this affordance signals
-    // "recoverable, just retry" and offers a one-tap resend of the last
-    // user message. Only render the retry button when the stall is the
-    // most recent bubble (chatTailMessageId) — replayed historical stalls
-    // surface the chip text + tooltip for diagnostics, but resending an
-    // ancient user_input from a long-finished turn would be misleading.
-    //
-    // #4603: thread the active session's provider through so the chip
-    // headline can carry a short label ("SDK · ...", "CLI · ...") for
-    // one-glance triage, and hand the View-logs affordance a closure
-    // that switches the view to the System pane (where session-level
-    // context lives). The View-logs button is only shown on the tail
-    // entry — replaying historical stalls shouldn't offer to jump the
-    // operator out of the chat for an old event.
-    if (storeMsg.type === 'error' && storeMsg.code === 'stream_stall') {
-      const isTail = msg.id === chatTailMessageId
-      const lastUserInput = isTail
-        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
-        : undefined
-      return (
-        <StreamStallChip
-          errorText={storeMsg.content}
-          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
-          timeoutMs={streamStallTimeoutMs ?? undefined}
-          provider={activeSessionProvider ?? undefined}
-          onViewLogs={isTail ? () => setViewMode('system') : undefined}
-        />
-      )
-    }
-
-    // #4615: dedicated chip for ASK_USER_QUESTION_STALL errors. The server
-    // emits `error{code: 'ASK_USER_QUESTION_STALL'}` (PR #4614) when the
-    // Claude TUI never acknowledges an AskUserQuestion answer — typically
-    // a multi-question form wedge. Generic red toast reads as "broken";
-    // this affordance signals "recoverable, just retry your original
-    // request" and offers a one-tap resend of the last user message.
-    // Mirrors the StreamStallChip pattern (#4476): retry only on tail
-    // entries so replayed historical stalls show the chip + tooltip for
-    // diagnostics but don't offer a misleading resend button.
-    if (storeMsg.type === 'error' && storeMsg.code === 'ASK_USER_QUESTION_STALL') {
-      const isTail = msg.id === chatTailMessageId
-      const lastUserInput = isTail
-        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
-        : undefined
-      return (
-        <AskUserQuestionStallChip
-          errorText={storeMsg.content}
-          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
-        />
-      )
-    }
-
-    // #4947 / #5006: dedicated chip for the two resume-failure error codes:
-    //   - `error{code: 'resume_unknown'}` (server PR #4944) — RECOVERABLE.
-    //     CliSession has ALREADY auto-fallen-back to a fresh conversation
-    //     by the time this lands; chip renders the polite "starting fresh"
-    //     copy.
-    //   - `error{code: 'resume_unknown_exhausted'}` (server PR #5004) —
-    //     TERMINAL. The post-fallback retry ALSO failed; the server has
-    //     stopped auto-respawning and the chip renders the "auto-recovery
-    //     exhausted, start a fresh session manually" copy + assertive
-    //     `role="alert"` so AT users get the urgency signal.
-    // Both variants surface `attemptedResumeId` as subtext for operator
-    // correlation against `~/.chroxy/session-state.json.resumeConversationId`.
-    // Distinct from the stream_stall / ASK_USER_QUESTION_STALL chips
-    // because no retry affordance is needed (recoverable: fresh conversation
-    // already running; exhausted: user must start a new session manually).
-    if (
-      storeMsg.type === 'error' &&
-      (storeMsg.code === 'resume_unknown' || storeMsg.code === 'resume_unknown_exhausted')
-    ) {
-      return (
-        <ResumeUnknownChip
-          variant={storeMsg.code === 'resume_unknown_exhausted' ? 'exhausted' : 'recoverable'}
-          errorText={storeMsg.content}
-          attemptedResumeId={storeMsg.attemptedResumeId}
-        />
-      )
-    }
-
-    // Default rendering
-    return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission])
+  // #5560 — the custom chat-message renderer (permission prompts, question
+  // prompts, tool bubbles/groups, evaluator banner, stall / resume chips) is
+  // built by `useMessageRenderer`. Same deps array, same per-branch JSX.
+  const renderMessage = useMessageRenderer({
+    storeMsgMap,
+    chatToolGroupPayloads,
+    chatTailMessageId,
+    sendPermissionResponse,
+    sendUserQuestionResponse,
+    markPromptAnswered,
+    storeMessages,
+    sendInput,
+    streamStallTimeoutMs,
+    allowMultiQuestionForm,
+    activeSessionProvider,
+    setViewMode,
+    stalledPromptIds,
+    hasPendingAskUserQuestionPermission,
+  })
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders
@@ -2072,114 +1493,10 @@ export function App() {
   // [shortcutRegistry] would silently skip rebinds because the
   // registry reference is stable. The work is cheap (constant-size
   // arrays, simple map) so re-running it per render is fine.
-  const isMacForCheatsheet = isMacPlatform()
-  const SHORTCUTS: ShortcutEntry[] = (() => {
-    // Section labels mirror the Settings panel groupings so the cheat
-    // sheet and customization UI stay coherent.
-    const CATEGORY_TO_SECTION: Record<string, string> = {
-      navigation: 'Global',
-      view: 'Global',
-      session: 'Session',
-      sidebar: 'Sidebar',
-      composer: 'Input',
-      other: 'Global',
-    }
-    // Cmd+1-9 collapse: nine separate rows would bloat the cheat
-    // sheet without adding signal. Emit a single "Cmd+1-9" row whose
-    // keys reflect the registry's current first-digit binding so a
-    // rebind (e.g. moving them to Alt+1-9) is still visible.
-    //
-    // #4432 — only collapse when all nine bindings share the same
-    // modifier set AND each `session.switch.N` has key `N`. If any
-    // entry diverges (e.g. user rebinds only session.switch.1 to
-    // Cmd+Q) the cheat sheet would otherwise show a misleading
-    // "Cmd+Q-9" label, so we fall back to nine individual rows.
-    const tabSwitchEntries = Array.from({ length: 9 }, (_, i) =>
-      shortcutRegistry.get(`session.switch.${i + 1}`),
-    )
-    const tabSwitchAligned = (() => {
-      const first = tabSwitchEntries[0]
-      if (!first) return false
-      const firstParsed = parseBinding(first.binding)
-      if (firstParsed.key !== '1') return false
-      for (let i = 0; i < tabSwitchEntries.length; i += 1) {
-        const entry = tabSwitchEntries[i]
-        if (!entry) return false
-        const parsed = parseBinding(entry.binding)
-        if (parsed.key !== String(i + 1)) return false
-        if (
-          parsed.meta !== firstParsed.meta ||
-          parsed.shift !== firstParsed.shift ||
-          parsed.alt !== firstParsed.alt
-        ) return false
-      }
-      return true
-    })()
-    const tabSwitch1 = tabSwitchEntries[0]
-    const tabSwitchKeys = tabSwitch1
-      ? formatBindingForDisplay(tabSwitch1.binding, isMacForCheatsheet).replace(/1$/, '1-9')
-      : 'Cmd+1-9'
-    const registryRows: ShortcutEntry[] = []
-    for (const entry of shortcutRegistry.list()) {
-      // When aligned: skip the 2..9 tab-switch entries — they're
-      // collapsed into one row driven by session.switch.1 below.
-      // When diverged: render all nine individually so each rebind is
-      // visible.
-      if (/^session\.switch\.[2-9]$/.test(entry.id)) {
-        if (tabSwitchAligned) continue
-        registryRows.push({
-          keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
-          description: entry.description,
-          section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-        })
-        continue
-      }
-      if (entry.id === 'session.switch.1') {
-        if (tabSwitchAligned) {
-          registryRows.push({
-            keys: tabSwitchKeys,
-            description: 'Switch to tab by number',
-            section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-          })
-        } else {
-          registryRows.push({
-            keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
-            description: entry.description,
-            section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-          })
-        }
-        continue
-      }
-      registryRows.push({
-        keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
-        description: entry.description,
-        section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-      })
-    }
-    // Non-registry entries: permission shortcuts (handled inside the
-    // permission prompt UI), composer send (handled in InputBar),
-    // Escape (handled per-modal), and the Tauri image-paste shortcut.
-    // None of these live in the global keydown ladder so they don't
-    // belong in the registry.
-    const extraEntries: ShortcutEntry[] = [
-      { keys: 'Cmd+Y', description: 'Allow current permission prompt', section: 'Session' },
-      { keys: 'Cmd+Shift+Y', description: 'Allow current permission prompt for this session (rule-eligible tools)', section: 'Session' },
-      { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
-      { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
-    ]
-    // #3748 — Ctrl+V (image-paste) only works in the Tauri desktop on
-    // macOS; on other platforms Ctrl+V is the native text-paste
-    // shortcut. Show the entry only where the shortcut is actually
-    // wired.
-    if (isTauri() && isMacPlatform()) {
-      extraEntries.push({
-        keys: 'Ctrl+V',
-        description: 'Paste image from clipboard (Cmd+V stays as text paste)',
-        section: 'Input',
-      })
-    }
-    return [...registryRows, ...extraEntries].map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
-  })()
+  // #5560 — the registry-driven cheat-sheet rows are built by the pure
+  // `buildShortcutEntries` helper. Still called on every render (not memoised)
+  // by design — see the helper's docblock (#4412).
+  const SHORTCUTS: ShortcutEntry[] = buildShortcutEntries(shortcutRegistry, isMacPlatform(), isMacPlatform())
 
   // #5424: resolve the active model's context window once for the header
   // meter, the footer meter, and the percent computation. `null` when the
@@ -2216,33 +1533,9 @@ export function App() {
   const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
   const showWelcome = isConnected && sessions.length === 0
 
-  // Track whether a configured tunnel is fully ready (connection info available)
-  const [tunnelReady, setTunnelReady] = useState(true)
-  useEffect(() => {
-    if (!isConnected) { setTunnelReady(true); return }
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    async function checkTunnel() {
-      try {
-        const { getServerInfo } = await import('./hooks/useTauriIPC')
-        const info = await getServerInfo()
-        // Only track tunnel readiness if tunnel mode is configured
-        if (!info || info.tunnelMode === 'none') { setTunnelReady(true); return }
-      } catch {
-        // Not in Tauri — check /connect directly
-      }
-      try {
-        const { getAuthToken } = await import('./utils/auth')
-        const token = getAuthToken()
-        if (!token) return
-        const res = await fetch('/connect', { headers: { Authorization: `Bearer ${token}` } })
-        if (res.ok) { if (!cancelled) setTunnelReady(true); return }
-      } catch { /* ignore */ }
-      if (!cancelled) { setTunnelReady(false); timer = setTimeout(checkTunnel, 3000) }
-    }
-    checkTunnel()
-    return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [isConnected])
+  // Track whether a configured tunnel is fully ready (connection info
+  // available). Extracted to `useTunnelReady` (#5560).
+  const tunnelReady = useTunnelReady(isConnected)
 
   // Fetch conversation history when welcome screen is shown
   useEffect(() => {
@@ -2318,193 +1611,56 @@ export function App() {
         />
       )}
 
-      {/* Header */}
-      <header id="header">
-        {/* #5200: two-row header — row 1 (.header-main) is the 3-column main
-            bar (logo/status | model+permission selects | bell + ⋯); the
-            cost/token cluster moved to row 2 (.header-meta) so the main bar
-            is never crowded and the permission selector isn't pushed out. */}
-        <div className="header-main">
-        <div className="header-left">
-          <span className="logo">Chroxy</span>
-          {/* #4630 — version + status-dot were bare spans with no
-              discoverable label, leaving Tauri/WKWebView and SR users with
-              nothing on hover. Pair `title` (browser hover tooltip) with
-              `aria-label` (screen-reader announcement) so both surfaces
-              get a label.
-              #4873 — the status dot intentionally does NOT carry
-              `role="status"`. role=status implies aria-live=polite,
-              which made reconnect-storm churn (connecting →
-              reconnecting → connected → reconnecting…) verbally hammer
-              SR users with every intermediate transition. aria-label
-              alone keeps the dot discoverable on focus/hover, and the
-              page-level debounced ConnectionAnnouncer (mounted above)
-              announces only the settled phase. */}
-          {(() => {
-            const versionLabel = `Chroxy server v${serverVersion ?? __APP_VERSION__}`
-            return (
-              <span
-                className="version-badge"
-                title={versionLabel}
-                aria-label={versionLabel}
-              >
-                v{serverVersion ?? __APP_VERSION__}
-              </span>
-            )
-          })()}
-          {(() => {
-            // #5182 (D1) — the top-bar dot reflects CONNECTED state (the
-            // app's WS/tunnel connection), NOT a daemon "running" state.
-            // It is driven purely by `connectionPhase` (the connected
-            // signal) plus the tunnel-warming gate below, mirroring the
-            // FooterBar's "Connected" dot exactly. The separate "Running"
-            // indicator lives on the left projects/explorer header (#5192)
-            // and is intentionally NOT wired here. The dot only turns
-            // green (`.connected`) when `connectionPhase === 'connected'`
-            // AND the tunnel is ready — i.e. genuinely connected end-to-end.
-            const warming = serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null)
-            const phase = warming ? 'connecting' : connectionPhase
-            const STATUS_LABELS: Record<string, string> = {
-              connected: 'Connected to Chroxy server',
-              connecting: warming ? 'Tunnel warming up…' : 'Connecting to Chroxy server…',
-              reconnecting: 'Reconnecting to Chroxy server…',
-              server_restarting: 'Server restarting…',
-              disconnected: 'Disconnected from Chroxy server',
-            }
-            const label = STATUS_LABELS[phase] ?? `Connection status: ${phase}`
-            return (
-              <span
-                className={`status-dot ${phase}`}
-                title={label}
-                aria-label={label}
-              />
-            )
-          })()}
-        </div>
-        <div className="header-center">
-          <ChatSettingsDropdown
-            availableModels={dropdownFlags.showModelPicker ? availableModels : []}
-            activeModel={activeModel}
-            defaultModelId={defaultModelId}
-            onModelChange={setModel}
-            readOnlyModel={dropdownFlags.readOnlyModel}
-            availablePermissionModes={availablePermissionModes}
-            permissionMode={permissionMode}
-            onPermissionModeChange={setPermissionMode}
-            showPermissionMode={dropdownFlags.showPermissionMode}
-            showThinkingLevel={dropdownFlags.showThinkingLevel}
-            thinkingLevel={thinkingLevel}
-            onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
-          />
-        </div>
-        <div className="header-right">
-          {/* #4890 — Slack-style intervention notifications widget. Bell
-              with unread badge → dropdown listing every intervention alert
-              (read + unread) so the operator gets a durable "do I have
-              outstanding interventions to deal with?" signal. The earlier
-              transient banners (NotificationBanners — still rendered above
-              the main content for unread alerts) keep their role as
-              foreground popups; the widget owns the durable history. */}
-          <NotificationsWidget
-            notifications={sessionNotifications}
-            onSwitchSession={handleSwitchSession}
-            onMarkRead={markSessionNotificationRead}
-            onMarkAllRead={markAllSessionNotificationsRead}
-            onDismiss={dismissSessionNotification}
-          />
-          {/* #4974: Skills / Copy / Settings collapsed behind a single
-              "⋯" overflow trigger. Previously these three icon buttons
-              lived inline in header-right alongside `+ New Session` and
-              the StatusBar, which at ≤1400px widths overlapped the
-              model selector chevron in header-center. Each item keeps
-              its existing handler, aria-label, and data-testid via the
-              HeaderOverflowMenu's `items[]` (testids still discoverable
-              from inside the open menu so the existing test coverage
-              for the underlying actions continues to apply).
-              The filter pattern (truthy `onClick`) mirrors the
-              SessionContextMenu capability gate — Copy is only present
-              when the chat view is active and has at least one
-              message, so the dropdown grows/shrinks naturally without
-              dead rows. */}
-          {(() => {
-            const overflowItems: HeaderOverflowItem[] = [
-              // #5062 — New Session moved INTO the overflow menu (was a
-              // standalone `chrome-new-session-btn` in the header-right
-              // zone). The Cmd+N shortcut still fires `handleNewSession`
-              // via the global keymap and the macOS menu-bar "File >
-              // New Session" item — this row is just the discoverable
-              // chrome entry point now. Listed first so a user scanning
-              // the menu top-to-bottom finds the most-used action
-              // immediately.
-              {
-                id: 'new-session',
-                label: 'New Session',
-                icon: '+',
-                title: `New session (${formatShortcutKeys('Cmd+N')})`,
-                onClick: handleNewSession,
-              },
-              {
-                id: 'skills',
-                label: 'Skills',
-                icon: '\u{1F9E9}',
-                title: 'Skills',
-                onClick: () => {
-                  setSkillsPanelOpen(prev => {
-                    const next = !prev
-                    if (next) requestListSkills()
-                    return next
-                  })
-                },
-              },
-              viewMode === 'chat' && storeMessages.length > 0
-                ? {
-                    id: 'copy-transcript',
-                    label: transcriptCopied ? 'Transcript copied' : 'Copy transcript',
-                    icon: transcriptCopied ? '✓' : '⎘',
-                    title: transcriptCopied ? 'Copied!' : `Copy transcript (${formatShortcutKeys('Cmd+Shift+T')})`,
-                    onClick: handleCopyTranscript,
-                  }
-                : { id: 'copy-transcript', label: 'Copy transcript' },
-              {
-                id: 'settings',
-                label: 'Settings',
-                icon: '⚙',
-                title: `Settings (${formatShortcutKeys('Cmd+,')})`,
-                // #5544 — redirect to the Control Room Settings tab (the
-                // single home) instead of opening the legacy slide-out modal.
-                onClick: openSettings,
-              },
-            ]
-            return <HeaderOverflowMenu items={overflowItems} />
-          })()}
-        </div>
-        </div>
-        <div className="header-meta">
-          <StatusBar
-            cost={sessionCost ?? undefined}
-            context={formatContext(contextUsage)}
-            contextPercent={contextPercent}
-            inputTokens={contextUsage?.inputTokens}
-            outputTokens={contextUsage?.outputTokens}
-            // #5065: surface the absolute `used / total` token meter in
-            // the header. We only pass the window when there's an active
-            // model — that's the "no session selected" gate the meter
-            // hides on (`showMeter` requires a positive window).
-            // #5424: `activeContextWindow` is null when the window is
-            // genuinely unknown (e.g. ollama) — the meter then hides and
-            // the chip falls back to the raw token-count text.
-            contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
-            isBusy={!isIdle}
-            agentCount={activeAgents.length}
-            provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
-            // #5184: model label + Settings-driven badge mode. The mode is
-            // always defined (store default `provider-model`), so the
-            // StatusBar always renders the configurable badge in the app.
-            model={activeModelLabel}
-            costBadgeMode={costBadgeMode}
-          />
-        </div>
-      </header>
+      {/* #5560 — the two-row header (#5200) is grouped into the presentational
+          <AppHeader>. App owns the state + the shared `formatContext`. */}
+      <AppHeader
+        serverVersion={serverVersion}
+        connectionPhase={connectionPhase}
+        serverPhase={serverPhase}
+        isConnected={isConnected}
+        tunnelReady={tunnelReady}
+        showModelPicker={dropdownFlags.showModelPicker}
+        availableModels={availableModels}
+        activeModel={activeModel}
+        defaultModelId={defaultModelId}
+        onModelChange={setModel}
+        readOnlyModel={dropdownFlags.readOnlyModel}
+        availablePermissionModes={availablePermissionModes}
+        permissionMode={permissionMode}
+        onPermissionModeChange={setPermissionMode}
+        showPermissionMode={dropdownFlags.showPermissionMode}
+        showThinkingLevel={dropdownFlags.showThinkingLevel}
+        thinkingLevel={thinkingLevel}
+        onThinkingLevelChange={(level) => setThinkingLevel(level as 'default' | 'high' | 'max')}
+        sessionNotifications={sessionNotifications}
+        onSwitchSession={handleSwitchSession}
+        onMarkNotificationRead={markSessionNotificationRead}
+        onMarkAllNotificationsRead={markAllSessionNotificationsRead}
+        onDismissNotification={dismissSessionNotification}
+        onNewSession={handleNewSession}
+        onToggleSkillsPanel={() => {
+          setSkillsPanelOpen(prev => {
+            const next = !prev
+            if (next) requestListSkills()
+            return next
+          })
+        }}
+        showCopyTranscript={viewMode === 'chat' && storeMessages.length > 0}
+        transcriptCopied={transcriptCopied}
+        onCopyTranscript={handleCopyTranscript}
+        onOpenSettings={openSettings}
+        cost={sessionCost ?? undefined}
+        context={formatContext(contextUsage)}
+        contextPercent={contextPercent}
+        inputTokens={contextUsage?.inputTokens}
+        outputTokens={contextUsage?.outputTokens}
+        contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
+        isBusy={!isIdle}
+        agentCount={activeAgents.length}
+        provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        modelLabel={activeModelLabel}
+        costBadgeMode={costBadgeMode}
+      />
 
       {/* Sidebar */}
       {sidebarRepos.length > 0 && (
@@ -2959,167 +2115,101 @@ export function App() {
         activeSessionId={activeSessionId}
       />
 
-      {/* Settings panel */}
-      <SettingsPanel
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+      {/* #5560 — the top-level overlay / modal stack is grouped into the
+          presentational <AppModals>. App still owns all the state; these are
+          leaf overlays separate from the main-content / terminal subtree. */}
+      <AppModals
+        settingsOpen={settingsOpen}
+        onSettingsClose={() => setSettingsOpen(false)}
         showConsoleTab={showConsoleTab}
-        onToggleConsoleTab={(show) => {
-          setShowConsoleTab(show)
-          persistShowConsoleTab(show)
-        }}
+        onToggleConsoleTab={(show) => { setShowConsoleTab(show); persistShowConsoleTab(show) }}
         interventionPingEnabled={interventionPingEnabled}
-        onToggleInterventionPing={(enabled) => {
-          setInterventionPingEnabled(enabled)
-          persistInterventionPing(enabled)
-        }}
-      />
-
-      {/* Keyboard shortcut help */}
-      <ShortcutHelp isOpen={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={SHORTCUTS} />
-
-      {/* Pasted-text inspect modal (#3797) — read-only viewer for the
-          collapsed paste whose chip the user clicked. */}
-      {inspectedPastedTextId != null && (() => {
-        const block = pastedTextBlocks.find(b => b.id === inspectedPastedTextId)
-        if (!block) return null
-        return (
-          <PastedTextModal
-            id={block.id}
-            content={block.content}
-            onClose={() => setInspectedPastedTextId(null)}
-            onRemove={handleRemovePastedText}
-          />
-        )
-      })()}
-
-      {/* QR code modal — shared by linking-mode QR and per-session "Share" QR (#3070) */}
-      <QrModal
-        open={qrModalOpen}
-        onClose={() => setQrModalOpen(false)}
+        onToggleInterventionPing={(enabled) => { setInterventionPingEnabled(enabled); persistInterventionPing(enabled) }}
+        shortcutHelpOpen={shortcutHelpOpen}
+        onShortcutHelpClose={() => setShortcutHelpOpen(false)}
+        shortcuts={SHORTCUTS}
+        inspectedPastedTextId={inspectedPastedTextId}
+        pastedTextBlocks={pastedTextBlocks}
+        onPastedTextClose={() => setInspectedPastedTextId(null)}
+        onRemovePastedText={handleRemovePastedText}
+        qrModalOpen={qrModalOpen}
+        onQrClose={() => setQrModalOpen(false)}
         qrSvg={qrSvg}
-        loading={qrLoading}
-        error={qrError ?? undefined}
-        title={qrShareMode === 'share' ? 'Share This Session' : 'Pair Mobile App'}
-        instructions={
-          qrShareMode === 'share'
-            ? 'Scan to chat into this session only — the scanner cannot list, switch, or destroy other sessions.'
-            : 'Scan with Chroxy app to pair your phone'
-        }
-        pairingCode={qrShareMode === 'share' ? null : qrPairingCode}
-        onPostToDiscord={qrShareMode === 'share' ? undefined : handlePostPairLinkToDiscord}
-      />
-
-      {/* #3209: SkillsPanel — popover for manual-skill toggles + #3205 metadata */}
-      {skillsPanelOpen && (
-        <SkillsPanel
-          skills={activeSkills}
-          canToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
-          mismatchedSkillNames={mismatchedSet}
-          onActivate={activateSkill}
-          onDeactivate={deactivateSkill}
-          onAcceptTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
-          pendingCommunitySkills={activePendingCommunitySkills}
-          onGrantTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
-          capabilities={{ skillTrustGrant: skillTrustGrantSupported }}
-          pendingTrustGrants={activePendingTrustGrants}
-          onClose={() => setSkillsPanelOpen(false)}
-        />
-      )}
-
-      {/* #4045: sidebar right-click context menu. Rendered at top level so
-          it floats above the sidebar without inheriting clip/overflow from
-          ancestor containers; SessionContextMenu handles its own outside-
-          click / Esc / blur dismissal. */}
-      {sidebarContextMenu && (
-        <SessionContextMenu
-          x={sidebarContextMenu.x}
-          y={sidebarContextMenu.y}
-          items={sidebarContextMenuItems}
-          onDismiss={dismissSidebarContextMenu}
-        />
-      )}
-
-      {/* Modals */}
-      <CreateSessionModal
-        open={showCreateSession}
-        onClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
-        onCreate={handleCreateSession}
-        initialCwd={pendingCwd}
+        qrLoading={qrLoading}
+        qrError={qrError}
+        qrShareMode={qrShareMode}
+        qrPairingCode={qrPairingCode}
+        onPostPairLinkToDiscord={handlePostPairLinkToDiscord}
+        skillsPanelOpen={skillsPanelOpen}
+        skills={activeSkills}
+        skillsCanToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
+        mismatchedSkillNames={mismatchedSet}
+        onActivateSkill={activateSkill}
+        onDeactivateSkill={deactivateSkill}
+        onAcceptSkillTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
+        pendingCommunitySkills={activePendingCommunitySkills}
+        onGrantSkillTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
+        skillsPanelCapabilities={{ skillTrustGrant: skillTrustGrantSupported }}
+        pendingTrustGrants={activePendingTrustGrants}
+        onSkillsPanelClose={() => setSkillsPanelOpen(false)}
+        sidebarContextMenu={sidebarContextMenu}
+        sidebarContextMenuItems={sidebarContextMenuItems}
+        onDismissSidebarContextMenu={dismissSidebarContextMenu}
+        showCreateSession={showCreateSession}
+        onCreateSessionClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
+        onCreateSession={handleCreateSession}
+        createSessionInitialCwd={pendingCwd}
         knownCwds={knownCwds}
-        existingNames={sessions.map(s => s.name)}
-        serverError={sessionCreateError ?? undefined}
-        isCreating={isCreatingSession}
-      />
-
-      {/* #5553 — the per-repo settings drawer (session preset editor). Opened
-          from a Control Room repo-row gear; one at a time. */}
-      {repoPresetDrawer && (
-        <RepoPresetDrawer
-          repoPath={repoPresetDrawer.path}
-          repoName={repoPresetDrawer.name}
-          onClose={() => setRepoPresetDrawer(null)}
-        />
-      )}
-
-      {/* #5206 — session-close confirmation. Shown only when the
-          confirmSessionClose setting is enabled (handleCloseSession gates it).
-          Confirm tears the session down; cancel/Escape/backdrop keep it. */}
-      <ConfirmDialog
-        open={closeConfirmSessionId !== null}
-        title="Close session?"
-        message={(() => {
+        existingSessionNames={sessions.map(s => s.name)}
+        sessionCreateError={sessionCreateError ?? undefined}
+        isCreatingSession={isCreatingSession}
+        repoPresetDrawer={repoPresetDrawer}
+        onRepoPresetDrawerClose={() => setRepoPresetDrawer(null)}
+        closeConfirmOpen={closeConfirmSessionId !== null}
+        closeConfirmMessage={(() => {
           const name = sessions.find(s => s.sessionId === closeConfirmSessionId)?.name
           return name
             ? `Close "${name}"? The Claude process will be terminated.`
             : 'Close this session? The Claude process will be terminated.'
         })()}
-        confirmLabel="Close session"
-        cancelLabel="Cancel"
-        danger
-        onConfirm={() => {
+        onCloseConfirm={() => {
           if (closeConfirmSessionId) performCloseSession(closeConfirmSessionId)
           setCloseConfirmSessionId(null)
         }}
-        onCancel={() => setCloseConfirmSessionId(null)}
-      />
-
-      {/* Toasts */}
-      <Toast items={toastItems} onDismiss={(id) => {
-        // #4075: cost-threshold toast IDs are routed via the per-session
-        // dismissedAt latch; everything else falls through to the
-        // existing server-error / info-notification dismissal paths.
-        if (id.startsWith('cost-threshold-')) {
-          const sid = id.slice('cost-threshold-'.length)
-          const states = useConnectionStore.getState().sessionStates
-          const ss = states[sid]
-          if (ss?.costThresholdWarning) {
-            useConnectionStore.setState({
-              sessionStates: {
-                ...states,
-                [sid]: {
-                  ...ss,
-                  costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+        onCloseConfirmCancel={() => setCloseConfirmSessionId(null)}
+        toastItems={toastItems}
+        onToastDismiss={(id) => {
+          // #4075: cost-threshold toast IDs are routed via the per-session
+          // dismissedAt latch; everything else falls through to the
+          // existing server-error / info-notification dismissal paths.
+          if (id.startsWith('cost-threshold-')) {
+            const sid = id.slice('cost-threshold-'.length)
+            const states = useConnectionStore.getState().sessionStates
+            const ss = states[sid]
+            if (ss?.costThresholdWarning) {
+              useConnectionStore.setState({
+                sessionStates: {
+                  ...states,
+                  [sid]: {
+                    ...ss,
+                    costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+                  },
                 },
-              },
-            })
+              })
+            }
+            return
           }
-          return
-        }
-        const item = toastItems.find(t => t.id === id)
-        if (!item) return
-        if (item.level === 'error') {
-          dismissServerError(id)
-        } else {
-          dismissInfoNotification(id)
-        }
-      }} />
-
-      {/* Command palette */}
-      <CommandPalette
+          const item = toastItems.find(t => t.id === id)
+          if (!item) return
+          if (item.level === 'error') {
+            dismissServerError(id)
+          } else {
+            dismissInfoNotification(id)
+          }
+        }}
         commands={trackedCommands}
-        isOpen={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
+        paletteOpen={paletteOpen}
+        onPaletteClose={() => setPaletteOpen(false)}
         mruList={paletteOpen ? getMruCommands() : undefined}
       />
     </div>
