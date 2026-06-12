@@ -13,7 +13,9 @@ import { isTauri } from '../utils/tauri'
  * (stable) registry reference would silently skip them.
  *
  * @param shortcutRegistry the live registry instance
- * @param isMac whether to format combos with the macOS glyphs (Cmd → ⌘, …)
+ * @param isMac whether to render the macOS modifier names (Cmd / Option) vs
+ *   the cross-platform ones (Ctrl / Alt). Textual, not glyphs — the rows feed
+ *   `formatBindingForDisplay`, which spells the modifiers out.
  * @param isMacPlatform whether the running platform is macOS — gates the
  *   Tauri-only Ctrl+V image-paste entry alongside `isTauri()`. Passed in (not
  *   re-derived) so the call site keeps reading the same value it always did.
