@@ -64,7 +64,7 @@ import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
 import { buildShortcutEntries } from './shortcuts/buildShortcutEntries'
 import { writeText as clipboardWriteText } from './utils/clipboard'
 import { useTauriEvents } from './hooks/useTauriEvents'
-import { useTauriMenuEvents } from './hooks/useTauriMenuEvents'
+import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
@@ -1571,78 +1571,14 @@ export function App() {
     handlePostPairLinkToDiscord,
   } = useQrModal(activeSessionId, pairingRefreshedCount)
 
-  // #4695 / #4942 — bridge the macOS menu bar items to App-state
-  // handlers. The sidebar's per-project "+" row and the command
-  // palette entries currently open their respective dialogs through
-  // inline handlers, so they are NOT routed through this hook. Hook
-  // is a no-op outside Tauri (web dashboard).
-  //
-  // Handler wiring (one prop per menu item that flows through this
-  // hook — Rust-side direct dispatches like Shell > Start aren't here):
-  //   - onNewSession        — File > New Session (same callback the
-  //                            chrome "New Session" button uses)
-  //   - onConnectToServer   — File > Connect to Server… (opens the
-  //                            Settings panel; the Server Registry
-  //                            section is the existing surface for
-  //                            managing connections)
-  //   - onDisconnect        — File > Disconnect (calls the store's
-  //                            disconnect action; no-op if not
-  //                            connected)
-  //   - onToggleSidebar     — View > Toggle Sidebar (same setter as
-  //                            the Cmd+B registry handler)
-  //   - onTogglePlanMode    — View > Toggle Plan Mode (same logic as
-  //                            the Shift+Tab registry handler)
-  //   - onShowQr            — View > Show QR Code (same fetch the
-  //                            chrome "Show QR" affordance triggers)
-  //   - onReload            — View > Reload (window.location.reload —
-  //                            Tauri's webview honours this)
-  //   - onTunnelSettings    — Tunnel > Tunnel Settings… (opens the
-  //                            Settings panel; tunnel mode lives there)
-  //   - onPreferences       — Chroxy > Preferences… (opens Settings)
-  //
-  // Window > Bring All to Front is handled entirely Rust-side
-  // (`handle_bring_all_to_front` iterates every webview window — main
-  // and any open `qr_popup` — and brings each one forward). The
-  // dashboard has no state to mutate, so it doesn't appear in the hook
-  // surface at all.
-  const menuConnectToServer = useCallback(() => {
-    // The dashboard's existing "connect to a different server" surface
-    // is the Settings panel's Server Registry section. The menu item
-    // opens Settings; the user picks a registry entry there.
-    // #5544 — Settings now lives in the Control Room Settings tab.
-    openSettings()
-  }, [openSettings])
-  const menuDisconnect = useCallback(() => {
-    useConnectionStore.getState().disconnect()
-  }, [])
-  const menuToggleSidebar = useCallback(() => {
-    setSidebarOpen(prev => !prev)
-  }, [])
-  const menuTogglePlanMode = useCallback(() => {
-    const state = useConnectionStore.getState()
-    if (state.permissionMode === 'plan') {
-      setPermissionMode(state.previousPermissionMode || 'approve')
-    } else {
-      setPermissionMode('plan')
-    }
-  }, [setPermissionMode])
-  const menuReload = useCallback(() => {
-    window.location.reload()
-  }, [])
-  const menuOpenSettings = useCallback(() => {
-    // #5544 — redirect to the Control Room Settings tab (the single home).
-    openSettings()
-  }, [openSettings])
-  useTauriMenuEvents({
+  // #5560 — the macOS menu-bar wiring (#4695 / #4942) lives in
+  // `useTauriMenuWiring`. No-op outside Tauri.
+  useTauriMenuWiring({
     onNewSession: handleNewSession,
-    onConnectToServer: menuConnectToServer,
-    onDisconnect: menuDisconnect,
-    onToggleSidebar: menuToggleSidebar,
-    onTogglePlanMode: menuTogglePlanMode,
     onShowQr: handleShowQr,
-    onReload: menuReload,
-    onTunnelSettings: menuOpenSettings,
-    onPreferences: menuOpenSettings,
+    openSettings,
+    setSidebarOpen,
+    setPermissionMode,
   })
 
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
