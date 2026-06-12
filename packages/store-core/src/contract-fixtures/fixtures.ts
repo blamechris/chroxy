@@ -679,6 +679,33 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       dashboard: { noop: true, callbacks: [] },
     },
   },
+
+  // -------------------------------------------------------------------------
+  // Slice 4 (epic #5556) — web-task upsert. BYTE-IDENTICAL on both clients:
+  // validate the task, then filter-and-append into the flat `webTasks` list
+  // via the shared table's `adapter.updateState`. Both clients are a table HIT
+  // (NOT a decline) — so these use a single `expect`, not a `divergent` block.
+  // The dedup-against-existing-task path needs a pre-seeded flat list, which the
+  // fixture init does not model; it is covered in dispatch-table.test.ts.
+  // -------------------------------------------------------------------------
+  {
+    name: 'web_task_created appends the task to the (empty) flat webTasks list',
+    type: 'web_task_created',
+    message: { type: 'web_task_created', task: { taskId: 't1', status: 'running' } },
+    expect: { flat: { webTasks: [{ taskId: 't1', status: 'running' }] } },
+  },
+  {
+    name: 'web_task_updated appends the task to the (empty) flat webTasks list',
+    type: 'web_task_updated',
+    message: { type: 'web_task_updated', task: { taskId: 't1', status: 'completed' } },
+    expect: { flat: { webTasks: [{ taskId: 't1', status: 'completed' }] } },
+  },
+  {
+    name: 'web_task_created is a no-op when the task payload is malformed (no taskId)',
+    type: 'web_task_created',
+    message: { type: 'web_task_created', task: { status: 'running' } },
+    expect: { noop: true },
+  },
 ]
 
 // ---------------------------------------------------------------------------

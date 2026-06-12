@@ -3763,6 +3763,18 @@ export function handleWebTaskUpsert(
   return { task: task as WebTask }
 }
 
+/**
+ * Filter-and-append upsert against an existing `webTasks` list (#5556 slice 4).
+ * Drops any existing task with the same `taskId`, then appends `task` at the
+ * end — exactly the `state.webTasks.filter(t => t.taskId !== task.taskId)`
+ * then-spread the app and dashboard both performed inline. Both clients were
+ * byte-identical here, so this is the shared body the dispatch handler runs.
+ */
+export function applyWebTaskUpsert(existing: WebTask[], task: WebTask): WebTask[] {
+  const kept = existing.filter((t) => t.taskId !== task.taskId)
+  return [...kept, task]
+}
+
 // ---------------------------------------------------------------------------
 // web_task_error
 //

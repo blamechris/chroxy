@@ -89,6 +89,7 @@ import {
   handleServerShutdown,
   handleServerStatusLegacy,
   handleWebTaskUpsert,
+  applyWebTaskUpsert,
   handleWebTaskError,
   handleWebTaskList,
   handleWebFeatureStatus,
@@ -5289,6 +5290,39 @@ describe('handleWebTaskUpsert', () => {
       error: null,
     }
     expect(handleWebTaskUpsert({ task })).toEqual({ task })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// applyWebTaskUpsert (#5556 slice 4)
+// ---------------------------------------------------------------------------
+describe('applyWebTaskUpsert', () => {
+  const t = (taskId: string, status: string) =>
+    ({ taskId, status }) as unknown as Parameters<typeof applyWebTaskUpsert>[0][number]
+
+  it('appends a new task to the end of the list', () => {
+    const result = applyWebTaskUpsert([t('a', 'running')], t('b', 'running'))
+    expect(result).toEqual([
+      { taskId: 'a', status: 'running' },
+      { taskId: 'b', status: 'running' },
+    ])
+  })
+
+  it('replaces an existing task with the same taskId, re-appending it at the end', () => {
+    const result = applyWebTaskUpsert(
+      [t('a', 'running'), t('b', 'running')],
+      t('a', 'completed'),
+    )
+    expect(result).toEqual([
+      { taskId: 'b', status: 'running' },
+      { taskId: 'a', status: 'completed' },
+    ])
+  })
+
+  it('does not mutate the input list', () => {
+    const existing = [t('a', 'running')]
+    applyWebTaskUpsert(existing, t('a', 'completed'))
+    expect(existing).toEqual([{ taskId: 'a', status: 'running' }])
   })
 })
 

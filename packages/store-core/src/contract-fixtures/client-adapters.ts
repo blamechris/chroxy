@@ -126,6 +126,10 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     hasSession: (id) => Object.prototype.hasOwnProperty.call(sessions, id),
     updateSession,
     setState: (patch) => Object.assign(flat, patch),
+    // #5556 slice 4 — functional flat-state update. Both clients back it with
+    // their Zustand `set((state) => …)`, modelled here as a read-merge of the
+    // live `flat` ref so the web-task upsert fixtures observe identical results.
+    updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => added.push(m),
     getSessions: () => sessionList,
     // #5653 — only the APP opts its imperative-callback registry into the table.

@@ -89,6 +89,9 @@ import {
   handleGitBranchesResult,
   handleGitStageResult,
   handleGitCommitResult,
+  // --- slice 4 (epic #5556) — web-task upsert (#5653 follow-on) ---
+  handleWebTaskUpsert,
+  applyWebTaskUpsert,
   resolveSessionId,
   type PermissionMode,
   type PermissionRule,
@@ -162,6 +165,16 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   updateSession(sessionId: string, updater: (session: S) => Partial<S>): void
   /** Shallow-merge a patch into the flat connection state. */
   setState(patch: Flat): void
+  /**
+   * Functional flat-state update (#5556 slice 4). The updater receives the
+   * current flat state and returns the partial patch to shallow-merge. Needed
+   * by the read-modify-write cases (`web_task_created` / `web_task_updated`),
+   * whose upsert filters the existing `webTasks` list before appending — the
+   * plain `setState(patch)` form cannot read prior state. Both clients back
+   * this with their Zustand `set((state) => patch)`, which is byte-identical to
+   * the inline `set((state) => …)` the migrated cases used.
+   */
+  updateState(updater: (flat: Flat) => Flat): void
   /** Append a chat message via the client's own add-message path. */
   addMessage(message: ChatMessage): void
   /** Read the current session list (for `session_updated`). */
@@ -350,6 +363,11 @@ export interface DispatchMessageMap {
   git_stage_result: { type: 'git_stage_result' }
   git_unstage_result: { type: 'git_unstage_result' }
   git_commit_result: { type: 'git_commit_result' }
+  // --- slice 4 (epic #5556) — web-task upsert ---
+  // Both carry a single `task` payload; `handleWebTaskUpsert` validates it and
+  // the dispatch handler filter-and-appends against the flat `webTasks` list.
+  web_task_created: { type: 'web_task_created'; task?: unknown }
+  web_task_updated: { type: 'web_task_updated'; task?: unknown }
 }
 
 /** Union of message types this table currently handles. */
@@ -839,6 +857,32 @@ function dispatchGitCommitResult<S extends DispatchSessionBase>(
 }
 
 // ---------------------------------------------------------------------------
+// Slice 4 — web-task upsert (epic #5556)
+//
+// `web_task_created` and `web_task_updated` were BYTE-IDENTICAL in both the app
+// and dashboard switches: validate the `task` payload via `handleWebTaskUpsert`,
+// then filter the flat `webTasks` list by `taskId` and append the new task. The
+// only reason they were not in slices 1-3 is the read-modify-write upsert needs
+// to read the prior `webTasks` list — hence the new `adapter.updateState`
+// functional-flat-update primitive (both clients back it with their Zustand
+// `set((state) => …)`, which is exactly what the inline cases used). A malformed
+// payload (`task: null`) is a no-op on both clients — same guard as before.
+// ---------------------------------------------------------------------------
+
+/** `web_task_created` / `web_task_updated` — upsert the task into the flat list. */
+function dispatchWebTaskUpsert<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['web_task_created'] | DispatchMessageMap['web_task_updated'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { task } = handleWebTaskUpsert(msg as Record<string, unknown>)
+  if (!task) return
+  adapter.updateState((flat) => {
+    const existing = (flat as { webTasks?: WebTask[] }).webTasks ?? []
+    return { webTasks: applyWebTaskUpsert(existing, task) } as unknown as typeof flat
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Table + runner
 // ---------------------------------------------------------------------------
 
@@ -884,6 +928,9 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     git_stage_result: dispatchGitStageResult,
     git_unstage_result: dispatchGitStageResult,
     git_commit_result: dispatchGitCommitResult,
+    // --- slice 4 (epic #5556) — web-task upsert ---
+    web_task_created: dispatchWebTaskUpsert,
+    web_task_updated: dispatchWebTaskUpsert,
   }
 }
 
@@ -922,6 +969,9 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'git_stage_result',
   'git_unstage_result',
   'git_commit_result',
+  // --- slice 4 (epic #5556) — web-task upsert ---
+  'web_task_created',
+  'web_task_updated',
 ]
 
 /**

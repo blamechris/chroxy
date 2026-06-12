@@ -60,6 +60,7 @@ function makeAdapter(init?: {
       sessions[id] = { ...current, ...updater(current) }
     },
     setState: (patch) => Object.assign(flat, patch),
+    updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => addedMessages.push(m),
     getSessions: () => sessionList,
     ...(init?.callbacks
@@ -752,6 +753,54 @@ describe('shared dispatch table', () => {
       const env = makeAdapter({ callbacks: { gitCommit: (p) => seen.push(p) } })
       dispatch(env, { type: 'git_commit_result', hash: 'abc', message: 'feat: x' })
       expect(seen).toEqual([{ hash: 'abc', message: 'feat: x', error: null }])
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Slice 4 — web-task upsert (#5556)
+  //
+  // `web_task_created` / `web_task_updated` filter-and-append the validated task
+  // into the flat `webTasks` list via `adapter.updateState`. Both clients are a
+  // table HIT (no decline). A malformed task payload is a no-op.
+  // -------------------------------------------------------------------------
+  describe('web_task_created / web_task_updated', () => {
+    it('owns the message (runDispatch true) for both create and update', () => {
+      const env = makeAdapter()
+      expect(dispatch(env, { type: 'web_task_created', task: { taskId: 't1' } })).toBe(true)
+      expect(dispatch(env, { type: 'web_task_updated', task: { taskId: 't1' } })).toBe(true)
+    })
+
+    it('appends a new task to the (empty) flat webTasks list', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'web_task_created', task: { taskId: 't1', status: 'running' } })
+      expect(env.flat.webTasks).toEqual([{ taskId: 't1', status: 'running' }])
+    })
+
+    it('upserts (replaces) an existing task with the same taskId, preserving order of others', () => {
+      const env = makeAdapter()
+      // Pre-seed the flat list the read-modify-write upsert reads from.
+      env.flat.webTasks = [
+        { taskId: 't1', status: 'running' },
+        { taskId: 't2', status: 'running' },
+      ]
+      dispatch(env, { type: 'web_task_updated', task: { taskId: 't1', status: 'completed' } })
+      // t1 is dropped then re-appended at the end with its new status; t2 stays.
+      expect(env.flat.webTasks).toEqual([
+        { taskId: 't2', status: 'running' },
+        { taskId: 't1', status: 'completed' },
+      ])
+    })
+
+    it('is a no-op when the task payload is missing taskId', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'web_task_created', task: { status: 'running' } })
+      expect(env.flat.webTasks).toBeUndefined()
+    })
+
+    it('is a no-op when the task payload is absent', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'web_task_updated' })
+      expect(env.flat.webTasks).toBeUndefined()
     })
   })
 })

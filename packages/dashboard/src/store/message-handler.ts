@@ -110,7 +110,8 @@ import {
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
-  handleWebTaskUpsert as sharedWebTaskUpsert,
+  // web_task_created / web_task_updated — migrated to the shared dispatch table
+  // (#5556 slice 4); the dashboard no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
   // web_task_list / web_feature_status migrated to the shared dispatch table
   // (#5556 slice 2)
@@ -878,6 +879,14 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   hasSession: (id) => !!getStore().getState().sessionStates[id],
   updateSession: (id, updater) => updateSession(id, updater),
   setState: (patch) => getStore().setState(patch as Partial<ConnectionState>),
+  // #5556 slice 4 — functional flat-state update for the web-task upsert cases.
+  // Mirrors the prior inline `set((state) => …)` exactly (Zustand merges the
+  // returned partial). The loose record in/out is cast to the store's
+  // ConnectionState shape, same as `setState` above.
+  updateState: (updater) =>
+    getStore().setState((state) =>
+      updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
+    ),
   addMessage: (m) => getStore().getState().addMessage(m),
   getSessions: () => getStore().getState().sessions,
 };
@@ -4152,16 +4161,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // -- Web tasks (Claude Code Web) --
 
-    case 'web_task_created':
-    case 'web_task_updated': {
-      const { task } = sharedWebTaskUpsert(msg);
-      if (!task) break;
-      set((state: ConnectionState) => {
-        const existing = state.webTasks.filter((t) => t.taskId !== task.taskId);
-        return { webTasks: [...existing, task] };
-      });
-      break;
-    }
+    // web_task_created / web_task_updated — migrated to the shared dispatch
+    // table (#5556 slice 4). Both were the byte-identical `sharedWebTaskUpsert`
+    // → filter-and-append upsert (identical to the app's), now run by the table
+    // via `_dispatchAdapter.updateState` (functional flat-state update).
 
     case 'web_task_error': {
       const { taskId: errTaskId, errorMessage, chatMessageContent } = sharedWebTaskError(msg);
