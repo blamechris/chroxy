@@ -645,3 +645,39 @@ export type {
   ReconnectScheduler,
   SelectReconnectEndpointInput,
 } from './connect-flow'
+
+// epic #5556, sub-item 5: shared behavioral-contract fixtures. The
+// `(wire message in → expected store mutation out)` table is DATA, consumed by
+// BOTH clients' test suites (app jest, dashboard vitest) to drive the same rows
+// through each client's REAL `handleMessage` switch and assert they agree. Pure
+// data + types — exported from the index so both clients resolve it via the
+// guaranteed `@chroxy/store-core` entry point (no fragile subpath resolution).
+export {
+  DISPATCH_FIXTURES,
+  SWITCH_FIXTURES,
+} from './contract-fixtures/fixtures'
+export type {
+  ContractFixture,
+  FixtureInitialState,
+  FixtureExpectation,
+} from './contract-fixtures/fixtures'
+
+// epic #5556, sub-item 6: the encrypted-handshake fake-WS driver. The real
+// client handshake state machine + a fake server holding real test keypairs;
+// both clients run it against their OWN store via a thin HandshakeStoreAdapter
+// (same per-client-adapter pattern as the contract fixtures). Exported so the
+// app/dashboard suites can drive a replay-into-real-store handshake.
+export {
+  FakeHandshakeServer,
+  FakeHandshakeClient,
+  makeMemoryStore,
+} from './handshake-e2e/fake-ws'
+export type {
+  HandshakeStoreAdapter,
+  HandshakePhase,
+  DriverMessage,
+  ReplayEntrySpec,
+  FakeServerOptions,
+  HandshakeClientOptions,
+  MemoryStore,
+} from './handshake-e2e/fake-ws'

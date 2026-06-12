@@ -11,6 +11,23 @@ import { resolve } from 'node:path'
  * types as platform-specific.
  *
  * Uses static analysis (regex on source files) — no runtime imports needed.
+ *
+ * RELATIONSHIP TO THE #5556.5 BEHAVIORAL-CONTRACT FIXTURES
+ * --------------------------------------------------------
+ * This guard is a SPELLING / EXHAUSTIVENESS check: it asserts that EVERY
+ * ServerMessageType has *some* handler `case` (in a client switch, the shared
+ * store-core dispatch table, or an explicit exclusion). It is RETAINED because
+ * it covers an axis the fixtures do not: completeness across ALL ~95 message
+ * types, catching a brand-new wire type that nobody wired up anywhere.
+ *
+ * It does NOT — and structurally cannot — assert that the two clients produce
+ * the SAME store mutation for a given input; a case can exist in both and still
+ * behave differently (the exact drift the #5556 swarm-audit found). That gap is
+ * closed by the BEHAVIORAL-CONTRACT FIXTURES in
+ * `packages/store-core/src/contract-fixtures/` (driven through both clients'
+ * real dispatch table + switch in store-core / app jest / dashboard vitest).
+ * The two are complementary: this guard = "a handler exists for every type";
+ * the fixtures = "the handlers that exist agree on behaviour".
  */
 
 // ---------------------------------------------------------------------------
