@@ -83,8 +83,9 @@ import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { useTunnelReady } from './hooks/useTunnelReady'
 import { useQrModal } from './hooks/useQrModal'
 import { useSidebarOrdering } from './hooks/useSidebarOrdering'
+import { useControlRoomState } from './hooks/useControlRoomState'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
@@ -95,7 +96,7 @@ import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
-import { ControlRoomView, type ControlRoomTab } from './components/ControlRoomView'
+import { ControlRoomView } from './components/ControlRoomView'
 import { RepoPresetDrawer } from './components/RepoPresetDrawer'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
@@ -613,11 +614,6 @@ export function App() {
   const [sessionCreateError, setSessionCreateError] = useState<string | null>(null)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
-  const [settingsOpen, setSettingsOpen] = useState(() => {
-    const params = new URLSearchParams(window.location.search)
-    return params.get('settings') === '1'
-  })
-  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
@@ -627,65 +623,27 @@ export function App() {
     x: number
     y: number
   } | null>(null)
-  const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
-  // #5204 — Control Room top-level tab. `controlRoomOpen` is whether the
-  // pinned tab exists in the SessionBar strip; `controlRoomActive` is whether
-  // it's the focused view. Both are local (not persisted) — opening the CR is
-  // cheap (the host/repo snapshot lives in the store, so closing/reopening
-  // doesn't wipe it) and it should not survive a reload. Switching to a
-  // session deactivates it; switching back re-activates without re-fetching.
-  const [controlRoomOpen, setControlRoomOpen] = useState(false)
-  const [controlRoomActive, setControlRoomActive] = useState(false)
-  const openControlRoom = useCallback(() => {
-    setControlRoomOpen(true)
-    setControlRoomActive(true)
-    setSplitMode(null)
-    persistSplitMode(null)
-  }, [])
-  // #5544 — the Control Room Settings tab is now the single home for the
-  // preference surfaces that used to live in the slide-out SettingsPanel
-  // modal. Two redirect paths converge on the Settings tab:
-  //   - Control Room already open: bump `settingsRedirectNonce`, which
-  //     ControlRoomView watches to switch tabs (even from another tab).
-  //   - Control Room closed: mount ControlRoomView with `initialTab='settings'`
-  //     so it opens straight onto Settings without a flash of another tab.
-  // `controlRoomInitialTab` is a one-shot: cleared back to undefined right
-  // after the open so a later sidebar "Control Room" click lands on the
-  // operator's persisted tab, not Settings.
-  const [settingsRedirectNonce, setSettingsRedirectNonce] = useState(0)
-  const [controlRoomInitialTab, setControlRoomInitialTab] = useState<ControlRoomTab | undefined>(undefined)
-  const openSettings = useCallback(() => {
-    // The redirect must also dismiss the legacy modal (the `?settings=1`
-    // deep-link can leave it open) — otherwise the tab switch happens behind
-    // the overlay and the shortcut appears dead.
-    setSettingsOpen(false)
-    if (controlRoomActive) {
-      // CR already visible — drive the redirect via the nonce instead.
-      setSettingsRedirectNonce((n) => n + 1)
-    } else {
-      // CR is opening fresh — seed the initial tab so the mount lands on
-      // Settings without a flash of another tab.
-      setControlRoomInitialTab('settings')
-    }
-    openControlRoom()
-  }, [controlRoomActive, openControlRoom])
-  // #5544 — clear the one-shot initial-tab seed after the Control Room has
-  // mounted with it. ControlRoomView only reads `initialTab` in its mount
-  // initializer, so clearing it now is invisible to the live view but ensures
-  // a later reopen (e.g. sidebar "Control Room") starts on the persisted tab.
-  useEffect(() => {
-    if (controlRoomActive && controlRoomInitialTab !== undefined) {
-      setControlRoomInitialTab(undefined)
-    }
-  }, [controlRoomActive, controlRoomInitialTab])
-  const closeControlRoom = useCallback(() => {
-    // Closing is non-destructive: the tab disappears and we fall back to the
-    // prior session (activeSessionId is untouched). The store-held snapshot
-    // survives, so reopening re-renders from cache.
-    setControlRoomOpen(false)
-    setControlRoomActive(false)
-  }, [])
+  // #5560 — Control Room tab (#5204), converged Settings redirect (#5544), the
+  // legacy settings modal + shortcut-help flags, and split-view mode all live
+  // in `useControlRoomState` (split-view is co-located because openControlRoom
+  // clears it).
+  const {
+    controlRoomOpen,
+    controlRoomActive,
+    setControlRoomActive,
+    settingsRedirectNonce,
+    controlRoomInitialTab,
+    settingsOpen,
+    setSettingsOpen,
+    shortcutHelpOpen,
+    setShortcutHelpOpen,
+    splitMode,
+    setSplitMode,
+    openControlRoom,
+    openSettings,
+    closeControlRoom,
+  } = useControlRoomState()
   // #5206 — the session id awaiting close-confirmation, or null when no
   // confirm is pending. Drives the ConfirmDialog rendered near the modals.
   const [closeConfirmSessionId, setCloseConfirmSessionId] = useState<string | null>(null)
