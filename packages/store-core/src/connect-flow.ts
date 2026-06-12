@@ -38,10 +38,14 @@
  * ## #5597 / #5537 seam — `resolveEndpoint(attempt)`
  *
  * Endpoint selection is a PER-ATTEMPT callback, not a closure-captured constant.
- * Today both clients return the same static `{ url, token }` they captured at
- * connect-start (current behavior, byte-identical). The next PR (#5597/#5537)
- * plugs LAN/tunnel re-resolution into exactly this seam: a retry can re-probe
- * the registry and switch endpoints without restructuring the flow.
+ * Each client's `resolveEndpoint(attempt)` re-reads the CURRENT endpoint from
+ * its authoritative store every attempt (#5597): the app re-derives the tunnel
+ * URL from the saved connection (so a rotated `tunnel_url_changed` push / a URL
+ * persisted from a prior session is picked up on the next retry); the dashboard
+ * re-reads the active registry entry's `wsUrl` + token. The app additionally
+ * threads `attempt` into {@link selectReconnectEndpoint} for the #5537 LAN→tunnel
+ * fast fallback (a dead `ws://` LAN host fails over to the tunnel after
+ * {@link LAN_FALLBACK_THRESHOLD} attempts instead of burning the whole budget).
  */
 
 /** Bounded initial-connect retry budget — initial attempt + this many retries. */
@@ -106,13 +110,61 @@ export type ProbeResult =
 
 /**
  * The endpoint to connect to for a given attempt. Returned by
- * `resolveEndpoint(attempt)` — the #5597/#5537 seam. Today both clients return
- * the static `{ url, token }` captured at connect-start; a future PR can
- * re-resolve LAN/tunnel here per attempt.
+ * `resolveEndpoint(attempt)` — the #5597/#5537 seam. Each client re-resolves the
+ * live endpoint here per attempt (rotated tunnel URL / LAN→tunnel fallback)
+ * rather than returning a closure-captured constant.
  */
 export interface ConnectEndpoint {
   url: string
   token: string
+}
+
+/** How many attempts stay pinned to a dead LAN URL before the #5537 fallback
+ * switches to the tunnel. Attempts `0..(LAN_FALLBACK_THRESHOLD-1)` retry LAN;
+ * attempt `LAN_FALLBACK_THRESHOLD` (and beyond) switch to the tunnel. Two LAN
+ * retries cover a brief wifi blip (the link came back) without burning the rest
+ * of the health-check budget hammering a dead LAN URL when it didn't. */
+export const LAN_FALLBACK_THRESHOLD = 2
+
+export interface SelectReconnectEndpointInput {
+  /** The URL this connect/reconnect was dialing. */
+  lastUrl: string
+  /** Zero-based attempt index — the app threads the inner health-check ladder's
+   * `_retryCount` here (the rung that hammers the dead LAN URL). */
+  attempt: number
+  /** The tunnel (TLS) fallback for this connection, or null if none exists. */
+  tunnelUrl: string | null
+  /** True when `lastUrl` is a plaintext `ws://` LAN socket. Injected by the
+   * caller (each client owns its `isLanWsUrl` predicate). */
+  lastUrlIsLan: boolean
+  /** Override the fallback threshold (defaults to {@link LAN_FALLBACK_THRESHOLD}). */
+  threshold?: number
+}
+
+/**
+ * #5537 — pick the URL to dial for a given attempt, with LAN→tunnel fast
+ * fallback.
+ *
+ * When the connect was on a `ws://` LAN URL and a tunnel fallback exists, the
+ * first `threshold` attempts stay on the LAN URL (so a momentary wifi blip
+ * recovers in place), then every later attempt switches to the tunnel — instead
+ * of burning the whole health-check retry budget hammering a dead LAN URL while
+ * the daemon is still reachable over the tunnel.
+ *
+ * Pure: no store reads, no network. The caller resolves `lastUrl` / `tunnelUrl`
+ * / `lastUrlIsLan` from its own authoritative state and supplies the attempt
+ * index from the ladder, so this stays unit-testable and shared. Returns
+ * `lastUrl` unchanged for every non-LAN case (tunnel drops, LAN-only records
+ * with no tunnel) — the reverse direction (tunnel→LAN) is out of scope (#5537).
+ */
+export function selectReconnectEndpoint(input: SelectReconnectEndpointInput): string {
+  const { lastUrl, attempt, tunnelUrl, lastUrlIsLan } = input
+  const threshold = input.threshold ?? LAN_FALLBACK_THRESHOLD
+  // Only LAN drops with a real tunnel fallback are eligible. A tunnel drop, or a
+  // LAN-only record (no tunnel), keeps retrying the same URL.
+  if (!lastUrlIsLan || !tunnelUrl) return lastUrl
+  // Stay on LAN for the first `threshold` attempts; switch to the tunnel after.
+  return attempt >= threshold ? tunnelUrl : lastUrl
 }
 
 export interface RunConnectAttemptOptions {
@@ -125,9 +177,10 @@ export interface RunConnectAttemptOptions {
 
   /**
    * #5597/#5537 seam — resolve the endpoint (url + token) for THIS attempt.
-   * Read once at the top of the attempt. Today static; a future PR re-resolves
-   * LAN/tunnel here per retry. Return `null` to abort the attempt silently (the
-   * caller bumped the attempt id out from under us — a superseded connect).
+   * Read once at the top of the attempt; clients re-resolve the live endpoint
+   * here (rotated tunnel URL / LAN→tunnel fallback) per retry. Return `null` to
+   * abort the attempt silently (the caller bumped the attempt id out from under
+   * us — a superseded connect).
    */
   resolveEndpoint: (attempt: number) => ConnectEndpoint | null
 
@@ -279,8 +332,10 @@ export interface CreateReconnectSchedulerOptions {
   nextRung: () => number
   /**
    * Reconnect now — recurse into the client's `connect()`. The client resolves
-   * the freshest token here (the dashboard re-reads the registry; the app uses
-   * the captured token). Guarded by the stale-attempt check before the call.
+   * the freshest endpoint here (#5597): the dashboard re-reads the registry
+   * entry's `wsUrl` + token; the app re-derives the URL from the saved
+   * connection (and the inner health-check ladder then owns the #5537 LAN→tunnel
+   * fallback). Guarded by the stale-attempt check before the call.
    */
   reconnect: () => void
   /** True when this socket's attempt has been superseded — skip the reconnect. */

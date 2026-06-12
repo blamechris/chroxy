@@ -87,7 +87,7 @@ import type {
   SessionState,
 } from './types';
 import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, formatQuestionAnswerSummary } from './utils';
-import { selectConnectEndpoint } from '../utils/endpoint-selector';
+import { selectConnectEndpoint, deriveTunnelUrl, isLanWsUrl } from '../utils/endpoint-selector';
 import {
   setStore,
   wsSend,
@@ -155,6 +155,8 @@ import {
   // as callbacks. `resolveEndpoint` is the #5597/#5537 LAN/tunnel seam (static).
   runConnectAttempt,
   createReconnectScheduler,
+  // #5537 — shared LAN→tunnel fast-fallback decision for the reconnect ladder.
+  selectReconnectEndpoint,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
@@ -198,6 +200,61 @@ export { getWsCloseMessage, getHealthCheckErrorMessage } from '@chroxy/store-cor
 
 export const selectShowSession = (s: ConnectionState): boolean =>
   useConnectionLifecycleStore.getState().connectionPhase !== 'disconnected' || s.viewingCachedSession;
+
+/**
+ * #5597 — re-resolve the freshest tunnel URL for a dial that was started against
+ * `dialUrl`. The authoritative source is the SecureStore-backed saved
+ * connection's `tunnelUrl`, which `applyRotatedTunnelUrl` repoints on a live
+ * `tunnel_url_changed` push (or auth_bootstrap re-advertisement). When `dialUrl`
+ * is a `wss://` tunnel URL and the record has since rotated to a different
+ * tunnel, return the new one so a reconnect/retry stops hammering the dead URL.
+ *
+ * A `ws://` LAN `dialUrl` is returned unchanged — a rotation only concerns the
+ * tunnel endpoint, and the LAN→tunnel failover is handled by
+ * {@link resolveEndpointForAttempt} (#5537). Also unchanged when there's no
+ * saved record, no tunnel, or the tunnel already matches `dialUrl` (the common
+ * no-op case).
+ */
+function resolveCurrentEndpointUrl(dialUrl: string): string {
+  if (isLanWsUrl(dialUrl)) return dialUrl;
+  const saved = useConnectionLifecycleStore.getState().savedConnection;
+  if (!saved) return dialUrl;
+  const tunnelUrl = deriveTunnelUrl(saved);
+  return tunnelUrl ?? dialUrl;
+}
+
+/**
+ * #5597 + #5537 — pick the URL for connect attempt `attempt` (the inner
+ * health-check retry index, `_retryCount`), given this connect was started
+ * against `dialUrl`. Both re-resolutions read the authoritative saved record:
+ *
+ *  - #5537 LAN→tunnel fast fallback: when `dialUrl` is a `ws://` LAN URL and the
+ *    record has a tunnel, the first `LAN_FALLBACK_THRESHOLD` attempts stay on
+ *    LAN (so a momentary wifi blip recovers in place), then attempt
+ *    `LAN_FALLBACK_THRESHOLD`+ switches to the tunnel — instead of burning the
+ *    whole 5-retry health-check budget hammering the dead LAN host while the
+ *    daemon is still reachable over the tunnel. The decision is the shared,
+ *    tested `selectReconnectEndpoint`.
+ *  - #5597 tunnel rotation: once the URL is the tunnel (either `dialUrl` already
+ *    was, or #5537 just switched to it), re-resolve the freshest `tunnelUrl` so
+ *    a rotation that landed mid-ladder is dialed, not the dead captured URL.
+ *
+ * No-op (returns `dialUrl`) when there's no saved record.
+ */
+function resolveEndpointForAttempt(dialUrl: string, attempt: number): string {
+  const saved = useConnectionLifecycleStore.getState().savedConnection;
+  if (!saved) return dialUrl;
+  const tunnelUrl = deriveTunnelUrl(saved);
+  const chosen = selectReconnectEndpoint({
+    lastUrl: dialUrl,
+    attempt,
+    tunnelUrl,
+    lastUrlIsLan: isLanWsUrl(dialUrl),
+  });
+  // If #5537 fell back to (or stayed on) the tunnel, make sure it's the freshest
+  // rotated tunnel URL (#5597). A LAN URL we're still retrying passes through.
+  return isLanWsUrl(chosen) ? chosen : (tunnelUrl ?? chosen);
+}
 
 // Session-aware selectors — read from sessionStates[activeSessionId]
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -852,11 +909,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       attempt: _retryCount,
       maxRetries: MAX_RETRIES,
       retryDelays: RETRY_DELAYS,
-      // #5597/#5537 seam — static endpoint today (the url/token captured at
-      // connect-start). Returns null when this attempt is already superseded so
-      // the probe is skipped entirely.
-      resolveEndpoint: (): ConnectEndpoint | null =>
-        myAttemptId !== connectionAttemptId ? null : { url, token },
+      // #5597/#5537 seam — re-resolve the endpoint per attempt instead of
+      // dialing the closure-captured URL forever:
+      //   • #5597: a tunnel rotation that landed mid-ladder (live
+      //     `tunnel_url_changed` push, or a URL persisted from a prior session
+      //     into `savedConnection.tunnelUrl`) is picked up on the next retry.
+      //   • #5537: a dead `ws://` LAN URL fast-falls-back to the tunnel after
+      //     LAN_FALLBACK_THRESHOLD health-check retries (keyed on `attempt`),
+      //     instead of burning the whole 5-retry budget on the unreachable host.
+      // Returns null when the attempt is already superseded so the probe is
+      // skipped entirely.
+      resolveEndpoint: (attempt): ConnectEndpoint | null => {
+        if (myAttemptId !== connectionAttemptId) return null;
+        return { url: resolveEndpointForAttempt(url, attempt), token };
+      },
       isStale: () => myAttemptId !== connectionAttemptId,
       // The HTTP `/health` GET (bare origin — the server answers both `/` and
       // `/health`) with the 5s abort, mapped to a ProbeResult. Probe failures
@@ -908,7 +974,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         console.log(`[ws] Retrying in ${delayMs}ms...`);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
-          get().connect(url, token, { silent, _retryCount: nextAttempt });
+          // #5597/#5537 — re-resolve the URL for the NEXT attempt so a mid-ladder
+          // tunnel rotation, or the LAN→tunnel fallback at the threshold, is
+          // dialed instead of the dead captured URL.
+          get().connect(resolveEndpointForAttempt(url, nextAttempt), token, { silent, _retryCount: nextAttempt });
         }, delayMs);
       },
       onRestartGaveUp: () => {
@@ -973,7 +1042,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // writes.
     const reconnectScheduler = createReconnectScheduler({
       nextRung: nextReconnectAttempt,
-      reconnect: () => get().connect(url, token),
+      // #5597 — the socket-close reconnect no longer re-dials the closure-
+      // captured `url` forever: re-resolve the freshest tunnel URL so a rotation
+      // (live `tunnel_url_changed` push / persisted from a prior session) is
+      // dialed. The reconnect re-enters connect() with _retryCount=0, so the
+      // inner health-check ladder's resolveEndpoint then owns the #5537 LAN→
+      // tunnel fast-fallback (keyed on the per-attempt index).
+      reconnect: () => get().connect(resolveCurrentEndpointUrl(url), token),
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: RETRY_DELAYS,
     });

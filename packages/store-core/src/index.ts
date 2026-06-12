@@ -610,13 +610,16 @@ export type {
 // per-socket reconnect dedup that the app and dashboard hand-copied into two
 // drifting `connect()` orchestrations. Each client supplies its store
 // writes / give-up UX / pairing wiring as callbacks. The `resolveEndpoint`
-// callback is the #5597/#5537 LAN/tunnel re-resolution seam (static today).
+// callback is the #5597/#5537 LAN/tunnel re-resolution seam, and
+// `selectReconnectEndpoint` is the #5537 LAN→tunnel fast-fallback decision.
 export {
   runConnectAttempt,
   createReconnectScheduler,
   retryDelayForAttempt,
+  selectReconnectEndpoint,
   CONNECT_MAX_RETRIES,
   CONNECT_RETRY_DELAYS,
+  LAN_FALLBACK_THRESHOLD,
 } from './connect-flow'
 export type {
   ProbeResult,
@@ -625,4 +628,5 @@ export type {
   RunConnectAttemptOptions,
   CreateReconnectSchedulerOptions,
   ReconnectScheduler,
+  SelectReconnectEndpointInput,
 } from './connect-flow'
