@@ -1,0 +1,274 @@
+/**
+ * Behavioral-contract switch-case test — APP side (epic #5556, sub-item 5).
+ *
+ * Drives the SHARED {@link SWITCH_FIXTURES} (defined once in @chroxy/store-core)
+ * through the mobile app's REAL `handleMessage` switch and asserts the resulting
+ * `sessionStates[id].messages` match each fixture's expectation.
+ *
+ * The dashboard's vitest suite (`packages/dashboard/src/store/contract-switch.test.ts`)
+ * drives the SAME fixtures through the dashboard's REAL handler against the SAME
+ * expectations. One fixture source + one expected output, exercised through both
+ * clients' real switches ⇒ a behavioural drift in either client fails a test,
+ * unlike the static handler-coverage guard (which only checks the `case` exists).
+ */
+
+// ---------------------------------------------------------------------------
+// Mocks — must be declared before imports (mirrors message-handler.test.ts)
+// ---------------------------------------------------------------------------
+
+jest.mock('../src/utils/crypto', () => ({
+  createKeyPair: jest.fn(),
+  deriveSharedKey: jest.fn(),
+  encrypt: jest.fn(),
+  decrypt: jest.fn(),
+  generateConnectionSalt: jest.fn(() => 'mock-salt'),
+  deriveConnectionKey: jest.fn(() => new Uint8Array(32)),
+  DIRECTION_CLIENT: 0,
+  DIRECTION_SERVER: 1,
+}));
+
+jest.mock('../src/notifications', () => ({
+  registerForPushNotifications: jest.fn(),
+}));
+
+jest.mock('../src/utils/haptics', () => ({
+  hapticSuccess: jest.fn(),
+}));
+
+jest.mock('../src/store/persistence', () => ({
+  clearPersistedSession: jest.fn(),
+}));
+
+jest.mock('../src/store/imperative-callbacks', () => ({
+  getCallback: jest.fn(() => undefined),
+}));
+
+jest.mock('../src/store/multi-client', () => ({
+  useMultiClientStore: { getState: jest.fn(() => ({ setClients: jest.fn() })), setState: jest.fn() },
+}));
+
+jest.mock('../src/store/web', () => ({
+  useWebStore: { getState: jest.fn(() => ({})), setState: jest.fn() },
+}));
+
+jest.mock('../src/store/cost', () => ({
+  useCostStore: { getState: jest.fn(() => ({ handleCostUpdate: jest.fn() })), setState: jest.fn() },
+}));
+
+jest.mock('../src/store/terminal', () => ({
+  useTerminalStore: { getState: jest.fn(() => ({ appendTerminalData: jest.fn() })), setState: jest.fn() },
+}));
+
+jest.mock('../src/store/notifications', () => ({
+  useNotificationStore: { getState: jest.fn(() => ({ addNotification: jest.fn(), dismissNotification: jest.fn() })), setState: jest.fn() },
+}));
+
+jest.mock('../src/store/conversations', () => ({
+  useConversationStore: { getState: jest.fn(() => ({})), setState: jest.fn() },
+}));
+
+jest.mock('../src/store/connection-lifecycle', () => ({
+  useConnectionLifecycleStore: { getState: jest.fn(() => ({})), setState: jest.fn() },
+}));
+
+jest.mock('expo-secure-store', () => ({
+  getItemAsync: jest.fn(() => Promise.resolve(null)),
+  setItemAsync: jest.fn(() => Promise.resolve()),
+  deleteItemAsync: jest.fn(() => Promise.resolve()),
+}));
+
+jest.mock('@chroxy/store-core', () => ({
+  ...jest.requireActual('../../store-core/src/index'),
+  parseUserInputMessage: jest.fn((text: string) => ({ type: 'text', content: text })),
+}));
+
+// ---------------------------------------------------------------------------
+// Imports
+// ---------------------------------------------------------------------------
+
+import {
+  handleMessage,
+  setStore,
+  setConnectionContext,
+  clearDeltaBuffers,
+  updateSession,
+} from '../src/store/message-handler';
+import { createEmptySessionState } from '../src/store/utils';
+import type { ConnectionState, SessionState } from '../src/store/types';
+import {
+  SWITCH_FIXTURES,
+  type ContractFixture,
+  FakeHandshakeServer,
+  FakeHandshakeClient,
+  type HandshakeStoreAdapter,
+  type DriverMessage,
+} from '@chroxy/store-core';
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+function createMockStore(initial: Partial<ConnectionState>) {
+  let state = initial as ConnectionState;
+  return {
+    getState: () => state,
+    setState: (s: Partial<ConnectionState> | ((prev: ConnectionState) => Partial<ConnectionState>)) => {
+      const patch = typeof s === 'function' ? s(state) : s;
+      state = { ...state, ...patch };
+    },
+  };
+}
+
+const mockCtx = {
+  url: 'wss://test.example.com',
+  token: 'test-token',
+  socket: {} as WebSocket,
+  isReconnect: false,
+  silent: false,
+};
+
+/** Strip non-deterministic fields so the output matches the stable fixture. */
+function normalize(messages: unknown[]): Array<Record<string, unknown>> {
+  return (messages as Array<Record<string, unknown>>).map((m) => ({
+    id: m.id,
+    type: m.type,
+    content: m.content,
+    tool: m.tool,
+    toolUseId: m.toolUseId,
+  }));
+}
+
+/** Seed an app store from a fixture's init. */
+function seedStore(fx: ContractFixture) {
+  const sessionStates: Record<string, SessionState> = {};
+  for (const [id, seed] of Object.entries(fx.init?.sessions ?? {})) {
+    sessionStates[id] = { ...createEmptySessionState(), ...(seed as Partial<SessionState>) };
+  }
+  return createMockStore({
+    activeSessionId: fx.init?.activeSessionId ?? null,
+    sessions: [],
+    availableProviders: [],
+    sessionStates,
+    messages: [],
+    addMessage: jest.fn(),
+    // The app's stream/tool handlers reach for the store's appendTerminalData.
+    appendTerminalData: jest.fn(),
+  } as unknown as ConnectionState);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('contract switch fixtures — app real handleMessage (#5556.5)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    clearDeltaBuffers();
+  });
+
+  afterEach(() => {
+    clearDeltaBuffers();
+    jest.runAllTimers();
+    jest.useRealTimers();
+    setConnectionContext(null);
+  });
+
+  for (const fx of SWITCH_FIXTURES) {
+    it(`${fx.name}`, () => {
+      const store = seedStore(fx);
+      setStore(store);
+      setConnectionContext(mockCtx as never);
+
+      handleMessage(fx.message);
+      // Stream cases buffer deltas behind a flush timer; drain it.
+      jest.runAllTimers();
+
+      const exp = fx.expect ?? fx.divergent?.app;
+      expect(exp).toBeDefined();
+
+      for (const [id, fields] of Object.entries(exp!.sessions ?? {})) {
+        const ss = (store.getState() as unknown as { sessionStates: Record<string, SessionState> })
+          .sessionStates[id];
+        expect(ss).toBeDefined();
+        if (fields.messages) {
+          const expected = fields.messages as Array<Record<string, unknown>>;
+          const actual = normalize(ss.messages);
+          expect(actual).toHaveLength(expected.length);
+          expected.forEach((m, i) => {
+            expect(actual[i]).toMatchObject(m);
+          });
+        }
+      }
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Encrypted-handshake replay INTO the app's real store (#5556.6)
+//
+// The shared fake-WS handshake driver (REAL store-core crypto) runs the full
+// keyed sequence and writes replayed/live messages through a HandshakeStoreAdapter
+// backed by the app's REAL `updateSession`. Same per-client-adapter pattern as the
+// contract fixtures: one driver, a thin store binding per client.
+// ---------------------------------------------------------------------------
+
+describe('encrypted handshake replay into the app store (#5556.6)', () => {
+  afterEach(() => {
+    setConnectionContext(null);
+  });
+
+  it('decrypts the replay burst and lands the messages in the real session state', () => {
+    const sid = 's1';
+    const store = createMockStore({
+      activeSessionId: sid,
+      sessions: [],
+      availableProviders: [],
+      sessionStates: { [sid]: { ...createEmptySessionState(), messages: [] } },
+      messages: [],
+      addMessage: jest.fn(),
+    } as unknown as ConnectionState);
+    setStore(store);
+
+    const adapter: HandshakeStoreAdapter = {
+      activateEncryption: () => {},
+      setMessages: (id, msgs) =>
+        updateSession(id, () => ({ messages: msgs as unknown as SessionState['messages'] })),
+      getMessages: (id) =>
+        ((store.getState() as unknown as { sessionStates: Record<string, SessionState> })
+          .sessionStates[id]?.messages ?? []) as unknown as DriverMessage[],
+      applyBootstrap: () => {},
+      refuse: () => {},
+      pin: () => {},
+    };
+
+    const server = new FakeHandshakeServer();
+    const client = new FakeHandshakeClient(adapter, { pinnedIdentityKey: server.identityPublicKey });
+    const auth = client.sendAuth();
+    server.keyExchangeWithClient(auth.publicKey as string);
+    const decision = client.handleAuthOk(server.authOk());
+    expect(decision.action).toBe('connect');
+
+    client.receive(server.encryptFrame({ type: 'history_replay_start', sessionId: sid, fullHistory: true }));
+    client.receive(
+      server.encryptFrame({
+        type: 'history_replay_entry',
+        sessionId: sid,
+        entry: { id: 'h1', type: 'response', content: 'replayed' },
+        historySeq: 1,
+      }),
+    );
+    client.receive(server.encryptFrame({ type: 'history_replay_end', sessionId: sid, latestSeq: 1 }));
+    client.receive(
+      server.encryptFrame({
+        type: 'live_message',
+        sessionId: sid,
+        entry: { id: 'L1', type: 'response', content: 'live' },
+      }),
+    );
+
+    const ss = (store.getState() as unknown as { sessionStates: Record<string, SessionState> })
+      .sessionStates[sid];
+    expect((ss.messages as Array<{ id: string }>).map((m) => m.id)).toEqual(['h1', 'L1']);
+    expect(client.plaintextAfterActivation).toEqual([]);
+  });
+});
