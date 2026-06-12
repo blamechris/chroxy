@@ -619,6 +619,17 @@ export function setPendingPairingId(id: string | null): void {
   pendingPairingId = id;
 }
 
+// #5536 — the daemon's E2E identity public key captured from the trusted pairing
+// channel (QR / pairing-code `idk=`) for THIS connection attempt, not yet
+// committed as the pin. The key-exchange handler verifies the server's signed
+// exchange key against it and pins it on first successful connect. Cleared once
+// consumed (a successful pin / auth_ok) so it never leaks into the next dial.
+export let pendingPairingIdentityKey: string | null = null;
+
+export function setPendingPairingIdentityKey(key: string | null): void {
+  pendingPairingIdentityKey = key;
+}
+
 // ---------------------------------------------------------------------------
 // History replay flags
 // ---------------------------------------------------------------------------
@@ -1071,6 +1082,10 @@ async function registerPushToken(socket: WebSocket): Promise<void> {
 // ---------------------------------------------------------------------------
 import * as SecureStore from 'expo-secure-store';
 import type { SavedConnection } from '@chroxy/store-core';
+import {
+  decideKeyPinWithPairingIdentity,
+  KEY_PIN_MISMATCH_MESSAGE,
+} from '@chroxy/store-core';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
 const STORAGE_KEY_TOKEN = 'chroxy_last_token';
@@ -1080,7 +1095,10 @@ const STORAGE_KEY_TOKEN = 'chroxy_last_token';
 const STORAGE_KEY_LAN_META = 'chroxy_last_lan_meta';
 
 /** Optional dual-endpoint fields persisted alongside the legacy url+token. */
-export type SavedConnectionExtras = Pick<SavedConnection, 'lanUrl' | 'lanVerified' | 'tunnelUrl'>;
+export type SavedConnectionExtras = Pick<
+  SavedConnection,
+  'lanUrl' | 'lanVerified' | 'tunnelUrl' | 'pinnedIdentityKey'
+>;
 
 export async function saveConnection(
   url: string,
@@ -1096,6 +1114,8 @@ export async function saveConnection(
     if (extras?.lanUrl) meta.lanUrl = extras.lanUrl;
     if (extras?.lanVerified) meta.lanVerified = true;
     if (extras?.tunnelUrl) meta.tunnelUrl = extras.tunnelUrl;
+    // #5536 — the pinned E2E identity travels in the same metadata blob.
+    if (extras?.pinnedIdentityKey) meta.pinnedIdentityKey = extras.pinnedIdentityKey;
     if (Object.keys(meta).length > 0) {
       await SecureStore.setItemAsync(STORAGE_KEY_LAN_META, JSON.stringify(meta));
     } else {
@@ -1123,6 +1143,10 @@ export async function loadConnection(): Promise<SavedConnection | null> {
         }
         if (meta.lanVerified === true && conn.lanUrl) conn.lanVerified = true;
         if (typeof meta.tunnelUrl === 'string') conn.tunnelUrl = meta.tunnelUrl;
+        // #5536 — restore the pinned identity (base64 string) if present.
+        if (typeof meta.pinnedIdentityKey === 'string' && meta.pinnedIdentityKey) {
+          conn.pinnedIdentityKey = meta.pinnedIdentityKey;
+        }
       }
     } catch {
       // Corrupt metadata — drop it, keep the legacy url+token.
@@ -1143,7 +1167,14 @@ export async function loadConnection(): Promise<SavedConnection | null> {
  * SecureStore and the in-memory lifecycle store. Centralised so the auth_ok and
  * token_rotated sites share identical semantics.
  */
-export function persistVerifiedConnection(connectedUrl: string, token: string): void {
+export function persistVerifiedConnection(
+  connectedUrl: string,
+  token: string,
+  // #5536 — the pinned identity to persist with this record. Pass the newly
+  // pinned key on a pin-on-first-use; omit to preserve whatever the prior
+  // record carried (every reconnect re-runs this and must not drop the pin).
+  pinnedIdentityKey?: string | null,
+): void {
   const prev = useConnectionLifecycleStore.getState().savedConnection;
   const base: SavedConnection = prev?.token === token && prev
     ? prev
@@ -1151,10 +1182,18 @@ export function persistVerifiedConnection(connectedUrl: string, token: string): 
   const next = recordVerifiedLanCandidate(base, connectedUrl, token);
   // `url` tracks the last-dialed endpoint for backward compat / manual flows.
   next.url = connectedUrl;
+  // #5536 — a freshly pinned key wins; otherwise keep the prior record's pin.
+  // recordVerifiedLanCandidate clears verification on token change but does not
+  // touch pinnedIdentityKey, so an explicit token change does not silently drop
+  // the pin — the identity is per-daemon, not per-token.
+  if (pinnedIdentityKey) {
+    next.pinnedIdentityKey = pinnedIdentityKey;
+  }
   void saveConnection(next.url, next.token, {
     lanUrl: next.lanUrl,
     lanVerified: next.lanVerified,
     tunnelUrl: next.tunnelUrl,
+    pinnedIdentityKey: next.pinnedIdentityKey,
   });
   useConnectionLifecycleStore.getState().setSavedConnection(next);
 }
@@ -1226,6 +1265,60 @@ export async function clearSavedCredentials(): Promise<void> {
   } catch {
     // Storage not available
   }
+}
+
+/**
+ * #5536 — verify the server's signed ephemeral exchange key against the pinned
+ * (or pairing-time) E2E identity before keying off it. Shared by BOTH handshake
+ * paths (eager auth_ok and discrete key_exchange_ok).
+ *
+ * On REFUSE (server identity changed / MITM / pinned-but-unsigned downgrade) it
+ * tears the socket down and writes a distinct, specific error so the UI shows a
+ * "server identity changed" state — NOT a silent retry loop. Returns
+ * `{ refused: true }` so the caller aborts the handshake without deriving a key.
+ *
+ * On CONNECT it returns the identity to PERSIST (`pinToPersist`): the
+ * pairing-time key on a pin-on-first-use, or null to leave the existing record's
+ * pin untouched. The caller passes that to `persistVerifiedConnection`.
+ *
+ * @returns `{ refused: false, pinToPersist }` to proceed, or `{ refused: true }`.
+ */
+function verifyServerIdentityOrRefuse(
+  ctx: ConnectionContext,
+  exchangePublicKey: string,
+  serverKeySig: string | null,
+): { refused: false; pinToPersist: string | null } | { refused: true } {
+  const saved = useConnectionLifecycleStore.getState().savedConnection;
+  const pinnedIdentityKey = saved?.pinnedIdentityKey ?? null;
+  const decision = decideKeyPinWithPairingIdentity({
+    pinnedIdentityKey,
+    pairingIdentityKey: pendingPairingIdentityKey,
+    exchangePublicKey,
+    serverKeySig,
+  });
+  if (decision.action === 'refuse') {
+    console.error(`[crypto] Server identity verification failed (${decision.reason}) — refusing connection`);
+    // Loud, specific, terminal error state. setConnectionError(…, 0) clears the
+    // retry countdown so the banner reads as a hard refusal, not a transient
+    // drop. We do NOT clear the saved connection — the user re-pairs to adopt
+    // the new identity, which overwrites the pin.
+    useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+    useConnectionLifecycleStore.getState().setConnectionError(KEY_PIN_MISMATCH_MESSAGE, 0);
+    useConnectionLifecycleStore.getState().setUserDisconnected(true);
+    if (!ctx.silent) {
+      Alert.alert('Server Identity Changed', KEY_PIN_MISMATCH_MESSAGE);
+    }
+    try { ctx.socket.close(); } catch { /* already closing */ }
+    getStore().setState({ socket: null });
+    // Consume the pairing identity so a subsequent dial doesn't reuse it.
+    pendingPairingIdentityKey = null;
+    return { refused: true };
+  }
+  // Connect — capture the pin to persist on first use; clear the pairing
+  // identity once it's been adopted (or wasn't needed).
+  const pinToPersist = decision.action === 'pin-and-connect' ? decision.identityKey : null;
+  pendingPairingIdentityKey = null;
+  return { refused: false, pinToPersist };
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,6 +1505,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Start client-side heartbeat for dead connection detection
       startHeartbeat(ctx.socket);
 
+      // #5536 — pin to persist with the connection record on a successful eager
+      // handshake (pin-on-first-use). Declared at case scope so the
+      // persistVerifiedConnection call below (outside the encryption branch) can
+      // read it. null = keep the existing record's pin (discrete path / reconnect).
+      let eagerPinToPersist: string | null = null;
       // Initiate key exchange if server requires encryption
       if (auth.encryption === 'required') {
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
@@ -1431,6 +1529,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // on any failure instead of letting the throw tear down the connection.
         let eagerEstablished = false;
         if (auth.serverPublicKey && _ctx.pendingKeyPair) {
+          // #5536 — verify the server's signed exchange key against the pinned
+          // (or pairing-time) identity BEFORE deriving the shared key. On a
+          // mismatch this closes the socket and surfaces the refusal; we abort
+          // the handshake entirely (no key derived, no post-auth burst).
+          const verdict = verifyServerIdentityOrRefuse(ctx, auth.serverPublicKey, auth.serverKeySig);
+          if (verdict.refused) {
+            _ctx.pendingKeyPair = null;
+            _ctx.pendingSalt = null;
+            break;
+          }
+          eagerPinToPersist = verdict.pinToPersist;
           try {
             const rawSharedKey = deriveSharedKey(auth.serverPublicKey, _ctx.pendingKeyPair.secretKey);
             const encryptionKey = _ctx.pendingSalt
@@ -1481,7 +1590,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // A successful auth against ctx.url with effectiveToken proves identity,
       // so if ctx.url is a ws:// LAN URL it becomes the *verified* LAN candidate
       // (the only kind we ever auto-prefer — see endpoint-selector.ts).
-      persistVerifiedConnection(ctx.url, effectiveToken);
+      // #5536: eagerPinToPersist carries a pin-on-first-use captured this
+      // handshake (null on the discrete path / reconnect — that pin is written
+      // in key_exchange_ok). Null leaves the existing record's pin intact.
+      persistVerifiedConnection(ctx.url, effectiveToken, eagerPinToPersist);
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
       break;
@@ -1489,12 +1601,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'key_exchange_ok': {
       if (_ctx.pendingKeyPair) {
-        const { publicKey: serverPublicKey } = sharedKeyExchangeOk(msg);
+        const { publicKey: serverPublicKey, serverKeySig } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
           set({ socket: null });
           useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+          _ctx.pendingKeyPair = null;
+          _ctx.pendingSalt = null;
+          break;
+        }
+        // #5536 — verify the server's signed exchange key against the pinned (or
+        // pairing-time) identity BEFORE deriving the shared key. On a mismatch
+        // this closes the socket + surfaces the refusal; abort the handshake.
+        const verdict = verifyServerIdentityOrRefuse(ctx, serverPublicKey, serverKeySig);
+        if (verdict.refused) {
           _ctx.pendingKeyPair = null;
           _ctx.pendingSalt = null;
           break;
@@ -1507,6 +1628,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         _ctx.pendingKeyPair = null;
         _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
+        // #5536 — persist a pin-on-first-use captured this discrete handshake.
+        // The auth_ok handler already wrote the verified connection (unpinned on
+        // this path); re-persist now to add the pin. Use the token the auth_ok
+        // handler saved (the effectiveToken — a pairing-issued session token may
+        // differ from the dial token), falling back to the dial ctx.token.
+        if (verdict.pinToPersist) {
+          const savedToken =
+            useConnectionLifecycleStore.getState().savedConnection?.token ?? ctx.token;
+          persistVerifiedConnection(ctx.url, savedToken, verdict.pinToPersist);
+        }
         // Now send the post-auth messages that were deferred. #5555: skip the
         // 3 list requests when the server advertised the auth_bootstrap
         // capability (the burst frame already carries that data, queued behind

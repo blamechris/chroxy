@@ -19,7 +19,7 @@ import {
 import { clientHasCapability } from '../src/handler-utils.js'
 import nacl from 'tweetnacl'
 import naclUtil from 'tweetnacl-util'
-import { deriveSharedKey, deriveConnectionKey, generateConnectionSalt } from '@chroxy/store-core/crypto'
+import { deriveSharedKey, deriveConnectionKey, generateConnectionSalt, createSigningKeyPair, verifyExchangeKeySignature } from '@chroxy/store-core/crypto'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1634,6 +1634,65 @@ describe('handleKeyExchange', () => {
       // Keys will differ because server generates fresh keypair each time
       assert.notDeepEqual(client1.encryptionState.sharedKey, client2.encryptionState.sharedKey,
         'different salts (and fresh server keypairs) must produce different encryption keys')
+    })
+  })
+
+  describe('identity signing (#5536)', () => {
+    it('signs the exchange key with the configured identity so it verifies under the identity pubkey', () => {
+      const identity = createSigningKeyPair()
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws })
+      ctx.serverIdentity = identity
+
+      handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      assert.ok(keOk.serverKeySig, 'key_exchange_ok should carry serverKeySig when an identity is configured')
+      // The signature must verify over the SERVER's exchange public key under the
+      // identity public key — the exact check a pinned client runs.
+      assert.equal(
+        verifyExchangeKeySignature(keOk.publicKey, keOk.serverKeySig, identity.publicKey),
+        true,
+      )
+    })
+
+    it('omits serverKeySig when no identity is configured (TOFU unchanged)', () => {
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws }) // no serverIdentity on ctx
+
+      handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      assert.ok(keOk, 'key_exchange_ok still sent')
+      assert.equal(keOk.serverKeySig, undefined, 'no signature when no identity')
+    })
+
+    it('the signature does NOT verify under a DIFFERENT identity (MITM key swap is detectable)', () => {
+      const realIdentity = createSigningKeyPair()
+      const attackerIdentity = createSigningKeyPair()
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws })
+      ctx.serverIdentity = realIdentity
+
+      handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      // A client that pinned the attacker's identity would reject this.
+      assert.equal(
+        verifyExchangeKeySignature(keOk.publicKey, keOk.serverKeySig, attackerIdentity.publicKey),
+        false,
+      )
     })
   })
 

@@ -494,11 +494,17 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
     this._pairingManager = pairingManager || null
+    // #5536 — long-lived Ed25519 identity keypair. Its secret half signs each
+    // connection's ephemeral exchange public key (eager + discrete paths) so a
+    // pinned client can verify the exchange key came from this daemon. Null when
+    // pinning is unavailable — in that case the server signs nothing and the
+    // exchange stays TOFU (backward compatible: old clients never look for a sig).
+    this._serverIdentity = serverIdentity || null
     // Runtime config object — exposed to handler dispatch so validators
     // can read settings (e.g. workspaceRoots for cwd allowlist) at
     // message time. May be null in tests that don't pass it through.
@@ -773,6 +779,8 @@ export class WsServer {
       get latestVersion() { return self._latestVersion },
       get gitInfo() { return self._gitInfo },
       get encryptionEnabled() { return self._encryptionEnabled },
+      // #5536 — identity keypair for signing the eager exchange public key.
+      get serverIdentity() { return self._serverIdentity },
       get localhostBypass() { return self._localhostBypass },
       get keyExchangeTimeoutMs() { return self._keyExchangeTimeoutMs },
       protocolVersion: SERVER_PROTOCOL_VERSION,
@@ -822,6 +830,8 @@ export class WsServer {
       get authFailures() { return self._authFailures },
       get benignPairAttempts() { return self._benignPairAttempts },
       get pairingManager() { return self._pairingManager },
+      // #5536 — identity keypair for signing the discrete exchange public key.
+      get serverIdentity() { return self._serverIdentity },
       get activeSessionId() {
         // Linking-mode default: return null so paired tokens are NOT auto-bound
         // to a specific session. The QR shown by the dashboard is intended as a

@@ -85,10 +85,30 @@ const PENDING_RATE_MAX = 5
 const PENDING_RATE_WINDOW_MS = 60_000
 const MAX_RATE_SOURCES = 1_000 // cap the rate-limit map cardinality
 
+/**
+ * Append the daemon's pinned E2E identity public key to a pairing URL as the
+ * `idk` (IDentity Key) query param (#5536). The pairing channel is the trust
+ * root — it already conveys the URL + pairing id out-of-band — so it is the
+ * sound place to convey the identity key the client pins. Old clients ignore
+ * the extra param. No-op when there is no identity key (encryption disabled /
+ * older daemon) or no base URL.
+ * @param {string|null} url - base chroxy:// pairing URL
+ * @param {string|null} identityPublicKey - base64 Ed25519 identity public key
+ * @returns {string|null}
+ */
+function appendIdentityKey(url, identityPublicKey) {
+  if (!url || !identityPublicKey) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}idk=${encodeURIComponent(identityPublicKey)}`
+}
+
 export class PairingManager extends EventEmitter {
-  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, sessionTokenTtlMs = DEFAULT_SESSION_TOKEN_TTL_MS, autoRefresh = false, pendingTtlMs = DEFAULT_PENDING_TTL_MS } = {}) {
+  constructor({ wsUrl = null, ttlMs = DEFAULT_TTL_MS, sessionTokenTtlMs = DEFAULT_SESSION_TOKEN_TTL_MS, autoRefresh = false, pendingTtlMs = DEFAULT_PENDING_TTL_MS, identityPublicKey = null } = {}) {
     super()
     this._wsUrl = wsUrl
+    // #5536 — the daemon's long-lived E2E identity public key (base64 Ed25519),
+    // pinned by clients at pairing time. Rides every pairing URL as `?idk=`.
+    this._identityPublicKey = identityPublicKey
     this._ttlMs = ttlMs
     this._sessionTokenTtlMs = sessionTokenTtlMs
     this._autoRefresh = autoRefresh
@@ -119,7 +139,17 @@ export class PairingManager extends EventEmitter {
   get currentPairingUrl() {
     if (!this._current || !this._wsUrl) return null
     const host = this._wsUrl.replace(/^wss?:\/\//, '')
-    return `chroxy://${host}?pair=${this._current.id}`
+    return appendIdentityKey(`chroxy://${host}?pair=${this._current.id}`, this._identityPublicKey)
+  }
+
+  /** The daemon's pinned E2E identity public key (base64 Ed25519), or null. */
+  get identityPublicKey() {
+    return this._identityPublicKey
+  }
+
+  /** Update the identity public key (e.g. after the keypair is minted late). */
+  setIdentityPublicKey(key) {
+    this._identityPublicKey = key || null
   }
 
   /**
@@ -134,6 +164,7 @@ export class PairingManager extends EventEmitter {
     return {
       code: this._current.id,
       url: this.currentPairingUrl,
+      identityPublicKey: this._identityPublicKey,
       expiresAtMs: this._current.expiresAt,
       ttlMs: this._ttlMs,
     }
@@ -186,7 +217,7 @@ export class PairingManager extends EventEmitter {
     this._activePairings.set(id, { expiresAt, used: false, boundSessionId: sessionId })
 
     const pairingUrl = this._wsUrl
-      ? `chroxy://${this._wsUrl.replace(/^wss?:\/\//, '')}?pair=${id}`
+      ? appendIdentityKey(`chroxy://${this._wsUrl.replace(/^wss?:\/\//, '')}?pair=${id}`, this._identityPublicKey)
       : null
     return { pairingId: id, pairingUrl }
   }
@@ -233,7 +264,7 @@ export class PairingManager extends EventEmitter {
     this._activePairings.set(id, { expiresAt, used: false, requiresApproval: true })
 
     const pairingUrl = this._wsUrl
-      ? `chroxy://${this._wsUrl.replace(/^wss?:\/\//, '')}?pair=${id}`
+      ? appendIdentityKey(`chroxy://${this._wsUrl.replace(/^wss?:\/\//, '')}?pair=${id}`, this._identityPublicKey)
       : null
     return { pairingId: id, pairingUrl, expiresAt }
   }

@@ -4,7 +4,7 @@
  * Extracted from ws-server.js _handleMessage to separate auth/encryption
  * concerns from message routing.
  */
-import { createKeyPair, deriveSharedKey, deriveConnectionKey } from '@chroxy/store-core/crypto'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { AuthSchema, KeyExchangeSchema, PairSchema, PairRequestSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
@@ -505,7 +505,7 @@ export function handlePairRequestMessage(ctx, ws, msg) {
  * @returns {boolean}
  */
 export function handleKeyExchange(ctx, ws, msg) {
-  const { clients, flushPostAuthQueue } = ctx
+  const { clients, flushPostAuthQueue, serverIdentity } = ctx
   const client = clients.get(ws)
 
   if (!client?.encryptionPending) return false
@@ -564,8 +564,25 @@ export function handleKeyExchange(ctx, ws, msg) {
     const encryptionKey = deriveConnectionKey(rawSharedKey, msg.salt)
     client.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
     client.encryptionPending = false
+    // #5536 — sign the ephemeral exchange public key with the long-lived
+    // identity key so a client that pinned our identity (at pairing time) can
+    // verify this exchange key really came from this daemon, defeating a MITM
+    // key swap. Absent when pinning is unavailable (no identity / signing
+    // error) — old clients ignore the field and the exchange stays TOFU.
+    let serverKeySig = null
+    if (serverIdentity?.secretKey) {
+      try {
+        serverKeySig = signExchangeKey(serverKp.publicKey, serverIdentity.secretKey)
+      } catch (err) {
+        log.warn(`Failed to sign exchange key for ${client.id}: ${err.message}`)
+      }
+    }
     try {
-      ws.send(JSON.stringify({ type: 'key_exchange_ok', publicKey: serverKp.publicKey }))
+      ws.send(JSON.stringify({
+        type: 'key_exchange_ok',
+        publicKey: serverKp.publicKey,
+        ...(serverKeySig ? { serverKeySig } : {}),
+      }))
     } catch (err) {
       log.error(`Failed to send key_exchange_ok: ${err.message}`)
     }

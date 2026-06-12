@@ -58,7 +58,7 @@ interface AddServerFormProps {
   initialName?: string
   initialUrl?: string
   /** Pair via a pasted chroxy://…?pair= URL — no token typed (#5281 ③ PR 2). */
-  onPair: (name: string, wsUrl: string, pairingId: string) => void
+  onPair: (name: string, wsUrl: string, pairingId: string, identityKey?: string) => void
   /** #5510 — request approval-gated pairing for a known wss:// URL (no token). */
   onRequestPair: (name: string, wsUrl: string) => void
 }
@@ -83,7 +83,8 @@ function AddServerForm({ onAdd, onCancel, error, initialName = '', initialUrl = 
     let host = p?.wsUrl ?? ''
     try { if (p) host = new URL(p.wsUrl).host } catch { /* keep wsUrl */ }
     if (p?.pairingId) {
-      onPair(name.trim() || host, p.wsUrl, p.pairingId)
+      // #5536 — pass the pinned identity from the URL `idk=` through to pairing.
+      onPair(name.trim() || host, p.wsUrl, p.pairingId, p.identityKey)
       return
     }
     if (p?.token) {
@@ -268,7 +269,7 @@ function RequestPairPanel({ wsUrl, name, onApproved, onCancel }: RequestPairPane
 
 interface HaveCodePanelProps {
   /** Pair via host + typed code — same path as the chroxy://?pair= flow (#5512). */
-  onPair: (name: string, wsUrl: string, pairingId: string) => void
+  onPair: (name: string, wsUrl: string, pairingId: string, identityKey?: string) => void
   onCancel: () => void
 }
 
@@ -295,7 +296,7 @@ function HaveCodePanel({ onPair, onCancel }: HaveCodePanelProps) {
     setError(null)
     let name = parsed.wsUrl
     try { name = new URL(parsed.wsUrl).host } catch { /* keep wsUrl */ }
-    onPair(name, parsed.wsUrl, parsed.pairingId)
+    onPair(name, parsed.wsUrl, parsed.pairingId, parsed.identityKey)
   }, [host, code, onPair])
 
   return (
@@ -453,9 +454,9 @@ export function ServerPicker() {
     }
   }, [addServer, switchServer])
 
-  const handlePair = useCallback((name: string, wsUrl: string, pairingId: string) => {
+  const handlePair = useCallback((name: string, wsUrl: string, pairingId: string, identityKey?: string) => {
     try {
-      pairServer(name, wsUrl, pairingId)
+      pairServer(name, wsUrl, pairingId, identityKey)
       setAddError(null)
       setShowAddForm(false)
       setShowCodeForm(false)

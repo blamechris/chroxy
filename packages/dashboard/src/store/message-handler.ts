@@ -42,6 +42,8 @@ import {
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
+  decideKeyPinWithPairingIdentity,
+  KEY_PIN_MISMATCH_MESSAGE,
   handleServerMode as sharedServerMode,
   handleCheckpointCreated as sharedCheckpointCreated,
   handleCheckpointList as sharedCheckpointList,
@@ -428,6 +430,21 @@ export function getPendingKeyPair(): KeyPair | null {
 
 export function setPendingKeyPair(kp: KeyPair | null): void {
   _pendingKeyPair = kp;
+}
+
+// #5536 — the daemon's E2E identity public key captured from the trusted pairing
+// URL (`idk=`) for THIS pairing attempt, not yet committed as the pin. The
+// key-exchange handler verifies the server's signed exchange key against it and
+// pins it (on the active registry entry) on first successful connect. Cleared
+// once consumed so it never leaks into a later dial.
+let _pendingPairingIdentityKey: string | null = null;
+
+export function setPendingPairingIdentityKey(key: string | null): void {
+  _pendingPairingIdentityKey = key;
+}
+
+export function getPendingPairingIdentityKey(): string | null {
+  return _pendingPairingIdentityKey;
 }
 
 /**
@@ -923,6 +940,65 @@ export function loadConnection(): { url: string; token: string } | null {
  */
 export function clearSavedCredentials(): void {
   _storage.clearSavedCredentials()
+}
+
+/**
+ * #5536 — verify the server's signed ephemeral exchange key against the pinned
+ * (or pairing-time) E2E identity before keying off it. Shared by BOTH handshake
+ * paths (eager auth_ok and discrete key_exchange_ok).
+ *
+ * The pinned identity lives on the ACTIVE registry entry (the dashboard's
+ * per-server record). On REFUSE (server identity changed / MITM / pinned-but-
+ * unsigned downgrade) it tears the socket down and writes a distinct, specific
+ * error so the UI shows a "server identity changed" state — NOT a silent retry
+ * loop. On CONNECT it pins the pairing-time identity onto the active entry on a
+ * pin-on-first-use.
+ *
+ * @returns true to PROCEED with the handshake, false to ABORT (already refused).
+ */
+function verifyServerIdentityOrRefuse(
+  ctx: { socket: WebSocket; silent: boolean },
+  exchangePublicKey: string,
+  serverKeySig: string | null,
+): boolean {
+  const state = getStore().getState();
+  const activeServerId = state.activeServerId;
+  const activeEntry = activeServerId
+    ? state.serverRegistry.find((s) => s.id === activeServerId)
+    : undefined;
+  const pinnedIdentityKey = activeEntry?.pinnedIdentityKey ?? null;
+  const decision = decideKeyPinWithPairingIdentity({
+    pinnedIdentityKey,
+    pairingIdentityKey: getPendingPairingIdentityKey(),
+    exchangePublicKey,
+    serverKeySig,
+  });
+  if (decision.action === 'refuse') {
+    console.error(`[crypto] Server identity verification failed (${decision.reason}) — refusing connection`);
+    try { ctx.socket.close(); } catch { /* already closing */ }
+    // Loud, terminal error state. We do NOT remove the registry entry — the user
+    // re-pairs to adopt the new identity (which overwrites the pin). Mark
+    // userDisconnected so the auto-reconnect loop doesn't immediately re-dial a
+    // box we just refused.
+    getStore().setState({
+      connectionPhase: 'disconnected',
+      socket: null,
+      connectionError: KEY_PIN_MISMATCH_MESSAGE,
+      userDisconnected: true,
+    });
+    if (!ctx.silent) {
+      _adapters.alert.alert('Server Identity Changed', KEY_PIN_MISMATCH_MESSAGE);
+    }
+    // Consume the pairing identity so a later dial doesn't reuse it.
+    setPendingPairingIdentityKey(null);
+    return false;
+  }
+  // Connect — pin on first use, then clear the pairing identity.
+  if (decision.action === 'pin-and-connect' && activeServerId) {
+    getStore().getState().updateServer(activeServerId, { pinnedIdentityKey: decision.identityKey });
+  }
+  setPendingPairingIdentityKey(null);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2621,6 +2697,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // on any failure instead of letting the throw tear down the connection.
         let eagerEstablished = false;
         if (auth.serverPublicKey && _pendingKeyPair) {
+          // #5536 — verify the server's signed exchange key against the pinned
+          // (or pairing-time) identity BEFORE deriving the shared key. On a
+          // mismatch this closes the socket + surfaces the refusal; abort.
+          if (!verifyServerIdentityOrRefuse(ctx, auth.serverPublicKey, auth.serverKeySig)) {
+            _pendingKeyPair = null;
+            _pendingSalt = null;
+            break;
+          }
           try {
             const rawSharedKey = deriveSharedKey(auth.serverPublicKey, _pendingKeyPair.secretKey);
             const encryptionKey = _pendingSalt
@@ -2676,11 +2760,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'key_exchange_ok': {
       if (_pendingKeyPair) {
-        const { publicKey: serverPublicKey } = sharedKeyExchangeOk(msg);
+        const { publicKey: serverPublicKey, serverKeySig } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
           set({ connectionPhase: 'disconnected', socket: null });
+          _pendingKeyPair = null;
+          _pendingSalt = null;
+          break;
+        }
+        // #5536 — verify the server's signed exchange key against the pinned (or
+        // pairing-time) identity BEFORE deriving the shared key. On a mismatch
+        // this closes the socket + surfaces the refusal; abort the handshake.
+        if (!verifyServerIdentityOrRefuse(ctx, serverPublicKey, serverKeySig)) {
           _pendingKeyPair = null;
           _pendingSalt = null;
           break;

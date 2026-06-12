@@ -38,6 +38,69 @@ export function createKeyPair() {
     return { publicKey: encodeBase64(kp.publicKey), secretKey: kp.secretKey };
 }
 /**
+ * Generate a long-lived Ed25519 identity (signing) keypair. The server
+ * persists this across restarts (keychain / state dir); the public half is the
+ * value pinned by clients at pairing time.
+ */
+export function createSigningKeyPair() {
+    const kp = nacl.sign.keyPair();
+    return { publicKey: encodeBase64(kp.publicKey), secretKey: kp.secretKey };
+}
+/**
+ * Sign an ephemeral exchange public key (base64) with the identity secret key.
+ * Returns the detached signature as base64. The signed message is the RAW bytes
+ * of the exchange public key (decoded from base64), so both sides sign/verify
+ * over identical bytes regardless of base64 canonicalisation.
+ *
+ * @param exchangePublicKeyBase64 - the per-connection X25519 public key to bind
+ * @param identitySecretKey - the 64-byte Ed25519 secret key
+ * @returns base64-encoded 64-byte detached signature
+ */
+export function signExchangeKey(exchangePublicKeyBase64, identitySecretKey) {
+    if (typeof exchangePublicKeyBase64 !== 'string' || exchangePublicKeyBase64.trim().length === 0) {
+        throw new Error('signExchangeKey: exchange public key must be a non-empty base64 string');
+    }
+    if (!(identitySecretKey instanceof Uint8Array) || identitySecretKey.length !== nacl.sign.secretKeyLength) {
+        throw new Error(`signExchangeKey: identity secret key must be a ${nacl.sign.secretKeyLength}-byte Uint8Array`);
+    }
+    const message = new Uint8Array(decodeBase64(exchangePublicKeyBase64));
+    const sig = nacl.sign.detached(message, identitySecretKey);
+    return encodeBase64(sig);
+}
+/**
+ * Verify that `signatureBase64` is a valid Ed25519 signature over
+ * `exchangePublicKeyBase64`, produced by the holder of the secret key matching
+ * `identityPublicKeyBase64` (the pinned identity key). Returns true on a valid
+ * signature, false on any mismatch / malformed input. NEVER throws — a bad or
+ * absent signature is a verification FAILURE the caller must treat as a refusal,
+ * not an exception to swallow.
+ *
+ * @param exchangePublicKeyBase64 - the per-connection X25519 public key offered
+ * @param signatureBase64 - the detached signature offered by the server
+ * @param identityPublicKeyBase64 - the PINNED identity public key to verify against
+ */
+export function verifyExchangeKeySignature(exchangePublicKeyBase64, signatureBase64, identityPublicKeyBase64) {
+    try {
+        if (typeof exchangePublicKeyBase64 !== 'string' || exchangePublicKeyBase64.length === 0)
+            return false;
+        if (typeof signatureBase64 !== 'string' || signatureBase64.length === 0)
+            return false;
+        if (typeof identityPublicKeyBase64 !== 'string' || identityPublicKeyBase64.length === 0)
+            return false;
+        const message = new Uint8Array(decodeBase64(exchangePublicKeyBase64));
+        const sig = new Uint8Array(decodeBase64(signatureBase64));
+        const identityPub = new Uint8Array(decodeBase64(identityPublicKeyBase64));
+        if (sig.length !== nacl.sign.signatureLength)
+            return false;
+        if (identityPub.length !== nacl.sign.publicKeyLength)
+            return false;
+        return nacl.sign.detached.verify(message, sig, identityPub);
+    }
+    catch {
+        return false;
+    }
+}
+/**
  * Derive a shared symmetric key from the other side's public key and our secret key.
  */
 export function deriveSharedKey(theirPubBase64, mySecretKey) {

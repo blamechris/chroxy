@@ -411,7 +411,7 @@ describe('ServerPicker', () => {
         target: { value: 'chroxy://192.168.1.5:8765?pair=ABC123' },
       })
       fireEvent.click(screen.getByTestId('server-add-submit'))
-      expect(mockPairServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'ABC123')
+      expect(mockPairServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'ABC123', undefined)
       // Not the manual add path.
       expect(mockAddServer).not.toHaveBeenCalled()
     })
@@ -424,7 +424,7 @@ describe('ServerPicker', () => {
         target: { value: 'chroxy://my-tunnel.trycloudflare.com?pair=XYZ' },
       })
       fireEvent.click(screen.getByTestId('server-add-submit'))
-      expect(mockPairServer).toHaveBeenCalledWith('Studio Mac', 'wss://my-tunnel.trycloudflare.com/ws', 'XYZ')
+      expect(mockPairServer).toHaveBeenCalledWith('Studio Mac', 'wss://my-tunnel.trycloudflare.com/ws', 'XYZ', undefined)
     })
 
     it('stays in manual mode (token required) for a plain ws URL', () => {
@@ -605,7 +605,7 @@ describe('ServerPicker', () => {
       fireEvent.change(screen.getByTestId('have-code-code-input'), { target: { value: 'abcd-2345' } })
       fireEvent.click(screen.getByTestId('have-code-submit'))
       // Code normalized (uppercased, dashes stripped); LAN ws inferred from the port.
-      expect(mockPairServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'ABCD2345')
+      expect(mockPairServer).toHaveBeenCalledWith('192.168.1.5:8765', 'ws://192.168.1.5:8765/ws', 'ABCD2345', undefined)
       expect(mockAddServer).not.toHaveBeenCalled()
     })
 
@@ -615,7 +615,7 @@ describe('ServerPicker', () => {
       fireEvent.change(screen.getByTestId('have-code-host-input'), { target: { value: 'my.tunnel.tld' } })
       fireEvent.change(screen.getByTestId('have-code-code-input'), { target: { value: 'WXYZ2345' } })
       fireEvent.click(screen.getByTestId('have-code-submit'))
-      expect(mockPairServer).toHaveBeenCalledWith('my.tunnel.tld', 'wss://my.tunnel.tld/ws', 'WXYZ2345')
+      expect(mockPairServer).toHaveBeenCalledWith('my.tunnel.tld', 'wss://my.tunnel.tld/ws', 'WXYZ2345', undefined)
     })
 
     it('disables Pair until both host and code are entered', () => {

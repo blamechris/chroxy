@@ -1458,6 +1458,7 @@ describe('handleAuthOk', () => {
       webFeatures: { available: true, remote: false, teleport: true },
       capabilities: { notificationPrefs: true, somethingElse: false },
       serverPublicKey: 'srv-pub-key',
+      serverKeySig: 'srv-key-sig',
       // #5555 — folded static permission-mode enum.
       availablePermissionModes: [
         { id: 'approve', label: 'Approve' },
@@ -1480,6 +1481,7 @@ describe('handleAuthOk', () => {
       webFeatures: { available: true, remote: false, teleport: true },
       serverCapabilities: { notificationPrefs: true, somethingElse: false },
       serverPublicKey: 'srv-pub-key',
+      serverKeySig: 'srv-key-sig',
       availablePermissionModes: [
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto' },
@@ -1719,6 +1721,7 @@ describe('handleAuthOk', () => {
       webFeatures: { available: false, remote: false, teleport: false },
       serverCapabilities: {},
       serverPublicKey: null,
+      serverKeySig: null,
       availablePermissionModes: null,
     })
   })
@@ -1847,18 +1850,31 @@ describe('handleKeyExchangeOk', () => {
   it('extracts publicKey string', () => {
     expect(handleKeyExchangeOk({ publicKey: 'base64key==' })).toEqual({
       publicKey: 'base64key==',
+      serverKeySig: null,
     })
   })
 
   it('returns null publicKey when missing', () => {
-    expect(handleKeyExchangeOk({})).toEqual({ publicKey: null })
+    expect(handleKeyExchangeOk({})).toEqual({ publicKey: null, serverKeySig: null })
   })
 
   it('returns null publicKey for non-string values', () => {
     // Matches inline guard: `if (!msg.publicKey || typeof msg.publicKey !== 'string')`
-    expect(handleKeyExchangeOk({ publicKey: 42 })).toEqual({ publicKey: null })
-    expect(handleKeyExchangeOk({ publicKey: null })).toEqual({ publicKey: null })
-    expect(handleKeyExchangeOk({ publicKey: '' })).toEqual({ publicKey: null })
+    expect(handleKeyExchangeOk({ publicKey: 42 })).toEqual({ publicKey: null, serverKeySig: null })
+    expect(handleKeyExchangeOk({ publicKey: null })).toEqual({ publicKey: null, serverKeySig: null })
+    expect(handleKeyExchangeOk({ publicKey: '' })).toEqual({ publicKey: null, serverKeySig: null })
+  })
+
+  it('#5536 — extracts the serverKeySig when present', () => {
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: 'sig==' })).toEqual({
+      publicKey: 'pk==',
+      serverKeySig: 'sig==',
+    })
+  })
+
+  it('#5536 — null serverKeySig for missing / empty / non-string', () => {
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: '' }).serverKeySig).toBe(null)
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: 42 }).serverKeySig).toBe(null)
   })
 })
 

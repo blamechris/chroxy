@@ -115,11 +115,11 @@ export function removeServerEntry(servers: ServerEntry[], serverId: string): Ser
   return updated
 }
 
-/** Update a server entry (name, url, or token). Returns updated list. */
+/** Update a server entry (name, url, token, or #5536 pinned identity). Returns updated list. */
 export function updateServerEntry(
   servers: ServerEntry[],
   serverId: string,
-  patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token'>>,
+  patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token' | 'pinnedIdentityKey'>>,
 ): ServerEntry[] {
   const trimmed: typeof patch = {}
   if (patch.name !== undefined) trimmed.name = patch.name.trim() || 'Unnamed Server'
@@ -129,6 +129,8 @@ export function updateServerEntry(
     trimmed.wsUrl = patch.wsUrl.trim()
   }
   if (patch.token !== undefined) trimmed.token = patch.token.trim()
+  // #5536 — pinned identity is a base64 key; persisted verbatim.
+  if (patch.pinnedIdentityKey !== undefined) trimmed.pinnedIdentityKey = patch.pinnedIdentityKey
   const updated = servers.map(s =>
     s.id === serverId ? { ...s, ...trimmed } : s,
   )

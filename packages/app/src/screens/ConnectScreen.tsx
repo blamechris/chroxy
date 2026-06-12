@@ -16,7 +16,7 @@ import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-ca
 import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
-import { setPendingPairingId } from '../store/message-handler';
+import { setPendingPairingId, setPendingPairingIdentityKey } from '../store/message-handler';
 import { Icon } from '../components/Icon';
 import { ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -27,8 +27,8 @@ const DEFAULT_PORT = 8765;
 
 
 type ParseResult =
-  | { ok: true; wsUrl: string; token: string; pairingId?: undefined }
-  | { ok: true; wsUrl: string; token?: undefined; pairingId: string }
+  | { ok: true; wsUrl: string; token: string; pairingId?: undefined; identityKey?: string }
+  | { ok: true; wsUrl: string; token?: undefined; pairingId: string; identityKey?: string }
   | { ok: false; reason: 'not_chroxy' | 'missing_token' | 'invalid_url' };
 
 export function parseChroxyUrl(raw: string): ParseResult {
@@ -45,13 +45,18 @@ export function parseChroxyUrl(raw: string): ParseResult {
       const scheme = parsed.port ? 'ws' : 'wss';
       const wsUrl = `${scheme}://${parsed.host}`;
 
+      // #5536 — the daemon's pinned E2E identity public key (base64 Ed25519),
+      // conveyed over the trusted pairing channel as `idk=`. Captured here and
+      // pinned on first connect; absent for older daemons / encryption-off.
+      const identityKey = parsed.searchParams.get('idk') ?? undefined;
+
       // New pairing flow: chroxy://host?pair=PAIRING_ID
       const pairingId = parsed.searchParams.get('pair');
-      if (pairingId) return { ok: true, wsUrl, pairingId };
+      if (pairingId) return { ok: true, wsUrl, pairingId, ...(identityKey ? { identityKey } : {}) };
 
       // Legacy flow: chroxy://host?token=TOKEN
       const token = parsed.searchParams.get('token');
-      if (token) return { ok: true, wsUrl, token };
+      if (token) return { ok: true, wsUrl, token, ...(identityKey ? { identityKey } : {}) };
 
       return { ok: false, reason: 'missing_token' };
     }
@@ -157,6 +162,9 @@ export function ConnectScreen() {
       const parsed = parseChroxyUrl(rawUrl);
       if (parsed.ok) {
         Keyboard.dismiss();
+        // #5536 — capture the pinned identity (if the URL carried `idk=`) so the
+        // key-exchange handler pins it on first connect.
+        setPendingPairingIdentityKey(parsed.identityKey ?? null);
         if ('pairingId' in parsed && parsed.pairingId) {
           setPendingPairingId(parsed.pairingId);
           connect(parsed.wsUrl, '');
@@ -229,6 +237,9 @@ export function ConnectScreen() {
     const parsed = parseChroxyUrl(result.data);
     if (parsed.ok) {
       setShowScanner(false);
+      // #5536 — capture the pinned identity (if the QR carried `idk=`) so the
+      // key-exchange handler pins it on first connect / verifies on later ones.
+      setPendingPairingIdentityKey(parsed.identityKey ?? null);
       if ('pairingId' in parsed && parsed.pairingId) {
         // New pairing flow: set pairing ID before connecting
         setPendingPairingId(parsed.pairingId);
