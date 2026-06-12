@@ -29,16 +29,13 @@ import {
   handleMessage as sharedMessageHandler,
   handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
-  handleAvailablePermissionModes as sharedAvailablePermissionModes,
-  handleSessionUpdated as sharedSessionUpdated,
-  handleConfirmPermissionMode as sharedConfirmPermissionMode,
+  // available_permission_modes / session_updated / confirm_permission_mode /
+  // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
   handleAgentIdle as sharedAgentIdle,
-  handleAgentBusy as sharedAgentBusy,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
-  handleBudgetResumed as sharedBudgetResumed,
   handlePlanStarted as sharedPlanStarted,
   handlePlanReady as sharedPlanReady,
   handleInactivityWarning as sharedInactivityWarning,
@@ -68,7 +65,7 @@ import {
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
   handleClientFocusChanged as sharedClientFocusChanged,
-  handleConversationId as sharedConversationId,
+  // conversation_id migrated to the shared dispatch table (#5556)
   handleConversationsList as sharedConversationsList,
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
@@ -76,7 +73,7 @@ import {
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionExpired as sharedPermissionExpired,
   handlePermissionTimeout as sharedPermissionTimeout,
-  handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — remaining both-sides duplicates extracted into store-core
   handleRawOutput as sharedRawOutput,
   handleTokenRotated as sharedTokenRotated,
@@ -144,8 +141,13 @@ import {
   // #5556 (epic #5514): shared delta-flusher wiring (accumulator + timer +
   // override) — the client supplies only its `applyDeltas` store mutation.
   createDeltaFlusher,
+  // epic #5556, sub-item 3: shared client message dispatch table.
+  // Pure-delegation cases that were byte-identical with the dashboard route
+  // through this table; a miss falls through to the switch below unchanged.
+  createDispatchTable,
+  runDispatch,
 } from '@chroxy/store-core';
-import type { DeltaFlusher } from '@chroxy/store-core';
+import type { DeltaFlusher, ClientStoreAdapter } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
 import { hapticSuccess } from '../utils/haptics';
@@ -950,6 +952,26 @@ export function updateActiveSession(updater: (session: SessionState) => Partial<
 }
 
 // ---------------------------------------------------------------------------
+// Shared dispatch table (epic #5556, sub-item 3)
+//
+// Pure-delegation message cases that were byte-identical with the dashboard's
+// handler are owned by the store-core table. `handleMessage` runs the table
+// first; a miss falls through to the switch below, so the remaining (and
+// genuinely divergent) cases stay exactly where they were.
+// ---------------------------------------------------------------------------
+
+const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
+  getActiveSessionId: () => getStore().getState().activeSessionId,
+  hasSession: (id) => !!getStore().getState().sessionStates[id],
+  updateSession: (id, updater) => updateSession(id, updater),
+  setState: (patch) => getStore().setState(patch as Partial<ConnectionState>),
+  addMessage: (m) => getStore().getState().addMessage(m),
+  getSessions: () => getStore().getState().sessions,
+};
+
+const _dispatchTable = createDispatchTable<SessionState>();
+
+// ---------------------------------------------------------------------------
 // Input preview helper
 // ---------------------------------------------------------------------------
 
@@ -1205,6 +1227,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       });
     }
   }
+
+  // #5556 — shared dispatch table first. A hit handles the message and returns;
+  // a miss falls through to the switch below, keeping migration incremental.
+  if (runDispatch(_dispatchTable, msg, _dispatchAdapter)) return;
 
   switch (msg.type) {
     case 'pong':
@@ -1599,13 +1625,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_updated': {
-      const updated = sharedSessionUpdated(msg, get().sessions);
-      if (updated) {
-        set({ sessions: updated });
-      }
-      break;
-    }
+    // session_updated — migrated to the shared dispatch table (#5556)
+
 
     case 'subscriptions_updated': {
       // Server confirms which sessions we're subscribed to — log for debugging
@@ -1663,16 +1684,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'conversation_id': {
-      // Parser is shared via store-core; the session-existence guard and the
-      // updateSession call stay here. Note: this handler does NOT fall back
-      // to activeSessionId — a missing sessionId skips the patch entirely.
-      const { sessionId: convSessionId, conversationId } = sharedConversationId(msg);
-      if (convSessionId && get().sessionStates[convSessionId]) {
-        updateSession(convSessionId, () => ({ conversationId }));
-      }
-      break;
-    }
+    // conversation_id — migrated to the shared dispatch table (#5556)
+
 
     case 'session_error': {
       // Crash branch: flip session health + notify; non-crash branch: special-
@@ -2132,21 +2145,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'confirm_permission_mode': {
-      const pending = sharedConfirmPermissionMode(msg);
-      if (pending) {
-        set({ pendingPermissionConfirm: pending });
-      }
-      break;
-    }
+    // confirm_permission_mode — migrated to the shared dispatch table (#5556)
 
-    case 'available_permission_modes': {
-      const modes = sharedAvailablePermissionModes(msg);
-      if (modes) {
-        set({ availablePermissionModes: modes });
-      }
-      break;
-    }
+
+    // available_permission_modes — migrated to the shared dispatch table (#5556)
+
 
     case 'raw': {
       const { data: rawData } = sharedRawOutput(msg);
@@ -2180,13 +2183,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'agent_busy': {
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => sharedAgentBusy());
-      }
-      break;
-    }
+    // agent_busy — migrated to the shared dispatch table (#5556)
+
 
     case 'agent_spawned': {
       const builder = sharedAgentSpawned(msg, get().activeSessionId);
@@ -2543,15 +2541,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'permission_rules_updated': {
-      const { sessionId: rulesExplicitSessionId, rules } =
-        sharedPermissionRulesUpdated(msg);
-      const rulesSessionId = rulesExplicitSessionId || get().activeSessionId;
-      if (rulesSessionId && get().sessionStates[rulesSessionId]) {
-        updateSession(rulesSessionId, () => ({ sessionRules: rules as PermissionRule[] }));
-      }
-      break;
-    }
+    // permission_rules_updated — migrated to the shared dispatch table (#5556)
+
 
     case 'user_question': {
       const parsed = sharedUserQuestion(msg, get().activeSessionId);
@@ -2966,18 +2957,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'budget_resumed': {
-      const { systemMessage } = sharedBudgetResumed();
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => ({
-          messages: [...ss.messages, systemMessage],
-        }));
-      } else {
-        get().addMessage(systemMessage);
-      }
-      break;
-    }
+    // budget_resumed — migrated to the shared dispatch table (#5556)
+
 
     case 'dev_preview': {
       const builder = sharedDevPreview(msg, get().activeSessionId);

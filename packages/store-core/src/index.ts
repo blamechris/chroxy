@@ -571,3 +571,22 @@ export type {
   CreateDeltaFlusherOptions,
   DeltaFlushScheduler,
 } from './delta-flush'
+
+// epic #5556, sub-item 3: shared client message dispatch table. A
+// `Record<msgType, handler>` registry of pure-delegation cases that were
+// byte-identical between the app and dashboard switches, driven through a thin
+// per-client `ClientStoreAdapter`. Clients dispatch through `runDispatch`
+// first; a table miss falls through to their existing switch, so migration
+// stays incremental. Divergent cases stay platform-local (not registered).
+export {
+  createDispatchTable,
+  runDispatch,
+  DISPATCH_TABLE_TYPES,
+} from './dispatch-table'
+export type {
+  ClientStoreAdapter,
+  DispatchTable,
+  DispatchHandler,
+  DispatchMessageMap,
+  DispatchMessageType,
+} from './dispatch-table'

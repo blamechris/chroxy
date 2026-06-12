@@ -19,16 +19,13 @@ import {
   handleMessage as sharedMessageHandler,
   handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
-  handleAvailablePermissionModes as sharedAvailablePermissionModes,
-  handleSessionUpdated as sharedSessionUpdated,
-  handleConfirmPermissionMode as sharedConfirmPermissionMode,
+  // available_permission_modes / session_updated / confirm_permission_mode /
+  // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
   handleAgentIdle as sharedAgentIdle,
-  handleAgentBusy as sharedAgentBusy,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
-  handleBudgetResumed as sharedBudgetResumed,
   handlePlanStarted as sharedPlanStarted,
   handlePlanReady as sharedPlanReady,
   handleInactivityWarning as sharedInactivityWarning,
@@ -57,11 +54,11 @@ import {
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
   handleClientFocusChanged as sharedClientFocusChanged,
-  handleConversationId as sharedConversationId,
+  // conversation_id migrated to the shared dispatch table (#5556)
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
   handlePermissionExpired as sharedPermissionExpired,
-  handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — dashboard adopts the shared permission family + the remaining
   // both-sides duplicates
   handlePermissionRequest as sharedPermissionRequest,
@@ -138,6 +135,12 @@ import {
   createDeltaFlusher,
   type DeltaFlusher,
   type PlatformAdapters, type StorageAdapter,
+  // epic #5556, sub-item 3: shared client message dispatch table.
+  // Pure-delegation cases that were byte-identical with the app route through
+  // this table; a miss falls through to the HANDLERS map + switch unchanged.
+  createDispatchTable,
+  runDispatch,
+  type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
@@ -827,6 +830,26 @@ export function updateActiveSession(updater: (session: SessionState) => Partial<
 }
 
 // ---------------------------------------------------------------------------
+// Shared dispatch table (epic #5556, sub-item 3)
+//
+// Pure-delegation message cases that were byte-identical with the app's
+// handler are owned by the store-core table. `handleMessage` runs the table
+// first; a miss falls through to the HANDLERS map + switch below, so the
+// remaining (and genuinely divergent) cases stay exactly where they were.
+// ---------------------------------------------------------------------------
+
+const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
+  getActiveSessionId: () => getStore().getState().activeSessionId,
+  hasSession: (id) => !!getStore().getState().sessionStates[id],
+  updateSession: (id, updater) => updateSession(id, updater),
+  setState: (patch) => getStore().setState(patch as Partial<ConnectionState>),
+  addMessage: (m) => getStore().getState().addMessage(m),
+  getSessions: () => getStore().getState().sessions,
+};
+
+const _dispatchTable = createDispatchTable<SessionState>();
+
+// ---------------------------------------------------------------------------
 // Session notification helper
 // ---------------------------------------------------------------------------
 
@@ -1338,19 +1361,8 @@ function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, 
   set({ pendingPermissionConfirm: null });
 }
 
-function handleAvailablePermissionModes(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const modes = sharedAvailablePermissionModes(msg);
-  if (modes) {
-    set({ availablePermissionModes: modes });
-  }
-}
-
-function handleSessionUpdated(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const updated = sharedSessionUpdated(msg, get().sessions);
-  if (updated) {
-    set({ sessions: updated });
-  }
-}
+// available_permission_modes + session_updated migrated to the shared
+// store-core dispatch table (#5556)
 
 function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const switched = sharedSessionSwitched(msg);
@@ -1433,12 +1445,7 @@ function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
   }
 }
 
-function handleAgentBusy(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => sharedAgentBusy());
-  }
-}
+// agent_busy migrated to the shared store-core dispatch table (#5556)
 
 function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const targetId = (msg.sessionId as string) || get().activeSessionId;
@@ -1939,17 +1946,7 @@ function handleBudgetExceeded(msg: Record<string, unknown>, get: MsgGet, _set: M
   }
 }
 
-function handleBudgetResumed(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const { systemMessage } = sharedBudgetResumed();
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, (ss) => ({
-      messages: [...ss.messages, systemMessage],
-    }));
-  } else {
-    get().addMessage(systemMessage);
-  }
-}
+// budget_resumed migrated to the shared store-core dispatch table (#5556)
 
 function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const { serverError, chatMessage: errorMsg } = sharedServerError(msg);
@@ -2313,12 +2310,11 @@ const HANDLERS: Record<string, Handler> = {
   skill_trust_granted: handleSkillTrustGranted,
   skill_trust_grant_ok: handleSkillTrustGrantOk,
   permission_mode_changed: handlePermissionModeChanged,
-  available_permission_modes: handleAvailablePermissionModes,
-  session_updated: handleSessionUpdated,
+  // available_permission_modes / session_updated / agent_busy migrated to the
+  // shared store-core dispatch table (#5556)
   session_switched: handleSessionSwitched,
   claude_ready: handleClaudeReady,
   agent_idle: handleAgentIdle,
-  agent_busy: handleAgentBusy,
   stream_start: handleStreamStart,
   stream_delta: handleStreamDelta,
   stream_end: handleStreamEnd,
@@ -2329,7 +2325,7 @@ const HANDLERS: Record<string, Handler> = {
   permission_resolved: handlePermissionResolved,
   budget_warning: handleBudgetWarning,
   budget_exceeded: handleBudgetExceeded,
-  budget_resumed: handleBudgetResumed,
+  // budget_resumed migrated to the shared store-core dispatch table (#5556)
   server_error: handleServerError,
   server_shutdown: handleServerShutdown,
   // #5163 (epic #5159): Control Room live activity tree.
@@ -2415,7 +2411,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
   }
 
-  // Dispatch to the handler map first — extracted, self-contained cases.
+  // #5556 — shared dispatch table first. A hit handles the message and
+  // returns; a miss falls through to the dashboard's own HANDLERS map +
+  // switch below, keeping migration incremental.
+  if (runDispatch(_dispatchTable, msg, _dispatchAdapter)) return;
+
+  // Dispatch to the handler map next — extracted, self-contained cases.
   const handler = HANDLERS[msg.type];
   if (handler) {
     handler(msg, get, set, ctx);
@@ -2891,16 +2892,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'conversation_id': {
-      // Parser is shared via store-core; the session-existence guard and the
-      // updateSession call stay here. Note: this handler does NOT fall back
-      // to activeSessionId — a missing sessionId skips the patch entirely.
-      const { sessionId: convSessionId, conversationId } = sharedConversationId(msg);
-      if (convSessionId && get().sessionStates[convSessionId]) {
-        updateSession(convSessionId, () => ({ conversationId }));
-      }
-      break;
-    }
+    // conversation_id — migrated to the shared dispatch table (#5556)
+
 
     case 'evaluate_draft_result': {
       // #3068: route to the resolver registered by the matching evaluateDraft()
@@ -3299,13 +3292,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'confirm_permission_mode': {
-      const pending = sharedConfirmPermissionMode(msg);
-      if (pending) {
-        set({ pendingPermissionConfirm: pending });
-      }
-      break;
-    }
+    // confirm_permission_mode — migrated to the shared dispatch table (#5556)
+
 
     case 'agent_spawned': {
       const builder = sharedAgentSpawned(msg, get().activeSessionId);
@@ -3546,17 +3534,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'permission_rules_updated': {
-      // Server broadcasts the full rule set for a session after a successful
-      // set_permission_rules call. Store it on the session so "Allow for
-      // Session" (#2834) can append new rules without clobbering existing ones.
-      const { sessionId: rulesExplicitSessionId, rules } = sharedPermissionRulesUpdated(msg);
-      const rulesSessionId = rulesExplicitSessionId || get().activeSessionId;
-      if (rulesSessionId && get().sessionStates[rulesSessionId]) {
-        updateSession(rulesSessionId, () => ({ sessionRules: rules }));
-      }
-      break;
-    }
+    // permission_rules_updated — migrated to the shared dispatch table (#5556)
+
 
     case 'user_question': {
       const parsed = sharedUserQuestion(msg, get().activeSessionId);
