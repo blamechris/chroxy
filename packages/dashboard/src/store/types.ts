@@ -129,6 +129,12 @@ export interface ProviderCapabilities {
   inProcessPermissions: boolean;
   modelSwitch: boolean;
   permissionModeSwitch: boolean;
+  // #5609: true when switching to 'auto' mid-turn interrupts the running
+  // turn (CLI respawns its `claude -p` subprocess — the #3729 panic-button).
+  // SDK/TUI apply the switch in-place and leave the turn running, so they
+  // report false / omit it. The dashboard uses this + the active session's
+  // streaming state to word the auto-mode confirm dialog accurately.
+  interruptsTurnOnAutoSwitch?: boolean;
   planMode: boolean;
   resume: boolean;
   terminal: boolean;

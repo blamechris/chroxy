@@ -108,6 +108,11 @@ export class SdkSession extends BaseSession {
       inProcessPermissions: true,
       modelSwitch: true,
       permissionModeSwitch: true,
+      // #5609: SDK applies a mid-turn switch to 'auto' in-process (clears
+      // rules + auto-resolves pending prompts at the next tool check) without
+      // killing the turn. Declared false so the capability matrix is uniform —
+      // CliSession is the only provider where the auto-switch is destructive.
+      interruptsTurnOnAutoSwitch: false,
       planMode: false,
       resume: true,
       terminal: false,

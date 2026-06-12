@@ -314,6 +314,67 @@ describe('settings-handlers', () => {
       assert.equal(session.setPermissionMode.callCount, 0)
     })
 
+    // #5609: the confirm_permission_mode warning must name the interrupt
+    // consequence when (a) the provider interrupts the turn on auto-switch
+    // (CLI panic-button) AND (b) a turn is in flight. SDK/TUI and idle CLI
+    // keep the plain bypass warning.
+    describe('confirm warning copy (#5609)', () => {
+      function sessionWithCaps(caps, isBusy) {
+        const session = createMockSession()
+        // Override constructor so `session.constructor.capabilities` is
+        // read by the handler (mirrors the real static-getter contract).
+        Object.defineProperty(session, 'constructor', {
+          value: { capabilities: caps },
+          configurable: true,
+        })
+        session._isBusy = isBusy
+        return session
+      }
+
+      it('warns about interrupting the turn for an interrupting provider mid-turn (CLI)', () => {
+        const sessions = new Map()
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true }, true)
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-cli' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
+
+        assert.equal(ctx._sent.length, 1)
+        assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
+        assert.match(ctx._sent[0].warning, /INTERRUPT/)
+        assert.match(ctx._sent[0].warning, /restart the session/)
+      })
+
+      it('keeps the plain warning for an interrupting provider when idle (CLI, no turn)', () => {
+        const sessions = new Map()
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true }, false)
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-cli' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
+
+        assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
+        assert.doesNotMatch(ctx._sent[0].warning, /INTERRUPT/)
+        assert.match(ctx._sent[0].warning, /bypasses all permission checks/)
+      })
+
+      it('keeps the plain warning for a non-interrupting provider mid-turn (SDK/TUI)', () => {
+        const sessions = new Map()
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: false }, true)
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
+
+        assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
+        assert.doesNotMatch(ctx._sent[0].warning, /INTERRUPT/)
+        assert.match(ctx._sent[0].warning, /bypasses all permission checks/)
+      })
+    })
+
     it('sets auto mode when confirmed', () => {
       const sessions = new Map()
       const session = createMockSession()

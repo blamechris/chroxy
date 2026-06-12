@@ -153,11 +153,38 @@ type EvaluatorState =
   | { kind: 'result', result: EvaluatorResultPayload }
   | { kind: 'error', message: string }
 
+// #5610 — push-to-talk hold threshold. Space must be held for at least this
+// long (with no other keys pressed) before voice capture begins; a quicker
+// tap types a normal space. 300ms matches Claude Code's affordance and is
+// long enough to feel deliberate without lagging a fast typist.
+const PTT_HOLD_MS = 300
+
+// #5610 — internal push-to-talk arming state, tracked on a ref so the
+// repeated keydown events that fire while a key is held don't restart the
+// arm timer or re-suppress characters incorrectly.
+//   - 'idle'      : nothing happening (the common case)
+//   - 'arming'    : Space is down, its character has been suppressed, and the
+//                   hold timer is counting toward PTT_HOLD_MS
+//   - 'recording' : the timer fired while still held → voice capture is live
+type PttState = 'idle' | 'arming' | 'recording'
+
 export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
   const dictationStartRef = useRef(0)
+  // #5610 — text that sat *after* the dictation anchor when capture began.
+  // The transcript is spliced between the prefix and this suffix so caret-
+  // anchored dictation (push-to-talk mid-draft) doesn't truncate everything
+  // past the caret. For the mic button the anchor is the end of the value, so
+  // the suffix is empty and behaviour is unchanged.
+  const dictationSuffixRef = useRef('')
+  // #5610 — push-to-talk (hold Space). `pttStateRef` tracks arming/recording
+  // so repeated keydown events (browser key-repeat while Space is held) don't
+  // re-arm or restart the timer. `pttTimerRef` holds the pending hold timer
+  // so we can cancel it on early release or on any disqualifying keypress.
+  const pttStateRef = useRef<PttState>('idle')
+  const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -428,7 +455,160 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     })
   }, [userMessageHistory, setValue])
 
+  // #5610 — push-to-talk helpers.
+  //
+  // Disambiguation approach: on the first Space keydown we *suppress* the
+  // native space character (preventDefault) and arm a PTT_HOLD_MS timer.
+  //   - released before the timer fires → it was a tap → re-insert the single
+  //     space we suppressed (so quick taps still type a space).
+  //   - timer fires while still held → start voice capture; the space stays
+  //     suppressed and subsequent key-repeat keydowns are also suppressed so
+  //     the field is not flooded with spaces while recording.
+  // Suppress-then-reinsert (rather than insert-then-delete) avoids any race
+  // where a dropped or doubled character could slip through under React's
+  // controlled value.
+
+  // Insert a literal space at the current caret (used when a hold turns out to
+  // be a tap). Splices into the controlled value and restores the caret just
+  // past the inserted space on the next frame.
+  const insertSpaceAtCaret = useCallback(() => {
+    const el = textareaRef.current
+    const start = el?.selectionStart ?? value.length
+    const end = el?.selectionEnd ?? value.length
+    const next = value.slice(0, start) + ' ' + value.slice(end)
+    setValue(next)
+    const caret = start + 1
+    requestAnimationFrame(() => {
+      const t = textareaRef.current
+      if (!t) return
+      t.setSelectionRange(caret, caret)
+    })
+  }, [value, setValue])
+
+  // Cancel a pending arm timer (no-op if none is pending).
+  const clearPttTimer = useCallback(() => {
+    if (pttTimerRef.current !== null) {
+      clearTimeout(pttTimerRef.current)
+      pttTimerRef.current = null
+    }
+  }, [])
+
+  // Space keydown — the arming path. Returns true if the event was handled as
+  // a PTT trigger (caller should not fall through to normal Space handling).
+  const handlePttKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (e.key !== ' ' && e.key !== 'Spacebar') return false
+    // Only plain Space (no modifiers) and only when voice is actually wired
+    // and usable arms PTT. With a modifier the Space is a shortcut, not text.
+    if (!voiceInput?.isAvailable || disabled) return false
+    if (e.metaKey || e.ctrlKey || e.altKey) return false
+
+    // Already armed or recording → swallow key-repeat so the field isn't
+    // flooded with spaces while the key is held.
+    if (pttStateRef.current !== 'idle') {
+      e.preventDefault()
+      return true
+    }
+
+    // First Space down: suppress the native character, remember the caret as
+    // the dictation anchor, and start the hold timer.
+    e.preventDefault()
+    const el = textareaRef.current
+    const anchor = el?.selectionStart ?? value.length
+    dictationStartRef.current = anchor
+    // Capture the text after the caret so the transcript splices in place when
+    // recording starts (rather than truncating the rest of the draft).
+    dictationSuffixRef.current = value.slice(el?.selectionEnd ?? anchor)
+    pttStateRef.current = 'arming'
+    clearPttTimer()
+    pttTimerRef.current = setTimeout(() => {
+      pttTimerRef.current = null
+      // Still arming (not cancelled by release / another key) → go live.
+      if (pttStateRef.current === 'arming') {
+        pttStateRef.current = 'recording'
+        voiceInput?.start()
+      }
+    }, PTT_HOLD_MS)
+    return true
+  }, [voiceInput, disabled, value, clearPttTimer])
+
+  // Cancel an in-progress arm because the user pressed some *other* key — they
+  // were typing, not holding to talk. Re-inserts the space we suppressed so no
+  // character is lost. No-op once recording has started (a different key while
+  // recording does not abort capture — release of Space ends it).
+  const cancelPttArmOnOtherKey = useCallback(() => {
+    if (pttStateRef.current === 'arming') {
+      clearPttTimer()
+      pttStateRef.current = 'idle'
+      insertSpaceAtCaret()
+    }
+  }, [clearPttTimer, insertSpaceAtCaret])
+
+  // Space keyup — the release path.
+  const handlePttKeyUp = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== ' ' && e.key !== 'Spacebar') return
+    if (pttStateRef.current === 'arming') {
+      // Released before the threshold → it was a tap. Re-insert the space.
+      clearPttTimer()
+      pttStateRef.current = 'idle'
+      insertSpaceAtCaret()
+    } else if (pttStateRef.current === 'recording') {
+      // Released while live → stop capture; the transcript-merge effect
+      // splices the result in at dictationStartRef.
+      pttStateRef.current = 'idle'
+      voiceInput?.stop()
+    }
+  }, [clearPttTimer, insertSpaceAtCaret, voiceInput])
+
+  // Blur — if focus leaves mid-arm or mid-record, clean up so the mic doesn't
+  // stay open. We do NOT re-insert a space on blur-while-arming: the user has
+  // navigated away, and silently appending a space to a draft they've left is
+  // more surprising than dropping the still-suppressed tap.
+  const handlePttBlur = useCallback(() => {
+    if (pttStateRef.current === 'arming') {
+      clearPttTimer()
+      pttStateRef.current = 'idle'
+    } else if (pttStateRef.current === 'recording') {
+      pttStateRef.current = 'idle'
+      voiceInput?.stop()
+    }
+  }, [clearPttTimer, voiceInput])
+
+  // #5610 — keep the live `stop` in a ref so the unmount cleanup below (which
+  // runs only on true unmount, hence the empty deps) doesn't fire a stale
+  // closure. `useVoiceInput` re-memoises start/stop when the engine is selected
+  // after mount, so a cleanup pinned to the first render would otherwise call
+  // the engine==='none' no-op stop and leave the mic open.
+  const voiceStopRef = useRef<(() => void) | undefined>(undefined)
+  voiceStopRef.current = voiceInput?.stop
+
+  // Unmount cleanup — never leave a timer or an open mic behind.
+  useEffect(() => {
+    return () => {
+      if (pttTimerRef.current !== null) {
+        clearTimeout(pttTimerRef.current)
+        pttTimerRef.current = null
+      }
+      if (pttStateRef.current === 'recording') {
+        voiceStopRef.current?.()
+      }
+      pttStateRef.current = 'idle'
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // #5610 — push-to-talk. Space (no modifiers) arms voice capture on hold;
+    // any other key while arming means the user is typing, so cancel the arm
+    // and re-insert the suppressed space. Run this before the pickers so the
+    // arming Space isn't consumed by another handler. The pickers don't bind
+    // Space, so there's no conflict; we still guard the arm path on voice
+    // availability inside handlePttKeyDown.
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      if (handlePttKeyDown(e)) return
+    } else {
+      cancelPttArmOnOtherKey()
+    }
+
     // Slash command picker keyboard handling
     if (pickerOpen) {
       if (e.key === 'Escape') {
@@ -583,7 +763,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         e.preventDefault()
       }
     }
-  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue])
+  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue, handlePttKeyDown, cancelPttArmOnOtherKey])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value
@@ -667,7 +847,11 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       prevTranscriptRef.current = voiceInput.transcript
       const prefix = value.slice(0, dictationStartRef.current)
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : ''
-      setValue(prefix + separator + voiceInput.transcript)
+      // #5610 — preserve any text that followed the anchor so caret-anchored
+      // dictation splices in place instead of truncating the rest of the draft.
+      const suffix = dictationSuffixRef.current
+      const trailing = suffix.length > 0 && !suffix.startsWith(' ') ? ' ' : ''
+      setValue(prefix + separator + voiceInput.transcript + trailing + suffix)
     }
     if (!voiceInput?.isRecording && prevTranscriptRef.current) {
       prevTranscriptRef.current = ''
@@ -680,6 +864,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       voiceInput.stop()
     } else {
       dictationStartRef.current = value.length
+      dictationSuffixRef.current = ''
       voiceInput.start()
     }
   }, [voiceInput, value.length])
@@ -900,6 +1085,8 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onKeyUp={handlePttKeyUp}
+          onBlur={handlePttBlur}
           onPaste={handlePaste}
           // Scroll-sync the overlay to the textarea so multi-line drafts
           // keep keyword highlights aligned as the user scrolls within the
