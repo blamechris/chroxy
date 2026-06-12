@@ -30,10 +30,6 @@ import { toWireAttachments } from './utils/attachment-utils'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
-import { StatusBar } from './components/StatusBar'
-import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
-import { HeaderOverflowMenu, type HeaderOverflowItem } from './components/HeaderOverflowMenu'
-import { NotificationsWidget } from './components/NotificationsWidget'
 import { formatTranscript } from './lib/transcript'
 import { ActivityIndicator } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
@@ -83,6 +79,7 @@ import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
 import { ControlRoomView } from './components/ControlRoomView'
 import { AppModals } from './components/AppModals'
+import { AppHeader } from './components/AppHeader'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -1741,193 +1738,56 @@ export function App() {
         />
       )}
 
-      {/* Header */}
-      <header id="header">
-        {/* #5200: two-row header — row 1 (.header-main) is the 3-column main
-            bar (logo/status | model+permission selects | bell + ⋯); the
-            cost/token cluster moved to row 2 (.header-meta) so the main bar
-            is never crowded and the permission selector isn't pushed out. */}
-        <div className="header-main">
-        <div className="header-left">
-          <span className="logo">Chroxy</span>
-          {/* #4630 — version + status-dot were bare spans with no
-              discoverable label, leaving Tauri/WKWebView and SR users with
-              nothing on hover. Pair `title` (browser hover tooltip) with
-              `aria-label` (screen-reader announcement) so both surfaces
-              get a label.
-              #4873 — the status dot intentionally does NOT carry
-              `role="status"`. role=status implies aria-live=polite,
-              which made reconnect-storm churn (connecting →
-              reconnecting → connected → reconnecting…) verbally hammer
-              SR users with every intermediate transition. aria-label
-              alone keeps the dot discoverable on focus/hover, and the
-              page-level debounced ConnectionAnnouncer (mounted above)
-              announces only the settled phase. */}
-          {(() => {
-            const versionLabel = `Chroxy server v${serverVersion ?? __APP_VERSION__}`
-            return (
-              <span
-                className="version-badge"
-                title={versionLabel}
-                aria-label={versionLabel}
-              >
-                v{serverVersion ?? __APP_VERSION__}
-              </span>
-            )
-          })()}
-          {(() => {
-            // #5182 (D1) — the top-bar dot reflects CONNECTED state (the
-            // app's WS/tunnel connection), NOT a daemon "running" state.
-            // It is driven purely by `connectionPhase` (the connected
-            // signal) plus the tunnel-warming gate below, mirroring the
-            // FooterBar's "Connected" dot exactly. The separate "Running"
-            // indicator lives on the left projects/explorer header (#5192)
-            // and is intentionally NOT wired here. The dot only turns
-            // green (`.connected`) when `connectionPhase === 'connected'`
-            // AND the tunnel is ready — i.e. genuinely connected end-to-end.
-            const warming = serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null)
-            const phase = warming ? 'connecting' : connectionPhase
-            const STATUS_LABELS: Record<string, string> = {
-              connected: 'Connected to Chroxy server',
-              connecting: warming ? 'Tunnel warming up…' : 'Connecting to Chroxy server…',
-              reconnecting: 'Reconnecting to Chroxy server…',
-              server_restarting: 'Server restarting…',
-              disconnected: 'Disconnected from Chroxy server',
-            }
-            const label = STATUS_LABELS[phase] ?? `Connection status: ${phase}`
-            return (
-              <span
-                className={`status-dot ${phase}`}
-                title={label}
-                aria-label={label}
-              />
-            )
-          })()}
-        </div>
-        <div className="header-center">
-          <ChatSettingsDropdown
-            availableModels={dropdownFlags.showModelPicker ? availableModels : []}
-            activeModel={activeModel}
-            defaultModelId={defaultModelId}
-            onModelChange={setModel}
-            readOnlyModel={dropdownFlags.readOnlyModel}
-            availablePermissionModes={availablePermissionModes}
-            permissionMode={permissionMode}
-            onPermissionModeChange={setPermissionMode}
-            showPermissionMode={dropdownFlags.showPermissionMode}
-            showThinkingLevel={dropdownFlags.showThinkingLevel}
-            thinkingLevel={thinkingLevel}
-            onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
-          />
-        </div>
-        <div className="header-right">
-          {/* #4890 — Slack-style intervention notifications widget. Bell
-              with unread badge → dropdown listing every intervention alert
-              (read + unread) so the operator gets a durable "do I have
-              outstanding interventions to deal with?" signal. The earlier
-              transient banners (NotificationBanners — still rendered above
-              the main content for unread alerts) keep their role as
-              foreground popups; the widget owns the durable history. */}
-          <NotificationsWidget
-            notifications={sessionNotifications}
-            onSwitchSession={handleSwitchSession}
-            onMarkRead={markSessionNotificationRead}
-            onMarkAllRead={markAllSessionNotificationsRead}
-            onDismiss={dismissSessionNotification}
-          />
-          {/* #4974: Skills / Copy / Settings collapsed behind a single
-              "⋯" overflow trigger. Previously these three icon buttons
-              lived inline in header-right alongside `+ New Session` and
-              the StatusBar, which at ≤1400px widths overlapped the
-              model selector chevron in header-center. Each item keeps
-              its existing handler, aria-label, and data-testid via the
-              HeaderOverflowMenu's `items[]` (testids still discoverable
-              from inside the open menu so the existing test coverage
-              for the underlying actions continues to apply).
-              The filter pattern (truthy `onClick`) mirrors the
-              SessionContextMenu capability gate — Copy is only present
-              when the chat view is active and has at least one
-              message, so the dropdown grows/shrinks naturally without
-              dead rows. */}
-          {(() => {
-            const overflowItems: HeaderOverflowItem[] = [
-              // #5062 — New Session moved INTO the overflow menu (was a
-              // standalone `chrome-new-session-btn` in the header-right
-              // zone). The Cmd+N shortcut still fires `handleNewSession`
-              // via the global keymap and the macOS menu-bar "File >
-              // New Session" item — this row is just the discoverable
-              // chrome entry point now. Listed first so a user scanning
-              // the menu top-to-bottom finds the most-used action
-              // immediately.
-              {
-                id: 'new-session',
-                label: 'New Session',
-                icon: '+',
-                title: `New session (${formatShortcutKeys('Cmd+N')})`,
-                onClick: handleNewSession,
-              },
-              {
-                id: 'skills',
-                label: 'Skills',
-                icon: '\u{1F9E9}',
-                title: 'Skills',
-                onClick: () => {
-                  setSkillsPanelOpen(prev => {
-                    const next = !prev
-                    if (next) requestListSkills()
-                    return next
-                  })
-                },
-              },
-              viewMode === 'chat' && storeMessages.length > 0
-                ? {
-                    id: 'copy-transcript',
-                    label: transcriptCopied ? 'Transcript copied' : 'Copy transcript',
-                    icon: transcriptCopied ? '✓' : '⎘',
-                    title: transcriptCopied ? 'Copied!' : `Copy transcript (${formatShortcutKeys('Cmd+Shift+T')})`,
-                    onClick: handleCopyTranscript,
-                  }
-                : { id: 'copy-transcript', label: 'Copy transcript' },
-              {
-                id: 'settings',
-                label: 'Settings',
-                icon: '⚙',
-                title: `Settings (${formatShortcutKeys('Cmd+,')})`,
-                // #5544 — redirect to the Control Room Settings tab (the
-                // single home) instead of opening the legacy slide-out modal.
-                onClick: openSettings,
-              },
-            ]
-            return <HeaderOverflowMenu items={overflowItems} />
-          })()}
-        </div>
-        </div>
-        <div className="header-meta">
-          <StatusBar
-            cost={sessionCost ?? undefined}
-            context={formatContext(contextUsage)}
-            contextPercent={contextPercent}
-            inputTokens={contextUsage?.inputTokens}
-            outputTokens={contextUsage?.outputTokens}
-            // #5065: surface the absolute `used / total` token meter in
-            // the header. We only pass the window when there's an active
-            // model — that's the "no session selected" gate the meter
-            // hides on (`showMeter` requires a positive window).
-            // #5424: `activeContextWindow` is null when the window is
-            // genuinely unknown (e.g. ollama) — the meter then hides and
-            // the chip falls back to the raw token-count text.
-            contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
-            isBusy={!isIdle}
-            agentCount={activeAgents.length}
-            provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
-            // #5184: model label + Settings-driven badge mode. The mode is
-            // always defined (store default `provider-model`), so the
-            // StatusBar always renders the configurable badge in the app.
-            model={activeModelLabel}
-            costBadgeMode={costBadgeMode}
-          />
-        </div>
-      </header>
+      {/* #5560 — the two-row header (#5200) is grouped into the presentational
+          <AppHeader>. App owns the state + the shared `formatContext`. */}
+      <AppHeader
+        serverVersion={serverVersion}
+        connectionPhase={connectionPhase}
+        serverPhase={serverPhase}
+        isConnected={isConnected}
+        tunnelReady={tunnelReady}
+        showModelPicker={dropdownFlags.showModelPicker}
+        availableModels={availableModels}
+        activeModel={activeModel}
+        defaultModelId={defaultModelId}
+        onModelChange={setModel}
+        readOnlyModel={dropdownFlags.readOnlyModel}
+        availablePermissionModes={availablePermissionModes}
+        permissionMode={permissionMode}
+        onPermissionModeChange={setPermissionMode}
+        showPermissionMode={dropdownFlags.showPermissionMode}
+        showThinkingLevel={dropdownFlags.showThinkingLevel}
+        thinkingLevel={thinkingLevel}
+        onThinkingLevelChange={(level) => setThinkingLevel(level as 'default' | 'high' | 'max')}
+        sessionNotifications={sessionNotifications}
+        onSwitchSession={handleSwitchSession}
+        onMarkNotificationRead={markSessionNotificationRead}
+        onMarkAllNotificationsRead={markAllSessionNotificationsRead}
+        onDismissNotification={dismissSessionNotification}
+        onNewSession={handleNewSession}
+        onToggleSkillsPanel={() => {
+          setSkillsPanelOpen(prev => {
+            const next = !prev
+            if (next) requestListSkills()
+            return next
+          })
+        }}
+        showCopyTranscript={viewMode === 'chat' && storeMessages.length > 0}
+        transcriptCopied={transcriptCopied}
+        onCopyTranscript={handleCopyTranscript}
+        onOpenSettings={openSettings}
+        cost={sessionCost ?? undefined}
+        context={formatContext(contextUsage)}
+        contextPercent={contextPercent}
+        inputTokens={contextUsage?.inputTokens}
+        outputTokens={contextUsage?.outputTokens}
+        contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
+        isBusy={!isIdle}
+        agentCount={activeAgents.length}
+        provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        modelLabel={activeModelLabel}
+        costBadgeMode={costBadgeMode}
+      />
 
       {/* Sidebar */}
       {sidebarRepos.length > 0 && (
