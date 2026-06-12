@@ -73,7 +73,7 @@ import {
   updateServerEntry,
   markServerConnected,
 } from './server-registry';
-import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState, withJitter } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
@@ -138,6 +138,15 @@ import {
   getHistoryCursors,
   // #5555.4 — hard-reset the replay reconcile state on explicit disconnect.
   resetReplayReconcile,
+  // #5556 sub-item 4 — shared connect-flow orchestration: the retry ladder, the
+  // probe → restart → connect decision tree, and the per-socket reconnect
+  // dedup. The dashboard supplies its store writes / console give-up / registry
+  // token re-resolution as callbacks. `resolveEndpoint` is the #5597/#5537
+  // LAN/tunnel re-resolution seam (static today).
+  runConnectAttempt,
+  createReconnectScheduler,
+  type ProbeResult,
+  type ConnectEndpoint,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 // #5184: header cost-badge mode union, default, and runtime guard. Lives in
@@ -1273,73 +1282,86 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
     }
 
-    // HTTP health check before WebSocket — verify server is up.
-    // Use root path (/) not the WS path (/ws) — GET /ws returns 404.
-    const httpBase = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
-    const httpUrl = new URL('/', httpBase).href;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    fetch(httpUrl, { method: 'GET', signal: controller.signal })
-      .finally(() => clearTimeout(timeoutId))
-      .then(async (res) => {
-        if (myAttemptId !== connectionAttemptId) return;
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        // Check if the server is in restart mode (supervisor standby)
+    // #5556 sub-item 4 — the HTTP health check / restart-detect / retry-or-
+    // give-up decision tree now lives in the shared `runConnectAttempt`. The
+    // dashboard supplies the EFFECTS as callbacks (single-store `set()` writes,
+    // the console give-up + clearSavedConnection, the `_pairingId`-threaded
+    // recursion); the algorithm (which branch, when to retry, what delay) is
+    // shared with the app. `MAX_RETRIES`/`RETRY_DELAYS` above are kept for the
+    // inline log strings and stay equal to the shared defaults.
+    void runConnectAttempt({
+      attempt: _retryCount,
+      maxRetries: MAX_RETRIES,
+      retryDelays: RETRY_DELAYS,
+      // #5597/#5537 seam — static endpoint today (the url/token captured at
+      // connect-start). Returns null when superseded so the probe is skipped.
+      resolveEndpoint: (): ConnectEndpoint | null =>
+        myAttemptId !== connectionAttemptId ? null : { url, token },
+      isStale: () => myAttemptId !== connectionAttemptId,
+      // The HTTP `/health` GET — root path (/) not /ws (GET /ws returns 404) —
+      // with the 5s abort, mapped to a ProbeResult. #4771: the shared
+      // getHealthCheckErrorMessage gives distinct copy for AbortError / HTTP
+      // 4xx / 5xx / other instead of the raw status string.
+      probe: async (endpoint): Promise<ProbeResult> => {
+        const httpBase = endpoint.url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+        const httpUrl = new URL('/', httpBase).href;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
         try {
-          const body = await res.json();
-          console.log('[ws] Health check response:', body.status ?? 'no status field');
-          if (body.status === 'restarting') {
-            console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${MAX_RETRIES + 1})`);
-            const healthEta = typeof body.restartEtaMs === 'number' ? body.restartEtaMs : null;
-            const currentState = get();
-            set({
-              connectionPhase: 'server_restarting',
-              shutdownReason: currentState.shutdownReason ?? 'restart',
-              restartEtaMs: healthEta,
-              restartingSince: currentState.restartingSince || Date.now(),
-            });
-            if (_retryCount < MAX_RETRIES) {
-              const delay = withJitter(RETRY_DELAYS[Math.min(_retryCount, RETRY_DELAYS.length - 1)]!);
-              setTimeout(() => {
-                if (myAttemptId !== connectionAttemptId) return;
-                get().connect(url, token, { silent, _retryCount: _retryCount + 1, ...(pairingId ? { _pairingId: pairingId } : {}) });
-              }, delay);
-            } else {
-              set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
-              console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
+          const res = await fetch(httpUrl, { method: 'GET', signal: controller.signal });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          try {
+            const body = await res.json();
+            console.log('[ws] Health check response:', body.status ?? 'no status field');
+            if (body.status === 'restarting') {
+              const restartEtaMs = typeof body.restartEtaMs === 'number' ? body.restartEtaMs : null;
+              return { kind: 'restarting', restartEtaMs };
             }
-            return;
+          } catch (err) {
+            console.log('[ws] Health check body unreadable:', err instanceof Error ? err.message : String(err));
           }
+          return { kind: 'ok' };
         } catch (err) {
-          console.log('[ws] Health check body unreadable:', err instanceof Error ? err.message : String(err));
+          console.log(`[ws] Health check failed: ${err instanceof Error ? err.message : String(err)}`);
+          return { kind: 'failed', reason: getHealthCheckErrorMessage(err as { name?: string; message?: string }) };
+        } finally {
+          clearTimeout(timeoutId);
         }
-
+      },
+      openSocket: () => {
         console.log('[ws] Health check passed, connecting WebSocket...');
         _connectWebSocket();
-      })
-      .catch((err) => {
-        if (myAttemptId !== connectionAttemptId) return;
-        console.log(`[ws] Health check failed: ${err.message}`);
-        // #4771: shared mapping with the app — AbortError, HTTP 4xx
-        // (bad token), HTTP 5xx (server restart), other HTTP, and
-        // generic network errors all get distinct copy instead of
-        // collapsing 4xx/5xx into the raw status string.
-        const reason = getHealthCheckErrorMessage(err);
+      },
+      onRestarting: ({ restartEtaMs }) => {
+        const currentState = get();
+        set({
+          connectionPhase: 'server_restarting',
+          shutdownReason: currentState.shutdownReason ?? 'restart',
+          restartEtaMs,
+          restartingSince: currentState.restartingSince || Date.now(),
+        });
+        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${MAX_RETRIES + 1})`);
+      },
+      onProbeFailed: (reason) => {
         set({ connectionError: reason });
-        if (_retryCount < MAX_RETRIES) {
-          const delay = withJitter(RETRY_DELAYS[_retryCount]!);
-          console.log(`[ws] Retrying in ${delay}ms...`);
-          setTimeout(() => {
-            if (myAttemptId !== connectionAttemptId) return;
-            get().connect(url, token, { silent, _retryCount: _retryCount + 1, ...(pairingId ? { _pairingId: pairingId } : {}) });
-          }, delay);
-        } else {
-          set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
-          console.warn(`[chroxy] Connection Failed: Could not reach the Chroxy server. Make sure it's running.`);
-          void get().clearSavedConnection();
-        }
-      });
+      },
+      scheduleRetry: (nextAttempt, delayMs) => {
+        console.log(`[ws] Retrying in ${delayMs}ms...`);
+        setTimeout(() => {
+          if (myAttemptId !== connectionAttemptId) return;
+          get().connect(url, token, { silent, _retryCount: nextAttempt, ...(pairingId ? { _pairingId: pairingId } : {}) });
+        }, delayMs);
+      },
+      onRestartGaveUp: () => {
+        set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
+        console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
+      },
+      onProbeGaveUp: () => {
+        set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
+        console.warn(`[chroxy] Connection Failed: Could not reach the Chroxy server. Make sure it's running.`);
+        void get().clearSavedConnection();
+      },
+    });
 
     function _connectWebSocket() {
     // Reset encryption state for each new connection (forward secrecy)
@@ -1364,23 +1386,45 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //
     // First-write-wins on `connectionError`: both events carry equally generic
     // messages, so flipping mid-display would just be visual churn.
-    let reconnectScheduled = false;
+    // #5556 sub-item 4 — the per-socket dedup + ladder-advance + jittered-delay
+    // mechanics now live in the shared `createReconnectScheduler`. The
+    // dashboard keeps its PLATFORM guards (userDisconnected / stale-attempt) and
+    // its phase/error writes in the `scheduleReconnect` WRAPPER below — the app
+    // guards in its onclose/onerror callers, so the shared scheduler stays
+    // guard-free and both clients converge on the same dedup+ladder core.
+    //
+    // The `reconnect` callback re-resolves the token from the registry (#5281
+    // ③ PR 2): a paired connection started with an empty token; auth_ok wrote
+    // the issued session token back to the registry, so the reconnect must use
+    // that, not the stale captured (empty) token. The shared scheduler's own
+    // stale-attempt guard covers the timer-fire boundary.
+    const reconnectScheduler = createReconnectScheduler({
+      nextRung: nextReconnectAttempt,
+      reconnect: () => {
+        const sid = get().activeServerId;
+        const reconnectToken = sid
+          ? (get().serverRegistry.find((s) => s.id === sid)?.token ?? token)
+          : token;
+        get().connect(url, reconnectToken);
+      },
+      isStale: () => myAttemptId !== connectionAttemptId,
+      retryDelays: RETRY_DELAYS,
+    });
     const scheduleReconnect = (
       reasonText: string,
       errorMessage: string | null,
     ): void => {
-      if (reconnectScheduled) return;
+      // Platform guards run BEFORE the ladder advances, so a user-initiated
+      // close / superseded attempt doesn't burn a rung (these used to live
+      // inside scheduleReconnect's body — kept here verbatim).
+      if (reconnectScheduler.scheduled) return;
       if (get().userDisconnected) return;
       if (disconnectedAttemptId === myAttemptId) return;
-      reconnectScheduled = true;
       // #5555.5 — climb the RETRY_DELAYS ladder (was a fixed 1.5s/2s). The
-      // ladder advances only AFTER the user-disconnect / stale-attempt guards
-      // above, so a user-initiated close doesn't burn a rung. It resets on
-      // `auth_ok`, so a clean reconnect starts back at the bottom (1s). The
-      // per-socket `reconnectScheduled` dedupe means a paired error → close
-      // drop advances the ladder exactly once.
-      const rung = nextReconnectAttempt();
-      const delayMs = withJitter(RETRY_DELAYS[Math.min(rung, RETRY_DELAYS.length - 1)]!);
+      // per-socket dedupe means a paired error → close drop advances the ladder
+      // exactly once. The ladder resets on `auth_ok`, so a clean reconnect
+      // starts back at the bottom (1s).
+      reconnectScheduler.schedule();
       console.log(`[ws] ${reasonText}, reconnecting...`);
       // #4771: `errorMessage === null` means the close code was 1000
       // (normal server-initiated close — see getWsCloseMessage). Match
@@ -1391,18 +1435,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         ...(errorMessage !== null ? { connectionError: errorMessage } : {}),
         connectionRetryCount: 0,
       });
-      setTimeout(() => {
-        if (myAttemptId !== connectionAttemptId) return;
-        // #5281 ③ PR 2 — reconnect with the latest stored token for the active
-        // registry server. A paired connection started with an empty token;
-        // auth_ok wrote the issued session token back to the registry, so the
-        // reconnect must use that, not the stale captured (empty) token.
-        const sid = get().activeServerId;
-        const reconnectToken = sid
-          ? (get().serverRegistry.find((s) => s.id === sid)?.token ?? token)
-          : token;
-        get().connect(url, reconnectToken);
-      }, delayMs);
     };
 
     socket.onopen = () => {
