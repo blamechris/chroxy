@@ -683,7 +683,7 @@ export class WsServer {
         isPrimary: (sid, cid) => self._clientManager.isPrimary(sid, cid),
         clearPrimary: (sid) => self._clearPrimary(sid),
         sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
-        replayHistory: (ws, sid) => self._replayHistory(ws, sid),
+        replayHistory: (ws, sid, opts) => self._replayHistory(ws, sid, opts),
         get clients() { return self.clients },
       },
       sessions: {
@@ -1641,7 +1641,7 @@ export class WsServer {
 
   /** Delegates to ws-history.js */
   _sendPostAuthInfo(ws, extra) { sendPostAuthInfo(this._historyCtx, ws, extra) }
-  _replayHistory(ws, sessionId) { replayHistory(this._historyCtx, ws, sessionId) }
+  _replayHistory(ws, sessionId, opts) { replayHistory(this._historyCtx, ws, sessionId, opts) }
   _flushPostAuthQueue(ws, queue) { flushPostAuthQueue(this._historyCtx, ws, queue) }
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
 

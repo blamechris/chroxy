@@ -298,6 +298,47 @@ describe('handleAuthMessage', () => {
     })
   })
 
+  // #5555.3 (lastSeq delta replay) — the per-session history cursor map stashed
+  // off `auth` so replayHistory can send only entries newer than the cursor.
+  describe('history cursors (#5555.3)', () => {
+    it('stashes a valid per-session history cursor map', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        historyCursors: { 'sess-1': 42, 'sess-2': 0 },
+      })
+      assert.deepEqual(client.historyCursors, { 'sess-1': 42, 'sess-2': 0 })
+    })
+
+    it('leaves historyCursors undefined for old clients (field absent)', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
+      assert.equal(client.historyCursors, undefined)
+    })
+
+    it('drops non-numeric / negative / non-finite cursor values', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      // Zod coerces the record; invalid entries that survive parsing are
+      // filtered in the handler. Pass through .passthrough() with mixed values.
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        historyCursors: { ok: 7 },
+      })
+      assert.deepEqual(client.historyCursors, { ok: 7 })
+    })
+
+    it('caps the number of honoured cursors at MAX_HISTORY_CURSORS', () => {
+      const big = {}
+      for (let i = 0; i < 200; i++) big[`s${i}`] = i + 1
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token', historyCursors: big })
+      assert.ok(client.historyCursors)
+      assert.equal(Object.keys(client.historyCursors).length, 64)
+    })
+  })
+
   describe('invalid token — auth failure tracking', () => {
     it('rejects invalid token with auth_fail', () => {
       const { ctx, ws } = makeAuthCtx({

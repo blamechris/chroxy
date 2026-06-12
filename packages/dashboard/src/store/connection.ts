@@ -133,6 +133,10 @@ import {
   // #5163 (epic #5159): seed the Control Room activity state empty so the
   // reducer can apply snapshots/deltas immutably from the first message.
   createEmptyActivityState,
+  // #5555.3 — per-session history cursors for delta replay, sent in `auth`.
+  getHistoryCursors,
+  // #5555.4 — hard-reset the replay reconcile state on explicit disconnect.
+  resetReplayReconcile,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 // #5184: header cost-badge mode union, default, and runtime guard. Lives in
@@ -1417,12 +1421,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // encryption disabled) the fields are ignored and the auth_ok handler
           // falls back to the discrete handshake using the same stashed keypair.
           const eager = prepareEagerKeyExchange();
+          // #5555.3 — send the per-session history cursors so the server
+          // replays only entries newer than what we've already applied. Empty
+          // on a first connect → omitted → full replay (old-client shape).
+          const historyCursors = getHistoryCursors();
           socket.send(JSON.stringify({
             type: 'auth',
             token,
             ...common,
             eagerPublicKey: eager.publicKey,
             eagerSalt: eager.salt,
+            ...(Object.keys(historyCursors).length > 0 ? { historyCursors } : {}),
           }));
         }
       }
@@ -1612,6 +1621,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
+    // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay
+    // baseline AND the history cursors so a later connect (possibly to a
+    // different server) starts from a full replay rather than presenting a
+    // stale cursor. (Tunnel-blip RECONNECTS keep cursors — they don't run
+    // disconnect(); auth_ok clears only the baseline.)
+    resetReplayReconcile({ clearCursors: true });
     // Flush and clear any pending delta buffer
     clearDeltaBuffers();
     // Clear permission boundary split tracking

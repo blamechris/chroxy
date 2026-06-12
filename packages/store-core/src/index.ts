@@ -33,6 +33,18 @@ export { isVoiceInputMode } from './types'
 export { isFreeformAnswer } from './freeform-answer'
 export type { OtherFreeformAnswer } from './freeform-answer'
 
+// #5555.3 / #5555.4 — lastSeq cursor tracking + no-blank-flash replay reconcile.
+export {
+  resetReplayReconcile,
+  recordHistorySeq,
+  getHistoryCursors,
+  getHistoryCursor,
+  reconcileReplayStart,
+  reconcileReplayEnd,
+  isRebuildInProgress,
+  replayDedupCache,
+} from './replay-reconcile'
+
 export type {
   MessageAttachment,
   ToolResultImage,

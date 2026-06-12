@@ -53,6 +53,18 @@ export const AuthSchema = z.object({
     // `serverPublicKey` in auth_ok and falls back the same way. No flag day.
     eagerPublicKey: z.string().max(512).optional(),
     eagerSalt: z.string().max(512).optional(),
+    // #5555.3 (lastSeq delta replay) — optional per-session history cursor map
+    // ({ [sessionId]: lastSeq }). On reconnect the client sends the highest
+    // `historySeq` it has applied for each session it has cached, so the server
+    // replays ONLY entries newer than that cursor instead of the full ring
+    // buffer. Old clients omit the field and get the full replay unchanged; a
+    // new client talking to an old server gets a full replay too (the server
+    // ignores the field). The server falls back to a full replay (flagged with
+    // `fullHistory: true` on `history_replay_start`) whenever it cannot honour a
+    // cursor — history trimmed past it, unknown session, or a server restart
+    // reset the seqs. `seq` is a non-negative finite int; the server caps the
+    // number of honoured keys defensively so a fat map can't bloat the auth path.
+    historyCursors: z.record(z.string().max(256), z.number().int().nonnegative()).optional(),
 }).passthrough();
 export const PairSchema = z.object({
     type: z.literal('pair'),

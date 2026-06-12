@@ -2106,15 +2106,24 @@ export interface HistoryReplayStartPayload {
    * when the resolved id maps to an existing session in its store.
    */
   sessionId: string | null
+  /**
+   * #5555.3 — the server's latest per-session history seq, carried on the
+   * `history_replay_start` frame so the client can advance its cursor even for
+   * an EMPTY delta replay (already-current reconnect). null when absent
+   * (older server) — the client then derives the cursor from per-entry
+   * `historySeq` instead.
+   */
+  latestSeq: number | null
 }
 
 /**
  * Parse a `history_replay_start` message.
  *
  * Returns the new flag value (`receivingHistoryReplay: true`), the strict
- * `fullHistory` flag, and the resolved target session id for the clearing
- * branch. Module-level flag mutation, transient-state clearing, and the
- * existence guard on the resolved sessionId stay at the call site.
+ * `fullHistory` flag, the resolved target session id for the clearing branch,
+ * and (#5555.3) the server's `latestSeq` for cursor advancement. Module-level
+ * flag mutation, transient-state clearing, the no-blank-flash reconcile, and
+ * the existence guard on the resolved sessionId stay at the call site.
  *
  * Note: this handler intentionally does NOT use `resolveSessionId()` because
  * the prior inline logic was `(msg.sessionId as string) || activeSessionId`,
@@ -2132,6 +2141,10 @@ export function handleHistoryReplayStart(
     receivingHistoryReplay: true,
     fullHistory: msg.fullHistory === true,
     sessionId: rawSessionId || activeSessionId,
+    latestSeq:
+      typeof msg.latestSeq === 'number' && Number.isFinite(msg.latestSeq)
+        ? msg.latestSeq
+        : null,
   }
 }
 
