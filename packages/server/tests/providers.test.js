@@ -132,6 +132,28 @@ describe('Provider Registry', () => {
     assert.equal(sdkEntry.capabilities.resume, true)
   })
 
+  // #5609: clients word the auto-mode confirm dialog off this flag. Only CLI
+  // interrupts the in-flight turn when switching to auto (subprocess respawn —
+  // the #3729 panic-button); SDK/TUI apply the switch in-place.
+  it('listProviders surfaces interruptsTurnOnAutoSwitch only for claude-cli', () => {
+    const list = listProviders()
+    const cliEntry = list.find(p => p.name === 'claude-cli')
+    assert.ok(cliEntry, 'claude-cli provider should be registered')
+    assert.equal(cliEntry.capabilities.interruptsTurnOnAutoSwitch, true,
+      'claude-cli respawns its subprocess on auto-switch so should report interruptsTurnOnAutoSwitch: true')
+
+    const sdkEntry = list.find(p => p.name === 'claude-sdk')
+    assert.ok(sdkEntry, 'claude-sdk provider should be registered')
+    assert.equal(sdkEntry.capabilities.interruptsTurnOnAutoSwitch, false,
+      'claude-sdk applies the auto-switch in-process so should report interruptsTurnOnAutoSwitch: false')
+
+    const tuiEntry = list.find(p => p.name === 'claude-tui')
+    if (tuiEntry) {
+      assert.equal(tuiEntry.capabilities.interruptsTurnOnAutoSwitch, false,
+        'claude-tui rewrites a sidecar (no PTY restart) so should report interruptsTurnOnAutoSwitch: false')
+    }
+  })
+
   // #3072: clients gate the "Allow for Session" affordance on this capability
   // so they don't surface a button that the server would reject as
   // "not supported by this provider".

@@ -97,6 +97,11 @@ export class ClaudeTuiSession extends BaseSession {
       // (which would lose the resumed conversation context), unlike
       // CliSession's restart-based setPermissionMode.
       permissionModeSwitch: true,
+      // #5609: the sidecar rewrite above means a mid-turn switch to 'auto'
+      // takes effect on the next tool call WITHOUT a PTY restart — the
+      // running turn survives. False keeps the matrix uniform; only CliSession
+      // interrupts the turn on the auto-switch.
+      interruptsTurnOnAutoSwitch: false,
       planMode: false,
       // #5307 (WP-0.1) — the TUI now persists its upstream conversation uuid
       // (get resumeSessionId) and, on restore, respawns claude with

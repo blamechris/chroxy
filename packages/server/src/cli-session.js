@@ -213,6 +213,13 @@ export class CliSession extends BaseSession {
       inProcessPermissions: false,
       modelSwitch: true,
       permissionModeSwitch: true,
+      // #5609: switching to 'auto' mid-turn is the #3729 panic-button —
+      // BaseSession lets 'auto' bypass the _isBusy guard and CliSession's
+      // _onPermissionModeChanged respawns the `claude -p` subprocess, which
+      // DROPS the in-flight turn. Surfaced as a capability so the dashboard /
+      // app can word their confirm dialog accurately (CLI = interrupts;
+      // SDK/TUI = safe) instead of silently differing per provider.
+      interruptsTurnOnAutoSwitch: true,
       planMode: true,
       // #4887 — claude CLI supports `--resume <id>`; CliSession now wires
       // `_sessionId` into the spawn argv on respawn / restore so the model

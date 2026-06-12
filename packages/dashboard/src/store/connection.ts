@@ -77,6 +77,7 @@ import { stripAnsi, filterThinking, nextMessageId, createEmptySessionState } fro
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
+import { buildAutoModeConfirmMessage } from '../lib/auto-mode-confirm';
 import {
   setStore,
   wsSend,
@@ -2386,8 +2387,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // toggle target, and overwriting it on cancel would silently break the
     // toggle.
     if (mode === 'auto') {
+      // #5609: word the confirm to match the ACTUAL consequence for the
+      // active session's provider. On CLI a mid-turn switch interrupts the
+      // running turn (subprocess respawn — the #3729 panic-button); on SDK/TUI
+      // it applies in-place. Sourced from the provider capability so the copy
+      // never silently differs from what actually happens.
+      const state = get();
+      const activeSession = activeSessionId
+        ? state.sessions.find((s) => s.sessionId === activeSessionId)
+        : undefined;
+      const activeProvider = activeSession?.provider ?? null;
+      const caps = state.availableProviders.find(
+        (p) => p.name === activeProvider,
+      )?.capabilities;
+      const isStreaming = !!get().getActiveSessionState().streamingMessageId;
       const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
-        ? window.confirm('Switch to Auto mode? Tools will run without asking for permission.')
+        ? window.confirm(
+            buildAutoModeConfirmMessage({
+              interruptsTurn: caps?.interruptsTurnOnAutoSwitch,
+              isStreaming,
+            }),
+          )
         : true;
       if (!ok) return;
     }
