@@ -1503,6 +1503,40 @@ describe('replayHistory — lastSeq delta replay (#5555.3)', () => {
     assert.deepEqual(plan, { fullHistory: false, startOffset: 0 })
   })
 
+  // #5555.3 server-restart trap: `_seq` is server-internal and reassigned 1..N
+  // on state restore, so a client reconnecting after a restart can hold a cursor
+  // NUMERICALLY AHEAD of the freshly-reassigned latest. The trim-gap check
+  // (oldest > cursor+1) does NOT catch this (oldest is 1, not > cursor+1). Without
+  // a cursor>latest guard the client would get an EMPTY delta, keep stale
+  // messages, never rebuild, and its cursor would never recover past latest.
+  it('resolveReplayPlan: cursor AHEAD of latest (server-restart seq reassignment) → full replay', () => {
+    // Restored history reassigned 1..N (oldest=1, latest=300, but only 3 entries
+    // modelled here); client cursor from a prior process is 500.
+    const history = [1, 2, 3].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    // managerWith leaves getLatestHistorySeq deriving from getHistory → latest=3.
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 500)
+    assert.deepEqual(plan, { fullHistory: true, startOffset: 0 },
+      'cursor ahead of latest must force a full rebuild, not an empty delta')
+  })
+
+  it('resolveReplayPlan: cursor exactly one above latest → full replay (boundary)', () => {
+    const history = [1, 2, 3].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 4) // latest=3
+    assert.deepEqual(plan, { fullHistory: true, startOffset: 0 })
+  })
+
+  it('resolveReplayPlan: explicit latestSeq arg drives the cursor-ahead guard', () => {
+    // Caller passes latestSeq directly (the production path in replayHistory).
+    const history = [1, 2, 3].map(s => ({ type: 'm', _seq: s }))
+    const manager = managerWith(history)
+    // latestSeq passed = 3; cursor 4 > 3 → full replay even though the manager
+    // helper would agree. Verifies the arg is honoured (no double-fetch needed).
+    const plan = resolveReplayPlan(manager, history, 'sess-1', 4, 3)
+    assert.deepEqual(plan, { fullHistory: true, startOffset: 0 })
+  })
+
   it('delta replay: start frame carries fullHistory:false + latestSeq, only newer entries sent', async () => {
     const history = [1, 2, 3, 4, 5].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
     const manager = managerWith(history)
@@ -1556,6 +1590,27 @@ describe('replayHistory — lastSeq delta replay (#5555.3)', () => {
     assert.equal(start.truncated, true)
     const replayed = ctx._sends.filter(m => m.type === 'response')
     assert.deepEqual(replayed.map(m => m.historySeq), [10, 11, 12], 'full replay sends every retained entry')
+  })
+
+  it('cursor AHEAD of latest (server restart) → full replay rebuild, every entry sent', async () => {
+    // Reconnect after a server restart: history reassigned 1..3, but the client
+    // still presents its pre-restart cursor (500). A delta would yield nothing;
+    // the client must rebuild from the authoritative set instead.
+    const history = [1, 2, 3].map(s => ({ type: 'response', content: `m${s}`, _seq: s }))
+    const manager = managerWith(history)
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws, { historyCursors: { 'sess-1': 500 } })
+
+    replayHistory(ctx, ws, 'sess-1')
+    await new Promise(r => setImmediate(r))
+
+    const start = ctx._sends.find(m => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, true, 'cursor-ahead must flag a full rebuild')
+    assert.equal(start.latestSeq, 3)
+    const replayed = ctx._sends.filter(m => m.type === 'response')
+    assert.deepEqual(replayed.map(m => m.historySeq), [1, 2, 3],
+      'full replay re-sends every retained entry so the client re-syncs')
   })
 
   it('unknown session cursor (no cursor for THIS session) → full replay', async () => {

@@ -747,12 +747,21 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
  * Fallback to full replay (fullHistory: true, startOffset 0) when:
  *   - no cursor supplied (old client, or first connect),
  *   - cursor <= 0 (client has nothing yet),
+ *   - cursor > latestSeq — the client's cursor is numerically AHEAD of the
+ *     newest retained entry. This is the server-restart reassignment trap:
+ *     `_seq` is server-internal and reassigned 1..N on state restore, so a
+ *     client reconnecting after a restart can hold a cursor (e.g. 500) far
+ *     above the freshly-reassigned latest (e.g. 300). The trim-gap check below
+ *     does NOT catch this (oldest is 1, not `> 501`), and a delta replay would
+ *     hand the client an EMPTY slice while it keeps stale messages and never
+ *     rebuilds — and the cursor (500) would never recover past latest (300).
+ *     Force a full rebuild so the client re-syncs to the authoritative set.
  *   - the oldest RETAINED entry's seq is `> lastSeq + 1` — i.e. the entry the
  *     cursor pointed just-after has been trimmed off the front (or the seqs
  *     reset on a server restart), so a delta replay would leave a gap. The
  *     client can't append across a gap, so it must rebuild.
  *
- * When `lastSeq >= latestSeq` the client is already current: cursor replay with
+ * When `lastSeq === latestSeq` the client is already current: cursor replay with
  * an empty slice (startOffset === history.length). The caller still emits the
  * start/end frames so the client clears its `receivingHistoryReplay` flag and
  * resolves any stale prompts — just with nothing to append.
@@ -761,11 +770,26 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
  * @param {Array} history - the retained ring buffer (already fetched)
  * @param {string} sessionId
  * @param {number|null|undefined} lastSeq - client cursor, if any
+ * @param {number} [latestSeq] - seq of the newest retained entry (0 when empty)
  * @returns {{ fullHistory: boolean, startOffset: number }}
  */
-export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq) {
+export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq) {
   // No cursor / nothing applied yet → full replay (backward compatible).
   if (typeof lastSeq !== 'number' || !Number.isFinite(lastSeq) || lastSeq <= 0) {
+    return { fullHistory: true, startOffset: 0 }
+  }
+  // Cursor ahead of the newest retained entry (server-restart seq reassignment,
+  // or any seq regression): a delta replay would yield an empty slice and leave
+  // the client wedged on stale messages with a cursor that never recovers. Force
+  // a full rebuild. `latestSeq` is sourced by the caller from
+  // getLatestHistorySeq; fall back to a fetch here so a direct caller / test
+  // that omits it still gets the guard.
+  const resolvedLatest = typeof latestSeq === 'number' && Number.isFinite(latestSeq)
+    ? latestSeq
+    : (typeof sessionManager.getLatestHistorySeq === 'function'
+        ? sessionManager.getLatestHistorySeq(sessionId)
+        : 0)
+  if (lastSeq > resolvedLatest) {
     return { fullHistory: true, startOffset: 0 }
   }
   const oldestSeq = typeof sessionManager.getOldestHistorySeq === 'function'
@@ -832,15 +856,17 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // semantics and the atomic swap (#5555.4) hides the rebuild with no flash.
   const client = clients && typeof clients.get === 'function' ? clients.get(ws) : null
   const lastSeq = opts.forceFull ? undefined : client?.historyCursors?.[sessionId]
-  const { fullHistory, startOffset } = resolveReplayPlan(sessionManager, history, sessionId, lastSeq)
 
   // `latestSeq` rides the start frame so the client can advance its cursor even
   // when the slice is empty (already-current reconnect) — there'd be no entry
   // to read a `historySeq` off otherwise. Defensive against legacy ctx fixtures
-  // whose manager predates the seq helper.
+  // whose manager predates the seq helper. Computed BEFORE resolveReplayPlan so
+  // the cursor-ahead-of-latest guard (#5555.3 server-restart trap) can use it.
   const latestSeq = typeof sessionManager.getLatestHistorySeq === 'function'
     ? sessionManager.getLatestHistorySeq(sessionId)
     : 0
+  const { fullHistory, startOffset } = resolveReplayPlan(sessionManager, history, sessionId, lastSeq, latestSeq)
+
   send(ws, { type: 'history_replay_start', sessionId, truncated, fullHistory, latestSeq })
 
   const CHUNK_SIZE = 20
