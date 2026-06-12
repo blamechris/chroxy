@@ -136,6 +136,11 @@ export function verifyExchangeKeySignature(
     const message = new Uint8Array(decodeBase64(exchangePublicKeyBase64))
     const sig = new Uint8Array(decodeBase64(signatureBase64))
     const identityPub = new Uint8Array(decodeBase64(identityPublicKeyBase64))
+    // This function only ever verifies an X25519 EXCHANGE public key, so reject
+    // anything that isn't 32 bytes up front — a wrong-length key is malformed
+    // input, not a genuine signature mismatch. deriveSharedKey enforces the same
+    // length downstream, but checking here keeps the signature API honest.
+    if (message.length !== nacl.box.publicKeyLength) return false
     if (sig.length !== nacl.sign.signatureLength) return false
     if (identityPub.length !== nacl.sign.publicKeyLength) return false
     return nacl.sign.detached.verify(message, sig, identityPub)

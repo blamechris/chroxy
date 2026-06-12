@@ -699,6 +699,16 @@ describe('server identity signing (#5536 — E2E key pinning)', () => {
     expect(verifyExchangeKeySignature(undefined, sig, identity.publicKey)).toBe(false)
   })
 
+  it('returns false for a wrong-length exchange key (not 32 bytes) even with a valid signature over it', () => {
+    // A signature over a non-32-byte "exchange key" is malformed input — this
+    // function only ever verifies X25519 exchange keys, so reject it as false
+    // rather than treating it as a genuine mismatch / passing it downstream.
+    const identity = createSigningKeyPair()
+    const notAnExchangeKey = encodeBase64(nacl.randomBytes(16)) // 16 bytes, wrong
+    const sigOver16 = signExchangeKey(notAnExchangeKey, identity.secretKey)
+    expect(verifyExchangeKeySignature(notAnExchangeKey, sigOver16, identity.publicKey)).toBe(false)
+  })
+
   it('a tampered signature byte fails verification', () => {
     const identity = createSigningKeyPair()
     const exchange = createKeyPair()

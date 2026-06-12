@@ -31,12 +31,13 @@
  * The keychain module is dependency-injected (tests pass a fake) and the file
  * path is overridable so tests never touch the real ~/.chroxy/ tree.
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createSigningKeyPair } from '@chroxy/store-core/crypto'
 import nacl from 'tweetnacl'
 import * as realKeychain from './keychain.js'
+import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('identity')
@@ -124,9 +125,14 @@ export function persistServerIdentity(keyPair, { keychain = realKeychain, filePa
       log.warn(`Keychain write for server identity failed (${err.message}); falling back to 0600 file`)
     }
   }
-  // 0600 file fallback.
+  // 0600 file fallback. Use the repo's atomic, perm-enforcing writer
+  // (temp + chmod 0600 + rename) rather than a bare writeFileSync: this file
+  // holds the daemon's long-lived identity SECRET, so it must not be left
+  // partially written on a crash, and `writeFileSync`'s `mode` is honoured only
+  // on CREATION — a pre-existing file at a looser mode would keep that mode.
+  // writeFileRestricted chmods the final file to 0600 unconditionally.
   mkdirSync(dirname(filePath), { recursive: true })
-  writeFileSync(filePath, JSON.stringify({ v: 1, secretKey: secretB64 }), { mode: 0o600 })
+  writeFileRestricted(filePath, JSON.stringify({ v: 1, secretKey: secretB64 }))
   return 'file'
 }
 
