@@ -50,6 +50,31 @@ function createMockServer(overrides = {}) {
       }
       return true
     },
+    // Primary-class gate (#5533): mirrors the real WsServer helper. A token is
+    // primary iff it validates AND is not a PairingManager-issued session token.
+    // The mock treats the literal 'pairing-bound' (and any token the wired
+    // pairing manager's isSessionTokenValid accepts) as a non-primary token.
+    _isPairingSessionToken(token) {
+      if (token === 'pairing-bound') return true
+      const mgr = this._pairingManager
+      return !!(mgr && typeof mgr.isSessionTokenValid === 'function' && mgr.isSessionTokenValid(token))
+    },
+    _validatePrimaryBearerAuth(req, res) {
+      if (!this.authRequired) return true
+      const authHeader = req.headers['authorization'] || ''
+      const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+      if (!token || (!this._isTokenValid(token) && !this._isPairingSessionToken(token))) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return false
+      }
+      if (this._isPairingSessionToken(token)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'primary_token_required' }))
+        return false
+      }
+      return true
+    },
     ...overrides,
   }
 }
@@ -229,6 +254,85 @@ describe('http-routes', () => {
       })
       assert.equal(res.status, 503)
     })
+
+    // #5533: the linking QR is live pairing material — a pairing-bound token
+    // must not be able to read it (transitive peer minting).
+    it('GET /qr returns 200 SVG for the primary token', async () => {
+      const mock = createMockServer({
+        _pairingManager: {
+          extendCurrentId() {},
+          currentPairingUrl: 'chroxy://example.com?pair=ABCD2345',
+        },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      assert.equal(res.status, 200)
+      assert.equal(res.headers.get('content-type'), 'image/svg+xml')
+      assert.ok((await res.text()).includes('<svg'))
+    })
+
+    it('GET /qr returns 403 for a pairing-bound (non-primary) token (#5533)', async () => {
+      const mock = createMockServer({
+        _pairingManager: {
+          extendCurrentId() {},
+          currentPairingUrl: 'chroxy://example.com?pair=ABCD2345',
+        },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr`, {
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      const body = await res.json()
+      assert.equal(body.error, 'primary_token_required')
+    })
+
+    it('GET /qr returns 403 without auth', async () => {
+      const mock = createMockServer({
+        _pairingManager: { extendCurrentId() {}, currentPairingUrl: 'chroxy://example.com?pair=X' },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr`)
+      assert.equal(res.status, 403)
+    })
+  })
+
+  // #5533 sibling audit: GET /connect returns the raw PRIMARY apiToken (and a
+  // connectionUrl embedding it) when auth is required, so it must be gated on
+  // the primary token class — a pairing-bound token reaching it would escalate
+  // straight to the primary token.
+  describe('connect endpoint primary-class gate (#5533)', () => {
+    it('GET /connect returns 403 for a pairing-bound (non-primary) token', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/connect`, {
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      const body = await res.json()
+      assert.equal(body.error, 'primary_token_required')
+    })
+
+    it('GET /connect returns 403 without auth', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/connect`)
+      assert.equal(res.status, 403)
+    })
+
+    it('GET /connect passes the primary token (404 here since conn info is hidden in this suite)', async () => {
+      const mock = createMockServer()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/connect`, {
+        headers: { 'Authorization': 'Bearer test-token' },
+      })
+      // The suite renames ~/.chroxy/connection.json away, so readConnectionInfo
+      // returns null → 404. The point is the request got PAST the auth gate
+      // (not a 403), proving the primary token is accepted.
+      assert.equal(res.status, 404)
+    })
   })
 
   // #5512: typeable pairing-code endpoint
@@ -273,6 +377,21 @@ describe('http-routes', () => {
       await startWith(mock)
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/pairing-code`)
       assert.equal(res.status, 403)
+    })
+
+    // #5533: a pairing-bound session token must NOT read the live code (it could
+    // transitively onboard further peers). Must not extend the grace period
+    // either — the gate runs before extendCurrentId().
+    it('returns 403 for a pairing-bound (non-primary) token (#5533)', async () => {
+      const mock = makeCodeMock({ code: 'ABCD2345', url: null, expiresAtMs: Date.now() + 45_000, ttlMs: 60_000 })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/pairing-code`, {
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      const body = await res.json()
+      assert.equal(body.error, 'primary_token_required')
+      assert.equal(mock._pairingManager._extendedCount(), 0, 'a rejected request must not extend the grace period')
     })
 
     it('returns 503 when no pairing manager is wired', async () => {
@@ -452,6 +571,20 @@ describe('http-routes', () => {
       await startWith(mock)
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr/session/sess-A`)
       assert.equal(res.status, 403)
+    })
+
+    // #5533: generating a share QR MINTS a fresh bound pairing — a pairing-bound
+    // token must not reach it (transitive peer minting for its own session).
+    it('returns 403 for a pairing-bound (non-primary) token without minting (#5533)', async () => {
+      const mock = makeSharedMock()
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/qr/session/sess-A`, {
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      const body = await res.json()
+      assert.equal(body.error, 'primary_token_required')
+      assert.deepEqual(mock._issuedPairings, [], 'a rejected request must not mint a bound pairing')
     })
 
     it('returns 404 when the session does not exist', async () => {

@@ -433,9 +433,19 @@ export function createHttpHandler(server) {
       return
     }
 
-    // Connection info endpoint
+    // Connection info endpoint.
+    //
+    // Gated on the PRIMARY token class (#5533 sibling audit): when auth is
+    // required (the normal case), the response body carries the raw PRIMARY
+    // apiToken and a connectionUrl that embeds it (see startup-display.js →
+    // writeConnectionInfo). Accepting a pairing-bound session token here would
+    // hand a once-paired, session-scoped device the full primary token — a
+    // strict privilege escalation, worse than the /qr + /pairing-code leak.
+    // The redaction branch below only fires when auth is DISABLED, so it cannot
+    // be relied on as the boundary. The dashboard's ConsolePage / tunnel-ready
+    // probe both fetch /connect with the primary token, so they keep working.
     if (req.method === 'GET' && req.url === '/connect') {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const connInfo = readConnectionInfo()
       if (!connInfo) {
         res.writeHead(404, { 'Content-Type': 'application/json' })
@@ -447,7 +457,10 @@ export function createHttpHandler(server) {
         delete connInfo.connectionUrl
       }
       const connectCors = matchAllowedOrigin(req.headers['origin'])
-      const connectHeaders = { 'Content-Type': 'application/json' }
+      // no-store: the body carries the raw primary apiToken (and a connectionUrl
+      // embedding it) when auth is required, so browsers/proxies must not cache
+      // it — mirrors /pairing-code, which is also live credential material.
+      const connectHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
       if (connectCors) {
         connectHeaders['Access-Control-Allow-Origin'] = connectCors
         connectHeaders['Vary'] = 'Origin'
@@ -459,10 +472,18 @@ export function createHttpHandler(server) {
 
     // Typeable pairing-code endpoint (#5512): GET /pairing-code returns the
     // current linking-mode pairing code as JSON so the dashboard/CLI can DISPLAY
-    // it beside the QR (the QR encodes the same id — one mechanism). Same bearer
-    // auth + grace-extension as /qr; camera-less devices enter this code by hand.
+    // it beside the QR (the QR encodes the same id — one mechanism). Grace-
+    // extension mirrors /qr; camera-less devices enter this code by hand.
+    //
+    // Gated on the PRIMARY token class (#5533): the displayed code is live
+    // pairing material — anyone who can read it can onboard a new peer. A
+    // pairing-bound session token is scoped to one session, NOT host-level, so
+    // letting it read the current code would let a once-paired device
+    // transitively mint further peers. The daemon's own dashboard and
+    // `chroxy pair-code` both present the primary token, so the display path is
+    // unaffected; only the escalation path closes.
     if (req.method === 'GET' && req.url?.split('?')[0] === '/pairing-code') {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const codeCors = matchAllowedOrigin(req.headers['origin'])
       const codeHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
       if (codeCors) {
@@ -550,8 +571,15 @@ export function createHttpHandler(server) {
     // QR whose pairing URL issues a session-bound token. The scanner can chat
     // into that one session but cannot list/switch/destroy others. Must be
     // matched BEFORE the generic /qr handler since both share the prefix.
+    //
+    // Gated on the PRIMARY token class (#5533): generating a share QR MINTS a
+    // fresh bound pairing id (live pairing material). Letting a pairing-bound
+    // token reach this would let a once-paired device transitively mint peers
+    // for its session — the same escalation the linking /qr and /pairing-code
+    // close. The "Share this session" dashboard button runs on the daemon's own
+    // dashboard with the primary token, so the legitimate path is unaffected.
     if (req.method === 'GET' && req.url?.startsWith('/qr/session/')) {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const shareCors = matchAllowedOrigin(req.headers['origin'])
       const sharePathParts = req.url.split('?')[0].split('/').filter(Boolean) // ['qr','session','<id>']
       const writeShareErr = (status, body) => {
@@ -625,9 +653,16 @@ export function createHttpHandler(server) {
       return
     }
 
-    // QR code endpoint — uses live pairing URL (not stale file) when available
+    // QR code endpoint — uses live pairing URL (not stale file) when available.
+    //
+    // Gated on the PRIMARY token class (#5533): the linking QR encodes a live
+    // pairing URL — scanning it onboards a new peer. A pairing-bound session
+    // token is scoped to one session, not host-level, so it must not be able to
+    // read the current QR and transitively mint further peers. The daemon's own
+    // dashboard fetches /qr with the primary token, so the modal keeps working;
+    // only the escalation path closes.
     if (req.method === 'GET' && req.url?.startsWith('/qr')) {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const qrCors = matchAllowedOrigin(req.headers['origin'])
 
       // Prefer live pairing URL from PairingManager (always current).
