@@ -1199,14 +1199,19 @@ export function applyRotatedTunnelUrl(newTunnelUrl: string): boolean {
   if (!newTunnelUrl || !/^wss:\/\//i.test(newTunnelUrl)) return false;
   const prev = useConnectionLifecycleStore.getState().savedConnection;
   if (!prev) return false;
-  const oldTunnelUrl = prev.tunnelUrl ?? null;
+  // A legacy record predating the `tunnelUrl` field carries its tunnel endpoint
+  // only in `url` (a non-LAN `wss://` URL). Treat that as the implicit old
+  // tunnel URL so the gates below still recognise + repoint it.
+  const oldTunnelUrl =
+    prev.tunnelUrl ?? (prev.url && /^wss:\/\//i.test(prev.url) ? prev.url : null);
   // Idempotent: the auth_bootstrap path re-advertises the URL on every connect,
   // so skip when nothing changed.
   if (oldTunnelUrl === newTunnelUrl && prev.url !== oldTunnelUrl) return false;
   const next: SavedConnection = { ...prev, tunnelUrl: newTunnelUrl };
   // Repoint the canonical dial URL only when it WAS the old tunnel endpoint
-  // (a tunnel-only record). Never clobber a verified ws:// LAN `url`.
-  if (prev.url === oldTunnelUrl || prev.url === prev.tunnelUrl) {
+  // (a tunnel-only record, including a legacy `wss://` url). Never clobber a
+  // verified ws:// LAN `url`.
+  if (prev.url === oldTunnelUrl) {
     next.url = newTunnelUrl;
   }
   if (next.url === prev.url && next.tunnelUrl === prev.tunnelUrl) return false;
