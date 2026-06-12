@@ -1015,6 +1015,12 @@ export interface ConnectionState {
 
   // Session actions
   switchSession: (sessionId: string) => void;
+  /**
+   * #5589 / #5281 — request primary (driver) ownership of a shared session.
+   * `force` overrides the current owner (operator-driven take-over). The
+   * resulting `session_role` broadcast is the authoritative role update.
+   */
+  claimPrimary: (sessionId: string, options?: { force?: boolean }) => void;
   createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string; skipPermissions?: boolean }) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;

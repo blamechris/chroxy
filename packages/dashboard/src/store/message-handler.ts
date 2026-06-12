@@ -53,6 +53,7 @@ import {
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
+  handleSessionRole as sharedSessionRole,
   handleClientFocusChanged as sharedClientFocusChanged,
   // conversation_id migrated to the shared dispatch table (#5556)
   handleHistoryReplayStart as sharedHistoryReplayStart,
@@ -3802,6 +3803,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       } else if (!primarySessionId || primarySessionId === 'default') {
         set({ primaryClientId });
+      }
+      break;
+    }
+
+    case 'session_role': {
+      // #5589 / #5281 — explicit primary-ownership. Derive THIS client's role
+      // by comparing the server-named primary to our own id (from auth_ok,
+      // stored flat as `myClientId`). Stored per-session on `sessionRole` to
+      // drive the ViewersIndicator's observer state + claim affordance, and we
+      // mirror `primaryClientId` so presence stays in sync without depending on
+      // a separate legacy `primary_changed`. Kept platform-local (not in the
+      // shared dispatch table) for the same reason `primary_changed` is — the
+      // app's dedicated multi-client store vs the dashboard's flat+per-session
+      // slots diverge (see dispatch-table.ts divergent-cases note).
+      const role = sharedSessionRole(msg, get().myClientId);
+      if (role.sessionId && get().sessionStates[role.sessionId]) {
+        updateSession(role.sessionId, () => ({
+          sessionRole: role.role,
+          primaryClientId: role.primaryClientId,
+        }));
       }
       break;
     }

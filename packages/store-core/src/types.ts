@@ -755,6 +755,12 @@ export interface SessionIntervention {
 }
 
 /**
+ * #5589 / #5281 — THIS client's role for a shared session, derived from the
+ * server's `session_role` broadcast. See `handleSessionRole`.
+ */
+export type SessionRole = 'primary' | 'observer' | 'unclaimed';
+
+/**
  * Base session state shared by both the mobile app and web dashboard.
  *
  * Each consumer extends this with platform-specific fields:
@@ -874,6 +880,17 @@ export interface BaseSessionState {
   isPlanPending: boolean;
   planAllowedPrompts: { tool: string; prompt: string }[];
   primaryClientId: string | null;
+  /**
+   * #5589 / #5281 — THIS client's explicit role for this session, derived from
+   * the server's `session_role` broadcast (`primaryClientId` vs own clientId):
+   *   - `'primary'`   — this client owns the session (drives input)
+   *   - `'observer'`  — another client owns it (input rejected while running)
+   *   - `'unclaimed'` — nobody owns it yet (first input/claim takes over)
+   * `null` until the first `session_role` for this session arrives (treated as
+   * unclaimed by the UI). Distinct from `primaryClientId` (the raw "who owns
+   * it" pointer driven by both `primary_changed` and `session_role`).
+   */
+  sessionRole: SessionRole | null;
   conversationId: string | null;
   sessionContext: SessionContext | null;
   mcpServers: McpServer[];

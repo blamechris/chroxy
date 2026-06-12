@@ -1842,6 +1842,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   // Session actions
 
+  // #5589 / #5281 — explicitly request primary (driver) ownership of a session.
+  // `force: true` is an operator-driven take-over that overrides the current
+  // owner; without it the server rejects a claim another device holds with a
+  // PRIMARY_HELD `session_error` (input_conflict), surfaced as a calm notice.
+  // The authoritative role lands via the resulting `session_role` broadcast.
+  claimPrimary: (sessionId: string, options?: { force?: boolean }) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'claim_primary',
+        sessionId,
+        ...(options?.force ? { force: true } : {}),
+      });
+    }
+  },
+
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => {
     const { socket, activeSessionId, sessionStates } = get();
     const serverNotify = options?.serverNotify ?? true;

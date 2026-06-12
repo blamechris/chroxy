@@ -1140,6 +1140,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       isPlanPending: false,
       planAllowedPrompts: EMPTY_PROMPTS,
       primaryClientId: null,
+      // #5589 / #5281: null until the first session_role for this session
+      // arrives (the UI treats null as unclaimed).
+      sessionRole: null,
       conversationId: null,
       sessionContext: null,
       mcpServers: EMPTY_MCP_SERVERS,
@@ -2686,6 +2689,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   // Session actions
+
+  // #5589 / #5281 — explicitly request primary (driver) ownership of a session.
+  // `force: true` overrides the current owner (operator-driven take-over);
+  // without it a claim another device holds is rejected with a PRIMARY_HELD
+  // `session_error` (input_conflict), surfaced as a calm notice. The resulting
+  // `session_role` broadcast is the authoritative role update.
+  claimPrimary: (sessionId: string, options?: { force?: boolean }) => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, {
+        type: 'claim_primary',
+        sessionId,
+        ...(options?.force ? { force: true } : {}),
+      });
+    }
+  },
 
   switchSession: (sessionId: string) => {
     const { socket, activeSessionId, sessionStates } = get();

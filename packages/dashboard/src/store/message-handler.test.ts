@@ -854,6 +854,100 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #5589 / #5281 — explicit primary-ownership. The server names the primary
+  // (`primaryClientId`); the dashboard derives THIS client's role by comparing
+  // it to its own id (`myClientId`) and stores both per-session.
+  describe('session_role dispatch (#5589 / #5281)', () => {
+    it('derives observer when another device holds primary', () => {
+      store = createMockStore(baseState({
+        myClientId: 'me',
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      }))
+      setStore(store)
+      handleMessage(
+        { type: 'session_role', sessionId: 's1', primaryClientId: 'other' },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.sessionRole).toBe('observer')
+      expect(ss.primaryClientId).toBe('other')
+    })
+
+    it('derives primary when this device holds primary', () => {
+      store = createMockStore(baseState({
+        myClientId: 'me',
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      }))
+      setStore(store)
+      handleMessage(
+        { type: 'session_role', sessionId: 's1', primaryClientId: 'me' },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.sessionRole).toBe('primary')
+      expect(ss.primaryClientId).toBe('me')
+    })
+
+    it('derives unclaimed when the slot is vacated (nobody-until-claim)', () => {
+      store = createMockStore(baseState({
+        myClientId: 'me',
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: { ...createEmptySessionState(), messages: [], sessionRole: 'observer', primaryClientId: 'other' },
+        },
+      }))
+      setStore(store)
+      handleMessage(
+        { type: 'session_role', sessionId: 's1', primaryClientId: null },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.sessionRole).toBe('unclaimed')
+      expect(ss.primaryClientId).toBeNull()
+    })
+
+    it('ignores a session_role for a session not in the local store', () => {
+      store = createMockStore(baseState({ myClientId: 'me', sessionStates: {} }))
+      setStore(store)
+      handleMessage(
+        { type: 'session_role', sessionId: 'ghost', primaryClientId: 'other' },
+        ctx() as any,
+      )
+      expect((store.getState() as any).sessionStates.ghost).toBeUndefined()
+    })
+  })
+
+  // #5589 / #5281 — a `claim_primary` rejection (PRIMARY_HELD) arrives as a
+  // `session_error` of category input_conflict, so it rides the same calm
+  // notice path as a busy-session conflict (no red alert).
+  describe('PRIMARY_HELD claim rejection (#5589)', () => {
+    it('surfaces the rejection as a calm info notice, not a red error', () => {
+      store = createMockStore(baseState({
+        myClientId: 'me',
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      }))
+      setStore(store)
+      const reason = 'Another device is the primary for this session. Request a hand-off or wait for it to release.'
+      handleMessage(
+        {
+          type: 'session_error',
+          category: 'input_conflict',
+          sessionId: 's1',
+          code: 'PRIMARY_HELD',
+          primaryClientId: 'other',
+          message: reason,
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toEqual([])
+      expect(state._infoNotifications).toEqual([reason])
+    })
+  })
+
   // #4878 — user-initiated Stop confirmation. The wire path was wired by
   // PR #4868; this is the dashboard UX follow-up. Renders a quiet info
   // toast (NOT the red `addServerError` reserved for crashes), so the

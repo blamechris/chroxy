@@ -5,7 +5,7 @@
  * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback, useRef, useMemo } from 'react'
-import type { CumulativeUsage, SessionInfo, SessionVisualStatus } from '@chroxy/store-core'
+import type { CumulativeUsage, SessionInfo, SessionVisualStatus, SessionRole } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
@@ -74,6 +74,10 @@ export interface SidebarProps {
   connectedClients: ConnectedClient[]
   /** Active session's primary (last-driver) client id, or null. */
   activePrimaryClientId: string | null
+  /** #5589 / #5281 — this client's explicit role for the active session. */
+  activeSessionRole?: SessionRole | null
+  /** #5589 / #5281 — force-claim primary for the active session (take over). */
+  onTakeOverPrimary?: () => void
   onFilterChange: (value: string) => void
   onSessionClick: (sessionId: string) => void
   onResumeSession: (conversationId: string, cwd?: string) => void
@@ -125,6 +129,8 @@ export function Sidebar({
   tunnelUrl,
   connectedClients,
   activePrimaryClientId,
+  activeSessionRole,
+  onTakeOverPrimary,
   onFilterChange,
   onSessionClick,
   onResumeSession,
@@ -986,6 +992,8 @@ export function Sidebar({
               clients={connectedClients}
               primaryClientId={activePrimaryClientId}
               connected={serverStatus === 'connected'}
+              sessionRole={activeSessionRole ?? null}
+              onTakeOver={onTakeOverPrimary}
             />
           </div>
         </>

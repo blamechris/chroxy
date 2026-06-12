@@ -96,6 +96,9 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     isPlanPending: false,
     planAllowedPrompts: [],
     primaryClientId: null,
+    // #5589 / #5281: null until the first session_role for this session arrives
+    // (the UI treats null as unclaimed).
+    sessionRole: null,
     conversationId: null,
     sessionContext: null,
     mcpServers: [],

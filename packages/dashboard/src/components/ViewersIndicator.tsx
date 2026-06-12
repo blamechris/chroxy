@@ -19,6 +19,7 @@
  * session is genuinely shared (≥2 devices).
  */
 import { useEffect, useId, useRef, useState } from 'react'
+import type { SessionRole } from '@chroxy/store-core'
 import type { ConnectedClient } from '../store/types'
 
 export interface ViewersIndicatorProps {
@@ -31,6 +32,15 @@ export interface ViewersIndicatorProps {
   primaryClientId: string | null
   /** Footer renders nothing useful while disconnected; mirrors the old gate. */
   connected: boolean
+  /**
+   * #5589 / #5281 — THIS client's explicit role for the active session. When
+   * `'observer'`, the trigger gains an "Observing" badge and the popover gains
+   * a "Take over" affordance. Null/undefined or `'primary'`/`'unclaimed'`
+   * render the prior neutral presence UI.
+   */
+  sessionRole?: SessionRole | null
+  /** #5589 / #5281 — force-claim primary (take over) for the active session. */
+  onTakeOver?: () => void
 }
 
 function deviceGlyph(type: ConnectedClient['deviceType']): string {
@@ -71,7 +81,7 @@ export function resolveActivePrimaryClientId(
   return globalPrimaryClientId
 }
 
-export function ViewersIndicator({ clients, primaryClientId, connected }: ViewersIndicatorProps) {
+export function ViewersIndicator({ clients, primaryClientId, connected, sessionRole, onTakeOver }: ViewersIndicatorProps) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -113,6 +123,9 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
   if (total === 0) return null
 
   const countText = `${total} client${total === 1 ? '' : 's'}`
+  // #5589 / #5281 — this client is read-only-while-running because ANOTHER
+  // device holds primary. Surfaced unobtrusively on the trigger + popover.
+  const isObserving = sessionRole === 'observer'
 
   // Solo: keep the plain, non-interactive label the footer always showed.
   if (total === 1) {
@@ -123,8 +136,15 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
     )
   }
 
+  // Resolve the driving device's display name for the observer copy.
+  const driver = primaryClientId ? clients.find(c => c.clientId === primaryClientId) : null
+  const driverLabel = driver ? clientLabel(driver) : 'another device'
+
   return (
-    <div className="viewers-indicator sidebar-client-count" data-testid="viewers-indicator">
+    <div
+      className={`viewers-indicator sidebar-client-count${isObserving ? ' observing' : ''}`}
+      data-testid="viewers-indicator"
+    >
       <button
         ref={triggerRef}
         type="button"
@@ -136,12 +156,22 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
         aria-controls={popoverId}
         // The visible content is a decorative glyph + bare number, which a
         // screen reader would announce as just "2" — give the control an
-        // explicit name describing what it does.
-        aria-label={`${countText} sharing this session — show devices`}
-        title={`${countText} sharing this session`}
+        // explicit name describing what it does. When observing, fold the role
+        // into the name so a screen reader announces it too.
+        aria-label={
+          isObserving
+            ? `Observing — ${driverLabel} is driving. ${countText} sharing this session — show devices`
+            : `${countText} sharing this session — show devices`
+        }
+        title={isObserving ? `Observing — ${driverLabel} is driving` : `${countText} sharing this session`}
       >
         <span className="viewers-trigger-glyph" aria-hidden="true">{'\u{1F465}'}</span>
         <span className="viewers-trigger-count">{total}</span>
+        {isObserving && (
+          <span className="viewers-observing-badge" data-testid="viewers-observing-badge">
+            Observing
+          </span>
+        )}
       </button>
       {open && (
         <div
@@ -187,6 +217,24 @@ export function ViewersIndicator({ clients, primaryClientId, connected }: Viewer
               )
             })}
           </ul>
+          {isObserving && (
+            <div className="viewers-observing-footer" data-testid="viewers-observing-footer">
+              <p className="viewers-observing-note">
+                {driverLabel} is driving. Your input is rejected while the agent is
+                busy — take over to drive.
+              </p>
+              {onTakeOver && (
+                <button
+                  type="button"
+                  className="viewers-takeover-button"
+                  data-testid="viewers-takeover-button"
+                  onClick={() => { onTakeOver(); setOpen(false) }}
+                >
+                  Take over
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -48,6 +48,7 @@ import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { SessionTimeoutBanner } from '../components/SessionTimeoutBanner';
 import { StdinDisabledBanner } from '../components/StdinDisabledBanner';
 import { CostThresholdBanner } from '../components/CostThresholdBanner';
+import { ObserverBanner } from '../components/ObserverBanner';
 import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -314,6 +315,17 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].costThresholdWarning : null;
   });
   const costBudget = useConnectionStore((s) => s.costBudget);
+  // #5589 / #5281 — this device's shared-session role + the current driver, for
+  // the observer banner. Both are per-session.
+  const sessionRole = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].sessionRole : null;
+  });
+  const activePrimaryClientId = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].primaryClientId : null;
+  });
+  const claimPrimary = useConnectionStore((s) => s.claimPrimary);
   // #4764 — chroxy-side intervention ring for the active session. Drives the
   // session-header counter badge and the tap-to-expand recent-interventions
   // sheet (mirrors the dashboard's FooterBar surface from #4758).
@@ -1306,6 +1318,18 @@ export function SessionScreen() {
         visible={!!activeSession?.stdinForwardingDisabled}
         sessionId={activeSessionId}
         onRestart={handleRestartStdinSession}
+      />
+
+      {/* #5589 / #5281: observer role banner. Shows only when ANOTHER device is
+          the primary (driver) for the active session; names it (when the roster
+          resolves the id) and offers an explicit force take-over. */}
+      <ObserverBanner
+        visible={sessionRole === 'observer'}
+        sessionId={activeSessionId}
+        driverName={
+          connectedClients.find((c) => c.clientId === activePrimaryClientId)?.deviceName ?? null
+        }
+        onTakeOver={(sid) => claimPrimary(sid, { force: true })}
       />
 
       {/* #4075: cost-threshold soft warning banner. Server fires once per
