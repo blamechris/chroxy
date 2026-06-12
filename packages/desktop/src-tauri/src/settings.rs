@@ -14,6 +14,12 @@ pub struct DesktopSettings {
     pub node_path: Option<String>,
     #[serde(default = "default_tunnel_mode")]
     pub tunnel_mode: String,
+    /// #5356 — when false (the default), the embedded server binds loopback
+    /// (`127.0.0.1`) so the control socket is reachable only from this machine.
+    /// Set true to bind all interfaces (`0.0.0.0`) for the "scan QR from my
+    /// phone on the same wifi" LAN flow — explicit opt-in, not the default.
+    #[serde(default)]
+    pub expose_on_lan: bool,
     #[serde(default)]
     pub last_window_x: Option<f64>,
     #[serde(default)]
@@ -45,6 +51,7 @@ impl Default for DesktopSettings {
             auto_start_server: true,
             show_notifications: true,
             tunnel_mode: "none".to_string(),
+            expose_on_lan: false,
             node_path: None,
             last_window_x: None,
             last_window_y: None,
@@ -157,6 +164,23 @@ mod tests {
         assert!(settings.auto_start_server);
         assert!(settings.show_notifications);
         assert_eq!(settings.tunnel_mode, "none");
+    }
+
+    #[test]
+    fn expose_on_lan_defaults_to_false() {
+        // #5356 — loopback by default: the embedded server must NOT bind all
+        // interfaces unless the user explicitly opts into LAN exposure.
+        assert!(!DesktopSettings::default().expose_on_lan);
+        assert!(!DesktopSettings::from_json("{}").unwrap().expose_on_lan);
+    }
+
+    #[test]
+    fn expose_on_lan_round_trips() {
+        let mut settings = DesktopSettings::default();
+        settings.expose_on_lan = true;
+        let json = settings.to_json().unwrap();
+        let restored = DesktopSettings::from_json(&json).unwrap();
+        assert!(restored.expose_on_lan);
     }
 
     #[test]

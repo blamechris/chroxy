@@ -327,6 +327,35 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// #5356 — current "expose on LAN" setting. False (loopback-only) is the
+/// default and the safe posture for the control socket.
+#[tauri::command]
+fn get_expose_on_lan(settings_state: tauri::State<'_, Mutex<DesktopSettings>>) -> bool {
+    lock_or_recover(&settings_state).expose_on_lan
+}
+
+/// #5356 — toggle whether the embedded server binds all interfaces (LAN) or
+/// loopback-only. Persisted; applied on the next server start/restart (the bind
+/// address is fixed at spawn, so the dashboard prompts for a restart).
+#[tauri::command]
+fn set_expose_on_lan(app: tauri::AppHandle, expose: bool) -> Result<(), String> {
+    if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
+        let mut settings = lock_or_recover(&settings_state);
+        settings.expose_on_lan = expose;
+        settings
+            .save()
+            .map_err(|e| format!("Failed to save settings: {}", e))?;
+    }
+
+    // Update ServerManager so the next start/restart picks up the new bind host.
+    if let Some(mgr_state) = app.try_state::<Mutex<ServerManager>>() {
+        let mut mgr = lock_or_recover(&mgr_state);
+        mgr.set_expose_on_lan(expose);
+    }
+
+    Ok(())
+}
+
 /// #5294 — read the configured summon hotkey accelerator. Returns `None` when
 /// unset or blank (i.e. disabled), matching `effective_summon_hotkey()`.
 #[tauri::command]
@@ -825,6 +854,8 @@ pub fn run() {
             save_setup_config,
             get_tunnel_mode,
             set_tunnel_mode,
+            get_expose_on_lan,
+            set_expose_on_lan,
             get_summon_hotkey,
             set_summon_hotkey,
             get_allow_auto_permission_mode,
@@ -1683,14 +1714,21 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
 }
 
 fn handle_start(app: &tauri::AppHandle) {
-    // Read settings and apply to server manager
-    let (tunnel_mode, node_path) = app
+    // Read settings and apply to server manager. #5356 — also carry the
+    // expose-on-LAN flag so the embedded server is pinned to loopback unless
+    // the user explicitly opted in; defaults to false (loopback) when settings
+    // state is unavailable.
+    let (tunnel_mode, node_path, expose_on_lan) = app
         .try_state::<Mutex<DesktopSettings>>()
         .map(|s| {
             let settings = lock_or_recover(&s);
-            (settings.tunnel_mode.clone(), settings.node_path.clone())
+            (
+                settings.tunnel_mode.clone(),
+                settings.node_path.clone(),
+                settings.expose_on_lan,
+            )
         })
-        .unwrap_or_else(|| ("quick".to_string(), None));
+        .unwrap_or_else(|| ("quick".to_string(), None, false));
 
     // Validate cloudflared for tunnel modes
     if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
@@ -1713,6 +1751,7 @@ fn handle_start(app: &tauri::AppHandle) {
         };
         mgr.set_tunnel_mode(effective_mode);
         mgr.set_node_path(node_path.as_deref());
+        mgr.set_expose_on_lan(expose_on_lan);
         mgr.start()
     };
 

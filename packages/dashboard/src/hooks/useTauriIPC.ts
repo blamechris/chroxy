@@ -55,6 +55,28 @@ export async function setTunnelMode(mode: string): Promise<void> {
 }
 
 /**
+ * Read whether the embedded server is set to bind all interfaces (LAN) or
+ * loopback-only (#5356). Returns `null` outside Tauri. `false` (loopback) is
+ * the safe default.
+ */
+export async function getExposeOnLan(): Promise<boolean | null> {
+  return tauriInvoke<boolean>('get_expose_on_lan')
+}
+
+/**
+ * Toggle LAN exposure for the embedded server (#5356). Persisted; takes effect
+ * on the next server restart (bind address is fixed at spawn). Throws on error.
+ */
+export async function setExposeOnLan(expose: boolean): Promise<void> {
+  if (!isTauri()) return
+  const invoke = getTauriInvoke()
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
+  await invoke('set_expose_on_lan', { expose })
+}
+
+/**
  * Read the configured global summon hotkey accelerator (#5294).
  *
  * Returns `null` outside Tauri, or when no hotkey is set (the Rust side returns

@@ -32,6 +32,8 @@
     "allow-save-setup-config",
     "allow-get-tunnel-mode",
     "allow-set-tunnel-mode",
+    "allow-get-expose-on-lan",
+    "allow-set-expose-on-lan",
     "allow-get-summon-hotkey",
     "allow-set-summon-hotkey",
     "allow-get-allow-auto-permission-mode",
