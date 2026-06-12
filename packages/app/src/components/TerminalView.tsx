@@ -20,19 +20,28 @@ import { COLORS } from '../constants/colors';
  * Defense-in-depth: server-controlled ANSI (or a future xterm web-links addon /
  * regression) must never be able to trigger a navigation away from that
  * document. So we allow ONLY the inline document load (and its reload) and block
- * everything else — http/https, link taps, data: URLs, deep links, etc.
+ * everything else — http/https, link taps, data: URLs, deep links, `about:`
+ * pseudo-pages like `about:srcdoc`/`about:version`, etc.
  *
- * `originWhitelist` is narrowed to `['about:*']` (the inline document's origin)
- * from the previous `['*']`. The two are complementary: `originWhitelist` is a
- * coarse origin filter applied before the callback; `onShouldStartLoadWithRequest`
- * is the precise per-request gate.
+ * `originWhitelist` is the coarse origin pre-filter; `onShouldStartLoadWithRequest`
+ * (this guard) is the precise per-request gate and the *real* containment control —
+ * it is consulted for every real navigation. We deliberately keep `originWhitelist`
+ * at the permissive `['*']`: RN WebView's own `compileWhitelist`/`passesWhitelist`
+ * (WebViewShared.tsx) compute `extractOrigin('') === ''`, and ONLY the compiled
+ * `'*'` -> `^.*` regex matches that empty origin. A narrower value such as
+ * `['about:*']` rejects Android's empty (`''`) inline-load origin, which would
+ * blank the terminal with no recovery the moment any Android navigation is routed
+ * through the whitelist. The narrowing lives in this guard instead, where it can't
+ * break the legitimate inline load on either platform. (Empirically verified
+ * against the real RN filter — see TerminalView.test.tsx "RN whitelist wrapper".)
  */
 function isInlineDocumentRequest(request: ShouldStartLoadRequest): boolean {
-  // An inline `source={{ html }}` with no baseUrl resolves to `about:blank`.
-  // Some RN WebView lifecycle/platform combinations report it as an empty
-  // string; treat both as the legitimate initial/reload document load.
+  // The inline `source={{ html }}` with no baseUrl resolves to exactly
+  // `about:blank` on iOS (loadHTMLString:baseURL:about:blank) and to the empty
+  // string `''` on Android (loadDataWithBaseURL("", ...)). Allow ONLY those two
+  // exact URLs — nothing else, including other `about:` pseudo-pages.
   const url = request.url ?? '';
-  return url === '' || url === 'about:blank' || url.startsWith('about:');
+  return url === '' || url === 'about:blank';
 }
 
 export function shouldAllowTerminalNavigation(request: ShouldStartLoadRequest): boolean {
@@ -151,8 +160,12 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         source={{ html }}
         style={styles.container}
         // Containment (#5645): only the inline xterm document may load; block
-        // any server-/ANSI-triggered navigation. See shouldAllowTerminalNavigation.
-        originWhitelist={['about:*']}
+        // any server-/ANSI-triggered navigation. The real gate is
+        // onShouldStartLoadWithRequest below (consulted for every navigation).
+        // originWhitelist stays `['*']` because RN's whitelist rejects Android's
+        // empty (`''`) inline-load origin for any narrower glob — narrowing it
+        // would blank the terminal. See shouldAllowTerminalNavigation.
+        originWhitelist={['*']}
         onShouldStartLoadWithRequest={shouldAllowTerminalNavigation}
         onMessage={handleMessage}
         onContentProcessDidTerminate={handleWebViewCrash}
