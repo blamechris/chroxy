@@ -416,6 +416,12 @@ export interface CreateSessionOptions {
  */
 export interface MultiClientSessionActions {
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
+  /**
+   * #5589 / #5281 — request primary (driver) ownership of a shared session.
+   * `force` overrides the current owner (operator-driven take-over). The
+   * resulting `session_role` broadcast is the authoritative role update.
+   */
+  claimPrimary: (sessionId: string, options?: { force?: boolean }) => void;
   createSession: (opts: CreateSessionOptions) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;

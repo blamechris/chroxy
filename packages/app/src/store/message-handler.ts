@@ -62,6 +62,7 @@ import {
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
+  handleSessionRole as sharedSessionRole,
   handleClientFocusChanged as sharedClientFocusChanged,
   // conversation_id migrated to the shared dispatch table (#5556)
   handleConversationsList as sharedConversationsList,
@@ -1904,6 +1905,42 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(crashedId, () => ({ health: 'crashed' as const }));
           pushSessionNotification(crashedId, 'error', 'Session crashed');
         }
+      } else if (parsed.category === 'input_conflict') {
+        // #5281 ①.3 / #5589 — an expected "can't send / can't claim right now"
+        // event, NOT a failure: either another device's request is mid-flight,
+        // this session is still evaluating a previous draft, or a `claim_primary`
+        // was rejected because another device holds it (code PRIMARY_HELD). The
+        // generic Alert below would be the wrong register (loud modal). Instead:
+        // drop the stranded optimistic user message (its send was rejected) +
+        // its thinking spinner, and append a calm inline system notice.
+        const conflictSessionId =
+          typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
+        const rejectedId =
+          typeof msg.clientMessageId === 'string' && msg.clientMessageId.length > 0
+            ? msg.clientMessageId
+            : null;
+        const noticeText =
+          parsed.message ||
+          'Your message wasn’t sent — the session is busy. Wait for it to finish, or interrupt the current run.';
+        const noticeMsg: ChatMessage = {
+          id: nextMessageId('input-conflict'),
+          type: 'system',
+          content: noticeText,
+          timestamp: Date.now(),
+        };
+        const dropGhost = (messages: ChatMessage[]) =>
+          filterThinking(messages).filter(
+            (m) => !(rejectedId && m.id === rejectedId && m.type === 'user_input'),
+          );
+        if (conflictSessionId && get().sessionStates[conflictSessionId]) {
+          updateSession(conflictSessionId, (ss) => ({
+            messages: [...dropGhost(ss.messages), noticeMsg],
+            streamingMessageId:
+              ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
+          }));
+        } else {
+          get().addMessage(noticeMsg);
+        }
       } else if (parsed.category !== 'crash') {
         if (parsed.code === 'SESSION_TOKEN_MISMATCH' && parsed.boundSessionName) {
           showBoundSessionMismatchAlert(
@@ -2815,6 +2852,25 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       } else if (!primarySessionId || primarySessionId === 'default') {
         set({ primaryClientId });
+      }
+      break;
+    }
+
+    case 'session_role': {
+      // #5589 / #5281 — explicit primary-ownership. The server names the
+      // primary; we derive THIS client's role by comparing it to our own id
+      // (learned from auth_ok, canonical source: useMultiClientStore.myClientId).
+      // Stored per-session on `sessionRole` so the SessionScreen can surface an
+      // observer banner / claim affordance. We also mirror `primaryClientId`
+      // (the raw pointer) so the existing presence UI stays in sync without
+      // depending on a separate legacy `primary_changed` arriving.
+      const myClientId = useMultiClientStore.getState().myClientId;
+      const role = sharedSessionRole(msg, myClientId);
+      if (role.sessionId && get().sessionStates[role.sessionId]) {
+        updateSession(role.sessionId, () => ({
+          sessionRole: role.role,
+          primaryClientId: role.primaryClientId,
+        }));
       }
       break;
     }

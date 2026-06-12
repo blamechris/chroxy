@@ -46,6 +46,8 @@ export {
 } from './replay-reconcile'
 
 export type {
+  // #5589 / #5281 — this client's derived role for a shared session
+  SessionRole,
   MessageAttachment,
   ToolResultImage,
   ChatMessage,
@@ -369,6 +371,7 @@ export type {
   ClientJoinedResult,
   ClientLeftResult,
   PrimaryChanged,
+  SessionRoleInfo,
   ClientFocusChanged,
   ConversationIdPayload,
   HistoryReplayStartPayload,
@@ -458,6 +461,7 @@ export {
   handleClientJoined,
   handleClientLeft,
   handlePrimaryChanged,
+  handleSessionRole,
   handleClientFocusChanged,
   handleConversationId,
   handleConversationsList,

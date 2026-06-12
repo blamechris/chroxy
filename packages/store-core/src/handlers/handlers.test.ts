@@ -38,6 +38,7 @@ import {
   handleClientJoined,
   handleClientLeft,
   handlePrimaryChanged,
+  handleSessionRole,
   handleClientFocusChanged,
   handleConversationId,
   handleConversationsList,
@@ -2074,6 +2075,66 @@ describe('handlePrimaryChanged', () => {
     expect(
       handlePrimaryChanged({ sessionId: 'default', clientId: 'c' }),
     ).toEqual({ sessionId: 'default', primaryClientId: 'c' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionRole (#5589 / #5281)
+// ---------------------------------------------------------------------------
+describe('handleSessionRole', () => {
+  it('derives primary when the primary is THIS client', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 'me' }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: 'me', role: 'primary' })
+  })
+
+  it('derives observer when another client is primary', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 'other' }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: 'other', role: 'observer' })
+  })
+
+  it('derives unclaimed when primaryClientId is null (nobody-until-claim)', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: null }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: null, role: 'unclaimed' })
+  })
+
+  it('derives unclaimed when primaryClientId is missing', () => {
+    expect(handleSessionRole({ sessionId: 's1' }, 'me')).toEqual({
+      sessionId: 's1',
+      primaryClientId: null,
+      role: 'unclaimed',
+    })
+  })
+
+  it('treats a known primary as observer when own id is unknown (pre-auth race)', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 'other' }, null),
+    ).toEqual({ sessionId: 's1', primaryClientId: 'other', role: 'observer' })
+  })
+
+  it('stays unclaimed when own id is unknown and the slot is empty', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: null }, null),
+    ).toEqual({ sessionId: 's1', primaryClientId: null, role: 'unclaimed' })
+  })
+
+  it('returns null sessionId when missing or non-string', () => {
+    expect(handleSessionRole({ primaryClientId: 'me' }, 'me')).toEqual({
+      sessionId: null,
+      primaryClientId: 'me',
+      role: 'primary',
+    })
+    expect(
+      handleSessionRole({ sessionId: 42, primaryClientId: 'me' }, 'me'),
+    ).toEqual({ sessionId: null, primaryClientId: 'me', role: 'primary' })
+  })
+
+  it('returns null primaryClientId when non-string', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 42 }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: null, role: 'unclaimed' })
   })
 })
 

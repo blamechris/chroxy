@@ -39,6 +39,7 @@ describe('createEmptyBaseSessionState', () => {
       isPlanPending: false,
       planAllowedPrompts: [],
       primaryClientId: null,
+      sessionRole: null,
       conversationId: null,
       sessionContext: null,
       mcpServers: [],

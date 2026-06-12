@@ -164,6 +164,152 @@ describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
   });
 });
 
+// #5589 / #5281 — explicit primary-ownership. The server names the primary
+// (`primaryClientId`); the app derives THIS device's role (vs the canonical
+// myClientId in useMultiClientStore) and stores it per-session on sessionRole.
+describe('session_role handler (#5589 / #5281)', () => {
+  beforeEach(() => {
+    useMultiClientStore.getState().reset();
+  });
+
+  it('derives observer when another device holds primary', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: 'other' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.sessionRole).toBe('observer');
+    expect(ss.primaryClientId).toBe('other');
+  });
+
+  it('derives primary when THIS device holds primary', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: 'me' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.sessionRole).toBe('primary');
+    expect(ss.primaryClientId).toBe('me');
+  });
+
+  it('derives unclaimed when the slot is vacated (nobody-until-claim)', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), sessionRole: 'observer', primaryClientId: 'other' } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: null });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.sessionRole).toBe('unclaimed');
+    expect(ss.primaryClientId).toBeNull();
+  });
+
+  it('ignores a session_role for a session not in the local store', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({ activeSessionId: null, sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 'ghost', primaryClientId: 'other' });
+
+    expect(store.getState().sessionStates.ghost).toBeUndefined();
+  });
+});
+
+// #5589 / #5281 — input_conflict (incl. a PRIMARY_HELD claim rejection) is an
+// expected shared-session event, NOT a failure: it must surface a calm inline
+// system notice rather than the loud generic Alert, and drop the stranded
+// optimistic send.
+describe('session_error input_conflict handler (#5589 / #5281)', () => {
+  it('appends a calm system notice and drops the rejected optimistic send (no Alert)', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [
+            { id: 'older', type: 'user_input', content: 'earlier', timestamp: 0 } as any,
+            { id: 'user-123', type: 'user_input', content: 'hi', timestamp: 1 } as any,
+            { id: 'thinking', type: 'thinking', content: '', timestamp: 2 } as any,
+          ],
+          streamingMessageId: 'pending',
+        },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const reason = 'Session is already processing input from another device. Wait for it to finish or interrupt first.';
+    _testMessageHandler.handle({
+      type: 'session_error',
+      category: 'input_conflict',
+      sessionId: 's1',
+      clientMessageId: 'user-123',
+      message: reason,
+    });
+
+    // No loud modal — the calm path was taken.
+    expect(alertSpy).not.toHaveBeenCalled();
+    const ss = store.getState().sessionStates.s1;
+    // Stranded optimistic send + spinner gone; prior real message untouched.
+    expect(ss.messages.find((m: any) => m.id === 'user-123')).toBeUndefined();
+    expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined();
+    expect(ss.messages.find((m: any) => m.id === 'older')).toBeDefined();
+    expect(ss.streamingMessageId).toBeNull();
+    // A calm system notice carrying the server's reason was appended.
+    const notice = ss.messages.find((m: any) => m.type === 'system' && m.content === reason);
+    expect(notice).toBeDefined();
+  });
+
+  it('surfaces a PRIMARY_HELD claim rejection as the same calm notice', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const reason = 'Another device is the primary for this session. Request a hand-off or wait for it to release.';
+    _testMessageHandler.handle({
+      type: 'session_error',
+      category: 'input_conflict',
+      sessionId: 's1',
+      code: 'PRIMARY_HELD',
+      primaryClientId: 'other',
+      message: reason,
+    });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.messages.find((m: any) => m.type === 'system' && m.content === reason)).toBeDefined();
+  });
+});
+
 // #4879: quiet "user-initiated Stop" confirmation. The wire path (CliSession
 // → SessionManager → ws-forwarding → ServerSessionStoppedSchema) was wired
 // in #4868; this branch surfaces it to the mobile UX as a subtle status

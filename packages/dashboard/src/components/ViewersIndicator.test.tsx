@@ -1,7 +1,7 @@
 /**
  * ViewersIndicator (#5281 ①.3) — shared-session presence surface tests.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ViewersIndicator, resolveActivePrimaryClientId } from './ViewersIndicator'
 import type { ConnectedClient } from '../store/types'
@@ -183,6 +183,70 @@ describe('ViewersIndicator', () => {
       'title',
       '2 clients sharing this session',
     )
+  })
+
+  // #5589 / #5281 — observer-role surfacing.
+  describe('observer role (#5589)', () => {
+    it('shows an "Observing" badge on the trigger when this client is an observer', () => {
+      render(
+        <ViewersIndicator
+          connected
+          clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1', deviceName: 'iPhone' })]}
+          primaryClientId="c1"
+          sessionRole="observer"
+        />,
+      )
+      expect(screen.getByTestId('viewers-observing-badge')).toHaveTextContent('Observing')
+      // The trigger names the driver in its accessible name + title.
+      expect(screen.getByTestId('viewers-indicator-trigger')).toHaveAttribute(
+        'title',
+        'Observing — iPhone is driving',
+      )
+    })
+
+    it('does NOT show the observing badge when this client is primary', () => {
+      render(
+        <ViewersIndicator
+          connected
+          clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1' })]}
+          primaryClientId="c0"
+          sessionRole="primary"
+        />,
+      )
+      expect(screen.queryByTestId('viewers-observing-badge')).not.toBeInTheDocument()
+    })
+
+    it('renders a Take over button in the popover and fires onTakeOver', () => {
+      const onTakeOver = vi.fn()
+      render(
+        <ViewersIndicator
+          connected
+          clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1', deviceName: 'iPhone' })]}
+          primaryClientId="c1"
+          sessionRole="observer"
+          onTakeOver={onTakeOver}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('viewers-indicator-trigger'))
+      const btn = screen.getByTestId('viewers-takeover-button')
+      expect(screen.getByTestId('viewers-observing-footer')).toHaveTextContent('iPhone is driving')
+      fireEvent.click(btn)
+      expect(onTakeOver).toHaveBeenCalledTimes(1)
+    })
+
+    it('shows no Take over affordance for a primary/unclaimed session', () => {
+      render(
+        <ViewersIndicator
+          connected
+          clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1' })]}
+          primaryClientId={null}
+          sessionRole="unclaimed"
+        />,
+      )
+      fireEvent.click(screen.getByTestId('viewers-indicator-trigger'))
+      expect(screen.queryByTestId('viewers-takeover-button')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('viewers-observing-footer')).not.toBeInTheDocument()
+    })
   })
 
   it('swaps the solo label for the interactive chip when a second device joins', () => {

@@ -2139,3 +2139,41 @@ describe('sendUserQuestionResponse Other / freeform shape (#4755)', () => {
     expect(payload).not.toHaveProperty('toolUseId');
   });
 });
+
+// #5589 / #5281 — explicit primary (driver) ownership claim. The action sends
+// a `claim_primary` wire message; `force` overrides the current owner.
+describe('claimPrimary wire payload (#5589 / #5281)', () => {
+  function makeMockSocket(): { socket: WebSocket; sent: string[] } {
+    const sent: string[] = [];
+    const socket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(data); },
+    } as unknown as WebSocket;
+    return { socket, sent };
+  }
+
+  it('emits a plain claim (no force) by default', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().claimPrimary('s1');
+    expect(sent).toHaveLength(1);
+    const payload = JSON.parse(sent[0]);
+    expect(payload).toEqual({ type: 'claim_primary', sessionId: 's1' });
+    expect(payload).not.toHaveProperty('force');
+  });
+
+  it('emits force:true for an explicit take-over', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().claimPrimary('s1', { force: true });
+    expect(JSON.parse(sent[0])).toEqual({ type: 'claim_primary', sessionId: 's1', force: true });
+  });
+
+  it('no-ops when the socket is not open', () => {
+    const sent: string[] = [];
+    const socket = { readyState: 0, send: (d: string) => { sent.push(d); } } as unknown as WebSocket;
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().claimPrimary('s1');
+    expect(sent).toHaveLength(0);
+  });
+});

@@ -182,6 +182,14 @@ export function App() {
   // #5281 ①.3 — global primary (last-driver) fallback for the pre-session /
   // 'default' case; per-session primary is read from sessionStates below.
   const globalPrimaryClientId = useConnectionStore(s => s.primaryClientId)
+  // #5589 / #5281 — this client's explicit role for the active session, derived
+  // from the server's `session_role` broadcast. Drives the ViewersIndicator's
+  // observer state + take-over affordance.
+  const activeSessionRole = useConnectionStore(s => {
+    const id = s.activeSessionId
+    return id && s.sessionStates[id] ? s.sessionStates[id].sessionRole : null
+  })
+  const claimPrimary = useConnectionStore(s => s.claimPrimary)
   const pairingRefreshedCount = useConnectionStore(s => s.pairingRefreshedCount)
   // #4497: server-advertised stream-stall window — threaded into the
   // StreamStallChip render path so the headline humanises to e.g.
@@ -1674,6 +1682,8 @@ export function App() {
           tunnelUrl={null}
           connectedClients={connectedClients}
           activePrimaryClientId={resolveActivePrimaryClientId(activeSessionId, sessionStates, globalPrimaryClientId)}
+          activeSessionRole={activeSessionRole}
+          onTakeOverPrimary={() => { if (activeSessionId) claimPrimary(activeSessionId, { force: true }) }}
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}

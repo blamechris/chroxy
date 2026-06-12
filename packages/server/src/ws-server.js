@@ -369,6 +369,7 @@ function _isSecureRequest(req) {
  *   { type: 'checkpoint_list', sessionId, checkpoints }   — list of checkpoints
  *   { type: 'checkpoint_restored', checkpointId, newSessionId, name } — checkpoint restored (new session created)
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
+ *   { type: 'session_role', sessionId, primaryClientId } — #5589/#5281: explicit primary-ownership; client derives its role (primary iff primaryClientId === own clientId, observer if another holds it, null = unclaimed)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
  *   { type: 'token_rotated', expiresAt }                — API token was rotated, client must re-authenticate

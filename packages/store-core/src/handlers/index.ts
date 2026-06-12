@@ -31,6 +31,7 @@ import type {
   ServerError,
   SessionInfo,
   SessionIntervention,
+  SessionRole,
   ToolResultImage,
   WebTask,
 } from '../types'
@@ -1501,6 +1502,64 @@ export function handlePrimaryChanged(msg: Record<string, unknown>): PrimaryChang
     sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : null,
     primaryClientId: typeof msg.clientId === 'string' ? msg.clientId : null,
   }
+}
+
+// ---------------------------------------------------------------------------
+// session_role (#5589 / #5281)
+// ---------------------------------------------------------------------------
+
+export interface SessionRoleInfo {
+  /**
+   * Target session id. Unlike `primary_changed`, the server always sends
+   * `session_role` with an explicit `sessionId` (it is broadcast per-session
+   * via `_broadcastToSession`); null only on a malformed payload.
+   */
+  sessionId: string | null
+  /**
+   * The session's primary client id, or null when the session is unclaimed
+   * (nobody-until-claim — e.g. after the previous primary disconnected).
+   */
+  primaryClientId: string | null
+  /**
+   * THIS client's role, derived from `primaryClientId` vs the client's own id:
+   *   - `'primary'`   — this client owns the session (drives input)
+   *   - `'observer'`  — another client owns it (read-only while running; can
+   *                     still adopt an idle session per #5589)
+   *   - `'unclaimed'` — nobody owns it yet
+   */
+  role: SessionRole
+}
+
+/**
+ * Extract THIS client's role from a `session_role` message (#5589).
+ *
+ * Pure derivation: the server names the primary (`primaryClientId`, null when
+ * unclaimed); the client computes its own role by comparing that to its own
+ * id (`myClientId`, learned from `auth_ok`). Identical across both clients —
+ * the storage of the result diverges (the app's dedicated `useMultiClientStore`
+ * vs the dashboard's flat + per-session slots), so only this parse is shared,
+ * mirroring `handlePrimaryChanged`.
+ *
+ * When `myClientId` is unknown (null — e.g. a pre-auth race) the role is
+ * `'unclaimed'` if the slot is empty, else `'observer'` (we cannot be the
+ * primary if we don't yet know our own id).
+ */
+export function handleSessionRole(
+  msg: Record<string, unknown>,
+  myClientId: string | null,
+): SessionRoleInfo {
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const primaryClientId =
+    typeof msg.primaryClientId === 'string' ? msg.primaryClientId : null
+  let role: SessionRole
+  if (!primaryClientId) {
+    role = 'unclaimed'
+  } else if (myClientId && primaryClientId === myClientId) {
+    role = 'primary'
+  } else {
+    role = 'observer'
+  }
+  return { sessionId, primaryClientId, role }
 }
 
 // ---------------------------------------------------------------------------

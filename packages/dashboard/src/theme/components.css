@@ -1553,6 +1553,48 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent, var(--text-primary));
 }
 
+/* #5589 / #5281 — observer-role surface on the shared-session presence chip. */
+.viewers-observing-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--accent-muted, var(--border-primary));
+  color: var(--accent, var(--text-primary));
+}
+
+.viewers-observing-footer {
+  border-top: 1px solid var(--border-primary);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.viewers-observing-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.viewers-takeover-button {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px solid var(--accent, var(--border-primary));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent, var(--text-primary));
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.viewers-takeover-button:hover {
+  background: var(--accent-muted, var(--border-primary));
+}
+
 /* ---- Session Bar ---- */
 .session-bar {
   display: flex;
