@@ -196,6 +196,11 @@ export function setStore(store: StoreApi): void {
   _store = store;
 }
 
+/** @internal Exposed for testing only — resets the store reference to null. */
+export function _testResetStore(): void {
+  _store = null;
+}
+
 function getStore(): StoreApi {
   if (!_store) throw new Error('Store not initialized — call setStore() first');
   return _store;
@@ -390,6 +395,33 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
   } else {
     socket.send(JSON.stringify(payload));
   }
+}
+
+/**
+ * Canonical "send a WS frame iff the socket is open" helper.
+ *
+ * Collapses the `const { socket } = get(); if (socket && socket.readyState ===
+ * WebSocket.OPEN) { wsSend(socket, payload) }` boilerplate repeated across the
+ * connection store and file-operations store into one place (#5652). Reads the
+ * live socket from the connection store (set via setStore), so callers never
+ * have to thread it through.
+ *
+ * Returns `true` when the frame was sent (socket open), `false` when it was a
+ * no-op (no socket / not OPEN). Most callers ignore the result (a silent no-op
+ * on a closed socket is the existing behavior); the few that surface an error or
+ * return a status on the closed path read the boolean.
+ */
+export function sendIfOpen(payload: Record<string, unknown>): boolean {
+  // Treat an uninitialized store the same as "socket not open": the store
+  // hasn't been wired yet (file-operations.ts imports this directly, so it
+  // can be called before setStore() runs).  Return false — no send, no throw.
+  if (!_store) return false;
+  const socket = getStore().getState().socket;
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    wsSend(socket, payload);
+    return true;
+  }
+  return false;
 }
 
 // #3672: treat iOS `inactive` as visible. `inactive` is a transient state for

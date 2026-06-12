@@ -8,6 +8,8 @@ import { Alert } from 'react-native';
 import {
   _testMessageHandler,
   setStore,
+  sendIfOpen,
+  _testResetStore,
   CLIENT_PROTOCOL_VERSION,
   SUBSCRIBE_SESSIONS_CHUNK_SIZE,
   clearPermissionSplits,
@@ -5315,5 +5317,45 @@ describe('tunnel_url_changed (#5555 sub-item 7)', () => {
     expect(useConnectionLifecycleStore.getState().savedConnection?.tunnelUrl).toBe(
       'wss://old.trycloudflare.com',
     );
+  });
+});
+
+// #5657: sendIfOpen must not throw when the store hasn't been wired yet.
+// file-operations.ts imports sendIfOpen directly, so it can be called before
+// setStore() runs (e.g. during module initialisation or early mount).
+describe('sendIfOpen — uninitialized store guard (#5657)', () => {
+  afterEach(() => {
+    // Restore module-level _store reference so later tests aren't affected.
+    _testResetStore();
+  });
+
+  it('returns false and does NOT throw before setStore() is called', () => {
+    _testResetStore(); // ensure clean slate
+    let result: boolean | undefined;
+    expect(() => {
+      result = sendIfOpen({ type: 'ping' });
+    }).not.toThrow();
+    expect(result).toBe(false);
+  });
+
+  it('returns false when store is set but socket is null', () => {
+    const store = createMockStore({ socket: null });
+    setStore(store as any);
+    expect(sendIfOpen({ type: 'ping' })).toBe(false);
+  });
+
+  it('returns false when store is set but socket is not OPEN (CONNECTING)', () => {
+    const store = createMockStore({ socket: { readyState: WebSocket.CONNECTING, send: jest.fn() } as any });
+    setStore(store as any);
+    expect(sendIfOpen({ type: 'ping' })).toBe(false);
+  });
+
+  it('returns true and calls wsSend when store is set and socket is OPEN', () => {
+    const sendMock = jest.fn();
+    const store = createMockStore({ socket: { readyState: WebSocket.OPEN, send: sendMock } as any });
+    setStore(store as any);
+    const result = sendIfOpen({ type: 'ping' });
+    expect(result).toBe(true);
+    expect(sendMock).toHaveBeenCalledTimes(1);
   });
 });
