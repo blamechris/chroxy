@@ -28,9 +28,14 @@ function makeWsServer() {
     broadcasts: [],
     statuses: [],
     errors: [],
+    // #5555 (sub-item 7): capture tunnel-url state + the rotation push.
+    tunnelUrl: null,
+    urlChangedPushes: [],
     broadcastMinProtocolVersion(v, payload) { this.broadcasts.push({ v, payload }) },
     broadcastStatus(s) { this.statuses.push(s) },
     broadcastError(...a) { this.errors.push(a) },
+    setTunnelUrl(url) { this.tunnelUrl = url },
+    broadcastTunnelUrlChanged(url, previousUrl) { this.urlChangedPushes.push({ url, previousUrl }) },
   }
 }
 
@@ -115,6 +120,10 @@ describe('TunnelLifecycleHandler — success path', () => {
     assert.equal(pairingManager.extended, 1, 'extendCurrentId called (#2599)')
     const kinds = wsServer.broadcasts.map((b) => b.payload.kind)
     assert.ok(kinds.includes('warming') && kinds.includes('ready'), 'warming + ready status broadcast')
+    // #5555 (sub-item 7): the WsServer is seeded with the initial tunnel URL so
+    // the auth_bootstrap burst can advertise it; no rotation push on first start.
+    assert.equal(wsServer.tunnelUrl, 'wss://t.example', 'initial tunnel URL seeded on the WsServer')
+    assert.equal(wsServer.urlChangedPushes.length, 0, 'no url-changed push on first start')
   })
 })
 
@@ -132,6 +141,19 @@ describe('TunnelLifecycleHandler — tunnel_recovered', () => {
     assert.equal(pairingManager.refreshed, 1, 'pairing refreshed on a new url')
   })
 
+  it('#5555: pushes tunnel_url_changed with old+new URLs when the URL rotates', async () => {
+    const { handler, tunnel, wsServer } = build()
+    await handler.createAndStart()
+    assert.equal(wsServer.urlChangedPushes.length, 0)
+
+    tunnel.emit('tunnel_recovered', { httpUrl: 'https://new.example', wsUrl: 'wss://new.example', attempt: 2 })
+    await new Promise((r) => setImmediate(r))
+
+    assert.deepEqual(wsServer.urlChangedPushes, [
+      { url: 'wss://new.example', previousUrl: 'wss://t.example' },
+    ], 'rotation push carries the new + previous wss URLs')
+  })
+
   it('does NOT re-render when the URL is unchanged (status broadcast only)', async () => {
     const { handler, tunnel, wsServer, startupDisplay } = build()
     await handler.createAndStart()
@@ -143,6 +165,8 @@ describe('TunnelLifecycleHandler — tunnel_recovered', () => {
 
     assert.equal(startupDisplay.calls.length, 0, 'no QR re-render for an unchanged url')
     assert.ok(wsServer.statuses.some((s) => s.includes('recovered')), 'recovery status broadcast')
+    // #5555 (sub-item 7): no rotation push when the URL did not actually change.
+    assert.equal(wsServer.urlChangedPushes.length, 0, 'no url-changed push for an unchanged url')
   })
 
   it('a recovery DURING the initial waitForTunnel re-renders (modeLabel available — #5402 TDZ fix)', async () => {

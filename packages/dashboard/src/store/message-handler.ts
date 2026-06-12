@@ -92,6 +92,7 @@ import {
   handleAgentList as sharedAgentList,
   handleProviderList as sharedProviderList,
   handleAuthBootstrap as sharedAuthBootstrap,
+  handleTunnelUrlChanged as sharedTunnelUrlChanged,
   handleFileList as sharedFileList,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
@@ -964,6 +965,48 @@ function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: Ms
     } catch { /* non-critical */ }
   } else {
     console.log('[ws] Server token rotated — re-authentication required');
+  }
+}
+
+/**
+ * #5555 (sub-item 7) — repoint the active server-registry entry's `wsUrl` to a
+ * rotated tunnel URL so the dashboard's reconnect path dials the new endpoint
+ * instead of the dead one. localStorage-backed, so the fix survives a tab
+ * refresh / process restart.
+ *
+ * Only mutates a NON-localhost registry entry (`activeServerId !== null`): the
+ * same-origin "this machine" connection (`activeServerId === null`) dials
+ * `window.location` and never the tunnel URL, so a rotation does not affect it.
+ * The entry is updated only when its current `wsUrl` is a `wss://` URL — i.e. it
+ * really is a tunnel endpoint, not a `ws://` LAN entry. When the server told us
+ * the `previousUrl`, we additionally require the stored URL to match it, so we
+ * never clobber an entry the operator pointed at a different host.
+ *
+ * @returns true when an entry was updated, false on a no-op.
+ */
+function applyRotatedTunnelUrlDashboard(
+  get: MsgGet,
+  newUrl: string,
+  previousUrl: string | null,
+): boolean {
+  if (!newUrl || !/^wss:\/\//i.test(newUrl)) return false;
+  const state = get();
+  const activeServerId = state.activeServerId;
+  if (!activeServerId) return false;
+  const entry = state.serverRegistry.find((s) => s.id === activeServerId);
+  if (!entry) return false;
+  // Only repoint a tunnel (wss://) entry; never a ws:// LAN entry.
+  if (!/^wss:\/\//i.test(entry.wsUrl)) return false;
+  if (entry.wsUrl === newUrl) return false;
+  // When the server told us the prior URL, require the stored URL to match it
+  // so we don't repoint an entry the operator aimed at a different host.
+  if (previousUrl && entry.wsUrl !== previousUrl) return false;
+  try {
+    state.updateServer(activeServerId, { wsUrl: newUrl });
+    return true;
+  } catch {
+    // validateWsUrl rejected the new URL — leave the stored entry untouched.
+    return false;
   }
 }
 
@@ -3770,6 +3813,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // 3-request connect-time round trip. Apply each list through the SAME
       // store mutations the discrete responses use.
       const boot = sharedAuthBootstrap(msg);
+      // #5555 (sub-item 7): re-learn the live tunnel URL on every connect. If a
+      // quick-tunnel rotation happened while this dashboard was disconnected
+      // (so it missed the live `tunnel_url_changed` push), repoint the stored
+      // server entry to the working endpoint. No-op for the same-origin
+      // connection and for LAN entries.
+      if (boot.tunnelUrl) applyRotatedTunnelUrlDashboard(get, boot.tunnelUrl, null);
       set({ availableProviders: boot.providers as ProviderInfo[] });
       // Slash commands + agents are scoped to the connect-time active session.
       // Guard against a stale burst: if a session switch already moved the
@@ -3780,6 +3829,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (boot.sessionId && activeId && boot.sessionId !== activeId) break;
       set({ slashCommands: boot.slashCommands as SlashCommand[] });
       set({ customAgents: boot.agents as CustomAgent[] });
+      break;
+    }
+
+    case 'tunnel_url_changed': {
+      // #5555 (sub-item 7): a quick-tunnel recovery rotated the public URL.
+      // Repoint the active server-registry entry so the next reconnect dials
+      // the working URL (and survives a tab refresh — localStorage-backed).
+      //
+      // A localhost dashboard (served by the local daemon, activeServerId ===
+      // null) keeps its socket across the rotation and so RELIABLY receives
+      // this push — but it dials window.location, not the tunnel, so the
+      // helper is a no-op for it. A remote/LAN dashboard reaches the server
+      // THROUGH the tunnel, so it usually will NOT receive this frame (the old
+      // tunnel just died); its durable recovery is the `tunnelUrl` in the
+      // auth_bootstrap burst on the next reconnect (handled above).
+      const rotated = sharedTunnelUrlChanged(msg);
+      if (rotated) applyRotatedTunnelUrlDashboard(get, rotated.url, rotated.previousUrl);
       break;
     }
 

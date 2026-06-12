@@ -2611,12 +2611,59 @@ export function handleProviderList(
  */
 export function handleAuthBootstrap(
   msg: Record<string, unknown>,
-): { providers: unknown[]; slashCommands: unknown[]; agents: unknown[]; sessionId: string | null } {
+): {
+  providers: unknown[]
+  slashCommands: unknown[]
+  agents: unknown[]
+  sessionId: string | null
+  tunnelUrl: string | null
+} {
   const providers: unknown[] = Array.isArray(msg.providers) ? (msg.providers as unknown[]) : []
   const slashCommands: unknown[] = Array.isArray(msg.slashCommands) ? (msg.slashCommands as unknown[]) : []
   const agents: unknown[] = Array.isArray(msg.agents) ? (msg.agents as unknown[]) : []
   const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null
-  return { providers, slashCommands, agents, sessionId }
+  // #5555 (sub-item 7): the server's live public tunnel URL, when a tunnel is
+  // up. Lets a reconnecting client re-learn a URL that rotated while it was
+  // offline. Absent in LAN / no-tunnel deployments. Validated as `wss://` here
+  // (not just non-empty) so the parser matches its documented contract and a
+  // bogus scheme is dropped before either client's apply step.
+  const tunnelUrl = asWssUrl(msg.tunnelUrl)
+  return { providers, slashCommands, agents, sessionId, tunnelUrl }
+}
+
+/**
+ * #5555 (sub-item 7) — coerce a wire value to a `wss://` URL string, or null.
+ * The tunnel URL is always a secure WebSocket endpoint; rejecting any other
+ * scheme (or non-string) here keeps the shared tunnel-URL parsers honest so the
+ * platform apply steps never have to re-defend against `ws://`/garbage.
+ */
+function asWssUrl(value: unknown): string | null {
+  return typeof value === 'string' && /^wss:\/\//i.test(value) ? value : null
+}
+
+/**
+ * #5555 (sub-item 7) — parse a `tunnel_url_changed` push (quick-tunnel URL
+ * rotation). Returns the new `wss://` URL and the previous URL (when the server
+ * knew it), or null when the payload is malformed so the caller skips it.
+ *
+ * The tunnel URL is connection metadata, not a secret (the QR code shares it),
+ * so this is delivered to every authenticated client. Both clients apply it the
+ * same way conceptually — repoint the stored endpoint their reconnect path
+ * dials — but the STORAGE differs per platform (mobile: SecureStore-backed
+ * SavedConnection.tunnelUrl; dashboard: the server-registry entry's wsUrl in
+ * localStorage), so the apply step stays platform-local rather than living in
+ * the shared dispatch table.
+ */
+export function handleTunnelUrlChanged(
+  msg: Record<string, unknown>,
+): { url: string; previousUrl: string | null } | null {
+  // Validate as `wss://` (the parser's documented contract) rather than just
+  // non-empty, so a malformed scheme is dropped here instead of relying on each
+  // client's apply step to re-check it.
+  const url = asWssUrl(msg.url)
+  if (!url) return null
+  const previousUrl = asWssUrl(msg.previousUrl)
+  return { url, previousUrl }
 }
 
 /**

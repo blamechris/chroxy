@@ -108,6 +108,9 @@ export class TunnelLifecycleHandler {
       return { ok: false, tunnel }
     }
     startupDisplay.currentWsUrl = wsUrl
+    // #5555 (sub-item 7): seed the WsServer's current public URL so the
+    // auth_bootstrap burst can carry it to (re)connecting clients.
+    wsServer.setTunnelUrl(wsUrl)
 
     // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
     this._wireTunnelEvents(tunnel, wsServer)
@@ -128,10 +131,18 @@ export class TunnelLifecycleHandler {
 
         // Only display new QR code if URL actually changed
         if (newWsUrl !== startupDisplay.currentWsUrl) {
+          const previousWsUrl = startupDisplay.currentWsUrl
           startupDisplay.currentWsUrl = newWsUrl
           if (pairingManager) pairingManager.refresh()
           await startupDisplay.displayQr(newWsUrl, newHttpUrl, modeLabel)
           wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
+          // #5555 (sub-item 7): push the rotated URL to every connected client
+          // so their reconnect path dials the new endpoint instead of the dead
+          // one. Best-effort for tunnel-connected clients (their socket rode
+          // the now-dead old tunnel); LAN clients keep their socket and get it
+          // immediately. Also records the URL on the WsServer so reconnecting
+          // clients re-learn it via auth_bootstrap.
+          wsServer.broadcastTunnelUrlChanged(newWsUrl, previousWsUrl)
         } else {
           log.info(`Tunnel URL unchanged: ${newWsUrl}`)
           wsServer.broadcastStatus('Tunnel connection recovered')

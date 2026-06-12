@@ -5102,4 +5102,72 @@ describe('auth_bootstrap (#5555)', () => {
     expect(store.getState().slashCommands).toEqual([{ name: 'clear', source: 'builtin' }]);
     expect(store.getState().customAgents).toEqual([{ name: 'reviewer', source: 'project' }]);
   });
+
+  it('#5555 (sub-item 7): an auth_bootstrap burst with tunnelUrl re-learns the rotated URL', () => {
+    const store = createMockStore({ sessionStates: {}, activeSessionId: null });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    useConnectionLifecycleStore.getState().setSavedConnection({
+      url: 'wss://old.trycloudflare.com',
+      token: 'tok',
+      tunnelUrl: 'wss://old.trycloudflare.com',
+    });
+
+    _testMessageHandler.handle({
+      type: 'auth_bootstrap',
+      providers: [],
+      slashCommands: [],
+      agents: [],
+      tunnelUrl: 'wss://new.trycloudflare.com',
+    });
+
+    expect(useConnectionLifecycleStore.getState().savedConnection?.tunnelUrl).toBe(
+      'wss://new.trycloudflare.com',
+    );
+  });
+});
+
+// #5555 (sub-item 7) — live tunnel-url rotation push.
+describe('tunnel_url_changed (#5555 sub-item 7)', () => {
+  afterEach(() => {
+    useConnectionLifecycleStore.getState().reset();
+    useConnectionLifecycleStore.getState().setSavedConnection(null);
+  });
+
+  it('repoints the persisted tunnelUrl when the push arrives', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    useConnectionLifecycleStore.getState().setSavedConnection({
+      url: 'wss://old.trycloudflare.com',
+      token: 'tok',
+      tunnelUrl: 'wss://old.trycloudflare.com',
+    });
+
+    _testMessageHandler.handle({
+      type: 'tunnel_url_changed',
+      url: 'wss://new.trycloudflare.com',
+      previousUrl: 'wss://old.trycloudflare.com',
+    });
+
+    expect(useConnectionLifecycleStore.getState().savedConnection?.tunnelUrl).toBe(
+      'wss://new.trycloudflare.com',
+    );
+  });
+
+  it('ignores a malformed push (no url) without throwing', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    useConnectionLifecycleStore.getState().setSavedConnection({
+      url: 'wss://old.trycloudflare.com',
+      token: 'tok',
+      tunnelUrl: 'wss://old.trycloudflare.com',
+    });
+
+    expect(() => _testMessageHandler.handle({ type: 'tunnel_url_changed' })).not.toThrow();
+    expect(useConnectionLifecycleStore.getState().savedConnection?.tunnelUrl).toBe(
+      'wss://old.trycloudflare.com',
+    );
+  });
 });

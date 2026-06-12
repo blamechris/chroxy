@@ -104,6 +104,7 @@ import {
   handleAgentList as sharedAgentList,
   handleProviderList as sharedProviderList,
   handleAuthBootstrap as sharedAuthBootstrap,
+  handleTunnelUrlChanged as sharedTunnelUrlChanged,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
   handleGitBranchesResult as sharedGitBranchesResult,
@@ -1156,6 +1157,57 @@ export function persistVerifiedConnection(connectedUrl: string, token: string): 
     tunnelUrl: next.tunnelUrl,
   });
   useConnectionLifecycleStore.getState().setSavedConnection(next);
+}
+
+/**
+ * #5555 (sub-item 7) — apply a rotated tunnel URL to the persisted connection.
+ *
+ * A quick-tunnel recovery rotated the public URL; the server pushed it (live,
+ * via `tunnel_url_changed`) or re-advertised it (on reconnect, via the
+ * `auth_bootstrap` burst's `tunnelUrl`). We repoint the saved record's
+ * `tunnelUrl` to the new endpoint so the next reconnect dials it instead of the
+ * dead URL — and because the record is SecureStore-backed, the fix survives an
+ * app restart.
+ *
+ * `url` (the canonical "what to dial" field) is also repointed when it was the
+ * old tunnel URL, so a tunnel-only record (no separate LAN endpoint) keeps
+ * working. A `ws://` LAN `url` is left untouched — the rotation only concerns
+ * the `wss://` tunnel endpoint.
+ *
+ * No-op when there is no saved connection, when the new URL equals the stored
+ * one (idempotent re-advertisement on every reconnect), or when the new URL is
+ * not a `wss://` URL (defensive — the server only rotates the tunnel endpoint).
+ *
+ * @param newTunnelUrl the rotated `wss://` endpoint
+ * @returns true when the persisted record changed, false on a no-op
+ */
+export function applyRotatedTunnelUrl(newTunnelUrl: string): boolean {
+  if (!newTunnelUrl || !/^wss:\/\//i.test(newTunnelUrl)) return false;
+  const prev = useConnectionLifecycleStore.getState().savedConnection;
+  if (!prev) return false;
+  // A legacy record predating the `tunnelUrl` field carries its tunnel endpoint
+  // only in `url` (a non-LAN `wss://` URL). Treat that as the implicit old
+  // tunnel URL so the gates below still recognise + repoint it.
+  const oldTunnelUrl =
+    prev.tunnelUrl ?? (prev.url && /^wss:\/\//i.test(prev.url) ? prev.url : null);
+  // Idempotent: the auth_bootstrap path re-advertises the URL on every connect,
+  // so skip when nothing changed.
+  if (oldTunnelUrl === newTunnelUrl && prev.url !== oldTunnelUrl) return false;
+  const next: SavedConnection = { ...prev, tunnelUrl: newTunnelUrl };
+  // Repoint the canonical dial URL only when it WAS the old tunnel endpoint
+  // (a tunnel-only record, including a legacy `wss://` url). Never clobber a
+  // verified ws:// LAN `url`.
+  if (prev.url === oldTunnelUrl) {
+    next.url = newTunnelUrl;
+  }
+  if (next.url === prev.url && next.tunnelUrl === prev.tunnelUrl) return false;
+  void saveConnection(next.url, next.token, {
+    lanUrl: next.lanUrl,
+    lanVerified: next.lanVerified,
+    tunnelUrl: next.tunnelUrl,
+  });
+  useConnectionLifecycleStore.getState().setSavedConnection(next);
+  return true;
 }
 
 /**
@@ -2772,6 +2824,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // store mutations + element validation the discrete responses use, so the
       // bootstrap and refresh paths are behaviourally identical.
       const boot = sharedAuthBootstrap(msg);
+      // #5555 (sub-item 7): re-learn the live tunnel URL on every connect. If a
+      // quick-tunnel rotation happened while the app was offline (so it missed
+      // the live `tunnel_url_changed` push), this repoints the persisted record
+      // to the working endpoint. Applied before the session-scope guard below
+      // so a stale-session burst still refreshes the URL.
+      if (boot.tunnelUrl) applyRotatedTunnelUrl(boot.tunnelUrl);
       // Providers (server-wide, no session guard).
       set({ availableProviders: mapProviderList(boot.providers) });
       // Slash commands + agents are scoped to the connect-time active session.
@@ -2787,6 +2845,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const customAgents = boot.agents as CustomAgent[];
       set({ customAgents });
       useConversationStore.getState().setCustomAgents(customAgents);
+      break;
+    }
+
+    case 'tunnel_url_changed': {
+      // #5555 (sub-item 7): a quick-tunnel recovery rotated the public URL.
+      // Repoint the persisted tunnel endpoint so the next reconnect dials the
+      // working URL instead of hammering the dead one (and survives an app
+      // restart — the record is SecureStore-backed).
+      //
+      // BEST-EFFORT for us: this client is connected THROUGH the tunnel, so the
+      // socket carrying this frame rode the now-dead old tunnel — we often will
+      // NOT receive it. The durable recovery is the `tunnelUrl` re-advertised in
+      // the `auth_bootstrap` burst on the next reconnect (handled above).
+      const rotated = sharedTunnelUrlChanged(msg);
+      if (rotated) applyRotatedTunnelUrl(rotated.url);
       break;
     }
 

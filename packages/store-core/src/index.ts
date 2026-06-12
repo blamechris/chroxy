@@ -473,6 +473,8 @@ export {
   handleProviderList,
   // #5555 — connect-time bootstrap burst (providers + slash commands + agents)
   handleAuthBootstrap,
+  // #5555 (sub-item 7) — quick-tunnel URL rotation push
+  handleTunnelUrlChanged,
   handleFileList,
   handleDiffResult,
   handleGitStatusResult,
