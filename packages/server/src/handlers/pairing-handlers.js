@@ -30,19 +30,22 @@ import { sendError } from '../handler-utils.js'
 const log = createLogger('ws')
 
 /** Reject a bound (non-host) client. Mirrors the host_status_request gate. */
-function rejectIfBound(ws, client, msg) {
+function rejectIfBound(ws, client, msg, ctx) {
   if (!client?.boundSessionId) return false
+  // #5632: route through ctx.transport so the error is encrypted for a
+  // post-handshake host; the bound client invoking pair_approve may already
+  // have E2E encryption established.
   sendError(ws, msg?.requestId ?? null, 'FORBIDDEN',
-    'pair approval requires host-level authority (a session-bound token cannot approve new devices)')
+    'pair approval requires host-level authority (a session-bound token cannot approve new devices)', undefined, ctx)
   return true
 }
 
 async function handlePairApprove(ws, client, msg, ctx) {
-  if (rejectIfBound(ws, client, msg)) return
+  if (rejectIfBound(ws, client, msg, ctx)) return
   const pairingManager = ctx?.services?.pairingManager
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
   if (!pairingManager || !requestId) {
-    sendError(ws, requestId, 'PAIR_APPROVE_FAILED', 'pairing is not enabled or requestId is missing')
+    sendError(ws, requestId, 'PAIR_APPROVE_FAILED', 'pairing is not enabled or requestId is missing', undefined, ctx)
     return
   }
 
@@ -50,7 +53,7 @@ async function handlePairApprove(ws, client, msg, ctx) {
   if (!result.ok) {
     // not_found / expired / already_resolved — surface to the approver so the
     // dashboard can drop its banner. Never logs a token.
-    sendError(ws, requestId, 'PAIR_APPROVE_FAILED', `cannot approve request: ${result.reason}`, { reason: result.reason })
+    sendError(ws, requestId, 'PAIR_APPROVE_FAILED', `cannot approve request: ${result.reason}`, { reason: result.reason }, ctx)
     // Retract the banner on every host surface for a stale request.
     if (result.reason !== 'not_found') ctx.services.broadcastPairResolved(requestId, result.reason)
     return
@@ -68,11 +71,11 @@ async function handlePairApprove(ws, client, msg, ctx) {
 }
 
 async function handlePairDeny(ws, client, msg, ctx) {
-  if (rejectIfBound(ws, client, msg)) return
+  if (rejectIfBound(ws, client, msg, ctx)) return
   const pairingManager = ctx?.services?.pairingManager
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
   if (!pairingManager || !requestId) {
-    sendError(ws, requestId, 'PAIR_DENY_FAILED', 'pairing is not enabled or requestId is missing')
+    sendError(ws, requestId, 'PAIR_DENY_FAILED', 'pairing is not enabled or requestId is missing', undefined, ctx)
     return
   }
 

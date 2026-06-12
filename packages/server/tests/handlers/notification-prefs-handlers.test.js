@@ -23,7 +23,15 @@ function makeCtx(pushManager) {
   const broadcast = []
   return nsCtx({
     pushManager,
-    send: createSpy((_ws, msg) => { sent.push(msg) }),
+    // #5632: sendError now routes through ctx.transport.send. Mirror the real
+    // WsServer._send → ws.send step so the existing `ws._messages` assertions
+    // still observe error frames.
+    send: createSpy((_ws, msg) => {
+      sent.push(msg)
+      if (_ws && typeof _ws.send === 'function' && _ws.readyState === 1) {
+        _ws.send(JSON.stringify(msg))
+      }
+    }),
     broadcast: createSpy((msg) => { broadcast.push(msg) }),
     _sent: sent,
     _broadcast: broadcast,
@@ -80,7 +88,8 @@ describe('notification prefs handlers (#4541)', () => {
       ctx.transport.send = createSpy((_ws, msg) => { ctx._sent.push(msg) })
       const ws = makeWs()
       inputHandlers.notification_prefs_get(ws, { id: 'c1' }, { requestId: 'r1' }, ctx)
-      const err = ws._messages.find((m) => m.type === 'error')
+      // #5632: sendError routes through ctx.transport.send (here capturing to _sent).
+      const err = ctx._sent.find((m) => m.type === 'error')
       assert.ok(err, 'expected an error reply')
       assert.equal(err.code, 'NOT_AVAILABLE')
     })
@@ -174,7 +183,8 @@ describe('notification prefs handlers (#4541)', () => {
         { requestId: 'r1', prefs: { categories: { result: false } } },
         ctx,
       )
-      const err = ws._messages.find((m) => m.type === 'error')
+      // #5632: sendError routes through ctx.transport.send (here capturing to _sent).
+      const err = ctx._sent.find((m) => m.type === 'error')
       assert.ok(err)
       assert.equal(err.code, 'NOT_AVAILABLE')
     })

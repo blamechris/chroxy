@@ -12,8 +12,19 @@ function makeCtx(sessions = new Map(), overrides = {}) {
   const broadcasts = []
   const sessionBroadcasts = []
 
+  // #5632: sendError now routes through ctx.transport.send (the encryption-aware
+  // path) instead of a raw ws.send. To keep the existing `ws._messages` wire-shape
+  // assertions valid, the mock transport mirrors the real WsServer._send → ws.send
+  // step: it records the frame on `ctx._sent` AND delivers it to the target ws so
+  // `ws._messages` still observes error frames. (Production encrypts first; the
+  // wire-shape assertions here only care about the decrypted payload.)
   return nsCtx({
-    send: createSpy((_ws, msg) => { sent.push(msg) }),
+    send: createSpy((_ws, msg) => {
+      sent.push(msg)
+      if (_ws && typeof _ws.send === 'function' && _ws.readyState === 1) {
+        _ws.send(JSON.stringify(msg))
+      }
+    }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastToSession: createSpy((sessionId, msg) => { sessionBroadcasts.push({ sessionId, msg }) }),
     sessionManager: {
@@ -84,10 +95,15 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
 
-      settingsHandlers.set_model(makeWs(), client, { model: 'gpt-4' }, ctx)
+      const ws = makeWs()
+      settingsHandlers.set_model(ws, client, { model: 'gpt-4', requestId: 'r-gpt4' }, ctx)
 
       assert.equal(session.setModel.callCount, 0)
-      assert.equal(ctx.transport.send.callCount, 0)
+      // #5632: the INVALID_MODEL rejection now routes through the encryption-aware
+      // transport (ctx.transport.send → ws), not a raw ws.send.
+      assert.equal(ws._messages.length, 1)
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'INVALID_MODEL')
     })
 
     // #2946 — set_model must consult the session's provider, not a global

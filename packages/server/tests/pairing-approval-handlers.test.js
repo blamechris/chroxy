@@ -117,6 +117,10 @@ describe('pair_approve / pair_deny (#5510 host-level)', () => {
     const broadcasts = []
     const ctx = nsCtx({
       pairingManager: pm,
+      // #5632: pair_approve / pair_deny errors now route through
+      // ctx.transport.send. Mirror the real WsServer._send → ws.send step so the
+      // existing `ws.sent()` assertions still observe the error envelopes.
+      send: (socket, msg) => { if (socket && typeof socket.send === 'function') socket.send(JSON.stringify(msg)) },
       resolvePairRequester: (requestId, result) => resolved.push({ requestId, result }),
       broadcastPairResolved: (requestId, reason) => broadcasts.push({ requestId, reason }),
     })

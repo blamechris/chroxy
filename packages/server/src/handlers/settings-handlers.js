@@ -112,7 +112,7 @@ function getProviderAllowedModels(providerName) {
 function handleSetModel(ws, client, msg, ctx) {
   if (typeof msg.model !== 'string') {
     log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
-    sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+    sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`, undefined, ctx)
     return
   }
 
@@ -136,7 +136,7 @@ function handleSetModel(ws, client, msg, ctx) {
       const model = msg.model.trim()
       if (model.length === 0) {
         log.warn(`Rejected empty model id on ${entry.provider} session ${modelSessionId} from ${client.id}`)
-        sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+        sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`, undefined, ctx)
         return
       }
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${model}`)
@@ -157,6 +157,8 @@ function handleSetModel(ws, client, msg, ctx) {
           msg?.requestId,
           'MODEL_NOT_SUPPORTED_BY_PROVIDER',
           `Model '${msg.model}' is not supported by the active provider '${entry.provider}'. Supported models: ${providerAllowed.join(', ')}`,
+          undefined,
+          ctx,
         )
         return
       }
@@ -185,7 +187,7 @@ function handleSetModel(ws, client, msg, ctx) {
   }
 
   log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
-  sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+  sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`, undefined, ctx)
 }
 
 function handleSetPermissionMode(ws, client, msg, ctx) {
@@ -215,6 +217,8 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
             msg?.requestId,
             'CAPABILITY_NOT_SUPPORTED',
             `The active provider '${entry.provider}' does not support permission mode switching.`,
+            undefined,
+            ctx,
           )
           return
         }
@@ -256,14 +260,16 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
           // session the rejection belongs to.
           loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_FORBIDDEN_BOUND_CLIENT',
-            'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.')
+            'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.',
+            undefined, ctx)
           return
         }
         if (ctx.services.config?.allowAutoPermissionMode !== true) {
           // #4828: session-scoped (single-session fallback).
           ;sessionLogger(permModeSessionId).warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_DISABLED_BY_CONFIG',
-            'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.')
+            'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.',
+            undefined, ctx)
           return
         }
       }
@@ -313,7 +319,8 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
           // #4828: session-scoped (single-session fallback).
           ;sessionLogger(permModeSessionId).warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
           sendError(ws, msg?.requestId, 'PERMISSION_MODE_NOT_APPLIED',
-            `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`)
+            `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`,
+            undefined, ctx)
           return
         }
         if (ctx.permissions.permissionAudit) {
@@ -329,7 +336,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
     }
   } else {
     log.warn(`Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
-    sendError(ws, msg?.requestId, 'INVALID_PERMISSION_MODE', `Invalid permission mode: ${msg.mode}`)
+    sendError(ws, msg?.requestId, 'INVALID_PERMISSION_MODE', `Invalid permission mode: ${msg.mode}`, undefined, ctx)
   }
 }
 
@@ -483,11 +490,13 @@ function handleListProviders(ws, client, msg, ctx) {
  * @param {object} msg
  * @returns {boolean} true if the write was rejected.
  */
-function rejectCredentialWriteIfBound(ws, client, msg) {
+function rejectCredentialWriteIfBound(ws, client, msg, ctx) {
   if (!client?.boundSessionId) return false
   loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to modify provider credentials — rejected`)
+  // #5632: route through ctx.transport so the error is encrypted for a
+  // post-handshake host.
   sendError(ws, msg?.requestId, 'CREDENTIAL_WRITE_FORBIDDEN_BOUND_CLIENT',
-    'Pairing-issued session tokens cannot modify provider credentials. Use the primary API token from a device with physical access to this machine.')
+    'Pairing-issued session tokens cannot modify provider credentials. Use the primary API token from a device with physical access to this machine.', undefined, ctx)
   return true
 }
 
@@ -510,13 +519,13 @@ function handleByokGetCredentialsStatus(ws, client, msg, ctx) {
 }
 
 function handleByokSetCredentials(ws, client, msg, ctx) {
-  if (rejectCredentialWriteIfBound(ws, client, msg)) return
+  if (rejectCredentialWriteIfBound(ws, client, msg, ctx)) return
   // Trim leading/trailing whitespace — pastes often carry surrounding
   // spaces/newlines that would otherwise be persisted into the credentials
   // file and silently fail when the SDK tries to use the key.
   const key = typeof msg?.anthropicApiKey === 'string' ? msg.anthropicApiKey.trim() : msg?.anthropicApiKey
   if (typeof key !== 'string' || key.length === 0) {
-    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'anthropicApiKey is required')
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'anthropicApiKey is required', undefined, ctx)
     return
   }
   // Reject anything that doesn't even look like a key. The Anthropic key
@@ -524,14 +533,14 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
   // evolve — but the prefix check catches obvious pastes-of-the-wrong-
   // thing (e.g. OpenAI keys, OAuth tokens) before we persist them.
   if (!key.startsWith('sk-ant-')) {
-    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'API key must start with sk-ant-')
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'API key must start with sk-ant-', undefined, ctx)
     return
   }
   try {
     writeAnthropicApiKey(key)
   } catch (err) {
     log.warn(`byok_set_credentials write failed: ${err?.message}`)
-    sendError(ws, msg?.requestId, 'CREDENTIALS_WRITE_FAILED', err?.message || 'write failed')
+    sendError(ws, msg?.requestId, 'CREDENTIALS_WRITE_FAILED', err?.message || 'write failed', undefined, ctx)
     return
   }
   const status = getAnthropicApiKeyStatus()
@@ -546,11 +555,11 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
 }
 
 function handleByokClearCredentials(ws, client, msg, ctx) {
-  if (rejectCredentialWriteIfBound(ws, client, msg)) return
+  if (rejectCredentialWriteIfBound(ws, client, msg, ctx)) return
   try {
     clearAnthropicApiKey()
   } catch (err) {
-    sendError(ws, msg?.requestId, 'CREDENTIALS_CLEAR_FAILED', err?.message || 'clear failed')
+    sendError(ws, msg?.requestId, 'CREDENTIALS_CLEAR_FAILED', err?.message || 'clear failed', undefined, ctx)
     return
   }
   const status = getAnthropicApiKeyStatus()
@@ -600,14 +609,14 @@ function handleGetCredentialsStatus(ws, client, msg, ctx) {
 }
 
 function handleSetCredential(ws, client, msg, ctx) {
-  if (rejectCredentialWriteIfBound(ws, client, msg)) return
+  if (rejectCredentialWriteIfBound(ws, client, msg, ctx)) return
   const key = typeof msg?.key === 'string' ? msg.key : ''
   if (!isKnownCredentialKey(key)) {
-    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`, undefined, ctx)
     return
   }
   if (typeof msg?.value !== 'string' || msg.value.trim().length === 0) {
-    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'value is required')
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'value is required', undefined, ctx)
     return
   }
   try {
@@ -617,23 +626,23 @@ function handleSetCredential(ws, client, msg, ctx) {
   } catch (err) {
     // err.message is validation text or a file-mode reason — never the value.
     log.warn(`set_credential failed for ${key}: ${err?.message}`)
-    sendError(ws, msg?.requestId, 'CREDENTIAL_WRITE_FAILED', err?.message || 'write failed')
+    sendError(ws, msg?.requestId, 'CREDENTIAL_WRITE_FAILED', err?.message || 'write failed', undefined, ctx)
     return
   }
   _sendCredentialsStatus(ctx, ws, msg?.requestId)
 }
 
 function handleDeleteCredential(ws, client, msg, ctx) {
-  if (rejectCredentialWriteIfBound(ws, client, msg)) return
+  if (rejectCredentialWriteIfBound(ws, client, msg, ctx)) return
   const key = typeof msg?.key === 'string' ? msg.key : ''
   if (!isKnownCredentialKey(key)) {
-    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`, undefined, ctx)
     return
   }
   try {
     deleteStoredCredential(key)
   } catch (err) {
-    sendError(ws, msg?.requestId, 'CREDENTIAL_CLEAR_FAILED', err?.message || 'clear failed')
+    sendError(ws, msg?.requestId, 'CREDENTIAL_CLEAR_FAILED', err?.message || 'clear failed', undefined, ctx)
     return
   }
   _sendCredentialsStatus(ctx, ws, msg?.requestId)
@@ -642,7 +651,7 @@ function handleDeleteCredential(ws, client, msg, ctx) {
 async function handleTestCredential(ws, client, msg, ctx) {
   const key = typeof msg?.key === 'string' ? msg.key : ''
   if (!isKnownCredentialKey(key)) {
-    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`)
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', `Unknown credential key: ${key}`, undefined, ctx)
     return
   }
   let result
@@ -837,6 +846,8 @@ function handleSkillActivate(ws, client, msg, ctx) {
       msg?.requestId,
       'SKILL_TOGGLE_UNSUPPORTED',
       `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session with the skill in 'activeManualSkills' instead.`,
+      undefined,
+      ctx,
     )
     return
   }
@@ -875,6 +886,8 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
       msg?.requestId,
       'SKILL_TOGGLE_UNSUPPORTED',
       `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session without the skill in 'activeManualSkills' instead.`,
+      undefined,
+      ctx,
     )
     return
   }
@@ -934,6 +947,8 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
       msg?.requestId,
       'TRUST_NOT_ENABLED',
       'This session has no skills trust store wired (operator did not opt into warn/block mode).',
+      undefined,
+      ctx,
     )
     return
   }
@@ -983,6 +998,8 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
       msg?.requestId,
       'SKILL_NOT_FOUND',
       `No skill named '${msg.skillName}' found in the session's skill directories.`,
+      undefined,
+      ctx,
     )
     return
   }
@@ -1004,6 +1021,8 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
         msg?.requestId,
         'TRUST_FLUSH_FAILED',
         'Accepted in memory but the trust ledger could not be persisted. Retry; the next restart may re-flag this skill.',
+        undefined,
+        ctx,
       )
       return
     }
@@ -1122,11 +1141,11 @@ function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
  */
 function handleSkillTrustGrant(ws, client, msg, ctx) {
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    sendError(ws, msg?.requestId, 'INVALID_SKILL_NAME', 'skill_trust_grant requires a non-empty `skillName`')
+    sendError(ws, msg?.requestId, 'INVALID_SKILL_NAME', 'skill_trust_grant requires a non-empty `skillName`', undefined, ctx)
     return
   }
   if (typeof msg.author !== 'string' || msg.author === '') {
-    sendError(ws, msg?.requestId, 'INVALID_AUTHOR', 'skill_trust_grant requires a non-empty `author`')
+    sendError(ws, msg?.requestId, 'INVALID_AUTHOR', 'skill_trust_grant requires a non-empty `author`', undefined, ctx)
     return
   }
 
@@ -1136,7 +1155,7 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
 
   const trustStore = entry?.session?.getTrustStore?.() ?? null
   if (!trustStore || typeof trustStore.grantCommunityTrust !== 'function') {
-    sendError(ws, msg?.requestId, 'TRUST_NOT_ENABLED', 'This session has no skills trust store wired.')
+    sendError(ws, msg?.requestId, 'TRUST_NOT_ENABLED', 'This session has no skills trust store wired.', undefined, ctx)
     return
   }
 
@@ -1211,6 +1230,7 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
         `Community skill '${msg.skillName}' resolves to a different author than '${msg.author}'.`,
         // #3538: structured field for client suggestions ("did you mean X?").
         { actualAuthor: mismatchActualAuthor },
+        ctx,
       )
       return
     }
@@ -1227,10 +1247,11 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
         `Community skill '${msg.skillName}' is owned by '${actualAuthor}', not '${msg.author}'.`,
         // #3538: structured field for client suggestions ("did you mean X?").
         { actualAuthor },
+        ctx,
       )
       return
     }
-    sendError(ws, msg?.requestId, 'SKILL_NOT_FOUND', `No community skill '${msg.skillName}' found for author '${msg.author}'.`)
+    sendError(ws, msg?.requestId, 'SKILL_NOT_FOUND', `No community skill '${msg.skillName}' found for author '${msg.author}'.`, undefined, ctx)
     return
   }
 
@@ -1244,6 +1265,8 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
       msg?.requestId,
       'TRUST_FLUSH_FAILED',
       'Granted in memory but the trust ledger could not be persisted. Retry; the next restart may re-prompt for trust.',
+      undefined,
+      ctx,
     )
     return
   }

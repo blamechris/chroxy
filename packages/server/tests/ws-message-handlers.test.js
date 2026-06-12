@@ -250,12 +250,13 @@ describe('handleSessionMessage', () => {
       const ctx = makeCtx()
       const client = makeClient({ activeSessionId: 'sess-1' })
       const entry = addSession(ctx, 'sess-1', makeSession({ provider: 'ollama' }))
-      // sendError writes to the ws handle directly (not ctx.transport.send), so a
-      // live fake is needed to observe the rejection envelope.
+      // #5632: sendError now routes through ctx.transport.send (the
+      // encryption-aware path), not a raw ws.send. The rejection envelope is the
+      // payload (arguments[1]) of the last transport.send call.
       const ws = { readyState: 1, send: mock.fn() }
       await handleSessionMessage(ws, client, { type: 'set_model', model: '   ' }, ctx)
       assert.equal(entry.session.setModel.callCount, 0)
-      const sent = JSON.parse(ws.send.mock.calls.at(-1).arguments[0])
+      const sent = ctx.transport.send.mock.calls.at(-1).arguments[1]
       assert.equal(sent.type, 'error')
       assert.equal(sent.code, 'INVALID_MODEL')
     })
@@ -269,7 +270,8 @@ describe('handleSessionMessage', () => {
       const ws = { readyState: 1, send: mock.fn() }
       await handleSessionMessage(ws, client, { type: 'set_model', model: 'my-custom-finetune:7b' }, ctx)
       assert.equal(entry.session.setModel.callCount, 0)
-      const sent = JSON.parse(ws.send.mock.calls.at(-1).arguments[0])
+      // #5632: rejection routes through ctx.transport.send (encryption-aware path).
+      const sent = ctx.transport.send.mock.calls.at(-1).arguments[1]
       assert.equal(sent.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
     })
   })
@@ -407,11 +409,11 @@ describe('handleSessionMessage', () => {
       // Mapping must NOT have been consumed so the legit bound client can still respond
       assert.ok(ctx.permissions.permissionSessionMap.has('cross-req'),
         'permissionSessionMap entry must be preserved for the legit client')
-      // (We can't assert on the SESSION_TOKEN_MISMATCH error reaching the
-      // client here: sendError writes directly to ws.send, and the WS mock
-      // at the top of the file has no readyState=1 so the send is a no-op.
-      // The "no cross-session resolve" + "mapping preserved" assertions
-      // above are what actually prevent the attack.)
+      // (We don't assert on the SESSION_TOKEN_MISMATCH error reaching the client
+      // here: since #5632 sendError routes through ctx.transport.send, but the
+      // opaque WS handle at the top of the file isn't readyState=1 so the
+      // delivery is a no-op anyway. The "no cross-session resolve" + "mapping
+      // preserved" assertions above are what actually prevent the attack.)
     })
 
     it('allows bound client to respond to permission for its own bound session', async () => {

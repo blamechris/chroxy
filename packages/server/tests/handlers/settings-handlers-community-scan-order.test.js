@@ -76,7 +76,15 @@ if (typeof mock.module !== 'function') {
   function makeCtx(sessions = new Map()) {
     const sent = []
     return nsCtx({
-      send: createSpy((_ws, msg) => { sent.push(msg) }),
+      // #5632: sendError now routes through ctx.transport.send. Mirror the real
+      // WsServer._send → ws.send step so the existing `ws._messages` assertions
+      // still observe error frames.
+      send: createSpy((_ws, msg) => {
+        sent.push(msg)
+        if (_ws && typeof _ws.send === 'function' && _ws.readyState === 1) {
+          _ws.send(JSON.stringify(msg))
+        }
+      }),
       broadcast: createSpy(() => {}),
       broadcastToSession: createSpy(() => {}),
       sessionManager: { getSession: createSpy((id) => sessions.get(id)) },

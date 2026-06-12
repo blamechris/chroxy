@@ -14,6 +14,8 @@ import {
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { nsCtx } from './test-helpers.js'
+import { createClientSender } from '../src/ws-client-sender.js'
+import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
 import {
   validateAttachments,
   resolveFileRefAttachments,
@@ -1066,6 +1068,95 @@ describe('sendError', () => {
     assert.strictEqual(sent[0].safeField, 'kept')
     // And global Object.prototype must remain unpolluted.
     assert.strictEqual({}.polluted, undefined)
+  })
+
+  // #5632: sendError now accepts an optional handler `ctx` and, when present,
+  // routes the error through `ctx.transport.send` (→ WsServer._send → the
+  // per-client encrypting sender) instead of the raw `ws.send`. This makes a
+  // post-handshake error frame ENCRYPTED so the client's plaintext guard
+  // (connection.ts) doesn't reject it as a downgrade. A forged plaintext
+  // `error` post-encryption is then correctly rejected client-side.
+  describe('encryption-aware routing (#5632)', () => {
+    it('routes through ctx.transport.send when a ctx is supplied', () => {
+      const sent = []
+      const ws = { readyState: 1, send: () => { throw new Error('raw ws.send must not be used when ctx is present') } }
+      const ctx = { transport: { send: (targetWs, payload) => sent.push({ targetWs, payload }) } }
+
+      sendError(ws, 'req-1', 'INVALID_MODEL', 'nope', undefined, ctx)
+
+      assert.strictEqual(sent.length, 1)
+      assert.strictEqual(sent[0].targetWs, ws)
+      assert.strictEqual(sent[0].payload.type, 'error')
+      assert.strictEqual(sent[0].payload.code, 'INVALID_MODEL')
+      assert.strictEqual(sent[0].payload.message, 'nope')
+    })
+
+    it('falls back to raw ws.send when no ctx is supplied (pre-auth call sites)', () => {
+      const sent = []
+      const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
+      sendError(ws, 'req-2', 'FORBIDDEN', 'pre-auth')
+      assert.strictEqual(sent.length, 1)
+      assert.strictEqual(sent[0].type, 'error')
+      assert.strictEqual(sent[0].code, 'FORBIDDEN')
+    })
+
+    it('still merges data fields through the ctx.transport path', () => {
+      const sent = []
+      const ws = { readyState: 1, send: () => {} }
+      const ctx = { transport: { send: (_ws, payload) => sent.push(payload) } }
+      sendError(ws, 'req-3', 'INVALID_AUTHOR', 'wrong', { actualAuthor: 'alice' }, ctx)
+      assert.strictEqual(sent[0].actualAuthor, 'alice')
+      assert.strictEqual(sent[0].type, 'error')
+    })
+
+    // End-to-end through the real WsServer send pipeline shape: ctx.transport.send
+    // is `(ws, msg) => server._send(ws, msg)` and _send looks the client up by ws
+    // and hands off to the per-client encrypting sender. We reconstruct that path
+    // here with the real createClientSender to prove the wire frame is `encrypted`
+    // when the client's encryptionState is set, and a plaintext `error` when it is
+    // not — matching the client guard's expectation either side of the handshake.
+    it('produces an ENCRYPTED frame when the client encryptionState is established', () => {
+      const serverKp = createKeyPair()
+      const clientKp = createKeyPair()
+      const serverShared = deriveSharedKey(clientKp.publicKey, serverKp.secretKey)
+      const clientShared = deriveSharedKey(serverKp.publicKey, clientKp.secretKey)
+
+      const sent = []
+      const ws = { readyState: 1, send: (data) => sent.push(data) }
+      const client = { _seq: 0, encryptionState: { sharedKey: serverShared, sendNonce: 0, recvNonce: 0 } }
+      const clientSend = createClientSender({ error: () => {}, warn: () => {} })
+      // Mirror WsServer._send: (ws, msg) => clientSend(ws, client, msg)
+      const ctx = { transport: { send: (targetWs, payload) => clientSend(targetWs, client, payload) } }
+
+      sendError(ws, 'req-enc', 'INVALID_MODEL', 'gpt-9000', undefined, ctx)
+
+      assert.strictEqual(sent.length, 1)
+      const envelope = JSON.parse(sent[0])
+      // Wire frame is an `encrypted` envelope, NOT a plaintext { type: 'error' }.
+      assert.strictEqual(envelope.type, 'encrypted')
+      assert.strictEqual(typeof envelope.d, 'string')
+      assert.strictEqual(typeof envelope.n, 'number')
+      // The client can decrypt it back to the original error frame.
+      const plain = decrypt(envelope, clientShared, 0, DIRECTION_SERVER)
+      assert.strictEqual(plain.type, 'error')
+      assert.strictEqual(plain.code, 'INVALID_MODEL')
+      assert.strictEqual(plain.message, 'gpt-9000')
+    })
+
+    it('produces a PLAINTEXT error frame when the client has no encryptionState (pre-handshake)', () => {
+      const sent = []
+      const ws = { readyState: 1, send: (data) => sent.push(data) }
+      const client = { _seq: 0 } // no encryptionState
+      const clientSend = createClientSender({ error: () => {}, warn: () => {} })
+      const ctx = { transport: { send: (targetWs, payload) => clientSend(targetWs, client, payload) } }
+
+      sendError(ws, 'req-plain', 'FORBIDDEN', 'no auth yet', undefined, ctx)
+
+      assert.strictEqual(sent.length, 1)
+      const frame = JSON.parse(sent[0])
+      assert.strictEqual(frame.type, 'error')
+      assert.strictEqual(frame.code, 'FORBIDDEN')
+    })
   })
 })
 

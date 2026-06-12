@@ -734,7 +734,7 @@ function handleRegisterPushToken(ws, client, msg, ctx) {
  */
 function handleNotificationPrefsGet(ws, client, msg, ctx) {
   if (!ctx.services.pushManager) {
-    sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)')
+    sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)', undefined, ctx)
     return
   }
   ctx.transport.send(ws, {
@@ -746,12 +746,12 @@ function handleNotificationPrefsGet(ws, client, msg, ctx) {
 
 function handleNotificationPrefsSet(ws, client, msg, ctx) {
   if (!ctx.services.pushManager) {
-    sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)')
+    sendError(ws, msg?.requestId, 'NOT_AVAILABLE', 'notification prefs unavailable (no push manager)', undefined, ctx)
     return
   }
   const patch = msg?.prefs
   if (!patch || typeof patch !== 'object') {
-    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'prefs object is required')
+    sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'prefs object is required', undefined, ctx)
     return
   }
   // #4551 — validate every device-key against the same gate
@@ -771,12 +771,12 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
     // shape-specific message so misbehaving clients get a clear
     // signal that `devices` must be a map keyed by push token.
     if (Array.isArray(patch.devices)) {
-      sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'devices must be an object, not an array')
+      sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'devices must be an object, not an array', undefined, ctx)
       return
     }
     for (const key of Object.keys(patch.devices)) {
       if (!PushManager.isValidPushTokenFormat(key)) {
-        sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'Invalid device token format in notification_prefs_set')
+        sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'Invalid device token format in notification_prefs_set', undefined, ctx)
         return
       }
     }
@@ -790,7 +790,7 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
     next = ctx.services.pushManager.setPrefs(patch, { platform: client.deviceInfo?.platform || null })
   } catch (err) {
     log.warn(`notification_prefs_set persist failed: ${err?.message}`)
-    sendError(ws, msg?.requestId, 'NOTIFICATION_PREFS_WRITE_FAILED', err?.message || 'write failed')
+    sendError(ws, msg?.requestId, 'NOTIFICATION_PREFS_WRITE_FAILED', err?.message || 'write failed', undefined, ctx)
     return
   }
   // Reply to the originating client with the requestId so promise-style
