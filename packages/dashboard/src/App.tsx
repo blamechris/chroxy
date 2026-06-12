@@ -16,7 +16,6 @@ import {
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
 import type { BaseSessionState } from '@chroxy/store-core'
-import type { ChatViewMessage } from './components/ChatView'
 
 import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
 import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
@@ -37,18 +36,11 @@ import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
 import { SkillsPanel } from './components/SkillsPanel'
 import { HeaderOverflowMenu, type HeaderOverflowItem } from './components/HeaderOverflowMenu'
 import { NotificationsWidget } from './components/NotificationsWidget'
-import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
-import { QuestionPrompt } from './components/QuestionPrompt'
 import { ActivityIndicator } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
-import { ToolBubble } from './components/ToolBubble'
-import { ToolGroup } from './components/ToolGroup'
 import { PastedTextModal } from './components/PastedTextModal'
-import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
-import { StreamStallChip } from './components/StreamStallChip'
-import { AskUserQuestionStallChip } from './components/AskUserQuestionStallChip'
-import { ResumeUnknownChip } from './components/ResumeUnknownChip'
+import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
@@ -69,9 +61,8 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
 import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
-import { formatBindingForDisplay, parseBinding } from './shortcuts/registry'
+import { buildShortcutEntries } from './shortcuts/buildShortcutEntries'
 import { writeText as clipboardWriteText } from './utils/clipboard'
-import { formatQuestionAnswerSummary } from './utils/questionAnswerSummary'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { useTauriMenuEvents } from './hooks/useTauriMenuEvents'
 import { isTauri } from './utils/tauri'
@@ -84,6 +75,7 @@ import { useTunnelReady } from './hooks/useTunnelReady'
 import { useQrModal } from './hooks/useQrModal'
 import { useSidebarOrdering } from './hooks/useSidebarOrdering'
 import { useControlRoomState } from './hooks/useControlRoomState'
+import { useMessageRenderer } from './hooks/useMessageRenderer'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
@@ -1675,223 +1667,25 @@ export function App() {
     startServer()
   }, [])
 
-  // Custom message renderer for permission prompts and tool bubbles.
-  // `chatTailMessageId` is sourced from `useChatMessages` above (#4770).
-  const renderMessage = useCallback((msg: ChatViewMessage) => {
-    // Tool-group synthetic row (#3747) — id is a group key, not a store id.
-    if (msg.type === 'tool_group') {
-      const payload = chatToolGroupPayloads.get(msg.id)
-      if (!payload) return null
-      // #4305 — keep the trailing group expanded so the Chat tab matches
-      // Output-tab chronology when a turn ends on a tool run with no
-      // follow-up summary.
-      return (
-        <ToolGroup
-          messages={payload.messages}
-          isActive={payload.isActive}
-          isTail={msg.id === chatTailMessageId}
-        />
-      )
-    }
-    const storeMsg = storeMsgMap.get(msg.id)
-    if (!storeMsg) return null
-
-    // Permission prompt
-    if (storeMsg.requestId && storeMsg.expiresAt && !storeMsg.answered) {
-      // #3619 wall-clock site (kept on `Date.now()` intentionally).
-      // `storeMsg.expiresAt` is computed at receipt as
-      // `Date.now() + msg.remainingMs` in `message-handler.ts`, so this
-      // subtraction is wall-clock-vs-wall-clock — both sides use the
-      // same clock, no mixing. Switching this site to `performance.now()`
-      // would subtract a process-local monotonic clock from a wall-clock
-      // anchor and produce garbage. Wall-clock jumps after receipt do
-      // change `Date.now()` and therefore affect each re-computation
-      // here — that is correct behavior for a wall-clock anchor.
-      // Whatever value falls out is what feeds `<PermissionPrompt>`'s
-      // local countdown anchor as its initial `remainingMs` prop.
-      const remainingMs = Math.max(0, storeMsg.expiresAt - Date.now())
-      return (
-        <PermissionPrompt
-          requestId={storeMsg.requestId}
-          tool={storeMsg.tool || 'Unknown'}
-          description={storeMsg.content}
-          remainingMs={remainingMs}
-          onRespond={(reqId, decision) => sendPermissionResponse(reqId, decision)}
-        />
-      )
-    }
-
-    // Question prompt (options or free-text fallback)
-    if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
-      // #4615 — suppress unanswered prompts that have been invalidated by
-      // a subsequent ASK_USER_QUESTION_STALL. The chip rendered for the
-      // stall error carries the retry affordance; leaving the interactive
-      // prompt visible would let the user submit answers into a dead
-      // _pendingUserAnswer slot. Already-answered prompts still render
-      // (their answer summary is part of chat history).
-      if (stalledPromptIds.has(storeMsg.id)) return null
-      return (
-        <QuestionPrompt
-          question={storeMsg.content}
-          options={storeMsg.options}
-          questions={storeMsg.questions}
-          answered={storeMsg.answered}
-          // #4735 / #4731 — SDK / BYOK / Codex / Gemini sessions get the
-          // interactive MultiQuestionForm; TUI / CLI sessions keep the
-          // #4666 deferred notice (their permission-hook still denies
-          // multi-question forms per #4648). Derivation lives at
-          // `allowMultiQuestionForm` above so the flag flips correctly
-          // on session-switch without a full re-render of every prompt.
-          allowMultiQuestion={allowMultiQuestionForm}
-          // #4685 — gate the question content render on the matching
-          // AskUserQuestion permission_request being resolved. Pre-fix
-          // the user_question card rendered the moment the wire event
-          // arrived (which the server emits in parallel with the
-          // permission_request), leaking the model-supplied question
-          // text + options before the user had a chance to click Allow.
-          // The derivation `hasPendingAskUserQuestionPermission` scans
-          // the same session's messages for any AskUserQuestion
-          // permission prompt that is still unresolved on both this
-          // client and across clients. Already-answered prompts skip the
-          // gate so post-answer chat history renders normally.
-          pendingPermission={!storeMsg.answered && hasPendingAskUserQuestionPermission}
-          onSelect={(answer) => {
-            // #4604 Chunk B / #4735 — answer is `string` for
-            // single-question / free-text paths and
-            // `Record<string, string | string[]>` for multi-question
-            // forms (multi-select values are native arrays on the
-            // widened wire). sendUserQuestionResponse handles both
-            // shapes; markPromptAnswered records a string summary on
-            // the bubble so the post-answer collapse UI has something
-            // readable to show.
-            sendUserQuestionResponse(answer, storeMsg.toolUseId)
-            markPromptAnswered(storeMsg.id, formatQuestionAnswerSummary(answer))
-          }}
-        />
-      )
-    }
-
-    // Tool bubble
-    if (storeMsg.type === 'tool_use' && storeMsg.toolUseId) {
-      // #4313 — singleton activity runs (a single trailing tool_use)
-      // bypass the ToolGroup path entirely: `chatToolGroupPayloads`
-      // only collapses contiguous runs of 2+ messages (see above,
-      // ~line 897). Pass the same `isTail` signal that ToolGroup uses
-      // (#4309) so the Chat tab's last item matches Output-tab
-      // chronology in the 1-tool case too. Without this, a turn
-      // shaped `summary text -> 1 trailing tool` skipped the #4309
-      // mitigation entirely and the trailing tool rendered collapsed
-      // while Output still showed it inline.
-      return (
-        <ToolBubble
-          toolName={storeMsg.tool || 'Tool'}
-          toolUseId={storeMsg.toolUseId}
-          input={storeMsg.toolInput}
-          inputPartial={storeMsg.toolInputPartial}
-          result={storeMsg.toolResult}
-          serverName={storeMsg.serverName}
-          isTail={msg.id === chatTailMessageId}
-          resultImages={storeMsg.toolResultImages}
-          childAgentEvents={storeMsg.childAgentEvents}
-        />
-      )
-    }
-
-    // #3188: auto-evaluator rewrite banner. The system message is pushed
-    // by the dashboard's `evaluator_rewrite` handler and persisted in
-    // the per-session localStorage cache (`sessionMessagesKey` in
-    // packages/dashboard/src/store/persistence.ts). Reconnect/replay
-    // re-renders the banner from that cached metadata — no need to
-    // re-fire the transient wire event.
-    if (storeMsg.type === 'system' && storeMsg.evaluator?.kind === 'rewrite') {
-      return <EvaluatorRewriteBanner meta={storeMsg.evaluator} />
-    }
-
-    // #4476: distinct chip for stream-stall errors (server PR #4475 emits
-    // `error{code: 'stream_stall'}` after the configured inactivity window).
-    // Generic red bubble reads as "broken"; this affordance signals
-    // "recoverable, just retry" and offers a one-tap resend of the last
-    // user message. Only render the retry button when the stall is the
-    // most recent bubble (chatTailMessageId) — replayed historical stalls
-    // surface the chip text + tooltip for diagnostics, but resending an
-    // ancient user_input from a long-finished turn would be misleading.
-    //
-    // #4603: thread the active session's provider through so the chip
-    // headline can carry a short label ("SDK · ...", "CLI · ...") for
-    // one-glance triage, and hand the View-logs affordance a closure
-    // that switches the view to the System pane (where session-level
-    // context lives). The View-logs button is only shown on the tail
-    // entry — replaying historical stalls shouldn't offer to jump the
-    // operator out of the chat for an old event.
-    if (storeMsg.type === 'error' && storeMsg.code === 'stream_stall') {
-      const isTail = msg.id === chatTailMessageId
-      const lastUserInput = isTail
-        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
-        : undefined
-      return (
-        <StreamStallChip
-          errorText={storeMsg.content}
-          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
-          timeoutMs={streamStallTimeoutMs ?? undefined}
-          provider={activeSessionProvider ?? undefined}
-          onViewLogs={isTail ? () => setViewMode('system') : undefined}
-        />
-      )
-    }
-
-    // #4615: dedicated chip for ASK_USER_QUESTION_STALL errors. The server
-    // emits `error{code: 'ASK_USER_QUESTION_STALL'}` (PR #4614) when the
-    // Claude TUI never acknowledges an AskUserQuestion answer — typically
-    // a multi-question form wedge. Generic red toast reads as "broken";
-    // this affordance signals "recoverable, just retry your original
-    // request" and offers a one-tap resend of the last user message.
-    // Mirrors the StreamStallChip pattern (#4476): retry only on tail
-    // entries so replayed historical stalls show the chip + tooltip for
-    // diagnostics but don't offer a misleading resend button.
-    if (storeMsg.type === 'error' && storeMsg.code === 'ASK_USER_QUESTION_STALL') {
-      const isTail = msg.id === chatTailMessageId
-      const lastUserInput = isTail
-        ? [...storeMessages].reverse().find(m => m.type === 'user_input')
-        : undefined
-      return (
-        <AskUserQuestionStallChip
-          errorText={storeMsg.content}
-          onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
-        />
-      )
-    }
-
-    // #4947 / #5006: dedicated chip for the two resume-failure error codes:
-    //   - `error{code: 'resume_unknown'}` (server PR #4944) — RECOVERABLE.
-    //     CliSession has ALREADY auto-fallen-back to a fresh conversation
-    //     by the time this lands; chip renders the polite "starting fresh"
-    //     copy.
-    //   - `error{code: 'resume_unknown_exhausted'}` (server PR #5004) —
-    //     TERMINAL. The post-fallback retry ALSO failed; the server has
-    //     stopped auto-respawning and the chip renders the "auto-recovery
-    //     exhausted, start a fresh session manually" copy + assertive
-    //     `role="alert"` so AT users get the urgency signal.
-    // Both variants surface `attemptedResumeId` as subtext for operator
-    // correlation against `~/.chroxy/session-state.json.resumeConversationId`.
-    // Distinct from the stream_stall / ASK_USER_QUESTION_STALL chips
-    // because no retry affordance is needed (recoverable: fresh conversation
-    // already running; exhausted: user must start a new session manually).
-    if (
-      storeMsg.type === 'error' &&
-      (storeMsg.code === 'resume_unknown' || storeMsg.code === 'resume_unknown_exhausted')
-    ) {
-      return (
-        <ResumeUnknownChip
-          variant={storeMsg.code === 'resume_unknown_exhausted' ? 'exhausted' : 'recoverable'}
-          errorText={storeMsg.content}
-          attemptedResumeId={storeMsg.attemptedResumeId}
-        />
-      )
-    }
-
-    // Default rendering
-    return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission])
+  // #5560 — the custom chat-message renderer (permission prompts, question
+  // prompts, tool bubbles/groups, evaluator banner, stall / resume chips) is
+  // built by `useMessageRenderer`. Same deps array, same per-branch JSX.
+  const renderMessage = useMessageRenderer({
+    storeMsgMap,
+    chatToolGroupPayloads,
+    chatTailMessageId,
+    sendPermissionResponse,
+    sendUserQuestionResponse,
+    markPromptAnswered,
+    storeMessages,
+    sendInput,
+    streamStallTimeoutMs,
+    allowMultiQuestionForm,
+    activeSessionProvider,
+    setViewMode,
+    stalledPromptIds,
+    hasPendingAskUserQuestionPermission,
+  })
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —
   // not memoised, by design. The shortcut registry hook re-renders
@@ -1900,114 +1694,10 @@ export function App() {
   // [shortcutRegistry] would silently skip rebinds because the
   // registry reference is stable. The work is cheap (constant-size
   // arrays, simple map) so re-running it per render is fine.
-  const isMacForCheatsheet = isMacPlatform()
-  const SHORTCUTS: ShortcutEntry[] = (() => {
-    // Section labels mirror the Settings panel groupings so the cheat
-    // sheet and customization UI stay coherent.
-    const CATEGORY_TO_SECTION: Record<string, string> = {
-      navigation: 'Global',
-      view: 'Global',
-      session: 'Session',
-      sidebar: 'Sidebar',
-      composer: 'Input',
-      other: 'Global',
-    }
-    // Cmd+1-9 collapse: nine separate rows would bloat the cheat
-    // sheet without adding signal. Emit a single "Cmd+1-9" row whose
-    // keys reflect the registry's current first-digit binding so a
-    // rebind (e.g. moving them to Alt+1-9) is still visible.
-    //
-    // #4432 — only collapse when all nine bindings share the same
-    // modifier set AND each `session.switch.N` has key `N`. If any
-    // entry diverges (e.g. user rebinds only session.switch.1 to
-    // Cmd+Q) the cheat sheet would otherwise show a misleading
-    // "Cmd+Q-9" label, so we fall back to nine individual rows.
-    const tabSwitchEntries = Array.from({ length: 9 }, (_, i) =>
-      shortcutRegistry.get(`session.switch.${i + 1}`),
-    )
-    const tabSwitchAligned = (() => {
-      const first = tabSwitchEntries[0]
-      if (!first) return false
-      const firstParsed = parseBinding(first.binding)
-      if (firstParsed.key !== '1') return false
-      for (let i = 0; i < tabSwitchEntries.length; i += 1) {
-        const entry = tabSwitchEntries[i]
-        if (!entry) return false
-        const parsed = parseBinding(entry.binding)
-        if (parsed.key !== String(i + 1)) return false
-        if (
-          parsed.meta !== firstParsed.meta ||
-          parsed.shift !== firstParsed.shift ||
-          parsed.alt !== firstParsed.alt
-        ) return false
-      }
-      return true
-    })()
-    const tabSwitch1 = tabSwitchEntries[0]
-    const tabSwitchKeys = tabSwitch1
-      ? formatBindingForDisplay(tabSwitch1.binding, isMacForCheatsheet).replace(/1$/, '1-9')
-      : 'Cmd+1-9'
-    const registryRows: ShortcutEntry[] = []
-    for (const entry of shortcutRegistry.list()) {
-      // When aligned: skip the 2..9 tab-switch entries — they're
-      // collapsed into one row driven by session.switch.1 below.
-      // When diverged: render all nine individually so each rebind is
-      // visible.
-      if (/^session\.switch\.[2-9]$/.test(entry.id)) {
-        if (tabSwitchAligned) continue
-        registryRows.push({
-          keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
-          description: entry.description,
-          section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-        })
-        continue
-      }
-      if (entry.id === 'session.switch.1') {
-        if (tabSwitchAligned) {
-          registryRows.push({
-            keys: tabSwitchKeys,
-            description: 'Switch to tab by number',
-            section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-          })
-        } else {
-          registryRows.push({
-            keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
-            description: entry.description,
-            section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-          })
-        }
-        continue
-      }
-      registryRows.push({
-        keys: formatBindingForDisplay(entry.binding, isMacForCheatsheet),
-        description: entry.description,
-        section: CATEGORY_TO_SECTION[entry.category] || 'Global',
-      })
-    }
-    // Non-registry entries: permission shortcuts (handled inside the
-    // permission prompt UI), composer send (handled in InputBar),
-    // Escape (handled per-modal), and the Tauri image-paste shortcut.
-    // None of these live in the global keydown ladder so they don't
-    // belong in the registry.
-    const extraEntries: ShortcutEntry[] = [
-      { keys: 'Cmd+Y', description: 'Allow current permission prompt', section: 'Session' },
-      { keys: 'Cmd+Shift+Y', description: 'Allow current permission prompt for this session (rule-eligible tools)', section: 'Session' },
-      { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
-      { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
-    ]
-    // #3748 — Ctrl+V (image-paste) only works in the Tauri desktop on
-    // macOS; on other platforms Ctrl+V is the native text-paste
-    // shortcut. Show the entry only where the shortcut is actually
-    // wired.
-    if (isTauri() && isMacPlatform()) {
-      extraEntries.push({
-        keys: 'Ctrl+V',
-        description: 'Paste image from clipboard (Cmd+V stays as text paste)',
-        section: 'Input',
-      })
-    }
-    return [...registryRows, ...extraEntries].map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
-  })()
+  // #5560 — the registry-driven cheat-sheet rows are built by the pure
+  // `buildShortcutEntries` helper. Still called on every render (not memoised)
+  // by design — see the helper's docblock (#4412).
+  const SHORTCUTS: ShortcutEntry[] = buildShortcutEntries(shortcutRegistry, isMacPlatform(), isMacPlatform())
 
   // #5424: resolve the active model's context window once for the header
   // meter, the footer meter, and the percent computation. `null` when the
