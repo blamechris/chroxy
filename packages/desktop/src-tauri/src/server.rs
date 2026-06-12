@@ -325,6 +325,11 @@ pub struct ServerManager {
     node_path: Option<PathBuf>,
     config: ChroxyConfig,
     tunnel_mode: String,
+    /// #5356 — when false (the default), the embedded server is spawned with
+    /// `CHROXY_HOST=127.0.0.1` so it binds loopback only. Set true (via the
+    /// desktop "Expose on LAN" toggle) to bind all interfaces for the LAN
+    /// QR-scan flow. Applied on the next `start()`.
+    expose_on_lan: bool,
     health_generation: Arc<AtomicU64>,
     /// Set by stop() to prevent auto-restart after user-initiated stop.
     user_stopped: Arc<AtomicBool>,
@@ -352,6 +357,7 @@ impl ServerManager {
             node_path: None,
             config: ChroxyConfig::default(),
             tunnel_mode: "quick".to_string(),
+            expose_on_lan: false,
             health_generation: Arc::new(AtomicU64::new(0)),
             user_stopped: Arc::new(AtomicBool::new(false)),
             auto_restart_pending: Arc::new(AtomicBool::new(false)),
@@ -381,6 +387,25 @@ impl ServerManager {
 
     pub fn set_tunnel_mode(&mut self, mode: &str) {
         self.tunnel_mode = mode.to_string();
+    }
+
+    pub fn expose_on_lan(&self) -> bool {
+        self.expose_on_lan
+    }
+
+    pub fn set_expose_on_lan(&mut self, expose: bool) {
+        self.expose_on_lan = expose;
+    }
+
+    /// #5356 — the bind host to hand the embedded server via `CHROXY_HOST`.
+    /// `None` when exposing on LAN (let the server keep its `0.0.0.0` default);
+    /// `Some("127.0.0.1")` otherwise so the control socket is loopback-only.
+    fn bind_host_env(&self) -> Option<&'static str> {
+        if self.expose_on_lan {
+            None
+        } else {
+            Some("127.0.0.1")
+        }
     }
 
     /// Set a custom Node binary path from settings.
@@ -954,6 +979,15 @@ impl ServerManager {
         }
         // Tunnel mode: "quick", "named", or "none"
         cmd.env("CHROXY_TUNNEL", &self.tunnel_mode);
+        // #5356 — loopback by default. Unless the user opted into LAN exposure,
+        // pin the embedded server to 127.0.0.1 so the control socket (which
+        // drives a billed claude PTY and takes a token over the wire) is not
+        // reachable from the LAN. CHROXY_HOST maps to config.host in the server,
+        // which binds that interface with auth still on. When exposed, we omit
+        // the var so the server keeps its 0.0.0.0 default (LAN QR-scan flow).
+        if let Some(host) = self.bind_host_env() {
+            cmd.env("CHROXY_HOST", host);
+        }
         // Mark this as a bundled .app launch so the doctor Dependencies check
         // downgrades to `warn` instead of `fail` — end users can't run
         // `npm install` to fix a broken bundle; they need to reinstall.
@@ -1338,6 +1372,35 @@ impl Drop for ServerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- bind_host_env (#5356) --
+    //
+    // Loopback by default: the spawn must pin CHROXY_HOST=127.0.0.1 unless the
+    // user explicitly opted into LAN exposure, in which case the var is omitted
+    // and the server keeps its 0.0.0.0 default.
+
+    #[test]
+    fn bind_host_env_defaults_to_loopback() {
+        let mgr = ServerManager::new();
+        assert!(!mgr.expose_on_lan());
+        assert_eq!(mgr.bind_host_env(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn bind_host_env_none_when_exposed_on_lan() {
+        let mut mgr = ServerManager::new();
+        mgr.set_expose_on_lan(true);
+        assert!(mgr.expose_on_lan());
+        assert_eq!(mgr.bind_host_env(), None);
+    }
+
+    #[test]
+    fn set_expose_on_lan_toggles_back_to_loopback() {
+        let mut mgr = ServerManager::new();
+        mgr.set_expose_on_lan(true);
+        mgr.set_expose_on_lan(false);
+        assert_eq!(mgr.bind_host_env(), Some("127.0.0.1"));
+    }
 
     // -- build_enriched_path --
     //

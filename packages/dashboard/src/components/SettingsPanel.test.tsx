@@ -2664,4 +2664,73 @@ describe('SettingsPanel', () => {
       expect(err.textContent).toContain('Could not register')
     })
   })
+
+  // #5356 — LAN-exposure toggle: defaults off (loopback), reflects the saved
+  // value on open, and persists via set_expose_on_lan. Tauri-only.
+  describe('expose on LAN (#5356)', () => {
+    const tauriInvoke = vi.fn()
+    const setTauriEnv = (tauri: boolean) => {
+      if (tauri) {
+        ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke: tauriInvoke }
+      } else {
+        delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+      }
+    }
+    const baseImpl = (cmd: string): Promise<unknown> => {
+      switch (cmd) {
+        case 'get_summon_hotkey': return Promise.resolve(null)
+        case 'get_tunnel_mode': return Promise.resolve('none')
+        case 'get_server_info': return Promise.resolve({ tunnelMode: 'none' })
+        case 'get_allow_auto_permission_mode': return Promise.resolve(false)
+        case 'get_expose_on_lan': return Promise.resolve(false)
+        default: return Promise.resolve(undefined)
+      }
+    }
+
+    beforeEach(() => {
+      tauriInvoke.mockReset()
+      tauriInvoke.mockImplementation(baseImpl)
+      setTauriEnv(true)
+    })
+
+    afterEach(() => {
+      tauriInvoke.mockReset()
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    })
+
+    it('defaults to off (loopback) when the saved setting is false', async () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const toggle = await screen.findByTestId('expose-on-lan-toggle') as HTMLInputElement
+      await waitFor(() => expect(toggle.checked).toBe(false))
+    })
+
+    it('reflects the saved on (LAN) value on open', async () => {
+      tauriInvoke.mockImplementation((cmd: string) =>
+        cmd === 'get_expose_on_lan' ? Promise.resolve(true) : baseImpl(cmd))
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const toggle = await screen.findByTestId('expose-on-lan-toggle') as HTMLInputElement
+      await waitFor(() => expect(toggle.checked).toBe(true))
+    })
+
+    it('persists the toggle via set_expose_on_lan', async () => {
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const toggle = await screen.findByTestId('expose-on-lan-toggle') as HTMLInputElement
+      await waitFor(() => expect(toggle.checked).toBe(false))
+      fireEvent.click(toggle)
+      await waitFor(() =>
+        expect(tauriInvoke).toHaveBeenCalledWith('set_expose_on_lan', { expose: true }))
+    })
+
+    it('reverts the toggle when the save is rejected', async () => {
+      tauriInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'set_expose_on_lan') return Promise.reject(new Error('save failed'))
+        return baseImpl(cmd)
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const toggle = await screen.findByTestId('expose-on-lan-toggle') as HTMLInputElement
+      await waitFor(() => expect(toggle.checked).toBe(false))
+      fireEvent.click(toggle)
+      await waitFor(() => expect(toggle.checked).toBe(false))
+    })
+  })
 })

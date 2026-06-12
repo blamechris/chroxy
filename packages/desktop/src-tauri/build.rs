@@ -24,6 +24,8 @@ const APP_COMMANDS: &[&str] = &[
     "save_setup_config",
     "get_tunnel_mode",
     "set_tunnel_mode",
+    "get_expose_on_lan",
+    "set_expose_on_lan",
     "get_summon_hotkey",
     "set_summon_hotkey",
     "get_allow_auto_permission_mode",

@@ -32,6 +32,8 @@ import { getTauriInvoke } from '../utils/tauri-bridge'
 import {
   getTunnelMode,
   setTunnelMode,
+  getExposeOnLan,
+  setExposeOnLan,
   getSummonHotkey,
   setSummonHotkey,
   restartServer,
@@ -743,6 +745,12 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const [tunnelError, setTunnelError] = useState<string | null>(null)
   const [serverTunnelMode, setServerTunnelMode] = useState<string>('none')
   const [restarting, setRestarting] = useState(false)
+  // #5356 — LAN exposure of the embedded server. `exposeOnLan` is the saved
+  // setting; `savedExposeOnLan` tracks what's persisted so the panel can prompt
+  // for a restart when changed (bind address is fixed at server spawn).
+  const [exposeOnLan, setExposeOnLanState] = useState<boolean>(false)
+  const [savedExposeOnLan, setSavedExposeOnLan] = useState<boolean>(false)
+  const [exposeOnLanError, setExposeOnLanError] = useState<string | null>(null)
   // #5294 — global summon hotkey. `summonHotkeySaved` tracks the persisted
   // value so the Save button can disable when unchanged and Clear when empty.
   const [summonHotkeyInput, setSummonHotkeyInput] = useState<string>('')
@@ -848,6 +856,14 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     getTunnelMode().then(mode => {
       if (mode) setTunnelModeState(mode)
     })
+    // #5356 — read saved LAN-exposure setting (false = loopback-only default).
+    setExposeOnLanError(null)
+    getExposeOnLan().then(value => {
+      if (value !== null) {
+        setExposeOnLanState(value)
+        setSavedExposeOnLan(value)
+      }
+    }).catch(() => {})
     // Read running server's actual mode (may differ if not restarted)
     getServerInfo().then(info => {
       if (info?.tunnelMode) setServerTunnelMode(info.tunnelMode)
@@ -1018,6 +1034,19 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
       setTunnelError(err instanceof Error ? err.message : String(err))
     }
   }, [tunnelMode])
+
+  // #5356 — persist the LAN-exposure toggle. Optimistic; revert on error.
+  const handleExposeOnLanChange = useCallback(async (expose: boolean) => {
+    setExposeOnLanError(null)
+    const previous = exposeOnLan
+    setExposeOnLanState(expose)
+    try {
+      await setExposeOnLan(expose)
+    } catch (err) {
+      setExposeOnLanState(previous)
+      setExposeOnLanError(err instanceof Error ? err.message : String(err))
+    }
+  }, [exposeOnLan])
 
   // #5294 — persist + live-register the summon hotkey. On a bad/conflicting
   // accelerator the Rust side throws; surface it and leave the field as-typed
@@ -1842,11 +1871,50 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
           {inTauri && (
             <section className="settings-section">
               <h3>Network</h3>
+              {/* #5356 — loopback by default; LAN exposure is an explicit opt-in. */}
+              <div className="settings-field">
+                <label htmlFor="expose-on-lan">Expose on local network</label>
+                <input
+                  id="expose-on-lan"
+                  type="checkbox"
+                  data-testid="expose-on-lan-toggle"
+                  checked={exposeOnLan}
+                  onChange={(e) => handleExposeOnLanChange(e.target.checked)}
+                />
+              </div>
+              <p className="settings-help">
+                Off (default): the server is reachable only from this machine
+                (loopback). On: binds all network interfaces so phones on the
+                same Wi-Fi can scan the QR code and connect. Leave off and use a
+                tunnel (below) for remote access.
+              </p>
+              <div className="settings-field">
+                {exposeOnLanError && (
+                  <p className="tunnel-mode-error" role="alert">{exposeOnLanError}</p>
+                )}
+                {exposeOnLan !== savedExposeOnLan ? (
+                  <button
+                    type="button"
+                    className="tunnel-restart-btn"
+                    disabled={restarting}
+                    onClick={async () => {
+                      setRestarting(true)
+                      await restartServer()
+                      setSavedExposeOnLan(exposeOnLan)
+                      setTimeout(() => setRestarting(false), 3000)
+                    }}
+                  >
+                    {restarting ? 'Restarting...' : 'Restart Server to Apply'}
+                  </button>
+                ) : (
+                  <p className="tunnel-mode-note">Server restart required after change</p>
+                )}
+              </div>
               <div className="settings-field">
                 <span id="tunnel-mode-label">Tunnel mode</span>
                 <div className="tunnel-mode-options" role="radiogroup" aria-labelledby="tunnel-mode-label">
                   {([
-                    { value: 'none', label: 'Off', desc: 'LAN only' },
+                    { value: 'none', label: 'Off', desc: 'No public tunnel' },
                     { value: 'quick', label: 'Quick Tunnel', desc: 'Random Cloudflare URL' },
                     { value: 'named', label: 'Named Tunnel', desc: 'Stable URL, requires setup' },
                   ] as const).map(opt => (
