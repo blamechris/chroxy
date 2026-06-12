@@ -7,8 +7,12 @@
  *  2. TTL expiry on drain: a queued `interrupt` (5s TTL) could expire while a
  *     longer reconnect backoff ran, evaporating without trace.
  *
- * Both now surface a `system` message into the active session's transcript via
- * the store's addMessage — matching the existing "Message queued…" feedback.
+ * Both now surface a `system` message into the transcript of the session the
+ * dropped action belonged to (the queued payload's `sessionId`), falling back
+ * to the active session via addMessage only when the payload carried none —
+ * matching the existing "Message queued…" feedback. If the user switched
+ * sessions while disconnected, the notice must follow the action's session, not
+ * leak into whatever's active now.
  */
 
 // ---------------------------------------------------------------------------
@@ -87,19 +91,30 @@ import {
 import type { ChatMessage } from '../src/store/types';
 
 // ---------------------------------------------------------------------------
-// Test store — only needs addMessage + an active session so notifyQueueFailure
-// can land a system message we can assert on.
+// Test store — supports BOTH the active-session fallback (addMessage) and the
+// session-targeted append path (updateSession → setState({ sessionStates })).
+// `added` captures the active-session fallback; `sessionStates[sid].messages`
+// captures notices routed to a specific session so we can assert which
+// transcript a drop notice landed in.
 // ---------------------------------------------------------------------------
-function makeStore() {
+function makeStore(opts?: { activeSessionId?: string | null; sessionIds?: string[] }) {
   const added: ChatMessage[] = [];
-  const store = {
-    getState: () => ({
-      activeSessionId: 'sess-1',
-      addMessage: (m: ChatMessage) => added.push(m),
-    }),
-    setState: () => {},
+  const activeSessionId = opts?.activeSessionId === undefined ? 'sess-1' : opts.activeSessionId;
+  const sessionIds = opts?.sessionIds ?? ['sess-1'];
+  let state: any = {
+    activeSessionId,
+    sessionStates: Object.fromEntries(
+      sessionIds.map((id) => [id, { messages: [] as ChatMessage[] }]),
+    ),
+    addMessage: (m: ChatMessage) => added.push(m),
   };
-  return { store, added };
+  const store = {
+    getState: () => state,
+    setState: (patch: any) => {
+      state = { ...state, ...patch };
+    },
+  };
+  return { store, added, sessionMessages: (id: string) => store.getState().sessionStates[id]?.messages ?? [] };
 }
 
 describe('offline queue silent-drop surfacing (#5633)', () => {
@@ -118,11 +133,59 @@ describe('offline queue silent-drop surfacing (#5633)', () => {
     }
     expect(added).toHaveLength(0);
 
-    // The 11th overflows: returns false AND surfaces a system message.
+    // The 11th overflows: returns false AND surfaces a system message. No
+    // sessionId on the payload → falls back to the active session (addMessage).
     expect(enqueueMessage('input', { type: 'input', data: 'm10' })).toBe(false);
     expect(added).toHaveLength(1);
     expect(added[0].type).toBe('system');
     expect(added[0].content).toMatch(/too many pending/i);
+    expect(added[0].content).toMatch(/message/i);
+  });
+
+  it('routes an overflowed input notice to the payload session, not the active one (#5633)', () => {
+    // The user was typing into sess-2 while disconnected, then switched to view
+    // sess-1. The overflow notice must land in sess-2's transcript.
+    const { store, added, sessionMessages } = makeStore({
+      activeSessionId: 'sess-1',
+      sessionIds: ['sess-1', 'sess-2'],
+    });
+    setStore(store as any);
+
+    for (let i = 0; i < 10; i++) {
+      enqueueMessage('input', { type: 'input', data: `m${i}`, sessionId: 'sess-2' });
+    }
+    expect(enqueueMessage('input', { type: 'input', data: 'm10', sessionId: 'sess-2' })).toBe(false);
+
+    // Notice landed in sess-2 (the payload's session), NOT the active sess-1.
+    const target = sessionMessages('sess-2');
+    expect(target).toHaveLength(1);
+    expect(target[0].type).toBe('system');
+    expect(target[0].content).toMatch(/too many pending/i);
+    // Negative control: nothing leaked into the active session's fallback path
+    // or into sess-1's transcript.
+    expect(added).toHaveLength(0);
+    expect(sessionMessages('sess-1')).toHaveLength(0);
+  });
+
+  it('uses interrupt-specific copy on overflow, distinct from the message copy (#5633)', () => {
+    const { store, sessionMessages } = makeStore({
+      activeSessionId: 'sess-1',
+      sessionIds: ['sess-1'],
+    });
+    setStore(store as any);
+
+    // Fill the queue with interrupts targeting sess-1, then overflow with one.
+    for (let i = 0; i < 10; i++) {
+      enqueueMessage('interrupt', { type: 'interrupt', sessionId: 'sess-1' });
+    }
+    expect(enqueueMessage('interrupt', { type: 'interrupt', sessionId: 'sess-1' })).toBe(false);
+
+    const notices = sessionMessages('sess-1');
+    expect(notices).toHaveLength(1);
+    expect(notices[0].content).toMatch(/interrupt/i);
+    expect(notices[0].content).toMatch(/deliver/i);
+    // The interrupt copy must NOT call the dropped action a "message".
+    expect(notices[0].content).not.toMatch(/your message/i);
   });
 
   it('does NOT surface anything for non-queueable (excluded / no-TTL) types', () => {
@@ -154,6 +217,46 @@ describe('offline queue silent-drop surfacing (#5633)', () => {
     expect(added[0].content).toMatch(/interrupt expired/i);
     // The dead interrupt must NOT have been sent.
     expect((socket as any).send).not.toHaveBeenCalled();
+  });
+
+  it('routes a TTL-expired interrupt notice to the payload session, not the active one (#5633)', () => {
+    jest.useFakeTimers();
+    // Active session is sess-1, but the interrupt was fired against sess-2.
+    const { store, added, sessionMessages } = makeStore({
+      activeSessionId: 'sess-1',
+      sessionIds: ['sess-1', 'sess-2'],
+    });
+    setStore(store as any);
+
+    enqueueMessage('interrupt', { type: 'interrupt', sessionId: 'sess-2' });
+    jest.advanceTimersByTime(6_000);
+    const socket = { send: jest.fn(), readyState: 1 } as unknown as WebSocket;
+    drainMessageQueue(socket);
+
+    // Notice landed in sess-2, not the active sess-1.
+    const target = sessionMessages('sess-2');
+    expect(target).toHaveLength(1);
+    expect(target[0].content).toMatch(/interrupt expired/i);
+    // Negative control: active fallback + sess-1 untouched.
+    expect(added).toHaveLength(0);
+    expect(sessionMessages('sess-1')).toHaveLength(0);
+  });
+
+  it('uses distinct copy for an expired message vs an expired interrupt (#5633)', () => {
+    jest.useFakeTimers();
+    const { store, added } = makeStore();
+    setStore(store as any);
+
+    // An expired `input` (60s TTL) routes through the non-interrupt branch.
+    enqueueMessage('input', { type: 'input', data: 'late' });
+    jest.advanceTimersByTime(61_000);
+    drainMessageQueue({ send: jest.fn(), readyState: 1 } as unknown as WebSocket);
+
+    expect(added).toHaveLength(1);
+    const messageCopy = added[0].content;
+    expect(messageCopy).toMatch(/message expired/i);
+    // The message branch must NOT use the interrupt wording.
+    expect(messageCopy).not.toMatch(/interrupt/i);
   });
 
   it('drains still-valid messages without spurious drop notices', () => {

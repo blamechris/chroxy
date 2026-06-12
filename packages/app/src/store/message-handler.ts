@@ -902,20 +902,45 @@ const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'res
  * reconnection..." feedback is rendered in SessionScreen. Silently dropping
  * input/interrupts here is exactly the "I sent it and nothing happened" class
  * of bug we're fixing — the user must see that the action did not land.
+ *
+ * The notice is routed to the session the dropped action belonged to
+ * (`targetSessionId`, read off the queued payload's `sessionId`) rather than
+ * whatever session happens to be active now. If the user switched sessions
+ * while disconnected, the notice must land in the transcript they were typing
+ * into — not the one they're looking at. Falls back to the active session
+ * (`addMessage`) only when the payload carried no usable `sessionId`.
  */
-function notifyQueueFailure(content: string): void {
+function notifyQueueFailure(content: string, targetSessionId?: string | null): void {
   try {
-    getStore().getState().addMessage({
+    const noticeMsg: ChatMessage = {
       id: nextMessageId('queue-drop'),
       type: 'system',
       content,
       timestamp: Date.now(),
-    });
+    };
+    if (targetSessionId && getStore().getState().sessionStates[targetSessionId]) {
+      updateSession(targetSessionId, (ss) => ({
+        messages: [...ss.messages, noticeMsg],
+      }));
+    } else {
+      // No (live) target session — fall back to the active session. addMessage
+      // targets the active session; if there's no active session the failure
+      // can't be surfaced inline, but never let feedback throw into the
+      // send/drain path.
+      getStore().getState().addMessage(noticeMsg);
+    }
   } catch {
-    // addMessage targets the active session; if there's no active session the
-    // failure can't be surfaced inline, but never let feedback throw into the
-    // send/drain path.
+    // Never let feedback throw into the send/drain path.
   }
+}
+
+/** Read the `sessionId` off a queued payload, if it carries one (#5633). */
+function payloadSessionId(payload: unknown): string | null {
+  if (payload && typeof payload === 'object') {
+    const sid = (payload as Record<string, unknown>).sessionId;
+    if (typeof sid === 'string' && sid.length > 0) return sid;
+  }
+  return null;
 }
 
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
@@ -924,10 +949,15 @@ export function enqueueMessage(type: string, payload: unknown): 'queued' | false
   if (!maxAge) return false;
   if (_ctx.messageQueue.length >= QUEUE_MAX_SIZE) {
     // #5633: the queue is full — the 11th+ message would otherwise be dropped
-    // silently with sendInput still reporting nothing actionable. Tell the user.
+    // silently with sendInput still reporting nothing actionable. Tell the user,
+    // in the transcript the dropped action belonged to (not just whatever's
+    // active now), and with action-aware copy so an overflowed `interrupt`
+    // isn't called a "message".
     console.warn(`[queue] Queue full (${QUEUE_MAX_SIZE}) — dropping ${type}`);
+    const noun = type === 'interrupt' ? 'interrupt' : 'message';
     notifyQueueFailure(
-      `Couldn't queue your message — too many pending while disconnected (max ${QUEUE_MAX_SIZE}). Please resend after reconnecting.`,
+      `Couldn't ${type === 'interrupt' ? 'deliver' : 'queue'} your ${noun} — too many pending while disconnected (max ${QUEUE_MAX_SIZE}). Please resend after reconnecting.`,
+      payloadSessionId(payload),
     );
     return false;
   }
@@ -953,11 +983,23 @@ export function drainMessageQueue(socket: WebSocket): void {
   // Surface any expired entry so the user knows it didn't land.
   if (expired.length > 0) {
     console.warn(`[queue] Dropping ${expired.length} expired queued message(s) on drain`);
-    const hadInterrupt = expired.some((m) => m.type === 'interrupt');
-    if (hadInterrupt) {
-      notifyQueueFailure('Your interrupt expired before reconnecting and was not sent — tap Stop again if still needed.');
-    } else {
-      notifyQueueFailure('A queued message expired before reconnecting and was not sent — please resend.');
+    // #5633: route each expiry notice to the session the dropped action
+    // belonged to (the queued payload's `sessionId`) — if the user switched
+    // sessions while reconnecting, the notice must land in the transcript they
+    // were typing into, not the one now active.
+    const expiredInterrupt = expired.find((m) => m.type === 'interrupt');
+    if (expiredInterrupt) {
+      notifyQueueFailure(
+        'Your interrupt expired before reconnecting and was not sent — tap Stop again if still needed.',
+        payloadSessionId(expiredInterrupt.payload),
+      );
+    }
+    const expiredOther = expired.find((m) => m.type !== 'interrupt');
+    if (expiredOther) {
+      notifyQueueFailure(
+        'A queued message expired before reconnecting and was not sent — please resend.',
+        payloadSessionId(expiredOther.payload),
+      );
     }
   }
 
