@@ -587,6 +587,12 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
       slashCommands,
       agents,
       ...(info.sessionId ? { sessionId: info.sessionId } : {}),
+      // #5555 (sub-item 7): the live public tunnel URL, so a reconnecting
+      // client re-learns it on every connect — durable recovery for the case
+      // where a quick-tunnel rotation happened while the client was offline
+      // and it could not receive the live `tunnel_url_changed` push. Omitted
+      // for LAN / no-tunnel deployments (tunnelUrl is null).
+      ...(ctx.tunnelUrl ? { tunnelUrl: ctx.tunnelUrl } : {}),
     })
   }).catch(err => {
     // Defensive: Promise.all here can only reject if one of the .catch handlers

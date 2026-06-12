@@ -887,6 +887,44 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(boot, 'sessionId'), false)
   })
 
+  it('#5555 (sub-item 7): includes tunnelUrl when ctx.tunnelUrl is set', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      fileOps: makeFakeFileOps([], []),
+      tunnelUrl: 'wss://abc.trycloudflare.com',
+    })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.ok(boot)
+    assert.equal(boot.tunnelUrl, 'wss://abc.trycloudflare.com')
+  })
+
+  it('#5555 (sub-item 7): omits tunnelUrl for a LAN / no-tunnel server', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+    ])
+    const ws = makeFakeWs()
+    // ctx.tunnelUrl unset → null → field omitted.
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-1', fileOps: makeFakeFileOps([], []) })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.ok(boot)
+    assert.equal(Object.prototype.hasOwnProperty.call(boot, 'tunnelUrl'), false)
+  })
+
   it('ships empty lists when no fileOps is wired (graceful degrade)', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },

@@ -1716,6 +1716,40 @@ export const ServerAuthBootstrapSchema = z.object({
     // The active session id this burst was scoped to, when applicable. Lets a
     // client ignore a stale burst if it has already switched sessions.
     sessionId: z.string().optional(),
+    // #5555 (sub-item 7) — the server's current public tunnel URL as a `wss://`
+    // endpoint, when a tunnel is up. Carried in every connect-time bootstrap so a
+    // reconnecting client always re-learns the live URL (covers the case where a
+    // quick-tunnel rotation happened while the client was offline and it could
+    // not receive the live `tunnel_url_changed` push). Absent in LAN / no-tunnel
+    // deployments. Never a secret — the QR code already shares this URL.
+    tunnelUrl: z.string().optional(),
+}).passthrough();
+// #5555 (sub-item 7) — quick-tunnel recovery rotates the public URL. The
+// server pushes this to every connected client so they can update the stored
+// endpoint their reconnect path dials instead of hammering the dead URL.
+//
+// TIMING / BEST-EFFORT: when the tunnel URL rotates, tunnel-connected clients
+// are reaching the server THROUGH the old tunnel, which has just died — they
+// usually will NOT receive this frame (the socket is already gone). It is
+// genuinely best-effort for them; the durable recovery path for those clients
+// is `tunnelUrl` in the `auth_bootstrap` burst on their next reconnect. The
+// real beneficiaries are LAN-connected clients (desktop dashboard over
+// localhost, LAN clients) whose socket survives the rotation — they get the
+// fresh URL immediately and persist it.
+//
+// SECURITY: the tunnel URL is connection metadata, not a secret (it is shared
+// in the QR code), so it is broadcast to ALL authenticated clients including
+// pairing-bound ones — a bound client already knows the URL it connected to,
+// and a rotated URL is the same trust level. See
+// docs/security/bearer-token-authority.md.
+export const ServerTunnelUrlChangedSchema = z.object({
+    type: z.literal('tunnel_url_changed'),
+    // The new public endpoint as a `wss://` URL the client should dial on its
+    // next reconnect.
+    url: z.string(),
+    // The previous `wss://` URL, when known — lets a client match the rotation
+    // against a specific stored entry instead of guessing.
+    previousUrl: z.string().optional(),
 }).passthrough();
 export const ServerSkillsListSchema = z.object({
     type: z.literal('skills_list'),

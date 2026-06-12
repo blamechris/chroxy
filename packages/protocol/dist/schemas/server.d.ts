@@ -1849,6 +1849,12 @@ export declare const ServerAuthBootstrapSchema: z.ZodObject<{
         source: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
+    tunnelUrl: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+export declare const ServerTunnelUrlChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"tunnel_url_changed">;
+    url: z.ZodString;
+    previousUrl: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const ServerSkillsListSchema: z.ZodObject<{
     type: z.ZodLiteral<"skills_list">;
@@ -2251,6 +2257,7 @@ export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSess
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
 export type ServerAuthBootstrapMessage = z.infer<typeof ServerAuthBootstrapSchema>;
+export type ServerTunnelUrlChangedMessage = z.infer<typeof ServerTunnelUrlChangedSchema>;
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>;
 export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewriteSchema>;
 export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>;

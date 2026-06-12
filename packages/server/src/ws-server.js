@@ -305,7 +305,8 @@ function _isSecureRequest(req) {
  *   All session-scoped messages include a `sessionId` field for background sync.
  *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms, streamStallTimeoutMs = stream-stall recovery window in ms (0 = disabled) — #3760, #3905, #4477)
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
- *   { type: 'auth_bootstrap', providers, slashCommands, agents, sessionId? } — #5555: connect-time burst folding the provider/slash-command/agent lists so a new client skips its 3-request list_* round trip
+ *   { type: 'auth_bootstrap', providers, slashCommands, agents, sessionId?, tunnelUrl? } — #5555: connect-time burst folding the provider/slash-command/agent lists so a new client skips its 3-request list_* round trip; tunnelUrl re-advertises the live public URL (sub-item 7)
+ *   { type: 'tunnel_url_changed', url, previousUrl? } — #5555 (sub-item 7): quick-tunnel recovery rotated the public URL; clients repoint their stored endpoint. Best-effort for tunnel-connected clients (their socket rode the now-dead old tunnel); durable recovery is auth_bootstrap.tunnelUrl on reconnect
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
  *   { type: 'message',      ... }                     — parsed chat message
@@ -504,6 +505,12 @@ export class WsServer {
     // quick (trycloudflare) tunnel is configured.
     this._boundHost = undefined
     this._quickTunnelActive = false
+    // #5555 (sub-item 7): the server's current public tunnel URL as a `wss://`
+    // endpoint, set by server-cli once the tunnel is up and updated on a
+    // quick-tunnel URL rotation. Surfaced in the auth_bootstrap burst so a
+    // reconnecting client always re-learns the live URL. `null` for LAN /
+    // no-tunnel deployments.
+    this._tunnelUrl = null
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
     // #3996: name each limiter so eviction logs and /diagnostics
@@ -792,6 +799,11 @@ export class WsServer {
       // letting the client skip its 3-request connect-time round trip.
       get fileOps() { return self._fileOps },
       get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+      // #5555 (sub-item 7): the current public tunnel URL (wss://), folded into
+      // the auth_bootstrap burst so a reconnecting client always re-learns the
+      // live URL — the durable recovery path when a quick-tunnel rotation
+      // happened while the client was offline. null for LAN / no-tunnel.
+      get tunnelUrl() { return self._tunnelUrl },
     }
     this._authCtx = {
       get clients() { return self.clients },
@@ -1245,6 +1257,53 @@ export class WsServer {
    */
   setQuickTunnelActive(active) {
     this._quickTunnelActive = !!active
+  }
+
+  /**
+   * #5555 (sub-item 7): record the server's current public tunnel URL as a
+   * `wss://` endpoint. Called by server-cli once the tunnel is up (and on a
+   * URL rotation via broadcastTunnelUrlChanged). Surfaced in the
+   * auth_bootstrap burst so a reconnecting client always re-learns the live
+   * URL — the durable recovery path when a rotation happened while the client
+   * was offline. Pass `null` to clear (no tunnel).
+   * @param {string|null} wsUrl
+   */
+  setTunnelUrl(wsUrl) {
+    this._tunnelUrl = wsUrl || null
+  }
+
+  /** #5555 (sub-item 7): the current `wss://` tunnel URL, or null. */
+  get tunnelUrl() {
+    return this._tunnelUrl
+  }
+
+  /**
+   * #5555 (sub-item 7): a quick-tunnel recovery rotated the public URL. Record
+   * the new URL (so reconnecting clients get it via auth_bootstrap) and push a
+   * `tunnel_url_changed` frame to every authenticated client so they can
+   * update the stored endpoint their reconnect path dials.
+   *
+   * BEST-EFFORT for tunnel-connected clients: they reach the server THROUGH
+   * the old tunnel, which has just died, so the push usually will not arrive —
+   * their durable recovery is the auth_bootstrap `tunnelUrl` on next connect.
+   * LAN-connected clients (localhost dashboard, LAN clients) keep their socket
+   * across the rotation and get the new URL immediately.
+   *
+   * SECURITY: the tunnel URL is connection metadata, not a secret (the QR code
+   * shares it), so it goes to ALL authenticated clients including
+   * pairing-bound ones — see docs/security/bearer-token-authority.md.
+   *
+   * @param {string} newWsUrl  the new `wss://` endpoint
+   * @param {string|null} [previousWsUrl]  the prior `wss://` endpoint, if known
+   */
+  broadcastTunnelUrlChanged(newWsUrl, previousWsUrl = null) {
+    if (!newWsUrl) return
+    this.setTunnelUrl(newWsUrl)
+    this._broadcast({
+      type: 'tunnel_url_changed',
+      url: newWsUrl,
+      ...(previousWsUrl ? { previousUrl: previousWsUrl } : {}),
+    })
   }
 
   /**

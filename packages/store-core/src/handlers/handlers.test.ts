@@ -66,6 +66,7 @@ import {
   handleAgentList,
   handleProviderList,
   handleAuthBootstrap,
+  handleTunnelUrlChanged,
   handleFileList,
   handleDiffResult,
   handleGitStatusResult,
@@ -3524,7 +3525,7 @@ describe('handleAuthBootstrap', () => {
     const agents = [{ name: 'reviewer', source: 'project' }]
     expect(
       handleAuthBootstrap({ type: 'auth_bootstrap', providers, slashCommands, agents, sessionId: 'sess-1' }),
-    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1' })
+    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1', tunnelUrl: null })
   })
 
   it('defaults each missing list to [] and sessionId to null', () => {
@@ -3533,18 +3534,59 @@ describe('handleAuthBootstrap', () => {
       slashCommands: [],
       agents: [],
       sessionId: null,
+      tunnelUrl: null,
     })
   })
 
   it('coerces non-array lists to [] independently (partial-compute tolerance)', () => {
     expect(
       handleAuthBootstrap({ providers: [{ name: 'x' }], slashCommands: 'oops', agents: null }),
-    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null })
+    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null, tunnelUrl: null })
   })
 
   it('treats empty/non-string sessionId as null', () => {
     expect(handleAuthBootstrap({ sessionId: '' }).sessionId).toBeNull()
     expect(handleAuthBootstrap({ sessionId: 42 as unknown as string }).sessionId).toBeNull()
+  })
+
+  it('#5555 (sub-item 7): extracts a wss tunnelUrl, else null', () => {
+    expect(handleAuthBootstrap({ tunnelUrl: 'wss://abc.trycloudflare.com' }).tunnelUrl).toBe(
+      'wss://abc.trycloudflare.com',
+    )
+    expect(handleAuthBootstrap({ tunnelUrl: '' }).tunnelUrl).toBeNull()
+    expect(handleAuthBootstrap({ tunnelUrl: 42 as unknown as string }).tunnelUrl).toBeNull()
+    expect(handleAuthBootstrap({}).tunnelUrl).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleTunnelUrlChanged (#5555 sub-item 7)
+// ---------------------------------------------------------------------------
+describe('handleTunnelUrlChanged', () => {
+  it('extracts url + previousUrl when both present', () => {
+    expect(
+      handleTunnelUrlChanged({
+        type: 'tunnel_url_changed',
+        url: 'wss://new.trycloudflare.com',
+        previousUrl: 'wss://old.trycloudflare.com',
+      }),
+    ).toEqual({ url: 'wss://new.trycloudflare.com', previousUrl: 'wss://old.trycloudflare.com' })
+  })
+
+  it('previousUrl defaults to null when missing or non-string', () => {
+    expect(handleTunnelUrlChanged({ url: 'wss://new.example' })).toEqual({
+      url: 'wss://new.example',
+      previousUrl: null,
+    })
+    expect(
+      handleTunnelUrlChanged({ url: 'wss://new.example', previousUrl: 42 as unknown as string })!.previousUrl,
+    ).toBeNull()
+  })
+
+  it('returns null when url is missing or non-string (caller skips the apply)', () => {
+    expect(handleTunnelUrlChanged({ type: 'tunnel_url_changed' })).toBeNull()
+    expect(handleTunnelUrlChanged({ url: '' })).toBeNull()
+    expect(handleTunnelUrlChanged({ url: 99 as unknown as string })).toBeNull()
   })
 })
 

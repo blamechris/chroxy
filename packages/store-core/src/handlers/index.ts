@@ -2611,12 +2611,45 @@ export function handleProviderList(
  */
 export function handleAuthBootstrap(
   msg: Record<string, unknown>,
-): { providers: unknown[]; slashCommands: unknown[]; agents: unknown[]; sessionId: string | null } {
+): {
+  providers: unknown[]
+  slashCommands: unknown[]
+  agents: unknown[]
+  sessionId: string | null
+  tunnelUrl: string | null
+} {
   const providers: unknown[] = Array.isArray(msg.providers) ? (msg.providers as unknown[]) : []
   const slashCommands: unknown[] = Array.isArray(msg.slashCommands) ? (msg.slashCommands as unknown[]) : []
   const agents: unknown[] = Array.isArray(msg.agents) ? (msg.agents as unknown[]) : []
   const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null
-  return { providers, slashCommands, agents, sessionId }
+  // #5555 (sub-item 7): the server's live public tunnel URL, when a tunnel is
+  // up. Lets a reconnecting client re-learn a URL that rotated while it was
+  // offline. Absent in LAN / no-tunnel deployments.
+  const tunnelUrl = typeof msg.tunnelUrl === 'string' && msg.tunnelUrl ? msg.tunnelUrl : null
+  return { providers, slashCommands, agents, sessionId, tunnelUrl }
+}
+
+/**
+ * #5555 (sub-item 7) — parse a `tunnel_url_changed` push (quick-tunnel URL
+ * rotation). Returns the new `wss://` URL and the previous URL (when the server
+ * knew it), or null when the payload is malformed so the caller skips it.
+ *
+ * The tunnel URL is connection metadata, not a secret (the QR code shares it),
+ * so this is delivered to every authenticated client. Both clients apply it the
+ * same way conceptually — repoint the stored endpoint their reconnect path
+ * dials — but the STORAGE differs per platform (mobile: SecureStore-backed
+ * SavedConnection.tunnelUrl; dashboard: the server-registry entry's wsUrl in
+ * localStorage), so the apply step stays platform-local rather than living in
+ * the shared dispatch table.
+ */
+export function handleTunnelUrlChanged(
+  msg: Record<string, unknown>,
+): { url: string; previousUrl: string | null } | null {
+  const url = typeof msg.url === 'string' && msg.url ? msg.url : null
+  if (!url) return null
+  const previousUrl =
+    typeof msg.previousUrl === 'string' && msg.previousUrl ? msg.previousUrl : null
+  return { url, previousUrl }
 }
 
 /**
