@@ -790,18 +790,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Used by the auto-reconnect paths (saved-connection load, app resume, network
   // change). The manual paths (QR scan, ServerPicker, manual entry) keep calling
   // `connect()` directly so an explicit user choice is never second-guessed.
-  connectAuto: async (saved: SavedConnection, options?: { silent?: boolean; preferTunnel?: boolean }) => {
+  connectAuto: async (
+    saved: SavedConnection,
+    options?: { silent?: boolean; preferTunnel?: boolean; force?: boolean },
+  ) => {
     const selection = await selectConnectEndpoint(saved, { preferTunnel: options?.preferTunnel });
     console.log(`[ws] Endpoint selected: ${selection.path} (${selection.url})`);
     // No-op when the chosen endpoint matches the live connection. Without this
     // guard a network-change event that re-selects the *same* path (LAN probe
     // still answers, or no LAN candidate so it stays on the tunnel) would tear
     // down a healthy socket and re-handshake, disrupting an active session.
+    //
+    // #5633: the resume zombie-socket path (Case 0) passes `force: true` to skip
+    // ONLY this guard. There the socket claims OPEN and the URL is unchanged
+    // (tunnel fallback has no health probe), so all three conditions hold and we
+    // would no-op — leaving the dead socket in place, the exact failure the
+    // liveness fix targets. We still run selectConnectEndpoint above so the
+    // endpoint re-resolution (LAN→tunnel fallback, tunnel rotation) is preserved;
+    // we just don't let an unchanged URL short-circuit the forced reconnect.
     const { socket } = get();
     const currentUrl = useConnectionLifecycleStore.getState().wsUrl;
     const connected =
       useConnectionLifecycleStore.getState().connectionPhase === 'connected';
     if (
+      !options?.force &&
       connected &&
       socket &&
       socket.readyState === WebSocket.OPEN &&
@@ -2215,7 +2227,13 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
       );
       _lastResumeReconnectAt = now;
       if (savedConnection?.url && savedConnection?.token) {
-        void useConnectionStore.getState().connectAuto(savedConnection);
+        // #5633: force past connectAuto's "already connected to this URL" no-op
+        // guard. The socket claims OPEN and the tunnel URL is unchanged, so
+        // without `force` connectAuto would short-circuit and never tear down the
+        // zombie socket — making this whole liveness path a no-op. connect()
+        // (called inside connectAuto) still bumps the attempt id and neuters +
+        // closes the old socket before opening the new one.
+        void useConnectionStore.getState().connectAuto(savedConnection, { force: true });
       } else {
         useConnectionStore.getState().connect(wsUrl, apiToken);
       }
