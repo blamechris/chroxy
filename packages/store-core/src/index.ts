@@ -604,3 +604,25 @@ export type {
   DispatchMessageMap,
   DispatchMessageType,
 } from './dispatch-table'
+
+// epic #5556, sub-item 4: shared client connect-flow orchestration. Owns the
+// retry-ladder math, the probe → restart → connect decision tree, and the
+// per-socket reconnect dedup that the app and dashboard hand-copied into two
+// drifting `connect()` orchestrations. Each client supplies its store
+// writes / give-up UX / pairing wiring as callbacks. The `resolveEndpoint`
+// callback is the #5597/#5537 LAN/tunnel re-resolution seam (static today).
+export {
+  runConnectAttempt,
+  createReconnectScheduler,
+  retryDelayForAttempt,
+  CONNECT_MAX_RETRIES,
+  CONNECT_RETRY_DELAYS,
+} from './connect-flow'
+export type {
+  ProbeResult,
+  ConnectEndpoint,
+  ConnectFlowScheduler,
+  RunConnectAttemptOptions,
+  CreateReconnectSchedulerOptions,
+  ReconnectScheduler,
+} from './connect-flow'
