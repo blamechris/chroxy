@@ -23,7 +23,12 @@
  */
 import React from 'react';
 import { create, act, ReactTestRenderer } from 'react-test-renderer';
-import { TerminalView, TerminalHandle } from '../../components/TerminalView';
+import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
+import {
+  TerminalView,
+  TerminalHandle,
+  shouldAllowTerminalNavigation,
+} from '../../components/TerminalView';
 
 interface MockWebViewInstance {
   postMessage: jest.Mock;
@@ -169,5 +174,94 @@ describe('TerminalView postMessage bridge (#5519)', () => {
     // clear() emptied the pending buffer; nothing to flush, and clear() before
     // ready does not post (matches existing semantics).
     expect(wv.postMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('TerminalView navigation allow-list (#5645)', () => {
+  // The xterm document loads from an inline `source={{ html }}` with no baseUrl,
+  // so RN WebView reports the document URL as `about:blank` (or '' in some
+  // lifecycle phases). The crash-recovery reload() reloads that same document.
+  // Only those requests may proceed; any other navigation is blocked.
+  function makeRequest(
+    overrides: Partial<ShouldStartLoadRequest>,
+  ): ShouldStartLoadRequest {
+    return {
+      url: '',
+      navigationType: 'other',
+      title: '',
+      loading: false,
+      canGoBack: false,
+      canGoForward: false,
+      lockIdentifier: 0,
+      ...overrides,
+    } as ShouldStartLoadRequest;
+  }
+
+  it('allows the initial inline document load (about:blank)', () => {
+    expect(
+      shouldAllowTerminalNavigation(
+        makeRequest({ url: 'about:blank', navigationType: 'other' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('allows an empty-url inline load (iOS lifecycle phase)', () => {
+    expect(
+      shouldAllowTerminalNavigation(makeRequest({ url: '' })),
+    ).toBe(true);
+  });
+
+  it('allows the crash-recovery reload of the inline document', () => {
+    expect(
+      shouldAllowTerminalNavigation(
+        makeRequest({ url: 'about:blank', navigationType: 'reload' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('blocks an external https navigation (server-controlled ANSI / link tap)', () => {
+    expect(
+      shouldAllowTerminalNavigation(
+        makeRequest({ url: 'https://evil.example', navigationType: 'click' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('blocks http, data:, and deep-link navigations', () => {
+    expect(
+      shouldAllowTerminalNavigation(makeRequest({ url: 'http://evil.example' })),
+    ).toBe(false);
+    expect(
+      shouldAllowTerminalNavigation(
+        makeRequest({ url: 'data:text/html,<script>alert(1)</script>' }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldAllowTerminalNavigation(makeRequest({ url: 'chroxy://pair?token=x' })),
+    ).toBe(false);
+  });
+
+  it('wires the guard onto the WebView with a narrowed originWhitelist', () => {
+    const handleRef = React.createRef<TerminalHandle>();
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<TerminalView ref={handleRef} />);
+    });
+    const webView = renderer.root.findByProps({ testID: 'webview' });
+    expect(webView.props.originWhitelist).toEqual(['about:*']);
+    expect(webView.props.onShouldStartLoadWithRequest).toBe(
+      shouldAllowTerminalNavigation,
+    );
+    // The guard, as wired, blocks an external nav and allows the inline doc.
+    expect(
+      webView.props.onShouldStartLoadWithRequest(
+        makeRequest({ url: 'https://evil.example' }),
+      ),
+    ).toBe(false);
+    expect(
+      webView.props.onShouldStartLoadWithRequest(
+        makeRequest({ url: 'about:blank' }),
+      ),
+    ).toBe(true);
   });
 });

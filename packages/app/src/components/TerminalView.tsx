@@ -1,8 +1,43 @@
 import React, { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState, useEffect } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { buildXtermHtml } from './xterm-html';
 import { COLORS } from '../constants/colors';
+
+/**
+ * Navigation allow-list for the embedded xterm WebView (#5645).
+ *
+ * The terminal is rendered from an inline `source={{ html }}` document with no
+ * `baseUrl`. RN WebView's native code falls back to `about:blank` as the base
+ * URL on iOS (RNCWebViewImpl.m: `loadHTMLString:baseURL:about:blank`) and loads
+ * via `loadDataWithBaseURL("", ...)` on Android — so the document's request URL
+ * is reported as `about:blank` (iOS) or the empty string (Android). That
+ * document is purely display-only — it never navigates. The crash-recovery
+ * `reload()` path simply re-loads the *same* inline document, which again
+ * surfaces as `about:blank` / `''`.
+ *
+ * Defense-in-depth: server-controlled ANSI (or a future xterm web-links addon /
+ * regression) must never be able to trigger a navigation away from that
+ * document. So we allow ONLY the inline document load (and its reload) and block
+ * everything else — http/https, link taps, data: URLs, deep links, etc.
+ *
+ * `originWhitelist` is narrowed to `['about:*']` (the inline document's origin)
+ * from the previous `['*']`. The two are complementary: `originWhitelist` is a
+ * coarse origin filter applied before the callback; `onShouldStartLoadWithRequest`
+ * is the precise per-request gate.
+ */
+function isInlineDocumentRequest(request: ShouldStartLoadRequest): boolean {
+  // An inline `source={{ html }}` with no baseUrl resolves to `about:blank`.
+  // Some RN WebView lifecycle/platform combinations report it as an empty
+  // string; treat both as the legitimate initial/reload document load.
+  const url = request.url ?? '';
+  return url === '' || url === 'about:blank' || url.startsWith('about:');
+}
+
+export function shouldAllowTerminalNavigation(request: ShouldStartLoadRequest): boolean {
+  return isInlineDocumentRequest(request);
+}
 
 // -- Public handle --
 
@@ -115,7 +150,10 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         ref={webViewRef}
         source={{ html }}
         style={styles.container}
-        originWhitelist={['*']}
+        // Containment (#5645): only the inline xterm document may load; block
+        // any server-/ANSI-triggered navigation. See shouldAllowTerminalNavigation.
+        originWhitelist={['about:*']}
+        onShouldStartLoadWithRequest={shouldAllowTerminalNavigation}
         onMessage={handleMessage}
         onContentProcessDidTerminate={handleWebViewCrash}
         onRenderProcessGone={handleWebViewCrash}
