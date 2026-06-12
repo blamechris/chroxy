@@ -38,9 +38,7 @@ import { InputBar, type InputBarHandle } from '../components/InputBar';
 import { ActivityIndicator } from '../components/ActivityIndicator';
 import { CheckInChip } from '../components/CheckInChip';
 import { FileBrowser } from '../components/FileBrowser';
-import { DiffViewer } from '../components/DiffViewer';
-import { CheckpointView } from '../components/CheckpointView';
-import { GitView } from '../components/GitView';
+import { SessionPanels } from '../components/SessionPanels';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
@@ -56,6 +54,7 @@ import type { RootStackParamList } from '../App';
 import { Icon } from '../components/Icon';
 import { COLORS } from '../constants/colors';
 import { useLayout } from '../hooks/useLayout';
+import { useSessionViewState } from '../hooks/useSessionViewState';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import { useDictationComposer } from '../hooks/useDictationComposer';
 import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
@@ -157,17 +156,22 @@ export function SessionScreen() {
   const lastResultDuration = useConnectionStore(selectLastResultDuration);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
 
-  // Chat filter: 'all' shows everything, 'compact' hides tool_use and thinking
-  const [chatFilterCompact, setChatFilterCompact] = useState(false);
-
-  // Reset compact filter when switching sessions
-  const prevSessionRef = React.useRef(activeSessionId);
-  React.useEffect(() => {
-    if (activeSessionId !== prevSessionRef.current) {
-      prevSessionRef.current = activeSessionId;
-      setChatFilterCompact(false);
-    }
-  }, [activeSessionId]);
+  // #5654 — view-mode / panel-visibility state (chat compact filter and the
+  // three modal panels) is owned by useSessionViewState. The compact-filter
+  // reset-on-session-switch effect lives inside the hook.
+  const {
+    chatFilterCompact,
+    setChatFilterCompact,
+    showDiffViewer,
+    setShowDiffViewer,
+    showCheckpoints,
+    setShowCheckpoints,
+    showGitView,
+    setShowGitView,
+    closeDiffViewer,
+    closeCheckpoints,
+    closeGitView,
+  } = useSessionViewState({ activeSessionId });
 
   // Filter messages: exclude system (separate tab) and optionally tool_use/thinking (compact mode)
   const chatMessages = useMemo(
@@ -362,9 +366,9 @@ export function SessionScreen() {
   const setTerminalWriteCallback = useConnectionStore((s) => s.setTerminalWriteCallback);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showDiffViewer, setShowDiffViewer] = useState(false);
-  const [showCheckpoints, setShowCheckpoints] = useState(false);
-  const [showGitView, setShowGitView] = useState(false);
+  // #5654 — showDiffViewer / showCheckpoints / showGitView and chatFilterCompact
+  // come from useSessionViewState. The layout-chrome toggles (showMoreTools,
+  // showSessionOverview, settingsExpanded) are plain local useState here.
   const [showMoreTools, setShowMoreTools] = useState(false);
   const [showSessionOverview, setShowSessionOverview] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
@@ -1536,22 +1540,14 @@ export function SessionScreen() {
         onClose={() => setShowCreateModal(false)}
       />
 
-      {/* Diff viewer modal */}
-      <DiffViewer
-        visible={showDiffViewer}
-        onClose={() => setShowDiffViewer(false)}
-      />
-
-      {/* Checkpoint timeline modal */}
-      <CheckpointView
-        visible={showCheckpoints}
-        onClose={() => setShowCheckpoints(false)}
-      />
-
-      {/* Git view modal */}
-      <GitView
-        visible={showGitView}
-        onClose={() => setShowGitView(false)}
+      {/* Secondary modal panels (#5654): diff viewer, checkpoints, git view */}
+      <SessionPanels
+        showDiffViewer={showDiffViewer}
+        onCloseDiffViewer={closeDiffViewer}
+        showCheckpoints={showCheckpoints}
+        onCloseCheckpoints={closeCheckpoints}
+        showGitView={showGitView}
+        onCloseGitView={closeGitView}
       />
 
       {/* Attachment picker bottom sheet */}
