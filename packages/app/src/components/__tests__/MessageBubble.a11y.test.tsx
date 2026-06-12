@@ -102,6 +102,12 @@ describe('MessageBubble accessibility (#5634)', () => {
     // Empty input → Send is disabled.
     expect(send.props.accessibilityState).toEqual({ disabled: true });
 
+    // Cancel carries the same button role and an explicit label so a
+    // screen-reader user can back out of the freeform response.
+    const cancel = tree.root.findByProps({ testID: 'approval-freetext-cancel' });
+    expect(cancel.props.accessibilityRole).toBe('button');
+    expect(cancel.props.accessibilityLabel).toBe('Cancel response');
+
     // After typing, Send is no longer disabled.
     const inputs = tree.root.findAllByProps({ testID: 'approval-freetext-input' });
     act(() => {

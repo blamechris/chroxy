@@ -967,7 +967,8 @@ export function SessionScreen() {
               style={[styles.modeButton, chatFilterCompact && styles.modeButtonActive]}
               onPress={() => { setChatFilterCompact((v) => !v); clearSelection(); }}
               accessibilityRole="button"
-              accessibilityLabel={chatFilterCompact ? 'Show all messages' : 'Show chat only'}
+              accessibilityLabel={chatFilterCompact ? 'Compact messages' : 'All messages'}
+              accessibilityHint={chatFilterCompact ? 'Show all messages' : 'Show compact messages only'}
               accessibilityState={{ selected: chatFilterCompact }}
             >
               <Text style={[styles.modeButtonText, chatFilterCompact && styles.modeButtonTextActive]}>

@@ -525,6 +525,7 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
             accessibilityRole="button"
             // #5634 — cancel the freeform response and return to the options.
             accessibilityLabel="Cancel response"
+            testID="approval-freetext-cancel"
             onPress={() => {
               setOtherActive(false);
               setOtherText('');
