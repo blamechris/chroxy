@@ -342,6 +342,62 @@ describe('shared dispatch table', () => {
     })
   })
 
+  describe('agent_event', () => {
+    it('appends a child event to the parent Task tool_use bubble', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [
+              { type: 'tool_use', toolUseId: 'parent-1' } as unknown as ChatMessage,
+            ],
+          },
+        },
+      })
+      dispatch(env, {
+        type: 'agent_event',
+        sessionId: 's1',
+        parentToolUseId: 'parent-1',
+        eventType: 'tool_start',
+        payload: { name: 'Read' },
+      })
+      const parent = env.sessions.s1.messages[0] as unknown as {
+        childAgentEvents?: { type: string; payload: Record<string, unknown> }[]
+      }
+      expect(parent.childAgentEvents).toEqual([{ type: 'tool_start', payload: { name: 'Read' } }])
+    })
+
+    it('same-reference no-op when the parent bubble is not present', () => {
+      const original = [
+        { type: 'tool_use', toolUseId: 'other' } as unknown as ChatMessage,
+      ]
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: original } },
+      })
+      dispatch(env, {
+        type: 'agent_event',
+        sessionId: 's1',
+        parentToolUseId: 'missing',
+        eventType: 'tool_start',
+        payload: {},
+      })
+      // No parent match → builder returns the same array reference → the
+      // dispatch wrapper patches nothing, so the slot is untouched.
+      expect(env.sessions.s1.messages).toBe(original)
+    })
+
+    it('no-ops when the session is not present locally', () => {
+      const env = makeAdapter({ activeSessionId: 'gone' })
+      dispatch(env, {
+        type: 'agent_event',
+        parentToolUseId: 'p',
+        eventType: 'tool_start',
+        payload: {},
+      })
+      expect(Object.keys(env.sessions)).toHaveLength(0)
+    })
+  })
+
   describe('background_work_changed', () => {
     it('replaces the pending-background-shells snapshot for the session', () => {
       const env = makeAdapter({

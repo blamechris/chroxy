@@ -167,7 +167,12 @@ describe('message-handler.ts — notification_prefs WS message (#4542 / #5556 sl
   });
 
   it('no longer has an inline notification_prefs switch case', () => {
-    expect(messageHandlerSource).not.toMatch(/case 'notification_prefs'\s*:\s*\{/);
+    // Reject any reintroduced `case 'notification_prefs':` regardless of
+    // whether it opens a block on the same line (this file mixes braced and
+    // unbraced switch-case styles, so an unbraced reintroduction must also
+    // fail). The migration marker comment doesn't contain the quoted
+    // `case '...'` form, so it can't trigger a false positive.
+    expect(messageHandlerSource).not.toMatch(/case 'notification_prefs'\s*:/);
   });
 
   it('routes notification_prefs through the shared dispatch table', () => {
