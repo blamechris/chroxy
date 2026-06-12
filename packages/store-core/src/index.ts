@@ -624,6 +624,9 @@ export type {
   DispatchHandler,
   DispatchMessageMap,
   DispatchMessageType,
+  // #5653 — file-ops / git wrapper-case adapter surface.
+  DispatchCallbackName,
+  DispatchCallbackPayload,
 } from './dispatch-table'
 
 // epic #5556, sub-item 4: shared client connect-flow orchestration. Owns the

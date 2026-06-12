@@ -51,6 +51,14 @@ export interface AdapterResult {
   flat: Record<string, unknown>
   /** Messages pushed via `addMessage`, in order. */
   added: ChatMessage[]
+  /**
+   * Imperative callbacks the table invoked, in order (#5653). Only the APP
+   * adapter records these — it opts into `getCallback`; the dashboard adapter
+   * has no `getCallback`, so the file-ops / git cases DECLINE there and never
+   * reach a callback (the dashboard handles them in its local switch). An empty
+   * array on the dashboard side IS the contract for those cases.
+   */
+  callbacks: Array<{ name: string; payload: unknown }>
 }
 
 /** Which client an adapter models — drives the `updateSession` divergence. */
@@ -88,6 +96,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   let sessionList: SessionInfo[] = init?.sessionList ?? []
   const flat: Record<string, unknown> = {}
   const added: ChatMessage[] = []
+  const callbacks: Array<{ name: string; payload: unknown }> = []
 
   // Reproduce each client's real `updateSession`. Both share the
   // "no-op on missing session / empty patch" guard; they diverge only in the
@@ -119,12 +128,23 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     setState: (patch) => Object.assign(flat, patch),
     addMessage: (m) => added.push(m),
     getSessions: () => sessionList,
+    // #5653 — only the APP opts its imperative-callback registry into the table.
+    // Model it as "a callback IS registered for every channel" so the contract
+    // can observe the invocation + payload. The DASHBOARD omits `getCallback`
+    // entirely (no spread below), so the file-ops / git cases DECLINE there.
+    ...(kind === 'app'
+      ? {
+          getCallback: ((name: string) => (payload: unknown) => {
+            callbacks.push({ name, payload })
+          }) as ClientStoreAdapter<FixtureSession>['getCallback'],
+        }
+      : {}),
   }
 
   return {
     adapter,
     get result(): AdapterResult {
-      return { sessions, flat, added }
+      return { sessions, flat, added, callbacks }
     },
     setActive: (id: string | null) => {
       activeSessionId = id

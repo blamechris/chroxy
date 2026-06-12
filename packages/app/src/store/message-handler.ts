@@ -88,10 +88,8 @@ import {
   // Zod parse now routes through the shared handleNotificationPrefs.
   // #5454 — pure core of the #554 stream-split block (permission_request)
   resolvePermissionStreamSplit,
-  handleDirectoryListing as sharedDirectoryListing,
-  handleFileListing as sharedFileListing,
-  handleFileContent as sharedFileContent,
-  handleWriteFileResult as sharedWriteFileResult,
+  // directory_listing / file_listing / file_content / write_file_result —
+  // migrated to the shared dispatch table (#5556 slice 3 / #5653).
   buildSessionListPatches as sharedBuildSessionListPatches,
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
   chunkSubscribeSessionIds as sharedChunkSubscribeSessionIds,
@@ -106,11 +104,9 @@ import {
   handleProviderList as sharedProviderList,
   handleAuthBootstrap as sharedAuthBootstrap,
   handleTunnelUrlChanged as sharedTunnelUrlChanged,
-  handleDiffResult as sharedDiffResult,
-  handleGitStatusResult as sharedGitStatusResult,
-  handleGitBranchesResult as sharedGitBranchesResult,
-  handleGitStageResult as sharedGitStageResult,
-  handleGitCommitResult as sharedGitCommitResult,
+  // diff_result / git_status_result / git_branches_result / git_stage_result /
+  // git_unstage_result / git_commit_result — migrated to the shared dispatch
+  // table (#5556 slice 3 / #5653).
   // agent_spawned / agent_completed / agent_event / background_work_changed /
   // mcp_servers / session_usage / web_task_list / web_feature_status migrated
   // to the shared dispatch table (#5556 slice 2)
@@ -144,7 +140,12 @@ import {
   createDispatchTable,
   runDispatch,
 } from '@chroxy/store-core';
-import type { DeltaFlusher, ClientStoreAdapter } from '@chroxy/store-core';
+import type {
+  DeltaFlusher,
+  ClientStoreAdapter,
+  DispatchCallbackName,
+  DispatchCallbackPayload,
+} from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
 import type {
@@ -153,8 +154,6 @@ import type {
   ConnectionContext,
   ConnectionState,
   CustomAgent,
-  DirectoryEntry,
-  FileEntry,
   QueuedMessage,
   ServerError,
   SessionInfo,
@@ -169,6 +168,7 @@ import { createEmptySessionState } from './utils';
 import { deriveActivityState } from './session-activity';
 import { clearPersistedSession, persistLastConversationId, loadLastConversationId } from './persistence';
 import { getCallback } from './imperative-callbacks';
+import type { CallbackName } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
 import { useCostStore } from './cost';
@@ -1088,6 +1088,17 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   setState: (patch) => getStore().setState(patch as Partial<ConnectionState>),
   addMessage: (m) => getStore().getState().addMessage(m),
   getSessions: () => getStore().getState().sessions,
+  // #5653 — file-ops / git wrapper cases route through the shared dispatch
+  // table; the app supplies its module-level imperative-callback registry so
+  // the parsed payload reaches the UI's registered callback exactly as the
+  // prior `getCallback(name) → shared*(msg) → cb(...)` switch arms did. The
+  // store-core handler narrows to a loose `(payload) => void`; the registered
+  // callback's concrete type (e.g. `(listing: DirectoryListing) => void`) is
+  // structurally compatible since the parsed payload is a superset.
+  getCallback: (name: DispatchCallbackName) =>
+    getCallback(name as CallbackName) as
+      | ((payload: DispatchCallbackPayload) => void)
+      | null,
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -3025,97 +3036,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'directory_listing': {
-      const cb = getCallback('directoryListing');
-      if (cb) {
-        const payload = sharedDirectoryListing(msg);
-        cb({ ...payload, entries: payload.entries as DirectoryEntry[] });
-      }
-      break;
-    }
-
-    case 'file_listing': {
-      const fileBrowserCb = getCallback('fileBrowser');
-      if (fileBrowserCb) {
-        const payload = sharedFileListing(msg);
-        fileBrowserCb({ ...payload, entries: payload.entries as FileEntry[] });
-      }
-      break;
-    }
-
-    case 'file_content': {
-      const fileContentCb = getCallback('fileContent');
-      if (fileContentCb) {
-        fileContentCb(sharedFileContent(msg));
-      }
-      break;
-    }
-
-    case 'write_file_result': {
-      const fileWriteCb = getCallback('fileWrite');
-      if (fileWriteCb) {
-        fileWriteCb(sharedWriteFileResult(msg));
-      }
-      break;
-    }
-
-    case 'diff_result': {
-      const diffCb = getCallback('diff');
-      if (diffCb) {
-        const payload = sharedDiffResult(msg);
-        // payload arrays are now strongly typed from store-core (#3132).
-        diffCb({
-          files: payload.files,
-          error: payload.error,
-        });
-      }
-      break;
-    }
-
-    case 'git_status_result': {
-      const cb = getCallback('gitStatus');
-      if (cb) {
-        const payload = sharedGitStatusResult(msg);
-        cb({
-          branch: payload.branch,
-          staged: payload.staged,
-          unstaged: payload.unstaged,
-          untracked: payload.untracked,
-          error: payload.error,
-        });
-      }
-      break;
-    }
-
-    case 'git_branches_result': {
-      const cb = getCallback('gitBranches');
-      if (cb) {
-        const payload = sharedGitBranchesResult(msg);
-        cb({
-          branches: payload.branches,
-          currentBranch: payload.currentBranch,
-          error: payload.error,
-        });
-      }
-      break;
-    }
-
-    case 'git_stage_result':
-    case 'git_unstage_result': {
-      const cb = getCallback('gitStage');
-      if (cb) {
-        cb(sharedGitStageResult(msg));
-      }
-      break;
-    }
-
-    case 'git_commit_result': {
-      const cb = getCallback('gitCommit');
-      if (cb) {
-        cb(sharedGitCommitResult(msg));
-      }
-      break;
-    }
+    // directory_listing / file_listing / file_content / write_file_result /
+    // diff_result / git_status_result / git_branches_result / git_stage_result /
+    // git_unstage_result / git_commit_result — migrated to the shared dispatch
+    // table (#5556 slice 3 / #5653). Each was the same `getCallback(name) →
+    // shared*(msg) → cb(payload)` wrapper; the table now parses and invokes the
+    // imperative callback via `_dispatchAdapter.getCallback`.
 
     case 'slash_commands': {
       const slashResult = sharedSlashCommands(msg, get().activeSessionId);
