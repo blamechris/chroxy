@@ -156,19 +156,12 @@ export function SessionScreen() {
   const lastResultDuration = useConnectionStore(selectLastResultDuration);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
 
-  // #5654 — view-mode / panel-visibility state (chat compact filter, the
-  // secondary-tools row, session overview, settings-bar expansion, and the
+  // #5654 — view-mode / panel-visibility state (chat compact filter and the
   // three modal panels) is owned by useSessionViewState. The compact-filter
   // reset-on-session-switch effect lives inside the hook.
   const {
     chatFilterCompact,
     setChatFilterCompact,
-    showMoreTools,
-    setShowMoreTools,
-    showSessionOverview,
-    setShowSessionOverview,
-    settingsExpanded,
-    setSettingsExpanded,
     showDiffViewer,
     setShowDiffViewer,
     showCheckpoints,
@@ -373,9 +366,12 @@ export function SessionScreen() {
   const setTerminalWriteCallback = useConnectionStore((s) => s.setTerminalWriteCallback);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
-  // #5654 — showDiffViewer / showCheckpoints / showGitView / showMoreTools /
-  // showSessionOverview / settingsExpanded now come from useSessionViewState
-  // (destructured above).
+  // #5654 — showDiffViewer / showCheckpoints / showGitView and chatFilterCompact
+  // come from useSessionViewState. The layout-chrome toggles (showMoreTools,
+  // showSessionOverview, settingsExpanded) are plain local useState here.
+  const [showMoreTools, setShowMoreTools] = useState(false);
+  const [showSessionOverview, setShowSessionOverview] = useState(false);
+  const [settingsExpanded, setSettingsExpanded] = useState(false);
 
   // Search state
   const [searchVisible, setSearchVisible] = useState(false);
