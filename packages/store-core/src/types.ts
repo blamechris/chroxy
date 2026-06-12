@@ -758,7 +758,7 @@ export interface SessionIntervention {
  * #5589 / #5281 — THIS client's role for a shared session, derived from the
  * server's `session_role` broadcast. See `handleSessionRole`.
  */
-export type SessionRole = 'primary' | 'observer' | 'unclaimed'
+export type SessionRole = 'primary' | 'observer' | 'unclaimed';
 
 /**
  * Base session state shared by both the mobile app and web dashboard.
