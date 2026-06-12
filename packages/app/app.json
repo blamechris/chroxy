@@ -40,6 +40,13 @@
       "favicon": "./assets/favicon.png"
     },
     "scheme": "chroxy",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/5747b2cd-e15a-4742-9562-de949408f896",
+      "enabled": true
+    },
     "plugins": [
       [
         "expo-camera",
