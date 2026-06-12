@@ -594,8 +594,28 @@ export let connectionAttemptId = 0;
 export let disconnectedAttemptId = -1;
 export let lastConnectedUrl: string | null = null;
 
+// #5555.5 — consecutive close/error-path reconnect counter, used to index the
+// RETRY_DELAYS backoff ladder so a flapping tunnel escalates its retry spacing
+// (1s → 2s → 3s → 5s → 8s) instead of hammering the handshake at a fixed delay.
+// Reset to 0 on `auth_ok` (a *successful* connect — proof the link is healthy),
+// NOT on mere socket-open, so a socket that opens but never authenticates keeps
+// climbing the ladder. Lives here (not a connect() closure) because the count
+// must survive the connect() → drop → connect() cycle and be cleared from the
+// auth_ok handler.
+export let reconnectAttempt = 0;
+
 export function bumpConnectionAttemptId(): number {
   return ++connectionAttemptId;
+}
+
+/** Advance the backoff ladder, returning the pre-increment attempt index. */
+export function nextReconnectAttempt(): number {
+  return reconnectAttempt++;
+}
+
+/** Reset the backoff ladder — called from the `auth_ok` handler on a clean connect. */
+export function resetReconnectAttempt(): void {
+  reconnectAttempt = 0;
 }
 
 export function setDisconnectedAttemptId(id: number): void {
@@ -1301,6 +1321,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       resetReplayReconcile();
       _ctx.isSessionSwitchReplay = false;
       _ctx.pendingSwitchSessionId = null;
+      // #5555.5 — a successful auth is the ONLY proof the link is healthy, so
+      // reset the close/error-path backoff ladder here (not on socket-open). A
+      // socket that opens but never authenticates keeps climbing the ladder.
+      resetReconnectAttempt();
       if (!ctx.isReconnect) hapticSuccess();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;

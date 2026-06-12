@@ -93,6 +93,7 @@ import {
   setDisconnectedAttemptId,
   lastConnectedUrl,
   setLastConnectedUrl,
+  nextReconnectAttempt,
   resetReplayFlags,
   clearPermissionSplits,
   clearTerminalWriteBatching,
@@ -259,10 +260,10 @@ const EMPTY_TRANSCRIPT_BACKGROUND_TASKS: never[] = [];
 // TypeScript widens `never[]` to any element type at the call site.
 const EMPTY_INTERVENTIONS: never[] = [];
 
-/** Delay before auto-reconnecting after an unexpected socket close (ms) */
-const AUTO_RECONNECT_DELAY = 1500;
-/** Delay before reconnecting after a WebSocket error (ms) */
-const ERROR_RECONNECT_DELAY = 2000;
+// #5555.5 — the close/error-path reconnect delay is no longer a fixed
+// constant. Both handlers now climb the RETRY_DELAYS ladder (defined in
+// connect()) via the module-level reconnectAttempt counter, which resets on
+// `auth_ok`. See scheduleReconnect() below.
 
 /**
  * #3605: Clear in-flight `pendingTrustGrants` arrays from every session.
@@ -1367,12 +1368,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const scheduleReconnect = (
       reasonText: string,
       errorMessage: string | null,
-      delayMs: number,
     ): void => {
       if (reconnectScheduled) return;
       if (get().userDisconnected) return;
       if (disconnectedAttemptId === myAttemptId) return;
       reconnectScheduled = true;
+      // #5555.5 — climb the RETRY_DELAYS ladder (was a fixed 1.5s/2s). The
+      // ladder advances only AFTER the user-disconnect / stale-attempt guards
+      // above, so a user-initiated close doesn't burn a rung. It resets on
+      // `auth_ok`, so a clean reconnect starts back at the bottom (1s). The
+      // per-socket `reconnectScheduled` dedupe means a paired error → close
+      // drop advances the ladder exactly once.
+      const rung = nextReconnectAttempt();
+      const delayMs = withJitter(RETRY_DELAYS[Math.min(rung, RETRY_DELAYS.length - 1)]!);
       console.log(`[ws] ${reasonText}, reconnecting...`);
       // #4771: `errorMessage === null` means the close code was 1000
       // (normal server-initiated close — see getWsCloseMessage). Match
@@ -1557,7 +1565,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         scheduleReconnect(
           typeof code === 'number' ? `Connection lost (code ${code})` : 'Connection lost',
           closeMsg,
-          AUTO_RECONNECT_DELAY,
         );
       } else if (disconnectedAttemptId === myAttemptId || get().userDisconnected) {
         set({ connectionPhase: 'disconnected' });
@@ -1592,7 +1599,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // ordering (onclose already armed the timer); the error → close
       // ordering is covered symmetrically by onclose's `wasConnected`
       // gate (handler defined above).
-      scheduleReconnect('WebSocket error', 'Connection error', ERROR_RECONNECT_DELAY);
+      scheduleReconnect('WebSocket error', 'Connection error');
     };
     } // end _connectWebSocket
   },

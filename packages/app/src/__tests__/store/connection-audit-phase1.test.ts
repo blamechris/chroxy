@@ -24,6 +24,7 @@ jest.mock('expo-secure-store', () => ({
 import * as SecureStore from 'expo-secure-store';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
+import { resetReconnectAttempt } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 // ---------------------------------------------------------------------------
@@ -109,6 +110,10 @@ beforeEach(() => {
   jest.useFakeTimers();
   clearAllCallbacks();
   __resetDeviceIdCacheForTests();
+  // #5555.5 — the close/error-path backoff ladder is module-level state; reset
+  // it between tests so a prior test's climbed rung doesn't push a later
+  // reconnect's delay past this file's fixed `advanceTimersByTime(5000)` budget.
+  resetReconnectAttempt();
   (SecureStore.getItemAsync as jest.Mock).mockReset();
   (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('dev-id-123');
   (SecureStore.setItemAsync as jest.Mock).mockResolvedValue(undefined);
