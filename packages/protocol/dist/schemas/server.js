@@ -115,6 +115,12 @@ export const ServerAuthOkSchema = z.object({
     // the server predates #5555 (old server) — in every absent case the client
     // falls back to the discrete `key_exchange` handshake. No flag day.
     serverPublicKey: z.string().max(512).optional(),
+    // #5536 (E2E key pinning) — base64 Ed25519 signature over `serverPublicKey`,
+    // present only on the eager path when the daemon has a pinned identity. A
+    // pinned client verifies it against the identity key it captured at pairing
+    // time before keying off `serverPublicKey`. Absent for unpinned daemons /
+    // older servers — old clients ignore it (TOFU unchanged).
+    serverKeySig: z.string().max(512).optional(),
     // #5555 (auth_bootstrap) — fold the static permission-mode enum into auth_ok
     // so a new client reads it here instead of waiting for the discrete
     // `available_permission_modes` burst frame (still sent for older clients).
