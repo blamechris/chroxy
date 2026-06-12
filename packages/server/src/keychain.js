@@ -13,6 +13,14 @@ const DEFAULT_SERVICE = 'chroxy'
 const ACCOUNT = 'api-token'
 
 /**
+ * macOS `security` exit code for errSecItemNotFound — the item genuinely is not
+ * in the keychain (a clean "absent"). Any OTHER non-zero exit (locked keychain,
+ * interaction-not-allowed, keychain not found, auth denied, …) is a READ FAILURE
+ * we must NOT confuse with absence — see getTokenStatus / #5615.
+ */
+const MAC_ERR_SEC_ITEM_NOT_FOUND = 44
+
+/**
  * Check if OS keychain is available on this system.
  */
 export function isKeychainAvailable() {
@@ -48,6 +56,49 @@ export function getToken(service = DEFAULT_SERVICE) {
     return _linuxGetToken(service)
   }
   return null
+}
+
+/**
+ * @typedef {object} KeychainReadResult
+ * @property {'found'|'absent'|'error'} status
+ *   - `found`  — the item exists; `value` is the stored string.
+ *   - `absent` — the item genuinely is not stored (clean first-run signal).
+ *   - `error`  — the read FAILED for a reason other than absence (keychain
+ *                locked / interaction-not-allowed / backend error). The caller
+ *                MUST NOT treat this as absence — see #5615.
+ * @property {string|null} value  - the token when `found`, else null.
+ * @property {string|null} error  - a short diagnostic when `status === 'error'`.
+ */
+
+/**
+ * Read a token while DISTINGUISHING "genuinely absent" from "read failed".
+ *
+ * `getToken` collapses both into `null`, which is fine for the API token and the
+ * credential data-key (a failed read there just falls back to a file or re-prompts).
+ * It is NOT fine for the server identity key (#5615): a transient keychain lock
+ * read as "absent" would re-mint a fresh identity → every already-pinned client
+ * sees a false MITM. This variant lets that caller fail safe instead of rotating.
+ *
+ * Heuristic by platform:
+ *   - macOS: `security find-generic-password` exits 44 (errSecItemNotFound) when
+ *     the item is absent; ANY other non-zero exit is a read failure.
+ *   - Linux: `secret-tool lookup` exits 1 with NO output when absent; a non-zero
+ *     exit WITH stderr (or any other code) is a read failure. secret-tool does
+ *     not expose a distinct not-found code, so this is best-effort — and it errs
+ *     toward `error` (fail safe), never silently toward `absent`.
+ *   - Other platforms: no keychain → `absent` (the file fallback owns identity).
+ *
+ * @param {string} [service]
+ * @returns {KeychainReadResult}
+ */
+export function getTokenStatus(service = DEFAULT_SERVICE) {
+  if (isMac) {
+    return _macGetTokenStatus(service)
+  }
+  if (isLinux) {
+    return _linuxGetTokenStatus(service)
+  }
+  return { status: 'absent', value: null, error: null }
 }
 
 /**
@@ -124,6 +175,28 @@ function _macGetToken(service) {
   }
 }
 
+function _macGetTokenStatus(service) {
+  try {
+    const output = execFileSync('security', [
+      'find-generic-password',
+      '-s', service,
+      '-a', ACCOUNT,
+      '-w',
+    ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
+    const value = output.trim() || null
+    // A zero exit with empty output should not happen for a stored secret, but
+    // treat it as absence rather than a phantom "found null".
+    return value ? { status: 'found', value, error: null } : { status: 'absent', value: null, error: null }
+  } catch (err) {
+    // errSecItemNotFound (44) = genuinely absent. Anything else = read failure.
+    if (err && err.status === MAC_ERR_SEC_ITEM_NOT_FOUND) {
+      return { status: 'absent', value: null, error: null }
+    }
+    const detail = (err && (err.stderr?.toString().trim() || err.message)) || `exit ${err?.status}`
+    return { status: 'error', value: null, error: detail }
+  }
+}
+
 function _macSetToken(service, token) {
   // -U flag updates existing entry or creates new one (atomic)
   execFileSync('security', [
@@ -159,6 +232,28 @@ function _linuxGetToken(service) {
     return output.trim() || null
   } catch {
     return null
+  }
+}
+
+function _linuxGetTokenStatus(service) {
+  try {
+    const output = execFileSync('secret-tool', [
+      'lookup',
+      'service', service,
+      'account', ACCOUNT,
+    ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
+    const value = output.trim() || null
+    return value ? { status: 'found', value, error: null } : { status: 'absent', value: null, error: null }
+  } catch (err) {
+    // secret-tool exits 1 with NO stderr when the item simply isn't stored. A
+    // non-empty stderr (or any other exit code) means the lookup itself failed
+    // (locked collection / D-Bus error / no session bus) — fail safe to `error`.
+    const stderr = (err && err.stderr?.toString().trim()) || ''
+    if (!stderr && err && err.status === 1) {
+      return { status: 'absent', value: null, error: null }
+    }
+    const detail = stderr || (err && err.message) || `exit ${err?.status}`
+    return { status: 'error', value: null, error: detail }
   }
 }
 

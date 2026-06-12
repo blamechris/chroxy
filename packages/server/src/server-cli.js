@@ -27,7 +27,7 @@ const log = createLogger('cli')
 import { removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
-import { getOrCreateServerIdentity } from './server-identity.js'
+import { getOrCreateServerIdentity, IdentityUnavailableError } from './server-identity.js'
 import { getLanIp } from './lan-ip.js'
 import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopbackBind } from './bind-host.js'
 import { writeFileRestricted } from './platform.js'
@@ -806,8 +806,45 @@ export async function startCliServer(config) {
     try {
       serverIdentity = getOrCreateServerIdentity()
     } catch (err) {
-      log.warn(`Could not establish server identity key (${err.message}); E2E key pinning disabled — connections stay TOFU`)
-      serverIdentity = null
+      if (err instanceof IdentityUnavailableError) {
+        // #5615 case (b): the keychain is PRESENT but the identity read FAILED
+        // (locked / interaction-not-allowed). We deliberately did NOT mint a
+        // replacement — doing so would silently rotate the daemon's identity and
+        // brick every already-pinned client with a false "network impersonation"
+        // alert. A transient lock must not look like an active MITM.
+        //
+        // Fail loudly by default: refuse to start so the operator unlocks the
+        // keychain (or grants access) and the SAME pinned identity loads. The
+        // CHROXY_ALLOW_UNPINNED_BOOT escape hatch lets an operator who knows no
+        // clients are pinned boot anyway with pinning DISABLED this boot — the
+        // server then signs nothing and clients are told pinning is unavailable
+        // (an old-daemon shape: TOFU), rather than being shown a false MITM.
+        if (process.env.CHROXY_ALLOW_UNPINNED_BOOT === '1') {
+          log.warn(
+            `Server identity keychain read failed (${err.message}). ` +
+            'CHROXY_ALLOW_UNPINNED_BOOT=1 set — starting WITH KEY PINNING DISABLED this boot ' +
+            '(server signs no exchange keys; pinned clients see TOFU, not a false impersonation alert). ' +
+            'Unlock the keychain and restart to restore pinning.',
+          )
+          serverIdentity = null
+        } else {
+          log.error(
+            `Server identity keychain read failed (${err.message}). ` +
+            'Refusing to start: minting a replacement would rotate this daemon\'s identity and ' +
+            'falsely alarm every paired client as a network-impersonation attempt. ' +
+            'Unlock your OS keychain (or grant chroxy access) and start again. ' +
+            'If you are certain NO clients have pinned this daemon, set CHROXY_ALLOW_UNPINNED_BOOT=1 ' +
+            'to start once with key pinning disabled.',
+          )
+          process.exit(1)
+        }
+      } else {
+        // Any other failure (e.g. no keychain + unwritable fallback file) keeps
+        // the original behaviour: disable pinning, stay TOFU. This is NOT the
+        // silent-rotation hazard — there was no prior identity to contradict.
+        log.warn(`Could not establish server identity key (${err.message}); E2E key pinning disabled — connections stay TOFU`)
+        serverIdentity = null
+      }
     }
   }
 

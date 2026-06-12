@@ -104,6 +104,49 @@ describe('Keychain token storage (#1838)', () => {
   })
 })
 
+describe('getTokenStatus — absent vs read-failure (#5615)', () => {
+  it('exports getTokenStatus', () => {
+    assert.equal(typeof keychain.getTokenStatus, 'function')
+  })
+
+  it('reports {status: absent} for a service that is not stored', () => {
+    // On a real keychain this exercises the not-found code (macOS exit 44 /
+    // secret-tool empty-stderr exit 1); off-keychain platforms also report
+    // absent. The one outcome we must NEVER produce for absence is `error`.
+    const res = keychain.getTokenStatus('chroxy-test-nonexistent-status')
+    assert.equal(res.status, 'absent', 'a genuinely-absent item must not look like a read failure')
+    assert.equal(res.value, null)
+  })
+
+  keychainTest('round-trips a stored value as {status: found}', () => {
+    const serviceName = 'chroxy-test-status-found'
+    const token = 'status-token-' + Date.now()
+    keychain.setToken(token, serviceName)
+    try {
+      const res = keychain.getTokenStatus(serviceName)
+      assert.equal(res.status, 'found')
+      assert.equal(res.value, token)
+    } finally {
+      keychain.deleteToken(serviceName)
+    }
+  })
+
+  it('macOS distinguishes errSecItemNotFound (44) from other errors in source', () => {
+    const source = readFileSync(join(srcDir, 'keychain.js'), 'utf-8')
+    const macStatus = source.match(/function _macGetTokenStatus[\s\S]*?^}/m)
+    assert.ok(macStatus, '_macGetTokenStatus should exist')
+    // Absence is keyed on exit 44; everything else maps to a read failure.
+    assert.ok(
+      macStatus[0].includes('MAC_ERR_SEC_ITEM_NOT_FOUND'),
+      '_macGetTokenStatus must branch on the not-found exit code',
+    )
+    assert.ok(
+      /status:\s*'error'/.test(macStatus[0]),
+      '_macGetTokenStatus must report a read failure as error (not absent)',
+    )
+  })
+})
+
 describe('Keychain failure paths (#1887)', () => {
   it('migrateToken falls back when setToken throws', () => {
     const source = readFileSync(join(srcDir, 'keychain.js'), 'utf-8')

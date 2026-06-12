@@ -54,7 +54,7 @@ export type KeyPinDecision =
   /** Abort the connection; the offered key failed verification against the pin. */
   | {
       action: 'refuse'
-      reason: 'signature-mismatch' | 'pinned-but-unsigned'
+      reason: 'signature-mismatch' | 'pinned-but-unsigned' | 'pinned-but-unencrypted'
       message: string
     }
 
@@ -79,6 +79,62 @@ export const KEY_PIN_MISMATCH_MESSAGE =
   "reinstalled or its identity key rotated — or it could be a network " +
   'impersonation attempt. Re-pair (scan a fresh QR / enter a new pairing code) ' +
   'to trust the new identity.'
+
+/**
+ * The user-facing refusal copy for a pinned connection that arrived WITHOUT
+ * encryption (#5614). Distinct enough that the UI/log can tell it apart from a
+ * signature mismatch, but the same "refused — possible impersonation" framing so
+ * the user treats it as the security event it is.
+ */
+export const KEY_PIN_DOWNGRADE_MESSAGE =
+  'Refused to connect — this server you paired with did not negotiate ' +
+  'encryption. A paired (pinned) connection must be end-to-end encrypted; an ' +
+  'unencrypted handshake here means the server lost its identity key, or a ' +
+  'network attacker is trying to downgrade you to plaintext to bypass identity ' +
+  'verification. Re-pair (scan a fresh QR / enter a new pairing code) if the ' +
+  'server was genuinely reinstalled.'
+
+/**
+ * #5614 — the encryption-mode gate for the eager `auth_ok` frame, evaluated
+ * BEFORE the per-path pin check (which only runs once encryption is negotiated).
+ *
+ * The pin verification ({@link decideKeyPin}) is reached only when the server
+ * asks for encryption. A MITM who forges a plaintext `auth_ok` with
+ * `encryption:'none'` (or omits the field) would therefore skip the pin check
+ * entirely and drop the client onto an unencrypted, UNVERIFIED session —
+ * defeating #5536 with a one-field downgrade. This gate closes that cell: if the
+ * connection carries ANY pinned identity (a committed pin from a prior connect,
+ * OR a pairing-time identity captured this dial), the ONLY acceptable handshake
+ * is `encryption:'required'`. Anything else fails closed — same refusal posture
+ * as a pin mismatch, never a silent fall-through to plaintext.
+ *
+ * Unpinned connections are unaffected: they keep TOFU (encryption optional),
+ * exactly as before. The caller invokes this at the TOP of its `auth_ok` handler
+ * — before it branches on `encryption === 'required'` — so the gate cannot be
+ * bypassed on either the eager or the discrete path.
+ *
+ * @returns `{ action: 'refuse', ... }` when a pinned connection is unencrypted,
+ *          else `{ action: 'connect', reason: 'verified' }` to continue (the
+ *          real pin check still runs inside the encryption branch). Pure; no I/O.
+ */
+export function decodeEncryptionGate(input: {
+  /** The committed pin for this connection record, or null. */
+  pinnedIdentityKey: string | null
+  /** Identity captured at pairing time this dial but not yet committed, or null. */
+  pairingIdentityKey: string | null
+  /** The `encryption` field from the `auth_ok` frame (server-advertised mode). */
+  encryptionMode: string | null | undefined
+}): Extract<KeyPinDecision, { action: 'refuse' }> | { action: 'connect'; reason: 'verified' } {
+  const isPinned = Boolean(input.pinnedIdentityKey || input.pairingIdentityKey)
+  if (isPinned && input.encryptionMode !== 'required') {
+    return {
+      action: 'refuse',
+      reason: 'pinned-but-unencrypted',
+      message: KEY_PIN_DOWNGRADE_MESSAGE,
+    }
+  }
+  return { action: 'connect', reason: 'verified' }
+}
 
 /**
  * The shared pin-or-TOFU decision. Pure: no I/O, no store reads. The caller
