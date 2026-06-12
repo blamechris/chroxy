@@ -82,8 +82,9 @@ import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { useTunnelReady } from './hooks/useTunnelReady'
 import { useQrModal } from './hooks/useQrModal'
+import { useSidebarOrdering } from './hooks/useSidebarOrdering'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder, persistSessionTabOrder, loadPersistedSessionTabOrder } from './store/persistence'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
@@ -620,14 +621,6 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
-  // #4832 — user-defined order for the sidebar's repo groups and the
-  // sessions inside each group. Both are layered on top of the
-  // server-supplied session list and persisted in localStorage so they
-  // survive reload + Tauri restart. State sits at App-level so the
-  // `sidebarRepos` memo below can apply the order to the derived
-  // RepoNode[].
-  const [sidebarRepoOrder, setSidebarRepoOrder] = useState<string[]>(() => loadPersistedSidebarRepoOrder())
-  const [sidebarSessionOrder, setSidebarSessionOrder] = useState<Record<string, string[]>>(() => loadPersistedSidebarSessionOrder())
   // #4045: sidebar right-click context menu state. `null` when closed.
   const [sidebarContextMenu, setSidebarContextMenu] = useState<{
     target: ContextMenuTarget
@@ -1165,37 +1158,17 @@ export function App() {
     })
   }, [sessionStates, sessionActivityNow])
 
-  // #4831 — user-defined SessionBar tab order (overlay on the server's
-  // `sessions[]` membership). Loaded lazily from localStorage on mount and
-  // re-persisted whenever the user drags / keyboard-reorders a tab. The
-  // server is still authoritative for which sessions EXIST; this slice
-  // controls only the visual order in the top tab strip (issue #4831).
-  const [tabOrder, setTabOrder] = useState<string[]>(() => loadPersistedSessionTabOrder())
-  // #4831 — `loadPersistedSessionTabOrder` reads under the *current*
-  // server scope (set by `setServerScope` on server-switch). The initial
-  // `useState` only fires once on mount, so without this effect a server
-  // switch in the same browser tab would leave SessionBar showing the
-  // previous server's tabOrder until a full page refresh. Re-load whenever
-  // the active server changes so each server gets its own persisted order.
-  const activeServerId = useConnectionStore(s => s.activeServerId)
-  useEffect(() => {
-    setTabOrder(loadPersistedSessionTabOrder())
-  }, [activeServerId])
-  // #4940 — same server-switch refresh for the sidebar repo / per-repo
-  // session orders declared above (see lines around the `sidebarRepoOrder`
-  // useState). The persistence layer is already server-scoped via
-  // `scopedKey` / `scopedRead`, but the App-level state was initialised
-  // once and never re-read. Without this effect, switching servers via
-  // the ServerPicker left server A's drag-ordering applied to server B's
-  // sidebar until a full page reload, silently bypassing the scoping.
-  useEffect(() => {
-    setSidebarRepoOrder(loadPersistedSidebarRepoOrder())
-    setSidebarSessionOrder(loadPersistedSidebarSessionOrder())
-  }, [activeServerId])
-  const handleReorderTabs = useCallback((nextOrder: string[]) => {
-    setTabOrder(nextOrder)
-    persistSessionTabOrder(nextOrder)
-  }, [])
+  // #5560 — the three user-defined ordering overlays (SessionBar tab order
+  // #4831; sidebar repo + per-repo session orders #4832) plus their
+  // server-switch refresh effects (#4831 / #4940) live in `useSidebarOrdering`.
+  const {
+    tabOrder,
+    sidebarRepoOrder,
+    sidebarSessionOrder,
+    handleReorderTabs,
+    handleReorderRepos,
+    handleReorderSidebarSessions,
+  } = useSidebarOrdering()
 
   // Map sessions to SessionTabData[] with unified status indicators.
   //
@@ -1315,23 +1288,6 @@ export function App() {
       }
     })
   }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage, sidebarRepoOrder, sidebarSessionOrder])
-
-  // #4832 — reorder callbacks wired into the Sidebar component. Both
-  // persist immediately so a reload (or Tauri restart) restores the
-  // order. We update local state synchronously so the UI reflects the
-  // new order on the next render without waiting for a round-trip.
-  const handleReorderRepos = useCallback((orderedPaths: string[]) => {
-    setSidebarRepoOrder(orderedPaths)
-    persistSidebarRepoOrder(orderedPaths)
-  }, [])
-
-  const handleReorderSidebarSessions = useCallback((repoPath: string, orderedIds: string[]) => {
-    setSidebarSessionOrder(prev => {
-      const next = { ...prev, [repoPath]: orderedIds }
-      persistSidebarSessionOrder(next)
-      return next
-    })
-  }, [])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(
