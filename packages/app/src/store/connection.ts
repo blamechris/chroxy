@@ -214,11 +214,18 @@ export const selectShowSession = (s: ConnectionState): boolean =>
  * {@link resolveEndpointForAttempt} (#5537). Also unchanged when there's no
  * saved record, no tunnel, or the tunnel already matches `dialUrl` (the common
  * no-op case).
+ *
+ * Scoped to the dial's own credentials: `savedConnection` is only updated on
+ * `auth_ok`, so during a manual connect to a DIFFERENT server it still holds the
+ * previous server's record. Re-resolving against it would redirect the new dial
+ * to the old server's tunnel URL. We therefore only consult the saved record
+ * when its token matches `dialToken` (proof it describes this same connection);
+ * otherwise the captured `dialUrl` passes through untouched.
  */
-function resolveCurrentEndpointUrl(dialUrl: string): string {
+function resolveCurrentEndpointUrl(dialUrl: string, dialToken: string): string {
   if (isLanWsUrl(dialUrl)) return dialUrl;
   const saved = useConnectionLifecycleStore.getState().savedConnection;
-  if (!saved) return dialUrl;
+  if (!saved || saved.token !== dialToken) return dialUrl;
   const tunnelUrl = deriveTunnelUrl(saved);
   return tunnelUrl ?? dialUrl;
 }
@@ -239,11 +246,15 @@ function resolveCurrentEndpointUrl(dialUrl: string): string {
  *    was, or #5537 just switched to it), re-resolve the freshest `tunnelUrl` so
  *    a rotation that landed mid-ladder is dialed, not the dead captured URL.
  *
- * No-op (returns `dialUrl`) when there's no saved record.
+ * No-op (returns `dialUrl`) when there's no saved record, or when the saved
+ * record's token doesn't match `dialToken` — `savedConnection` only updates on
+ * `auth_ok`, so a manual connect to a DIFFERENT server still sees the previous
+ * server's record; gating on the token prevents redirecting the new dial to the
+ * old server's tunnel/LAN endpoints.
  */
-function resolveEndpointForAttempt(dialUrl: string, attempt: number): string {
+function resolveEndpointForAttempt(dialUrl: string, dialToken: string, attempt: number): string {
   const saved = useConnectionLifecycleStore.getState().savedConnection;
-  if (!saved) return dialUrl;
+  if (!saved || saved.token !== dialToken) return dialUrl;
   const tunnelUrl = deriveTunnelUrl(saved);
   const chosen = selectReconnectEndpoint({
     lastUrl: dialUrl,
@@ -921,7 +932,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // skipped entirely.
       resolveEndpoint: (attempt): ConnectEndpoint | null => {
         if (myAttemptId !== connectionAttemptId) return null;
-        return { url: resolveEndpointForAttempt(url, attempt), token };
+        return { url: resolveEndpointForAttempt(url, token, attempt), token };
       },
       isStale: () => myAttemptId !== connectionAttemptId,
       // The HTTP `/health` GET (bare origin — the server answers both `/` and
@@ -977,7 +988,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // #5597/#5537 — re-resolve the URL for the NEXT attempt so a mid-ladder
           // tunnel rotation, or the LAN→tunnel fallback at the threshold, is
           // dialed instead of the dead captured URL.
-          get().connect(resolveEndpointForAttempt(url, nextAttempt), token, { silent, _retryCount: nextAttempt });
+          get().connect(resolveEndpointForAttempt(url, token, nextAttempt), token, { silent, _retryCount: nextAttempt });
         }, delayMs);
       },
       onRestartGaveUp: () => {
@@ -1048,7 +1059,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // dialed. The reconnect re-enters connect() with _retryCount=0, so the
       // inner health-check ladder's resolveEndpoint then owns the #5537 LAN→
       // tunnel fast-fallback (keyed on the per-attempt index).
-      reconnect: () => get().connect(resolveCurrentEndpointUrl(url), token),
+      reconnect: () => get().connect(resolveCurrentEndpointUrl(url, token), token),
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: RETRY_DELAYS,
     });

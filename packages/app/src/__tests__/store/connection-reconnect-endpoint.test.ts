@@ -172,6 +172,38 @@ describe('#5597 — socket-close reconnect re-resolves a rotated tunnel URL', ()
 
     ws.restore();
   });
+
+  // A manual connect to a DIFFERENT server (different token) must NOT be
+  // redirected back to the stale savedConnection's tunnel URL. savedConnection
+  // is only updated on auth_ok, so during the connect-to-server-B window it
+  // still holds server A's record — re-resolution is token-scoped to prevent
+  // the hijack.
+  it('does not redirect a manual connect to a different server (stale savedConnection ignored)', async () => {
+    const SERVER_A = 'wss://server-a.trycloudflare.com';
+    const SERVER_B = 'wss://server-b.trycloudflare.com';
+    // savedConnection still describes server A (token 'tok-a'); we dial server B
+    // with a different token before B's auth_ok lands.
+    useConnectionLifecycleStore.getState().setSavedConnection({
+      url: SERVER_A,
+      token: 'tok-a',
+      tunnelUrl: SERVER_A,
+    });
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(200, { status: 'ok' }));
+    const ws = installMockWebSocket();
+
+    useConnectionStore.getState().connect(SERVER_B, 'tok-b', { silent: true });
+    await flushPromises();
+    useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+
+    // The socket drops; the reconnect must dial SERVER_B, not server A's tunnel.
+    ws.instances[0].onclose?.({ code: 1006 });
+    jest.advanceTimersByTime(RETRY_DELAYS[0]);
+    await flushPromises();
+
+    expect(lastDialedUrl(ws)).toBe(SERVER_B);
+
+    ws.restore();
+  });
 });
 
 // ---------------------------------------------------------------------------
