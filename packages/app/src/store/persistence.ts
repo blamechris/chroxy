@@ -5,10 +5,17 @@
  * app restarts. Large data (messages, terminal buffer) uses AsyncStorage
  * while sensitive data (tokens, URLs) remains in SecureStore.
  *
+ * Sensitive blobs (message bodies, terminal buffer, session list) are
+ * encrypted at rest with a key held in the OS keychain (see persist-crypto) —
+ * AsyncStorage writes plaintext to the device filesystem, where backups /
+ * extraction could read echoed secrets. Small non-sensitive identifiers
+ * (view mode, active/last session IDs) stay plaintext.
+ *
  * Data is debounced to avoid excessive writes on rapid message streams.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { ChatMessage, SessionInfo } from './types';
+import { encryptForStorage, decryptForStorage } from './persist-crypto';
 
 const KEY_PREFIX = 'chroxy_persist_';
 const KEY_VIEW_MODE = `${KEY_PREFIX}view_mode`;
@@ -94,7 +101,9 @@ export function persistSessionMessages(sessionId: string, messages: ChatMessage[
   getMessagePersister(sessionId).schedule(async () => {
     // Keep only the last N messages, strip large base64 data
     const trimmed = messages.slice(-MAX_MESSAGES).map(stripLargeData);
-    await AsyncStorage.setItem(sessionMessagesKey(sessionId), JSON.stringify(trimmed));
+    // Encrypt at rest — message bodies can echo secrets (#5644).
+    const blob = await encryptForStorage(JSON.stringify(trimmed));
+    await AsyncStorage.setItem(sessionMessagesKey(sessionId), blob);
   });
 }
 
@@ -126,14 +135,18 @@ export function persistTerminalBuffer(buffer: string): void {
     const trimmed = buffer.length > MAX_TERMINAL_SIZE
       ? buffer.slice(-MAX_TERMINAL_SIZE)
       : buffer;
-    await AsyncStorage.setItem(KEY_TERMINAL_BUFFER, trimmed);
+    // Encrypt at rest — terminal output can echo secrets (#5644).
+    const blob = await encryptForStorage(trimmed);
+    await AsyncStorage.setItem(KEY_TERMINAL_BUFFER, blob);
   });
 }
 
 /** Persist the session list (debounced) */
 export function persistSessionList(sessions: SessionInfo[]): void {
   _sessionListPersister.schedule(async () => {
-    await AsyncStorage.setItem(KEY_SESSION_LIST, JSON.stringify(sessions));
+    // Encrypt at rest — session metadata carries cwd / names (#5644).
+    const blob = await encryptForStorage(JSON.stringify(sessions));
+    await AsyncStorage.setItem(KEY_SESSION_LIST, blob);
   });
 }
 
@@ -184,10 +197,13 @@ export async function loadPersistedState(): Promise<PersistedState> {
       rawViewMode && (VALID_VIEW_MODES as readonly string[]).includes(rawViewMode)
         ? TRANSIENT_VIEW_MODES.has(rawViewMode) ? 'chat' : (rawViewMode as ViewMode)
         : null;
+    // Terminal buffer is encrypted at rest — decrypt; a legacy-plaintext or
+    // undecryptable value yields null (treated as absent, re-populates live).
+    const terminalBuffer_decrypted = await decryptForStorage(terminalBuffer[1]);
     return {
       viewMode: validatedViewMode,
       activeSessionId: activeSessionId[1] || null,
-      terminalBuffer: terminalBuffer[1] || null,
+      terminalBuffer: terminalBuffer_decrypted,
     };
   } catch {
     return { viewMode: null, activeSessionId: null, terminalBuffer: null };
@@ -197,7 +213,9 @@ export async function loadPersistedState(): Promise<PersistedState> {
 /** Load persisted messages for a specific session */
 export async function loadSessionMessages(sessionId: string): Promise<ChatMessage[]> {
   try {
-    const raw = await AsyncStorage.getItem(sessionMessagesKey(sessionId));
+    const blob = await AsyncStorage.getItem(sessionMessagesKey(sessionId));
+    // Decrypt at rest — legacy-plaintext / undecryptable → null → empty (#5644).
+    const raw = await decryptForStorage(blob);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -209,7 +227,9 @@ export async function loadSessionMessages(sessionId: string): Promise<ChatMessag
 /** Load persisted session list */
 export async function loadSessionList(): Promise<SessionInfo[]> {
   try {
-    const raw = await AsyncStorage.getItem(KEY_SESSION_LIST);
+    const blob = await AsyncStorage.getItem(KEY_SESSION_LIST);
+    // Decrypt at rest — legacy-plaintext / undecryptable → null → empty (#5644).
+    const raw = await decryptForStorage(blob);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
