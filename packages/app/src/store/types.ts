@@ -386,7 +386,10 @@ export interface ConnectionActions {
    */
   connectAuto: (
     saved: SavedConnection,
-    options?: { silent?: boolean; preferTunnel?: boolean },
+    // #5633 — `force` skips connectAuto's "already connected to this URL" no-op
+    // guard so the resume zombie-socket path can force a fresh reconnect even
+    // when the socket still claims OPEN on an unchanged tunnel URL.
+    options?: { silent?: boolean; preferTunnel?: boolean; force?: boolean },
   ) => Promise<void>;
   disconnect: () => void;
   loadSavedConnection: () => Promise<void>;

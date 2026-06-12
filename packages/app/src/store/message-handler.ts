@@ -689,7 +689,11 @@ export function clearTerminalWriteBatching(): void {
  * app and dashboard can't drift apart (#4767).
  */
 export const SUBSCRIBE_SESSIONS_CHUNK_SIZE = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE;
-const HEARTBEAT_INTERVAL_MS = 15_000;
+// Exported (#5633) so the AppState resume handler can use the real heartbeat
+// cadence as its "was the app backgrounded long enough for the socket to have
+// silently died?" threshold, rather than hardcoding a separate magic number
+// that could drift from this one.
+export const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 // #5515 (epic #5514): throttle the dev latency readout so a streaming turn
 // can't spam the console — one line every few seconds is enough to watch the
@@ -892,11 +896,71 @@ const QUEUE_TTLS: Record<string, number> = {
 const QUEUE_MAX_SIZE = 10;
 const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
 
+/**
+ * #5633: surface a queue failure to the user as a system message in the
+ * transcript, matching how the existing "Message queued — waiting for
+ * reconnection..." feedback is rendered in SessionScreen. Silently dropping
+ * input/interrupts here is exactly the "I sent it and nothing happened" class
+ * of bug we're fixing — the user must see that the action did not land.
+ *
+ * The notice is routed to the session the dropped action belonged to
+ * (`targetSessionId`, read off the queued payload's `sessionId`) rather than
+ * whatever session happens to be active now. If the user switched sessions
+ * while disconnected, the notice must land in the transcript they were typing
+ * into — not the one they're looking at. Falls back to the active session
+ * (`addMessage`) only when the payload carried no usable `sessionId`.
+ */
+function notifyQueueFailure(content: string, targetSessionId?: string | null): void {
+  try {
+    const noticeMsg: ChatMessage = {
+      id: nextMessageId('queue-drop'),
+      type: 'system',
+      content,
+      timestamp: Date.now(),
+    };
+    if (targetSessionId && getStore().getState().sessionStates[targetSessionId]) {
+      updateSession(targetSessionId, (ss) => ({
+        messages: [...ss.messages, noticeMsg],
+      }));
+    } else {
+      // No (live) target session — fall back to the active session. addMessage
+      // targets the active session; if there's no active session the failure
+      // can't be surfaced inline, but never let feedback throw into the
+      // send/drain path.
+      getStore().getState().addMessage(noticeMsg);
+    }
+  } catch {
+    // Never let feedback throw into the send/drain path.
+  }
+}
+
+/** Read the `sessionId` off a queued payload, if it carries one (#5633). */
+function payloadSessionId(payload: unknown): string | null {
+  if (payload && typeof payload === 'object') {
+    const sid = (payload as Record<string, unknown>).sessionId;
+    if (typeof sid === 'string' && sid.length > 0) return sid;
+  }
+  return null;
+}
+
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
   if (QUEUE_EXCLUDED.has(type)) return false;
   const maxAge = QUEUE_TTLS[type];
   if (!maxAge) return false;
-  if (_ctx.messageQueue.length >= QUEUE_MAX_SIZE) return false;
+  if (_ctx.messageQueue.length >= QUEUE_MAX_SIZE) {
+    // #5633: the queue is full — the 11th+ message would otherwise be dropped
+    // silently with sendInput still reporting nothing actionable. Tell the user,
+    // in the transcript the dropped action belonged to (not just whatever's
+    // active now), and with action-aware copy so an overflowed `interrupt`
+    // isn't called a "message".
+    console.warn(`[queue] Queue full (${QUEUE_MAX_SIZE}) — dropping ${type}`);
+    const noun = type === 'interrupt' ? 'interrupt' : 'message';
+    notifyQueueFailure(
+      `Couldn't ${type === 'interrupt' ? 'deliver' : 'queue'} your ${noun} — too many pending while disconnected (max ${QUEUE_MAX_SIZE}). Please resend after reconnecting.`,
+      payloadSessionId(payload),
+    );
+    return false;
+  }
   _ctx.messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
   console.log(`[queue] Queued ${type} (${_ctx.messageQueue.length}/${QUEUE_MAX_SIZE})`);
   return 'queued';
@@ -905,8 +969,40 @@ export function enqueueMessage(type: string, payload: unknown): 'queued' | false
 export function drainMessageQueue(socket: WebSocket): void {
   if (_ctx.messageQueue.length === 0) return;
   const now = Date.now();
-  const valid = _ctx.messageQueue.filter((m) => now - m.queuedAt < m.maxAge);
+  const valid: QueuedMessage[] = [];
+  const expired: QueuedMessage[] = [];
+  for (const m of _ctx.messageQueue) {
+    if (now - m.queuedAt < m.maxAge) valid.push(m);
+    else expired.push(m);
+  }
   _ctx.messageQueue.length = 0;
+
+  // #5633: a queued message can expire before a longer backoff completes —
+  // notably an `interrupt` with its 5s TTL. That drop was invisible: the user
+  // tapped Stop, the reconnect took >5s, and the interrupt silently evaporated.
+  // Surface any expired entry so the user knows it didn't land.
+  if (expired.length > 0) {
+    console.warn(`[queue] Dropping ${expired.length} expired queued message(s) on drain`);
+    // #5633: route each expiry notice to the session the dropped action
+    // belonged to (the queued payload's `sessionId`) — if the user switched
+    // sessions while reconnecting, the notice must land in the transcript they
+    // were typing into, not the one now active.
+    const expiredInterrupt = expired.find((m) => m.type === 'interrupt');
+    if (expiredInterrupt) {
+      notifyQueueFailure(
+        'Your interrupt expired before reconnecting and was not sent — tap Stop again if still needed.',
+        payloadSessionId(expiredInterrupt.payload),
+      );
+    }
+    const expiredOther = expired.find((m) => m.type !== 'interrupt');
+    if (expiredOther) {
+      notifyQueueFailure(
+        'A queued message expired before reconnecting and was not sent — please resend.',
+        payloadSessionId(expiredOther.payload),
+      );
+    }
+  }
+
   if (valid.length === 0) return;
   console.log(`[queue] Draining ${valid.length} queued message(s)`);
   for (const m of valid) {
