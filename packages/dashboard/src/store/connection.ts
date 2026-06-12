@@ -183,17 +183,36 @@ const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 // MUST arrive inside an `encrypted` envelope. The #5614 downgrade gate only
 // protects the `auth_ok` handshake frame; without this guard a MITM could still
 // inject a forged plaintext app frame AFTER the handshake and have the client
-// act on it. We fail closed exactly like a decrypt failure.
+// act on it. We fail closed exactly like a decrypt failure (log + socket.close,
+// no dispatch).
 //
-// The allow-list is the set of cleartext handshake frames the server
-// legitimately emits before encryption is active (auth_ok / key_exchange_ok /
-// auth_fail / pair_fail — see packages/server/src/ws-auth.js). On a normal
-// connection these all arrive while encState is still null, so they never hit
-// this guard; they are listed so a benign duplicate/terminal handshake frame is
-// tolerated rather than tearing down the socket.
-const ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST = new Set([
+// Post-encState cleartext frames fall into three buckets, handled below:
+//
+//   1. auth_ok / key_exchange_ok — re-entry handshake frames. On a normal
+//      connection these arrive while encState is still null, so they never hit
+//      this guard. After encState is set, a plaintext copy is a forged
+//      re-handshake attempt (a MITM replaying it re-enters the handshake state
+//      machine and can clobber connectedClients / myClientId / UI state and
+//      trigger a fresh key_exchange re-key — see message-handler.ts). We DROP
+//      these silently (log + return, NO dispatch) rather than close, so a
+//      forged frame cannot weaponise the guard into a DoS disconnect.
+//
+//   2. auth_fail / pair_fail — terminal handshake frames the server may
+//      legitimately emit cleartext (e.g. a late rejection). These are safe to
+//      dispatch — they only surface an error / tear the connection down — so
+//      they stay allow-listed and flow through to handleMessage.
+//
+//   3. everything else (including `error`, which since #5632 the server now
+//      sends ENCRYPTED post-handshake) — treated as a downgrade/injection
+//      attempt: log + socket.close, no dispatch.
+//
+// (Encryption-disabled / plaintext sessions never set encState, so the guard is
+// inert for them.)
+const ENCRYPTED_PHASE_HANDSHAKE_DROP = new Set([
   'auth_ok',
   'key_exchange_ok',
+]);
+const ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST = new Set([
   'auth_fail',
   'pair_fail',
 ]);
@@ -1552,9 +1571,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           socket.close();
           return;
         }
+      } else if (encState && ENCRYPTED_PHASE_HANDSHAKE_DROP.has(msg.type)) {
+        // #5632 — a plaintext re-handshake frame (auth_ok / key_exchange_ok)
+        // after encryption is established. A MITM replaying it re-enters the
+        // handshake state machine and can clobber client/UI state or force a
+        // re-key. DROP it silently (no dispatch, no close — closing would let a
+        // forged frame DoS the connection).
+        console.error('[crypto] Dropped plaintext handshake frame after encryption established:', msg.type);
+        return;
       } else if (encState && !ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST.has(msg.type)) {
         // #5632 — encryption is active but this frame is NOT an `encrypted`
-        // envelope and NOT a permitted cleartext handshake frame. Treat it as a
+        // envelope and NOT a permitted terminal handshake frame. Treat it as a
         // downgrade/injection attempt and fail closed on the same path a decrypt
         // failure takes (log + close, no dispatch).
         console.error('[crypto] Rejected plaintext frame after encryption established:', msg.type);

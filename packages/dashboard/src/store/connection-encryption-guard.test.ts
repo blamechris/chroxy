@@ -104,15 +104,73 @@ describe('#5632 post-handshake plaintext guard (dashboard)', () => {
     expect(useConnectionStore.getState().serverErrors).toHaveLength(0)
   })
 
-  it('still accepts cleartext handshake frames when encryption is active', async () => {
+  it('still DISPATCHES cleartext terminal handshake frames (auth_fail) when encryption is active', async () => {
     const socket = await openConnected()
     establishEncryption()
-    // Null the pending keypair so the key_exchange_ok handler early-returns —
-    // the assertion is purely that the GUARD did not tear the socket down.
-    setPendingKeyPair(null)
+    // Seed a non-null socket in the store so the handler's `set({ socket: null })`
+    // is an observable side effect (the guard's reject path never nulls it).
+    useConnectionStore.setState({ socket: socket as unknown as WebSocket, connectionPhase: 'connected' })
 
-    socket.onmessage!({ data: JSON.stringify({ type: 'key_exchange_ok', publicKey: 'x' }) })
+    // auth_fail is a terminal handshake frame the server may legitimately emit
+    // cleartext — the guard must allow-list it so it reaches handleMessage. The
+    // handler tears the connection down (connectionPhase → disconnected, socket →
+    // null), which the guard's reject path never does — proving DISPATCH.
+    socket.onmessage!({ data: JSON.stringify({ type: 'auth_fail', reason: 'token-expired' }) })
+
+    expect(useConnectionStore.getState().connectionPhase).toBe('disconnected')
+    expect(useConnectionStore.getState().socket).toBeNull()
+  })
+
+  it('DROPS a late plaintext auth_ok after encryption — no dispatch, socket stays open (#5632 Copilot)', async () => {
+    const socket = await openConnected()
+    establishEncryption()
+
+    // Seed identity/UI state a re-entered handshake would clobber.
+    useConnectionStore.setState({
+      myClientId: 'client-real',
+      connectedClients: [{ clientId: 'client-real', deviceName: 'real' } as never],
+    })
+
+    // A MITM injects a plaintext auth_ok AFTER encryption is established. It must
+    // be DROPPED (logged + return) — not re-dispatched into the handshake state
+    // machine — and the socket must stay OPEN.
+    socket.onmessage!({
+      data: JSON.stringify({ type: 'auth_ok', clientId: 'attacker', connectedClients: [] }),
+    })
+
     expect(socket.closed).toBe(0)
+    expect(useConnectionStore.getState().myClientId).toBe('client-real')
+    expect(useConnectionStore.getState().connectedClients).toHaveLength(1)
+  })
+
+  it('DROPS a late plaintext key_exchange_ok after encryption — no dispatch, socket stays open (#5632 Copilot)', async () => {
+    const socket = await openConnected()
+    establishEncryption()
+    // A re-key handler would run if dispatched. Keep a pending keypair set so the
+    // handler WOULD have done work — proving the drop happened before dispatch.
+    setPendingKeyPair(createKeyPair())
+    const before = getEncryptionState()
+
+    socket.onmessage!({ data: JSON.stringify({ type: 'key_exchange_ok', publicKey: 'attacker' }) })
+
+    expect(socket.closed).toBe(0)
+    // Encryption state untouched — the drop happened before any handler ran.
+    expect(getEncryptionState()).toBe(before)
+  })
+
+  it('REJECTS a forged plaintext `error` frame after encryption (server now sends it encrypted) — closes socket', async () => {
+    const socket = await openConnected()
+    establishEncryption()
+
+    // Since #5632 the server routes sendError() through the encrypting
+    // transport, so a legitimate post-handshake `error` arrives as an
+    // `encrypted` envelope. A plaintext `error` is therefore a forged/downgrade
+    // frame and must be rejected + closed.
+    socket.onmessage!({
+      data: JSON.stringify({ type: 'error', code: 'INVALID_MODEL', message: 'pwned' }),
+    })
+
+    expect(socket.closed).toBe(1)
   })
 
   it('decrypts and dispatches a genuine encrypted frame when encryption is active', async () => {

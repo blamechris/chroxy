@@ -514,13 +514,27 @@ export function requireSessionMethod(ws, ctx, entry, method, message) {
  * `data` keys named `type`/`requestId`/`code`/`message` are ignored, so a
  * misbehaving caller cannot spoof the wire shape.
  *
+ * #5632: routes through the encryption-aware transport when a handler `ctx`
+ * is supplied. `sendError` emits a plaintext `{ type: 'error' }` frame, and the
+ * client's post-handshake plaintext guard (connection.ts) closes the socket on
+ * any non-`encrypted` frame that isn't a handshake frame once E2E encryption is
+ * established. Passing `ctx` makes the error go out through `ctx.transport.send`
+ * (→ WsServer._send → the per-client encrypting sender), so a post-handshake
+ * error is encrypted (the client decrypts it normally) and a pre-handshake one
+ * stays cleartext (the client's guard is inactive while encState is null —
+ * correct). When `ctx` is absent (pre-auth call sites with no handler context,
+ * e.g. pairing rejectIfBound) we fall back to the raw `ws.send`; those paths run
+ * before encryption is established, so cleartext is correct there too.
+ *
  * @param {WebSocket} ws - Target WebSocket connection
  * @param {string|null} requestId - Correlating request ID (may be null)
  * @param {string} code - Machine-readable error code (e.g. 'HANDLER_ERROR')
  * @param {string} message - Human-readable error description
  * @param {object} [data] - Optional structured fields merged into the payload
+ * @param {object} [ctx] - Handler context; when present routes via
+ *   `ctx.transport.send` so the frame is encrypted for post-handshake clients
  */
-export function sendError(ws, requestId, code, message, data) {
+export function sendError(ws, requestId, code, message, data, ctx) {
   if (!ws || ws.readyState !== 1) return
   const payload = { type: 'error', requestId: requestId ?? null, code, message }
   if (data && typeof data === 'object' && !Array.isArray(data)) {
@@ -534,6 +548,12 @@ export function sendError(ws, requestId, code, message, data) {
       if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
       payload[key] = value
     }
+  }
+  // #5632: prefer the encryption-aware transport so post-handshake errors are
+  // encrypted; fall back to raw send for pre-auth call sites without a ctx.
+  if (ctx && typeof ctx.transport?.send === 'function') {
+    ctx.transport.send(ws, payload)
+    return
   }
   ws.send(JSON.stringify(payload))
 }

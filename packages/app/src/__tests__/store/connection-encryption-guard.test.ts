@@ -150,16 +150,74 @@ describe('#5632 post-handshake plaintext guard', () => {
     expect(useConnectionStore.getState().serverErrors).toHaveLength(0);
   });
 
-  it('still accepts cleartext handshake frames when encryption is active', async () => {
+  it('still DISPATCHES cleartext terminal handshake frames (auth_fail) when encryption is active', async () => {
     const socket = await connectAndGetSocket();
     establishEncryption();
 
-    // key_exchange_ok / auth_fail are on the handshake allow-list — the guard
-    // must NOT close the socket for them. (They never carry app state; the
-    // dispatch is a no-op here because no pendingKeyPair is set, which is fine —
-    // the assertion is purely that the GUARD did not tear the socket down.)
-    socket.onmessage!({ data: JSON.stringify({ type: 'key_exchange_ok', publicKey: 'x' }) });
+    // auth_fail is a terminal handshake frame the server may legitimately emit
+    // cleartext — the guard must allow-list it so it reaches handleMessage. The
+    // handler itself tears the connection down (sets a connectionError +
+    // disconnected phase), which the guard's reject path never does. Asserting on
+    // that handler side effect proves the frame was DISPATCHED, not rejected.
+    socket.onmessage!({ data: JSON.stringify({ type: 'auth_fail', reason: 'token-expired' }) });
+
+    const err = useConnectionLifecycleStore.getState().connectionError;
+    expect(err).toMatch(/Auth failed/i);
+    expect(err).toMatch(/token-expired/);
+  });
+
+  it('DROPS a late plaintext auth_ok after encryption — no dispatch, socket stays open (#5632 Copilot)', async () => {
+    const socket = await connectAndGetSocket();
+    establishEncryption();
+
+    // Seed identity/UI state that a re-entered handshake would clobber.
+    useConnectionStore.setState({
+      myClientId: 'client-real',
+      connectedClients: [{ clientId: 'client-real', deviceName: 'real' } as never],
+    });
+
+    // A MITM injects a plaintext auth_ok AFTER encryption is established. It must
+    // be DROPPED (logged + return) — not re-dispatched into the handshake state
+    // machine — and the socket must stay OPEN (closing would let a forged frame
+    // DoS the connection).
+    socket.onmessage!({
+      data: JSON.stringify({ type: 'auth_ok', clientId: 'attacker', connectedClients: [] }),
+    });
+
     expect(socket.close).not.toHaveBeenCalled();
+    // State the forged handshake would have overwritten is untouched.
+    expect(useConnectionStore.getState().myClientId).toBe('client-real');
+    expect(useConnectionStore.getState().connectedClients).toHaveLength(1);
+  });
+
+  it('DROPS a late plaintext key_exchange_ok after encryption — no dispatch, socket stays open (#5632 Copilot)', async () => {
+    const socket = await connectAndGetSocket();
+    establishEncryption();
+
+    const before = getEncryptionState();
+    // A forged key_exchange_ok would re-enter the key-exchange path and could
+    // force a fresh re-key. It must be dropped without dispatch and without
+    // tearing the socket down.
+    socket.onmessage!({ data: JSON.stringify({ type: 'key_exchange_ok', publicKey: 'attacker' }) });
+
+    expect(socket.close).not.toHaveBeenCalled();
+    // Encryption state untouched — the drop happened before any handler ran.
+    expect(getEncryptionState()).toBe(before);
+  });
+
+  it('REJECTS a forged plaintext `error` frame after encryption (server now sends it encrypted) — closes socket', async () => {
+    const socket = await connectAndGetSocket();
+    establishEncryption();
+
+    // Since #5632 the server routes sendError() through the encrypting
+    // transport, so a legitimate post-handshake `error` arrives as an
+    // `encrypted` envelope. A plaintext `error` is therefore a forged/downgrade
+    // frame and must be rejected + closed.
+    socket.onmessage!({
+      data: JSON.stringify({ type: 'error', code: 'INVALID_MODEL', message: 'pwned' }),
+    });
+
+    expect(socket.close).toHaveBeenCalledTimes(1);
   });
 
   it('decrypts and dispatches a genuine encrypted frame when encryption is active', async () => {
