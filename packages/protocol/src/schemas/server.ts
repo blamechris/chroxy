@@ -123,7 +123,15 @@ export const ServerAuthOkSchema = z.object({
   // `available_permission_modes` burst frame (still sent for older clients).
   // Optional: servers from before #5555 omit it and clients fall back to the
   // discrete frame.
-  availablePermissionModes: z.array(z.string()).optional(),
+  // Object array — each entry is `{ id, label, description? }` (server
+  // `PERMISSION_MODES`), the SAME shape as the discrete
+  // `available_permission_modes` frame's `modes`. (#5592 review: a
+  // `z.array(z.string())` here would reject a real new-server auth_ok.)
+  availablePermissionModes: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    description: z.string().optional(),
+  })).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({
@@ -1794,17 +1802,17 @@ export const ServerAuthBootstrapSchema = z.object({
     name: z.string(),
     capabilities: z.record(z.string(), z.boolean()).optional(),
     auth: ProviderAuthSchema.optional(),
-  })).optional(),
+  })).default([]),
   slashCommands: z.array(z.object({
     name: z.string(),
     description: z.string().optional(),
     source: z.string().optional(),
-  })).optional(),
+  })).default([]),
   agents: z.array(z.object({
     name: z.string(),
     description: z.string().optional(),
     source: z.string().optional(),
-  })).optional(),
+  })).default([]),
   // The active session id this burst was scoped to, when applicable. Lets a
   // client ignore a stale burst if it has already switched sessions.
   sessionId: z.string().optional(),
