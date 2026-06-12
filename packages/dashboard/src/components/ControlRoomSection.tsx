@@ -380,41 +380,16 @@ const SUMMARY_CHIPS: readonly SummaryChip[] = [
   { key: 'recent', label: 'Recent / your call', accent: 'warn' },
 ]
 
-function VerdictTag({
-  repo,
-  onInvestigate,
-}: {
-  repo: RepoStatus
-  /** #5202 — when provided and the verdict is actionable, the tag is a button. */
-  onInvestigate?: (req: RepoInvestigateRequest) => void
-}) {
+function VerdictTag({ repo }: { repo: RepoStatus }) {
   const { verdict } = repo
   const accent = VERDICT_ACCENT[verdict]
-  // #5202 — the only wired action today is Investigate. Keep the dispatch
-  // table-driven so adding e.g. an `abandoned` action is a one-line change.
-  const actionable = ACTIONABLE_VERDICTS[verdict] === true && !!onInvestigate
-
-  if (actionable) {
-    return (
-      <button
-        type="button"
-        className={`cr-tag cr-tag-${accent} cr-tag-action`}
-        data-testid={`cr-verdict-${verdict}`}
-        data-accent={accent}
-        // #5202 — the visible label is just "Investigate", identical on every
-        // row; give screen readers a per-row accessible name (the title tooltip
-        // is not a reliable accessible-name source).
-        aria-label={`Investigate ${repo.name} — open a session in ${repo.path}`}
-        title={`Investigate ${repo.name} — open a session in ${repo.path}`}
-        onClick={() =>
-          onInvestigate!({ cwd: repo.path, name: repo.name, reason: repo.note ?? '' })
-        }
-      >
-        {VERDICT_LABEL[verdict]}
-      </button>
-    )
-  }
-
+  // #5608 — verdict tags are pure status indicators. Pre-#5608 the
+  // `investigate` tag was secretly a button that opened the create-session
+  // modal (#5202), which read as an inconsistent affordance: one badge was
+  // clickable and the others weren't, with nothing to signal which. The
+  // session-creating action now lives on an explicit, discoverable "Investigate"
+  // button in the row's actions cell (see RowActions) — so every badge here is
+  // just a status chip again.
   return (
     <span
       className={`cr-tag cr-tag-${accent}`}
@@ -596,7 +571,11 @@ function AttributionCell({ attribution }: { attribution: boolean | null }) {
  * #5507 — adds an "Open session" action (shown on every row when `onOpenSession`
  * is wired) that opens the create-session modal pre-filled with this repo's cwd.
  */
-function RowActions({ repo, onOpenSession, onConfigureRepo }: { repo: RepoStatus; onOpenSession?: (req: RepoOpenSessionRequest) => void; onConfigureRepo?: (req: { path: string; name: string }) => void }) {
+function RowActions({ repo, onInvestigate, onOpenSession, onConfigureRepo }: { repo: RepoStatus; onInvestigate?: (req: RepoInvestigateRequest) => void; onOpenSession?: (req: RepoOpenSessionRequest) => void; onConfigureRepo?: (req: { path: string; name: string }) => void }) {
+  // #5608 — the Investigate action is shown only for actionable verdicts
+  // (currently just `investigate`). Table-driven via ACTIONABLE_VERDICTS so
+  // adding e.g. an `abandoned` action stays a one-line change.
+  const investigable = ACTIONABLE_VERDICTS[repo.verdict] === true && !!onInvestigate
   const [copied, setCopied] = useState(false)
   const copyPath = useCallback(() => {
     // Route through the shared clipboard helper, which uses the Tauri plugin
@@ -633,6 +612,24 @@ function RowActions({ repo, onOpenSession, onConfigureRepo }: { repo: RepoStatus
       >
         {copied ? 'Copied' : 'Copy path'}
       </button>
+      {investigable && (
+        // #5608 — explicit, discoverable session-creating affordance for an
+        // actionable verdict, replacing the pre-#5608 clickable `investigate`
+        // badge. Same plumbing as the badge used to have: opens the
+        // create-session modal pre-filled with the repo cwd AND seeds the
+        // composer with the investigation reason (the repo's `↳` note) — that
+        // reason seed is what distinguishes Investigate from plain Open session.
+        <button
+          type="button"
+          className="cr-action cr-action-investigate"
+          data-testid={`cr-action-investigate-${repo.name}`}
+          aria-label={`Investigate ${repo.name} — open a session in ${repo.path}`}
+          title={`Investigate ${repo.name} — open a session in ${repo.path}`}
+          onClick={() => onInvestigate!({ cwd: repo.path, name: repo.name, reason: repo.note ?? '' })}
+        >
+          Investigate
+        </button>
+      )}
       {onOpenSession && (
         <button
           type="button"
@@ -750,7 +747,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
             <AheadBehindBadge repo={repo} />
           </div>
         </td>
-        <td><VerdictTag repo={repo} onInvestigate={onInvestigate} /></td>
+        <td><VerdictTag repo={repo} /></td>
         {/* #5201: ellipsis-truncate on an inner block element, not the <td>
             itself — text-overflow on display:table-cell is unreliable and can
             still let long content widen the column. The branch cell already
@@ -761,7 +758,7 @@ function RepoRows({ repo, activity, sessions, expanded, onToggleExpand, now, onI
         <PrCell repo={repo} />
         <AttributionCell attribution={repo.attribution} />
         <td className="cr-dim cr-last">{relativeLast(repo.lastTouched)}</td>
-        <RowActions repo={repo} onOpenSession={onOpenSession} onConfigureRepo={onConfigureRepo} />
+        <RowActions repo={repo} onInvestigate={onInvestigate} onOpenSession={onOpenSession} onConfigureRepo={onConfigureRepo} />
       </tr>
       {repo.note && (
         <tr className="cr-act" data-testid={`cr-note-row-${repo.name}`}>

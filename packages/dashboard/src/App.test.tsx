@@ -2436,12 +2436,13 @@ describe('App', () => {
       }
     }
 
-    // Open the Control Room and click the repo's actionable Investigate verdict
-    // tag — this stashes the repo's note as the pending seed and opens the
+    // Open the Control Room and click the repo's dedicated Investigate row
+    // action (#5608 — moved off the verdict badge onto an explicit button) —
+    // this stashes the repo's note as the pending seed and opens the
     // create-session modal.
     function stashSeedViaInvestigate() {
       fireEvent.click(screen.getByTestId('sidebar-panel-slot-launcher-control-room'))
-      fireEvent.click(screen.getByTestId('cr-verdict-investigate'))
+      fireEvent.click(screen.getByTestId('cr-action-investigate-alpha'))
       // Modal opened (mock renders its node only when open=true).
       expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
     }

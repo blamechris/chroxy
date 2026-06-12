@@ -5132,10 +5132,15 @@ button.sidebar-token-view-session-row:hover {
   border-top: 1px solid var(--border-primary);
 }
 
+/* #5606: lay Advanced fields out like the Provider row above — label + control
+   on one row, help text as full-width secondary text below the control.
+   flex-wrap + a full-width .form-hint (below) lets the hint break to its own
+   line instead of being squeezed into a tall narrow far-right column. */
 .advanced-section .form-field {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   margin-bottom: 8px;
 }
 
@@ -5147,6 +5152,7 @@ button.sidebar-token-view-session-row:hover {
 
 .advanced-section select {
   flex: 1;
+  min-width: 0;
 }
 
 .advanced-section .form-field--checkbox {
@@ -5198,6 +5204,16 @@ button.sidebar-token-view-session-row:hover {
   font-size: 11px;
   color: var(--text-muted);
   margin-left: 22px;
+}
+
+/* #5606: in the Advanced section's wrapping form rows the hint must break to a
+   full-width line under the control (label + control share the first row).
+   Without flex-basis:100% the hint becomes a third flex child and collapses
+   into a tall sliver on the far right. Drop the global 22px indent so it lines
+   up with the label, matching the Provider billing note's full-width layout. */
+.advanced-section .form-field > .form-hint {
+  flex-basis: 100%;
+  margin-left: 0;
 }
 
 .provider-select {
@@ -7705,12 +7721,16 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-dim);
 }
 
+/* #5607: stack the discovered-server row vertically so the pairing actions
+   below the server info get the full sidebar width. The previous horizontal
+   layout (info | actions) pushed the action row past the sidebar edge, clipping
+   "Add with token…" with no way to reach it. */
 .server-discover-item {
   width: 100%;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   padding: 6px 8px;
   border: 1px dashed var(--border-primary);
   border-radius: 6px;
@@ -7718,10 +7738,12 @@ button.sidebar-token-view-session-row:hover {
   text-align: left;
 }
 
-/* #5511 — per-daemon actions: primary "Request to pair" + token-entry fallback. */
+/* #5511 — per-daemon actions: primary "Request to pair" + token-entry fallback.
+   #5607 — wrap so both buttons stay reachable when the sidebar is too narrow to
+   fit them side by side. */
 .server-discover-actions {
   display: flex;
-  flex-shrink: 0;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
 }
@@ -9683,24 +9705,18 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-red);
 }
 
-/* #5202 — an actionable verdict tag rendered as a <button> (e.g. Investigate).
- * Inherits the .cr-tag look; resets button chrome and adds a clickable
- * affordance (pointer, hover lift, focus ring) so it reads as interactive. */
-.cr-tag-action {
-  cursor: pointer;
-  font: inherit;
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: 11px;
-  transition: filter 0.12s, box-shadow 0.12s;
+/* #5608 — the "Investigate" row action (a real .cr-action button now, replacing
+ * the pre-#5608 clickable verdict badge). Tinted amber to match the
+ * investigate/warn verdict accent so the contextual action reads at a glance,
+ * while sharing .cr-action's geometry with the other row actions. */
+.cr-action-investigate {
+  border-color: var(--accent-orange-border);
+  color: var(--accent-orange);
 }
-.cr-tag-action:hover {
-  filter: brightness(1.12);
-  box-shadow: 0 0 0 1px currentColor inset;
-}
-.cr-tag-action:focus-visible {
-  outline: 2px solid var(--border-focus);
-  outline-offset: 1px;
+.cr-action-investigate:hover {
+  border-color: var(--accent-orange);
+  color: var(--accent-orange);
+  background: var(--accent-orange-subtle);
 }
 
 

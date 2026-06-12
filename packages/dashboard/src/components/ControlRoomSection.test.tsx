@@ -766,14 +766,31 @@ describe('ControlRoomSection control actions (#5272)', () => {
   })
 })
 
-describe('ControlRoomSection investigate action (#5202)', () => {
-  it('renders the investigate verdict as a non-interactive span when no handler is wired', () => {
+describe('ControlRoomSection investigate action (#5202 / #5608)', () => {
+  // #5608 — the verdict badge is now a pure status indicator on EVERY row;
+  // the session-creating action moved to an explicit "Investigate" button in
+  // the row's actions cell (shown only for actionable verdicts).
+  it('renders every verdict badge as a non-interactive span, even with a handler', () => {
+    render(
+      <ControlRoomSection
+        snapshot={makeSnapshot()}
+        loading={false}
+        onRefresh={() => {}}
+        now={() => NOW}
+        onInvestigate={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('cr-verdict-investigate').tagName).toBe('SPAN')
+    expect(screen.getByTestId('cr-verdict-live').tagName).toBe('SPAN')
+    expect(screen.getByTestId('cr-verdict-onboarded').tagName).toBe('SPAN')
+  })
+
+  it('does not render an Investigate action when no handler is wired', () => {
     render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
-    const tag = screen.getByTestId('cr-verdict-investigate')
-    expect(tag.tagName).toBe('SPAN')
+    expect(screen.queryByTestId('cr-action-investigate-medlens')).toBeNull()
   })
 
-  it('renders the investigate verdict as a button when onInvestigate is provided', () => {
+  it('renders the Investigate action button only for actionable verdicts', () => {
     render(
       <ControlRoomSection
         snapshot={makeSnapshot()}
@@ -783,12 +800,15 @@ describe('ControlRoomSection investigate action (#5202)', () => {
         onInvestigate={() => {}}
       />,
     )
-    const tag = screen.getByTestId('cr-verdict-investigate')
-    expect(tag.tagName).toBe('BUTTON')
-    expect(tag).toHaveClass('cr-tag-action')
+    // medlens is the investigate-verdict repo in the fixture → gets the action.
+    const btn = screen.getByTestId('cr-action-investigate-medlens')
+    expect(btn.tagName).toBe('BUTTON')
+    // Non-actionable verdicts (live=chroxy, onboarded=no-it-all) get no action.
+    expect(screen.queryByTestId('cr-action-investigate-chroxy')).toBeNull()
+    expect(screen.queryByTestId('cr-action-investigate-no-it-all')).toBeNull()
   })
 
-  it('gives the investigate button a per-row accessible name including the repo', () => {
+  it('gives the Investigate button a per-row accessible name including the repo', () => {
     render(
       <ControlRoomSection
         snapshot={makeSnapshot()}
@@ -798,8 +818,8 @@ describe('ControlRoomSection investigate action (#5202)', () => {
         onInvestigate={() => {}}
       />,
     )
-    const tag = screen.getByTestId('cr-verdict-investigate')
-    expect(tag).toHaveAttribute('aria-label', expect.stringContaining('medlens'))
+    const btn = screen.getByTestId('cr-action-investigate-medlens')
+    expect(btn).toHaveAttribute('aria-label', expect.stringContaining('medlens'))
   })
 
   it('calls onInvestigate with the repo cwd, name, and reason note on click', () => {
@@ -813,7 +833,7 @@ describe('ControlRoomSection investigate action (#5202)', () => {
         onInvestigate={onInvestigate}
       />,
     )
-    fireEvent.click(screen.getByTestId('cr-verdict-investigate'))
+    fireEvent.click(screen.getByTestId('cr-action-investigate-medlens'))
     expect(onInvestigate).toHaveBeenCalledWith({
       cwd: '/Users/me/Projects/medlens',
       name: 'medlens',
@@ -848,26 +868,12 @@ describe('ControlRoomSection investigate action (#5202)', () => {
     render(
       <ControlRoomSection snapshot={snap} loading={false} onRefresh={() => {}} now={() => NOW} onInvestigate={onInvestigate} />,
     )
-    fireEvent.click(screen.getByTestId('cr-verdict-investigate'))
+    fireEvent.click(screen.getByTestId('cr-action-investigate-noteless'))
     expect(onInvestigate).toHaveBeenCalledWith({
       cwd: '/Users/me/Projects/noteless',
       name: 'noteless',
       reason: '',
     })
-  })
-
-  it('leaves non-actionable verdicts (live, onboarded) as plain spans even with a handler', () => {
-    render(
-      <ControlRoomSection
-        snapshot={makeSnapshot()}
-        loading={false}
-        onRefresh={() => {}}
-        now={() => NOW}
-        onInvestigate={() => {}}
-      />,
-    )
-    expect(screen.getByTestId('cr-verdict-live').tagName).toBe('SPAN')
-    expect(screen.getByTestId('cr-verdict-onboarded').tagName).toBe('SPAN')
   })
 })
 
