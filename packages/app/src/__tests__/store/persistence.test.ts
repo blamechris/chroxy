@@ -316,6 +316,63 @@ describe('persistSessionList', () => {
 // loadAllSessionMessages
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// At-rest encryption + legacy migration (#5644)
+// ---------------------------------------------------------------------------
+
+describe('at-rest encryption', () => {
+  it('stores message blobs encrypted (ciphertext on disk, not plaintext)', async () => {
+    persistSessionMessages('s1', [makeMsg('secret', { content: 'sk-LIVE-TOKEN-xyz' })]);
+    await jest.advanceTimersByTimeAsync(500);
+
+    const onDisk = await AsyncStorage.getItem('chroxy_persist_messages_s1');
+    expect(onDisk).toBeTruthy();
+    expect(onDisk!.startsWith('v1:')).toBe(true);
+    expect(onDisk).not.toContain('sk-LIVE-TOKEN-xyz');
+
+    // ...but decrypts back to the original on load.
+    const loaded = await loadSessionMessages('s1');
+    expect(loaded[0].content).toBe('sk-LIVE-TOKEN-xyz');
+  });
+
+  it('stores terminal buffer encrypted on disk', async () => {
+    persistTerminalBuffer('export API_KEY=sk-LIVE-9999');
+    await jest.advanceTimersByTimeAsync(1000);
+
+    const onDisk = await AsyncStorage.getItem('chroxy_persist_terminal_buffer');
+    expect(onDisk!.startsWith('v1:')).toBe(true);
+    expect(onDisk).not.toContain('sk-LIVE-9999');
+
+    const state = await loadPersistedState();
+    expect(state.terminalBuffer).toBe('export API_KEY=sk-LIVE-9999');
+  });
+
+  it('migrates a legacy-plaintext message blob to empty without crashing', async () => {
+    // A blob written before the encryption change — raw JSON, no v1: prefix.
+    await AsyncStorage.setItem(
+      'chroxy_persist_messages_legacy',
+      JSON.stringify([makeMsg('old')]),
+    );
+    const loaded = await loadSessionMessages('legacy');
+    expect(loaded).toEqual([]);
+  });
+
+  it('migrates a legacy-plaintext terminal buffer to null without crashing', async () => {
+    await AsyncStorage.setItem('chroxy_persist_terminal_buffer', 'legacy plaintext output');
+    const state = await loadPersistedState();
+    expect(state.terminalBuffer).toBeNull();
+  });
+
+  it('migrates a legacy-plaintext session list to empty without crashing', async () => {
+    await AsyncStorage.setItem(
+      'chroxy_persist_session_list',
+      JSON.stringify([makeSession('old')]),
+    );
+    const loaded = await loadSessionList();
+    expect(loaded).toEqual([]);
+  });
+});
+
 describe('loadAllSessionMessages', () => {
   it('loads messages for multiple sessions', async () => {
     // Persist s1, flush, then persist s2 (single debouncer — must flush between)
