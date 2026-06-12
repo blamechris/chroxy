@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform, UIManager, TouchableOpacity, Text } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
@@ -61,7 +61,7 @@ export default function App() {
     const parts = cwd.split('/');
     return parts.length > 2 ? parts.slice(-2).join('/') : cwd;
   });
-  const { isLocked, unlock } = useBiometricLock();
+  const { isLocked, gateReady, unlock } = useBiometricLock();
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -86,6 +86,14 @@ export default function App() {
     setOnboardingDone(true);
   }, []);
 
+  // #5643 — cold-start biometric gate. The navigator (and its ConnectScreen,
+  // which auto-reconnects using the stored token) must not mount until the
+  // biometric-lock decision has resolved AND any cold-start lock is cleared.
+  // navigatorMounted records that the navigator has already come up once, so a
+  // later resume-lock (background→foreground) stays an overlay rather than
+  // tearing the live session down.
+  const navigatorMounted = useRef(false);
+
   // Still loading onboarding state
   if (onboardingDone === null) return null;
 
@@ -97,6 +105,23 @@ export default function App() {
       </>
     );
   }
+
+  // Gate cold start: while the lock decision is unresolved render nothing (no
+  // flash of app content); if locked before the navigator has ever mounted,
+  // render only the LockScreen so auto-reconnect can't fire behind it.
+  if (!gateReady) {
+    return <StatusBar style="light" />;
+  }
+  if (isLocked && !navigatorMounted.current) {
+    return (
+      <>
+        <StatusBar style="light" />
+        <LockScreen onUnlock={unlock} />
+      </>
+    );
+  }
+
+  navigatorMounted.current = true;
 
   return (
     <NavigationContainer>

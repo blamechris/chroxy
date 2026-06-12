@@ -216,6 +216,69 @@ describe('useBiometricLock', () => {
     expect(result.current.isLocked).toBe(false);
   });
 
+  // -------------------------------------------------------------------------
+  // Cold-start gate (#5643)
+  // -------------------------------------------------------------------------
+
+  it('cold start: locked + gate opens when preference enabled and biometrics available', async () => {
+    (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('true');
+    const { result } = renderHookSimple(() => useBiometricLock());
+    await actAsync(async () => { await flushMicrotasks(); });
+
+    expect(result.current.enabled).toBe(true);
+    expect(result.current.isLocked).toBe(true);
+    expect(result.current.gateReady).toBe(true);
+  });
+
+  it('cold start: NOT locked, gate ready when preference disabled', async () => {
+    (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('false');
+    const { result } = renderHookSimple(() => useBiometricLock());
+    await actAsync(async () => { await flushMicrotasks(); });
+
+    expect(result.current.enabled).toBe(false);
+    expect(result.current.isLocked).toBe(false);
+    expect(result.current.gateReady).toBe(true);
+  });
+
+  it('cold start: unlock() clears the lock so the navigator can mount', async () => {
+    (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('true');
+    const { result } = renderHookSimple(() => useBiometricLock());
+    await actAsync(async () => { await flushMicrotasks(); });
+    expect(result.current.isLocked).toBe(true);
+
+    let success: boolean | undefined;
+    await actAsync(async () => { success = await result.current.unlock(); });
+    expect(success).toBe(true);
+    expect(result.current.isLocked).toBe(false);
+    expect(result.current.gateReady).toBe(true);
+  });
+
+  it('cold start: auto-disables and unlocks if enrollment was revoked', async () => {
+    // Preference enabled but biometrics no longer available (enrollment removed)
+    (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('true');
+    (LocalAuthentication.isEnrolledAsync as jest.Mock).mockResolvedValue(false);
+    const { result } = renderHookSimple(() => useBiometricLock());
+    await actAsync(async () => { await flushMicrotasks(); });
+
+    // Auto-disabled to avoid a permanent lockout
+    expect(SecureStore.setItemAsync).toHaveBeenCalledWith('chroxy_biometric_enabled', 'false');
+    expect(result.current.enabled).toBe(false);
+    expect(result.current.isLocked).toBe(false);
+    expect(result.current.gateReady).toBe(true);
+  });
+
+  it('cold start: auto-disables and unlocks if hardware is absent', async () => {
+    (SecureStore.getItemAsync as jest.Mock).mockResolvedValue('true');
+    (LocalAuthentication.hasHardwareAsync as jest.Mock).mockResolvedValue(false);
+    const { result } = renderHookSimple(() => useBiometricLock());
+    await actAsync(async () => { await flushMicrotasks(); });
+
+    expect(SecureStore.setItemAsync).toHaveBeenCalledWith('chroxy_biometric_enabled', 'false');
+    expect(result.current.enabled).toBe(false);
+    expect(result.current.isLocked).toBe(false);
+    expect(result.current.gateReady).toBe(true);
+  });
+
   it('cleans up AppState listener on unmount', () => {
     const { unmount } = renderHookSimple(() => useBiometricLock());
     unmount();

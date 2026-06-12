@@ -60,17 +60,62 @@ export async function authenticate(): Promise<boolean> {
 /**
  * Hook that manages biometric lock state. Returns:
  * - isLocked: whether the app is currently locked
+ * - gateReady: whether the cold-start lock decision has resolved. The app must
+ *   NOT mount the navigator (and thus must not auto-reconnect using the stored
+ *   token) until this is true — otherwise a cold start races the async
+ *   preference read and opens straight into the app, bypassing the lock (#5643).
  * - unlock: trigger biometric prompt
+ * - refresh: re-read the preference (e.g. after a Settings toggle)
+ * - enabled: current biometric-lock preference
  */
 export function useBiometricLock() {
+  // Cold-start default is LOCKED-pending: until the async preference read
+  // resolves we keep the gate closed (gateReady=false) so no app content or
+  // auto-reconnect can run. We do NOT default isLocked=true here because that
+  // would flash the LockScreen even for users with the preference disabled;
+  // instead the gate hides everything until we know which state to land in.
   const [isLocked, setIsLocked] = useState(false);
   const [enabled, setEnabled] = useState(false);
+  const [gateReady, setGateReady] = useState(false);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const wentBackground = useRef(false);
 
-  // Load setting on mount
+  // Resolve the cold-start lock decision on mount. This MUST complete before
+  // the navigator mounts (App gates on gateReady), so the stored-token
+  // auto-reconnect can't fire while the app should be locked.
   useEffect(() => {
-    getBiometricEnabled().then(setEnabled);
+    let cancelled = false;
+    getBiometricEnabled().then(async (val) => {
+      if (cancelled) return;
+      setEnabled(val);
+      if (!val) {
+        // Preference disabled — never lock, open the gate immediately.
+        setIsLocked(false);
+        setGateReady(true);
+        return;
+      }
+      // Preference enabled. Guard against a permanent lockout: if biometric
+      // enrollment was revoked (e.g. all fingerprints/Face ID removed) the
+      // unlock prompt would always fail, so auto-disable and open the gate —
+      // mirrors the SettingsScreen auto-disable path.
+      const available = await isBiometricAvailable();
+      if (cancelled) return;
+      if (!available) {
+        await setBiometricEnabled(false);
+        if (cancelled) return;
+        setEnabled(false);
+        setIsLocked(false);
+        setGateReady(true);
+        return;
+      }
+      // Enabled and available — lock on cold start, then open the gate so the
+      // LockScreen renders (the navigator stays unmounted until unlock).
+      setIsLocked(true);
+      setGateReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Track app state transitions and re-sync preference on foreground
@@ -119,5 +164,5 @@ export function useBiometricLock() {
     if (!val) setIsLocked(false);
   }, []);
 
-  return { isLocked, unlock, refresh, enabled };
+  return { isLocked, gateReady, unlock, refresh, enabled };
 }
