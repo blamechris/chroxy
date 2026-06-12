@@ -457,7 +457,10 @@ export function createHttpHandler(server) {
         delete connInfo.connectionUrl
       }
       const connectCors = matchAllowedOrigin(req.headers['origin'])
-      const connectHeaders = { 'Content-Type': 'application/json' }
+      // no-store: the body carries the raw primary apiToken (and a connectionUrl
+      // embedding it) when auth is required, so browsers/proxies must not cache
+      // it — mirrors /pairing-code, which is also live credential material.
+      const connectHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
       if (connectCors) {
         connectHeaders['Access-Control-Allow-Origin'] = connectCors
         connectHeaders['Vary'] = 'Origin'
