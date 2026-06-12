@@ -5,7 +5,13 @@ import {
   DISPATCH_TABLE_TYPES,
   type ClientStoreAdapter,
 } from './dispatch-table'
-import type { ChatMessage, SessionInfo } from './types'
+import type {
+  ChatMessage,
+  SessionInfo,
+  AgentInfo,
+  DevPreview,
+  PendingBackgroundShell,
+} from './types'
 import type { PermissionRule } from './handlers'
 
 // ---------------------------------------------------------------------------
@@ -20,6 +26,10 @@ interface FakeSession {
   isIdle?: boolean
   conversationId?: string | null
   sessionRules?: PermissionRule[]
+  // slice 2 reads
+  activeAgents?: AgentInfo[]
+  pendingBackgroundShells?: PendingBackgroundShell[]
+  devPreviews?: DevPreview[]
   [k: string]: unknown
 }
 
@@ -266,6 +276,282 @@ describe('shared dispatch table', () => {
       const env = makeAdapter()
       dispatch(env, { type: 'confirm_permission_mode' })
       expect(env.flat.pendingPermissionConfirm).toBeUndefined()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Slice 2 (epic #5556) — next batch of byte-identical pure cases
+  // -------------------------------------------------------------------------
+
+  describe('agent_spawned', () => {
+    it('adds the spawned agent entry to its session', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], activeAgents: [] } },
+      })
+      dispatch(env, {
+        type: 'agent_spawned',
+        sessionId: 's1',
+        toolUseId: 'tu-1',
+        description: 'Search the repo',
+        startedAt: 1000,
+      })
+      expect(env.sessions.s1.activeAgents).toEqual([
+        { toolUseId: 'tu-1', description: 'Search the repo', startedAt: 1000 },
+      ])
+    })
+
+    it('dedupes a repeat spawn for the same toolUseId (same-reference no-op)', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            activeAgents: [{ toolUseId: 'tu-1', description: 'x', startedAt: 1 }],
+          },
+        },
+      })
+      dispatch(env, { type: 'agent_spawned', sessionId: 's1', toolUseId: 'tu-1' })
+      expect(env.sessions.s1.activeAgents).toHaveLength(1)
+    })
+
+    it('no-ops when the session is not present locally', () => {
+      const env = makeAdapter({ activeSessionId: 'gone' })
+      dispatch(env, { type: 'agent_spawned', toolUseId: 'tu-1' })
+      expect(Object.keys(env.sessions)).toHaveLength(0)
+    })
+  })
+
+  describe('agent_completed', () => {
+    it('removes the completed agent entry', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            activeAgents: [
+              { toolUseId: 'tu-1', description: 'a', startedAt: 1 },
+              { toolUseId: 'tu-2', description: 'b', startedAt: 2 },
+            ],
+          },
+        },
+      })
+      dispatch(env, { type: 'agent_completed', sessionId: 's1', toolUseId: 'tu-1' })
+      expect(env.sessions.s1.activeAgents).toEqual([
+        { toolUseId: 'tu-2', description: 'b', startedAt: 2 },
+      ])
+    })
+  })
+
+  describe('background_work_changed', () => {
+    it('replaces the pending-background-shells snapshot for the session', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], pendingBackgroundShells: [] } },
+      })
+      dispatch(env, {
+        type: 'background_work_changed',
+        sessionId: 's1',
+        pending: [{ shellId: 'sh-1', command: 'npm test', startedAt: 1000 }],
+      })
+      expect(env.sessions.s1.pendingBackgroundShells).toEqual([
+        { shellId: 'sh-1', command: 'npm test', startedAt: 1000 },
+      ])
+    })
+  })
+
+  describe('plan_started', () => {
+    it('clears pending-plan state on the target session', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: { sessionId: 's1', messages: [], isPlanPending: true, planAllowedPrompts: ['x'] },
+        },
+      })
+      dispatch(env, { type: 'plan_started', sessionId: 's1' })
+      expect(env.sessions.s1.isPlanPending).toBe(false)
+      expect(env.sessions.s1.planAllowedPrompts).toEqual([])
+    })
+  })
+
+  describe('inactivity_warning', () => {
+    it('stamps the soft check-in prompt onto its session', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, {
+        type: 'inactivity_warning',
+        sessionId: 's1',
+        idleMs: 60_000,
+        prefab: 'Still there?',
+      })
+      expect(env.sessions.s1.inactivityWarning).toMatchObject({
+        idleMs: 60_000,
+        prefab: 'Still there?',
+      })
+    })
+
+    it('no-ops when the payload is invalid (handler returns null)', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, { type: 'inactivity_warning', sessionId: 's1', idleMs: 0, prefab: 'x' })
+      expect(env.sessions.s1.inactivityWarning).toBeUndefined()
+    })
+  })
+
+  describe('mcp_servers', () => {
+    it('replaces the target session MCP-server list', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], mcpServers: [] } },
+      })
+      dispatch(env, {
+        type: 'mcp_servers',
+        sessionId: 's1',
+        servers: [{ name: 'fs', status: 'connected' }],
+      })
+      expect(env.sessions.s1.mcpServers).toEqual([{ name: 'fs', status: 'connected' }])
+    })
+
+    it('falls back to the active session when sessionId is absent', () => {
+      const env = makeAdapter({
+        activeSessionId: 'active',
+        sessions: { active: { sessionId: 'active', messages: [], mcpServers: [] } },
+      })
+      dispatch(env, { type: 'mcp_servers', servers: [] })
+      expect(env.sessions.active.mcpServers).toEqual([])
+    })
+  })
+
+  describe('session_usage', () => {
+    it('stores the session cumulative usage', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, {
+        type: 'session_usage',
+        sessionId: 's1',
+        cumulativeUsage: { inputTokens: 10, outputTokens: 20, costUsd: 0.5 },
+      })
+      expect(env.sessions.s1.cumulativeUsage).toMatchObject({
+        inputTokens: 10,
+        outputTokens: 20,
+        costUsd: 0.5,
+      })
+    })
+  })
+
+  describe('session_cost_threshold_crossed', () => {
+    it('stores the one-shot cost-warning banner (explicit sessionId only)', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, {
+        type: 'session_cost_threshold_crossed',
+        sessionId: 's1',
+        costUsd: 5,
+        thresholdUsd: 4,
+      })
+      expect(env.sessions.s1.costThresholdWarning).toEqual({
+        costUsd: 5,
+        thresholdUsd: 4,
+        dismissedAt: null,
+      })
+    })
+
+    it('does NOT fall back to the active session when sessionId is missing', () => {
+      const env = makeAdapter({
+        activeSessionId: 'active',
+        sessions: { active: { sessionId: 'active', messages: [] } },
+      })
+      dispatch(env, { type: 'session_cost_threshold_crossed', costUsd: 5, thresholdUsd: 4 })
+      expect(env.sessions.active.costThresholdWarning).toBeUndefined()
+    })
+  })
+
+  describe('dev_preview / dev_preview_stopped', () => {
+    it('adds a dev-preview entry deduped by port', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], devPreviews: [] } },
+      })
+      dispatch(env, { type: 'dev_preview', sessionId: 's1', port: 3000, url: 'http://localhost:3000' })
+      expect(env.sessions.s1.devPreviews).toEqual([
+        { port: 3000, url: 'http://localhost:3000' },
+      ])
+    })
+
+    it('removes the dev-preview entry matching the stopped port', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            devPreviews: [{ port: 3000, url: 'http://localhost:3000' }],
+          },
+        },
+      })
+      dispatch(env, { type: 'dev_preview_stopped', sessionId: 's1', port: 3000 })
+      expect(env.sessions.s1.devPreviews).toEqual([])
+    })
+  })
+
+  describe('web_feature_status', () => {
+    it('replaces the flat webFeatures availability flags (booleans coerced)', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'web_feature_status', available: 1, remote: true, teleport: 0 })
+      expect(env.flat.webFeatures).toEqual({ available: true, remote: true, teleport: false })
+    })
+  })
+
+  describe('web_task_list', () => {
+    it('replaces the flat web-task list', () => {
+      const env = makeAdapter()
+      const tasks = [{ taskId: 't1', status: 'running' }]
+      dispatch(env, { type: 'web_task_list', tasks })
+      expect(env.flat.webTasks).toEqual(tasks)
+    })
+
+    it('defaults to an empty list when tasks is not an array', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'web_task_list' })
+      expect(env.flat.webTasks).toEqual([])
+    })
+  })
+
+  // notification_prefs — slice-2 RECONCILE. The app previously hand-maintained
+  // a byte-identical inline Zod parse; both clients now share
+  // handleNotificationPrefs. These tests pin that UNIFIED behaviour.
+  describe('notification_prefs (reconciled — app dropped its inline copy)', () => {
+    it('stores the validated prefs snapshot, including optional bypassCategories', () => {
+      const env = makeAdapter()
+      dispatch(env, {
+        type: 'notification_prefs',
+        prefs: {
+          categories: { permission: true, activity_error: false },
+          devices: {},
+          quietHours: null,
+          bypassCategories: ['permission'],
+        },
+      })
+      expect(env.flat.notificationPrefs).toMatchObject({
+        categories: { permission: true, activity_error: false },
+        devices: {},
+        bypassCategories: ['permission'],
+      })
+    })
+
+    it('omits bypassCategories from stored state when the server does not send it', () => {
+      const env = makeAdapter()
+      dispatch(env, {
+        type: 'notification_prefs',
+        prefs: { categories: { permission: true }, devices: {}, quietHours: null },
+      })
+      const stored = env.flat.notificationPrefs as Record<string, unknown>
+      expect(stored).toBeDefined()
+      expect('bypassCategories' in stored).toBe(false)
+    })
+
+    it('leaves state untouched on an invalid payload', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'notification_prefs', prefs: 'not-an-object' })
+      expect(env.flat.notificationPrefs).toBeUndefined()
     })
   })
 })

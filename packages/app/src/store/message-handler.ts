@@ -36,13 +36,11 @@ import {
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
-  handlePlanStarted as sharedPlanStarted,
+  // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
+  // migrated to the shared dispatch table (#5556 slice 2)
   handlePlanReady as sharedPlanReady,
-  handleInactivityWarning as sharedInactivityWarning,
   handleMultiQuestionIntervention as sharedMultiQuestionIntervention,
   applyInterventionBuilder,
-  handleDevPreview as sharedDevPreview,
-  handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
   handleToolInputDelta as sharedToolInputDelta,
@@ -84,9 +82,9 @@ import {
   handleRawOutput as sharedRawOutput,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
-  handleSessionCostThresholdCrossed as sharedSessionCostThresholdCrossed,
-  // (no handleNotificationPrefs import — the app keeps notification_prefs
-  // inline; the #4542/#4544 source-shape tests pin that implementation)
+  // session_cost_threshold_crossed + notification_prefs migrated to the shared
+  // dispatch table (#5556 slice 2) — notification_prefs's previously-inline
+  // Zod parse now routes through the shared handleNotificationPrefs.
   // #5454 — pure core of the #554 stream-split block (permission_request)
   resolvePermissionStreamSplit,
   handleDirectoryListing as sharedDirectoryListing,
@@ -111,26 +109,17 @@ import {
   handleGitBranchesResult as sharedGitBranchesResult,
   handleGitStageResult as sharedGitStageResult,
   handleGitCommitResult as sharedGitCommitResult,
-  handleAgentSpawned as sharedAgentSpawned,
-  handleAgentCompleted as sharedAgentCompleted,
-  handleBackgroundWorkChanged as sharedBackgroundWorkChanged,
-  // #5060 — Task subagent intermediate progress. Appends one entry to
-  // the parent Task tool_use bubble's `childAgentEvents[]`; the shared
-  // builder is the same one the dashboard uses so the two platforms
-  // can't drift on routing.
-  handleAgentEvent as sharedAgentEvent,
+  // agent_spawned / agent_completed / agent_event / background_work_changed /
+  // mcp_servers / session_usage / web_task_list / web_feature_status migrated
+  // to the shared dispatch table (#5556 slice 2)
   handleAvailableModels as sharedAvailableModels,
-  handleMcpServers as sharedMcpServers,
   handleCostUpdate as sharedCostUpdate,
-  handleSessionUsage as sharedSessionUsage,
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   handleWebTaskUpsert as sharedWebTaskUpsert,
   handleWebTaskError as sharedWebTaskError,
-  handleWebTaskList as sharedWebTaskList,
-  handleWebFeatureStatus as sharedWebFeatureStatus,
   handleSearchResults as sharedSearchResults,
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
@@ -155,7 +144,6 @@ import {
 } from '@chroxy/store-core';
 import type { DeltaFlusher, ClientStoreAdapter } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
-import { ServerNotificationPrefsSchema } from '@chroxy/protocol/schemas';
 import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
@@ -165,7 +153,6 @@ import type {
   CustomAgent,
   DirectoryEntry,
   FileEntry,
-  McpServer,
   QueuedMessage,
   ServerError,
   SessionInfo,
@@ -174,7 +161,6 @@ import type {
   SlashCommand,
   ProviderInfo,
   ConversationSummary,
-  WebTask,
   PermissionRule,
 } from './types';
 import { createEmptySessionState } from './utils';
@@ -2232,67 +2218,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // agent_busy — migrated to the shared dispatch table (#5556)
 
 
-    case 'agent_spawned': {
-      const builder = sharedAgentSpawned(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.activeAgents);
-          return next === ss.activeAgents ? {} : { activeAgents: next };
-        });
-      }
-      break;
-    }
-
-    case 'agent_completed': {
-      const builder = sharedAgentCompleted(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.activeAgents);
-          return next === ss.activeAgents ? {} : { activeAgents: next };
-        });
-      }
-      break;
-    }
-
-    case 'agent_event': {
-      // #5060 — Task subagent intermediate progress. The shared builder
-      // appends one entry to the parent Task tool_use bubble's
-      // `childAgentEvents[]`. Same-reference no-op when the parent
-      // bubble isn't found (event arrived before tool_start, which the
-      // server's ordering guarantee prevents but is defended).
-      const builder = sharedAgentEvent(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.messages);
-          return next === ss.messages ? {} : { messages: next };
-        });
-      }
-      break;
-    }
-
-    case 'background_work_changed': {
-      // #4307 — pending-background-shells snapshot updated for a
-      // session. Full-snapshot protocol; the shared handler returns
-      // the same reference when next === current to skip re-renders.
-      const builder = sharedBackgroundWorkChanged(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.pendingBackgroundShells);
-          return next === ss.pendingBackgroundShells
-            ? {}
-            : { pendingBackgroundShells: next };
-        });
-      }
-      break;
-    }
-
-    case 'plan_started': {
-      const planStarted = sharedPlanStarted(msg, get().activeSessionId);
-      if (planStarted.sessionId && get().sessionStates[planStarted.sessionId]) {
-        updateSession(planStarted.sessionId, () => planStarted.patch);
-      }
-      break;
-    }
+    // agent_spawned / agent_completed / agent_event / background_work_changed /
+    // plan_started — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'plan_ready': {
       const planReady = sharedPlanReady(msg, get().activeSessionId);
@@ -2308,21 +2235,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'inactivity_warning': {
-      // #3899 — server fired the soft check-in prompt. Store on the
-      // targeted session so the CheckInChip can render the prefab
-      // button. The activity-event branch above clears this on the
-      // next stream_*/tool_*/result/message; sendInput clears it
-      // locally when the user actually sends a follow-up. Mirrors the
-      // dashboard handler shape; no push-notification side-effect here
-      // because server-cli sends the device-level push directly off
-      // the `inactivity_warning` event emit.
-      const warning = sharedInactivityWarning(msg, get().activeSessionId);
-      if (warning && warning.sessionId && get().sessionStates[warning.sessionId]) {
-        updateSession(warning.sessionId, () => warning.patch);
-      }
-      break;
-    }
+    // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'multi_question_intervention': {
       // #4764 — chroxy's permission-hook (#4648) just denied a multi-question
@@ -2916,15 +2829,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'mcp_servers': {
-      const result = sharedMcpServers(msg, get().activeSessionId);
-      if (result.sessionId && get().sessionStates[result.sessionId]) {
-        updateSession(result.sessionId, () => ({
-          mcpServers: result.patch.mcpServers as McpServer[],
-        }));
-      }
-      break;
-    }
+    // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'cost_update': {
       const result = sharedCostUpdate(msg, get().activeSessionId);
@@ -2939,29 +2844,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_usage': {
-      // #4074: per-session cumulative tokens + cost. Drives the
-      // SessionScreen header cost badge + tap-to-expand breakdown.
-      // Emitted after every result event.
-      const result = sharedSessionUsage(msg, get().activeSessionId);
-      if (result.sessionId && get().sessionStates[result.sessionId]) {
-        updateSession(result.sessionId, () => result.patch);
-      }
-      break;
-    }
-
-    case 'session_cost_threshold_crossed': {
-      // #4075: soft "you've spent $X" warning. Fires ONCE per session.
-      // Mobile mirrors dashboard semantics: the server doesn't replay so
-      // a missed banner stays missed (no store-and-replay). Parse shared
-      // via store-core (#5454) — explicit sessionId only, no fallback.
-      const { sessionId: thresholdSid, patch: thresholdPatch } =
-        sharedSessionCostThresholdCrossed(msg);
-      if (thresholdSid && get().sessionStates[thresholdSid]) {
-        updateSession(thresholdSid, () => thresholdPatch);
-      }
-      break;
-    }
+    // session_usage / session_cost_threshold_crossed — migrated to the shared
+    // dispatch table (#5556 slice 2)
 
     case 'budget_warning': {
       const { warningMessage, systemMessage } = sharedBudgetWarning(msg);
@@ -3006,30 +2890,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // budget_resumed — migrated to the shared dispatch table (#5556)
 
 
-    case 'dev_preview': {
-      const builder = sharedDevPreview(msg, get().activeSessionId);
-      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
-      if (builder.sessionId && target) {
-        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
-      }
-      break;
-    }
-
-    case 'dev_preview_stopped': {
-      const builder = sharedDevPreviewStopped(msg, get().activeSessionId);
-      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
-      if (builder.sessionId && target) {
-        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
-      }
-      break;
-    }
+    // dev_preview / dev_preview_stopped — migrated to the shared dispatch
+    // table (#5556 slice 2)
 
     // -- Web tasks (Claude Code Web) --
 
-    case 'web_feature_status': {
-      set(sharedWebFeatureStatus(msg));
-      break;
-    }
+    // web_feature_status — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'web_task_created':
     case 'web_task_updated': {
@@ -3091,11 +2957,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'web_task_list': {
-      const { tasks } = sharedWebTaskList(msg);
-      set({ webTasks: tasks as WebTask[] });
-      break;
-    }
+    // web_task_list — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'conversations_list': {
       // Parser shared via store-core; app-only state mirroring (loading/error
@@ -3116,37 +2978,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'notification_prefs': {
-      // #4542: notification-prefs snapshot. Emitted in response to
-      // `notification_prefs_get` and broadcast after every
-      // `notification_prefs_set` so multiple connected clients stay in
-      // lockstep. Validated against the protocol Zod schema before storing.
-      // #5454: kept inline (store-core's handleNotificationPrefs has the
-      // same logic; the #4542/#4544 source-shape tests pin this impl).
-      const parsed = ServerNotificationPrefsSchema.safeParse(msg);
-      if (!parsed.success) {
-        // eslint-disable-next-line no-console
-        console.warn('notification_prefs: invalid payload from server', parsed.error.issues);
-        break;
-      }
-      const prefs = parsed.data.prefs;
-      // #4544: wire snapshot now carries an optional `bypassCategories`
-      // (categories that fire even during quiet hours). Older servers
-      // omit it — clients fall back to the documented defaults
-      // (permission + activity_error). The quiet-hours window's
-      // `timezone` field is required by the schema when the window is
-      // present, so we forward it verbatim.
-      const bypassCategories = (prefs as { bypassCategories?: string[] }).bypassCategories;
-      set({
-        notificationPrefs: {
-          categories: prefs.categories,
-          devices: prefs.devices,
-          quietHours: prefs.quietHours,
-          ...(Array.isArray(bypassCategories) ? { bypassCategories } : {}),
-        },
-      });
-      break;
-    }
+    // notification_prefs — migrated to the shared dispatch table (#5556 slice
+    // 2). The app previously hand-maintained a byte-identical inline Zod parse
+    // (same ServerNotificationPrefsSchema + bypassCategories spread); it now
+    // routes through the shared handleNotificationPrefs like the dashboard.
 
     case 'server_error': {
       const { serverError, chatMessage: errorMsg } = sharedServerError(msg);
